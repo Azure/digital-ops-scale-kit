@@ -92,7 +92,7 @@ jobs:
                   fi
 
             - name: Checkout repository
-              uses: actions/checkout@v4
+              uses: actions/checkout@v6
               with:
                   ref: ${{ steps.resolve-ref.outputs.ref }}
                   persist-credentials: false
