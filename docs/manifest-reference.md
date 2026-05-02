@@ -136,13 +136,13 @@ CLI override: `siteops deploy manifest.yaml -p 5`
 
 When a manifest contains `scope: subscription` steps, Site Ops uses two-phase deployment:
 
-**Phase 1** — Subscription-scoped steps:
+**Phase 1**: subscription-scoped steps:
 - Groups selected sites by subscription
 - Finds the subscription-level site for each subscription
 - Executes subscription-scoped steps once per subscription
 - Caches outputs keyed by subscription ID
 
-**Phase 2** — RG-scoped steps:
+**Phase 2**: RG-scoped steps:
 - Executes for all RG-level sites (parallelizable)
 - Subscription-level sites are skipped (no resource group)
 - Can reference Phase 1 outputs via cross-scope chaining

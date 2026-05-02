@@ -45,7 +45,7 @@ param aioApiVersion string
 param useSelfHostedIssuer bool = false
 
 // =====================================================================================
-// Instance read — dispatched per API version
+// Instance read: dispatched per API version
 //
 // Adding a new API version:
 //   1. Extend @allowed on aioApiVersion above.
@@ -98,7 +98,7 @@ var activeInstance = aioApiVersion == '2025-10-01'
     }
 
 // =====================================================================================
-// Chained Resolution — version-stable
+// Chained Resolution: version-stable
 //   Custom location and connected cluster live under different RPs whose
 //   ARM API versions are not coupled to AIO releases. They stay single-pinned
 //   and shared.
@@ -119,7 +119,7 @@ module resolvedCluster '../common/modules/resolve-cluster.bicep' = {
 }
 
 // =====================================================================================
-// Outputs — resolved infrastructure
+// Outputs: resolved infrastructure
 // =====================================================================================
 
 @description('Full ARM resource ID of the custom location.')
@@ -130,9 +130,6 @@ output customLocationName string = resolvedCl.outputs.name
 
 @description('Kubernetes namespace associated with the custom location.')
 output customLocationNamespace string = resolvedCl.outputs.namespace
-
-@description('Full ARM resource IDs of the cluster extensions bound to this AIO custom location. Used by the upgrade flow to discover the AIO and secret-store Arc extensions by extensionType.')
-output clusterExtensionIds string[] = resolvedCl.outputs.clusterExtensionIds
 
 @description('Connected cluster name.')
 output connectedClusterName string = resolvedCluster.outputs.name
@@ -146,7 +143,7 @@ output oidcIssuerUrl string = useSelfHostedIssuer
   : resolvedCluster.outputs.oidcIssuerUrl
 
 // =====================================================================================
-// Outputs — instance properties (forwarded for safe PUT by downstream templates)
+// Outputs: instance properties (forwarded for safe PUT by downstream templates)
 // =====================================================================================
 
 @description('Instance location.')

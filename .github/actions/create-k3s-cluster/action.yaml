@@ -50,7 +50,7 @@ runs:
         export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 
         # systemd reports the unit active before the API is necessarily
-        # serving — poll for kubectl liveness, then wait for node Ready.
+        # serving. Poll for kubectl liveness, then wait for node Ready.
         MAX_ATTEMPTS=30
         SLEEP_SECONDS=10
         for attempt in $(seq 1 $MAX_ATTEMPTS); do

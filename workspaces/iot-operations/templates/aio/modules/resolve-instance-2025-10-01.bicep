@@ -4,7 +4,7 @@
 // templates/aio/resolve-aio.bicep.
 //
 // Why version-bound: Microsoft.IoTOperations is an Arc-mapped RP. The ARM
-// API version on `existing` is not just a Bicep schema lens — it issues
+// API version on `existing` is not just a Bicep schema lens. It issues
 // `GET ?api-version=<pinned>` and the RP/bridge projects through that
 // version's CRD generation. Mismatching the cluster's CRD generation can
 // drift or fail the read. The router selects this module when the site's

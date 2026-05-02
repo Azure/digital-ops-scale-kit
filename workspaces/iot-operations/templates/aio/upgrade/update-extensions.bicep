@@ -21,7 +21,7 @@
 // router pattern (see `update-instance.bicep`) rather than mutating this template
 // in place.
 //
-// IMPORTANT — `union()` is ADDITIVE-ONLY:
+// IMPORTANT: `union()` is ADDITIVE-ONLY:
 //   `union(existing, overrides)` cannot delete or rename keys in existing. If a
 //   future AIO release renames a `configurationSettings` key (e.g.,
 //   `trustSource` -> `trust.source`), this template will preserve BOTH the old
@@ -31,7 +31,7 @@
 //   versioned `update-extensions-<apiVersion>.bicep` behind a router. Do NOT
 //   pre-build either mechanism for hypothetical migrations.
 //
-// IMPORTANT — `scope.cluster.releaseNamespace` handling is per-extension:
+// IMPORTANT: `scope.cluster.releaseNamespace` handling is per-extension:
 //   - AIO: install path parameterizes `releaseNamespace: clusterNamespace` (default
 //     `azure-iot-operations` but overridable). The upgrade PUT MUST forward whatever
 //     the install stamped to avoid a full-replace dropping the field. Snapshotted
@@ -47,7 +47,7 @@
 // -------------------------------------------------------------------------------------
 
 // =====================================================================================
-// Parameters — connected cluster + resolved snapshots (from resolve-extensions chaining)
+// Parameters: connected cluster + resolved snapshots (from resolve-extensions chaining)
 // =====================================================================================
 
 @description('Name of the Arc-connected cluster hosting the AIO instance.')
@@ -67,7 +67,7 @@ param certManager object
 param certManagerPresent bool
 
 // =====================================================================================
-// Parameters — target versions (all optional; empty = preserve resolved).
+// Parameters: target versions (all optional; empty = preserve resolved).
 // Names mirror the keys in `parameters/aio-releases/<release>.yaml` so the release config
 // can be wired in directly via the manifest's `parameters:` list (same source the
 // install path consumes).
@@ -104,7 +104,7 @@ param certManagerTrain string = ''
 param certManagerConfigurationOverrides object = {}
 
 // =====================================================================================
-// Effective values — empty target preserves the resolved current value.
+// Effective values: empty target preserves the resolved current value.
 // =====================================================================================
 
 var effectiveAioVersion = !empty(aioVersion) ? aioVersion : aio.version
@@ -125,7 +125,7 @@ resource cluster 'Microsoft.Kubernetes/connectedClusters@2024-07-15-preview' exi
 }
 
 // =====================================================================================
-// AIO Extension — PUT with target version, preserving config + identity.
+// AIO Extension: PUT with target version, preserving config + identity.
 // =====================================================================================
 
 resource aioExtensionUpdate 'Microsoft.KubernetesConfiguration/extensions@2023-05-01' = {
@@ -147,7 +147,7 @@ resource aioExtensionUpdate 'Microsoft.KubernetesConfiguration/extensions@2023-0
 }
 
 // =====================================================================================
-// Secret Store Extension — PUT with target version, preserving config + identity.
+// Secret Store Extension: PUT with target version, preserving config + identity.
 // =====================================================================================
 
 resource secretStoreExtensionUpdate 'Microsoft.KubernetesConfiguration/extensions@2023-05-01' = {
@@ -169,7 +169,7 @@ resource secretStoreExtensionUpdate 'Microsoft.KubernetesConfiguration/extension
 }
 
 // =====================================================================================
-// cert-manager Extension — conditional PUT only when present on the cluster.
+// cert-manager Extension: conditional PUT only when present on the cluster.
 // =====================================================================================
 
 resource certManagerExtensionUpdate 'Microsoft.KubernetesConfiguration/extensions@2023-05-01' = if (certManagerPresent) {
@@ -191,7 +191,7 @@ resource certManagerExtensionUpdate 'Microsoft.KubernetesConfiguration/extension
 }
 
 // =====================================================================================
-// Outputs — post-upgrade state, useful for E2E/integration assertions.
+// Outputs: post-upgrade state, useful for E2E/integration assertions.
 // =====================================================================================
 
 @description('Resource ID of the (updated) AIO Arc extension.')

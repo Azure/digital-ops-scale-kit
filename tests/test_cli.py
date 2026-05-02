@@ -242,6 +242,7 @@ class TestCmdSites:
         orchestrator = Orchestrator(complete_workspace)
 
         args = MagicMock()
+        args.name = None
         args.workspace = complete_workspace
         args.selector = None
         args.verbose = False
@@ -260,6 +261,7 @@ class TestCmdSites:
         orchestrator = Orchestrator(multi_site_workspace)
 
         args = MagicMock()
+        args.name = None
         args.workspace = multi_site_workspace
         args.selector = "environment=dev"
         args.verbose = False
@@ -279,6 +281,7 @@ class TestCmdSites:
         orchestrator = Orchestrator(complete_workspace)
 
         args = MagicMock()
+        args.name = None
         args.workspace = complete_workspace
         args.selector = "nonexistent=value"
         args.verbose = False
@@ -300,6 +303,7 @@ class TestCmdSites:
         orchestrator = Orchestrator(tmp_path)
 
         args = MagicMock()
+        args.name = None
         args.workspace = tmp_path
         args.selector = None
         args.verbose = False
@@ -325,6 +329,7 @@ class TestCmdSites:
         orchestrator = Orchestrator(complete_workspace)
 
         args = MagicMock()
+        args.name = None
         args.workspace = complete_workspace
         args.selector = None
         args.verbose = False
@@ -351,6 +356,7 @@ class TestCmdSites:
         orchestrator = Orchestrator(complete_workspace)
 
         args = MagicMock()
+        args.name = None
         args.workspace = complete_workspace
         args.selector = None
         args.verbose = False
@@ -361,6 +367,47 @@ class TestCmdSites:
         captured = capsys.readouterr()
         assert "properties:" in captured.out
         assert "mqtt" in captured.out
+
+    def test_sites_positional_name(self, multi_site_workspace, capsys):
+        """Positional name scopes to one site, equivalent to -l name=<NAME>."""
+        from siteops.orchestrator import Orchestrator
+
+        orchestrator = Orchestrator(multi_site_workspace)
+
+        args = MagicMock()
+        args.name = None
+        args.workspace = multi_site_workspace
+        args.name = "dev-eastus"
+        args.selector = None
+        args.verbose = False
+        args.render = False
+
+        exit_code = cmd_sites(args, orchestrator)
+
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "dev-eastus" in captured.out
+        assert "dev-westus" not in captured.out
+        assert "prod-eastus" not in captured.out
+
+    def test_sites_positional_and_selector_rejected(self, multi_site_workspace, capsys):
+        """Combining positional name and -l name= is rejected to avoid ambiguity."""
+        from siteops.orchestrator import Orchestrator
+
+        orchestrator = Orchestrator(multi_site_workspace)
+
+        args = MagicMock()
+        args.name = None
+        args.workspace = multi_site_workspace
+        args.name = "dev-eastus"
+        args.selector = "name=prod-eastus"
+        args.verbose = False
+        args.render = False
+
+        exit_code = cmd_sites(args, orchestrator)
+
+        assert exit_code == 1
+        assert "either the positional `name` or `-l name=" in capsys.readouterr().err
 
 
 class TestCmdDeploy:
@@ -509,23 +556,66 @@ class TestCmdDeploy:
             assert call_kwargs["parallel_override"] == 3
 
     def test_deploy_negative_parallel_rejected(self, complete_workspace, capsys):
-        """Test negative --parallel value is rejected."""
-        from siteops.orchestrator import Orchestrator
+        """Negative --parallel value is rejected at argparse time."""
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "siteops",
+                "-w",
+                str(complete_workspace),
+                "deploy",
+                "manifests/test-manifest.yaml",
+                "--parallel",
+                "-1",
+            ],
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 2  # argparse error exit code
+        assert "--parallel must be >= 0" in capsys.readouterr().err
 
-        orchestrator = Orchestrator(complete_workspace)
-        manifest_path = complete_workspace / "manifests" / "test-manifest.yaml"
+    def test_deploy_parallel_max_alias(self, complete_workspace):
+        """`--parallel max` is accepted and parses to the same value as `0`."""
+        for alias in ("max", "auto", "0"):
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "siteops",
+                    "-w",
+                    str(complete_workspace),
+                    "deploy",
+                    "manifests/test-manifest.yaml",
+                    "--parallel",
+                    alias,
+                ],
+            ):
+                with patch("siteops.cli.cmd_deploy") as mock_cmd:
+                    mock_cmd.return_value = 0
+                    with pytest.raises(SystemExit):
+                        main()
+                    args = mock_cmd.call_args[0][0]
+                    assert args.parallel == 0, f"alias {alias!r} did not parse to 0"
 
-        args = MagicMock()
-        args.manifest = manifest_path
-        args.workspace = complete_workspace
-        args.selector = None
-        args.parallel = -1
-
-        exit_code = cmd_deploy(args, orchestrator)
-
-        assert exit_code == 1
-        captured = capsys.readouterr()
-        assert "--parallel must be >= 0" in captured.err
+    def test_deploy_parallel_invalid_string_rejected(self, complete_workspace, capsys):
+        """A non-int, non-alias string for --parallel is rejected."""
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "siteops",
+                "-w",
+                str(complete_workspace),
+                "deploy",
+                "manifests/test-manifest.yaml",
+                "--parallel",
+                "bogus",
+            ],
+        ):
+            with pytest.raises(SystemExit):
+                main()
+        assert "must be a non-negative integer or 'max' / 'auto'" in capsys.readouterr().err
 
     def test_deploy_with_selector(self, complete_workspace):
         """Test deploy passes selector to orchestrator."""
@@ -747,8 +837,9 @@ class TestMainArgumentParsing:
                 args = mock_cmd.call_args[0][0]
                 assert args.selector == "region=eastus"
 
-    def test_workspace_default_cwd(self):
-        """Test workspace defaults to current directory."""
+    def test_workspace_default_when_no_discovery(self, tmp_path, monkeypatch):
+        """When -w is omitted and cwd has no workspaces/ shape, defaults to cwd."""
+        monkeypatch.chdir(tmp_path)
         with patch.object(
             sys,
             "argv",
@@ -760,7 +851,49 @@ class TestMainArgumentParsing:
                     main()
 
                 args = mock_cmd.call_args[0][0]
-                assert args.workspace == Path.cwd().resolve()
+                assert args.workspace == tmp_path.resolve()
+
+    def test_workspace_auto_discovered_from_workspaces_dir(self, tmp_path, monkeypatch):
+        """When cwd has workspaces/<single>/ with workspace shape, auto-discover it."""
+        ws = tmp_path / "workspaces" / "iot-operations"
+        (ws / "sites").mkdir(parents=True)
+        (ws / "manifests").mkdir()
+        monkeypatch.chdir(tmp_path)
+        with patch.object(
+            sys,
+            "argv",
+            ["siteops", "sites"],
+        ):
+            with patch("siteops.cli.cmd_sites") as mock_cmd:
+                mock_cmd.return_value = 0
+                with pytest.raises(SystemExit):
+                    main()
+
+                args = mock_cmd.call_args[0][0]
+                assert args.workspace == ws.resolve()
+
+    def test_workspace_auto_discovery_ambiguous_falls_back(self, tmp_path, monkeypatch):
+        """When workspaces/ contains multiple workspace-shaped dirs, fall back to cwd."""
+        for name in ("a", "b"):
+            ws = tmp_path / "workspaces" / name
+            (ws / "sites").mkdir(parents=True)
+            (ws / "manifests").mkdir()
+        monkeypatch.chdir(tmp_path)
+        with patch.object(
+            sys,
+            "argv",
+            ["siteops", "sites"],
+        ):
+            with patch("siteops.cli.cmd_sites") as mock_cmd:
+                mock_cmd.return_value = 0
+                with pytest.raises(SystemExit):
+                    main()
+
+                args = mock_cmd.call_args[0][0]
+                # Ambiguous discovery: caller falls back to cwd, which here
+                # is not itself a valid workspace but is still passed through
+                # for the orchestrator to error on (preserves prior behavior).
+                assert args.workspace == tmp_path.resolve()
 
 
 class TestUserAgentConfiguration:

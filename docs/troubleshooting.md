@@ -66,7 +66,7 @@ The output is the post-inherit + post-overlay site as a single YAML doc, with em
 
 1. Check Azure portal for deployment error details
 2. Fix the issue
-3. Re-run—Bicep deployments are idempotent
+3. Re-run. Bicep deployments are idempotent.
 
 ## Arc proxy issues
 

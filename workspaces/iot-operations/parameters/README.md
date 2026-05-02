@@ -13,9 +13,9 @@ Parameter YAML files referenced by manifest steps. All paths in this dir are wor
 
 ## Conventions
 
-- **Auto-filtering** — the engine drops any parameter key the target Bicep template does not declare. This lets a single `inputs/<step>.yaml` cover multiple template versions without per-version duplication.
-- **Filename = step name** — `parameters/inputs/<step>.yaml` and `parameters/outputs/<step>.yaml` are conventionally named after the step they wire, even when the file is consumed at the manifest level.
-- **Header comments** — each parameters file should declare in a header what it produces or consumes ("Fan-in for X step", "Fan-out from X step consumed by Y").
-- **Common dedup** — values already provided by `base-site.yaml` (e.g. `managedBy: siteops`) should not be re-declared in `common/common.yaml`.
+- **Auto-filtering**: the engine drops any parameter key the target Bicep template does not declare. This lets a single `inputs/<step>.yaml` cover multiple template versions without per-version duplication.
+- **Filename = step name**: `parameters/inputs/<step>.yaml` and `parameters/outputs/<step>.yaml` are conventionally named after the step they wire, even when the file is consumed at the manifest level.
+- **Header comments**: each parameters file should declare in a header what it produces or consumes ("Fan-in for X step", "Fan-out from X step consumed by Y").
+- **Common dedup**: values already provided by `base-site.yaml` (e.g. `managedBy: siteops`) should not be re-declared in `common/common.yaml`.
 
 See `docs/parameter-resolution.md` for the full merge precedence (manifest → site → step) and the auto-filtering algorithm.

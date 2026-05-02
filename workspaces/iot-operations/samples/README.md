@@ -41,5 +41,5 @@ Real samples may exceed the shape above. Conventions:
 
 ## Composing samples in scenarios
 
-Scenarios under `scenarios/` should `include:` the sample's `_partial.yaml` (not the standalone `manifest.yaml`). Standalone manifests re-include `_resolve-aio.yaml` so they can be deployed on their own; composing two standalone manifests in one scenario will collide on the `resolve-aio` step name. See `scenarios/README.md` for the full composition rules.
+Scenarios under `scenarios/` should `include:` the sample's `_partial.yaml` (not the standalone `manifest.yaml`). Standalone manifests re-include `_resolve-aio.yaml` so they can be deployed on their own. Composing two standalone manifests in one scenario will collide on the `resolve-aio` step name. See `scenarios/README.md` for the full composition rules.
 

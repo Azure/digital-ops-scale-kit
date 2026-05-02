@@ -251,7 +251,7 @@ class TestExtraSitesDirsBehavior:
         """The bare-filename fallback is intentionally narrow: it ONLY
         searches `workspace/sites/`. A site in one extra dir must not be
         able to inherit from a template in a sibling extra dir purely by
-        filename — that would create an implicit shared-template namespace
+        filename. That would create an implicit shared-template namespace
         across trusted dirs, which is a larger semantic change than the
         fallback is meant to enable.
         """

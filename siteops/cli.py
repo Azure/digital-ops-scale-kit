@@ -46,11 +46,7 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         print(f"Error: Manifest not found: {manifest_path}", file=sys.stderr)
         return 1
 
-    # Validate parallel override if provided
     parallel_override = getattr(args, "parallel", None)
-    if parallel_override is not None and parallel_override < 0:
-        print("Error: --parallel must be >= 0", file=sys.stderr)
-        return 1
 
     from siteops.models import Manifest
 
@@ -152,15 +148,29 @@ def _print_value(value: Any, indent: int = 6) -> None:
 def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     """List available sites in the workspace.
 
-    With `--render`, emits the merged YAML for each matched site instead of
-    the human-readable summary. Useful for confirming what an overlay or
-    extras-dir file actually changed (typically combined with a single-site
-    selector like `-l name=munich-dev`).
+    A bare `siteops sites` lists every site. Pass a positional `name`
+    (filename without extension, or the internal `name:` field) to
+    scope to one site, equivalent to `-l name=<NAME>`. With `--render`,
+    emits the merged YAML for each matched site instead of the
+    human-readable summary, useful for confirming what an overlay or
+    extras-dir file actually changed.
     """
+    # Positional `name` is sugar for `-l name=<NAME>`. Combining the two
+    # forms is rejected so a confusing override path cannot exist.
+    name_arg = getattr(args, "name", None)
+    selector_str = getattr(args, "selector", None)
+    if name_arg and selector_str:
+        print(
+            "Error: pass either the positional `name` or `-l name=<value>`, not both.",
+            file=sys.stderr,
+        )
+        return 1
+    if name_arg:
+        selector_str = f"name={name_arg}"
+
     all_sites = orchestrator.load_all_sites()
 
     # Filter by selector if provided
-    selector_str = getattr(args, "selector", None)
     if selector_str:
         from siteops.models import parse_selector
 
@@ -271,19 +281,75 @@ def _resolve_extra_sites_dirs(cli_dirs: list[Path] | None) -> list[Path]:
     return env_dirs
 
 
+def _parse_parallel(value: str) -> int:
+    """Parse the `--parallel` value, accepting friendly aliases for unlimited.
+
+    Accepts:
+        max, auto, 0   -> 0 (unlimited)
+        any positive int -> that int
+        negative ints  -> argparse error
+
+    The `0` form is preserved for backward compatibility but `max` reads
+    more naturally for the no-cap case (the integer 0 is easy to misread
+    as "no parallelism").
+    """
+    lowered = value.lower()
+    if lowered in ("max", "auto"):
+        return 0
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"--parallel must be a non-negative integer or 'max' / 'auto', got {value!r}"
+        )
+    if n < 0:
+        raise argparse.ArgumentTypeError("--parallel must be >= 0")
+    return n
+
+
+def _auto_discover_workspace(start: Path) -> Path | None:
+    """Auto-discover a workspace from `start` when -w was not supplied.
+
+    Two cases siteops can resolve unambiguously:
+
+      1. `start` itself looks like a workspace (has `sites/` and
+         `manifests/` subdirs).
+      2. `start` contains a `workspaces/` subdir with exactly one entry
+         that has the workspace shape.
+
+    Returns the resolved workspace Path on success. Returns None when
+    the discovery is ambiguous or no workspace shape is found, and the
+    caller falls back to using `start` directly (preserving the prior
+    "default to cwd" behavior).
+    """
+    if (start / "sites").is_dir() and (start / "manifests").is_dir():
+        return start
+    workspaces_dir = start / "workspaces"
+    if not workspaces_dir.is_dir():
+        return None
+    candidates = [
+        d for d in sorted(workspaces_dir.iterdir())
+        if d.is_dir() and (d / "sites").is_dir() and (d / "manifests").is_dir()
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
 def main() -> None:
     """Main entry point for the Site Ops CLI."""
     parser = argparse.ArgumentParser(
         prog="siteops",
-        description="Azure Site Ops - Multi-site Azure IaC orchestration",
+        description="Azure Site Ops: multi-site Azure IaC orchestration.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  siteops -w workspace deploy manifests/iot-ops.yaml
-  siteops -w workspace deploy manifests/iot-ops.yaml --dry-run
-  siteops -w workspace deploy manifests/iot-ops.yaml -l environment=prod -p 5
-  siteops -w workspace validate manifests/iot-ops.yaml -v
-  siteops -w workspace sites -l region=eastus
+  siteops -w workspaces/iot-operations sites
+  siteops -w workspaces/iot-operations sites munich-dev --render
+  siteops -w workspaces/iot-operations validate manifests/aio-install.yaml
+  siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml
+  siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml --dry-run
+  siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml -l environment=prod -p max
 """,
     )
     parser.add_argument("--version", action="version", version=f"siteops {__version__}")
@@ -291,8 +357,12 @@ Examples:
         "-w",
         "--workspace",
         type=Path,
-        default=Path.cwd(),
-        help="Workspace directory (default: current directory)",
+        default=None,
+        help=(
+            "Workspace directory. When omitted, siteops auto-discovers a "
+            "single workspace under ./workspaces/ or uses the current "
+            "directory if it has the workspace shape."
+        ),
     )
     parser.add_argument(
         "--extra-sites-dir",
@@ -302,14 +372,9 @@ Examples:
         default=None,
         metavar="DIR",
         help=(
-            "Additional trusted directory to search for site YAML files "
-            "(repeatable). Treated with the same trust level as the "
-            "workspace's sites/ directory: files may declare 'inherits'. "
-            "Searched after sites/ and before sites.local/. "
-            "Alternatively set SITEOPS_EXTRA_SITES_DIRS to a list of "
-            "directories using the platform path separator "
-            "(';' on Windows, ':' on Unix). When both are provided, "
-            "--extra-sites-dir wins."
+            "Additional trusted sites/ directory (repeatable). Also accepts "
+            "the SITEOPS_EXTRA_SITES_DIRS env var. See "
+            "docs/site-configuration.md for trust rules and precedence."
         ),
     )
 
@@ -325,21 +390,25 @@ Examples:
     p_deploy.add_argument(
         "--dry-run",
         action="store_true",
-        help="Show what would be deployed without executing",
+        help="Show what would be deployed without executing (default: false)",
     )
     p_deploy.add_argument(
         "-l",
         "--selector",
         type=str,
+        default=None,
         help="Filter sites by labels (e.g., 'environment=prod')",
     )
     p_deploy.add_argument(
         "-p",
         "--parallel",
-        type=int,
+        type=_parse_parallel,
         default=None,
         metavar="N",
-        help="Max concurrent sites (0=unlimited, 1=sequential). Overrides manifest.",
+        help=(
+            "Max concurrent sites. Accepts a positive integer, or 'max' / "
+            "'auto' / '0' for unlimited. Overrides the manifest setting."
+        ),
     )
 
     # validate command
@@ -353,40 +422,54 @@ Examples:
         "-l",
         "--selector",
         type=str,
+        default=None,
         help="Filter sites by labels (e.g., 'environment=prod')",
     )
     p_validate.add_argument(
         "-v",
         "--verbose",
         action="store_true",
-        help="Show deployment plan after validation",
+        help="Show deployment plan after validation (default: false)",
     )
 
     # sites command
     p_sites = subparsers.add_parser(
         "sites",
         help="List available sites",
-        description="List all sites in the workspace, optionally filtered by labels.",
+        description=(
+            "List sites in the workspace. Pass a positional name "
+            "(filename or internal `name:`) to scope to one site."
+        ),
+    )
+    p_sites.add_argument(
+        "name",
+        nargs="?",
+        default=None,
+        help=(
+            "Optional site name to scope to (filename without extension, "
+            "or the internal `name:` field). Equivalent to `-l name=<NAME>`."
+        ),
     )
     p_sites.add_argument(
         "-l",
         "--selector",
         type=str,
+        default=None,
         help="Filter sites by labels (e.g., 'environment=prod', 'name=munich-dev')",
     )
     p_sites.add_argument(
         "-v",
         "--verbose",
         action="store_true",
-        help="Show additional details (properties)",
+        help="Show additional details (properties) (default: false)",
     )
     p_sites.add_argument(
         "--render",
         action="store_true",
         help=(
-            "Emit the merged YAML for each matched site instead of the "
-            "summary. Combine with `-l name=<site>` to inspect one site's "
-            "full resolved configuration after inheritance and overlays."
+            "Emit the merged YAML for each matched site instead of the summary. "
+            "Useful with a single-site scope to inspect resolved config "
+            "(default: false)."
         ),
     )
 
@@ -396,6 +479,12 @@ Examples:
     verbose = getattr(args, "verbose", False)
     setup_logging(verbose)
 
+    # Workspace resolution. Explicit -w wins. Otherwise auto-discover
+    # from cwd; if discovery is ambiguous or finds nothing, fall back
+    # to cwd (the prior default).
+    if args.workspace is None:
+        discovered = _auto_discover_workspace(Path.cwd())
+        args.workspace = discovered if discovered is not None else Path.cwd()
     args.workspace = Path(args.workspace).resolve()
 
     if not args.workspace.is_dir():

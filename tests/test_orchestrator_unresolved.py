@@ -85,7 +85,7 @@ class TestUnresolvedTemplateGuard:
         """A `{{ ... }}` left on a param the template does NOT accept is
         filtered out before the unresolved-check and must not raise.
 
-        This verifies the filter-then-check ordering — common.yaml-injected
+        This verifies the filter-then-check ordering: common.yaml-injected
         defaults (e.g. `siteAddress.country`) targeting non-consuming steps
         must not break deployment.
         """

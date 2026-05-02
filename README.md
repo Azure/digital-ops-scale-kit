@@ -5,7 +5,7 @@
 > [!NOTE]
 > This project is under active development. If you're an Azure IoT Operations customer or interested in fleet-scale deployment, reach out at <azureiotoperationslicensinghelp@microsoft.com>.
 
-Deploy Azure IoT Operations—or any Azure infrastructure—across dozens of sites with a single command. Per-site customization, parallel execution, and failure isolation built in.
+Deploy Azure IoT Operations, or any Azure infrastructure, across dozens of sites with a single command. Per-site customization, parallel execution, and failure isolation built in.
 
 ```bash
 # Deploy to all production sites
@@ -18,7 +18,7 @@ siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml -l "envir
 
 | Project | Description |
 |---------|-------------|
-| **Site Ops** | A reference implementation of a multi-site IaC orchestration tool. Template-agnostic—works with any Bicep or ARM templates. |
+| **Site Ops** | A reference implementation of a multi-site IaC orchestration tool. Template-agnostic. Works with any Bicep or ARM templates. |
 | **IoT Operations Workspace** | A starter kit demonstrating Site Ops for deploying Azure IoT Operations at scale. |
 
 ---
@@ -27,7 +27,7 @@ siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml -l "envir
 
 ARM/Bicep deploys resources. Site Ops orchestrates deployments across your fleet.
 
-> **Site Ops isn't replacing ARM/Bicep—it's the fleet management layer on top.**
+> **Site Ops isn't replacing ARM/Bicep. It's the fleet management layer on top.**
 
 | Challenge | Site Ops Solution |
 |-----------|-------------------|
@@ -35,32 +35,32 @@ ARM/Bicep deploys resources. Site Ops orchestrates deployments across your fleet
 | Targeting specific sites or environments | Label-based selection filters your fleet (`-l environment=prod`, `-l country=US`) |
 | Per-site configuration differences | Template variables (`{{ site.name }}`, `{{ site.labels.X }}`) customize each deployment |
 | Multi-step dependencies | Output chaining passes resource IDs between steps automatically |
-| Partial failures stopping everything | Failure isolation—one site's failure doesn't block others |
+| Partial failures stopping everything | Failure isolation. One site's failure doesn't block others |
 | Environment-specific values mixed with code | Site overlays separate per-environment config from committed files |
 
 ### Portability
 
-Site Ops runs anywhere Python runs—no agents, no servers, no state to manage.
+Site Ops runs anywhere Python runs. No agents, no servers, no state to manage.
 
-- **Run anywhere** — Local machine, GitHub Actions, Azure DevOps, GitLab CI, or any CI/CD platform
-- **Zero infrastructure** — No servers, agents, or state backends to provision
-- **CI/CD agnostic** — Included GitHub Actions workflows serve as reference implementations; adapt to your preferred platform
+- **Run anywhere**: local machine, GitHub Actions, Azure DevOps, GitLab CI, or any CI/CD platform
+- **Zero infrastructure**: no servers, agents, or state backends to provision
+- **CI/CD agnostic**: included GitHub Actions workflows serve as reference implementations. Adapt to your preferred platform.
 
 ### Key capabilities
 
-- **One-command fleet deployment** — Deploy to all matching sites with a single command
-- **Declarative site inventory** — Define your fleet as code—sites with labels, parameters, and inheritance
-- **Label-based site selection** — Target any slice of your fleet: `-l environment=prod`, `-l country=US,city=Seattle`, or `-l name=munich-dev`
-- **Subscription-scoped deployment** — Deploy shared resources once per subscription, then deploy per-site resources with automatic output resolution
-- **Output chaining** — Reference outputs from previous steps, including cross-scope resolution from subscription to resource group deployments
-- **Parallel execution** — Deploy to multiple sites simultaneously with configurable concurrency
-- **Failure isolation** — One site's failure doesn't block others; subscription failures block only dependent sites
-- **Dry-run validation** — Preview the full deployment plan without making Azure calls
-- **Flexible step orchestration** — Conditional execution, parameter auto-filtering, and mixed step types (Bicep and kubectl via Arc proxy) in a single manifest
+- **One-command fleet deployment**: deploy to all matching sites with a single command
+- **Declarative site inventory**: define your fleet as code. Sites have labels, parameters, and inheritance.
+- **Label-based site selection**: target any slice of your fleet with expressions like `-l environment=prod`, `-l country=US,city=Seattle`, or `-l name=munich-dev`
+- **Subscription-scoped deployment**: deploy shared resources once per subscription, then deploy per-site resources with automatic output resolution
+- **Output chaining**: reference outputs from previous steps, including cross-scope resolution from subscription to resource group deployments
+- **Parallel execution**: deploy to multiple sites simultaneously with configurable concurrency
+- **Failure isolation**: one site's failure doesn't block others. Subscription failures block only dependent sites.
+- **Dry-run validation**: preview the full deployment plan without making Azure calls
+- **Flexible step orchestration**: conditional execution, parameter auto-filtering, and mixed step types (Bicep and kubectl via Arc proxy) in a single manifest
 
 ### Cloud-first deployment
 
-Site Ops deploys infrastructure through Azure Resource Manager—the native control plane for Azure resources. For Arc-enabled solutions like Azure IoT Operations, this aligns with Azure's cloud-first model: no in-cluster GitOps agents required.
+Site Ops deploys infrastructure through Azure Resource Manager, the native control plane for Azure resources. For Arc-enabled solutions like Azure IoT Operations, this aligns with Azure's cloud-first model: no in-cluster GitOps agents required.
 
 ---
 
@@ -187,120 +187,73 @@ Each workspace follows a consistent structure:
 
 ### Sites
 
-Sites define deployment targets. Sites operate at two levels:
-
-| Site has | Site level | Deploys |
-|----------|-----------|--------|
-| `subscription` + `resourceGroup` | RG-level | Both subscription and RG-scoped steps |
-| `subscription` only | Subscription-level | `scope: subscription` steps only |
-
-**RG-level site** (most common):
+A **site** is a deployment target. Define one per row in your fleet
+under `workspaces/<workspace>/sites/`:
 
 ```yaml
 apiVersion: siteops/v1
 kind: Site
 name: munich-dev
-
 subscription: "00000000-0000-0000-0000-000000000000"
 resourceGroup: rg-iot-munich-dev
 location: germanywestcentral
-
 labels:
   environment: dev
-  country: DE
   city: Munich
-
 parameters:
   clusterName: munich-dev-arc
-  brokerConfig:
-    memoryProfile: Low
 ```
 
-**Subscription-level site** (for shared resources):
-
-```yaml
-apiVersion: siteops/v1
-kind: Site
-name: germany-subscription
-
-subscription: "00000000-0000-0000-0000-000000000000"
-location: germanywestcentral
-# No resourceGroup → subscription-level site
-
-parameters:
-  edgeSiteName: germany-edge-site
-```
-
-See [docs/site-configuration.md](docs/site-configuration.md) for inheritance, overlays, and SiteTemplate patterns.
+Sites can inherit shared defaults from a `SiteTemplate`, get overlaid
+by `sites.local/` files at runtime, and operate at either RG scope or
+subscription scope. See [docs/site-configuration.md](docs/site-configuration.md)
+for the full model.
 
 ### Manifests
 
-Manifests define deployment steps and target sites:
+A **manifest** is an ordered list of deployment steps targeted at one
+or more sites:
 
 ```yaml
 apiVersion: siteops/v1
 kind: Manifest
 name: aio-install
-description: Deploy Azure IoT Operations
-parallel: 3  # Deploy up to 3 sites concurrently
-
 selector: "environment=dev"
-
-parameters:
-  - parameters/common/common.yaml  # Applied to all steps
-
 steps:
-  - name: global-edge-site
-    template: templates/edge-site/subscription.bicep
-    scope: subscription  # Deploys once per subscription
-    when: "{{ site.properties.deployOptions.enableGlobalSite }}"
-
-  - name: edge-site
-    template: templates/edge-site/main.bicep
-    scope: resourceGroup  # Deploys per-site
-    when: "{{ site.properties.deployOptions.enableEdgeSite }}"
-
   - name: schema-registry
     template: templates/deps/schema-registry.bicep
     scope: resourceGroup
-
-  # ... additional steps (adr-ns, aio-enablement) omitted for brevity
-
   - name: aio-instance
     template: templates/aio/instance.bicep
     scope: resourceGroup
     parameters:
-      - parameters/inputs/aio-instance.yaml  # Uses outputs from previous steps
-
-  # ... additional steps (schema-registry-role, secretsync) omitted for brevity
+      - parameters/inputs/aio-instance.yaml  # outputs from prior steps
 ```
+
+A manifest can also `include:` other manifests (partials and standalone
+manifests) to compose larger pipelines. See
+[docs/manifest-reference.md](docs/manifest-reference.md) for the full
+step shape, conditions, and parallel options, and
+[docs/manifest-includes.md](docs/manifest-includes.md) for the
+composition contract.
 
 ### Template variables
 
-Reference site values in parameter files:
+Site values flow into parameter files via Mustache-style placeholders:
 
 ```yaml
-# parameters/common/common.yaml (manifest-level)
+# parameters/common/common.yaml (manifest-level, applies to every step)
 location: "{{ site.location }}"
-customLocationName: "{{ site.name }}-cl"
 aioInstanceName: "{{ site.name }}-aio"
-schemaRegistryName: "{{ site.name }}-sr"
-adrNamespaceName: "{{ site.name }}-ns"
-tags:
-  environment: "{{ site.labels.environment }}"
-  site: "{{ site.name }}"
 ```
 
 ```yaml
-# parameters/inputs/aio-instance.yaml (step-level, for output chaining)
+# parameters/inputs/aio-instance.yaml (step-level chaining)
 schemaRegistryId: "{{ steps.schema-registry.outputs.schemaRegistry.id }}"
-adrNamespaceId: "{{ steps.adr-ns.outputs.adrNamespace.id }}"
-
-# Cross-scope output chaining (subscription → resource group)
-edgeSiteId: "{{ steps.global-edge-site.outputs.site.id }}"
 ```
 
-See [docs/parameter-resolution.md](docs/parameter-resolution.md) for auto-filtering, merge order, and cross-scope resolution.
+See [docs/parameter-resolution.md](docs/parameter-resolution.md) for
+auto-filtering, merge order, and cross-scope output chaining.
 
 ---
 
@@ -308,19 +261,22 @@ See [docs/parameter-resolution.md](docs/parameter-resolution.md) for auto-filter
 
 | Command | Description |
 |---------|-------------|
-| `siteops sites` | List available sites |
+| `siteops sites` | List sites in the workspace |
+| `siteops sites <name>` | Inspect one site (filename or internal `name:`) |
+| `siteops sites <name> --render` | Show the resolved YAML after inheritance + overlays |
 | `siteops validate <manifest>` | Validate manifest and all references |
+| `siteops validate <manifest> -v` | Validation plus the deployment plan |
 | `siteops deploy <manifest>` | Execute deployment |
-| `siteops deploy <manifest> --dry-run` | Show commands without executing |
+| `siteops deploy <manifest> --dry-run` | Show what would deploy without calling Azure |
 
 ### Common options
 
-| Option | Description | Commands | Examples |
-|--------|-------------|----------|----------|
-| `-w, --workspace` | Workspace directory (required) | All | `-w workspaces/iot-operations` |
-| `-l, --selector` | Filter sites by label | All | `-l environment=prod`, `-l country=US,city=Seattle` |
-| `-p, --parallel` | Override parallel site count | `deploy` | `-p 5`, `-p 0` (unlimited) |
-| `-v, --verbose` | Verbose output | `validate`, `sites` | |
+| Option | Description | Default |
+|--------|-------------|---------|
+| `-w, --workspace` | Workspace directory | current directory |
+| `-l, --selector` | Filter sites by label (e.g. `-l environment=prod,city=Seattle`) | none |
+| `-p, --parallel` | Max concurrent sites for `deploy` (`0` = unlimited, `1` = serial) | manifest setting |
+| `--extra-sites-dir` | Additional trusted `sites/` directory (repeatable; also accepts `SITEOPS_EXTRA_SITES_DIRS`) | none |
 
 ---
 

@@ -6,12 +6,12 @@
 // present on the cluster.
 //
 // Discovery: direct `existing` lookups by names sourced from
-// `templates/common/extension-names.bicep` — the same module the install path
+// `templates/common/extension-names.bicep`, the same module the install path
 // uses to STAMP these names. Drift between install and upgrade is structurally
 // impossible because both sides import the same authoritative deriver/constants.
 //
 // What this template does NOT resolve:
-//   cert-manager — its presence depends on the runtime trustSource read here,
+//   cert-manager. Its presence depends on the runtime trustSource read here,
 //   and Bicep does not allow `existing if(cond)` where `cond` is produced at
 //   deployment runtime by a sibling module/resource (BCP182). cert-manager
 //   resolution is therefore the next manifest step (`resolve-cert-manager.bicep`),
@@ -59,7 +59,7 @@ resource secretStoreExtension 'Microsoft.KubernetesConfiguration/extensions@2023
 }
 
 // =====================================================================================
-// Outputs — uniform snapshot shape consumed by update-extensions alongside
+// Outputs: uniform snapshot shape consumed by update-extensions alongside
 // resolve-cert-manager.outputs.snapshot.
 // =====================================================================================
 

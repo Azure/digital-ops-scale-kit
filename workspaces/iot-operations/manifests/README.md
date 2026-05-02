@@ -17,7 +17,7 @@ Standalone manifests and their internal partials for the AIO platform.
 
 - **`_` prefix** marks an internal partial. Not deployed directly. Composed via `include:`. The `test_partial_files_use_underscore_prefix` workspace test enforces this (a manifest authored to be included must start with `_`).
 - **Standalone manifests** are convenience entry points for `siteops deploy`. They re-include the partials they depend on.
-- **Compositions live in `scenarios/`**, not here. A composition that pulls in two standalone manifests will collide on shared step names (e.g. `resolve-aio`); compose the underlying `_partial.yaml` files instead.
+- **Composed manifests live in `scenarios/`**, not here. A scenario that pulls in two standalone manifests will collide on shared step names (e.g. `resolve-aio`). Compose the underlying `_partial.yaml` files instead.
 
 ## Authoring a new partial
 

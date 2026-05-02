@@ -6,7 +6,7 @@
 // Kubernetes secret on the cluster. The SecretSync references the default SPC
 // created by enable-secretsync.
 //
-// Security: The secret value is a @secure() parameter — it is never logged in ARM
+// Security: The secret value is a @secure() parameter and is never logged in ARM
 // deployment history or Bicep outputs. Provide the value via:
 //   - sites.local/ parameter overrides (gitignored)
 //   - CI/CD pipeline secrets
@@ -37,7 +37,7 @@ param spcName string
 param secretName string
 
 @secure()
-@description('Secret value. Provide at deployment time — never store in source control.')
+@description('Secret value. Provide at deployment time. Never store in source control.')
 param secretValue string
 
 @description('Name for the Kubernetes secret. Defaults to the Key Vault secret name.')

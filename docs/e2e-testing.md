@@ -131,7 +131,7 @@ Ephemeral teardown runs three independent guards before `az group delete`. Any s
 
 Persistent teardown deletes the Arc cluster only if it was not present in the pre-run snapshot (i.e. only clusters this run registered; an operator-owned cluster with the same name is preserved). Resource deletion is bounded to the snapshot delta (post − pre): the workflow records every resource ID present in the RG before any Azure-side creation and deletes only what was added during the run. Missing snapshot → skip delta cleanup (manual inspection). Post-run enumeration failure → emit an error instead of declaring the RG clean.
 
-**Use a dedicated RG for persistent mode.** Anything added to the RG between the snapshot and teardown — by operators, automation, or a `keep-cluster-alive-minutes` hold — appears in the delta and is deleted.
+**Use a dedicated RG for persistent mode.** Anything added to the RG between the snapshot and teardown (by operators, automation, or a `keep-cluster-alive-minutes` hold) appears in the delta and is deleted.
 
 A JUnit XML artifact is uploaded per matrix cell (`e2e-results-<release>.xml`). When `upgrade-to` is set and the cell exercises the upgrade phase, a second artifact (`e2e-results-<release>-to-<upgrade-to>.xml`) is uploaded with the upgrade-only test results.
 

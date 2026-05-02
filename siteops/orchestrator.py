@@ -134,6 +134,12 @@ class Orchestrator:
         self._params_cache_lock = threading.Lock()
         self._site_cache: dict[str, Site] = {}
         self._cache_lock = threading.Lock()
+        # Lazy index of internal `name:` to file path. Built when a stem
+        # lookup misses and falls back to internal-name resolution. Lets
+        # a site declare a `name:` different from its filename and still
+        # be resolved by either form.
+        self._internal_name_index: dict[str, Path] | None = None
+        self._internal_name_index_lock = threading.Lock()
         self._extra_trusted_sites_dirs = self._normalize_extra_sites_dirs(
             extra_trusted_sites_dirs or []
         )
@@ -196,19 +202,140 @@ class Orchestrator:
         """
         return [self.workspace / "sites", *self._extra_trusted_sites_dirs]
 
-    def _find_trusted_site_file(self, name: str) -> Path | None:
-        """Return the first trusted directory path containing `<name>.yaml`.
+    def _find_trusted_site_file(self, identifier: str) -> Path | None:
+        """Return the trusted directory path containing the named site.
 
-        Searches `sites/` and each extra trusted directory in order.
-        Does NOT search `sites.local/`: sites must be declared in a
-        code-reviewed (or caller-vouched-for) location to be loadable.
+        Resolves `identifier` in two passes.
+
+        1. Filename stem. Searches `sites/` and each extra trusted dir
+           in order for `<identifier>.yaml` (or `.yml`). The common case,
+           since most sites use a `name:` that matches their filename.
+        2. Internal `name:` field. Falls back to a workspace-wide index
+           when the stem lookup misses. Lets a site declared
+           `name: contoso-edge` in `sites/seattle.yaml` resolve as
+           `contoso-edge` from both the CLI selector and `load_site()`.
+
+        Eagerly triggers the internal-name index build (and its
+        uniqueness validation) on the first call. This guarantees the
+        invariants fire even when every lookup happens to hit the stem
+        fast path. Without this, a workspace with two sites declaring
+        the same internal `name:` would pass silently for any command
+        that only uses filename-stem identifiers.
+
+        `sites.local/` is never searched. Sites must live in a
+        code-reviewed or caller-vouched-for trusted location.
         """
+        # Eager index build. Cheap (one filesystem pass), catches drift
+        # the lazy fallback path would miss.
+        self._ensure_internal_name_index()
         for sites_dir in self._trusted_sites_dirs:
             for ext in (".yaml", ".yml"):
-                path = sites_dir / f"{name}{ext}"
+                path = sites_dir / f"{identifier}{ext}"
                 if path.exists():
                     return path
-        return None
+        return self._internal_name_lookup(identifier)
+
+    def _ensure_internal_name_index(self) -> None:
+        """Build the internal-name index if it has not been built yet.
+
+        Called by every site-touching entry point so the workspace
+        uniqueness invariants are enforced regardless of which lookup
+        path the caller takes.
+        """
+        with self._internal_name_index_lock:
+            if self._internal_name_index is None:
+                self._internal_name_index = self._build_internal_name_index()
+
+    def _internal_name_lookup(self, name: str) -> Path | None:
+        """Resolve `name` through the internal-name index.
+
+        Builds the index on first call via `_ensure_internal_name_index`
+        if it has not been built yet. The build pass enforces the
+        workspace uniqueness invariants documented on
+        `_build_internal_name_index`.
+        """
+        self._ensure_internal_name_index()
+        return self._internal_name_index.get(name)
+
+    def _build_internal_name_index(self) -> dict[str, Path]:
+        """Index trusted site files by their internal `name:` field.
+
+        Skips:
+          - SiteTemplates (`kind: SiteTemplate`), which are not loadable.
+          - Files whose `name:` already equals their filename stem,
+            because the stem fast path already covers them.
+
+        Raises ValueError on either drift condition that would make site
+        identity ambiguous.
+
+          - Two sites declare the same internal `name:`.
+          - One site's internal `name:` equals another site's filename
+            stem, which would let the same identifier resolve to two
+            different files.
+        """
+        # Collect (stem, path) for all candidate site files first. The
+        # second-pass check needs to see every stem in the workspace, not
+        # just the ones with overridden `name:` fields.
+        all_stems: dict[str, Path] = {}
+        for sites_dir in self._trusted_sites_dirs:
+            if not sites_dir.exists():
+                continue
+            for ext in ("*.yaml", "*.yml"):
+                for path in sites_dir.glob(ext):
+                    if self._is_site_template(path):
+                        continue
+                    # First trusted dir wins on stem collisions, matching
+                    # `_find_trusted_site_file` ordering.
+                    all_stems.setdefault(path.stem, path)
+
+        index: dict[str, Path] = {}
+        for path in all_stems.values():
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = yaml.safe_load(f) or {}
+            except (yaml.YAMLError, OSError):
+                # Defer parse errors to load_site() for context-rich reporting.
+                continue
+            internal_name = self._read_internal_name(data)
+            if not internal_name or internal_name == path.stem:
+                continue
+            if internal_name in all_stems and all_stems[internal_name] != path:
+                raise ValueError(
+                    f"Site '{path.name}' declares `name: {internal_name}` "
+                    f"which collides with file `{all_stems[internal_name].name}`. "
+                    f"Each site identity must resolve to exactly one file. "
+                    f"Rename the `name:` field or one of the files."
+                )
+            if internal_name in index and index[internal_name] != path:
+                existing = index[internal_name]
+                raise ValueError(
+                    f"Two sites declare the same `name: {internal_name}`: "
+                    f"`{existing.name}` and `{path.name}`. Site names must "
+                    f"be unique across the workspace."
+                )
+            index[internal_name] = path
+        return index
+
+    @staticmethod
+    def _read_internal_name(data: dict[str, Any]) -> str | None:
+        """Read the internal `name:` from a parsed site file.
+
+        Supports the flat shape (`name:` at top level) and the K8s-style
+        nested shape (`metadata.name:`). Returns None if neither is set.
+        """
+        if "spec" in data:
+            metadata = data.get("metadata") or {}
+            return metadata.get("name")
+        return data.get("name")
+
+    def _invalidate_internal_name_index(self) -> None:
+        """Clear the lazy internal-name index.
+
+        Call when a site file may have been added, removed, or had its
+        `name:` field changed during the orchestrator's lifetime.
+        """
+        with self._internal_name_index_lock:
+            self._internal_name_index = None
 
     def _deep_merge(self, base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
         """Deep merge two dictionaries, with override taking precedence.
@@ -438,40 +565,52 @@ class Orchestrator:
     def load_site(self, name: str) -> Site:
         """Load a site by name, applying inheritance and local overlays.
 
+        `name` may be either the site file's filename stem OR the
+        internal `name:` field declared in the file. The two forms are
+        symmetric (see `_find_trusted_site_file`).
+
         Resolution order (later sources override earlier):
         1. Inherited site/template (if 'inherits' specified on the base file).
         2. Base site file from `sites/` or any extra trusted dir (first
-           trusted dir containing the file wins; see `_find_trusted_site_file`).
+           trusted dir containing the file wins).
         3. Overlays from any remaining trusted dirs (`inherits` stripped).
-        4. Local overlay from `sites.local/{name}.yaml` (if it exists;
-           `inherits` stripped).
+        4. Local overlay from `sites.local/<stem>.yaml` if present
+           (`inherits` stripped). Keyed by canonical filename stem.
 
         Args:
-            name: Site name (filename stem, without extension).
+            name: Filename stem OR internal `name:` value.
 
         Returns:
             Fully resolved Site instance.
 
         Raises:
-            ValueError: If site file is invalid, missing required fields,
-                       or references non-existent inherited files.
-            FileNotFoundError: If `{name}.yaml` is not found in `sites/`
-                or any extra trusted directory.
+            ValueError: If the site file is invalid, missing required
+                fields, references a non-existent inherited file, or two
+                files in the workspace would resolve to the same name.
+            FileNotFoundError: If neither the filename stem nor any
+                internal `name:` matches.
         """
-        # Check cache first
+        # Check cache first. Cached under both forms (stem + internal name)
+        # below so a second call with either form is a hit.
         with self._cache_lock:
             if name in self._site_cache:
                 return self._site_cache[name]
 
-        # Locate the site file in a trusted directory (sites/ or extras).
-        # sites.local/ cannot be the primary source. Sites must be declared
-        # in a code-reviewed / caller-vouched-for location.
+        # Resolve the identifier to a trusted file. Stem fast path first,
+        # then internal-name index fallback.
         site_path = self._find_trusted_site_file(name)
         if site_path is None:
             where = "sites/"
             if self._extra_trusted_sites_dirs:
                 where += " or extra trusted sites dirs"
             raise FileNotFoundError(f"Site file not found: {name} (searched {where})")
+
+        # Use the canonical filename stem for the overlay merge. The
+        # `_load_site_data` step keys overlays in `sites.local/` and
+        # additional trusted dirs by `<stem>.yaml`, not by internal name,
+        # so we must canonicalize here when the caller passed an
+        # internal-name override.
+        canonical_stem = site_path.stem
 
         # Check if this is a SiteTemplate (cannot be loaded directly)
         if self._is_site_template(site_path):
@@ -481,20 +620,22 @@ class Orchestrator:
             )
 
         # Load and merge site data (handles inheritance + local overlay)
-        merged_data = self._load_site_data(name)
+        merged_data = self._load_site_data(canonical_stem)
 
         # Validate merged data
         _validate_resource(merged_data, "Site", site_path)
 
-        # Parse merged data (similar to Site.from_file but from dict)
+        # Parse merged data (similar to Site.from_file but from dict).
+        # Default the site's name to the canonical filename stem so a
+        # missing `name:` field still produces a well-formed Site.
         if "spec" in merged_data:
             spec = merged_data["spec"]
             metadata = merged_data.get("metadata", {})
-            site_name = metadata.get("name", name)
+            site_name = metadata.get("name", canonical_stem)
             labels = metadata.get("labels", {})
         else:
             spec = merged_data
-            site_name = merged_data.get("name", name)
+            site_name = merged_data.get("name", canonical_stem)
             labels = merged_data.get("labels", {})
 
         required = ["subscription", "location"]
@@ -512,8 +653,14 @@ class Orchestrator:
             parameters=spec.get("parameters", {}),
         )
 
-        # Cache the resolved site
+        # Cache under every form the caller might use later. Always under
+        # the canonical stem and the internal name. Also under whatever
+        # the caller actually passed, so a redundant lookup of an alias
+        # short-circuits without re-resolving.
         with self._cache_lock:
+            self._site_cache[canonical_stem] = site
+            if site.name and site.name != canonical_stem:
+                self._site_cache[site.name] = site
             self._site_cache[name] = site
 
         return site
@@ -1936,7 +2083,7 @@ class Orchestrator:
         # Validate manifest-level parameter files
         for param_path in manifest.parameters:
             if "{{" in param_path:
-                # Dynamic path — validate resolved path for each site
+                # Dynamic path: validate resolved path for each site
                 for site in sites:
                     resolved = manifest.resolve_parameter_path(param_path, site)
                     full_path = (self.workspace / resolved).resolve()
@@ -1994,7 +2141,7 @@ class Orchestrator:
 
                 for param_path in step.parameters:
                     if "{{" in param_path:
-                        # Dynamic path — validate resolved path for each site
+                        # Dynamic path: validate resolved path for each site
                         for site in sites:
                             resolved = manifest.resolve_parameter_path(param_path, site)
                             full_path = (self.workspace / resolved).resolve()

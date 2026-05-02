@@ -635,7 +635,7 @@ jobs:
           fi
           # Only delete the Arc cluster if it was created by THIS run: grep
           # the pre-snapshot for a matching connectedClusters/<name> id. If
-          # it was already there, the operator owns it — skip.
+          # it was already there, the operator owns it. Skip.
           if grep -qiE "/providers/Microsoft\.Kubernetes/connectedClusters/${CLUSTER}$" "$PRE_FILE"; then
             echo "Skipping cluster delete: Arc resource '$CLUSTER' pre-existed the snapshot (operator-owned)."
           else

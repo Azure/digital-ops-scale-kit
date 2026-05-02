@@ -41,7 +41,7 @@ parameters:
     default: false
 
   # Per-environment lookup tables. To split resources per environment,
-  # change the values below — no structural changes needed.
+  # change the values below. No structural changes needed.
   - name: serviceConnections
     displayName: Service connection per environment
     type: object

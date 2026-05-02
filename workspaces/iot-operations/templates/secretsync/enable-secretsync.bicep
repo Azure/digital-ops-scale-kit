@@ -4,16 +4,16 @@
 // Mirrors the behavior of `az iot ops secretsync enable`.
 //
 // All resolved infrastructure values (CL name, cluster name, OIDC issuer, namespace,
-// instance properties) are received as parameters — typically via output chaining from
+// instance properties) are received as parameters, typically via output chaining from
 // the resolve-aio step. This template has no cross-directory module dependencies.
 //
 // Resources provisioned/managed:
 //   1. User-Assigned Managed Identity (idempotent PUT)
 //   2. Key Vault with RBAC authorization (idempotent PUT)
-//   3. Key Vault role assignments — Key Vault Secrets User + Key Vault Reader
+//   3. Key Vault role assignments: Key Vault Secrets User + Key Vault Reader
 //   4. Federated Identity Credential on the managed identity
 //   5. AzureKeyVaultSecretProviderClass (SPC) on the custom location
-//   6. IoT Operations instance update — sets defaultSecretProviderClassRef to the SPC
+//   6. IoT Operations instance update: sets defaultSecretProviderClassRef to the SPC
 //
 // Usage (with siteops output chaining from resolve-aio):
 //   The resolve-aio step outputs all required values. The inputs/secretsync.yaml
@@ -28,7 +28,7 @@
 // -------------------------------------------------------------------------------------
 
 // =====================================================================================
-// Parameters — resolved infrastructure (from resolve-aio output chaining)
+// Parameters: resolved infrastructure (from resolve-aio output chaining)
 // =====================================================================================
 
 import { aioSecretSyncServiceAccountName } from '../common/extension-names.bicep'
@@ -52,7 +52,7 @@ param connectedClusterName string
 param oidcIssuerUrl string
 
 // =====================================================================================
-// Parameters — instance properties (from resolve-aio, forwarded to instance update)
+// Parameters: instance properties (from resolve-aio, forwarded to instance update)
 // =====================================================================================
 
 @description('Instance location.')
@@ -80,7 +80,7 @@ param features object = {}
 param instanceDescription string = ''
 
 // =====================================================================================
-// Parameters — AIO API version (drives update-instance dispatch)
+// Parameters: AIO API version (drives update-instance dispatch)
 // =====================================================================================
 
 @description('IoT Operations API version for the instance PUT. Must match the version the instance was created with.')
@@ -91,7 +91,7 @@ param instanceDescription string = ''
 param aioApiVersion string
 
 // =====================================================================================
-// Parameters — secret sync configuration
+// Parameters: secret sync configuration
 // =====================================================================================
 
 @description('Name for the user-assigned managed identity. Auto-generated if empty.')
@@ -146,7 +146,7 @@ resource customLocation 'Microsoft.ExtendedLocation/customLocations@2021-08-31-p
 
 // =====================================================================================
 // User-Assigned Managed Identity
-//   Idempotent PUT — if an MI with this name already exists, it is confirmed in place.
+//   Idempotent PUT: if an MI with this name already exists, it is confirmed in place.
 // =====================================================================================
 
 resource managedIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
@@ -158,7 +158,7 @@ resource managedIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-
 // =====================================================================================
 // Key Vault
 //   Conditional: only created when no existing Key Vault is provided.
-//   Idempotent PUT — if a KV with this name already exists in the RG, it is confirmed
+//   Idempotent PUT: if a KV with this name already exists in the RG, it is confirmed
 //   in place with RBAC authorization enabled.
 // =====================================================================================
 

@@ -8,7 +8,7 @@
 // the target API version must be forwarded to prevent data loss, so callers are
 // expected to chain from resolve-aio outputs.
 //
-// Mirrors the pattern in templates/aio/instance.bicep (CREATE) — this module is
+// Mirrors the pattern in templates/aio/instance.bicep (CREATE). This module is
 // the matching UPDATE primitive. Lives in templates/aio/modules/ so it is
 // available to any capability, not only secretsync.
 //
@@ -35,7 +35,7 @@ param instanceName string
 @description('Instance location (from existing instance).')
 param instanceLocation string
 
-@description('Extended location resource ID — the custom location ID.')
+@description('Extended location resource ID (the custom location ID).')
 param extendedLocationName string
 
 @description('Instance tags.')

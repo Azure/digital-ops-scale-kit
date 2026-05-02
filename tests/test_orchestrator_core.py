@@ -885,6 +885,140 @@ class TestGetAllSiteNames:
         assert names == []
 
 
+class TestSiteIdentityResolution:
+    """Sites can be resolved by either filename stem or internal `name:`.
+
+    Today most workspace sites use a `name:` that matches the filename
+    stem. The bilingual lookup lets an operator declare a different
+    `name:` (for renames or human-readable identifiers) and still have
+    the site resolve from CLI selectors and `Orchestrator.load_site`.
+    """
+
+    def _write_site(self, workspace, filename, internal_name, **extra):
+        body = {
+            "apiVersion": "siteops/v1",
+            "kind": "Site",
+            "name": internal_name,
+            "subscription": "00000000-0000-0000-0000-000000000000",
+            "resourceGroup": "rg-test",
+            "location": "eastus",
+            **extra,
+        }
+        path = workspace / "sites" / filename
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.dump(body, f)
+        return path
+
+    def test_load_by_filename_stem_when_name_matches(self, tmp_workspace):
+        """The common case: name == stem. Stem fast path wins."""
+        self._write_site(tmp_workspace, "munich-dev.yaml", "munich-dev")
+        orchestrator = Orchestrator(tmp_workspace)
+        site = orchestrator.load_site("munich-dev")
+        assert site.name == "munich-dev"
+
+    def test_load_by_filename_stem_when_name_overridden(self, tmp_workspace):
+        """Stem still resolves even when internal name differs."""
+        self._write_site(tmp_workspace, "seattle.yaml", "contoso-edge")
+        orchestrator = Orchestrator(tmp_workspace)
+        site = orchestrator.load_site("seattle")
+        assert site.name == "contoso-edge"
+
+    def test_load_by_internal_name_when_overridden(self, tmp_workspace):
+        """Internal name resolves via the lazy index fallback."""
+        self._write_site(tmp_workspace, "seattle.yaml", "contoso-edge")
+        orchestrator = Orchestrator(tmp_workspace)
+        site = orchestrator.load_site("contoso-edge")
+        assert site.name == "contoso-edge"
+
+    def test_load_by_internal_name_caches_under_both_forms(self, tmp_workspace):
+        """A subsequent load via the other form is a cache hit, not a re-resolve."""
+        self._write_site(tmp_workspace, "seattle.yaml", "contoso-edge")
+        orchestrator = Orchestrator(tmp_workspace)
+        site_by_internal = orchestrator.load_site("contoso-edge")
+        site_by_stem = orchestrator.load_site("seattle")
+        assert site_by_internal is site_by_stem  # same cached instance
+
+    def test_unknown_identifier_raises_file_not_found(self, tmp_workspace):
+        self._write_site(tmp_workspace, "seattle.yaml", "contoso-edge")
+        orchestrator = Orchestrator(tmp_workspace)
+        with pytest.raises(FileNotFoundError):
+            orchestrator.load_site("nonexistent")
+
+    def test_two_sites_same_internal_name_rejected(self, tmp_workspace):
+        """A workspace cannot have two files claiming the same internal name."""
+        self._write_site(tmp_workspace, "seattle.yaml", "contoso-edge")
+        self._write_site(tmp_workspace, "tacoma.yaml", "contoso-edge")
+        orchestrator = Orchestrator(tmp_workspace)
+        # Stem fast path still works for either file directly. The
+        # collision only surfaces when the index is built (on internal-
+        # name lookup or any path that triggers the fallback).
+        with pytest.raises(ValueError, match="Two sites declare the same"):
+            orchestrator.load_site("contoso-edge")
+
+    def test_internal_name_shadowing_another_stem_rejected(self, tmp_workspace):
+        """A site cannot set `name: X` if `X.yaml` is another file in the workspace."""
+        # File `seattle.yaml` declares `name: tacoma`. Another file
+        # `tacoma.yaml` exists. The identifier "tacoma" is now ambiguous:
+        # stem lookup returns tacoma.yaml, internal-name lookup would
+        # return seattle.yaml. Reject at index-build time.
+        self._write_site(tmp_workspace, "seattle.yaml", "tacoma")
+        self._write_site(tmp_workspace, "tacoma.yaml", "tacoma")
+        orchestrator = Orchestrator(tmp_workspace)
+        with pytest.raises(ValueError, match="collides with file"):
+            orchestrator.load_site("does-not-matter")
+
+    def test_index_skips_sites_where_name_matches_stem(self, tmp_workspace):
+        """Common-case sites do not appear in the internal-name index."""
+        self._write_site(tmp_workspace, "munich-dev.yaml", "munich-dev")
+        self._write_site(tmp_workspace, "seattle.yaml", "contoso-edge")
+        orchestrator = Orchestrator(tmp_workspace)
+        # Force build via a fallback lookup.
+        orchestrator.load_site("contoso-edge")
+        # Only the overridden site should be indexed.
+        assert set(orchestrator._internal_name_index.keys()) == {"contoso-edge"}
+
+    def test_collision_caught_via_stem_fast_path(self, tmp_workspace):
+        """Collision detection fires even when every lookup hits the stem
+        fast path. Without eager index build, a workspace with two sites
+        declaring the same internal `name:` would silently pass any
+        command that only resolves filename stems.
+        """
+        self._write_site(tmp_workspace, "site-a.yaml", "shared")
+        self._write_site(tmp_workspace, "site-b.yaml", "shared")
+        orchestrator = Orchestrator(tmp_workspace)
+        # Both files have stems that resolve via the fast path. The
+        # collision is in their internal `name:` fields. The eager
+        # index build (triggered by _find_trusted_site_file) must
+        # surface the drift even though we never miss the stem path.
+        with pytest.raises(ValueError, match="Two sites declare the same"):
+            orchestrator.load_site("site-a")
+
+    def test_shadow_caught_via_stem_fast_path(self, tmp_workspace):
+        """`name:` shadowing another file's stem is rejected at load
+        time even when every operator lookup happens to hit the stem
+        fast path."""
+        self._write_site(tmp_workspace, "tacoma.yaml", "tacoma")
+        self._write_site(tmp_workspace, "seattle.yaml", "tacoma")
+        orchestrator = Orchestrator(tmp_workspace)
+        with pytest.raises(ValueError, match="collides with file"):
+            orchestrator.load_site("seattle")
+
+    def test_site_template_not_indexed(self, tmp_workspace):
+        """SiteTemplates are skipped when building the internal-name index."""
+        body = {
+            "apiVersion": "siteops/v1",
+            "kind": "SiteTemplate",
+            "name": "shared-prod",
+            "labels": {"environment": "prod"},
+        }
+        with open(tmp_workspace / "sites" / "base.yaml", "w", encoding="utf-8") as f:
+            yaml.dump(body, f)
+        self._write_site(tmp_workspace, "seattle.yaml", "contoso-edge")
+        orchestrator = Orchestrator(tmp_workspace)
+        orchestrator.load_site("contoso-edge")
+        assert "shared-prod" not in orchestrator._internal_name_index
+
+
 class TestGetStepTypeLabel:
     """Tests for step type display labels."""
 

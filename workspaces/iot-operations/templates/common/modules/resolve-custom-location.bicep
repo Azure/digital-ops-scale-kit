@@ -31,6 +31,3 @@ output namespace string = customLocation.properties.namespace
 
 @description('Full ARM resource ID of the host connected cluster.')
 output hostResourceId string = customLocation.properties.hostResourceId
-
-@description('Full ARM resource IDs of the cluster extensions bound to this custom location. Typically contains [secret-store, AIO] for scalekit-managed installs; cert-manager is intentionally excluded as it is cluster-wide infrastructure outside the custom location boundary.')
-output clusterExtensionIds string[] = customLocation.properties.clusterExtensionIds

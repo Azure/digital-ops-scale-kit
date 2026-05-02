@@ -88,8 +88,8 @@ class TestAioInstallVersioning:
         """The bicep output `aioExtension.version` reflects
         `Microsoft.KubernetesConfiguration/extensions/.../properties/version`
         from Azure. Cross-check it against the `aioVersion` declared in the
-        site's aio-releases config file (selected by the site's aioRelease) —
-        this is the primary regression guard for versioned-templates wiring.
+        site's aio-releases config file (selected by the site's aioRelease).
+        This is the primary regression guard for versioned-templates wiring.
         A drift here means the wrong template dispatched, even if everything
         else looks green.
         """
@@ -119,7 +119,7 @@ class TestAioInstallVersioning:
             )
             expected = yaml.safe_load(version_config.read_text(encoding="utf-8"))["aioVersion"]
             assert deployed_version == expected, (
-                f"Site '{name}': aio extension version drift — "
+                f"Site '{name}': aio extension version drift. "
                 f"expected {expected!r} (from {version_config.name}), "
                 f"deployed {deployed_version!r}. The versioned-templates dispatch "
                 f"selected the wrong API version or the version YAML is stale."

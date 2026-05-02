@@ -574,7 +574,7 @@ In ADO → **Project settings → Service connections → New → Azure Resource
 
 The service connection name is referenced in the deploy pipeline. Default: `azure-siteops`.
 
-> **Reusing the GitHub Actions app registration:** If you already configured OIDC for GitHub Actions (section above), you can reuse that same app registration. Create a new federated credential for ADO — the issuer and subject claims are different from GitHub's. The Azure roles are shared.
+> **Reusing the GitHub Actions app registration:** If you already configured OIDC for GitHub Actions (section above), you can reuse that same app registration. Create a new federated credential for ADO. The issuer and subject claims are different from GitHub's. The Azure roles are shared.
 
 #### 2. Create variable group
 
@@ -607,7 +607,7 @@ In ADO → **Pipelines → New pipeline** → **Azure Repos Git** (or GitHub, if
 
 #### 5. Assign Azure roles
 
-Same as GitHub Actions — see [Assign Azure roles](#3-assign-azure-roles). The service connection's managed identity needs the same Contributor (or Owner with conditions) role assignment.
+Same as GitHub Actions, see [Assign Azure roles](#3-assign-azure-roles). The service connection's managed identity needs the same Contributor (or Owner with conditions) role assignment.
 
 ### Running ADO deployments
 

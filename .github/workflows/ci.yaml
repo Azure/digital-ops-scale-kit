@@ -129,10 +129,10 @@ jobs:
         # dirs so CI validates standalone manifests (manifests/), sample
         # entry points (samples/<name>/manifest.yaml), and composed scenarios
         # (scenarios/) consistently. Excludes:
-        #   - partials (filename prefixed `_`) — fail standalone validation by
-        #     design when they reference outputs from a parent's earlier steps.
-        #   - parameters files in samples (inputs.yaml, outputs.yaml, etc.) —
-        #     not manifests.
+        #   - partials (filename prefixed `_`), which fail standalone validation
+        #     by design when they reference outputs from a parent's earlier steps.
+        #   - parameters files in samples (inputs.yaml, outputs.yaml, etc.),
+        #     which are not manifests.
         run: |
           MANIFESTS=$(
             { find "$WORKSPACE_DIR/manifests" "$WORKSPACE_DIR/scenarios" -maxdepth 1 \

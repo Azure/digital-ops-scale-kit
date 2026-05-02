@@ -4,7 +4,7 @@
 //
 // Declares the Key Vault as an existing resource and assigns the required roles
 // to a managed identity principal. Deployed as a module so that cross-resource-group
-// Key Vaults are supported — the parent template sets the module scope to the
+// Key Vaults are supported. The parent template sets the module scope to the
 // Key Vault's resource group.
 // -------------------------------------------------------------------------------------
 

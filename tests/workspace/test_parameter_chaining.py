@@ -191,7 +191,7 @@ class TestUpdateInstanceDispatch:
     """Ensure callers of update-instance.bicep pass every param the router declares.
 
     Adding a new param to the shared UPDATE primitive without wiring it into
-    every caller would silently omit the value at deploy time — all params
+    every caller would silently omit the value at deploy time. All params
     have defaults in the caller signature via ARM, meaning the original
     property would be wiped on PUT without any test failure. This structural
     check is cheap insurance against that class of regression.
@@ -605,7 +605,7 @@ class TestReleaseConfigs:
             f"@allowed lists for aioApiVersion diverge between dispatchers: {allowed_sets}"
         )
         allowed = values[0]
-        assert allowed, "No @allowed values parsed — regex or template changed"
+        assert allowed, "No @allowed values parsed (regex or template changed)"
 
         for release_file in self._get_release_files(workspace):
             with open(release_file, "r", encoding="utf-8") as f:

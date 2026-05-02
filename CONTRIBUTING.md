@@ -28,7 +28,7 @@ pytest --cov=siteops --cov-report=term-missing
 ## Testing
 
 - Add tests for new functionality
-- Mock `subprocess.run` for executor tests—no real Azure calls
+- Mock `subprocess.run` for executor tests so no real Azure calls happen
 - Use fixtures from `conftest.py` for workspace setup
 
 ## Pull Request Process
@@ -45,7 +45,7 @@ This repository uses two independent version streams with [semantic versioning](
 
 Git tags: `v1.0.0b1`, `v1.1.0`, `v2.0.0`
 
-Covers workspace content — Bicep templates, manifests, parameter files, site examples, GitHub
+Covers workspace content: Bicep templates, manifests, parameter files, site examples, GitHub
 workflows, and documentation. Unscoped `v*` tags are the primary release. GitHub Releases attach
 to these tags and note the minimum required siteops version.
 
@@ -53,7 +53,7 @@ to these tags and note the minimum required siteops version.
 
 Git tags: `siteops/v1.0.0b1`, `siteops/v1.1.0`
 
-Covers the `siteops/` Python package — CLI, orchestrator, executor, models. The `siteops/v*` tag
+Covers the `siteops/` Python package: CLI, orchestrator, executor, models. The `siteops/v*` tag
 stays in sync with the version in `siteops/__init__.py` (read dynamically by pyproject.toml).
 
 ### Guidelines
@@ -64,10 +64,10 @@ stays in sync with the version in `siteops/__init__.py` (read dynamically by pyp
 - Content-only changes (new templates, manifest updates, doc fixes) bump only the `v*` tag.
 - Tool-only changes (CLI features, orchestrator fixes) bump only the `siteops/v*` tag.
 - Use conventional commits to distinguish change types:
-  - `feat(workspace):` — new content
-  - `feat(siteops):` — new tool feature
-  - `fix(siteops):` — tool bugfix
-  - `docs:` — documentation
+  - `feat(workspace):` for new content
+  - `feat(siteops):` for new tool features
+  - `fix(siteops):` for tool bugfixes
+  - `docs:` for documentation
 
 ### Example timeline
 

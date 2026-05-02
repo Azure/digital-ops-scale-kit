@@ -177,7 +177,7 @@ class TestRender:
     def test_bare_dollar_passes_through(self, tmp_path):
         """A literal `$` not part of `${name}` must not raise. Templates may
         contain shell-style `$VAR` refs in comments, regex examples, or doc
-        snippets — `safe_substitute` lets those through; the leftover-pattern
+        snippets. `safe_substitute` lets those through. The leftover-pattern
         only fires on `${...}` forms."""
         body = "comment: '# uses $RUNNER_TEMP at runtime'\nname: ${E2E_SITE_NAME}\n"
         tmpl = self._make_template(tmp_path, body)
@@ -186,7 +186,7 @@ class TestRender:
         assert "name: e2e-unit-test" in out
 
     def test_template_placeholders_preserved_verbatim_outside_dollar_brace(self, tmp_path):
-        """`{{ ... }}` and `$VAR` (no braces) must pass through untouched — those
+        """`{{ ... }}` and `$VAR` (no braces) must pass through untouched. Those
         forms are consumed by siteops' own templater at load time."""
         body = "name: ${E2E_SITE_NAME}\ncluster: {{ site.parameters.clusterName }}\n"
         tmpl = self._make_template(tmp_path, body)

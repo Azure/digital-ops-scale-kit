@@ -13,7 +13,7 @@
 #
 # AIO-install fields inherited from base-site.yaml (aioRelease, brokerConfig,
 # defaultDataflowInstanceCount, deployOptions.enableSecretSync, etc.) are
-# inert here — no resourceGroup-scoped step runs against this site.
+# inert here. No resourceGroup-scoped step runs against this site.
 
 apiVersion: siteops/v1
 kind: Site

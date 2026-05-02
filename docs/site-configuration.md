@@ -1,6 +1,6 @@
 # Site Configuration
 
-Sites define **where** to deploy—the Azure subscription, resource group, location, and site-specific configuration.
+Sites define **where** to deploy: the Azure subscription, resource group, location, and site-specific configuration.
 
 ## Site levels
 
@@ -11,7 +11,7 @@ Sites operate at two levels based on whether they have a `resourceGroup`:
 | `subscription` + `resourceGroup` | RG-level | Both subscription and RG-scoped steps |
 | `subscription` only | Subscription-level | `scope: subscription` steps only |
 
-**RG-level sites** are the most common—they deploy resources into a specific resource group.
+**RG-level sites** are the most common. They deploy resources into a specific resource group.
 
 **Subscription-level sites** deploy shared resources once per subscription (like Azure Edge Sites), then RG-level sites in that subscription can reference those outputs via cross-scope output chaining.
 
@@ -42,6 +42,42 @@ properties:
   deployOptions:
     enableSecretSync: true
 ```
+
+### Site identity (filename vs `name:`)
+
+By convention the internal `name:` field equals the filename without
+extension (`sites/munich-dev.yaml` declares `name: munich-dev`). When
+they match, this is the site's only identity and everything keys off
+it.
+
+If you want a friendlier or longer identifier without renaming the
+file (or vice versa), set `name:` to anything you like and siteops
+resolves the site by either form symmetrically:
+
+```yaml
+# sites/seattle.yaml
+apiVersion: siteops/v1
+kind: Site
+name: contoso-edge-seattle   # any identifier you want
+...
+```
+
+Both work as identifiers everywhere a site is referenced:
+
+```bash
+siteops -w workspaces/X sites contoso-edge-seattle --render   # internal name
+siteops -w workspaces/X sites seattle --render                # filename
+siteops -w workspaces/X deploy <manifest> -l name=contoso-edge-seattle
+```
+
+Workspace invariants enforced at load time:
+
+- Every internal `name:` is unique across the workspace.
+- No internal `name:` may equal another file's name (without
+  extension), since that would create ambiguous resolution.
+
+A clear `ValueError` surfaces at load time when either invariant is
+violated.
 
 **Subscription-level site** (for shared resources):
 
@@ -107,19 +143,28 @@ Use parameters for:
 
 ### Properties
 
-Structured **metadata** and **deployment options**:
+Free-form site state read by manifests and templates via
+`{{ site.properties.<path> }}` substitution and `when:` conditions.
+Open schema. Siteops does not enforce field names or shapes. The
+workspace defines its own conventions.
 
 ```yaml
 properties:
-  aioRelease: "2603"                   # Target AIO release (see [aio-releases.md](aio-releases.md))
-  deployOptions:                       # Capability gates evaluated by manifest `when:` conditions
+  # Pinned AIO release (workspace convention; selects which
+  # `parameters/aio-releases/<release>.yaml` gets loaded).
+  aioRelease: "2603"
+
+  # Capability gates evaluated by manifest `when:` conditions
+  # (workspace convention; the `enable*` prefix is a workspace style).
+  deployOptions:
     enableGlobalSite: false
     enableEdgeSite: false
     enableSecretSync: false
-  tags:
-    costCenter: operations
-    team: platform
-  opcUaEndpoints:                      # Arrays of configuration
+
+  # Free-form custom fields. Anything you reference via
+  # `{{ site.properties.X }}` in a manifest, parameters file,
+  # or `when:` condition belongs here.
+  opcUaEndpoints:
     - name: cnc-machine-1
       address: opc.tcp://10.1.1.100:4840
 ```
@@ -127,9 +172,34 @@ properties:
 Use properties for:
 
 - Capability gates evaluated via `when:` (`deployOptions.*`)
-- Azure resource tags
-- Arrays of endpoints or devices
-- Nested metadata structures
+- Workspace-specific orchestration state (release pins, feature toggles)
+- Free-form data structures consumed via `{{ site.properties.X }}`
+
+> **Bicep inputs go in `parameters:`, not `properties:`.** Resource tags,
+> cluster names, and any other value the engine should hand to a Bicep
+> `param` declaration belong in `parameters:` (auto-filtered per template).
+> `properties:` is read by the orchestrator and template substitution
+> only.
+
+### What siteops enforces vs what the workspace conventions are
+
+The siteops engine has a deliberately narrow contract over a site
+file. Knowing where the boundary sits tells you what you can rename
+when forking the workspace:
+
+| Layer | Owned by | What it cares about |
+|---|---|---|
+| YAML mechanics | siteops engine | Top-level fields (`name`, `subscription`, `resourceGroup`, `location`, `labels`, `inherits`, `parameters`, `properties`); the `parameters:` filter against Bicep template params; the `{{ site.X }}` and `{{ site.properties.<path> }}` substitution surface; selector parsing on `labels`. |
+| Field semantics | The workspace | The names of fields under `properties:` (`aioRelease`, `deployOptions`, `enable*` prefix, etc.) and the names of label keys used in selectors (`environment`, `country`, `scope`, etc.). |
+
+Anything in the second row is a convention you can rename for your own
+workspace. The iot-operations workspace happens to use
+`properties.aioRelease`, `properties.deployOptions.enable*`, and
+`labels.environment`. A forked workspace could call them
+`properties.release`, `properties.featureFlags.*`, or `labels.tier`
+without the engine caring. Just keep manifest `when:` conditions and
+`{{ site.properties.X }}` references in sync with whatever the
+workspace decides.
 
 ### Conditionals
 
@@ -341,7 +411,7 @@ three mutually-exclusive precedence tiers:
      - chicago-staging
      - seattle-prod
    ```
-   Each entry is a filename stem; missing files raise
+   Each entry is a filename without extension; missing files raise
    `FileNotFoundError` with the full list.
 
 3. **Manifest `selector:` (label expression).**
