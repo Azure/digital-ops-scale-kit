@@ -94,6 +94,23 @@ class TestValidation:
         errors = orchestrator.validate(manifest_path)
         assert errors == []
 
+    def test_validate_duplicate_non_name_selector_key_surfaces_error(self, complete_workspace):
+        """Selector parse errors (e.g. duplicate non-name key) appear in the
+        validation error list rather than being silently swallowed."""
+        orchestrator = Orchestrator(complete_workspace)
+
+        manifest_data = {
+            "name": "test",
+            "sites": ["test-site"],
+            "steps": [{"name": "step1", "template": "templates/test.bicep"}],
+        }
+        manifest_path = complete_workspace / "manifests" / "test.yaml"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            yaml.dump(manifest_data, f)
+
+        errors = orchestrator.validate(manifest_path, selector="env=prod,env=dev")
+        assert any("may only appear once" in e for e in errors)
+
     def test_validate_invalid_condition(self, complete_workspace):
         orchestrator = Orchestrator(complete_workspace)
 

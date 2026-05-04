@@ -507,6 +507,33 @@ class TestCmdDeploy:
         captured = capsys.readouterr()
         assert "declares no `sites:` or `selector:`" in captured.err
 
+    def test_deploy_duplicate_non_name_selector_key_errors(self, complete_workspace, capsys):
+        """Duplicate non-name selector key surfaces as exit 1 with clear error."""
+        from siteops.orchestrator import Orchestrator
+
+        manifest_data = {
+            "name": "test",
+            "sites": ["test-site"],
+            "steps": [{"name": "step1", "template": "templates/test.bicep"}],
+        }
+        manifest_path = complete_workspace / "manifests" / "test.yaml"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            yaml.dump(manifest_data, f)
+
+        orchestrator = Orchestrator(complete_workspace)
+
+        args = MagicMock()
+        args.manifest = manifest_path
+        args.workspace = complete_workspace
+        args.selector = "env=prod,env=dev"
+        args.parallel = None
+
+        exit_code = cmd_deploy(args, orchestrator)
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "may only appear once" in captured.err
+
     def test_deploy_no_steps(self, complete_workspace, capsys):
         """Test deploy with no steps returns exit code 0."""
         from siteops.orchestrator import Orchestrator
@@ -795,6 +822,37 @@ class TestMainArgumentParsing:
 
                 args = mock_cmd.call_args[0][0]
                 assert args.selector == "env=prod"
+
+    def test_deploy_selector_flag_repeatable(self, complete_workspace):
+        """Multiple -l flags merge into a single comma-joined string."""
+        manifest_path = complete_workspace / "manifests" / "test-manifest.yaml"
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "siteops",
+                "-w",
+                str(complete_workspace),
+                "deploy",
+                str(manifest_path),
+                "-l",
+                "name=a",
+                "-l",
+                "name=b",
+                "-l",
+                "env=prod",
+            ],
+        ):
+            with patch("siteops.cli.cmd_deploy") as mock_cmd:
+                mock_cmd.return_value = 0
+                with pytest.raises(SystemExit):
+                    main()
+
+                args = mock_cmd.call_args[0][0]
+                # Joined in CLI order; downstream parse_selector applies
+                # name-OR / non-name-error rules.
+                assert args.selector == "name=a,name=b,env=prod"
 
     def test_validate_verbose_flag(self, complete_workspace):
         """Test validate -v flag is parsed correctly."""

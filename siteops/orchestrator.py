@@ -36,6 +36,7 @@ from siteops.models import (
     KubectlStep,
     Manifest,
     ManifestStep,
+    NoTargetingError,
     ParallelConfig,
     Site,
     _validate_resource,
@@ -2017,7 +2018,7 @@ class Orchestrator:
         # the missing-targeting case loudly so the operator can either add
         # targeting to the manifest or pass it on the CLI.
         if not cli_selector and not manifest.sites and not manifest.site_selector:
-            raise ValueError(
+            raise NoTargetingError(
                 f"Manifest '{manifest.name}' declares no `sites:` or `selector:`, "
                 f"and no `-l/--selector` was provided on the CLI. Either add "
                 f"targeting to the manifest, or pass `-l <key>=<value>` to "
@@ -2027,21 +2028,42 @@ class Orchestrator:
         # CLI selector requires loading all sites for filtering
         if cli_selector:
             selector = parse_selector(cli_selector)
-            # When the operator explicitly names a site via `name=X`, and a
-            # trusted site file is named `X.yaml` (or `X.yml`), route through
-            # load_site() so load errors (broken inherits chain, invalid
-            # YAML) propagate instead of being silently swallowed by
-            # load_all_sites() and reported as "no sites matched".
-            #
-            # If there is no trusted file whose filename (without extension)
-            # is `X`, fall through to load_all_sites(): the operator may be
-            # selecting by the site's internal `name:` field, which is
-            # permitted to differ from the filename.
-            if "name" in selector and self._find_trusted_site_file(selector["name"]) is not None:
-                site = self.load_site(selector["name"])
-                if site.matches_selector(selector):
-                    return [site]
-                return []
+            # When the operator explicitly names sites via `name=X` (or
+            # repeated `name=X,name=Y`), route every name whose filename
+            # exists in a trusted sites/ directory through load_site() so
+            # load errors (broken inherits chain, invalid YAML) propagate
+            # instead of being silently swallowed by load_all_sites() and
+            # reported as "no sites matched". Names that have no trusted
+            # filename match fall through to load_all_sites() so the
+            # operator may also select by the site's internal `name:`
+            # field, which is permitted to differ from the filename.
+            if "name" in selector:
+                requested_names = selector["name"]
+                trusted_results: list[Site] = []
+                untrusted_names: list[str] = []
+                for n in requested_names:
+                    if self._find_trusted_site_file(n) is not None:
+                        site = self.load_site(n)
+                        if site.matches_selector(selector):
+                            trusted_results.append(site)
+                    else:
+                        untrusted_names.append(n)
+                # Resolve untrusted names (and any other selector keys)
+                # via the full sweep, scoped to the untrusted name set so
+                # we do not double-count trusted sites.
+                if untrusted_names:
+                    sweep_selector = {**selector, "name": untrusted_names}
+                    fallback = [
+                        s for s in self.load_all_sites()
+                        if s.matches_selector(sweep_selector)
+                    ]
+                    seen = {s.name for s in trusted_results}
+                    for s in fallback:
+                        if s.name not in seen:
+                            trusted_results.append(s)
+                            seen.add(s.name)
+                trusted_results.sort(key=lambda s: s.name)
+                return trusted_results
             all_sites = self.load_all_sites()
             return [s for s in all_sites if s.matches_selector(selector)]
 
@@ -2099,13 +2121,15 @@ class Orchestrator:
 
         try:
             sites = self.resolve_sites(manifest, selector)
-        except ValueError:
-            # Generic manifest without CLI targeting. Valid as a library or
-            # partial that will be composed (via `include:`) or targeted at
-            # deploy time. Skip site-dependent checks since they require a
-            # concrete site. `cmd_deploy` surfaces the same condition as a
-            # hard error.
+        except NoTargetingError:
+            # Generic library or partial manifest. Skip site-dependent
+            # checks since they require a concrete site. `cmd_deploy`
+            # surfaces the same condition as a hard error.
             sites = []
+        except ValueError as e:
+            # Selector parse error or similar. Surface as a validation
+            # error so the operator sees what is wrong.
+            return [str(e)]
         if not sites and (manifest.sites or manifest.site_selector or selector):
             errors.append("No sites matched the specified criteria")
 

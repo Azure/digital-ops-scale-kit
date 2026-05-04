@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from siteops import __version__
+from siteops.models import _merge_selector_strings
 from siteops.orchestrator import Orchestrator
 
 
@@ -178,7 +179,11 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     if selector_str:
         from siteops.models import parse_selector
 
-        selector = parse_selector(selector_str)
+        try:
+            selector = parse_selector(selector_str)
+        except ValueError as e:
+            print(f"\nError: {e}\n", file=sys.stderr)
+            return 1
         sites = [s for s in all_sites if s.matches_selector(selector)]
     else:
         sites = all_sites
@@ -399,9 +404,15 @@ Examples:
     p_deploy.add_argument(
         "-l",
         "--selector",
-        type=str,
+        action="append",
         default=None,
-        help="Filter sites by labels (e.g., 'environment=prod')",
+        metavar="KEY=VALUE",
+        help=(
+            "Filter sites by labels (e.g., `environment=prod`). Repeatable: "
+            "multiple `-l` flags AND-combine across distinct keys. "
+            "Duplicate `name=` values OR-combine; any other duplicate key "
+            "is an error."
+        ),
     )
     p_deploy.add_argument(
         "-p",
@@ -425,9 +436,15 @@ Examples:
     p_validate.add_argument(
         "-l",
         "--selector",
-        type=str,
+        action="append",
         default=None,
-        help="Filter sites by labels (e.g., 'environment=prod')",
+        metavar="KEY=VALUE",
+        help=(
+            "Filter sites by labels (e.g., `environment=prod`). Repeatable: "
+            "multiple `-l` flags AND-combine across distinct keys. "
+            "Duplicate `name=` values OR-combine; any other duplicate key "
+            "is an error."
+        ),
     )
     p_validate.add_argument(
         "-v",
@@ -457,9 +474,15 @@ Examples:
     p_sites.add_argument(
         "-l",
         "--selector",
-        type=str,
+        action="append",
         default=None,
-        help="Filter sites by labels (e.g., 'environment=prod', 'name=munich-dev')",
+        metavar="KEY=VALUE",
+        help=(
+            "Filter sites by labels (e.g., `environment=prod`, `name=munich-dev`). "
+            "Repeatable: multiple `-l` flags AND-combine across distinct keys. "
+            "Duplicate `name=` values OR-combine; any other duplicate key "
+            "is an error."
+        ),
     )
     p_sites.add_argument(
         "-v",
@@ -478,6 +501,13 @@ Examples:
     )
 
     args = parser.parse_args()
+
+    # Flatten repeatable -l/--selector (action="append" gives a list) into
+    # a single comma-joined string. Joining is safe because parse_selector
+    # enforces the name-OR and non-name-duplicate rules over the merged
+    # input, and every downstream caller consumes a string.
+    if hasattr(args, "selector"):
+        args.selector = _merge_selector_strings(getattr(args, "selector", None))
 
     # Setup logging - use verbose from subcommand if available, otherwise False
     verbose = getattr(args, "verbose", False)

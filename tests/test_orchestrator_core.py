@@ -378,6 +378,40 @@ class TestResolveSites:
         assert len(sites) == 2
         assert all(s.labels["environment"] == "dev" for s in sites)
 
+    def test_cli_selector_name_or_combines_multiple_sites(self, multi_site_workspace):
+        """`-l name=a,name=b` resolves both sites via load_site fast-path."""
+        orchestrator = Orchestrator(multi_site_workspace)
+        manifest = Manifest(name="generic", description="", sites=[], steps=[])
+
+        sites = orchestrator.resolve_sites(
+            manifest, cli_selector="name=dev-eastus,name=dev-westus"
+        )
+
+        assert {s.name for s in sites} == {"dev-eastus", "dev-westus"}
+
+    def test_cli_selector_name_or_dedupes_repeated(self, multi_site_workspace):
+        """Repeated name values dedup at parse time."""
+        orchestrator = Orchestrator(multi_site_workspace)
+        manifest = Manifest(name="generic", description="", sites=[], steps=[])
+
+        sites = orchestrator.resolve_sites(
+            manifest, cli_selector="name=dev-eastus,name=dev-eastus"
+        )
+
+        assert len(sites) == 1
+        assert sites[0].name == "dev-eastus"
+
+    def test_cli_selector_duplicate_non_name_key_raises(self, multi_site_workspace):
+        """Repeating any non-name key in the same selector raises."""
+        orchestrator = Orchestrator(multi_site_workspace)
+        manifest = Manifest(name="generic", description="", sites=[], steps=[])
+
+        import pytest
+        with pytest.raises(ValueError, match="may only appear once"):
+            orchestrator.resolve_sites(
+                manifest, cli_selector="environment=dev,environment=prod"
+            )
+
 
 class TestDeploymentNameGeneration:
     """Tests for deployment name truncation and hashing."""

@@ -113,32 +113,86 @@ CONDITION_PATTERN = re.compile(
 KUBECTL_OPERATIONS = {"apply"}
 
 
-def parse_selector(selector: str | None) -> dict[str, str]:
-    """Parse a label selector string into key-value pairs.
+class NoTargetingError(ValueError):
+    """Raised when neither the manifest nor the CLI provides any targeting.
+
+    Distinct from generic `ValueError` so callers can differentiate the
+    "generic library manifest with no CLI selector" case from selector
+    parse errors. `validate()` treats this as structurally OK and skips
+    site-dependent checks. `cmd_deploy` surfaces it as a hard error.
+    """
+
+
+def parse_selector(selector: str | None) -> dict[str, list[str]]:
+    """Parse a label selector string into key to value-list pairs.
+
+    Within a single selector string, comma-separated `key=value` pairs are
+    AND-combined across distinct keys. Duplicate keys follow these rules:
+
+    - The special `name` key may repeat. Repeated values OR-combine and
+      duplicates are deduped (preserving first-seen order).
+    - Any non-name key may only appear once. Duplicate non-name keys
+      raise `ValueError`. This matches kubectl, Terraform, and Ansible
+      label-selector grammars where AND across distinct keys is the rule.
 
     Args:
-        selector: Comma-separated key=value pairs (e.g., 'environment=prod,region=eastus'),
-                  or None/empty string for no filtering.
+        selector: Comma-separated `key=value` pairs (e.g.,
+            `environment=prod,region=eastus`), or None/empty for no
+            filtering.
 
     Returns:
-        Dict of label key-value pairs (empty dict if selector is None/empty)
+        Dict mapping each key to a list of allowed values. Non-name keys
+        always map to a single-element list. The `name` key may map to
+        multiple values (OR-combined). Empty dict if `selector` is None
+        or empty.
+
+    Raises:
+        ValueError: If a non-name key appears more than once.
 
     Example:
         >>> parse_selector('environment=prod,region=eastus')
-        {'environment': 'prod', 'region': 'eastus'}
+        {'environment': ['prod'], 'region': ['eastus']}
+        >>> parse_selector('name=a,name=b,name=a')
+        {'name': ['a', 'b']}
         >>> parse_selector(None)
         {}
     """
     if not selector:
         return {}
 
-    labels = {}
+    labels: dict[str, list[str]] = {}
     for part in selector.split(","):
         part = part.strip()
-        if "=" in part:
-            key, value = part.split("=", 1)
-            labels[key.strip()] = value.strip()
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if key in labels:
+            if key != "name":
+                raise ValueError(
+                    f"Selector key '{key}' may only appear once. Only the "
+                    f"`name` key supports multiple values (OR-combined)."
+                )
+            if value not in labels[key]:
+                labels[key].append(value)
+        else:
+            labels[key] = [value]
     return labels
+
+
+def _merge_selector_strings(strings: list[str] | None) -> str | None:
+    """Merge multiple selector strings into a single comma-separated string.
+
+    Used by the CLI to flatten repeated `-l/--selector` flags into a single
+    string before parsing. The grammar is associative under comma joining:
+    `parse_selector(",".join(parts))` enforces the same name-OR /
+    non-name-error rules across the merged input.
+    """
+    if not strings:
+        return None
+    merged = ",".join(s for s in strings if s)
+    return merged or None
 
 
 def _validate_resource(data: dict[str, Any], expected_kind: str | list[str], path: Path) -> str:
@@ -296,27 +350,31 @@ class Site:
     properties: dict[str, Any] = field(default_factory=dict)
     parameters: dict[str, Any] = field(default_factory=dict)
 
-    def matches_selector(self, selector: dict[str, str]) -> bool:
+    def matches_selector(self, selector: dict[str, list[str]]) -> bool:
         """Check if site matches all selector criteria.
 
         Supports:
-        - name=<value>: Match site name exactly
-        - <label>=<value>: Match label value
+        - `name`: site name must be one of the listed values (OR-combined)
+        - any other `<label>`: site label value must equal the single
+          listed value
 
         Args:
-            selector: Dictionary of key=value pairs to match
+            selector: Dict mapping each key to a list of allowed values.
+                Non-name keys must map to a single-element list (enforced
+                by `parse_selector`).
 
         Returns:
-            True if all selector criteria match
+            True if all selector criteria match.
         """
-        for key, value in selector.items():
+        for key, values in selector.items():
             if key == "name":
-                # Special case: match site name
-                if self.name != value:
+                if self.name not in values:
                     return False
             else:
-                # Match against labels
-                if self.labels.get(key) != value:
+                # Non-name keys carry a single value (enforced upstream).
+                # Use list containment so a malformed multi-value list still
+                # produces deterministic match behavior.
+                if self.labels.get(key) not in values:
                     return False
         return True
 
