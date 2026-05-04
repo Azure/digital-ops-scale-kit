@@ -12,7 +12,9 @@ def _all_manifest_files(workspace: Path) -> list[Path]:
     """Discover every Manifest YAML across `manifests/`, `samples/`, `scenarios/`.
 
     Centralized so validation and structural tests stay aligned as the layout
-    grows. Looks for `*.yaml` and `*.yml` at the conventional layer locations.
+    grows. The samples sweep filters to the manifest convention
+    (`manifest.yaml` + `_*.yaml` partials) and skips parameter files like
+    `inputs.yaml` and `outputs.yaml`.
     """
     found: list[Path] = []
     for sub in ("manifests", "scenarios"):
@@ -22,8 +24,15 @@ def _all_manifest_files(workspace: Path) -> list[Path]:
     samples = workspace / "samples"
     if samples.is_dir():
         for sample_dir in sorted(samples.iterdir()):
-            if sample_dir.is_dir():
-                found.extend(sorted(sample_dir.glob("*.yaml")) + sorted(sample_dir.glob("*.yml")))
+            if not sample_dir.is_dir():
+                continue
+            for ext in ("yaml", "yml"):
+                # Standalone sample manifest.
+                manifest = sample_dir / f"manifest.{ext}"
+                if manifest.is_file():
+                    found.append(manifest)
+                # Partials in the sample dir (filename prefixed `_`).
+                found.extend(sorted(sample_dir.glob(f"_*.{ext}")))
     return found
 
 

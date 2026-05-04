@@ -51,7 +51,11 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     from siteops.models import Manifest
 
     manifest = Manifest.from_file(manifest_path, workspace_root=args.workspace)
-    sites = orchestrator.resolve_sites(manifest, getattr(args, "selector", None))
+    try:
+        sites = orchestrator.resolve_sites(manifest, getattr(args, "selector", None))
+    except ValueError as e:
+        print(f"\nError: {e}\n", file=sys.stderr)
+        return 1
 
     if not sites:
         print("\n⚠ No sites matched. Nothing to deploy.\n")

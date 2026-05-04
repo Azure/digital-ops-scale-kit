@@ -481,6 +481,32 @@ class TestCmdDeploy:
         captured = capsys.readouterr()
         assert "No sites matched" in captured.out
 
+    def test_deploy_generic_manifest_no_selector_errors(self, complete_workspace, capsys):
+        """Generic manifest (no targeting) without `-l` is a hard error."""
+        from siteops.orchestrator import Orchestrator
+
+        manifest_data = {
+            "name": "generic",
+            "steps": [{"name": "step1", "template": "templates/test.bicep"}],
+        }
+        manifest_path = complete_workspace / "manifests" / "generic.yaml"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            yaml.dump(manifest_data, f)
+
+        orchestrator = Orchestrator(complete_workspace)
+
+        args = MagicMock()
+        args.manifest = manifest_path
+        args.workspace = complete_workspace
+        args.selector = None
+        args.parallel = None
+
+        exit_code = cmd_deploy(args, orchestrator)
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "declares no `sites:` or `selector:`" in captured.err
+
     def test_deploy_no_steps(self, complete_workspace, capsys):
         """Test deploy with no steps returns exit code 0."""
         from siteops.orchestrator import Orchestrator

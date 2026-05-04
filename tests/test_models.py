@@ -887,6 +887,98 @@ class TestManifest:
         with pytest.raises(ValueError, match="Empty or invalid"):
             Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
 
+    def test_from_file_unknown_top_level_key_with_did_you_mean(self, tmp_path):
+        """A typo close to a known field should error with a `did you mean` hint."""
+        manifest_path = tmp_path / "typo.yaml"
+        manifest_path.write_text(
+            "apiVersion: siteops/v1\n"
+            "kind: Manifest\n"
+            "name: typo\n"
+            "site:\n"           # singular: typo for `sites:`
+            "  - munich-dev\n"
+            "steps:\n"
+            "  - name: x\n"
+            "    template: t.bicep\n"
+        )
+        with pytest.raises(ValueError) as exc:
+            Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
+        msg = str(exc.value)
+        assert "unknown top-level key" in msg
+        assert "`site`" in msg
+        assert "did you mean `sites`" in msg
+
+    def test_from_file_unknown_top_level_key_no_suggestion(self, tmp_path):
+        """A key with no close match should error without a suggestion."""
+        manifest_path = tmp_path / "novel.yaml"
+        manifest_path.write_text(
+            "apiVersion: siteops/v1\n"
+            "kind: Manifest\n"
+            "name: novel\n"
+            "completely_unrelated_field: 42\n"
+            "selector: env=dev\n"
+            "steps:\n"
+            "  - name: x\n"
+            "    template: t.bicep\n"
+        )
+        with pytest.raises(ValueError) as exc:
+            Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
+        msg = str(exc.value)
+        assert "`completely_unrelated_field`" in msg
+        # No suggestion since no known key is close to this string.
+        assert "did you mean" not in msg
+
+    def test_from_file_selector_typo_caught(self, tmp_path):
+        """`selctor:` (missing 'e') should suggest `selector`."""
+        manifest_path = tmp_path / "selctor.yaml"
+        manifest_path.write_text(
+            "apiVersion: siteops/v1\n"
+            "kind: Manifest\n"
+            "name: typo\n"
+            "selctor: env=dev\n"
+            "steps:\n"
+            "  - name: x\n"
+            "    template: t.bicep\n"
+        )
+        with pytest.raises(ValueError) as exc:
+            Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
+        assert "did you mean `selector`" in str(exc.value)
+
+    def test_from_file_unknown_metadata_key_in_nested_shape(self, tmp_path):
+        """K8s-style nested envelope: unknown metadata key is rejected too."""
+        manifest_path = tmp_path / "nested.yaml"
+        manifest_path.write_text(
+            "apiVersion: siteops/v1\n"
+            "kind: Manifest\n"
+            "metadata:\n"
+            "  name: nested\n"
+            "  annotations: {foo: bar}\n"   # unknown metadata key
+            "spec:\n"
+            "  selector: env=dev\n"
+            "  steps:\n"
+            "    - name: x\n"
+            "      template: t.bicep\n"
+        )
+        with pytest.raises(ValueError, match="unknown metadata key"):
+            Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
+
+    def test_from_file_unknown_spec_key_in_nested_shape(self, tmp_path):
+        """K8s-style nested envelope: unknown spec key is rejected."""
+        manifest_path = tmp_path / "nested.yaml"
+        manifest_path.write_text(
+            "apiVersion: siteops/v1\n"
+            "kind: Manifest\n"
+            "metadata:\n"
+            "  name: nested\n"
+            "spec:\n"
+            "  selector: env=dev\n"
+            "  steps:\n"
+            "    - name: x\n"
+            "      template: t.bicep\n"
+            "  bogus_spec_field: 42\n"
+        )
+        with pytest.raises(ValueError, match="unknown spec key"):
+            Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
+
     def test_resolve_parameter_path_simple(self):
         manifest = Manifest(
             name="test",

@@ -358,6 +358,26 @@ class TestResolveSites:
         assert len(sites) == 2
         assert all(s.labels["region"] == "eastus" for s in sites)
 
+    def test_no_targeting_anywhere_raises(self, multi_site_workspace):
+        """Generic manifest (no `sites:`/`selector:`) with no CLI selector
+        is a hard deploy-time error."""
+        orchestrator = Orchestrator(multi_site_workspace)
+        manifest = Manifest(name="generic", description="", sites=[], steps=[])
+
+        import pytest
+        with pytest.raises(ValueError, match="declares no `sites:` or `selector:`"):
+            orchestrator.resolve_sites(manifest)
+
+    def test_generic_manifest_with_cli_selector_resolves(self, multi_site_workspace):
+        """Generic manifest is targetable from the CLI."""
+        orchestrator = Orchestrator(multi_site_workspace)
+        manifest = Manifest(name="generic", description="", sites=[], steps=[])
+
+        sites = orchestrator.resolve_sites(manifest, cli_selector="environment=dev")
+
+        assert len(sites) == 2
+        assert all(s.labels["environment"] == "dev" for s in sites)
+
 
 class TestDeploymentNameGeneration:
     """Tests for deployment name truncation and hashing."""

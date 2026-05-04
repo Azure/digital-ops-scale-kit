@@ -77,6 +77,23 @@ class TestValidation:
         errors = orchestrator.validate(manifest_path)
         assert any("No sites matched" in e for e in errors)
 
+    def test_validate_generic_manifest_passes(self, complete_workspace):
+        """A manifest with no `sites:` and no `selector:` is a valid library
+        manifest. `validate` should pass without surfacing the missing
+        targeting (deploy enforces that separately)."""
+        orchestrator = Orchestrator(complete_workspace)
+
+        manifest_data = {
+            "name": "generic",
+            "steps": [{"name": "step1", "template": "templates/test.bicep"}],
+        }
+        manifest_path = complete_workspace / "manifests" / "generic.yaml"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            yaml.dump(manifest_data, f)
+
+        errors = orchestrator.validate(manifest_path)
+        assert errors == []
+
     def test_validate_invalid_condition(self, complete_workspace):
         orchestrator = Orchestrator(complete_workspace)
 

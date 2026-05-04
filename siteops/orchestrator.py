@@ -1995,6 +1995,15 @@ class Orchestrator:
         2. Explicit sites list in manifest
         3. Manifest selector (`selector:`, or legacy `siteSelector:`)
 
+        Raises:
+            ValueError: When neither the manifest nor the CLI provides any
+                site targeting. The manifest is "generic" (no `sites:` and
+                no `selector:`) AND no `-l/--selector` was passed. The
+                operator must add targeting to the manifest or supply it
+                on the CLI.
+            FileNotFoundError: When the manifest lists explicit site names
+                that do not resolve to any file in the workspace.
+
         Args:
             manifest: The manifest
             cli_selector: Optional selector from CLI
@@ -2002,6 +2011,19 @@ class Orchestrator:
         Returns:
             List of matching sites
         """
+        # Hard error when the manifest declares no targeting AND the operator
+        # passed no -l/--selector. Today this would silently resolve to the
+        # empty set and cause a confusing "nothing to deploy" exit; surface
+        # the missing-targeting case loudly so the operator can either add
+        # targeting to the manifest or pass it on the CLI.
+        if not cli_selector and not manifest.sites and not manifest.site_selector:
+            raise ValueError(
+                f"Manifest '{manifest.name}' declares no `sites:` or `selector:`, "
+                f"and no `-l/--selector` was provided on the CLI. Either add "
+                f"targeting to the manifest, or pass `-l <key>=<value>` to "
+                f"choose sites at deploy time."
+            )
+
         # CLI selector requires loading all sites for filtering
         if cli_selector:
             selector = parse_selector(cli_selector)
@@ -2075,10 +2097,17 @@ class Orchestrator:
         except Exception as e:
             return [f"Failed to parse manifest: {e}"]
 
-        sites = self.resolve_sites(manifest, selector)
-        if not sites:
-            if manifest.sites or manifest.site_selector or selector:
-                errors.append("No sites matched the specified criteria")
+        try:
+            sites = self.resolve_sites(manifest, selector)
+        except ValueError:
+            # Generic manifest without CLI targeting. Valid as a library or
+            # partial that will be composed (via `include:`) or targeted at
+            # deploy time. Skip site-dependent checks since they require a
+            # concrete site. `cmd_deploy` surfaces the same condition as a
+            # hard error.
+            sites = []
+        if not sites and (manifest.sites or manifest.site_selector or selector):
+            errors.append("No sites matched the specified criteria")
 
         # Validate manifest-level parameter files
         for param_path in manifest.parameters:

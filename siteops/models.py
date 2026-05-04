@@ -33,6 +33,64 @@ MAX_INCLUDE_DEPTH = 8
 # is an authoring error.
 _INCLUDE_ALLOWED_KEYS = {"include", "when"}
 
+# Allowed top-level keys on a flat-shape Manifest (most common form). Any
+# other key triggers a parse-time error with a "did you mean?" hint when the
+# unknown key is close to a known one. Catches typos like `site:` (singular)
+# or `selctor:` that today silently degrade to "missing field".
+_MANIFEST_FLAT_KNOWN_KEYS = {
+    "apiVersion",
+    "kind",
+    "name",
+    "description",
+    "sites",
+    "selector",
+    "siteSelector",
+    "parallel",
+    "parameters",
+    "steps",
+}
+
+# K8s-style nested envelope. Top-level allows only the four envelope keys.
+# `metadata` carries name/description/labels. `spec` carries everything else.
+_MANIFEST_NESTED_TOP_KEYS = {"apiVersion", "kind", "metadata", "spec"}
+_MANIFEST_NESTED_METADATA_KEYS = {"name", "description", "labels"}
+_MANIFEST_NESTED_SPEC_KEYS = _MANIFEST_FLAT_KNOWN_KEYS - {"apiVersion", "kind", "name", "description"}
+
+
+def _suggest_known_key(unknown: str, known: set[str]) -> str | None:
+    """Return a 'did you mean X?' suggestion for a typo if there is a close match."""
+    import difflib
+    matches = difflib.get_close_matches(unknown, sorted(known), n=1, cutoff=0.7)
+    return matches[0] if matches else None
+
+
+def _validate_known_keys(
+    actual: dict, allowed: set[str], path: Path, context: str
+) -> None:
+    """Reject any keys in `actual` that are not in `allowed`.
+
+    Args:
+        actual: The dict whose keys to validate.
+        allowed: The closed set of permitted keys.
+        path: Source file path, used in the error message.
+        context: Where in the manifest this dict lives (e.g. "top-level",
+            "spec", "metadata"), used to disambiguate the error.
+    """
+    unknown = sorted(set(actual.keys()) - allowed)
+    if not unknown:
+        return
+    parts = []
+    for key in unknown:
+        suggestion = _suggest_known_key(key, allowed)
+        if suggestion:
+            parts.append(f"`{key}` (did you mean `{suggestion}`?)")
+        else:
+            parts.append(f"`{key}`")
+    raise ValueError(
+        f"Manifest '{path}' has unknown {context} key(s): {', '.join(parts)}. "
+        f"Allowed: {sorted(allowed)}."
+    )
+
 
 class IncludeError(ValueError):
     """Raised when a manifest `include:` directive cannot be resolved.
@@ -670,8 +728,10 @@ class Manifest:
 def _read_manifest_spec(path: Path) -> tuple[dict[str, Any], str, str]:
     """Read a manifest YAML file and return (spec, name, description).
 
-    Validates apiVersion + kind and unwraps the K8s-style `spec:` envelope
-    when present. Raises ValueError on empty files or wrong kind.
+    Validates apiVersion + kind, rejects unknown top-level keys with a
+    "did you mean?" hint, and unwraps the K8s-style `spec:` envelope when
+    present. Raises ValueError on empty files, wrong kind, or unknown
+    top-level keys.
     """
     with open(path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
@@ -682,11 +742,17 @@ def _read_manifest_spec(path: Path) -> tuple[dict[str, Any], str, str]:
     _validate_resource(data, "Manifest", path)
 
     if "spec" in data:
-        metadata = data.get("metadata", {})
-        spec = data["spec"]
+        _validate_known_keys(data, _MANIFEST_NESTED_TOP_KEYS, path, "top-level")
+        metadata = data.get("metadata", {}) or {}
+        if metadata:
+            _validate_known_keys(metadata, _MANIFEST_NESTED_METADATA_KEYS, path, "metadata")
+        spec = data["spec"] or {}
+        if isinstance(spec, dict):
+            _validate_known_keys(spec, _MANIFEST_NESTED_SPEC_KEYS, path, "spec")
         name = metadata.get("name", path.stem)
         description = metadata.get("description", "")
     else:
+        _validate_known_keys(data, _MANIFEST_FLAT_KNOWN_KEYS, path, "top-level")
         spec = data
         name = data.get("name", path.stem)
         description = data.get("description", "")
