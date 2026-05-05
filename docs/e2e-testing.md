@@ -112,7 +112,8 @@ From the **Actions** tab, dispatch **E2E Tests** with the defaults to run a sing
 | `custom-locations-oid` | tenant value | See prerequisite 2. |
 | `skip-teardown` | false | Preserve the deployment for inspection. Scope depends on mode (see below). |
 | `keep-cluster-alive-minutes` | `0` | Hold the runner for N min before teardown for debugging. Max 300. Nothing should be added to the persistent RG during the hold (it'll be deleted by teardown). |
-| `upgrade-to` | empty or `2604` | Optional AIO release to upgrade to after install-phase tests pass. Empty skips the upgrade phase. Per-cell skip when equal to the cell's `aio-releases` value. |
+| `scenarios` | empty (run all) or `aio-install,secretsync` | Comma-separated allowlist of scenario manifests to deploy. Valid values: `aio-install`, `secretsync`, `opc-ua-solution`, `aio-upgrade`. Useful for demos and focused debugging when paired with `keep-cluster-alive-minutes`. |
+| `upgrade-to` | empty or `2604` | Optional AIO release to upgrade to after install-phase tests pass. Empty skips the upgrade phase. Per-cell skip when equal to the cell's `aio-releases` value. Requires `aio-upgrade` to be in the `scenarios` allowlist (or `scenarios` empty). |
 
 ### What `skip-teardown` leaves behind
 
@@ -129,7 +130,7 @@ Ephemeral teardown runs three independent guards before `az group delete`. Any s
 2. **Tag provenance.** RG must carry `managedBy=siteops-e2e`, `ephemeral=true`, `run_id=<this run>`, `run_attempt=<this attempt>`. Tags are written by the `Create resource group` step and are never applied by the persistent path, so an operator-supplied RG cannot accidentally carry them.
 3. **Existence.** A missing RG is treated as idempotent success (not failure), so reruns after manual cleanup do not fail spuriously.
 
-Persistent teardown deletes the Arc cluster only if it was not present in the pre-run snapshot (i.e. only clusters this run registered; an operator-owned cluster with the same name is preserved). Resource deletion is bounded to the snapshot delta (post − pre): the workflow records every resource ID present in the RG before any Azure-side creation and deletes only what was added during the run. Missing snapshot → skip delta cleanup (manual inspection). Post-run enumeration failure → emit an error instead of declaring the RG clean.
+Persistent teardown deletes the Arc cluster only if it was not present in the pre-run snapshot (i.e. only clusters this run registered). An operator-owned cluster with the same name is preserved. Resource deletion is bounded to the snapshot delta (post − pre): the workflow records every resource ID present in the RG before any Azure-side creation and deletes only what was added during the run. Missing snapshot → skip delta cleanup (manual inspection). Post-run enumeration failure → emit an error instead of declaring the RG clean.
 
 **Use a dedicated RG for persistent mode.** Anything added to the RG between the snapshot and teardown (by operators, automation, or a `keep-cluster-alive-minutes` hold) appears in the delta and is deleted.
 
@@ -137,9 +138,9 @@ A JUnit XML artifact is uploaded per matrix cell (`e2e-results-<release>.xml`). 
 
 ## Running locally
 
-Local runs target your own k3s (or any Arc-connected) cluster against your own subscription. The renderer is cross-platform Python; no `envsubst` or bash required.
+Local runs target your own k3s (or any Arc-connected) cluster against your own subscription. The renderer is cross-platform Python. No `envsubst` or bash required.
 
-Set three required env vars; three more are auto-computed on first use.
+Set three required env vars. Three more are auto-computed on first use.
 
 | Variable | Required | Default |
 |----------|----------|---------|
@@ -184,9 +185,9 @@ export INTEGRATION_SELECTOR="name=$E2E_SITE_NAME"
 pytest tests/integration/ -v -m integration
 ```
 
-Setting `E2E_SITE_NAME` explicitly (or letting the renderer default to `e2e-local-<unix_time>`) gives you a predictable site name up front; the renderer also writes the file as `<E2E_SITE_NAME>.yaml` so the filename matches the site's `name:` field (the standard siteops convention).
+Setting `E2E_SITE_NAME` explicitly (or letting the renderer default to `e2e-local-<unix_time>`) gives you a predictable site name up front. The renderer also writes the file as `<E2E_SITE_NAME>.yaml` so the filename matches the site's `name:` field (the standard siteops convention).
 
-You must already be logged in (`az login`) and have the cluster registered with Arc; the workflow automates these steps but local runs assume you already have an Arc-enabled target.
+You must already be logged in (`az login`) and have the cluster registered with Arc. The workflow automates these steps but local runs assume you already have an Arc-enabled target.
 
 ### Running upgrade-phase tests locally
 

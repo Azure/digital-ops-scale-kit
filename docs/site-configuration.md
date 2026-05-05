@@ -285,25 +285,20 @@ the env var was ignored.
 inherits target → sites/ → <extra dirs, in listed order> → sites.local/
 ```
 
-Extras cannot collide with the workspace's own `sites/` or `sites.local/`
-directories; the orchestrator rejects both at construction time.
-Registering `sites.local/` as trusted is specifically refused because it
-would let overlays inject inheritance and break the overlay security
-invariant.
+Extras cannot collide with the workspace's own `sites/` or `sites.local/` directories. The orchestrator rejects both at construction time. Registering `sites.local/` as trusted is specifically refused because it would let overlays inject inheritance and break the overlay security invariant.
 
-### Leaf sites must live at the top level
+### Discovery walks subdirectories
 
-Discovery is **flat, not recursive**. Every trusted directory (`sites/`,
-each extras dir, and `sites.local/`) is scanned at its top level only.
-Subdirectories are reserved for inherit targets and are reachable only
-through an explicit subpath in `inherits:`.
+Every trusted directory (`sites/`, each extras dir, `sites.local/`) is scanned recursively. A site at any depth is reachable by its basename (filename without extension), by its rel-path under the trusted dir, or by its internal `name:` field. Basename uniqueness within each trusted dir is enforced at load time so the basename shorthand always resolves unambiguously. Cross-dir basename collisions are valid only when the rel-path also matches (the overlay pattern).
 
-| Path | Kind | Discovered? |
+| Path | Kind | Reachable via |
 |---|---|---|
-| `sites/munich-prod.yaml` | `Site` | ✅ deployable |
-| `sites/base-site.yaml` | `SiteTemplate` | ✅ as inherit target only |
-| `sites/shared/usa-west.yaml` | `SiteTemplate` | ❌ reachable only via `inherits: shared/usa-west.yaml` |
-| `sites/eu/munich.yaml` | `Site` | ❌ silently ignored; move to top level |
+| `sites/munich-prod.yaml` | `Site` | `munich-prod`, internal `name:` |
+| `sites/regions/eu/munich-prod.yaml` | `Site` | `munich-prod`, `regions/eu/munich-prod`, internal `name:` |
+| `sites/base-site.yaml` | `SiteTemplate` | `inherits: base-site.yaml` only |
+| `sites/shared/usa-west.yaml` | `SiteTemplate` | `inherits: shared/usa-west.yaml` only |
+
+See [targeting.md](targeting.md) for the full identity model and CLI grammar.
 
 ## Site inheritance
 
@@ -388,55 +383,31 @@ Inherited values are overridden by child site values. Nested objects (labels, pa
 
 ## Site selection from a manifest
 
-When a manifest is deployed, Site Ops resolves the target sites through
-three mutually-exclusive precedence tiers:
+A manifest's target sites resolve from three sources: CLI `-l/--selector` (overrides everything), manifest `sites:` (explicit name list), and manifest `selector:` (label expression). A manifest with none of the three is a library or partial that requires `-l` at deploy time.
 
-1. **CLI `--selector` overrides everything.**
-   ```bash
-   siteops deploy manifests/aio-install.yaml --selector environment=dev
-   siteops deploy manifests/aio-install.yaml --selector name=munich-dev
-   ```
-   - If the selector includes `name=X` and a trusted file `X.yaml` (or
-     `X.yml`) exists, the named site is loaded directly; any load
-     error (broken inherits chain, invalid YAML) is surfaced instead of
-     silently resolving to zero sites.
-   - Otherwise the orchestrator loads all discoverable sites and keeps
-     those whose `name:` or `labels` match every `key=value` pair. This
-     path supports selecting by the site's internal `name:` field even
-     when it differs from the filename.
+```bash
+siteops deploy manifests/aio-install.yaml                           # uses manifest selector
+siteops deploy manifests/aio-install.yaml -l environment=dev        # CLI overrides manifest
+siteops deploy manifests/aio-install.yaml -l name=munich-dev        # single site
+siteops deploy manifests/aio-install.yaml -l name=a,name=b          # multi-site (name OR-combines)
+```
 
-2. **Explicit `sites:` list in the manifest.**
-   ```yaml
-   # manifests/regional-rollout.yaml
-   sites:
-     - chicago-staging
-     - seattle-prod
-   ```
-   Each entry is a filename without extension; missing files raise
-   `FileNotFoundError` with the full list.
-
-3. **Manifest `selector:` (label expression).**
-   ```yaml
-   # manifests/aio-install.yaml
-   selector: "environment=dev"
-   ```
-   The orchestrator loads all discoverable sites and keeps those whose
-   labels satisfy the expression.
-
-A manifest with none of the three is rejected at parse time.
+`-l` is repeatable. Distinct keys AND-combine. Repeated `name=` values OR-combine; any other duplicate key is an error. Path-form names (`-l name=regions/eu/munich`) work for nested site files. See [targeting.md](targeting.md) for the full grammar, the no-match diagnostic, and the validation rules.
 
 ### Quick decision table
 
 | I want to… | Do this |
 |---|---|
-| Add a new deployable site | Drop `my-site.yaml` at the root of `workspace/sites/` or an extras dir |
+| Add a new deployable site | Drop `my-site.yaml` under `workspace/sites/` (any subdir) or an extras dir |
 | Share a reusable template across sites | Put it in `workspace/sites/<name>.yaml` (same dir) or `workspace/sites/shared/<name>.yaml` (subdir) and reference via `inherits:` |
 | Override a committed site at runtime without a PR | Put `my-site.yaml` in `workspace/sites.local/` (overlay merges; `inherits:` stripped) |
-| Inject a site from CI without touching the workspace | Register a dir via `SITEOPS_EXTRA_SITES_DIRS` / `--extra-sites-dir` and drop `my-site.yaml` at its root |
-| Target one specific site at the CLI | `siteops deploy <manifest> --selector name=<site-name>` |
+| Inject a site from CI without touching the workspace | Register a dir via `SITEOPS_EXTRA_SITES_DIRS` / `--extra-sites-dir` and drop `my-site.yaml` in it |
+| Target one specific site at the CLI | `siteops deploy <manifest> -l name=<site-name>` |
+| Target multiple specific sites at the CLI | `siteops deploy <manifest> -l name=<a>,name=<b>` |
 | Pin the manifest to a labeled cohort | Set `selector:` in the manifest |
 | Hard-code the target list for a manifest | Set `sites:` in the manifest |
 | Preview a fully-resolved site (post inherit + overlay) | `siteops -w <workspace> sites <name> --render` |
+| See where every value in a resolved site came from | `siteops -w <workspace> sites <name> -v` |
 
 ## Scaling to a fleet
 

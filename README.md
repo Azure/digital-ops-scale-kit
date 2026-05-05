@@ -164,6 +164,7 @@ digital-ops-scale-kit/
 │   ├── parameter-resolution.md   # Variables, output chaining
 │   ├── secret-sync.md            # Secret sync enablement and usage
 │   ├── site-configuration.md     # Sites, inheritance, overlays
+│   ├── targeting.md              # Selector grammar, site identity, no-match diagnostic
 │   └── troubleshooting.md        # Common issues and solutions
 ├── .github/                      # GitHub Actions workflows
 └── .pipelines/                   # Azure DevOps pipeline definitions
@@ -262,8 +263,9 @@ auto-filtering, merge order, and cross-scope output chaining.
 | Command | Description |
 |---------|-------------|
 | `siteops sites` | List sites in the workspace |
-| `siteops sites <name>` | Inspect one site (filename or internal `name:`) |
-| `siteops sites <name> --render` | Show the resolved YAML after inheritance + overlays |
+| `siteops sites <name>` | Inspect one site (basename, rel-path, or internal `name:`) |
+| `siteops sites <name> -v` | Show every value with the source file it came from after inherits and overlays |
+| `siteops sites <name> --render` | Show the resolved YAML after inheritance and overlays |
 | `siteops validate <manifest>` | Validate manifest and all references |
 | `siteops validate <manifest> -v` | Validation plus the deployment plan |
 | `siteops deploy <manifest>` | Execute deployment |
@@ -273,10 +275,12 @@ auto-filtering, merge order, and cross-scope output chaining.
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `-w, --workspace` | Workspace directory | current directory |
-| `-l, --selector` | Filter sites by label (e.g. `-l environment=prod,city=Seattle`) | none |
-| `-p, --parallel` | Max concurrent sites for `deploy` (`0` = unlimited, `1` = serial) | manifest setting |
-| `--extra-sites-dir` | Additional trusted `sites/` directory (repeatable; also accepts `SITEOPS_EXTRA_SITES_DIRS`) | none |
+| `-w, --workspace` | Workspace directory | current dir, walking upward to the nearest `sites/` ancestor |
+| `-l, --selector` | Filter sites by label. Repeatable. `name=` may carry multiple values (OR-combined). | none |
+| `-p, --parallel` | Max concurrent sites for `deploy`. Accepts a positive integer, or `max`/`auto`/`0` for unlimited | manifest setting |
+| `--extra-sites-dir` | Additional trusted `sites/` directory. Repeatable. Also accepts `SITEOPS_EXTRA_SITES_DIRS` | none |
+
+See [docs/targeting.md](docs/targeting.md) for the selector grammar and the no-match diagnostic.
 
 ---
 
@@ -360,6 +364,7 @@ See [docs/ci-cd-setup.md](docs/ci-cd-setup.md) for detailed configuration.
 | Document | Description |
 |----------|-------------|
 | [docs/site-configuration.md](docs/site-configuration.md) | Site definitions, inheritance, overlays |
+| [docs/targeting.md](docs/targeting.md) | Selector grammar, site identity, no-match diagnostic |
 | [docs/manifest-reference.md](docs/manifest-reference.md) | Manifest syntax, step types, conditions |
 | [docs/parameter-resolution.md](docs/parameter-resolution.md) | Template variables, output chaining, auto-filtering |
 | [docs/aio-releases.md](docs/aio-releases.md) | Pinning an AIO release per site, in-place upgrades, adding a new release |

@@ -7,6 +7,7 @@ Extended documentation for the Digital Operations Scale Kit.
 | Document | Description |
 |----------|-------------|
 | [site-configuration.md](site-configuration.md) | Site definitions, inheritance, overlays |
+| [targeting.md](targeting.md) | Selector grammar, site identity, no-match diagnostic |
 | [manifest-reference.md](manifest-reference.md) | Manifest syntax, step types, conditions |
 | [manifest-includes.md](manifest-includes.md) | Splicing one manifest into another via `include:` |
 | [parameter-resolution.md](parameter-resolution.md) | Template variables, output chaining, auto-filtering |

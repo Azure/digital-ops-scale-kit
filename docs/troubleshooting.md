@@ -94,8 +94,11 @@ siteops -w workspaces/iot-operations validate manifests/aio-install.yaml -v
 # Dry run to see exact commands
 siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml --dry-run
 
-# List sites with details
-siteops -w workspaces/iot-operations sites -v
+# Show every value's source file (post inherit + overlay merge)
+siteops -w workspaces/iot-operations sites <name> -v
+
+# Print the fully-resolved site as YAML
+siteops -w workspaces/iot-operations sites <name> --render
 
 # Check Azure CLI authentication
 az account show

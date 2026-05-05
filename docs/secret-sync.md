@@ -232,7 +232,7 @@ If `resolve-aio` fails with an error about a property not existing on the instan
 
 ### Role assignment conflicts
 
-Role assignments use deterministic names via `guid(keyVault.id, principalId, roleId)`. Re-running the deployment is idempotent; existing assignments are confirmed in place, not duplicated.
+Role assignments use deterministic names via `guid(keyVault.id, principalId, roleId)`. Re-running the deployment is idempotent. Existing assignments are confirmed in place, not duplicated.
 
 ### Key Vault RBAC not enabled
 

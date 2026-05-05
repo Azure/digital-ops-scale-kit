@@ -39,12 +39,17 @@ steps:
 |--------|----------|
 | `sites:` list | Deploy to named sites only |
 | `selector:` | Deploy to all sites matching label |
-| CLI `-l` flag | **Overrides** manifest selection |
+| CLI `-l` flag | Overrides manifest selection. Repeatable. `name=` may carry multiple values (OR-combined) |
 
 ```bash
-# Overrides manifest's sites: list, deploys to all prod sites
-siteops deploy manifest.yaml -l "environment=prod"
+# Overrides manifest selection, deploys to all prod sites.
+siteops deploy manifest.yaml -l environment=prod
+
+# Multi-site CLI selection (name OR-combines).
+siteops deploy manifest.yaml -l name=munich-dev,name=seattle-dev
 ```
+
+A manifest with neither `sites:` nor `selector:` is a library or partial. It requires `-l` at deploy time. See [targeting.md](targeting.md) for the full grammar, the no-match diagnostic, and validation rules.
 
 ## Step types
 
