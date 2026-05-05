@@ -38,6 +38,7 @@ from siteops.models import (
     ManifestStep,
     NoTargetingError,
     ParallelConfig,
+    SelectorParseError,
     Site,
     _normalize_site_identifier,
     _validate_resource,
@@ -756,11 +757,18 @@ class Orchestrator:
                     # to RESTATE the same name (the common case where
                     # extras-dir overlays mirror the base shape) and
                     # reject only when the overlay tries to CHANGE it.
+                    # When the base omits an explicit `name:`, identity
+                    # defaults to the basename of the canonical id, so
+                    # an overlay introducing a different name is also
+                    # a rename.
                     if not is_base_file:
                         overlay_name = self._read_internal_name(data)
                         if overlay_name is not None:
-                            existing_name = self._read_internal_name(merged_data)
-                            if existing_name is not None and overlay_name != existing_name:
+                            existing_name = (
+                                self._read_internal_name(merged_data)
+                                or name.rsplit("/", 1)[-1]
+                            )
+                            if overlay_name != existing_name:
                                 raise ValueError(
                                     f"Overlay {path} cannot rename the site "
                                     f"({existing_name!r} -> {overlay_name!r}). "
@@ -805,31 +813,6 @@ class Orchestrator:
             return path.resolve().relative_to(self.workspace.resolve()).as_posix()
         except ValueError:
             return path.as_posix()
-
-    def _load_inherited_with_provenance(
-        self,
-        path: Path,
-        seen: list[Path],
-        prov: dict[str, str],
-    ) -> dict[str, Any]:
-        """Deprecated thin wrapper around `_load_inherited_data(path, seen, prov)`.
-
-        Retained briefly for any external caller; remove on the next
-        engine refactor.
-        """
-        return self._load_inherited_data(path, seen=seen, prov=prov)
-
-    def _load_site_data_with_provenance(
-        self, name: str
-    ) -> tuple[dict[str, Any], dict[str, str]]:
-        """Deprecated thin wrapper around `_load_site_data(name, prov={})`.
-
-        Retained briefly for any external caller; remove on the next
-        engine refactor.
-        """
-        prov: dict[str, str] = {}
-        merged = self._load_site_data(name, prov=prov)
-        return merged, prov
 
     def load_site_with_provenance(self, name: str) -> tuple[Site, dict[str, str]]:
         """Load a site and return per-key provenance for its merged data.
@@ -892,8 +875,22 @@ class Orchestrator:
         attributed keys like `spec.subscription` and `metadata.name`.
         The flat-shape view used by the CLI display is `subscription`
         and `name`. Translate so the consumer sees one shape.
+
+        The trigger is conservative: only rewrite when the merged data
+        actually has the K8s-envelope shape (a `spec:` or `metadata:`
+        top-level dict), and only for `Site` (or unspecified-kind)
+        resources. Anything else is passed through to avoid silently
+        mis-normalizing a flat-shape dict that happens to have a
+        top-level field named `spec`.
         """
-        if "spec" not in merged_data:
+        kind = merged_data.get("kind")
+        if kind not in (None, "Site"):
+            return prov
+        has_envelope = (
+            isinstance(merged_data.get("spec"), dict)
+            or isinstance(merged_data.get("metadata"), dict)
+        )
+        if not has_envelope:
             return prov
         new_prov: dict[str, str] = {}
         for key, origin in prov.items():
@@ -2492,7 +2489,7 @@ class Orchestrator:
             return "No sites matched the manifest's targeting."
         try:
             sel = parse_selector(cli_selector)
-        except ValueError as e:
+        except SelectorParseError as e:
             return f"CLI selector `-l {cli_selector}` is invalid: {e}"
         all_sites = self.load_all_sites()
         if not all_sites:
@@ -2570,27 +2567,34 @@ class Orchestrator:
 
         try:
             sites = self.resolve_sites(manifest, selector)
+            selector_parse_failed = False
         except NoTargetingError:
             # Generic library or partial manifest. Skip site-dependent
             # checks since they require a concrete site. `cmd_deploy`
             # surfaces the same condition as a hard error.
             sites = []
-        except ValueError as e:
-            # Selector parse error or similar. Append to errors and
-            # continue so the operator sees every other manifest issue
-            # in one diagnostic pass instead of fixing a stray `-l`
-            # then discovering the next problem on re-run.
+            selector_parse_failed = False
+        except SelectorParseError as e:
+            # CLI selector failed to parse. Append the parse error
+            # (operator sees it alongside other manifest issues in one
+            # diagnostic pass) but suppress the no-match diagnostic
+            # below since the parse error is the higher-signal cause.
             errors.append(str(e))
             sites = []
+            selector_parse_failed = True
+        except ValueError as e:
+            # Site-resolution failure (cycle, overlay-rename, missing
+            # field, etc.). Append and continue so other manifest
+            # issues still surface in this pass.
+            errors.append(str(e))
+            sites = []
+            selector_parse_failed = False
         if not sites and (manifest.sites or manifest.site_selector or selector):
-            if selector:
-                # Use the rich diagnostic when CLI selector knocked
-                # everything out so the operator sees what was wrong.
-                # Skip when a parse error already surfaced; the parse
-                # error is the higher-signal explanation.
-                if not any("may only appear once" in e or "Selector key" in e for e in errors):
-                    errors.append(self.explain_no_match(selector))
-            else:
+            if selector and not selector_parse_failed:
+                # Rich diagnostic when CLI selector knocked everything
+                # out and the selector itself parsed cleanly.
+                errors.append(self.explain_no_match(selector))
+            elif not selector:
                 errors.append("No sites matched the specified criteria")
 
         # Validate manifest-level parameter files

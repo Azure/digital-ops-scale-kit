@@ -22,7 +22,7 @@ siteops deploy manifests/aio-install.yaml                    # all env=prod site
 siteops deploy manifests/aio-install.yaml -l name=munich-dev # only munich-dev
 ```
 
-The override model matches the convention of `kubectl`, `terraform`, and `helm`. It supports the common incident-response and gradual-rollout flows where the operator narrows the manifest's default scope to a specific cluster.
+Same precedence model as `kubectl`, `terraform`, and `helm`.
 
 ## Selector grammar
 
@@ -73,7 +73,7 @@ Each deployable site is reachable by three identifiers, all of which work in `-l
 
 | Form | Example | Notes |
 |---|---|---|
-| Basename | `munich-dev` | The filename without extension. Unique across each trusted dir by load-time invariant. |
+| Basename | `munich-dev` | The filename without extension. The orchestrator enforces basename uniqueness across each trusted dir at load time. |
 | Rel-path | `regions/eu/munich-dev` | The path under the owning trusted dir, no extension. |
 | Internal `name:` | `contoso-munich` | The value of the `name:` field if it differs from the basename. Must be unique workspace-wide. |
 
@@ -116,7 +116,7 @@ When a CLI selector matches zero sites, `deploy` exits non-zero with a diagnosti
 ```bash
 siteops deploy manifests/aio-install.yaml -l environment=prdo
 # Error: CLI selector `-l environment=prdo` matched no sites.
-# `environment=prdo` requested. Workspace `environment` values: dev, prod.
+# `environment=prdo` requested. Workspace `environment` values: dev, prod, staging.
 ```
 
 ```bash
@@ -134,7 +134,7 @@ siteops deploy manifests/aio-install.yaml -l name=munich-dev,environment=prod
 # filtered it out.
 ```
 
-A manifest selector that matches zero sites still exits zero with a generic warning. The hard exit is reserved for CLI selectors so CI surfaces do not silently mask operator typos.
+Manifest selectors that match zero sites warn but still exit zero.
 
 ## Validation
 

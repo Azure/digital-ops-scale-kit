@@ -133,6 +133,52 @@ class TestValidation:
         assert any("may only appear once" in e for e in errors)
         assert any("Template not found" in e for e in errors)
 
+    def test_validate_selector_parse_error_suppresses_no_match_diagnostic(
+        self, complete_workspace
+    ):
+        """When the selector itself fails to parse, the no-match
+        diagnostic is redundant noise. The parse error is the cause."""
+        orchestrator = Orchestrator(complete_workspace)
+
+        manifest_data = {
+            "name": "selector-typo",
+            "sites": ["test-site"],
+            "steps": [{"name": "step1", "template": "templates/test.bicep"}],
+        }
+        manifest_path = complete_workspace / "manifests" / "selector-typo.yaml"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            yaml.dump(manifest_data, f)
+
+        errors = orchestrator.validate(manifest_path, selector="env=prod,env=dev")
+        # Parse error must surface.
+        assert any("may only appear once" in e for e in errors)
+        # The "matched no sites" diagnostic must NOT also surface.
+        assert not any("matched no sites" in e for e in errors)
+        assert not any("No sites matched" in e for e in errors)
+
+    def test_validate_non_selector_value_error_still_shows_no_match(
+        self, complete_workspace
+    ):
+        """A non-selector ValueError (e.g. overlay-rename) must NOT
+        suppress the no-match diagnostic. Only SelectorParseError
+        does."""
+        orchestrator = Orchestrator(complete_workspace)
+
+        manifest_data = {
+            "name": "no-match",
+            "siteSelector": "nonexistent=value",
+            "steps": [{"name": "step1", "template": "templates/test.bicep"}],
+        }
+        manifest_path = complete_workspace / "manifests" / "no-match-cli.yaml"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            yaml.dump(manifest_data, f)
+
+        # CLI selector parses cleanly but matches zero sites in the
+        # workspace.
+        errors = orchestrator.validate(manifest_path, selector="environment=nope")
+        # Rich diagnostic surfaces.
+        assert any("matched no sites" in e for e in errors)
+
     def test_validate_invalid_condition(self, complete_workspace):
         orchestrator = Orchestrator(complete_workspace)
 

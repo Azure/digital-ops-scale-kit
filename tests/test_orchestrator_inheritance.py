@@ -786,3 +786,60 @@ class TestSiteProvenance:
         site = orch.load_site("munich")
         assert site.name == "munich"
         assert site.subscription == "overlay-sub"
+
+    def test_overlay_renames_site_when_base_omits_name(self, tmp_workspace):
+        """When the base file relies on the basename default and the
+        overlay introduces a different `name:`, the rejection must
+        still fire. Without this, the overlay would set `Site.name` to
+        a value not found in any workspace index."""
+        # Base file has NO explicit `name:`. Identity defaults to the
+        # basename ("mysite").
+        self._write_yaml(
+            tmp_workspace / "sites" / "mysite.yaml",
+            {
+                "apiVersion": "siteops/v1",
+                "kind": "Site",
+                "subscription": "trusted-sub",
+                "resourceGroup": "rg-trusted",
+                "location": "eastus",
+            },
+        )
+        # Overlay introduces a different name.
+        self._write_yaml(
+            tmp_workspace / "sites.local" / "mysite.yaml",
+            {
+                "name": "renamed",
+                "subscription": "overlay-sub",
+            },
+        )
+        from siteops.orchestrator import Orchestrator
+        orch = Orchestrator(tmp_workspace)
+        import pytest as _pytest
+        with _pytest.raises(ValueError, match="cannot rename the site"):
+            orch.load_site("mysite")
+
+    def test_overlay_restating_basename_default_allowed(self, tmp_workspace):
+        """When the base file omits `name:`, an overlay may still
+        restate the basename (the implicit identity)."""
+        self._write_yaml(
+            tmp_workspace / "sites" / "mysite.yaml",
+            {
+                "apiVersion": "siteops/v1",
+                "kind": "Site",
+                "subscription": "trusted-sub",
+                "resourceGroup": "rg-trusted",
+                "location": "eastus",
+            },
+        )
+        self._write_yaml(
+            tmp_workspace / "sites.local" / "mysite.yaml",
+            {
+                "name": "mysite",  # Matches the basename default. Allowed.
+                "subscription": "overlay-sub",
+            },
+        )
+        from siteops.orchestrator import Orchestrator
+        orch = Orchestrator(tmp_workspace)
+        site = orch.load_site("mysite")
+        assert site.name == "mysite"
+        assert site.subscription == "overlay-sub"

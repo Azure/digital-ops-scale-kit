@@ -123,6 +123,15 @@ class NoTargetingError(ValueError):
     """
 
 
+class SelectorParseError(ValueError):
+    """Raised when a `-l/--selector` string fails to parse.
+
+    Distinct from generic `ValueError` so `validate()` can attribute
+    the failure to selector input (and skip the redundant no-match
+    diagnostic) without substring-matching the error message.
+    """
+
+
 def parse_selector(selector: str | None) -> dict[str, list[str]]:
     """Parse a label selector string into key to value-list pairs.
 
@@ -132,8 +141,9 @@ def parse_selector(selector: str | None) -> dict[str, list[str]]:
     - The special `name` key may repeat. Repeated values OR-combine and
       duplicates are deduped (preserving first-seen order).
     - Any non-name key may only appear once. Duplicate non-name keys
-      raise `ValueError`. This matches kubectl, Terraform, and Ansible
-      label-selector grammars where AND across distinct keys is the rule.
+      raise `SelectorParseError`. This matches kubectl, Terraform, and
+      Ansible label-selector grammars where AND across distinct keys is
+      the rule.
 
     Args:
         selector: Comma-separated `key=value` pairs (e.g.,
@@ -147,7 +157,7 @@ def parse_selector(selector: str | None) -> dict[str, list[str]]:
         or empty.
 
     Raises:
-        ValueError: If a non-name key appears more than once.
+        SelectorParseError: If a non-name key appears more than once.
 
     Example:
         >>> parse_selector('environment=prod,region=eastus')
@@ -170,7 +180,7 @@ def parse_selector(selector: str | None) -> dict[str, list[str]]:
         value = value.strip()
         if key in labels:
             if key != "name":
-                raise ValueError(
+                raise SelectorParseError(
                     f"Selector key '{key}' may only appear once. Only the "
                     f"`name` key supports multiple values (OR-combined)."
                 )

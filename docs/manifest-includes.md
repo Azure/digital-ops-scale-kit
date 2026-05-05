@@ -17,7 +17,7 @@ steps:
 
 After resolution, the parent's step list is a flat sequence of every step the included manifests contribute, in declared order, interleaved with any inline steps the parent defines.
 
-> **Compose partials, not standalone manifests.** Including two standalone manifests that each include `_resolve-aio.yaml` will collide on the `resolve-aio` step name. Compose the leaf partials directly. See `scenarios/README.md` for the full composition rules.
+The standalone-vs-partial distinction matters for composition: scenarios should include the leaf partials, not standalone manifests. See [Standalone manifests vs partials](#standalone-manifests-vs-partials) and `scenarios/README.md`.
 
 ## Step shape
 
@@ -89,3 +89,4 @@ Step output references (`{{ steps.<name>.outputs.<field> }}`) are resolved again
 
 - [manifest-reference.md](manifest-reference.md): step shapes, conditional steps, parallel execution.
 - [parameter-resolution.md](parameter-resolution.md): how parameters merge across manifest, site, and step levels.
+- [targeting.md](targeting.md): how a composed manifest's sites are selected. Partials inherit the parent's targeting.

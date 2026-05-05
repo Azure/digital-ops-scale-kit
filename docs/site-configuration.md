@@ -2,6 +2,23 @@
 
 Sites define **where** to deploy: the Azure subscription, resource group, location, and site-specific configuration.
 
+## Quick decision table
+
+| I want to... | Do this |
+|---|---|
+| Add a new deployable site | Drop `my-site.yaml` under `workspace/sites/` (any subdir) or an extras dir |
+| Share a reusable template across sites | Put it in `workspace/sites/<name>.yaml` (same dir) or `workspace/sites/shared/<name>.yaml` (subdir) and reference via `inherits:` |
+| Override a committed site at runtime without a PR | Put `my-site.yaml` in `workspace/sites.local/` (overlay merges, `inherits:` stripped) |
+| Inject a site from CI without touching the workspace | Register a dir via `SITEOPS_EXTRA_SITES_DIRS` / `--extra-sites-dir` and drop `my-site.yaml` in it |
+| Target one specific site at the CLI | `siteops deploy <manifest> -l name=<site-name>` |
+| Target multiple specific sites at the CLI | `siteops deploy <manifest> -l name=<a>,name=<b>` |
+| Pin the manifest to a labeled cohort | Set `selector:` in the manifest |
+| Hard-code the target list for a manifest | Set `sites:` in the manifest |
+| Preview a fully-resolved site (post inherit + overlay) | `siteops -w <workspace> sites <name> --render` |
+| See where every value in a resolved site came from | `siteops -w <workspace> sites <name> -v` |
+
+The reference material below covers the model in depth. See [targeting.md](targeting.md) for the selector grammar and the no-match diagnostic.
+
 ## Site levels
 
 Sites operate at two levels based on whether they have a `resourceGroup`:
@@ -392,22 +409,7 @@ siteops deploy manifests/aio-install.yaml -l name=munich-dev        # single sit
 siteops deploy manifests/aio-install.yaml -l name=a,name=b          # multi-site (name OR-combines)
 ```
 
-`-l` is repeatable. Distinct keys AND-combine. Repeated `name=` values OR-combine; any other duplicate key is an error. Path-form names (`-l name=regions/eu/munich`) work for nested site files. See [targeting.md](targeting.md) for the full grammar, the no-match diagnostic, and the validation rules.
-
-### Quick decision table
-
-| I want to… | Do this |
-|---|---|
-| Add a new deployable site | Drop `my-site.yaml` under `workspace/sites/` (any subdir) or an extras dir |
-| Share a reusable template across sites | Put it in `workspace/sites/<name>.yaml` (same dir) or `workspace/sites/shared/<name>.yaml` (subdir) and reference via `inherits:` |
-| Override a committed site at runtime without a PR | Put `my-site.yaml` in `workspace/sites.local/` (overlay merges; `inherits:` stripped) |
-| Inject a site from CI without touching the workspace | Register a dir via `SITEOPS_EXTRA_SITES_DIRS` / `--extra-sites-dir` and drop `my-site.yaml` in it |
-| Target one specific site at the CLI | `siteops deploy <manifest> -l name=<site-name>` |
-| Target multiple specific sites at the CLI | `siteops deploy <manifest> -l name=<a>,name=<b>` |
-| Pin the manifest to a labeled cohort | Set `selector:` in the manifest |
-| Hard-code the target list for a manifest | Set `sites:` in the manifest |
-| Preview a fully-resolved site (post inherit + overlay) | `siteops -w <workspace> sites <name> --render` |
-| See where every value in a resolved site came from | `siteops -w <workspace> sites <name> -v` |
+`-l` is repeatable. Distinct keys AND-combine. Repeated `name=` values OR-combine. Any other duplicate key is an error. Path-form names (`-l name=regions/eu/munich`) work for nested site files. See [targeting.md](targeting.md) for the full grammar, the no-match diagnostic, and the validation rules.
 
 ## Scaling to a fleet
 
