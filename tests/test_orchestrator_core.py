@@ -414,6 +414,49 @@ class TestResolveSites:
             )
 
 
+class TestExplainNoMatch:
+    """`explain_no_match` produces operator-friendly diagnostics for
+    CLI selectors that filter the workspace down to zero sites."""
+
+    def test_label_typo_lists_actual_workspace_values(self, multi_site_workspace):
+        orchestrator = Orchestrator(multi_site_workspace)
+        msg = orchestrator.explain_no_match("environment=prdo")
+        assert "matched no sites" in msg
+        assert "environment=prdo" in msg
+        # Diagnostic should list the actual `environment` values present.
+        assert "dev" in msg or "prod" in msg
+
+    def test_unknown_label_says_so(self, multi_site_workspace):
+        orchestrator = Orchestrator(multi_site_workspace)
+        msg = orchestrator.explain_no_match("nonexistent=value")
+        assert "nonexistent" in msg
+        assert "no site declares" in msg or "Workspace" in msg
+
+    def test_name_typo_lists_workspace_site_names(self, multi_site_workspace):
+        orchestrator = Orchestrator(multi_site_workspace)
+        msg = orchestrator.explain_no_match("name=does-not-exist")
+        assert "does-not-exist" in msg
+        # At least one real site name should appear in the diagnostic.
+        all_sites = orchestrator.load_all_sites()
+        assert any(s.name in msg for s in all_sites)
+
+    def test_none_selector_returns_generic_message(self, multi_site_workspace):
+        orchestrator = Orchestrator(multi_site_workspace)
+        msg = orchestrator.explain_no_match(None)
+        assert "manifest" in msg.lower() or "matched" in msg.lower()
+
+    def test_empty_workspace(self, tmp_workspace):
+        orchestrator = Orchestrator(tmp_workspace)
+        msg = orchestrator.explain_no_match("env=dev")
+        assert "No sites in workspace" in msg
+
+    def test_invalid_selector_surfaces_parse_error(self, multi_site_workspace):
+        orchestrator = Orchestrator(multi_site_workspace)
+        msg = orchestrator.explain_no_match("env=dev,env=prod")
+        assert "invalid" in msg.lower()
+        assert "may only appear once" in msg
+
+
 class TestDeploymentNameGeneration:
     """Tests for deployment name truncation and hashing."""
 

@@ -534,6 +534,69 @@ class TestCmdDeploy:
         captured = capsys.readouterr()
         assert "may only appear once" in captured.err
 
+    def test_deploy_cli_selector_no_match_errors_with_diagnostic(self, complete_workspace, capsys):
+        """CLI selector matching zero workspace sites exits 1 with a
+        diagnostic listing the workspace label values."""
+        from siteops.orchestrator import Orchestrator
+
+        # Manifest exists; CLI selector overrides and matches nothing.
+        manifest_data = {
+            "name": "test",
+            "sites": ["test-site"],
+            "steps": [{"name": "step1", "template": "templates/test.bicep"}],
+        }
+        manifest_path = complete_workspace / "manifests" / "test.yaml"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            yaml.dump(manifest_data, f)
+
+        orchestrator = Orchestrator(complete_workspace)
+
+        args = MagicMock()
+        args.manifest = manifest_path
+        args.workspace = complete_workspace
+        args.selector = "nonexistent=value"
+        args.parallel = None
+
+        exit_code = cmd_deploy(args, orchestrator)
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "matched no sites" in captured.err
+        # Diagnostic should mention the missing label so the operator
+        # sees the typo.
+        assert "nonexistent" in captured.err
+
+    def test_deploy_cli_name_typo_errors_with_workspace_names(
+        self, complete_workspace, capsys
+    ):
+        """CLI `-l name=X` for an unknown name lists workspace site names."""
+        from siteops.orchestrator import Orchestrator
+
+        manifest_data = {
+            "name": "test",
+            "sites": ["test-site"],
+            "steps": [{"name": "step1", "template": "templates/test.bicep"}],
+        }
+        manifest_path = complete_workspace / "manifests" / "test.yaml"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            yaml.dump(manifest_data, f)
+
+        orchestrator = Orchestrator(complete_workspace)
+
+        args = MagicMock()
+        args.manifest = manifest_path
+        args.workspace = complete_workspace
+        args.selector = "name=does-not-exist"
+        args.parallel = None
+
+        exit_code = cmd_deploy(args, orchestrator)
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "does-not-exist" in captured.err
+        # The diagnostic should list at least one real workspace site.
+        assert "test-site" in captured.err
+
     def test_deploy_no_steps(self, complete_workspace, capsys):
         """Test deploy with no steps returns exit code 0."""
         from siteops.orchestrator import Orchestrator

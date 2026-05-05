@@ -2229,6 +2229,62 @@ class Orchestrator:
 
         return []
 
+    def explain_no_match(self, cli_selector: str | None) -> str:
+        """Diagnose why a CLI selector matched no workspace sites.
+
+        For each selector key, report what values the operator
+        requested and what values are actually present in the
+        workspace. Distinguishes a typo (`-l env=prdo`) from an
+        empty workspace or a missing label.
+
+        Returns a single-paragraph diagnostic suitable for the
+        `cmd_deploy` error path, or a generic message when
+        `cli_selector` is None.
+        """
+        if not cli_selector:
+            return "No sites matched the manifest's targeting."
+        try:
+            sel = parse_selector(cli_selector)
+        except ValueError as e:
+            return f"CLI selector `-l {cli_selector}` is invalid: {e}"
+        all_sites = self.load_all_sites()
+        if not all_sites:
+            return (
+                f"No sites in workspace; CLI selector `-l {cli_selector}` "
+                f"cannot match. Add a site file under `sites/` or pass "
+                f"`--extra-sites-dir` to point at one."
+            )
+        parts: list[str] = []
+        for key, requested in sel.items():
+            if key == "name":
+                names_in_ws = sorted({s.name for s in all_sites})
+                missing = [v for v in requested if v not in names_in_ws]
+                if missing:
+                    parts.append(
+                        f"`name={','.join(missing)}` not found. Workspace "
+                        f"site names: {', '.join(names_in_ws)}."
+                    )
+            else:
+                values_in_ws = sorted(
+                    {str(s.labels[key]) for s in all_sites if key in s.labels}
+                )
+                requested_str = ",".join(requested)
+                if not values_in_ws:
+                    parts.append(
+                        f"`{key}={requested_str}` requested but no site "
+                        f"declares the `{key}` label."
+                    )
+                else:
+                    parts.append(
+                        f"`{key}={requested_str}` requested. Workspace "
+                        f"`{key}` values: {', '.join(values_in_ws)}."
+                    )
+        if not parts:
+            return f"CLI selector `-l {cli_selector}` matched no sites."
+        return (
+            f"CLI selector `-l {cli_selector}` matched no sites. " + " ".join(parts)
+        )
+
     def validate(self, manifest_path: Path, selector: str | None = None) -> list[str]:
         """Validate manifest and return list of errors.
 
@@ -2268,7 +2324,12 @@ class Orchestrator:
             # error so the operator sees what is wrong.
             return [str(e)]
         if not sites and (manifest.sites or manifest.site_selector or selector):
-            errors.append("No sites matched the specified criteria")
+            if selector:
+                # Use the rich diagnostic when CLI selector knocked
+                # everything out so the operator sees what was wrong.
+                errors.append(self.explain_no_match(selector))
+            else:
+                errors.append("No sites matched the specified criteria")
 
         # Validate manifest-level parameter files
         for param_path in manifest.parameters:

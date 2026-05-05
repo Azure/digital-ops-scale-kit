@@ -52,13 +52,23 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     from siteops.models import Manifest
 
     manifest = Manifest.from_file(manifest_path, workspace_root=args.workspace)
+    cli_selector = getattr(args, "selector", None)
     try:
-        sites = orchestrator.resolve_sites(manifest, getattr(args, "selector", None))
+        sites = orchestrator.resolve_sites(manifest, cli_selector)
     except ValueError as e:
         print(f"\nError: {e}\n", file=sys.stderr)
         return 1
 
     if not sites:
+        if cli_selector:
+            # Operator explicitly asked for a target set and got
+            # nothing. Surface the diagnostic and exit non-zero so the
+            # condition is not silently masked in CI.
+            print(
+                f"\nError: {orchestrator.explain_no_match(cli_selector)}\n",
+                file=sys.stderr,
+            )
+            return 1
         print("\n⚠ No sites matched. Nothing to deploy.\n")
         return 0
 
