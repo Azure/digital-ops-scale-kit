@@ -11,7 +11,7 @@
 // configurationOverrides are unioned over the existing configurationSettings so
 // the PUT cannot wipe operator state.
 //
-// cert-manager is gated by `certManagerPresent`: when false, no cert-manager PUT
+// cert-manager is gated by `enableCertManager`: when false, no cert-manager PUT
 // is emitted. (Conditional resource declaration; the existing extension is left
 // untouched.)
 //
@@ -60,11 +60,11 @@ param aio object
 #disable-next-line secure-secrets-in-params
 param secretStore object
 
-@description('cert-manager extension snapshot from resolve-extensions.outputs.certManager. Ignored when certManagerPresent is false.')
+@description('cert-manager extension snapshot from resolve-extensions.outputs.certManager. Ignored when enableCertManager is false.')
 param certManager object
 
-@description('Whether cert-manager is present on the cluster. From resolve-extensions.outputs.certManagerPresent.')
-param certManagerPresent bool
+@description('Whether cert-manager is present on the cluster. From resolve-extensions.outputs.enableCertManager.')
+param enableCertManager bool
 
 // =====================================================================================
 // Parameters: target versions (all optional; empty = preserve resolved).
@@ -94,13 +94,13 @@ param secretStoreTrain string = ''
 #disable-next-line secure-secrets-in-params
 param secretStoreConfigurationOverrides object = {}
 
-@description('Target version for the cert-manager Arc extension. Ignored when certManagerPresent is false. Empty preserves the resolved current version.')
+@description('Target version for the cert-manager Arc extension. Ignored when enableCertManager is false. Empty preserves the resolved current version.')
 param certManagerVersion string = ''
 
-@description('Target release train for the cert-manager Arc extension. Ignored when certManagerPresent is false. Empty preserves the resolved current train.')
+@description('Target release train for the cert-manager Arc extension. Ignored when enableCertManager is false. Empty preserves the resolved current train.')
 param certManagerTrain string = ''
 
-@description('Configuration overrides to merge over the cert-manager extension\'s existing configurationSettings on PUT. Ignored when certManagerPresent is false.')
+@description('Configuration overrides to merge over the cert-manager extension\'s existing configurationSettings on PUT. Ignored when enableCertManager is false.')
 param certManagerConfigurationOverrides object = {}
 
 // =====================================================================================
@@ -163,16 +163,16 @@ resource secretStoreExtensionUpdate 'Microsoft.KubernetesConfiguration/extension
     // newer schemas are not pruned, so they accumulate across multi-hop upgrades.
     configurationSettings: union(secretStore.configurationSettings, secretStoreConfigurationOverrides)
   }
-  // Conditional dependency must stay in sync with the `if (certManagerPresent)`
+  // Conditional dependency must stay in sync with the `if (enableCertManager)`
   // guard on certManagerExtensionUpdate below.
-  dependsOn: certManagerPresent ? [certManagerExtensionUpdate] : []
+  dependsOn: enableCertManager ? [certManagerExtensionUpdate] : []
 }
 
 // =====================================================================================
 // cert-manager Extension: conditional PUT only when present on the cluster.
 // =====================================================================================
 
-resource certManagerExtensionUpdate 'Microsoft.KubernetesConfiguration/extensions@2023-05-01' = if (certManagerPresent) {
+resource certManagerExtensionUpdate 'Microsoft.KubernetesConfiguration/extensions@2023-05-01' = if (enableCertManager) {
   scope: cluster
   name: certManager.name
   identity: certManager.identity
@@ -200,8 +200,8 @@ output aioExtensionId string = aioExtensionUpdate.id
 @description('Resource ID of the (updated) secret store Arc extension.')
 output secretStoreExtensionId string = secretStoreExtensionUpdate.id
 
-@description('Resource ID of the (updated) cert-manager Arc extension. Empty when certManagerPresent is false.')
-output certManagerExtensionId string = certManagerPresent ? certManagerExtensionUpdate!.id : ''
+@description('Resource ID of the (updated) cert-manager Arc extension. Empty when enableCertManager is false.')
+output certManagerExtensionId string = enableCertManager ? certManagerExtensionUpdate!.id : ''
 
 @description('Effective version applied to the AIO Arc extension.')
 output aioVersionApplied string = effectiveAioVersion
@@ -209,5 +209,5 @@ output aioVersionApplied string = effectiveAioVersion
 @description('Effective version applied to the secret store Arc extension.')
 output secretStoreVersionApplied string = effectiveSecretStoreVersion
 
-@description('Effective version applied to the cert-manager Arc extension. Empty when certManagerPresent is false.')
-output certManagerVersionApplied string = certManagerPresent ? effectiveCertManagerVersion : ''
+@description('Effective version applied to the cert-manager Arc extension. Empty when enableCertManager is false.')
+output certManagerVersionApplied string = enableCertManager ? effectiveCertManagerVersion : ''

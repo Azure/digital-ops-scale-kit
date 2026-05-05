@@ -18,6 +18,7 @@ properties:
     enableGlobalSite: false      # Subscription-scoped edge site
     enableEdgeSite: false        # RG-scoped edge site
     enableSecretSync: false
+    enableCertManager: true      # cert-manager Arc extension on the cluster
 
 parameters:
   # AIO broker configuration defaults

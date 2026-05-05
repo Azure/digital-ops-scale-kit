@@ -6,3 +6,7 @@
 # derive the AIO Arc extension name through the shared source-of-truth deriver.
 connectedClusterName: "{{ steps.resolve-aio.outputs.connectedClusterName }}"
 connectedClusterResourceId: "{{ steps.resolve-aio.outputs.connectedClusterResourceId }}"
+
+# cert-manager ownership flag from site config. False skips cert-manager
+# resolution so externally-managed cert-manager installs are never touched.
+enableCertManager: "{{ site.properties.deployOptions.enableCertManager }}"

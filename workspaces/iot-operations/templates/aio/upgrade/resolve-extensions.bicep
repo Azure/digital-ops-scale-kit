@@ -1,21 +1,20 @@
 // resolve-extensions.bicep
 // -------------------------------------------------------------------------------------
-// Resolves the AIO and azure-secret-store Arc extensions on the cluster hosting
-// the AIO instance and surfaces the `trustSource` recorded in the AIO extension's
-// configurationSettings so a follow-up step can decide whether cert-manager is
-// present on the cluster.
+// Resolves the AIO, azure-secret-store, and (conditionally) cert-manager Arc
+// extensions on the cluster hosting the AIO instance, returning uniform
+// snapshots that update-extensions consumes.
 //
 // Discovery: direct `existing` lookups by names sourced from
 // `templates/common/extension-names.bicep`, the same module the install path
 // uses to STAMP these names. Drift between install and upgrade is structurally
 // impossible because both sides import the same authoritative deriver/constants.
 //
-// What this template does NOT resolve:
-//   cert-manager. Its presence depends on the runtime trustSource read here,
-//   and Bicep does not allow `existing if(cond)` where `cond` is produced at
-//   deployment runtime by a sibling module/resource (BCP182). cert-manager
-//   resolution is therefore the next manifest step (`resolve-cert-manager.bicep`),
-//   gated by `detectedTrustSource` chained from this template's outputs.
+// cert-manager ownership: the conditional `existing` is gated on the deploy-time
+// `enableCertManager` parameter (sourced from `site.properties.deployOptions.
+// enableCertManager`). This is the same flag that gates the install in
+// `enablement.bicep`, so the upgrade's view of cert-manager ownership matches
+// the install's. Sites that delegate cert-manager to a customer-managed install
+// pass `enableCertManager: false` and the snapshot is returned zero-valued.
 //
 // Why not iterate `customLocation.clusterExtensionIds` and filter by extensionType?
 //   BCP138 forces duplicating the filter predicate per extension, `filter(...)[0]`
@@ -28,6 +27,8 @@
 import {
   aioExtensionName as deriveAioExtensionName
   secretStoreExtensionName
+  certManagerExtensionName
+  certManagerExtensionType
 } from '../../common/extension-names.bicep'
 
 // =====================================================================================
@@ -39,6 +40,9 @@ param connectedClusterName string
 
 @description('Full ARM resource ID of the connected cluster. Chained from resolve-aio.outputs.connectedClusterResourceId. Used to derive the AIO Arc extension name via the same uniqueString algebra the install path uses.')
 param connectedClusterResourceId string
+
+@description('Whether scaleKit owns cert-manager on this cluster. Sourced from `site.properties.deployOptions.enableCertManager`. False skips cert-manager resolution entirely so externally-managed cert-manager installs are never read by this template.')
+param enableCertManager bool
 
 // =====================================================================================
 // Direct existing lookups via shared source-of-truth names.
@@ -58,9 +62,13 @@ resource secretStoreExtension 'Microsoft.KubernetesConfiguration/extensions@2023
   name: secretStoreExtensionName
 }
 
+resource certManagerExtension 'Microsoft.KubernetesConfiguration/extensions@2023-05-01' existing = if (enableCertManager) {
+  scope: cluster
+  name: certManagerExtensionName
+}
+
 // =====================================================================================
-// Outputs: uniform snapshot shape consumed by update-extensions alongside
-// resolve-cert-manager.outputs.snapshot.
+// Outputs: uniform snapshot shape consumed by update-extensions.
 // =====================================================================================
 
 @description('AIO Arc extension snapshot (id, name, extensionType, version, releaseTrain, configurationSettings, identity, releaseNamespace). releaseNamespace is forwarded into update-extensions so the upgrade PUT preserves the cluster namespace stamped by the install path.')
@@ -87,5 +95,23 @@ output secretStore object = {
   identity: secretStoreExtension.?identity ?? { type: 'None' }
 }
 
-@description('Trust source detected from the AIO extension configurationSettings.trustSource (set at install time by instance-*.bicep). Chained into resolve-cert-manager.bicep to gate whether cert-manager is resolved on the cluster.')
-output detectedTrustSource string = aioExtension.properties.?configurationSettings.?trustSource ?? ''
+@description('cert-manager Arc extension snapshot. Populated when enableCertManager is true; otherwise zero-valued with the canonical name and type so update-extensions can consume a uniform shape.')
+output certManager object = enableCertManager
+  ? {
+      id: certManagerExtension!.id
+      name: certManagerExtension!.name
+      extensionType: certManagerExtension!.properties.extensionType
+      version: certManagerExtension!.properties.?version ?? ''
+      releaseTrain: certManagerExtension!.properties.?releaseTrain ?? ''
+      configurationSettings: certManagerExtension!.properties.?configurationSettings ?? {}
+      identity: certManagerExtension!.?identity ?? { type: 'None' }
+    }
+  : {
+      id: ''
+      name: certManagerExtensionName
+      extensionType: certManagerExtensionType
+      version: ''
+      releaseTrain: ''
+      configurationSettings: {}
+      identity: { type: 'None' }
+    }

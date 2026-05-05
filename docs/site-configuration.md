@@ -160,6 +160,7 @@ properties:
     enableGlobalSite: false
     enableEdgeSite: false
     enableSecretSync: false
+    enableCertManager: true
 
   # Free-form custom fields. Anything you reference via
   # `{{ site.properties.X }}` in a manifest, parameters file,

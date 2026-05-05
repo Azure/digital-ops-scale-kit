@@ -35,10 +35,10 @@ class TestAioUpgradeDeployment:
             assert site["status"] == "success", (
                 f"Site '{name}' failed: {site.get('error')}"
             )
-            assert site["steps_completed"] == 4
+            assert site["steps_completed"] == 3
 
     def test_all_phases_run(self, aio_upgrade_result):
-        expected = ("resolve-aio", "resolve-extensions", "resolve-cert-manager", "update-extensions")
+        expected = ("resolve-aio", "resolve-extensions", "update-extensions")
         for name in aio_upgrade_result["sites"]:
             for step_name in expected:
                 assert_step_succeeded(aio_upgrade_result, name, step_name)
@@ -86,14 +86,18 @@ class TestAioUpgradeResolveExtensions:
                 f"upgrade would wipe operator config"
             )
 
-    def test_cert_manager_resolution(self, aio_upgrade_result):
-        """resolve-cert-manager outputs `present` (bool) + `snapshot` (or empty)."""
+    def test_cert_manager_snapshot_shape(self, aio_upgrade_result):
+        """resolve-extensions returns a uniform certManager snapshot whether
+        the extension is installed or not. When `enableCertManager` is true
+        the snapshot is populated; when false it is the zero-valued shape."""
         for name in aio_upgrade_result["sites"]:
-            step = assert_step_succeeded(aio_upgrade_result, name, "resolve-cert-manager")
-            present = assert_output_exists(step, "present")
-            assert isinstance(present, bool)
-            assert_output_exists(step, "snapshot")
-            assert_output_exists(step, "trustSource")
+            step = assert_step_succeeded(aio_upgrade_result, name, "resolve-extensions")
+            cert_manager = assert_output_exists(step, "certManager")
+            for key in ("id", "name", "extensionType", "version", "releaseTrain",
+                        "configurationSettings", "identity"):
+                assert key in cert_manager, (
+                    f"Site '{name}': certManager snapshot missing '{key}'"
+                )
 
 
 class TestAioUpgradePreservation:

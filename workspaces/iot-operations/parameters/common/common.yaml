@@ -37,6 +37,12 @@ labels:
 trustConfig:
   source: SelfSigned
 
+# cert-manager ownership flag. Drives both the install gate
+# (enablement.bicep) and the upgrade gate (resolve-extensions.bicep,
+# update-extensions.bicep). Sourced from site config so trust source and
+# cert-manager ownership remain orthogonal capabilities.
+enableCertManager: "{{ site.properties.deployOptions.enableCertManager }}"
+
 # ─────────────────────────────────────────────────────────────
 # Resource Metadata (auto-filtered per template)
 # ─────────────────────────────────────────────────────────────

@@ -13,9 +13,11 @@ description: |
   the AIO instance ARM resource has no writable version property and is not
   mutated.
 
-  cert-manager is upgraded only when the cluster's trust source is SelfSigned
-  (auto-detected from the AIO extension's configurationSettings.trustSource).
-  Custom or partial overrides can be applied via standard parameter overrides.
+  cert-manager is upgraded only when the site declares
+  `deployOptions.enableCertManager: true`. Sites that delegate cert-manager
+  to a customer-managed install set the flag false to leave the existing
+  extension untouched. Custom or partial overrides can be applied via
+  standard parameter overrides.
 
   Prerequisites:
     - AIO instance must be deployed and running
@@ -45,12 +47,6 @@ steps:
     scope: resourceGroup
     parameters:
       - parameters/inputs/aio-upgrade-resolve-extensions.yaml
-
-  - name: resolve-cert-manager
-    template: templates/aio/upgrade/resolve-cert-manager.bicep
-    scope: resourceGroup
-    parameters:
-      - parameters/inputs/aio-upgrade-resolve-cert-manager.yaml
 
   - name: update-extensions
     template: templates/aio/upgrade/update-extensions.bicep

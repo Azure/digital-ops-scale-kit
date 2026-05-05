@@ -8,7 +8,6 @@
 // without embedding version constants.
 // -------------------------------------------------------------------------------------
 
-import * as types from './modules/types.bicep'
 import { certManagerExtensionName, secretStoreExtensionName, certManagerExtensionType, secretStoreExtensionType } from '../common/extension-names.bicep'
 
 /*****************************************************************************/
@@ -21,13 +20,11 @@ import { certManagerExtensionName, secretStoreExtensionName, certManagerExtensio
 @description('Name of the existing arc-enabled cluster where AIO will be deployed.')
 param clusterName string
 
-/*                                TLS Parameters                             */
+/*                          Capability Toggles                               */
 ///////////////////////////////////////////////////////////////////////////////
 
-@description('Trust bundle config for AIO.')
-param trustConfig types.TrustConfig = {
-  source: 'SelfSigned'
-}
+@description('Whether scaleKit owns the cert-manager Arc extension on this cluster. When false, the install assumes cert-manager is provided externally and skips both the install and the dependsOn wiring on the secret store extension. Mirrors `site.properties.deployOptions.enableCertManager`.')
+param enableCertManager bool = true
 
 /*                          Extension Version Parameters                     */
 ///////////////////////////////////////////////////////////////////////////////
@@ -65,7 +62,7 @@ resource cluster 'Microsoft.Kubernetes/connectedClusters@2024-07-15-preview' exi
 /*                      Azure IoT Operations Dependencies.                   */
 /*****************************************************************************/
 
-resource certManagerExtension 'Microsoft.KubernetesConfiguration/extensions@2023-05-01' = if (trustConfig.source == 'SelfSigned') {
+resource certManagerExtension 'Microsoft.KubernetesConfiguration/extensions@2023-05-01' = if (enableCertManager) {
   scope: cluster
   name: certManagerExtensionName
   identity: {
@@ -104,7 +101,7 @@ resource secretStoreExtension 'Microsoft.KubernetesConfiguration/extensions@2023
         'validatingAdmissionPolicies.applyPolicies': 'false'
       }, secretStoreConfigurationOverrides)
   }
-  dependsOn: (trustConfig.source == 'SelfSigned') ? [certManagerExtension] : []
+  dependsOn: enableCertManager ? [certManagerExtension] : []
 }
 
 /*****************************************************************************/

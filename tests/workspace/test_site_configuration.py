@@ -13,6 +13,7 @@ EXPECTED_DEPLOY_OPTIONS = {
     "enableGlobalSite",
     "enableEdgeSite",
     "enableSecretSync",
+    "enableCertManager",
 }
 
 
