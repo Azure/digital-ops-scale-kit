@@ -133,6 +133,60 @@ class TestMergeSelectorStrings:
             parse_selector(merged)
 
 
+class TestNormalizeSiteIdentifier:
+    """Tests for the _normalize_site_identifier helper."""
+
+    def test_basename_passthrough(self):
+        from siteops.models import _normalize_site_identifier
+        assert _normalize_site_identifier("munich-dev") == "munich-dev"
+
+    def test_relative_path_passthrough(self):
+        from siteops.models import _normalize_site_identifier
+        assert _normalize_site_identifier("regions/eu/munich") == "regions/eu/munich"
+
+    def test_backslash_normalized_to_forward_slash(self):
+        from siteops.models import _normalize_site_identifier
+        assert (
+            _normalize_site_identifier("regions\\eu\\munich")
+            == "regions/eu/munich"
+        )
+
+    def test_empty_string_rejected(self):
+        from siteops.models import _normalize_site_identifier
+        with pytest.raises(ValueError, match="must not be empty"):
+            _normalize_site_identifier("")
+
+    def test_leading_dot_slash_rejected(self):
+        from siteops.models import _normalize_site_identifier
+        with pytest.raises(ValueError, match=r"must not start with `\./`"):
+            _normalize_site_identifier("./regions/eu/munich")
+
+    def test_leading_slash_rejected(self):
+        from siteops.models import _normalize_site_identifier
+        with pytest.raises(ValueError, match="must be relative"):
+            _normalize_site_identifier("/regions/eu/munich")
+
+    def test_trailing_slash_rejected(self):
+        from siteops.models import _normalize_site_identifier
+        with pytest.raises(ValueError, match=r"must not end with `/`"):
+            _normalize_site_identifier("regions/eu/")
+
+    def test_dotdot_segment_rejected(self):
+        from siteops.models import _normalize_site_identifier
+        with pytest.raises(ValueError, match=r"must not contain `\.\.`"):
+            _normalize_site_identifier("regions/../etc/passwd")
+
+    def test_dot_segment_rejected(self):
+        from siteops.models import _normalize_site_identifier
+        with pytest.raises(ValueError, match=r"must not contain `\.`"):
+            _normalize_site_identifier("regions/./eu/munich")
+
+    def test_double_slash_rejected(self):
+        from siteops.models import _normalize_site_identifier
+        with pytest.raises(ValueError, match="empty path segments"):
+            _normalize_site_identifier("regions//eu/munich")
+
+
 class TestConditionPattern:
     """Tests for the CONDITION_PATTERN regex."""
 
@@ -776,6 +830,48 @@ class TestManifest:
         manifest = Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
         assert manifest.site_selector == "environment=prod"
         assert manifest.sites == []
+
+    def test_from_file_with_nested_path_in_sites(self, tmp_path):
+        """Path-form site identifiers in `sites:` are normalized."""
+        manifest_data = {
+            "name": "nested-manifest",
+            "sites": ["regions/eu/munich", "flat-site"],
+            "steps": [{"name": "step-1", "template": "test.bicep"}],
+        }
+        manifest_path = tmp_path / "manifest.yaml"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            yaml.dump(manifest_data, f)
+
+        manifest = Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
+        assert manifest.sites == ["regions/eu/munich", "flat-site"]
+
+    def test_from_file_normalizes_backslash_in_sites(self, tmp_path):
+        """Backslash paths in `sites:` are normalized to forward slashes."""
+        manifest_data = {
+            "name": "backslash-manifest",
+            "sites": ["regions\\eu\\munich"],
+            "steps": [{"name": "step-1", "template": "test.bicep"}],
+        }
+        manifest_path = tmp_path / "manifest.yaml"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            yaml.dump(manifest_data, f)
+
+        manifest = Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
+        assert manifest.sites == ["regions/eu/munich"]
+
+    def test_from_file_rejects_dotdot_in_sites(self, tmp_path):
+        """Path traversal in `sites:` raises a clear parse error."""
+        manifest_data = {
+            "name": "bad-manifest",
+            "sites": ["../escape"],
+            "steps": [{"name": "step-1", "template": "test.bicep"}],
+        }
+        manifest_path = tmp_path / "manifest.yaml"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            yaml.dump(manifest_data, f)
+
+        with pytest.raises(ValueError, match="Invalid site identifier"):
+            Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
 
     def test_from_file_parallel_mode(self, tmp_path):
         manifest_data = {

@@ -20,7 +20,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import yaml
 
@@ -39,6 +39,7 @@ from siteops.models import (
     NoTargetingError,
     ParallelConfig,
     Site,
+    _normalize_site_identifier,
     _validate_resource,
     parse_selector,
 )
@@ -135,10 +136,17 @@ class Orchestrator:
         self._params_cache_lock = threading.Lock()
         self._site_cache: dict[str, Site] = {}
         self._cache_lock = threading.Lock()
-        # Lazy index of internal `name:` to file path. Built when a stem
-        # lookup misses and falls back to internal-name resolution. Lets
-        # a site declare a `name:` different from its filename and still
-        # be resolved by either form.
+        # Lazy site indexes built on first lookup. Workspace-load
+        # invariants enforced during build (see `_build_site_indexes`).
+        # - basename_index: `munich-dev` to abs path. Unique
+        #   workspace-wide so `-l name=munich-dev` resolves unambiguously
+        #   under nested `sites/` subdirectories.
+        # - rel_path_index: `regions/eu/munich-dev` to abs path. Used
+        #   for path-form lookups (`sites: [regions/eu/munich-dev]`).
+        # - internal_name_index: declared `name:` to abs path. Lets a
+        #   site resolve by an internal name distinct from its filename.
+        self._basename_index: dict[str, Path] | None = None
+        self._rel_path_index: dict[str, Path] | None = None
         self._internal_name_index: dict[str, Path] | None = None
         self._internal_name_index_lock = threading.Lock()
         self._extra_trusted_sites_dirs = self._normalize_extra_sites_dirs(
@@ -204,93 +212,186 @@ class Orchestrator:
         return [self.workspace / "sites", *self._extra_trusted_sites_dirs]
 
     def _find_trusted_site_file(self, identifier: str) -> Path | None:
-        """Return the trusted directory path containing the named site.
+        """Return the trusted file path for the named site.
 
-        Resolves `identifier` in two passes.
+        Resolves `identifier` against three workspace indexes built on
+        first call:
 
-        1. Filename stem. Searches `sites/` and each extra trusted dir
-           in order for `<identifier>.yaml` (or `.yml`). The common case,
-           since most sites use a `name:` that matches their filename.
-        2. Internal `name:` field. Falls back to a workspace-wide index
-           when the stem lookup misses. Lets a site declared
-           `name: contoso-edge` in `sites/seattle.yaml` resolve as
-           `contoso-edge` from both the CLI selector and `load_site()`.
+        1. Path-form index (`regions/eu/munich-dev`) for explicit
+           relative paths under any trusted `sites/` directory.
+        2. Basename index (`munich-dev`) for the common shorthand. The
+           basename invariant guarantees the basename maps to one file
+           workspace-wide.
+        3. Internal-name index for sites that declare a `name:` field
+           distinct from their filename.
 
-        Eagerly triggers the internal-name index build (and its
-        uniqueness validation) on the first call. This guarantees the
-        invariants fire even when every lookup happens to hit the stem
-        fast path. Without this, a workspace with two sites declaring
-        the same internal `name:` would pass silently for any command
-        that only uses filename-stem identifiers.
+        The eager build catches workspace-wide drift (basename
+        collisions, internal-name shadows) on the first lookup, so the
+        invariants fire even for commands that only use the basename
+        path.
+
+        SiteTemplates are findable via a direct path probe so
+        `load_site` can surface a friendly "cannot deploy a template"
+        error rather than a generic "not found".
 
         `sites.local/` is never searched. Sites must live in a
         code-reviewed or caller-vouched-for trusted location.
         """
-        # Eager index build. Cheap (one filesystem pass), catches drift
-        # the lazy fallback path would miss.
-        self._ensure_internal_name_index()
-        for sites_dir in self._trusted_sites_dirs:
-            for ext in (".yaml", ".yml"):
-                path = sites_dir / f"{identifier}{ext}"
-                if path.exists():
-                    return path
-        return self._internal_name_lookup(identifier)
+        self._ensure_site_indexes()
+        # Path-form lookup first. A `/` in the identifier signals an
+        # explicit relative path under a trusted `sites/` dir.
+        if "/" in identifier or "\\" in identifier:
+            try:
+                normalized = _normalize_site_identifier(identifier)
+            except ValueError:
+                return None
+            hit = self._rel_path_index.get(normalized)
+            if hit is not None:
+                return hit
+            return self._find_template_path(normalized)
+        # Basename lookup. The basename invariant makes this unambiguous.
+        if identifier in self._basename_index:
+            return self._basename_index[identifier]
+        # Internal `name:` fallback.
+        hit = self._internal_name_index.get(identifier)
+        if hit is not None:
+            return hit
+        return self._find_template_path(identifier)
 
-    def _ensure_internal_name_index(self) -> None:
-        """Build the internal-name index if it has not been built yet.
+    def _find_template_path(self, identifier: str) -> Path | None:
+        """Locate a SiteTemplate file matching `identifier`.
+
+        Used by `_find_trusted_site_file` as a fallback so callers can
+        surface a clear "this is a SiteTemplate, not deployable" error
+        rather than a generic "not found". Walks subdirectories so a
+        nested template (e.g., `sites/shared/base.yaml` resolved as
+        `base`) gets the friendly error too.
+        """
+        for sites_dir in self._trusted_sites_dirs:
+            if not sites_dir.exists():
+                continue
+            # Direct path probe (path-form identifier).
+            for ext in (".yaml", ".yml"):
+                candidate = sites_dir / f"{identifier}{ext}"
+                if candidate.exists() and self._is_site_template(candidate):
+                    return candidate
+            # Recursive basename probe (so nested templates also hit
+            # the friendly error path).
+            if "/" not in identifier:
+                for ext in ("*.yaml", "*.yml"):
+                    for path in sorted(sites_dir.rglob(ext)):
+                        if path.stem == identifier and self._is_site_template(path):
+                            return path
+        return None
+
+    def _ensure_site_indexes(self) -> None:
+        """Build the trusted-site indexes if they have not been built yet.
 
         Called by every site-touching entry point so the workspace
-        uniqueness invariants are enforced regardless of which lookup
-        path the caller takes.
+        invariants are enforced regardless of which lookup path the
+        caller takes.
         """
         with self._internal_name_index_lock:
             if self._internal_name_index is None:
-                self._internal_name_index = self._build_internal_name_index()
+                basename, rel_path, internal = self._build_site_indexes()
+                self._basename_index = basename
+                self._rel_path_index = rel_path
+                self._internal_name_index = internal
 
-    def _internal_name_lookup(self, name: str) -> Path | None:
-        """Resolve `name` through the internal-name index.
+    def _iter_trusted_site_files(
+        self, include_templates: bool = False
+    ) -> Iterator[tuple[Path, Path]]:
+        """Yield `(sites_dir, abs_path)` for every Site file under a
+        trusted directory, walking subdirectories.
 
-        Builds the index on first call via `_ensure_internal_name_index`
-        if it has not been built yet. The build pass enforces the
-        workspace uniqueness invariants documented on
-        `_build_internal_name_index`.
+        Skips SiteTemplates (`kind: SiteTemplate`) by default since
+        those are inheritance-only and never selectable. Pass
+        `include_templates=True` to keep them, useful when callers want
+        to surface a friendly error if the operator tries to load one
+        directly.
         """
-        self._ensure_internal_name_index()
-        return self._internal_name_index.get(name)
-
-    def _build_internal_name_index(self) -> dict[str, Path]:
-        """Index trusted site files by their internal `name:` field.
-
-        Skips:
-          - SiteTemplates (`kind: SiteTemplate`), which are not loadable.
-          - Files whose `name:` already equals their filename stem,
-            because the stem fast path already covers them.
-
-        Raises ValueError on either drift condition that would make site
-        identity ambiguous.
-
-          - Two sites declare the same internal `name:`.
-          - One site's internal `name:` equals another site's filename
-            stem, which would let the same identifier resolve to two
-            different files.
-        """
-        # Collect (stem, path) for all candidate site files first. The
-        # second-pass check needs to see every stem in the workspace, not
-        # just the ones with overridden `name:` fields.
-        all_stems: dict[str, Path] = {}
         for sites_dir in self._trusted_sites_dirs:
             if not sites_dir.exists():
                 continue
             for ext in ("*.yaml", "*.yml"):
-                for path in sites_dir.glob(ext):
-                    if self._is_site_template(path):
+                for path in sorted(sites_dir.rglob(ext)):
+                    if not include_templates and self._is_site_template(path):
                         continue
-                    # First trusted dir wins on stem collisions, matching
-                    # `_find_trusted_site_file` ordering.
-                    all_stems.setdefault(path.stem, path)
+                    yield sites_dir, path
 
-        index: dict[str, Path] = {}
-        for path in all_stems.values():
+    def _build_site_indexes(self) -> tuple[dict[str, Path], dict[str, Path], dict[str, Path]]:
+        """Walk trusted dirs and build the basename, rel-path, and
+        internal-name indexes.
+
+        Workspace-load invariants enforced during the build:
+
+        - Within any one trusted directory, every basename is unique
+          across all subdirectories. Lets `-l name=munich-dev` resolve
+          unambiguously when nested layouts are used.
+        - Across trusted directories, basename collisions are
+          legitimate overlays only when the rel-path also matches.
+          Cross-dir collisions where the rel-path differs would create
+          two distinct logical sites sharing one identifier and are
+          rejected.
+        - No internal `name:` collides with another file's basename.
+        - No internal `name:` collides with another file's rel-path
+          (the path-form identifier).
+        - No two sites declare the same internal `name:`.
+
+        Returns:
+            `(basename_index, rel_path_index, internal_name_index)`.
+        """
+        basename_to_path: dict[str, Path] = {}
+        rel_path_to_path: dict[str, Path] = {}
+
+        # Group files by their owning trusted directory so the within-dir
+        # uniqueness check does not flag legitimate cross-dir overlays.
+        per_dir: dict[Path, list[Path]] = {}
+        for sites_dir, path in self._iter_trusted_site_files():
+            per_dir.setdefault(sites_dir, []).append(path)
+
+        for sites_dir, paths in per_dir.items():
+            dir_basenames: dict[str, Path] = {}
+            for path in paths:
+                rel_path = path.relative_to(sites_dir).with_suffix("").as_posix()
+                basename = path.stem
+
+                # Within-dir basename invariant. Catches nested
+                # collisions that would make `-l name=basename`
+                # ambiguous.
+                existing = dir_basenames.get(basename)
+                if existing is not None:
+                    raise ValueError(
+                        f"Two site files in `{sites_dir}` share basename "
+                        f"`{basename}`: `{existing}` and `{path}`. Every "
+                        f"basename must be unique within a trusted sites "
+                        f"directory so `-l name={basename}` resolves "
+                        f"unambiguously. Rename one of the files."
+                    )
+                dir_basenames[basename] = path
+                # Cross-dir basename collisions are only valid overlays
+                # when the rel-path also matches. Otherwise the same
+                # identifier would refer to two distinct logical sites.
+                existing_basename = basename_to_path.get(basename)
+                if existing_basename is not None:
+                    existing_rel = self._canonical_site_id(existing_basename)
+                    if existing_rel != rel_path:
+                        raise ValueError(
+                            f"Cross-directory basename `{basename}` "
+                            f"collision between `{existing_basename}` "
+                            f"and `{path}`. Cross-dir basename matches "
+                            f"are valid only when the rel-path also "
+                            f"matches (overlay). Different rel-paths "
+                            f"would let `-l name={basename}` refer to "
+                            f"two distinct sites. Rename one of the files."
+                        )
+                # First trusted dir wins on basename and rel-path
+                # (overlay semantics).
+                basename_to_path.setdefault(basename, path)
+                rel_path_to_path.setdefault(rel_path, path)
+
+        internal_name_to_path: dict[str, Path] = {}
+        for path in basename_to_path.values():
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     data = yaml.safe_load(f) or {}
@@ -300,22 +401,30 @@ class Orchestrator:
             internal_name = self._read_internal_name(data)
             if not internal_name or internal_name == path.stem:
                 continue
-            if internal_name in all_stems and all_stems[internal_name] != path:
+            collider = basename_to_path.get(internal_name)
+            if collider is not None and collider.resolve() != path.resolve():
                 raise ValueError(
-                    f"Site '{path.name}' declares `name: {internal_name}` "
-                    f"which collides with file `{all_stems[internal_name].name}`. "
+                    f"Site `{path}` declares `name: {internal_name}` "
+                    f"which collides with file basename `{collider.name}`. "
                     f"Each site identity must resolve to exactly one file. "
                     f"Rename the `name:` field or one of the files."
                 )
-            if internal_name in index and index[internal_name] != path:
-                existing = index[internal_name]
+            collider = rel_path_to_path.get(internal_name)
+            if collider is not None and collider.resolve() != path.resolve():
+                raise ValueError(
+                    f"Site `{path}` declares `name: {internal_name}` "
+                    f"which collides with the path-form identifier of "
+                    f"file `{collider}`. Rename the `name:` field."
+                )
+            existing = internal_name_to_path.get(internal_name)
+            if existing is not None and existing.resolve() != path.resolve():
                 raise ValueError(
                     f"Two sites declare the same `name: {internal_name}`: "
-                    f"`{existing.name}` and `{path.name}`. Site names must "
-                    f"be unique across the workspace."
+                    f"`{existing}` and `{path}`. Site names must be "
+                    f"unique across the workspace."
                 )
-            index[internal_name] = path
-        return index
+            internal_name_to_path[internal_name] = path
+        return basename_to_path, rel_path_to_path, internal_name_to_path
 
     @staticmethod
     def _read_internal_name(data: dict[str, Any]) -> str | None:
@@ -330,13 +439,29 @@ class Orchestrator:
         return data.get("name")
 
     def _invalidate_internal_name_index(self) -> None:
-        """Clear the lazy internal-name index.
+        """Clear the lazy site indexes.
 
         Call when a site file may have been added, removed, or had its
         `name:` field changed during the orchestrator's lifetime.
         """
         with self._internal_name_index_lock:
+            self._basename_index = None
+            self._rel_path_index = None
             self._internal_name_index = None
+
+    def _canonical_site_id(self, site_path: Path) -> str:
+        """Return the canonical relative-path identifier for a site file.
+
+        Used to key the overlay merge in `_load_site_data`. Falls back to
+        the basename when the path is not under any trusted directory
+        (defensive; should not happen in practice).
+        """
+        for sites_dir in self._trusted_sites_dirs:
+            try:
+                return site_path.relative_to(sites_dir).with_suffix("").as_posix()
+            except ValueError:
+                continue
+        return site_path.stem
 
     def _deep_merge(self, base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
         """Deep merge two dictionaries, with override taking precedence.
@@ -566,20 +691,21 @@ class Orchestrator:
     def load_site(self, name: str) -> Site:
         """Load a site by name, applying inheritance and local overlays.
 
-        `name` may be either the site file's filename stem OR the
-        internal `name:` field declared in the file. The two forms are
-        symmetric (see `_find_trusted_site_file`).
+        `name` may be the site file's basename, its rel-path under a
+        trusted `sites/` directory, OR its internal `name:` field. All
+        three forms are symmetric (see `_find_trusted_site_file`).
 
         Resolution order (later sources override earlier):
         1. Inherited site/template (if 'inherits' specified on the base file).
         2. Base site file from `sites/` or any extra trusted dir (first
            trusted dir containing the file wins).
         3. Overlays from any remaining trusted dirs (`inherits` stripped).
-        4. Local overlay from `sites.local/<stem>.yaml` if present
-           (`inherits` stripped). Keyed by canonical filename stem.
+        4. Local overlay from `sites.local/<rel-path>.yaml` if present
+           (`inherits` stripped). Keyed by the rel-path of the base file
+           under its trusted dir, so nested sites have nested overlays.
 
         Args:
-            name: Filename stem OR internal `name:` value.
+            name: Basename, rel-path, OR internal `name:` value.
 
         Returns:
             Fully resolved Site instance.
@@ -588,30 +714,35 @@ class Orchestrator:
             ValueError: If the site file is invalid, missing required
                 fields, references a non-existent inherited file, or two
                 files in the workspace would resolve to the same name.
-            FileNotFoundError: If neither the filename stem nor any
-                internal `name:` matches.
+            FileNotFoundError: If no form matches.
         """
-        # Check cache first. Cached under both forms (stem + internal name)
-        # below so a second call with either form is a hit.
+        # Normalize path-form identifiers (forward-slash separators) so
+        # the cache lookup is consistent across `regions/eu/munich` and
+        # `regions\\eu\\munich` and similar variants.
+        if "/" in name or "\\" in name:
+            try:
+                lookup_key = _normalize_site_identifier(name)
+            except ValueError:
+                lookup_key = name
+        else:
+            lookup_key = name
         with self._cache_lock:
-            if name in self._site_cache:
-                return self._site_cache[name]
+            if lookup_key in self._site_cache:
+                return self._site_cache[lookup_key]
 
-        # Resolve the identifier to a trusted file. Stem fast path first,
-        # then internal-name index fallback.
-        site_path = self._find_trusted_site_file(name)
+        site_path = self._find_trusted_site_file(lookup_key)
         if site_path is None:
             where = "sites/"
             if self._extra_trusted_sites_dirs:
                 where += " or extra trusted sites dirs"
             raise FileNotFoundError(f"Site file not found: {name} (searched {where})")
 
-        # Use the canonical filename stem for the overlay merge. The
-        # `_load_site_data` step keys overlays in `sites.local/` and
-        # additional trusted dirs by `<stem>.yaml`, not by internal name,
-        # so we must canonicalize here when the caller passed an
-        # internal-name override.
-        canonical_stem = site_path.stem
+        # Canonical id keys the overlay merge in `_load_site_data`.
+        # Equal to the basename for flat layouts, or to the rel-path
+        # under the owning trusted dir for nested layouts.
+        canonical_id = self._canonical_site_id(site_path)
+        # Default `Site.name` is the basename. Unique by invariant.
+        default_name = site_path.stem
 
         # Check if this is a SiteTemplate (cannot be loaded directly)
         if self._is_site_template(site_path):
@@ -621,22 +752,22 @@ class Orchestrator:
             )
 
         # Load and merge site data (handles inheritance + local overlay)
-        merged_data = self._load_site_data(canonical_stem)
+        merged_data = self._load_site_data(canonical_id)
 
         # Validate merged data
         _validate_resource(merged_data, "Site", site_path)
 
         # Parse merged data (similar to Site.from_file but from dict).
-        # Default the site's name to the canonical filename stem so a
-        # missing `name:` field still produces a well-formed Site.
+        # Default the site's name to the basename so a missing `name:`
+        # field still produces a well-formed Site.
         if "spec" in merged_data:
             spec = merged_data["spec"]
             metadata = merged_data.get("metadata", {})
-            site_name = metadata.get("name", canonical_stem)
+            site_name = metadata.get("name", default_name)
             labels = metadata.get("labels", {})
         else:
             spec = merged_data
-            site_name = merged_data.get("name", canonical_stem)
+            site_name = merged_data.get("name", default_name)
             labels = merged_data.get("labels", {})
 
         required = ["subscription", "location"]
@@ -654,47 +785,47 @@ class Orchestrator:
             parameters=spec.get("parameters", {}),
         )
 
-        # Cache under every form the caller might use later. Always under
-        # the canonical stem and the internal name. Also under whatever
-        # the caller actually passed, so a redundant lookup of an alias
-        # short-circuits without re-resolving.
+        # Cache under every form the caller might use later. Always
+        # under the canonical id (basename or rel-path) and the internal
+        # name. Also under whatever the caller actually passed (and its
+        # normalized form, if a path-form identifier).
         with self._cache_lock:
-            self._site_cache[canonical_stem] = site
-            if site.name and site.name != canonical_stem:
+            self._site_cache[canonical_id] = site
+            if default_name != canonical_id:
+                self._site_cache[default_name] = site
+            if site.name and site.name not in self._site_cache:
                 self._site_cache[site.name] = site
-            self._site_cache[name] = site
+            self._site_cache[lookup_key] = site
+            if name != lookup_key:
+                self._site_cache[name] = site
 
         return site
 
     def _get_all_site_names(self) -> list[str]:
         """Get all deployable site names from trusted site directories.
 
-        Scans the workspace's `sites/` directory and every extra trusted
-        site directory for YAML files and returns names of files that
-        represent deployable sites (`kind: Site`). Files with
-        `kind: SiteTemplate` are excluded (inheritance-only). Files in
-        `sites.local/` are NOT discoverable. That directory is the
-        overlay for committed/trusted sites, not a source of new site
-        identities.
+        Recursively scans every trusted site directory for YAML files
+        and returns the basenames of files that represent deployable
+        sites (`kind: Site`). Files with `kind: SiteTemplate` are
+        excluded (inheritance-only). Files in `sites.local/` are NOT
+        discoverable. That directory is the overlay for committed and
+        trusted sites, not a source of new site identities.
+
+        The basename-uniqueness invariant (enforced by
+        `_build_site_indexes`) guarantees each returned basename maps to
+        exactly one file, even when nested under subdirectories.
 
         Returns:
-            Sorted list of site names (filename stems without extension).
+            Sorted list of site basenames (filenames without extension).
 
         Note:
-            Files that cannot be parsed are included and will error during
-            `load_site()`. This allows proper error reporting with full
-            context rather than silent omission.
+            Files that cannot be parsed are included and will error
+            during `load_site()`. Allows proper error reporting with
+            full context rather than silent omission.
         """
         site_names: set[str] = set()
-        for sites_dir in self._trusted_sites_dirs:
-            if not sites_dir.exists():
-                continue
-            for ext in ("*.yaml", "*.yml"):
-                for path in sites_dir.glob(ext):
-                    if self._is_site_template(path):
-                        continue
-                    site_names.add(path.stem)
-
+        for _sites_dir, path in self._iter_trusted_site_files():
+            site_names.add(path.stem)
         return sorted(site_names)  # Sort for deterministic order
 
     def _is_site_template(self, path: Path) -> bool:
@@ -2039,12 +2170,18 @@ class Orchestrator:
             # field, which is permitted to differ from the filename.
             if "name" in selector:
                 requested_names = selector["name"]
+                # The fast-path treats `_find_trusted_site_file` as the
+                # name-key matcher. Re-checking via matches_selector
+                # would fail when `name=` is a path-form or internal
+                # name and `Site.name` defaults to the basename. Other
+                # selector keys still apply.
+                other_selector = {k: v for k, v in selector.items() if k != "name"}
                 trusted_results: list[Site] = []
                 untrusted_names: list[str] = []
                 for n in requested_names:
                     if self._find_trusted_site_file(n) is not None:
                         site = self.load_site(n)
-                        if site.matches_selector(selector):
+                        if not other_selector or site.matches_selector(other_selector):
                             trusted_results.append(site)
                     else:
                         untrusted_names.append(n)

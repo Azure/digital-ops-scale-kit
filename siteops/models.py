@@ -195,6 +195,58 @@ def _merge_selector_strings(strings: list[str] | None) -> str | None:
     return merged or None
 
 
+def _normalize_site_identifier(identifier: str) -> str:
+    """Validate and normalize a site identifier or path-form identifier.
+
+    Accepts:
+    - Bare basename (`munich-dev`)
+    - Forward-slash relative path (`regions/eu/munich-dev`)
+    - Backslash relative path (normalized to forward slashes)
+
+    Rejects (raises `ValueError`):
+    - Empty string
+    - Leading `./`
+    - Leading `/` (absolute path)
+    - Trailing `/`
+    - `..` path segments (path traversal)
+    - `.` path segments
+    - Empty path segments (e.g., `a//b`)
+
+    Returns the normalized form (forward-slash separators, no leading or
+    trailing slash).
+    """
+    if not identifier:
+        raise ValueError("Site identifier must not be empty")
+    normalized = identifier.replace("\\", "/")
+    if normalized.startswith("./"):
+        raise ValueError(
+            f"Site identifier '{identifier}' must not start with `./`. "
+            f"Use the relative form (e.g., `regions/eu/munich`)."
+        )
+    if normalized.startswith("/"):
+        raise ValueError(
+            f"Site identifier '{identifier}' must be relative (no leading `/`)."
+        )
+    if normalized.endswith("/"):
+        raise ValueError(
+            f"Site identifier '{identifier}' must not end with `/`."
+        )
+    parts = normalized.split("/")
+    if any(p == ".." for p in parts):
+        raise ValueError(
+            f"Site identifier '{identifier}' must not contain `..` segments."
+        )
+    if any(p == "." for p in parts):
+        raise ValueError(
+            f"Site identifier '{identifier}' must not contain `.` segments."
+        )
+    if any(not p for p in parts):
+        raise ValueError(
+            f"Site identifier '{identifier}' must not contain empty path segments."
+        )
+    return normalized
+
+
 def _validate_resource(data: dict[str, Any], expected_kind: str | list[str], path: Path) -> str:
     """Validate apiVersion and kind for a resource file.
 
@@ -690,7 +742,12 @@ class Manifest:
         sites = []
         for item in spec.get("sites", []):
             if isinstance(item, str):
-                sites.append(item)
+                try:
+                    sites.append(_normalize_site_identifier(item))
+                except ValueError as e:
+                    raise ValueError(
+                        f"Invalid site identifier in `{path}` `sites:` list: {e}"
+                    ) from e
 
         # `selector:` is the preferred manifest field. `siteSelector:` is
         # accepted for backward compatibility but logs a one-time deprecation

@@ -8,6 +8,7 @@ Covers:
 - Output path resolution
 """
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1071,6 +1072,170 @@ class TestSiteIdentityResolution:
         orchestrator = Orchestrator(tmp_workspace)
         orchestrator.load_site("contoso-edge")
         assert "shared-prod" not in orchestrator._internal_name_index
+
+
+class TestNestedSiteDiscovery:
+    """Sites under nested subdirectories of `sites/` are discoverable.
+
+    Discovery walks every subdirectory. Identity for a nested file is
+    its rel-path under the trusted dir (e.g., `regions/eu/munich-dev`),
+    AND its basename (e.g., `munich-dev`). The basename is unique by
+    workspace invariant so the shorthand is always unambiguous.
+    """
+
+    def _write_site(self, root, rel, internal_name):
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        body = {
+            "apiVersion": "siteops/v1",
+            "kind": "Site",
+            "name": internal_name,
+            "subscription": "00000000-0000-0000-0000-000000000000",
+            "resourceGroup": "rg-test",
+            "location": "eastus",
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.dump(body, f)
+        return path
+
+    def test_load_nested_site_by_basename(self, tmp_workspace):
+        self._write_site(
+            tmp_workspace, Path("sites/regions/eu/munich-dev.yaml"), "munich-dev"
+        )
+        orchestrator = Orchestrator(tmp_workspace)
+        site = orchestrator.load_site("munich-dev")
+        assert site.name == "munich-dev"
+
+    def test_load_nested_site_by_rel_path(self, tmp_workspace):
+        self._write_site(
+            tmp_workspace, Path("sites/regions/eu/munich-dev.yaml"), "munich-dev"
+        )
+        orchestrator = Orchestrator(tmp_workspace)
+        site = orchestrator.load_site("regions/eu/munich-dev")
+        assert site.name == "munich-dev"
+
+    def test_get_all_site_names_recurses(self, tmp_workspace):
+        self._write_site(
+            tmp_workspace, Path("sites/regions/eu/munich-dev.yaml"), "munich-dev"
+        )
+        self._write_site(
+            tmp_workspace, Path("sites/regions/us/seattle-dev.yaml"), "seattle-dev"
+        )
+        self._write_site(tmp_workspace, Path("sites/flat-site.yaml"), "flat-site")
+        orchestrator = Orchestrator(tmp_workspace)
+        names = orchestrator._get_all_site_names()
+        assert names == ["flat-site", "munich-dev", "seattle-dev"]
+
+    def test_load_all_sites_returns_nested(self, tmp_workspace):
+        self._write_site(
+            tmp_workspace, Path("sites/regions/eu/munich-dev.yaml"), "munich-dev"
+        )
+        self._write_site(
+            tmp_workspace, Path("sites/regions/us/seattle-dev.yaml"), "seattle-dev"
+        )
+        orchestrator = Orchestrator(tmp_workspace)
+        sites = orchestrator.load_all_sites()
+        assert {s.name for s in sites} == {"munich-dev", "seattle-dev"}
+
+    def test_basename_collision_within_dir_rejected(self, tmp_workspace):
+        """Two nested files in one trusted dir sharing a basename are
+        rejected at load time."""
+        self._write_site(
+            tmp_workspace, Path("sites/regions/eu/munich.yaml"), "munich-eu"
+        )
+        self._write_site(
+            tmp_workspace, Path("sites/regions/us/munich.yaml"), "munich-us"
+        )
+        orchestrator = Orchestrator(tmp_workspace)
+        with pytest.raises(ValueError, match="share basename `munich`"):
+            orchestrator.load_site("munich-eu")
+
+    def test_nested_overlay_in_sites_local(self, tmp_workspace):
+        """`sites.local/regions/eu/munich.yaml` overlays the trusted file."""
+        self._write_site(
+            tmp_workspace, Path("sites/regions/eu/munich.yaml"), "munich"
+        )
+        local_path = tmp_workspace / "sites.local" / "regions" / "eu" / "munich.yaml"
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(local_path, "w", encoding="utf-8") as f:
+            yaml.dump(
+                {
+                    "subscription": "11111111-1111-1111-1111-111111111111",
+                    "resourceGroup": "rg-overlay",
+                },
+                f,
+            )
+        orchestrator = Orchestrator(tmp_workspace)
+        site = orchestrator.load_site("munich")
+        assert site.subscription == "11111111-1111-1111-1111-111111111111"
+        assert site.resource_group == "rg-overlay"
+
+    def test_internal_name_shadowing_rel_path_rejected(self, tmp_workspace):
+        """A site with `name: regions/eu/munich` collides with the
+        path-form identifier of the actual nested file."""
+        self._write_site(
+            tmp_workspace, Path("sites/regions/eu/munich.yaml"), "munich"
+        )
+        # Another flat site declares a `name:` that matches the nested
+        # rel-path identifier. The internal-name index build must reject.
+        flat = tmp_workspace / "sites" / "alias.yaml"
+        with open(flat, "w", encoding="utf-8") as f:
+            yaml.dump(
+                {
+                    "apiVersion": "siteops/v1",
+                    "kind": "Site",
+                    "name": "regions/eu/munich",
+                    "subscription": "00000000-0000-0000-0000-000000000000",
+                    "resourceGroup": "rg-test",
+                    "location": "eastus",
+                },
+                f,
+            )
+        orchestrator = Orchestrator(tmp_workspace)
+        with pytest.raises(ValueError, match="collides with the path-form"):
+            orchestrator.load_site("munich")
+
+    def test_cross_dir_basename_collision_with_different_rel_path_rejected(
+        self, tmp_workspace, tmp_path
+    ):
+        """Two trusted dirs cannot have the same basename at different
+        rel-paths. That would let the basename refer to two distinct
+        sites."""
+        self._write_site(
+            tmp_workspace, Path("sites/regions/eu/munich.yaml"), "munich-eu"
+        )
+        extras = tmp_path / "extras-dir"
+        self._write_site(extras, Path("factories/munich.yaml"), "munich-factory")
+        orchestrator = Orchestrator(tmp_workspace, extra_trusted_sites_dirs=[extras])
+        with pytest.raises(ValueError, match="Cross-directory basename"):
+            orchestrator.load_site("munich-eu")
+
+    def test_cross_dir_basename_collision_same_rel_path_is_overlay(
+        self, tmp_workspace, tmp_path
+    ):
+        """Same basename at the same rel-path across trusted dirs is a
+        legitimate overlay."""
+        self._write_site(
+            tmp_workspace, Path("sites/regions/eu/munich.yaml"), "munich"
+        )
+        extras = tmp_path / "extras-dir"
+        self._write_site(extras, Path("regions/eu/munich.yaml"), "munich-overlay")
+        orchestrator = Orchestrator(tmp_workspace, extra_trusted_sites_dirs=[extras])
+        # First trusted dir wins on identity, overlays merge on top.
+        site = orchestrator.load_site("munich")
+        # `Site.name` reflects the overlay-applied internal name.
+        assert site.name == "munich-overlay"
+
+    def test_path_form_lookup_normalizes_backslash(self, tmp_workspace):
+        """`load_site` accepts Windows-style path separators."""
+        self._write_site(
+            tmp_workspace, Path("sites/regions/eu/munich.yaml"), "munich"
+        )
+        orchestrator = Orchestrator(tmp_workspace)
+        # Both forms hit the same cached site instance.
+        site_forward = orchestrator.load_site("regions/eu/munich")
+        site_backslash = orchestrator.load_site("regions\\eu\\munich")
+        assert site_forward is site_backslash
 
 
 class TestGetStepTypeLabel:
