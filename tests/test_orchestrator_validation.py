@@ -179,6 +179,27 @@ class TestValidation:
         # Rich diagnostic surfaces.
         assert any("matched no sites" in e for e in errors)
 
+    def test_validate_unresolved_site_in_manifest_returns_error_not_traceback(
+        self, complete_workspace
+    ):
+        """A manifest `sites:` entry that does not resolve to a workspace
+        file must surface as a validation error, not a `FileNotFoundError`
+        traceback. `validate` must catch `OSError` alongside `ValueError`."""
+        orchestrator = Orchestrator(complete_workspace)
+
+        manifest_data = {
+            "name": "missing-site",
+            "sites": ["does-not-exist"],
+            "steps": [{"name": "step1", "template": "templates/test.bicep"}],
+        }
+        manifest_path = complete_workspace / "manifests" / "missing-site.yaml"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            yaml.dump(manifest_data, f)
+
+        # Must not raise.
+        errors = orchestrator.validate(manifest_path)
+        assert any("does-not-exist" in e for e in errors)
+
     def test_validate_invalid_condition(self, complete_workspace):
         orchestrator = Orchestrator(complete_workspace)
 

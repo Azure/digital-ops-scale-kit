@@ -150,6 +150,14 @@ class Orchestrator:
         self._rel_path_index: dict[str, Path] | None = None
         self._internal_name_index: dict[str, Path] | None = None
         self._internal_name_index_lock = threading.Lock()
+        # Memo of `_is_site_template(path)` keyed by resolved path.
+        # Cleared by `_invalidate_internal_name_index`. Avoids 3N+ YAML
+        # re-parses across `_get_all_site_names`, `_build_site_indexes`,
+        # and per-site `load_site` calls.
+        self._template_check_cache: dict[Path, bool] = {}
+        # Memo of the deduped site list returned by `load_all_sites`.
+        # Cleared on index invalidation.
+        self._all_sites_cache: list[Site] | None = None
         self._extra_trusted_sites_dirs = self._normalize_extra_sites_dirs(
             extra_trusted_sites_dirs or []
         )
@@ -440,15 +448,21 @@ class Orchestrator:
         return data.get("name")
 
     def _invalidate_internal_name_index(self) -> None:
-        """Clear the lazy site indexes.
+        """Clear the lazy site indexes and dependent caches.
 
         Call when a site file may have been added, removed, or had its
-        `name:` field changed during the orchestrator's lifetime.
+        `name:` field changed during the orchestrator's lifetime. Also
+        clears the template-check memo, the all-sites memo, and the
+        per-site cache, since all three are downstream of the indexes.
         """
         with self._internal_name_index_lock:
             self._basename_index = None
             self._rel_path_index = None
             self._internal_name_index = None
+            self._template_check_cache.clear()
+            self._all_sites_cache = None
+        with self._cache_lock:
+            self._site_cache.clear()
 
     def _canonical_site_id(self, site_path: Path) -> str:
         """Return the canonical relative-path identifier for a site file.
@@ -1075,6 +1089,9 @@ class Orchestrator:
     def _is_site_template(self, path: Path) -> bool:
         """Check if a YAML file is a SiteTemplate (inheritance-only).
 
+        Memoized on resolved path for the orchestrator's lifetime.
+        Cleared by `_invalidate_internal_name_index`.
+
         Args:
             path: Path to the YAML file
 
@@ -1085,13 +1102,19 @@ class Orchestrator:
             Returns False if the file cannot be parsed, allowing load_site()
             to handle the error with proper context.
         """
+        resolved = path.resolve()
+        cached = self._template_check_cache.get(resolved)
+        if cached is not None:
+            return cached
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f)
-            return bool(data and data.get("kind") == "SiteTemplate")
+            result = bool(data and data.get("kind") == "SiteTemplate")
         except (yaml.YAMLError, OSError):
             # Let load_site() handle parsing errors with full context
-            return False
+            result = False
+        self._template_check_cache[resolved] = result
+        return result
 
     def load_all_sites(self) -> list[Site]:
         """Load all deployable sites from trusted site directories.
@@ -1101,10 +1124,17 @@ class Orchestrator:
         Precedence within a single site: `sites.local/` > extra trusted
         dirs (last wins) > `sites/`.
 
+        Memoized for the orchestrator's lifetime. The result is a stable
+        snapshot of every site once the workspace finishes loading;
+        subsequent commands like `explain_no_match` reuse it.
+
         Returns:
             List of all Site instances found (with merged configuration).
         """
-        sites = []
+        if self._all_sites_cache is not None:
+            return self._all_sites_cache
+
+        sites: list[Site] = []
         skipped = []
 
         for name in self._get_all_site_names():
@@ -1123,6 +1153,7 @@ class Orchestrator:
                 print(f"  \u2022 {name}: {error}", file=sys.stderr)
             print(file=sys.stderr)
 
+        self._all_sites_cache = sites
         return sites
 
     def load_parameters(self, path: Path) -> dict[str, Any]:
@@ -2586,6 +2617,11 @@ class Orchestrator:
             # Site-resolution failure (cycle, overlay-rename, missing
             # field, etc.). Append and continue so other manifest
             # issues still surface in this pass.
+            errors.append(str(e))
+            sites = []
+            selector_parse_failed = False
+        except FileNotFoundError as e:
+            # Manifest `sites:` entry without a workspace file.
             errors.append(str(e))
             sites = []
             selector_parse_failed = False

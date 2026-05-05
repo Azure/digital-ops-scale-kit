@@ -534,6 +534,35 @@ class TestCmdDeploy:
         captured = capsys.readouterr()
         assert "may only appear once" in captured.err
 
+    def test_deploy_unresolved_site_in_manifest_exits_cleanly(self, complete_workspace, capsys):
+        """A manifest `sites:` entry that does not resolve to a workspace
+        file must surface as a clean error and exit 1, not a Python
+        traceback. `FileNotFoundError` is `OSError`, not `ValueError`."""
+        from siteops.orchestrator import Orchestrator
+
+        manifest_data = {
+            "name": "missing-site",
+            "sites": ["does-not-exist"],
+            "steps": [{"name": "step1", "template": "templates/test.bicep"}],
+        }
+        manifest_path = complete_workspace / "manifests" / "missing-site.yaml"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            yaml.dump(manifest_data, f)
+
+        orchestrator = Orchestrator(complete_workspace)
+
+        args = MagicMock()
+        args.manifest = manifest_path
+        args.workspace = complete_workspace
+        args.selector = None
+        args.parallel = None
+
+        exit_code = cmd_deploy(args, orchestrator)
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "does-not-exist" in captured.err
+
     def test_deploy_cli_selector_no_match_errors_with_diagnostic(self, complete_workspace, capsys):
         """CLI selector matching zero workspace sites exits 1 with a
         diagnostic listing the workspace label values."""

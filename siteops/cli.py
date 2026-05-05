@@ -55,7 +55,9 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     cli_selector = getattr(args, "selector", None)
     try:
         sites = orchestrator.resolve_sites(manifest, cli_selector)
-    except ValueError as e:
+    except (ValueError, FileNotFoundError) as e:
+        # ValueError: selector parse, no-targeting, overlay-rename, etc.
+        # FileNotFoundError: manifest `sites:` entry without a workspace file.
         print(f"\nError: {e}\n", file=sys.stderr)
         return 1
 
