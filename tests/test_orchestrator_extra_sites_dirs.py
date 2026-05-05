@@ -424,19 +424,19 @@ class TestCliExtraSitesDirsResolution:
         with patch.dict(os.environ, {"SITEOPS_EXTRA_SITES_DIRS": env_val}):
             assert _resolve_extra_sites_dirs(None) == [a]
 
-    def test_cli_wins_over_env(self, tmp_path, caplog):
+    def test_cli_wins_over_env(self, tmp_path, capsys):
         cli_dir = tmp_path / "cli"
         env_dir = tmp_path / "env"
         cli_dir.mkdir()
         env_dir.mkdir()
         with patch.dict(
             os.environ, {"SITEOPS_EXTRA_SITES_DIRS": str(env_dir)}
-        ), caplog.at_level("INFO", logger="siteops.cli"):
+        ):
             result = _resolve_extra_sites_dirs([cli_dir])
         assert result == [cli_dir]
-        assert any(
-            "SITEOPS_EXTRA_SITES_DIRS" in rec.message for rec in caplog.records
-        )
+        captured = capsys.readouterr()
+        assert "SITEOPS_EXTRA_SITES_DIRS" in captured.err
+        assert "ignored" in captured.err
 
     def test_neither_provided_returns_empty(self):
         with patch.dict(os.environ, {}, clear=False):

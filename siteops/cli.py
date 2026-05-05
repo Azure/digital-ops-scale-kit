@@ -114,6 +114,24 @@ def cmd_validate(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
 
     print(f"\n✓ Manifest is valid: {manifest_path.name}\n")
 
+    # Heads-up when the manifest is a library/partial (no `sites:` and
+    # no `selector:`) and no `-l` was provided. Validation passes, but
+    # `deploy` will hard-error without targeting. Surfacing this here
+    # eliminates the validate-passes-then-deploy-fails confusion class.
+    from siteops.models import Manifest as _Manifest
+    try:
+        _m = _Manifest.from_file(manifest_path, workspace_root=args.workspace)
+        if not selector and not _m.sites and not _m.site_selector:
+            print(
+                "  Note: library manifest (no `sites:` or `selector:`). "
+                "Pass `-l <key>=<value>` at deploy time, or run "
+                "`siteops validate <manifest> -l ...` to exercise resolution.\n"
+            )
+    except Exception:
+        # Manifest parse already passed (we're past the errors block);
+        # any failure here is best-effort and shouldn't change exit code.
+        pass
+
     # Show deployment plan if verbose
     if verbose:
         orchestrator.show_plan(manifest_path, selector=selector)
@@ -230,9 +248,13 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
 
     if not sites:
         if selector_str:
-            print(f"\nNo sites matched selector: {selector_str}\n")
-        else:
-            print("\nNo sites found in workspace\n")
+            # Operator explicitly asked for a target set (positional
+            # `name` or `-l`) and got nothing. Exit non-zero so wrapper
+            # scripts and `&&`-chained commands surface the failure
+            # instead of silently treating "0 sites" as success.
+            print(f"\nNo sites matched selector: {selector_str}\n", file=sys.stderr)
+            return 1
+        print("\nNo sites found in workspace\n")
         return 0
 
     if getattr(args, "render", False) is True:
@@ -337,9 +359,10 @@ def _resolve_extra_sites_dirs(cli_dirs: list[Path] | None) -> list[Path]:
 
     if cli_dirs:
         if env_dirs:
-            logging.getLogger("siteops.cli").info(
-                "Ignoring %s (--extra-sites-dir takes precedence).",
-                _EXTRA_SITES_DIRS_ENV,
+            print(
+                f"Note: {_EXTRA_SITES_DIRS_ENV} env var ignored "
+                f"(`--extra-sites-dir` takes precedence).",
+                file=sys.stderr,
             )
         return list(cli_dirs)
     return env_dirs
@@ -400,8 +423,26 @@ def _auto_discover_workspace(start: Path) -> Path | None:
     return None
 
 
+_SELECTOR_HELP = (
+    "Filter sites by labels (e.g., `environment=prod`, `name=munich-dev`). "
+    "Repeatable: multiple `-l` flags AND-combine across distinct keys. "
+    "Duplicate `name=` values OR-combine; any other duplicate key is an "
+    "error. `name=` accepts the basename, the rel-path under a trusted "
+    "`sites/` dir, or the file's internal `name:` field."
+)
+
+
 def main() -> None:
     """Main entry point for the Site Ops CLI."""
+    # Reconfigure stdout/stderr to UTF-8 so the status glyphs render on
+    # Windows consoles defaulting to cp1252. `reconfigure` is a no-op
+    # when the stream is already UTF-8.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8")
+            except Exception:
+                pass
     parser = argparse.ArgumentParser(
         prog="siteops",
         description="Azure Site Ops: multi-site Azure IaC orchestration.",
@@ -462,12 +503,7 @@ Examples:
         action="append",
         default=None,
         metavar="KEY=VALUE",
-        help=(
-            "Filter sites by labels (e.g., `environment=prod`). Repeatable: "
-            "multiple `-l` flags AND-combine across distinct keys. "
-            "Duplicate `name=` values OR-combine; any other duplicate key "
-            "is an error."
-        ),
+        help=_SELECTOR_HELP,
     )
     p_deploy.add_argument(
         "-p",
@@ -494,12 +530,7 @@ Examples:
         action="append",
         default=None,
         metavar="KEY=VALUE",
-        help=(
-            "Filter sites by labels (e.g., `environment=prod`). Repeatable: "
-            "multiple `-l` flags AND-combine across distinct keys. "
-            "Duplicate `name=` values OR-combine; any other duplicate key "
-            "is an error."
-        ),
+        help=_SELECTOR_HELP,
     )
     p_validate.add_argument(
         "-v",
@@ -532,20 +563,17 @@ Examples:
         action="append",
         default=None,
         metavar="KEY=VALUE",
-        help=(
-            "Filter sites by labels (e.g., `environment=prod`, `name=munich-dev`). "
-            "Repeatable: multiple `-l` flags AND-combine across distinct keys. "
-            "Duplicate `name=` values OR-combine; any other duplicate key "
-            "is an error."
-        ),
+        help=_SELECTOR_HELP,
     )
     p_sites.add_argument(
         "-v",
         "--verbose",
+        "--show-sources",
         action="store_true",
         help=(
             "Annotate every leaf with the source file the value came from "
-            "after inherits + overlay merge (default: false)."
+            "after inherits + overlay merge. `--show-sources` is an alias "
+            "for `-v` on `sites` (default: false)."
         ),
     )
     p_sites.add_argument(

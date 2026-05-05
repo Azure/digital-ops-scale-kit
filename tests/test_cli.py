@@ -179,6 +179,37 @@ class TestCmdValidate:
         assert "Sites" in captured.out
         assert "Steps" in captured.out
 
+    def test_validate_library_manifest_prints_note(self, complete_workspace, capsys):
+        """A library/partial manifest (no `sites:` and no `selector:`)
+        validates ✓ but prints a Note explaining `-l` will be required
+        at deploy time. Eliminates the validate-passes-then-deploy-
+        fails surprise class."""
+        from siteops.orchestrator import Orchestrator
+
+        manifest_data = {
+            "name": "library",
+            "steps": [{"name": "step1", "template": "templates/test.bicep"}],
+        }
+        manifest_path = complete_workspace / "manifests" / "library.yaml"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            yaml.dump(manifest_data, f)
+
+        orchestrator = Orchestrator(complete_workspace)
+
+        args = MagicMock()
+        args.manifest = manifest_path
+        args.workspace = complete_workspace
+        args.selector = None
+        args.verbose = False
+
+        exit_code = cmd_validate(args, orchestrator)
+
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "Manifest is valid" in captured.out
+        assert "library manifest" in captured.out
+        assert "-l" in captured.out
+
     def test_validate_verbose_not_shown_on_failure(self, complete_workspace, capsys):
         """Test plan is not shown when validation fails."""
         from siteops.orchestrator import Orchestrator
@@ -275,7 +306,9 @@ class TestCmdSites:
         assert "prod-eastus" not in captured.out
 
     def test_sites_no_match(self, complete_workspace, capsys):
-        """Test no sites matched selector."""
+        """When the operator passed a selector and got nothing, exit
+        non-zero so wrapper scripts surface the failure. Bare `sites`
+        on an empty workspace stays exit 0."""
         from siteops.orchestrator import Orchestrator
 
         orchestrator = Orchestrator(complete_workspace)
@@ -288,9 +321,9 @@ class TestCmdSites:
 
         exit_code = cmd_sites(args, orchestrator)
 
-        assert exit_code == 0
+        assert exit_code == 1
         captured = capsys.readouterr()
-        assert "No sites matched" in captured.out
+        assert "No sites matched" in captured.err
 
     def test_sites_empty_workspace(self, tmp_path, capsys):
         """Test no sites in workspace."""

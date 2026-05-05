@@ -416,7 +416,9 @@ class Orchestrator:
                     f"Site `{path}` declares `name: {internal_name}` "
                     f"which collides with file basename `{collider.name}`. "
                     f"Each site identity must resolve to exactly one file. "
-                    f"Rename the `name:` field or one of the files."
+                    f"If `{path.name}` is a copy you forgot to update, "
+                    f"change its `name:` field to `{path.stem}`. Otherwise "
+                    f"rename one of the files."
                 )
             collider = rel_path_to_path.get(internal_name)
             if collider is not None and collider.resolve() != path.resolve():
