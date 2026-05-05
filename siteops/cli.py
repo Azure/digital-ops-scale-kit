@@ -119,36 +119,64 @@ def cmd_validate(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     return 0
 
 
-def _print_value(value: Any, indent: int = 6) -> None:
+def _origin_suffix(prov: dict[str, str] | None, key: str) -> str:
+    """Format the `# <origin>` suffix for a leaf line.
+
+    Returns an empty string when `prov` is None or the key is not in
+    the map (e.g., a scalar within a list element); the leaf renders
+    as today.
+    """
+    if prov is None:
+        return ""
+    origin = prov.get(key)
+    if origin is None:
+        return ""
+    return f"  # {origin}"
+
+
+def _print_value(
+    value: Any,
+    indent: int = 6,
+    prov: dict[str, str] | None = None,
+    key_prefix: str = "",
+) -> None:
     """Recursively print a value with proper indentation.
+
+    When `prov` is provided, every leaf line is appended with a
+    `# <origin>` comment showing the source file the value came from.
 
     Args:
         value: The value to print (can be dict, list, or scalar)
         indent: Number of spaces for indentation
+        prov: Optional provenance map (dotted key to origin label).
+        key_prefix: Dotted-key prefix accumulated through recursion.
     """
     prefix = " " * indent
     if isinstance(value, dict):
         for k, v in value.items():
+            sub_key = f"{key_prefix}.{k}" if key_prefix else k
             if isinstance(v, dict):
                 print(f"{prefix}{k}:")
-                _print_value(v, indent + 2)
+                _print_value(v, indent + 2, prov=prov, key_prefix=sub_key)
             elif isinstance(v, list):
+                origin = _origin_suffix(prov, sub_key)
                 if len(v) == 0:
-                    print(f"{prefix}{k}: []")
+                    print(f"{prefix}{k}: []{origin}")
                 elif all(isinstance(item, (str, int, float, bool, type(None))) for item in v):
                     # Simple list - print inline
-                    print(f"{prefix}{k}: {v}")
+                    print(f"{prefix}{k}: {v}{origin}")
                 else:
                     # Complex list - print each item
-                    print(f"{prefix}{k}:")
+                    print(f"{prefix}{k}:{origin}")
                     for i, item in enumerate(v):
                         if isinstance(item, dict):
                             print(f"{prefix}  [{i}]:")
-                            _print_value(item, indent + 4)
+                            _print_value(item, indent + 4, prov=prov, key_prefix=f"{sub_key}.{i}")
                         else:
                             print(f"{prefix}  - {item}")
             else:
-                print(f"{prefix}{k}: {v}")
+                origin = _origin_suffix(prov, sub_key)
+                print(f"{prefix}{k}: {v}{origin}")
     elif isinstance(value, list):
         for i, item in enumerate(value):
             if isinstance(item, dict):
@@ -243,23 +271,38 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     print()
 
     for site in sorted(sites, key=lambda s: s.name):
+        # In verbose mode, re-load with provenance so each leaf line
+        # can be annotated with the source file the value came from
+        # (after inherits + overlay merge). Skipped in non-verbose
+        # mode to keep the bare listing fast.
+        prov: dict[str, str] | None = None
+        if verbose:
+            try:
+                _, prov = orchestrator.load_site_with_provenance(site.name)
+            except (FileNotFoundError, ValueError) as e:
+                print(f"  {site.name}  # provenance unavailable: {e}")
+                continue
+
         print(f"  {site.name}")
-        print(f"    subscription:   {site.subscription}")
-        print(f"    resourceGroup:  {site.resource_group}")
-        print(f"    location:       {site.location}")
+        print(f"    subscription:   {site.subscription}{_origin_suffix(prov, 'subscription')}")
+        print(
+            f"    resourceGroup:  {site.resource_group}"
+            f"{_origin_suffix(prov, 'resourceGroup')}"
+        )
+        print(f"    location:       {site.location}{_origin_suffix(prov, 'location')}")
 
         if site.labels:
             print("    labels:")
             for key, value in sorted(site.labels.items()):
-                print(f"      {key}: {value}")
+                print(f"      {key}: {value}{_origin_suffix(prov, f'labels.{key}')}")
 
         if site.properties:
             print("    properties:")
-            _print_value(site.properties, indent=6)
+            _print_value(site.properties, indent=6, prov=prov, key_prefix="properties")
 
         if site.parameters:
             print("    parameters:")
-            _print_value(site.parameters, indent=6)
+            _print_value(site.parameters, indent=6, prov=prov, key_prefix="parameters")
 
         print()
 
@@ -498,7 +541,10 @@ Examples:
         "-v",
         "--verbose",
         action="store_true",
-        help="Show additional details (properties) (default: false)",
+        help=(
+            "Annotate every leaf with the source file the value came from "
+            "after inherits + overlay merge (default: false)."
+        ),
     )
     p_sites.add_argument(
         "--render",

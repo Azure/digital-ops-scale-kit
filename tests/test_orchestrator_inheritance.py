@@ -598,3 +598,97 @@ labels:
         assert site.labels["platform"] == "azure-iot-operations"
         # Site-specific labels
         assert site.labels["environment"] == "dev"
+
+class TestSiteProvenance:
+    """Tests for `load_site_with_provenance` per-key origin tracking."""
+
+    def _write_yaml(self, path, body):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        import yaml as _yaml
+        with open(path, "w", encoding="utf-8") as f:
+            _yaml.dump(body, f)
+
+    def test_inherits_chain_attributes_each_leaf(self, tmp_workspace):
+        """Each leaf points to the file in the chain that supplied the value."""
+        self._write_yaml(
+            tmp_workspace / "sites" / "shared" / "base.yaml",
+            {
+                "apiVersion": "siteops/v1",
+                "kind": "SiteTemplate",
+                "name": "base",
+                "subscription": "default-sub",
+                "labels": {"managedBy": "siteops", "team": "platform"},
+                "properties": {"deployOptions": {"a": True, "b": True}},
+            },
+        )
+        self._write_yaml(
+            tmp_workspace / "sites" / "munich.yaml",
+            {
+                "apiVersion": "siteops/v1",
+                "kind": "Site",
+                "name": "munich",
+                "inherits": "shared/base.yaml",
+                "resourceGroup": "rg-munich",
+                "location": "eastus",
+                "labels": {"environment": "dev"},
+                "properties": {"deployOptions": {"b": False}},
+            },
+        )
+        from siteops.orchestrator import Orchestrator
+        orch = Orchestrator(tmp_workspace)
+        _, prov = orch.load_site_with_provenance("munich")
+        assert prov["subscription"].endswith("base.yaml")
+        assert prov["resourceGroup"].endswith("munich.yaml")
+        assert prov["location"].endswith("munich.yaml")
+        assert prov["labels.managedBy"].endswith("base.yaml")
+        assert prov["labels.team"].endswith("base.yaml")
+        assert prov["labels.environment"].endswith("munich.yaml")
+        assert prov["properties.deployOptions.a"].endswith("base.yaml")
+        # Override path: child wins on b but inherited a stays attributed to base.
+        assert prov["properties.deployOptions.b"].endswith("munich.yaml")
+
+    def test_overlay_overrides_attributed_to_overlay(self, tmp_workspace):
+        """`sites.local/<name>.yaml` overlays attribute the leaves it touches."""
+        self._write_yaml(
+            tmp_workspace / "sites" / "munich.yaml",
+            {
+                "apiVersion": "siteops/v1",
+                "kind": "Site",
+                "name": "munich",
+                "subscription": "trusted-sub",
+                "resourceGroup": "rg-trusted",
+                "location": "eastus",
+            },
+        )
+        self._write_yaml(
+            tmp_workspace / "sites.local" / "munich.yaml",
+            {
+                "subscription": "overlay-sub",
+            },
+        )
+        from siteops.orchestrator import Orchestrator
+        orch = Orchestrator(tmp_workspace)
+        _, prov = orch.load_site_with_provenance("munich")
+        assert prov["subscription"].endswith("sites.local/munich.yaml")
+        assert prov["resourceGroup"].endswith("sites/munich.yaml")
+        assert prov["location"].endswith("sites/munich.yaml")
+
+    def test_load_with_provenance_returns_same_site_as_load_site(self, tmp_workspace):
+        """The returned Site matches what `load_site` would return."""
+        self._write_yaml(
+            tmp_workspace / "sites" / "munich.yaml",
+            {
+                "apiVersion": "siteops/v1",
+                "kind": "Site",
+                "name": "munich",
+                "subscription": "sub",
+                "resourceGroup": "rg",
+                "location": "eastus",
+            },
+        )
+        from siteops.orchestrator import Orchestrator
+        orch = Orchestrator(tmp_workspace)
+        site_via_load = orch.load_site("munich")
+        site_via_prov, _ = orch.load_site_with_provenance("munich")
+        assert site_via_prov.name == site_via_load.name
+        assert site_via_prov.subscription == site_via_load.subscription

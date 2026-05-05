@@ -1389,3 +1389,86 @@ parameters:
         assert "00000000-0000-0000-0000-000000000000" not in captured.out
         assert "rg-placeholder" not in captured.out
         assert "placeholder-cluster" not in captured.out
+
+
+class TestCmdSitesVerboseProvenance:
+    """`-v` annotates every leaf with its source file."""
+
+    def test_verbose_shows_provenance_per_leaf(self, tmp_path, capsys):
+        workspace = tmp_path / "workspace"
+        (workspace / "sites" / "shared").mkdir(parents=True)
+        (workspace / "sites" / "shared" / "base.yaml").write_text(
+            """
+apiVersion: siteops/v1
+kind: SiteTemplate
+name: base
+subscription: shared-sub
+labels:
+  team: platform
+properties:
+  defaultRelease: r1
+""",
+            encoding="utf-8",
+        )
+        (workspace / "sites" / "munich.yaml").write_text(
+            """
+apiVersion: siteops/v1
+kind: Site
+name: munich
+inherits: shared/base.yaml
+resourceGroup: rg-munich
+location: eastus
+labels:
+  environment: dev
+""",
+            encoding="utf-8",
+        )
+
+        from argparse import Namespace
+        from siteops.cli import cmd_sites
+        from siteops.orchestrator import Orchestrator
+
+        orchestrator = Orchestrator(workspace)
+        args = Namespace(name=None, selector="name=munich", verbose=True, render=False)
+
+        cmd_sites(args, orchestrator)
+
+        captured = capsys.readouterr()
+        # Inherited values point at the shared template.
+        assert "subscription:   shared-sub" in captured.out
+        assert "shared/base.yaml" in captured.out
+        # Site-defined values point at the leaf file.
+        assert "rg-munich" in captured.out
+        assert "sites/munich.yaml" in captured.out
+        # Inherited and site-defined labels are both annotated.
+        assert "team: platform" in captured.out
+        assert "environment: dev" in captured.out
+
+    def test_non_verbose_skips_provenance(self, tmp_path, capsys):
+        """The bare listing skips the provenance walk to stay fast."""
+        workspace = tmp_path / "workspace"
+        (workspace / "sites").mkdir(parents=True)
+        (workspace / "sites" / "munich.yaml").write_text(
+            """
+apiVersion: siteops/v1
+kind: Site
+name: munich
+subscription: "00000000-0000-0000-0000-000000000000"
+resourceGroup: rg
+location: eastus
+""",
+            encoding="utf-8",
+        )
+
+        from argparse import Namespace
+        from siteops.cli import cmd_sites
+        from siteops.orchestrator import Orchestrator
+
+        orchestrator = Orchestrator(workspace)
+        args = Namespace(name=None, selector=None, verbose=False, render=False)
+
+        cmd_sites(args, orchestrator)
+
+        captured = capsys.readouterr()
+        # No origin annotation in non-verbose output.
+        assert "# sites/" not in captured.out

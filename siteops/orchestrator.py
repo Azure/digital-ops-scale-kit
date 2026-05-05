@@ -492,6 +492,42 @@ class Orchestrator:
                 result[key] = copy.deepcopy(value)
         return result
 
+    def _deep_merge_provenance(
+        self,
+        base: dict[str, Any],
+        override: dict[str, Any],
+        origin: str,
+        prov: dict[str, str],
+        prefix: str = "",
+    ) -> dict[str, Any]:
+        """Like `_deep_merge` but tracks per-key provenance.
+
+        For each leaf key in `override`, records `prov[<dotted-path>] = origin`.
+        Lists and scalars overwrite as a unit (matching `_deep_merge`'s
+        list-replacement semantic), so the whole key gets the new origin.
+        Nested dicts recurse so per-leaf attribution is preserved, even
+        when the dict subtree is new (not present in `base`).
+
+        `prov` is mutated in place. The returned dict is a new merged
+        result; neither input is modified.
+        """
+        result = copy.deepcopy(base)
+        for key, value in override.items():
+            full_key = f"{prefix}.{key}" if prefix else key
+            if isinstance(value, dict):
+                # Recurse whether or not the dict subtree exists in base.
+                # When base lacks the key the inner walk attributes every
+                # leaf; otherwise it merges and only re-attributes leaves
+                # the override actually touched.
+                base_subtree = result[key] if key in result and isinstance(result[key], dict) else {}
+                result[key] = self._deep_merge_provenance(
+                    base_subtree, value, origin, prov, full_key
+                )
+            else:
+                result[key] = copy.deepcopy(value)
+                prov[full_key] = origin
+        return result
+
     def _resolve_inherits(self, child_path: Path, inherits_value: str) -> Path:
         """Resolve an `inherits:` reference to an absolute path.
 
@@ -687,6 +723,163 @@ class Orchestrator:
             raise FileNotFoundError(f"Site '{name}' not found in {where}")
 
         return merged_data
+
+    def _origin_label(self, path: Path) -> str:
+        """Return a stable workspace-relative label for a source file.
+
+        Used by the provenance walk so per-key attribution renders
+        identically across machines. Falls back to the absolute path
+        when the file lives outside the workspace (e.g., an extra
+        trusted dir under a different parent).
+        """
+        try:
+            return path.resolve().relative_to(self.workspace.resolve()).as_posix()
+        except ValueError:
+            return path.as_posix()
+
+    def _load_inherited_with_provenance(
+        self,
+        path: Path,
+        seen: list[Path],
+        prov: dict[str, str],
+    ) -> dict[str, Any]:
+        """Walk an `inherits:` chain, attributing every leaf key to the
+        file in the chain that contributed the final value.
+
+        Mirrors `_load_inherited_data` but tracks provenance via
+        `_deep_merge_provenance`. `prov` is mutated in place.
+        """
+        normalized = path.resolve()
+        if normalized in seen:
+            cycle_path = " -> ".join(str(p) for p in seen) + f" -> {normalized}"
+            raise ValueError(f"Circular inheritance detected: {cycle_path}")
+        seen.append(normalized)
+
+        if not path.exists():
+            raise FileNotFoundError(f"Inherited file not found: {path}")
+
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+
+        kind = data.get("kind")
+        if kind is not None and kind != "SiteTemplate":
+            raise ValueError(
+                f"Cannot inherit from kind '{kind}' in {path}. "
+                f"Inherits parents must be SiteTemplate."
+            )
+
+        origin = self._origin_label(path)
+        if "inherits" in data:
+            parent_path = self._resolve_inherits(path, data["inherits"])
+            parent_data = self._load_inherited_with_provenance(parent_path, seen, prov)
+            child_data = {
+                k: v for k, v in data.items() if k not in ("inherits", "kind", "apiVersion")
+            }
+            return self._deep_merge_provenance(parent_data, child_data, origin, prov)
+        leaf_data = {k: v for k, v in data.items() if k not in ("kind", "apiVersion")}
+        # Attribute every leaf in the leaf template to itself.
+        return self._deep_merge_provenance({}, leaf_data, origin, prov)
+
+    def _load_site_data_with_provenance(
+        self, name: str
+    ) -> tuple[dict[str, Any], dict[str, str]]:
+        """Mirror of `_load_site_data` that also returns per-key provenance.
+
+        Returns:
+            `(merged_data, provenance)` where `provenance` maps every
+            dotted leaf path (e.g., `properties.deployOptions.enableCertManager`)
+            to the workspace-relative path of the file whose value won.
+        """
+        site_dirs = [
+            *self._trusted_sites_dirs,
+            self.workspace / "sites.local",
+        ]
+
+        merged_data: dict[str, Any] = {}
+        prov: dict[str, str] = {}
+        found = False
+        is_base_file = True
+
+        for sites_dir in site_dirs:
+            for ext in (".yaml", ".yml"):
+                path = sites_dir / f"{name}{ext}"
+                if path.exists():
+                    with open(path, "r", encoding="utf-8") as f:
+                        data = yaml.safe_load(f) or {}
+
+                    if is_base_file and "inherits" in data:
+                        inherits_path = self._resolve_inherits(path, data["inherits"])
+                        inherited = self._load_inherited_with_provenance(
+                            inherits_path, seen=[path.resolve()], prov=prov
+                        )
+                        # Merge inherited into the working dict WITHOUT
+                        # re-attribution. The per-leaf provenance for
+                        # inherited keys was already set during the chain
+                        # walk; the outer merge would otherwise clobber it
+                        # with the parent file's label.
+                        merged_data = self._deep_merge(merged_data, inherited)
+                        data = {k: v for k, v in data.items() if k != "inherits"}
+                    elif not is_base_file and "inherits" in data:
+                        data = {k: v for k, v in data.items() if k != "inherits"}
+
+                    merged_data = self._deep_merge_provenance(
+                        merged_data, data, self._origin_label(path), prov
+                    )
+                    found = True
+                    is_base_file = False
+                    break
+
+        if not found:
+            where = "sites/"
+            if self._extra_trusted_sites_dirs:
+                where += ", extra trusted sites dirs,"
+            where += " or sites.local/"
+            raise FileNotFoundError(f"Site '{name}' not found in {where}")
+
+        return merged_data, prov
+
+    def load_site_with_provenance(self, name: str) -> tuple[Site, dict[str, str]]:
+        """Load a site and return per-key provenance for its merged data.
+
+        The provenance dict maps every dotted leaf key in the merged
+        site to the workspace-relative path of the file whose value
+        won. Used by `siteops sites <name> -v` to show where each
+        value came from after inherit + overlay merge.
+
+        Args:
+            name: Basename, rel-path, or internal `name:` value.
+
+        Returns:
+            `(site, provenance)` where `site` is the fully resolved
+            Site (matching `load_site(name)`) and `provenance` is the
+            per-leaf origin map.
+        """
+        if "/" in name or "\\" in name:
+            try:
+                lookup_key = _normalize_site_identifier(name)
+            except ValueError:
+                lookup_key = name
+        else:
+            lookup_key = name
+        site_path = self._find_trusted_site_file(lookup_key)
+        if site_path is None:
+            where = "sites/"
+            if self._extra_trusted_sites_dirs:
+                where += " or extra trusted sites dirs"
+            raise FileNotFoundError(f"Site file not found: {name} (searched {where})")
+        if self._is_site_template(site_path):
+            raise ValueError(
+                f"Cannot load '{name}' as a site: it is a SiteTemplate "
+                f"(inheritance-only). SiteTemplates cannot be deployed directly."
+            )
+        canonical_id = self._canonical_site_id(site_path)
+        merged_data, prov = self._load_site_data_with_provenance(canonical_id)
+        _validate_resource(merged_data, "Site", site_path)
+        # Reuse the canonical Site construction by going through load_site.
+        # That call hits the cache populated by any prior load_site() and is
+        # the single source of truth for parsing rules. The provenance walk
+        # above does not touch the cache so its output is independent.
+        return self.load_site(name), prov
 
     def load_site(self, name: str) -> Site:
         """Load a site by name, applying inheritance and local overlays.
