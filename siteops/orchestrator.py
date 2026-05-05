@@ -586,7 +586,12 @@ class Orchestrator:
             f"declared in {child_path}. Searched:\n  - {searched}"
         )
 
-    def _load_inherited_data(self, path: Path, seen: list[Path] | None = None) -> dict[str, Any]:
+    def _load_inherited_data(
+        self,
+        path: Path,
+        seen: list[Path] | None = None,
+        prov: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         """Load inherited site template with support for chained inheritance.
 
         Resolves the `inherits` field recursively, merging parent data first.
@@ -594,6 +599,9 @@ class Orchestrator:
         Args:
             path: Absolute path to the inherited file
             seen: List of visited paths for cycle detection (preserves order)
+            prov: Optional provenance dict. When supplied, every leaf key
+                gets its origin attributed to the file that contributed
+                the final value. Mutated in place.
 
         Returns:
             Merged data from inheritance chain (with metadata fields stripped)
@@ -632,18 +640,34 @@ class Orchestrator:
         # Handle chained inheritance
         if "inherits" in data:
             parent_path = self._resolve_inherits(path, data["inherits"])
-            parent_data = self._load_inherited_data(parent_path, seen)
+            parent_data = self._load_inherited_data(parent_path, seen, prov=prov)
             # Remove metadata fields before merging
-            child_data = {k: v for k, v in data.items() if k not in ("inherits", "kind", "apiVersion")}
-            data = self._deep_merge(parent_data, child_data)
+            child_data = {
+                k: v for k, v in data.items() if k not in ("inherits", "kind", "apiVersion")
+            }
+            if prov is not None:
+                data = self._deep_merge_provenance(
+                    parent_data, child_data, self._origin_label(path), prov
+                )
+            else:
+                data = self._deep_merge(parent_data, child_data)
         else:
             # Remove metadata fields from leaf template
-            data = {k: v for k, v in data.items() if k not in ("kind", "apiVersion")}
+            leaf_data = {k: v for k, v in data.items() if k not in ("kind", "apiVersion")}
+            if prov is not None:
+                # Attribute every leaf in the leaf template to itself.
+                data = self._deep_merge_provenance(
+                    {}, leaf_data, self._origin_label(path), prov
+                )
+            else:
+                data = leaf_data
 
         logger.debug(f"Loaded inherited data from: {path}")
         return data
 
-    def _load_site_data(self, name: str) -> dict[str, Any]:
+    def _load_site_data(
+        self, name: str, prov: dict[str, str] | None = None
+    ) -> dict[str, Any]:
         """Load and merge site data with inheritance and overlay support.
 
         Merge order (later overrides earlier):
@@ -663,15 +687,28 @@ class Orchestrator:
         security invariant is preserved regardless of how many extra trusted
         dirs are configured.
 
+        Identity (`name`, `metadata.name`) is set by the BASE file. Overlays
+        in other trusted dirs and in `sites.local/` cannot rename the site.
+        Lifting that rule would let an overlay produce a site whose name is
+        not findable through any of the workspace indexes (built from the
+        base file). Use `inherits:` or rename the base file instead.
+
         Args:
             name: Site name (filename without extension).
+            prov: Optional provenance dict. When supplied, every leaf key
+                in the merged data gets attributed to the file whose
+                value won. The outer merge of inherited data uses plain
+                `_deep_merge` so attributions from the chain walk
+                survive (the inherited dict was already attributed
+                inside `_load_inherited_data`).
 
         Returns:
             Merged site data dictionary.
 
         Raises:
             FileNotFoundError: If no trusted dir or sites.local/ has the file.
-            ValueError: If inheritance creates a cycle or references invalid kind.
+            ValueError: If inheritance creates a cycle, references invalid
+                kind, or an overlay tries to set `name`/`metadata.name`.
         """
         site_dirs = [
             *self._trusted_sites_dirs,
@@ -693,7 +730,14 @@ class Orchestrator:
                     if is_base_file and "inherits" in data:
                         inherits_path = self._resolve_inherits(path, data["inherits"])
                         # Initialize seen list with current file to detect self-reference
-                        inherited_data = self._load_inherited_data(inherits_path, seen=[path.resolve()])
+                        inherited_data = self._load_inherited_data(
+                            inherits_path, seen=[path.resolve()], prov=prov
+                        )
+                        # Merge inherited into the working dict WITHOUT
+                        # re-attribution. The per-leaf provenance for
+                        # inherited keys was already set during the chain
+                        # walk; the outer merge would otherwise clobber it
+                        # with the parent file's label.
                         merged_data = self._deep_merge(merged_data, inherited_data)
                         # Remove inherits from data before merging
                         data = {k: v for k, v in data.items() if k != "inherits"}
@@ -705,7 +749,32 @@ class Orchestrator:
                         # the base file.
                         data = {k: v for k, v in data.items() if k != "inherits"}
 
-                    merged_data = self._deep_merge(merged_data, data)
+                    # Reject overlay-renames-site. Identity is set by the
+                    # base file; the workspace name indexes are built
+                    # from base files, so an overlay rename produces a
+                    # site unfindable through any index. Allow overlays
+                    # to RESTATE the same name (the common case where
+                    # extras-dir overlays mirror the base shape) and
+                    # reject only when the overlay tries to CHANGE it.
+                    if not is_base_file:
+                        overlay_name = self._read_internal_name(data)
+                        if overlay_name is not None:
+                            existing_name = self._read_internal_name(merged_data)
+                            if existing_name is not None and overlay_name != existing_name:
+                                raise ValueError(
+                                    f"Overlay {path} cannot rename the site "
+                                    f"({existing_name!r} -> {overlay_name!r}). "
+                                    f"Site identity is established by the base "
+                                    f"file. Use `inherits:` or rename the base "
+                                    f"file."
+                                )
+
+                    if prov is not None:
+                        merged_data = self._deep_merge_provenance(
+                            merged_data, data, self._origin_label(path), prov
+                        )
+                    else:
+                        merged_data = self._deep_merge(merged_data, data)
                     found = True
                     if is_base_file:
                         logger.debug(f"Loaded site data from: {path}")
@@ -743,100 +812,24 @@ class Orchestrator:
         seen: list[Path],
         prov: dict[str, str],
     ) -> dict[str, Any]:
-        """Walk an `inherits:` chain, attributing every leaf key to the
-        file in the chain that contributed the final value.
+        """Deprecated thin wrapper around `_load_inherited_data(path, seen, prov)`.
 
-        Mirrors `_load_inherited_data` but tracks provenance via
-        `_deep_merge_provenance`. `prov` is mutated in place.
+        Retained briefly for any external caller; remove on the next
+        engine refactor.
         """
-        normalized = path.resolve()
-        if normalized in seen:
-            cycle_path = " -> ".join(str(p) for p in seen) + f" -> {normalized}"
-            raise ValueError(f"Circular inheritance detected: {cycle_path}")
-        seen.append(normalized)
-
-        if not path.exists():
-            raise FileNotFoundError(f"Inherited file not found: {path}")
-
-        with open(path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-
-        kind = data.get("kind")
-        if kind is not None and kind != "SiteTemplate":
-            raise ValueError(
-                f"Cannot inherit from kind '{kind}' in {path}. "
-                f"Inherits parents must be SiteTemplate."
-            )
-
-        origin = self._origin_label(path)
-        if "inherits" in data:
-            parent_path = self._resolve_inherits(path, data["inherits"])
-            parent_data = self._load_inherited_with_provenance(parent_path, seen, prov)
-            child_data = {
-                k: v for k, v in data.items() if k not in ("inherits", "kind", "apiVersion")
-            }
-            return self._deep_merge_provenance(parent_data, child_data, origin, prov)
-        leaf_data = {k: v for k, v in data.items() if k not in ("kind", "apiVersion")}
-        # Attribute every leaf in the leaf template to itself.
-        return self._deep_merge_provenance({}, leaf_data, origin, prov)
+        return self._load_inherited_data(path, seen=seen, prov=prov)
 
     def _load_site_data_with_provenance(
         self, name: str
     ) -> tuple[dict[str, Any], dict[str, str]]:
-        """Mirror of `_load_site_data` that also returns per-key provenance.
+        """Deprecated thin wrapper around `_load_site_data(name, prov={})`.
 
-        Returns:
-            `(merged_data, provenance)` where `provenance` maps every
-            dotted leaf path (e.g., `properties.deployOptions.enableCertManager`)
-            to the workspace-relative path of the file whose value won.
+        Retained briefly for any external caller; remove on the next
+        engine refactor.
         """
-        site_dirs = [
-            *self._trusted_sites_dirs,
-            self.workspace / "sites.local",
-        ]
-
-        merged_data: dict[str, Any] = {}
         prov: dict[str, str] = {}
-        found = False
-        is_base_file = True
-
-        for sites_dir in site_dirs:
-            for ext in (".yaml", ".yml"):
-                path = sites_dir / f"{name}{ext}"
-                if path.exists():
-                    with open(path, "r", encoding="utf-8") as f:
-                        data = yaml.safe_load(f) or {}
-
-                    if is_base_file and "inherits" in data:
-                        inherits_path = self._resolve_inherits(path, data["inherits"])
-                        inherited = self._load_inherited_with_provenance(
-                            inherits_path, seen=[path.resolve()], prov=prov
-                        )
-                        # Merge inherited into the working dict WITHOUT
-                        # re-attribution. The per-leaf provenance for
-                        # inherited keys was already set during the chain
-                        # walk; the outer merge would otherwise clobber it
-                        # with the parent file's label.
-                        merged_data = self._deep_merge(merged_data, inherited)
-                        data = {k: v for k, v in data.items() if k != "inherits"}
-                    elif not is_base_file and "inherits" in data:
-                        data = {k: v for k, v in data.items() if k != "inherits"}
-
-                    merged_data = self._deep_merge_provenance(
-                        merged_data, data, self._origin_label(path), prov
-                    )
-                    found = True
-                    is_base_file = False
-                    break
-
-        if not found:
-            where = "sites/"
-            if self._extra_trusted_sites_dirs:
-                where += ", extra trusted sites dirs,"
-            where += " or sites.local/"
-            raise FileNotFoundError(f"Site '{name}' not found in {where}")
-
-        return merged_data, prov
+        merged = self._load_site_data(name, prov=prov)
+        return merged, prov
 
     def load_site_with_provenance(self, name: str) -> tuple[Site, dict[str, str]]:
         """Load a site and return per-key provenance for its merged data.
@@ -845,6 +838,11 @@ class Orchestrator:
         site to the workspace-relative path of the file whose value
         won. Used by `siteops sites <name> -v` to show where each
         value came from after inherit + overlay merge.
+
+        For sites authored with the K8s envelope shape (`spec:`,
+        `metadata:`), prov keys are normalized to the flat-shape view
+        (`subscription`, `labels.X`, `properties.X`) so callers do not
+        need to know about the on-disk envelope.
 
         Args:
             name: Basename, rel-path, or internal `name:` value.
@@ -873,13 +871,43 @@ class Orchestrator:
                 f"(inheritance-only). SiteTemplates cannot be deployed directly."
             )
         canonical_id = self._canonical_site_id(site_path)
-        merged_data, prov = self._load_site_data_with_provenance(canonical_id)
+        default_name = site_path.stem
+        prov: dict[str, str] = {}
+        merged_data = self._load_site_data(canonical_id, prov=prov)
         _validate_resource(merged_data, "Site", site_path)
-        # Reuse the canonical Site construction by going through load_site.
-        # That call hits the cache populated by any prior load_site() and is
-        # the single source of truth for parsing rules. The provenance walk
-        # above does not touch the cache so its output is independent.
-        return self.load_site(name), prov
+        site = self._parse_site_dict(merged_data, site_path, default_name, source_name=name)
+        # Normalize prov to the flat-shape view that matches `Site` so
+        # display-time lookups like `prov["subscription"]` succeed
+        # regardless of whether the on-disk file used the K8s envelope.
+        prov = self._normalize_provenance_to_flat_shape(merged_data, prov)
+        return site, prov
+
+    @staticmethod
+    def _normalize_provenance_to_flat_shape(
+        merged_data: dict[str, Any], prov: dict[str, str]
+    ) -> dict[str, str]:
+        """Rewrite K8s-envelope prov keys to the flat-shape view.
+
+        When the merged data uses `spec:`/`metadata:`, the walker
+        attributed keys like `spec.subscription` and `metadata.name`.
+        The flat-shape view used by the CLI display is `subscription`
+        and `name`. Translate so the consumer sees one shape.
+        """
+        if "spec" not in merged_data:
+            return prov
+        new_prov: dict[str, str] = {}
+        for key, origin in prov.items():
+            if key == "spec" or key == "metadata" or key == "metadata.labels":
+                continue
+            if key.startswith("spec."):
+                new_prov[key[len("spec."):]] = origin
+            elif key == "metadata.name":
+                new_prov["name"] = origin
+            elif key.startswith("metadata.labels."):
+                new_prov[key.replace("metadata.labels.", "labels.", 1)] = origin
+            else:
+                new_prov[key] = origin
+        return new_prov
 
     def load_site(self, name: str) -> Site:
         """Load a site by name, applying inheritance and local overlays.
@@ -950,33 +978,7 @@ class Orchestrator:
         # Validate merged data
         _validate_resource(merged_data, "Site", site_path)
 
-        # Parse merged data (similar to Site.from_file but from dict).
-        # Default the site's name to the basename so a missing `name:`
-        # field still produces a well-formed Site.
-        if "spec" in merged_data:
-            spec = merged_data["spec"]
-            metadata = merged_data.get("metadata", {})
-            site_name = metadata.get("name", default_name)
-            labels = metadata.get("labels", {})
-        else:
-            spec = merged_data
-            site_name = merged_data.get("name", default_name)
-            labels = merged_data.get("labels", {})
-
-        required = ["subscription", "location"]
-        for req in required:
-            if req not in spec:
-                raise ValueError(f"Missing required field '{req}' in site: {name}")
-
-        site = Site(
-            name=site_name,
-            subscription=spec["subscription"],
-            resource_group=spec.get("resourceGroup", ""),
-            location=spec["location"],
-            labels=labels,
-            properties=spec.get("properties", {}),
-            parameters=spec.get("parameters", {}),
-        )
+        site = self._parse_site_dict(merged_data, site_path, default_name, source_name=name)
 
         # Cache under every form the caller might use later. Always
         # under the canonical id (basename or rel-path) and the internal
@@ -993,6 +995,58 @@ class Orchestrator:
                 self._site_cache[name] = site
 
         return site
+
+    def _parse_site_dict(
+        self,
+        merged_data: dict[str, Any],
+        site_path: Path,
+        default_name: str,
+        source_name: str,
+    ) -> Site:
+        """Build a `Site` from merged data and the resolved file path.
+
+        Single source of truth for the parsing rules `load_site` and
+        `load_site_with_provenance` both depend on. Supports the flat
+        shape (`name:` at top level, fields at top level) and the K8s
+        envelope (`metadata:` + `spec:`). Defaults the site's `name`
+        to the basename when neither shape supplies one.
+
+        Args:
+            merged_data: Output of `_load_site_data` (any shape).
+            site_path: Resolved path of the base site file (used for
+                error messages only).
+            default_name: Default for `Site.name` when neither
+                `metadata.name` nor top-level `name` is set.
+            source_name: The identifier the caller passed; used in the
+                "missing required field" error message.
+
+        Raises:
+            ValueError: When required fields (`subscription`,
+                `location`) are missing.
+        """
+        if "spec" in merged_data:
+            spec = merged_data["spec"]
+            metadata = merged_data.get("metadata", {})
+            site_name = metadata.get("name", default_name)
+            labels = metadata.get("labels", {})
+        else:
+            spec = merged_data
+            site_name = merged_data.get("name", default_name)
+            labels = merged_data.get("labels", {})
+
+        for req in ("subscription", "location"):
+            if req not in spec:
+                raise ValueError(f"Missing required field '{req}' in site: {source_name}")
+
+        return Site(
+            name=site_name,
+            subscription=spec["subscription"],
+            resource_group=spec.get("resourceGroup", ""),
+            location=spec["location"],
+            labels=labels,
+            properties=spec.get("properties", {}),
+            parameters=spec.get("parameters", {}),
+        )
 
     def _get_all_site_names(self) -> list[str]:
         """Get all deployable site names from trusted site directories.
@@ -2457,6 +2511,15 @@ class Orchestrator:
                         f"`name={','.join(missing)}` not found. Workspace "
                         f"site names: {', '.join(names_in_ws)}."
                     )
+                else:
+                    # Names matched; another selector key must have
+                    # filtered them out. Surface the matched names so
+                    # the operator does not get a generic "no match".
+                    matched = ",".join(requested)
+                    parts.append(
+                        f"`name={matched}` matched a workspace site but "
+                        f"another selector key filtered it out."
+                    )
             else:
                 values_in_ws = sorted(
                     {str(s.labels[key]) for s in all_sites if key in s.labels}
@@ -2513,14 +2576,20 @@ class Orchestrator:
             # surfaces the same condition as a hard error.
             sites = []
         except ValueError as e:
-            # Selector parse error or similar. Surface as a validation
-            # error so the operator sees what is wrong.
-            return [str(e)]
+            # Selector parse error or similar. Append to errors and
+            # continue so the operator sees every other manifest issue
+            # in one diagnostic pass instead of fixing a stray `-l`
+            # then discovering the next problem on re-run.
+            errors.append(str(e))
+            sites = []
         if not sites and (manifest.sites or manifest.site_selector or selector):
             if selector:
                 # Use the rich diagnostic when CLI selector knocked
                 # everything out so the operator sees what was wrong.
-                errors.append(self.explain_no_match(selector))
+                # Skip when a parse error already surfaced; the parse
+                # error is the higher-signal explanation.
+                if not any("may only appear once" in e or "Selector key" in e for e in errors):
+                    errors.append(self.explain_no_match(selector))
             else:
                 errors.append("No sites matched the specified criteria")
 

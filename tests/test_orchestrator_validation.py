@@ -111,6 +111,28 @@ class TestValidation:
         errors = orchestrator.validate(manifest_path, selector="env=prod,env=dev")
         assert any("may only appear once" in e for e in errors)
 
+    def test_validate_selector_parse_error_does_not_short_circuit(self, complete_workspace):
+        """A selector parse error must NOT skip the other validation
+        checks. Operator iterating on a broken manifest deserves to see
+        every issue in one pass, not fix the typo and discover the next
+        problem on re-run."""
+        orchestrator = Orchestrator(complete_workspace)
+
+        # Manifest has BOTH a selector typo AND a missing template.
+        manifest_data = {
+            "name": "multi-error",
+            "sites": ["test-site"],
+            "steps": [{"name": "step1", "template": "templates/missing.bicep"}],
+        }
+        manifest_path = complete_workspace / "manifests" / "multi.yaml"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            yaml.dump(manifest_data, f)
+
+        errors = orchestrator.validate(manifest_path, selector="env=prod,env=dev")
+        # Both errors must surface so the operator fixes them in one pass.
+        assert any("may only appear once" in e for e in errors)
+        assert any("Template not found" in e for e in errors)
+
     def test_validate_invalid_condition(self, complete_workspace):
         orchestrator = Orchestrator(complete_workspace)
 

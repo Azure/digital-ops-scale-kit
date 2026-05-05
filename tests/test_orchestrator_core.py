@@ -456,6 +456,19 @@ class TestExplainNoMatch:
         assert "invalid" in msg.lower()
         assert "may only appear once" in msg
 
+    def test_name_matches_but_other_key_filters_explains(self, multi_site_workspace):
+        """When `name=X` matches a real site but another selector key
+        filters it out, the diagnostic must say so rather than fall
+        back to the generic 'matched no sites' line."""
+        orchestrator = Orchestrator(multi_site_workspace)
+        all_sites = orchestrator.load_all_sites()
+        real_name = all_sites[0].name
+        msg = orchestrator.explain_no_match(f"name={real_name},nonexistent=value")
+        assert "matched no sites" in msg
+        assert real_name in msg
+        # Tells the operator the name matched but another key filtered.
+        assert "matched a workspace site but" in msg or "another selector key" in msg
+
 
 class TestDeploymentNameGeneration:
     """Tests for deployment name truncation and hashing."""
@@ -1257,17 +1270,46 @@ class TestNestedSiteDiscovery:
         self, tmp_workspace, tmp_path
     ):
         """Same basename at the same rel-path across trusted dirs is a
-        legitimate overlay."""
+        legitimate overlay. The overlay restates the same name (matches
+        the base) and merges other fields on top."""
+        self._write_site(
+            tmp_workspace, Path("sites/regions/eu/munich.yaml"), "munich"
+        )
+        # Overlay file has same name as base (allowed). Use a custom
+        # write so we can supply a divergent label without touching name.
+        extras = tmp_path / "extras-dir"
+        overlay_path = extras / "regions" / "eu" / "munich.yaml"
+        overlay_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(overlay_path, "w", encoding="utf-8") as f:
+            yaml.dump(
+                {
+                    "apiVersion": "siteops/v1",
+                    "kind": "Site",
+                    "name": "munich",
+                    "subscription": "11111111-1111-1111-1111-111111111111",
+                    "labels": {"overlay": "yes"},
+                },
+                f,
+            )
+        orchestrator = Orchestrator(tmp_workspace, extra_trusted_sites_dirs=[extras])
+        site = orchestrator.load_site("munich")
+        # Identity preserved from base; overlay fields applied on top.
+        assert site.name == "munich"
+        assert site.subscription == "11111111-1111-1111-1111-111111111111"
+        assert site.labels.get("overlay") == "yes"
+
+    def test_overlay_renaming_site_rejected(self, tmp_workspace, tmp_path):
+        """Overlay that tries to CHANGE the site name (vs. restate it)
+        is rejected at load time. Renaming a site via overlay would
+        produce identity unfindable through any workspace index."""
         self._write_site(
             tmp_workspace, Path("sites/regions/eu/munich.yaml"), "munich"
         )
         extras = tmp_path / "extras-dir"
         self._write_site(extras, Path("regions/eu/munich.yaml"), "munich-overlay")
         orchestrator = Orchestrator(tmp_workspace, extra_trusted_sites_dirs=[extras])
-        # First trusted dir wins on identity, overlays merge on top.
-        site = orchestrator.load_site("munich")
-        # `Site.name` reflects the overlay-applied internal name.
-        assert site.name == "munich-overlay"
+        with pytest.raises(ValueError, match="cannot rename the site"):
+            orchestrator.load_site("munich")
 
     def test_path_form_lookup_normalizes_backslash(self, tmp_workspace):
         """`load_site` accepts Windows-style path separators."""

@@ -692,3 +692,97 @@ class TestSiteProvenance:
         site_via_prov, _ = orch.load_site_with_provenance("munich")
         assert site_via_prov.name == site_via_load.name
         assert site_via_prov.subscription == site_via_load.subscription
+
+    def test_provenance_for_k8s_envelope_site(self, tmp_workspace):
+        """Sites authored with the K8s envelope (`metadata:`/`spec:`)
+        get prov keys in the flat-shape view so display lookups
+        succeed regardless of on-disk shape."""
+        self._write_yaml(
+            tmp_workspace / "sites" / "munich.yaml",
+            {
+                "apiVersion": "siteops/v1",
+                "kind": "Site",
+                "metadata": {
+                    "name": "munich",
+                    "labels": {"environment": "dev"},
+                },
+                "spec": {
+                    "subscription": "envelope-sub",
+                    "resourceGroup": "rg-envelope",
+                    "location": "eastus",
+                    "properties": {
+                        "deployOptions": {"enableSecretSync": True},
+                    },
+                },
+            },
+        )
+        from siteops.orchestrator import Orchestrator
+        orch = Orchestrator(tmp_workspace)
+        _, prov = orch.load_site_with_provenance("munich")
+        # Flat-shape lookups must succeed even though the on-disk file
+        # used `spec:` and `metadata:` envelopes.
+        assert prov["subscription"].endswith("munich.yaml")
+        assert prov["resourceGroup"].endswith("munich.yaml")
+        assert prov["location"].endswith("munich.yaml")
+        assert prov["labels.environment"].endswith("munich.yaml")
+        assert prov["properties.deployOptions.enableSecretSync"].endswith("munich.yaml")
+        # Envelope-only keys must NOT leak through.
+        assert "spec" not in prov
+        assert "metadata" not in prov
+        assert "spec.subscription" not in prov
+
+    def test_overlay_renaming_site_rejected(self, tmp_workspace):
+        """Overlays in `sites.local/` cannot rename the site. Identity
+        is set by the base file and the workspace indexes are built
+        from base files, so an overlay rename produces a site
+        unfindable through any index."""
+        self._write_yaml(
+            tmp_workspace / "sites" / "munich.yaml",
+            {
+                "apiVersion": "siteops/v1",
+                "kind": "Site",
+                "name": "munich",
+                "subscription": "trusted-sub",
+                "resourceGroup": "rg-trusted",
+                "location": "eastus",
+            },
+        )
+        self._write_yaml(
+            tmp_workspace / "sites.local" / "munich.yaml",
+            {
+                "name": "munich-renamed",
+                "subscription": "overlay-sub",
+            },
+        )
+        from siteops.orchestrator import Orchestrator
+        orch = Orchestrator(tmp_workspace)
+        import pytest as _pytest
+        with _pytest.raises(ValueError, match="cannot rename the site"):
+            orch.load_site("munich")
+
+    def test_overlay_restating_same_name_allowed(self, tmp_workspace):
+        """Overlays may restate the site's existing name (common when
+        an overlay file mirrors the full base shape)."""
+        self._write_yaml(
+            tmp_workspace / "sites" / "munich.yaml",
+            {
+                "apiVersion": "siteops/v1",
+                "kind": "Site",
+                "name": "munich",
+                "subscription": "trusted-sub",
+                "resourceGroup": "rg-trusted",
+                "location": "eastus",
+            },
+        )
+        self._write_yaml(
+            tmp_workspace / "sites.local" / "munich.yaml",
+            {
+                "name": "munich",  # Same as base. Allowed.
+                "subscription": "overlay-sub",
+            },
+        )
+        from siteops.orchestrator import Orchestrator
+        orch = Orchestrator(tmp_workspace)
+        site = orch.load_site("munich")
+        assert site.name == "munich"
+        assert site.subscription == "overlay-sub"
