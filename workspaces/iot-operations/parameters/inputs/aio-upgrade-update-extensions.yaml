@@ -1,5 +1,5 @@
 # Fan-in inputs into the update-extensions step of aio-upgrade.yaml. See
-# docs/parameter-resolution.md for the *-chaining.yaml convention.
+# docs/parameter-resolution.md for the inputs/outputs convention.
 # Consumed by: update-extensions (in aio-upgrade.yaml)
 
 # Cluster identity for the extension PUTs (each extension is scoped at the

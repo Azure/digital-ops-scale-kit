@@ -12,10 +12,6 @@ labels:
   environment: dev
   city: Munich
 
-properties:
-  deployOptions:
-    enableSecretSync: false
-
 parameters:
   clusterName: munich-dev-arc
   brokerConfig:

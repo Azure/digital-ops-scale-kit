@@ -24,18 +24,7 @@ param clusterName string
 @description('The namespace on the cluster to deploy to.')
 param clusterNamespace string = 'azure-iot-operations'
 
-@allowed([
-  'eastus'
-  'eastus2'
-  'westus'
-  'westus2'
-  'westus3'
-  'westeurope'
-  'northeurope'
-  'eastus2euap'
-  'germanywestcentral'
-])
-@description('Location of the existing arc-enabled cluster where AIO will be deployed.')
+@description('Location of the existing arc-enabled cluster where AIO will be deployed. AIO RP enforces region support on PUT.')
 param clusterLocation string = any(resourceGroup().location)
 
 /*                          Custom Location Parameters                       */
@@ -56,7 +45,7 @@ param aioInstanceName string?
 @description('User assigned identity resource id to assign to the AIO instance.')
 param userAssignedIdentity string?
 
-@description('Schema Registry Id used to reference the namespace to be passed in to the to be passed to Instance.')
+@description('Schema Registry resource ID assigned to the AIO instance.')
 param schemaRegistryId string
 
 @description('Existing Azure Device Registry namespace resource ID to be passed in to the AIO Instance.')

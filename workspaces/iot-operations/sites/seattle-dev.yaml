@@ -12,10 +12,6 @@ labels:
   environment: dev
   city: Seattle
 
-properties:
-  deployOptions:
-    enableSecretSync: false
-
 parameters:
   clusterName: seattle-dev-arc
   brokerConfig:

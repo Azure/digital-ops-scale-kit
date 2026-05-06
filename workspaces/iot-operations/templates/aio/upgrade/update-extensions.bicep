@@ -63,7 +63,7 @@ param secretStore object
 @description('cert-manager extension snapshot from resolve-extensions.outputs.certManager. Ignored when enableCertManager is false.')
 param certManager object
 
-@description('Whether cert-manager is present on the cluster. From resolve-extensions.outputs.enableCertManager.')
+@description('Whether scalekit owns cert-manager on this cluster. Sourced from `site.properties.deployOptions.enableCertManager`. False skips the cert-manager extension PUT and assumes cert-manager is externally managed.')
 param enableCertManager bool
 
 // =====================================================================================

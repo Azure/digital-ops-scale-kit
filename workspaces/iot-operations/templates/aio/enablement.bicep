@@ -23,7 +23,7 @@ param clusterName string
 /*                          Capability Toggles                               */
 ///////////////////////////////////////////////////////////////////////////////
 
-@description('Whether scaleKit owns the cert-manager Arc extension on this cluster. When false, the install assumes cert-manager is provided externally and skips both the install and the dependsOn wiring on the secret store extension. Mirrors `site.properties.deployOptions.enableCertManager`.')
+@description('Whether scalekit owns the cert-manager Arc extension on this cluster. When false, the install assumes cert-manager is provided externally and skips both the install and the dependsOn wiring on the secret store extension. Mirrors `site.properties.deployOptions.enableCertManager`.')
 param enableCertManager bool = true
 
 /*                          Extension Version Parameters                     */

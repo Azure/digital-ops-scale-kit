@@ -12,10 +12,6 @@ labels:
   environment: prod
   city: Seattle
 
-properties:
-  deployOptions:
-    enableSecretSync: false
-
 parameters:
   clusterName: seattle-prod-arc
   brokerConfig:

@@ -41,7 +41,7 @@ param connectedClusterName string
 @description('Full ARM resource ID of the connected cluster. Chained from resolve-aio.outputs.connectedClusterResourceId. Used to derive the AIO Arc extension name via the same uniqueString algebra the install path uses.')
 param connectedClusterResourceId string
 
-@description('Whether scaleKit owns cert-manager on this cluster. Sourced from `site.properties.deployOptions.enableCertManager`. False skips cert-manager resolution entirely so externally-managed cert-manager installs are never read by this template.')
+@description('Whether scalekit owns cert-manager on this cluster. Sourced from `site.properties.deployOptions.enableCertManager`. False skips cert-manager resolution entirely so externally-managed cert-manager installs are never read by this template.')
 param enableCertManager bool
 
 // =====================================================================================

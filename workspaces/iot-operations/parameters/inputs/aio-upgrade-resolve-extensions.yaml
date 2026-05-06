@@ -1,5 +1,5 @@
 # Fan-in inputs into the resolve-extensions step of aio-upgrade.yaml. See
-# docs/parameter-resolution.md for the *-chaining.yaml convention.
+# docs/parameter-resolution.md for the inputs/outputs convention.
 # Consumed by: resolve-extensions (in aio-upgrade.yaml)
 
 # Cluster identity for direct existing lookup + the resource ID needed to

@@ -15,9 +15,5 @@ labels:
   environment: staging
   city: Chicago
 
-properties:
-  deployOptions:
-    enableSecretSync: false
-
 parameters:
   clusterName: chicago-staging-arc

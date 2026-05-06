@@ -6,7 +6,7 @@ Per-deployment-target YAML files (`kind: Site` and `kind: SiteTemplate`).
 
 - **`base-site.yaml`**: `kind: SiteTemplate`. The shared base every concrete site inherits from. Holds workspace defaults: subscription, location, labels, common parameters, the `deployOptions` shape.
 - **`<site>.yaml`**: `kind: Site`. A deployable target. Names match `<region>-<env>` for RG-scoped sites or `<tenant>-global` for subscription-scoped.
-- **`shared/`**: additional `kind: SiteTemplate` files for partial reuse (e.g. `region-eu.yaml`, `env-prod.yaml`).
+- **`shared/`**: additional `kind: SiteTemplate` files for partial reuse (e.g. `germany.yaml`, `usa-east.yaml`).
 
 ## Conventions
 

@@ -12,10 +12,6 @@ labels:
   environment: prod
   city: Munich
 
-properties:
-  deployOptions:
-    enableSecretSync: false
-
 parameters:
   clusterName: munich-prod-arc
   brokerConfig:
