@@ -210,6 +210,42 @@ class TestCmdValidate:
         assert "library manifest" in captured.out
         assert "-l" in captured.out
 
+    def test_validate_verbose_library_manifest_no_traceback(
+        self, complete_workspace, capsys
+    ):
+        """`validate -v` on a library manifest (no `sites:` and no
+        `selector:`) prints ✓ + Note and exits 0. Previously
+        `show_plan` re-resolved sites and re-raised NoTargetingError
+        as a traceback after the success print."""
+        from siteops.orchestrator import Orchestrator
+
+        manifest_data = {
+            "name": "library",
+            "steps": [{"name": "step1", "template": "templates/test.bicep"}],
+        }
+        manifest_path = complete_workspace / "manifests" / "library.yaml"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            yaml.dump(manifest_data, f)
+
+        orchestrator = Orchestrator(complete_workspace)
+
+        args = MagicMock()
+        args.manifest = manifest_path
+        args.workspace = complete_workspace
+        args.selector = None
+        args.verbose = True
+
+        exit_code = cmd_validate(args, orchestrator)
+
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "Manifest is valid" in captured.out
+        assert "library manifest" in captured.out
+        # No traceback or NoTargetingError leaked from show_plan.
+        assert "Traceback" not in captured.out and "Traceback" not in captured.err
+        assert "NoTargetingError" not in captured.out
+        assert "NoTargetingError" not in captured.err
+
     def test_validate_verbose_not_shown_on_failure(self, complete_workspace, capsys):
         """Test plan is not shown when validation fails."""
         from siteops.orchestrator import Orchestrator
@@ -324,6 +360,43 @@ class TestCmdSites:
         assert exit_code == 1
         captured = capsys.readouterr()
         assert "No sites matched" in captured.err
+
+    def test_sites_path_form_name_resolves(self, tmp_path, capsys):
+        """`siteops sites regions/eu/munich-dev` resolves the nested
+        site via the trusted-file fast path. Without parity to deploy,
+        the path-form would compare against `Site.name` (basename only)
+        and return no match."""
+        from siteops.orchestrator import Orchestrator
+
+        # Build a workspace with one nested site.
+        sites = tmp_path / "sites" / "regions" / "eu"
+        sites.mkdir(parents=True)
+        (tmp_path / "manifests").mkdir()
+        (sites / "munich-dev.yaml").write_text(
+            "apiVersion: siteops/v1\n"
+            "kind: Site\n"
+            "name: munich-dev\n"
+            "subscription: 00000000-0000-0000-0000-000000000000\n"
+            "resourceGroup: rg-munich-dev\n"
+            "location: westeurope\n",
+            encoding="utf-8",
+        )
+
+        orchestrator = Orchestrator(tmp_path)
+
+        args = MagicMock()
+        args.name = "regions/eu/munich-dev"
+        args.workspace = tmp_path
+        args.selector = None
+        args.verbose = False
+        args.render = False
+        args.show_sources = False
+
+        exit_code = cmd_sites(args, orchestrator)
+
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "munich-dev" in captured.out
 
     def test_sites_empty_workspace(self, tmp_path, capsys):
         """Test no sites in workspace."""
@@ -595,6 +668,34 @@ class TestCmdDeploy:
         assert exit_code == 1
         captured = capsys.readouterr()
         assert "does-not-exist" in captured.err
+
+    def test_deploy_malformed_yaml_exits_cleanly(self, complete_workspace, capsys):
+        """A manifest with broken YAML must exit 1 with a one-line
+        Error, not a 30-line yaml.YAMLError traceback. Manifest.from_file
+        raises yaml.YAMLError before resolve_sites; widen the try."""
+        from siteops.orchestrator import Orchestrator
+
+        # Tab inside indentation breaks the YAML parser.
+        manifest_path = complete_workspace / "manifests" / "broken.yaml"
+        manifest_path.write_text(
+            "name: broken\nsites:\n\t- test-site\nsteps:\n  - name: x\n    template: t.bicep\n",
+            encoding="utf-8",
+        )
+
+        orchestrator = Orchestrator(complete_workspace)
+
+        args = MagicMock()
+        args.manifest = manifest_path
+        args.workspace = complete_workspace
+        args.selector = None
+        args.parallel = None
+
+        exit_code = cmd_deploy(args, orchestrator)
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "Error" in captured.err
+        assert "Traceback" not in captured.err
 
     def test_deploy_cli_selector_no_match_errors_with_diagnostic(self, complete_workspace, capsys):
         """CLI selector matching zero workspace sites exits 1 with a

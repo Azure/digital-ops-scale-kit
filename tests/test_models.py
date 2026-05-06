@@ -91,6 +91,22 @@ class TestParseSelector:
         result = parse_selector("env=prod,,name=a")
         assert result == {"env": ["prod"], "name": ["a"]}
 
+    def test_empty_key_raises(self):
+        """A term like `=foo` has no key. Reject so a typo (e.g. an
+        unset shell variable) does not silently match zero sites."""
+        from siteops.models import SelectorParseError
+
+        with pytest.raises(SelectorParseError, match="empty key"):
+            parse_selector("=foo")
+
+    def test_empty_value_raises(self):
+        """A term like `name=` has no value. Reject so an empty
+        environment variable expansion (e.g. `-l env=`) is loud."""
+        from siteops.models import SelectorParseError
+
+        with pytest.raises(SelectorParseError, match="empty value"):
+            parse_selector("name=")
+
 
 class TestMergeSelectorStrings:
     """Tests for the _merge_selector_strings helper."""

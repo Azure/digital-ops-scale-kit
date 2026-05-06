@@ -49,15 +49,18 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
 
     parallel_override = getattr(args, "parallel", None)
 
+    import yaml as _yaml
+
     from siteops.models import Manifest
 
-    manifest = Manifest.from_file(manifest_path, workspace_root=args.workspace)
     cli_selector = getattr(args, "selector", None)
     try:
+        manifest = Manifest.from_file(manifest_path, workspace_root=args.workspace)
         sites = orchestrator.resolve_sites(manifest, cli_selector)
-    except (ValueError, FileNotFoundError) as e:
+    except (ValueError, OSError, _yaml.YAMLError) as e:
         # ValueError: selector parse, no-targeting, overlay-rename, etc.
-        # FileNotFoundError: manifest `sites:` entry without a workspace file.
+        # OSError: missing or unreadable file (includes FileNotFoundError).
+        # YAMLError: malformed manifest YAML.
         print(f"\nError: {e}\n", file=sys.stderr)
         return 1
 
@@ -118,10 +121,14 @@ def cmd_validate(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     # no `selector:`) and no `-l` was provided. Validation passes, but
     # `deploy` will hard-error without targeting. Surfacing this here
     # eliminates the validate-passes-then-deploy-fails confusion class.
+    is_library_no_selector = False
     from siteops.models import Manifest as _Manifest
     try:
         _m = _Manifest.from_file(manifest_path, workspace_root=args.workspace)
-        if not selector and not _m.sites and not _m.site_selector:
+        is_library_no_selector = (
+            not selector and not _m.sites and not _m.site_selector
+        )
+        if is_library_no_selector:
             print(
                 "  Note: library manifest (no `sites:` or `selector:`). "
                 "Pass `-l <key>=<value>` at deploy time, or run "
@@ -132,8 +139,9 @@ def cmd_validate(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         # any failure here is best-effort and shouldn't change exit code.
         pass
 
-    # Show deployment plan if verbose
-    if verbose:
+    # Skip the plan render for a library manifest with no selector;
+    # show_plan re-resolves and would re-raise NoTargetingError.
+    if verbose and not is_library_no_selector:
         orchestrator.show_plan(manifest_path, selector=selector)
 
     return 0
@@ -231,8 +239,6 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     if name_arg:
         selector_str = f"name={name_arg}"
 
-    all_sites = orchestrator.load_all_sites()
-
     # Filter by selector if provided
     if selector_str:
         from siteops.models import parse_selector
@@ -242,9 +248,11 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         except ValueError as e:
             print(f"\nError: {e}\n", file=sys.stderr)
             return 1
-        sites = [s for s in all_sites if s.matches_selector(selector)]
+        # Use filter_sites for parity with deploy: trusted-file fast
+        # path resolves path-form names like `regions/eu/munich-dev`.
+        sites = orchestrator.filter_sites(selector)
     else:
-        sites = all_sites
+        sites = orchestrator.load_all_sites()
 
     if not sites:
         if selector_str:

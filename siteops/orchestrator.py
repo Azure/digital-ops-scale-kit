@@ -151,13 +151,16 @@ class Orchestrator:
         self._internal_name_index: dict[str, Path] | None = None
         self._internal_name_index_lock = threading.Lock()
         # Memo of `_is_site_template(path)` keyed by resolved path.
-        # Cleared by `_invalidate_internal_name_index`. Avoids 3N+ YAML
-        # re-parses across `_get_all_site_names`, `_build_site_indexes`,
-        # and per-site `load_site` calls.
+        # Avoids 3N+ YAML re-parses across `_get_all_site_names`,
+        # `_build_site_indexes`, and per-site `load_site` calls.
         self._template_check_cache: dict[Path, bool] = {}
         # Memo of the deduped site list returned by `load_all_sites`.
-        # Cleared on index invalidation.
         self._all_sites_cache: list[Site] | None = None
+        # Memo of `_load_inherited_data(path)` keyed by resolved path,
+        # used only when no provenance dict is being recorded. With N
+        # sites sharing one template, the template would otherwise be
+        # parsed N times. Returns are deepcopied to keep callers safe.
+        self._inherited_data_cache: dict[Path, dict[str, Any]] = {}
         self._extra_trusted_sites_dirs = self._normalize_extra_sites_dirs(
             extra_trusted_sites_dirs or []
         )
@@ -449,23 +452,6 @@ class Orchestrator:
             return metadata.get("name")
         return data.get("name")
 
-    def _invalidate_internal_name_index(self) -> None:
-        """Clear the lazy site indexes and dependent caches.
-
-        Call when a site file may have been added, removed, or had its
-        `name:` field changed during the orchestrator's lifetime. Also
-        clears the template-check memo, the all-sites memo, and the
-        per-site cache, since all three are downstream of the indexes.
-        """
-        with self._internal_name_index_lock:
-            self._basename_index = None
-            self._rel_path_index = None
-            self._internal_name_index = None
-            self._template_check_cache.clear()
-            self._all_sites_cache = None
-        with self._cache_lock:
-            self._site_cache.clear()
-
     def _canonical_site_id(self, site_path: Path) -> str:
         """Return the canonical relative-path identifier for a site file.
 
@@ -613,6 +599,11 @@ class Orchestrator:
 
         Resolves the `inherits` field recursively, merging parent data first.
 
+        When called without a provenance dict, the merged result is
+        memoized on `path.resolve()` for the orchestrator's lifetime so
+        N sites sharing one template only parse it once. Provenance
+        callers bypass the cache because each call mutates `prov`.
+
         Args:
             path: Absolute path to the inherited file
             seen: List of visited paths for cycle detection (preserves order)
@@ -636,6 +627,12 @@ class Orchestrator:
             cycle_path = " -> ".join(str(p) for p in seen) + f" -> {normalized}"
             raise ValueError(f"Circular inheritance detected: {cycle_path}")
         seen.append(normalized)
+
+        # Cache hit returns a deep copy so callers may mutate freely.
+        # Skip cache when prov is supplied because each provenance call
+        # mutates the caller's prov dict and is not idempotent.
+        if prov is None and normalized in self._inherited_data_cache:
+            return copy.deepcopy(self._inherited_data_cache[normalized])
 
         if not path.exists():
             raise FileNotFoundError(f"Inherited file not found: {path}")
@@ -678,6 +675,9 @@ class Orchestrator:
                 )
             else:
                 data = leaf_data
+
+        if prov is None:
+            self._inherited_data_cache[normalized] = copy.deepcopy(data)
 
         logger.debug(f"Loaded inherited data from: {path}")
         return data
@@ -1092,7 +1092,6 @@ class Orchestrator:
         """Check if a YAML file is a SiteTemplate (inheritance-only).
 
         Memoized on resolved path for the orchestrator's lifetime.
-        Cleared by `_invalidate_internal_name_index`.
 
         Args:
             path: Path to the YAML file
@@ -2396,6 +2395,66 @@ class Orchestrator:
                 print(f"    [{result['site']}] {error}")
             print()
 
+    def filter_sites(self, selector: dict[str, list[str]]) -> list[Site]:
+        """Apply a parsed selector to the workspace's sites.
+
+        Resolves `name=` keys via the trusted-file fast path (path-form,
+        basename, or internal name) and falls back to a full-sweep
+        attribute match for the remaining selector keys. Used by both
+        `resolve_sites` (manifest deploy) and `cmd_sites` (CLI listing)
+        so the two commands accept identical selector grammar.
+
+        Args:
+            selector: Parsed selector dict (from `parse_selector`).
+
+        Returns:
+            Sorted list of matching sites, deduplicated by Site.name.
+        """
+        # When the operator explicitly names sites via `name=X` (or
+        # repeated `name=X,name=Y`), route every name whose filename
+        # exists in a trusted sites/ directory through load_site() so
+        # load errors (broken inherits chain, invalid YAML) propagate
+        # instead of being silently swallowed by load_all_sites() and
+        # reported as "no sites matched". Names that have no trusted
+        # filename match fall through to load_all_sites() so the
+        # operator may also select by the site's internal `name:`
+        # field, which is permitted to differ from the filename.
+        if "name" in selector:
+            requested_names = selector["name"]
+            # The fast-path treats `_find_trusted_site_file` as the
+            # name-key matcher. Re-checking via matches_selector
+            # would fail when `name=` is a path-form or internal
+            # name and `Site.name` defaults to the basename. Other
+            # selector keys still apply.
+            other_selector = {k: v for k, v in selector.items() if k != "name"}
+            trusted_results: list[Site] = []
+            untrusted_names: list[str] = []
+            for n in requested_names:
+                if self._find_trusted_site_file(n) is not None:
+                    site = self.load_site(n)
+                    if not other_selector or site.matches_selector(other_selector):
+                        trusted_results.append(site)
+                else:
+                    untrusted_names.append(n)
+            # Resolve untrusted names (and any other selector keys)
+            # via the full sweep, scoped to the untrusted name set so
+            # we do not double-count trusted sites.
+            if untrusted_names:
+                sweep_selector = {**selector, "name": untrusted_names}
+                fallback = [
+                    s for s in self.load_all_sites()
+                    if s.matches_selector(sweep_selector)
+                ]
+                seen = {s.name for s in trusted_results}
+                for s in fallback:
+                    if s.name not in seen:
+                        trusted_results.append(s)
+                        seen.add(s.name)
+            trusted_results.sort(key=lambda s: s.name)
+            return trusted_results
+        all_sites = self.load_all_sites()
+        return [s for s in all_sites if s.matches_selector(selector)]
+
     def resolve_sites(self, manifest: Manifest, cli_selector: str | None = None) -> list[Site]:
         """Resolve sites from manifest, applying selectors.
 
@@ -2436,50 +2495,7 @@ class Orchestrator:
         # CLI selector requires loading all sites for filtering
         if cli_selector:
             selector = parse_selector(cli_selector)
-            # When the operator explicitly names sites via `name=X` (or
-            # repeated `name=X,name=Y`), route every name whose filename
-            # exists in a trusted sites/ directory through load_site() so
-            # load errors (broken inherits chain, invalid YAML) propagate
-            # instead of being silently swallowed by load_all_sites() and
-            # reported as "no sites matched". Names that have no trusted
-            # filename match fall through to load_all_sites() so the
-            # operator may also select by the site's internal `name:`
-            # field, which is permitted to differ from the filename.
-            if "name" in selector:
-                requested_names = selector["name"]
-                # The fast-path treats `_find_trusted_site_file` as the
-                # name-key matcher. Re-checking via matches_selector
-                # would fail when `name=` is a path-form or internal
-                # name and `Site.name` defaults to the basename. Other
-                # selector keys still apply.
-                other_selector = {k: v for k, v in selector.items() if k != "name"}
-                trusted_results: list[Site] = []
-                untrusted_names: list[str] = []
-                for n in requested_names:
-                    if self._find_trusted_site_file(n) is not None:
-                        site = self.load_site(n)
-                        if not other_selector or site.matches_selector(other_selector):
-                            trusted_results.append(site)
-                    else:
-                        untrusted_names.append(n)
-                # Resolve untrusted names (and any other selector keys)
-                # via the full sweep, scoped to the untrusted name set so
-                # we do not double-count trusted sites.
-                if untrusted_names:
-                    sweep_selector = {**selector, "name": untrusted_names}
-                    fallback = [
-                        s for s in self.load_all_sites()
-                        if s.matches_selector(sweep_selector)
-                    ]
-                    seen = {s.name for s in trusted_results}
-                    for s in fallback:
-                        if s.name not in seen:
-                            trusted_results.append(s)
-                            seen.add(s.name)
-                trusted_results.sort(key=lambda s: s.name)
-                return trusted_results
-            all_sites = self.load_all_sites()
-            return [s for s in all_sites if s.matches_selector(selector)]
+            return self.filter_sites(selector)
 
         # Explicit sites list - load only the named sites (most common case)
         if manifest.sites:

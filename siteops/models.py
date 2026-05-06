@@ -178,6 +178,14 @@ def parse_selector(selector: str | None) -> dict[str, list[str]]:
         key, value = part.split("=", 1)
         key = key.strip()
         value = value.strip()
+        if not key:
+            raise SelectorParseError(
+                f"Selector term `{part}` has empty key. Use `key=value` form."
+            )
+        if not value:
+            raise SelectorParseError(
+                f"Selector key `{key}` has empty value. Use `{key}=<value>`."
+            )
         if key in labels:
             if key != "name":
                 raise SelectorParseError(
