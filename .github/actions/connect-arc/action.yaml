@@ -21,7 +21,7 @@
 # `~/.kube/config` points at the k3s cluster.
 
 name: Connect cluster to Azure Arc
-description: az connectedk8s connect + optional workload-identity flow.
+description: Internal E2E composite. az connectedk8s connect + optional workload-identity flow.
 
 inputs:
   cluster-name:

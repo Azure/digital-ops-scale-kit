@@ -73,6 +73,9 @@ jobs:
         displayName: Validate Bicep templates
 
       - script: |
+          # set -o pipefail so `siteops ... | tee` returns siteops's exit
+          # code, not tee's. ADO `script:` does not set pipefail by default.
+          set -o pipefail
           WORKSPACE_DIR="workspaces/iot-operations"
           # Discover standalone Manifest YAML across the standard top-level dirs.
           # Excludes partials (filename prefixed `_`) and non-manifest YAML

@@ -154,6 +154,10 @@ jobs:
           # Background service that refreshes OIDC token every 4 minutes.
           # GitHub OIDC tokens expire after ~5 minutes, so this keeps az cli
           # authenticated for long-running AIO deployments (which can take 20+ min).
+          # PID is written to disk so the Azure Logout step can kill the
+          # loop before clearing credentials. Otherwise the loop could
+          # tick once more between logout and runner cleanup, briefly
+          # re-establishing auth.
           (
             while true; do
               sleep 240
@@ -171,6 +175,7 @@ jobs:
               fi
             done
           ) &
+          echo $! > "$RUNNER_TEMP/oidc-refresh.pid"
           echo "OIDC token refresh service started (PID: $!)"
 
       - name: Deploy
@@ -211,4 +216,8 @@ jobs:
       - name: Azure Logout
         if: always()
         shell: bash
-        run: az logout || true
+        run: |
+          if [[ -f "$RUNNER_TEMP/oidc-refresh.pid" ]]; then
+            kill "$(cat "$RUNNER_TEMP/oidc-refresh.pid")" 2>/dev/null || true
+          fi
+          az logout || true

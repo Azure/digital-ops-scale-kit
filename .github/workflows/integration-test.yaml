@@ -32,7 +32,10 @@ env:
   PYTHONUNBUFFERED: "1"
 
 concurrency:
-  group: integration-test-${{ inputs.environment }}
+  # Shared `azure-${env}` lock so a deploy and an integration test
+  # against the same environment serialize. They both touch live Azure
+  # resources and an integration test mid-deploy can flake.
+  group: azure-${{ inputs.environment }}
   cancel-in-progress: false
 
 jobs:
@@ -97,7 +100,7 @@ jobs:
           --junitxml=integration-results.xml
 
       - name: Publish test results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         if: always()
         with:
           name: integration-test-results

@@ -12,7 +12,7 @@
 # Constraint: assumes a runner with systemd (GHA-hosted ubuntu-latest does).
 
 name: Create k3s cluster
-description: Install and start a single-node k3s cluster, write kubeconfig.
+description: Internal E2E composite. Install and start a single-node k3s cluster, write kubeconfig.
 
 inputs:
   version:

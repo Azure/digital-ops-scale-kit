@@ -56,9 +56,9 @@ on:
 env:
     PYTHONUNBUFFERED: "1"
 
-# Prevent concurrent deployments to the same environment
+# Serialize per-environment work across deploy and integration-test
 concurrency:
-    group: deploy-${{ inputs.environment }}
+    group: azure-${{ inputs.environment }}
     cancel-in-progress: false
 
 permissions:

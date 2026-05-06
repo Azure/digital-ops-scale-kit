@@ -28,9 +28,13 @@ parameters:
     displayName: siteops install source (empty = local editable install)
     type: string
     default: ''
+  - name: stageName
+    displayName: Stage id (override when including this template more than once)
+    type: string
+    default: deploy
 
 stages:
-  - stage: deploy
+  - stage: ${{ parameters.stageName }}
     variables:
       PYTHONUNBUFFERED: '1'
     jobs:
