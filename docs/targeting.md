@@ -59,7 +59,7 @@ siteops deploy manifests/aio-install.yaml -l env=dev -l env=prod
 
 ### Path-form names
 
-For sites under nested `sites/` subdirectories, `name=` accepts both the basename (filename without extension) and the rel-path under the trusted dir. Both forms resolve to the same site.
+For sites under nested `sites/` subdirectories, `name=` accepts both the basename (filename without extension) and the relative path under the trusted dir. Both forms resolve to the same site.
 
 ```bash
 siteops deploy manifests/aio-install.yaml -l name=munich-dev
@@ -74,10 +74,10 @@ Each deployable site is reachable by three identifiers, all of which work in `-l
 | Form | Example | Notes |
 |---|---|---|
 | Basename | `munich-dev` | The filename without extension. The orchestrator enforces basename uniqueness across each trusted dir at load time. |
-| Rel-path | `regions/eu/munich-dev` | The path under the owning trusted dir, no extension. |
+| Relative path | `regions/eu/munich-dev` | The path under the owning trusted dir, no extension. |
 | Internal `name:` | `contoso-munich` | The value of the `name:` field if it differs from the basename. Must be unique workspace-wide. |
 
-**Basename uniqueness.** Within any one trusted directory, every site basename must be unique across all subdirectories. The orchestrator rejects collisions at load time so `-l name=<basename>` always resolves to one file. Cross-dir collisions are valid only when the rel-path also matches (the overlay pattern).
+**Basename uniqueness.** Within any one trusted directory, every site basename must be unique across all subdirectories. The orchestrator rejects collisions at load time so `-l name=<basename>` always resolves to one file. Cross-dir collisions are valid only when the relative path also matches (the overlay pattern).
 
 **Path normalization.** Path-form identifiers are normalized: backslashes become forward slashes, `..` and `./` segments are rejected, leading or trailing `/` is rejected. These rules apply to both manifest `sites:` entries and `-l name=` values.
 
@@ -149,7 +149,7 @@ Manifest selectors that match zero sites warn but still exit zero.
 - **`-l env=prod -l env=dev` errors.** Duplicate non-name keys are rejected. If you genuinely want a union (rare), run twice or use a label that distinguishes the cohorts.
 - **`-l name=path/to/site` works but is rare in practice.** The basename form is shorter and just as unambiguous when the basename invariant holds.
 - **Adding a nested site that collides on basename fails the workspace load.** Rename one of the colliding files. The error message names both paths.
-- **An overlay file (in `sites.local/` or an extras dir) cannot rename a site.** It may restate the same `name:` (common when the overlay mirrors the base shape) but cannot change it. Use `inherits:` or rename the base file instead.
+- **An overlay in `sites.local/` cannot rename a site.** It may restate the same `name:` (common when the overlay mirrors the base shape) but cannot change it. The same rule applies to a file in an extras dir that overlays a base file at the same path under `sites/`. Use `inherits:` or rename the base file instead.
 
 ## Related
 

@@ -28,9 +28,7 @@ Sites operate at two levels based on whether they have a `resourceGroup`:
 | `subscription` + `resourceGroup` | RG-level | Both subscription and RG-scoped steps |
 | `subscription` only | Subscription-level | `scope: subscription` steps only |
 
-**RG-level sites** are the most common. They deploy resources into a specific resource group.
-
-**Subscription-level sites** deploy shared resources once per subscription (like Azure Edge Sites), then RG-level sites in that subscription can reference those outputs via cross-scope output chaining.
+RG-level sites are the common case. Subscription-level sites deploy shared resources once per subscription (like Azure Edge Sites). RG-level sites in the same subscription pick up those outputs via cross-scope output chaining.
 
 ## Site structure
 
@@ -60,41 +58,9 @@ properties:
     enableSecretSync: true
 ```
 
-### Site identity (filename vs `name:`)
+### Site identity
 
-By convention the internal `name:` field equals the filename without
-extension (`sites/munich-dev.yaml` declares `name: munich-dev`). When
-they match, this is the site's only identity and everything keys off
-it.
-
-If you want a friendlier or longer identifier without renaming the
-file (or vice versa), set `name:` to anything you like and siteops
-resolves the site by either form symmetrically:
-
-```yaml
-# sites/seattle.yaml
-apiVersion: siteops/v1
-kind: Site
-name: contoso-edge-seattle   # any identifier you want
-...
-```
-
-Both work as identifiers everywhere a site is referenced:
-
-```bash
-siteops -w workspaces/X sites contoso-edge-seattle --render   # internal name
-siteops -w workspaces/X sites seattle --render                # filename
-siteops -w workspaces/X deploy <manifest> -l name=contoso-edge-seattle
-```
-
-Workspace invariants enforced at load time:
-
-- Every internal `name:` is unique across the workspace.
-- No internal `name:` may equal another file's name (without
-  extension), since that would create ambiguous resolution.
-
-A clear `ValueError` surfaces at load time when either invariant is
-violated.
+A site is reachable by its filename basename, its relative path under the trusted directory, or its internal `name:` field. The three forms are symmetric. By convention `name:` matches the basename, but it can differ when a friendlier identifier is needed. See [targeting.md](targeting.md) for the full identity model and the workspace invariants the orchestrator enforces at load time.
 
 **Subscription-level site** (for shared resources):
 
@@ -306,7 +272,7 @@ Extras cannot collide with the workspace's own `sites/` or `sites.local/` direct
 
 ### Discovery walks subdirectories
 
-Every trusted directory (`sites/`, each extras dir, `sites.local/`) is scanned recursively. A site at any depth is reachable by its basename (filename without extension), by its rel-path under the trusted dir, or by its internal `name:` field. Basename uniqueness within each trusted dir is enforced at load time so the basename shorthand always resolves unambiguously. Cross-dir basename collisions are valid only when the rel-path also matches (the overlay pattern).
+Every trusted directory (`sites/`, each extras dir, `sites.local/`) is scanned recursively. A site at any depth is reachable by its basename (filename without extension), by its relative path under the trusted dir, or by its internal `name:` field. Basename uniqueness within each trusted dir is enforced at load time so the basename shorthand always resolves unambiguously. Cross-dir basename collisions are valid only when the relative path also matches (the overlay pattern).
 
 | Path | Kind | Reachable via |
 |---|---|---|

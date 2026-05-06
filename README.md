@@ -66,7 +66,38 @@ Site Ops deploys infrastructure through Azure Resource Manager, the native contr
 
 ## Quick start
 
-### Option 1: Use as a GitHub template (recommended)
+### Option 1: Run locally
+
+```bash
+# Clone the repository
+git clone https://github.com/Azure/digital-ops-scale-kit.git
+cd digital-ops-scale-kit
+
+# Install Site Ops
+pip install -e .
+
+# Authenticate with Azure
+az login
+
+# Run from the repo root. siteops auto-discovers the workspace
+# under `./workspaces/`. Pass `-w <dir>` to point it elsewhere.
+siteops -w workspaces/iot-operations sites
+
+# Subsequent commands can drop -w when run from the repo root.
+siteops validate manifests/aio-install.yaml
+siteops deploy manifests/aio-install.yaml --dry-run
+siteops deploy manifests/aio-install.yaml -l environment=dev
+```
+
+### Prerequisites
+
+- Python 3.10+
+- [Azure CLI](https://docs.microsoft.com/cli/azure/install-azure-cli) installed and authenticated
+- For kubectl steps: `kubectl` in PATH
+
+### Option 2: Use as a GitHub template
+
+The local path above proves the tool works. To productionize as a CI/CD pipeline:
 
 1. **Create your repository**:
    - Click **Use this template** → **Create a new repository**
@@ -84,17 +115,7 @@ Site Ops deploys infrastructure through Azure Resource Manager, the native contr
 
 3. **Configure site overrides** (optional):
 
-   The included sites use placeholder subscription IDs. To deploy to real Azure resources, create a `SITE_OVERRIDES` secret with your actual values:
-
-   ```json
-   {
-     "munich-dev": {
-       "subscription": "your-subscription-id",
-       "resourceGroup": "your-resource-group",
-       "parameters.clusterName": "your-arc-cluster"
-     }
-   }
-   ```
+   The included sites use placeholder subscription IDs. To deploy to real Azure resources, create a `SITE_OVERRIDES` secret with your actual values. See [docs/ci-cd-setup.md](docs/ci-cd-setup.md#site-overrides) for the JSON shape.
 
 4. **Configure environments** (optional):
    - Create `dev`, `staging`, `prod` environments in repository settings
@@ -104,38 +125,6 @@ Site Ops deploys infrastructure through Azure Resource Manager, the native contr
    - Go to **Actions** → **Deploy** → **Run workflow**
    - Select a manifest and environment
    - Monitor progress in the workflow logs
-
-### Option 2: Run locally
-
-```bash
-# Clone the repository
-git clone https://github.com/Azure/digital-ops-scale-kit.git
-cd digital-ops-scale-kit
-
-# Install Site Ops
-pip install -e .
-
-# Authenticate with Azure
-az login
-
-# List available sites
-siteops -w workspaces/iot-operations sites
-
-# Validate manifest and all referenced files
-siteops -w workspaces/iot-operations validate manifests/aio-install.yaml
-
-# Dry run (show commands without executing)
-siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml --dry-run
-
-# Deploy to dev sites
-siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml -l "environment=dev"
-```
-
-### Prerequisites
-
-- Python 3.10+
-- [Azure CLI](https://docs.microsoft.com/cli/azure/install-azure-cli) installed and authenticated
-- For kubectl steps: `kubectl` in PATH
 
 ---
 
@@ -160,6 +149,7 @@ digital-ops-scale-kit/
 │   ├── aio-releases.md           # AIO release pinning, upgrades, adding a new release
 │   ├── ci-cd-setup.md            # GitHub Actions, Azure DevOps, OIDC, secrets
 │   ├── e2e-testing.md            # End-to-end live-subscription test workflow
+│   ├── manifest-includes.md      # Splicing one manifest into another via `include:`
 │   ├── manifest-reference.md     # Manifest syntax, step types
 │   ├── parameter-resolution.md   # Variables, output chaining
 │   ├── secret-sync.md            # Secret sync enablement and usage
@@ -263,7 +253,7 @@ auto-filtering, merge order, and cross-scope output chaining.
 | Command | Description |
 |---------|-------------|
 | `siteops sites` | List sites in the workspace |
-| `siteops sites <name>` | Inspect one site (basename, rel-path, or internal `name:`) |
+| `siteops sites <name>` | Inspect one site (basename, relative path, or internal `name:`) |
 | `siteops sites <name> -v` | Show every value with the source file it came from after inherits and overlays |
 | `siteops sites <name> --render` | Show the resolved YAML after inheritance and overlays |
 | `siteops validate <manifest>` | Validate manifest and all references |
@@ -278,7 +268,7 @@ auto-filtering, merge order, and cross-scope output chaining.
 | `-w, --workspace` | Workspace directory | current dir, walking upward to the nearest `sites/` ancestor |
 | `-l, --selector` | Filter sites by label. Repeatable. `name=` may carry multiple values (OR-combined). | none |
 | `-p, --parallel` | Max concurrent sites for `deploy`. Accepts a positive integer, or `max`/`auto`/`0` for unlimited | manifest setting |
-| `--extra-sites-dir` | Additional trusted `sites/` directory. Repeatable. Also accepts `SITEOPS_EXTRA_SITES_DIRS` | none |
+| `--extra-sites-dir` | Additional trusted `sites/` directory. Repeatable. Also accepts `SITEOPS_EXTRA_SITES_DIRS`. CLI wins on conflict | none |
 
 See [docs/targeting.md](docs/targeting.md) for the selector grammar and the no-match diagnostic.
 
@@ -324,6 +314,8 @@ parameters:
   clusterName: seattle-prod-arc
 ```
 
+Sites can live at any depth under `sites/`. Use `sites/regions/eu/munich.yaml` to group by region. Basenames must remain unique within the trusted directory tree. See [docs/targeting.md](docs/targeting.md) for the identity model.
+
 ### Add conditional steps
 
 ```yaml
@@ -366,6 +358,7 @@ See [docs/ci-cd-setup.md](docs/ci-cd-setup.md) for detailed configuration.
 | [docs/site-configuration.md](docs/site-configuration.md) | Site definitions, inheritance, overlays |
 | [docs/targeting.md](docs/targeting.md) | Selector grammar, site identity, no-match diagnostic |
 | [docs/manifest-reference.md](docs/manifest-reference.md) | Manifest syntax, step types, conditions |
+| [docs/manifest-includes.md](docs/manifest-includes.md) | Splicing one manifest into another via `include:` |
 | [docs/parameter-resolution.md](docs/parameter-resolution.md) | Template variables, output chaining, auto-filtering |
 | [docs/aio-releases.md](docs/aio-releases.md) | Pinning an AIO release per site, in-place upgrades, adding a new release |
 | [docs/secret-sync.md](docs/secret-sync.md) | Secret sync enablement and usage |

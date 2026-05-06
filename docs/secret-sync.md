@@ -39,11 +39,7 @@ resolve-aio                          enable-secretsync
 └──────────────────────────┘         └──────────────────────────────────┘
 ```
 
-**Step 1, Resolve**: `resolve-aio.bicep` reads the existing IoT Operations instance and resolves the full infrastructure chain (instance → custom location → connected cluster) without creating or modifying any resources. It outputs everything downstream templates need.
-
-**Step 2, Enable**: `enable-secretsync.bicep` receives all resolved values via [output chaining](parameter-resolution.md#output-chaining) and provisions the secret sync resources.
-
-This pattern keeps templates portable. `enable-secretsync.bicep` never makes assumptions about naming conventions or directory layout.
+`resolve-aio.bicep` is read-only and outputs everything downstream needs. `enable-secretsync.bicep` receives those values via [output chaining](parameter-resolution.md#output-chaining) and provisions the secret sync resources. The split keeps `enable-secretsync.bicep` portable across naming conventions.
 
 ### Output chaining
 

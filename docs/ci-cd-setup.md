@@ -187,27 +187,27 @@ Override subscription, resource group, and parameters per site. Supports nested 
 {
   "munich-dev": {
     "subscription": "00000000-0000-0000-0000-000000000000",
-    "resourceGroup": "rg-aio-munich-dev",
-    "parameters.clusterName": "arc-muc-dev-01"
+    "resourceGroup": "rg-iot-munich-dev",
+    "parameters.clusterName": "munich-dev-arc"
   },
   "munich-prod": {
     "subscription": "00000000-0000-0000-0000-000000000000",
-    "resourceGroup": "rg-aio-munich-prod",
-    "parameters.clusterName": "arc-muc-prod-01"
+    "resourceGroup": "rg-iot-munich-prod",
+    "parameters.clusterName": "munich-prod-arc"
   },
   "seattle-dev": {
     "subscription": "00000000-0000-0000-0000-000000000000",
-    "resourceGroup": "rg-aio-seattle-dev",
+    "resourceGroup": "rg-iot-seattle-dev",
     "parameters.clusterName": "arc-sea-dev-01"
   },
   "seattle-prod": {
     "subscription": "00000000-0000-0000-0000-000000000000",
-    "resourceGroup": "rg-aio-seattle-prod",
+    "resourceGroup": "rg-iot-seattle-prod",
     "parameters.clusterName": "arc-sea-prod-01"
   },
   "chicago-staging": {
     "subscription": "00000000-0000-0000-0000-000000000000",
-    "resourceGroup": "rg-aio-chicago-staging",
+    "resourceGroup": "rg-iot-chicago-staging",
     "parameters.clusterName": "arc-chi-staging-01"
   }
 }

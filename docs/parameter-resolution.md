@@ -39,7 +39,7 @@ clExtensionIds: "{{ steps.aio-enablement.outputs.clExtensionIds }}"
 
 > **Note**: Output chaining only works during real deployments. In `--dry-run` mode, output templates remain unresolved.
 
-### `parameters/` layout
+## `parameters/` layout
 
 The directory groups files by the role they play in the parameter merge:
 
@@ -56,7 +56,7 @@ When one chaining file would be shared by multiple consumer steps **within the s
 
 Samples co-locate their input and output files inside `samples/<name>/` rather than `parameters/`. The roles are the same; only the location differs.
 
-### Cross-scope output chaining
+## Cross-scope output chaining
 
 RG-level sites can reference outputs from subscription-scoped steps. Subscription outputs are keyed by subscription ID and resolved automatically:
 

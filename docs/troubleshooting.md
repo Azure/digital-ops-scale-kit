@@ -12,7 +12,7 @@ Error: Site 'munich-dev' not found
 
 **Cause**: Site file doesn't exist or has wrong name.
 
-**Solution**: Check `sites/` directory. The site basename, rel-path, or internal `name:` must match the identifier referenced in the manifest. See [targeting.md](targeting.md) for the identity model.
+**Solution**: Check `sites/` directory. The site basename, relative path, or internal `name:` must match the identifier referenced in the manifest. See [targeting.md](targeting.md) for the identity model.
 
 ### "CLI selector matched no sites"
 

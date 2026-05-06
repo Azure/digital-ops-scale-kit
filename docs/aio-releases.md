@@ -68,7 +68,7 @@ Use `aio-upgrade.yaml` to move a site to a newer `aioRelease`. It bumps the Arc 
 
 The IoT Operations instance ARM resource has no writable version property and is not mutated by this manifest. New instance child resource types introduced by future AIO releases (broker properties, dataflow profile schema changes, etc.) are out of scope and will need a future tier of upgrade manifests.
 
-```
+```bash
 # 1. Bump aioRelease on the site (or its parent) to the new YAML filename (without extension).
 # 2. Deploy the upgrade manifest:
 siteops -w workspaces/iot-operations deploy manifests/aio-upgrade.yaml -l "name=<site>"
