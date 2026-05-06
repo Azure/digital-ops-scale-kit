@@ -435,7 +435,7 @@ _SELECTOR_HELP = (
     "Filter sites by labels (e.g., `environment=prod`, `name=munich-dev`). "
     "Repeatable: multiple `-l` flags AND-combine across distinct keys. "
     "Duplicate `name=` values OR-combine; any other duplicate key is an "
-    "error. `name=` accepts the basename, the rel-path under a trusted "
+    "error. `name=` accepts the basename, the relative path under a trusted "
     "`sites/` dir, or the file's internal `name:` field."
 )
 

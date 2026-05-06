@@ -997,12 +997,12 @@ class TestGetAllSiteNames:
 
 
 class TestSiteIdentityResolution:
-    """Sites can be resolved by either filename stem or internal `name:`.
+    """Sites can be resolved by either filename or internal `name:`.
 
-    Today most workspace sites use a `name:` that matches the filename
-    stem. The bilingual lookup lets an operator declare a different
-    `name:` (for renames or human-readable identifiers) and still have
-    the site resolve from CLI selectors and `Orchestrator.load_site`.
+    Today most workspace sites use a `name:` that matches the filename.
+    The bilingual lookup lets an operator declare a different `name:`
+    (for renames or human-readable identifiers) and still have the site
+    resolve from CLI selectors and `Orchestrator.load_site`.
     """
 
     def _write_site(self, workspace, filename, internal_name, **extra):
@@ -1021,14 +1021,14 @@ class TestSiteIdentityResolution:
         return path
 
     def test_load_by_filename_stem_when_name_matches(self, tmp_workspace):
-        """The common case: name == stem. Stem fast path wins."""
+        """The common case: name matches the filename. Filename fast path wins."""
         self._write_site(tmp_workspace, "munich-dev.yaml", "munich-dev")
         orchestrator = Orchestrator(tmp_workspace)
         site = orchestrator.load_site("munich-dev")
         assert site.name == "munich-dev"
 
     def test_load_by_filename_stem_when_name_overridden(self, tmp_workspace):
-        """Stem still resolves even when internal name differs."""
+        """Filename still resolves even when internal name differs."""
         self._write_site(tmp_workspace, "seattle.yaml", "contoso-edge")
         orchestrator = Orchestrator(tmp_workspace)
         site = orchestrator.load_site("seattle")
@@ -1060,7 +1060,7 @@ class TestSiteIdentityResolution:
         self._write_site(tmp_workspace, "seattle.yaml", "contoso-edge")
         self._write_site(tmp_workspace, "tacoma.yaml", "contoso-edge")
         orchestrator = Orchestrator(tmp_workspace)
-        # Stem fast path still works for either file directly. The
+        # Filename fast path still works for either file directly. The
         # collision only surfaces when the index is built (on internal-
         # name lookup or any path that triggers the fallback).
         with pytest.raises(ValueError, match="Two sites declare the same"):
@@ -1070,7 +1070,7 @@ class TestSiteIdentityResolution:
         """A site cannot set `name: X` if `X.yaml` is another file in the workspace."""
         # File `seattle.yaml` declares `name: tacoma`. Another file
         # `tacoma.yaml` exists. The identifier "tacoma" is now ambiguous:
-        # stem lookup returns tacoma.yaml, internal-name lookup would
+        # filename lookup returns tacoma.yaml, internal-name lookup would
         # return seattle.yaml. Reject at index-build time.
         self._write_site(tmp_workspace, "seattle.yaml", "tacoma")
         self._write_site(tmp_workspace, "tacoma.yaml", "tacoma")
@@ -1089,24 +1089,24 @@ class TestSiteIdentityResolution:
         assert set(orchestrator._internal_name_index.keys()) == {"contoso-edge"}
 
     def test_collision_caught_via_stem_fast_path(self, tmp_workspace):
-        """Collision detection fires even when every lookup hits the stem
-        fast path. Without eager index build, a workspace with two sites
-        declaring the same internal `name:` would silently pass any
-        command that only resolves filename stems.
+        """Collision detection fires even when every lookup hits the
+        filename fast path. Without eager index build, a workspace with
+        two sites declaring the same internal `name:` would silently
+        pass any command that only resolves by filename.
         """
         self._write_site(tmp_workspace, "site-a.yaml", "shared")
         self._write_site(tmp_workspace, "site-b.yaml", "shared")
         orchestrator = Orchestrator(tmp_workspace)
-        # Both files have stems that resolve via the fast path. The
+        # Both files have filenames that resolve via the fast path. The
         # collision is in their internal `name:` fields. The eager
         # index build (triggered by _find_trusted_site_file) must
-        # surface the drift even though we never miss the stem path.
+        # surface the drift even though we never miss the filename path.
         with pytest.raises(ValueError, match="Two sites declare the same"):
             orchestrator.load_site("site-a")
 
     def test_shadow_caught_via_stem_fast_path(self, tmp_workspace):
-        """`name:` shadowing another file's stem is rejected at load
-        time even when every operator lookup happens to hit the stem
+        """`name:` shadowing another file's filename is rejected at load
+        time even when every operator lookup happens to hit the filename
         fast path."""
         self._write_site(tmp_workspace, "tacoma.yaml", "tacoma")
         self._write_site(tmp_workspace, "seattle.yaml", "tacoma")
@@ -1134,9 +1134,10 @@ class TestNestedSiteDiscovery:
     """Sites under nested subdirectories of `sites/` are discoverable.
 
     Discovery walks every subdirectory. Identity for a nested file is
-    its rel-path under the trusted dir (e.g., `regions/eu/munich-dev`),
-    AND its basename (e.g., `munich-dev`). The basename is unique by
-    workspace invariant so the shorthand is always unambiguous.
+    its relative path under the trusted dir (e.g.,
+    `regions/eu/munich-dev`), AND its basename (e.g., `munich-dev`). The
+    basename is unique by workspace invariant so the shorthand is always
+    unambiguous.
     """
 
     def _write_site(self, root, rel, internal_name):
@@ -1233,7 +1234,7 @@ class TestNestedSiteDiscovery:
             tmp_workspace, Path("sites/regions/eu/munich.yaml"), "munich"
         )
         # Another flat site declares a `name:` that matches the nested
-        # rel-path identifier. The internal-name index build must reject.
+        # relative-path identifier. The internal-name index build must reject.
         flat = tmp_workspace / "sites" / "alias.yaml"
         with open(flat, "w", encoding="utf-8") as f:
             yaml.dump(
@@ -1255,7 +1256,7 @@ class TestNestedSiteDiscovery:
         self, tmp_workspace, tmp_path
     ):
         """Two trusted dirs cannot have the same basename at different
-        rel-paths. That would let the basename refer to two distinct
+        relative paths. That would let the basename refer to two distinct
         sites."""
         self._write_site(
             tmp_workspace, Path("sites/regions/eu/munich.yaml"), "munich-eu"
@@ -1269,9 +1270,9 @@ class TestNestedSiteDiscovery:
     def test_cross_dir_basename_collision_same_rel_path_is_overlay(
         self, tmp_workspace, tmp_path
     ):
-        """Same basename at the same rel-path across trusted dirs is a
-        legitimate overlay. The overlay restates the same name (matches
-        the base) and merges other fields on top."""
+        """Same basename at the same relative path across trusted dirs
+        is a legitimate overlay. The overlay restates the same name
+        (matches the base) and merges other fields on top."""
         self._write_site(
             tmp_workspace, Path("sites/regions/eu/munich.yaml"), "munich"
         )

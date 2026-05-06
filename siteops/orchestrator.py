@@ -143,7 +143,7 @@ class Orchestrator:
         #   workspace-wide so `-l name=munich-dev` resolves unambiguously
         #   under nested `sites/` subdirectories.
         # - rel_path_index: `regions/eu/munich-dev` to abs path. Used
-        #   for path-form lookups (`sites: [regions/eu/munich-dev]`).
+        #   for relative-path lookups (`sites: [regions/eu/munich-dev]`).
         # - internal_name_index: declared `name:` to abs path. Lets a
         #   site resolve by an internal name distinct from its filename.
         self._basename_index: dict[str, Path] | None = None
@@ -332,7 +332,7 @@ class Orchestrator:
                     yield sites_dir, path
 
     def _build_site_indexes(self) -> tuple[dict[str, Path], dict[str, Path], dict[str, Path]]:
-        """Walk trusted dirs and build the basename, rel-path, and
+        """Walk trusted dirs and build the basename, relative-path, and
         internal-name indexes.
 
         Workspace-load invariants enforced during the build:
@@ -341,12 +341,12 @@ class Orchestrator:
           across all subdirectories. Lets `-l name=munich-dev` resolve
           unambiguously when nested layouts are used.
         - Across trusted directories, basename collisions are
-          legitimate overlays only when the rel-path also matches.
-          Cross-dir collisions where the rel-path differs would create
-          two distinct logical sites sharing one identifier and are
-          rejected.
+          legitimate overlays only when the relative path also matches.
+          Cross-directory collisions where the relative path differs
+          would create two distinct logical sites sharing one identifier
+          and are rejected.
         - No internal `name:` collides with another file's basename.
-        - No internal `name:` collides with another file's rel-path
+        - No internal `name:` collides with another file's relative path
           (the path-form identifier).
         - No two sites declare the same internal `name:`.
 
@@ -381,9 +381,10 @@ class Orchestrator:
                         f"unambiguously. Rename one of the files."
                     )
                 dir_basenames[basename] = path
-                # Cross-dir basename collisions are only valid overlays
-                # when the rel-path also matches. Otherwise the same
-                # identifier would refer to two distinct logical sites.
+                # Cross-directory basename collisions are only valid
+                # overlays when the relative path also matches. Otherwise
+                # the same identifier would refer to two distinct logical
+                # sites.
                 existing_basename = basename_to_path.get(basename)
                 if existing_basename is not None:
                     existing_rel = self._canonical_site_id(existing_basename)
@@ -391,13 +392,14 @@ class Orchestrator:
                         raise ValueError(
                             f"Cross-directory basename `{basename}` "
                             f"collision between `{existing_basename}` "
-                            f"and `{path}`. Cross-dir basename matches "
-                            f"are valid only when the rel-path also "
-                            f"matches (overlay). Different rel-paths "
-                            f"would let `-l name={basename}` refer to "
-                            f"two distinct sites. Rename one of the files."
+                            f"and `{path}`. Cross-directory basename "
+                            f"matches are valid only when the relative "
+                            f"path also matches (overlay). Different "
+                            f"relative paths would let `-l name={basename}` "
+                            f"refer to two distinct sites. Rename one of "
+                            f"the files."
                         )
-                # First trusted dir wins on basename and rel-path
+                # First trusted dir wins on basename and relative path
                 # (overlay semantics).
                 basename_to_path.setdefault(basename, path)
                 rel_path_to_path.setdefault(rel_path, path)
@@ -844,7 +846,7 @@ class Orchestrator:
         need to know about the on-disk envelope.
 
         Args:
-            name: Basename, rel-path, or internal `name:` value.
+            name: Basename, relative path, or internal `name:` value.
 
         Returns:
             `(site, provenance)` where `site` is the fully resolved
@@ -925,8 +927,8 @@ class Orchestrator:
     def load_site(self, name: str) -> Site:
         """Load a site by name, applying inheritance and local overlays.
 
-        `name` may be the site file's basename, its rel-path under a
-        trusted `sites/` directory, OR its internal `name:` field. All
+        `name` may be the site file's basename, its relative path under
+        a trusted `sites/` directory, OR its internal `name:` field. All
         three forms are symmetric (see `_find_trusted_site_file`).
 
         Resolution order (later sources override earlier):
@@ -934,12 +936,12 @@ class Orchestrator:
         2. Base site file from `sites/` or any extra trusted dir (first
            trusted dir containing the file wins).
         3. Overlays from any remaining trusted dirs (`inherits` stripped).
-        4. Local overlay from `sites.local/<rel-path>.yaml` if present
-           (`inherits` stripped). Keyed by the rel-path of the base file
-           under its trusted dir, so nested sites have nested overlays.
+        4. Local overlay from `sites.local/<relative-path>.yaml` if present
+           (`inherits` stripped). Keyed by the relative path of the base
+           file under its trusted dir, so nested sites have nested overlays.
 
         Args:
-            name: Basename, rel-path, OR internal `name:` value.
+            name: Basename, relative path, OR internal `name:` value.
 
         Returns:
             Fully resolved Site instance.
@@ -972,8 +974,8 @@ class Orchestrator:
             raise FileNotFoundError(f"Site file not found: {name} (searched {where})")
 
         # Canonical id keys the overlay merge in `_load_site_data`.
-        # Equal to the basename for flat layouts, or to the rel-path
-        # under the owning trusted dir for nested layouts.
+        # Equal to the basename for flat layouts, or to the relative
+        # path under the owning trusted dir for nested layouts.
         canonical_id = self._canonical_site_id(site_path)
         # Default `Site.name` is the basename. Unique by invariant.
         default_name = site_path.stem
@@ -994,9 +996,9 @@ class Orchestrator:
         site = self._parse_site_dict(merged_data, site_path, default_name, source_name=name)
 
         # Cache under every form the caller might use later. Always
-        # under the canonical id (basename or rel-path) and the internal
-        # name. Also under whatever the caller actually passed (and its
-        # normalized form, if a path-form identifier).
+        # under the canonical id (basename or relative path) and the
+        # internal name. Also under whatever the caller actually passed
+        # (and its normalized form, if a path-form identifier).
         with self._cache_lock:
             self._site_cache[canonical_id] = site
             if default_name != canonical_id:
