@@ -91,7 +91,7 @@ This policy applies only to samples. Fundamentals (`templates/aio/`, `templates/
 ## Adding a new AIO release
 
 1. **Ship the release YAML.** Create `parameters/aio-releases/<release>.yaml` with all eight fields (`aioVersion`, `aioTrain`, `aioApiVersion`, `adrApiVersion`, `certManagerVersion`, `certManagerTrain`, `secretStoreVersion`, `secretStoreTrain`).
-2. **If `aioApiVersion` is new**, extend the dispatch in both Bicep routers:
+2. **If `aioApiVersion` is new**, extend the dispatch in both Bicep dispatchers:
    - `templates/aio/instance.bicep`: add to `@allowed` on `param aioApiVersion`, add a new conditional `module instance_<YYYY>` block, push the previously-newest version from `else` into an explicit equality, make the new version the `else`.
    - `templates/aio/modules/update-instance.bicep`: same pattern. The file header has a checklist.
    - Add `templates/aio/modules/instance-<YYYY-MM-DD>.bicep` and `update-instance-<YYYY-MM-DD>.bicep`. Start by copying the previous API version's modules verbatim and change only the API version strings. Diverge per-module only when the schema actually changes.
@@ -103,7 +103,7 @@ This policy applies only to samples. Fundamentals (`templates/aio/`, `templates/
    - `test_version_config_api_versions_are_allowed_in_bicep`: every `aioApiVersion` must appear in both AIO dispatchers' `@allowed` lists.
    - `test_version_config_adr_api_versions_are_allowed_in_bicep`: every `adrApiVersion` must appear in the ADR dispatcher's `@allowed` list.
    - `test_all_sites_aio_releases_have_config_files`: no site references a missing YAML file.
-   - `TestUpdateInstanceDispatch`: every param of the update-instance router is forwarded by every caller.
+   - `TestUpdateInstanceDispatch`: every param of the update-instance dispatcher is forwarded by every caller.
 6. **Decide the default for new sites.** If the new release should be the workspace default, update `aioRelease:` in `sites/base-site.yaml`. Sites that don't override `properties.aioRelease` will then pick it up on the next deploy. If the new release is opt-in only, leave the base alone and pin specific sites individually.
 7. **Test live**: dispatch the E2E workflow including the new release in `aio-releases`:
    ```
@@ -119,7 +119,7 @@ Four layers catch release misconfigurations before they reach production:
 |-------|-------|--------------|
 | Workflow prep job | Every requested `aio-releases` entry has a matching YAML | E2E dispatch (`e2e-test.yaml`) |
 | Workspace unit tests | `@allowed` membership, all-sites coverage, base-site coverage | Every CI run |
-| Workspace unit tests | `TestUpdateInstanceDispatch`: caller-vs-router param parity | Every CI run |
+| Workspace unit tests | `TestUpdateInstanceDispatch`: caller-vs-dispatcher param parity | Every CI run |
 | Live integration | Deployed `aioExtension.version` equals YAML's `aioVersion` | E2E matrix (per cell) |
 
 ## See also

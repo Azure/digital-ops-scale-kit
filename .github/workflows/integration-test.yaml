@@ -34,9 +34,10 @@ env:
 concurrency:
   # Shared `azure-${env}` lock so a deploy and an integration test
   # against the same environment serialize. They both touch live Azure
-  # resources and an integration test mid-deploy can flake.
+  # resources and an integration test mid-deploy can flake. Tests can
+  # be safely superseded by a newer run on the same env.
   group: azure-${{ inputs.environment }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   integration-test:

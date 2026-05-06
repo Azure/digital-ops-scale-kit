@@ -53,7 +53,8 @@ Duplicate values for any other key raise an error pointing at the conflict, sinc
 
 ```bash
 siteops deploy manifests/aio-install.yaml -l env=dev -l env=prod
-# Error: Selector key 'env' may only appear once. Only the `name` key
+# Error: Selector key `env` may only appear once. Selectors AND across
+# keys, so duplicating a key would always match zero sites. Only `name=`
 # supports multiple values (OR-combined).
 ```
 
@@ -146,7 +147,7 @@ Manifest selectors that match zero sites warn but still exit zero.
 
 ## Pitfalls
 
-- **`-l env=prod -l env=dev` errors.** Duplicate non-name keys are rejected. If you genuinely want a union (rare), run twice or use a label that distinguishes the cohorts.
+- **`-l env=prod -l env=dev` errors.** Selectors AND across keys, so duplicating a non-name key would always match zero sites. To target multiple cohorts, run two commands or add a label that spans them.
 - **`-l name=path/to/site` works but is rare in practice.** The basename form is shorter and just as unambiguous when the basename invariant holds.
 - **Adding a nested site that collides on basename fails the workspace load.** Rename one of the colliding files. The error message names both paths.
 - **An overlay in `sites.local/` cannot rename a site.** It may restate the same `name:` (common when the overlay mirrors the base shape) but cannot change it. The same rule applies to a file in an extras dir that overlays a base file at the same path under `sites/`. Use `inherits:` or rename the base file instead.

@@ -217,7 +217,12 @@ jobs:
         if: always()
         shell: bash
         run: |
+          # Stop the OIDC refresh first so it cannot re-auth post-logout.
+          # `kill <subshell-pid>` does not interrupt the loop's blocking
+          # `sleep`; kill the subshell's children too via pkill -P.
           if [[ -f "$RUNNER_TEMP/oidc-refresh.pid" ]]; then
-            kill "$(cat "$RUNNER_TEMP/oidc-refresh.pid")" 2>/dev/null || true
+            pid="$(cat "$RUNNER_TEMP/oidc-refresh.pid")"
+            pkill -TERM -P "$pid" 2>/dev/null || true
+            kill -TERM "$pid" 2>/dev/null || true
           fi
           az logout || true

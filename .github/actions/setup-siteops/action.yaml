@@ -1,5 +1,5 @@
 name: "Setup Site Ops"
-description: "Install Python and Site Ops"
+description: "Install Python and Site Ops. Stable input contract documented in docs/ci-cd-setup.md."
 
 inputs:
   python-version:
@@ -11,7 +11,7 @@ inputs:
     required: false
     default: "false"
   siteops-source:
-    description: "siteops install source (empty = local editable install)"
+    description: "siteops install source. Empty = local editable install. Pin to a tag or SHA (mutable refs share a cache slot)."
     required: false
     default: ""
 

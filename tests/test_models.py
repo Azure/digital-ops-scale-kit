@@ -75,7 +75,7 @@ class TestParseSelector:
             parse_selector("env=prod,env=dev")
 
     def test_non_name_duplicate_key_error_mentions_name_rule(self):
-        with pytest.raises(ValueError, match="`name`"):
+        with pytest.raises(ValueError, match=r"`name=`"):
             parse_selector("region=eastus,region=westus")
 
     def test_name_and_other_keys_combine(self):

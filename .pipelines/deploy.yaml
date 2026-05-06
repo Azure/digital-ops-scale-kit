@@ -40,6 +40,11 @@ parameters:
     type: boolean
     default: false
 
+  - name: siteopsSource
+    displayName: siteops install source (e.g. git+https://github.com/.../digital-ops-scale-kit@<tag>). Empty = local editable install.
+    type: string
+    default: ' '
+
   # Per-environment lookup tables. To split resources per environment,
   # change the values below. No structural changes needed.
   - name: serviceConnections
@@ -135,3 +140,5 @@ stages:
       ${{ else }}:
         selector: environment=${{ parameters.environment }}
       dryRun: ${{ parameters.dryRun }}
+      ${{ if not(in(parameters.siteopsSource, '', ' ')) }}:
+        siteopsSource: ${{ parameters.siteopsSource }}

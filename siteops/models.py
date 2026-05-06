@@ -189,8 +189,10 @@ def parse_selector(selector: str | None) -> dict[str, list[str]]:
         if key in labels:
             if key != "name":
                 raise SelectorParseError(
-                    f"Selector key '{key}' may only appear once. Only the "
-                    f"`name` key supports multiple values (OR-combined)."
+                    f"Selector key `{key}` may only appear once. Selectors "
+                    f"AND across keys, so duplicating a key would always "
+                    f"match zero sites. Only `name=` supports multiple "
+                    f"values (OR-combined)."
                 )
             if value not in labels[key]:
                 labels[key].append(value)

@@ -1,3 +1,5 @@
+# Used by e2e-test.yaml. Mutates the runner with systemd k3s.
+#
 # Create a single-node k3s cluster on the runner.
 #
 # Reference (not a verbatim port): Azure/azure-iot-ops-cli-extension
@@ -12,7 +14,7 @@
 # Constraint: assumes a runner with systemd (GHA-hosted ubuntu-latest does).
 
 name: Create k3s cluster
-description: Internal E2E composite. Install and start a single-node k3s cluster, write kubeconfig.
+description: Used by e2e-test.yaml. Install and start a single-node k3s cluster, write kubeconfig.
 
 inputs:
   version:

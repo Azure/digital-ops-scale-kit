@@ -22,7 +22,7 @@ This guide covers CI/CD configuration for automated testing and deployments. Sit
 | `ci.yaml` | Push, pull request, manual | Validate Bicep templates, run unit tests, and validate manifests |
 | `deploy.yaml` | Manual (`workflow_dispatch`) | Deploy infrastructure to Azure |
 | `_siteops-deploy.yaml` | Called by deploy.yaml | Reusable deployment logic |
-| `integration-test.yaml` | Manual (`workflow_dispatch`) | Deploy a manifest against real Azure and assert outputs |
+| `integration-test.yaml` | Manual (`workflow_dispatch`) | Run the integration pytest suite against an environment that was previously deployed via `deploy.yaml` |
 | `e2e-test.yaml` | Manual (`workflow_dispatch`) | Full-stack E2E: k3s + Arc + AIO deploy + integration tests (see [E2E testing](e2e-testing.md)) |
 
 ### Azure OIDC Configuration
@@ -350,7 +350,7 @@ gh workflow run deploy.yaml -f workspace="iot-operations" -f manifest="scenarios
 │  5. Azure Login (OIDC)                                      │
 │  6. Start OIDC token refresh service (background)           │
 │  7. Run: siteops deploy                                     │
-│  8. Azure Logout                                            │
+│  8. Stop OIDC refresh and Azure Logout                      │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -365,7 +365,7 @@ See [ADO architecture](#ado-architecture) for the Azure DevOps equivalent.
 | **Input Validation** | Prevents path traversal and injection attacks | Same validation logic in pipeline scripts |
 | **Site Name Sanitization** | `SITE_OVERRIDES` keys validated against `^[a-zA-Z0-9_-]+$` | Same |
 | **Override Value Masking** | `::add-mask::` per value | `##vso[task.setvariable issecret=true]` per value |
-| **Concurrency Control** | `concurrency` groups (one deploy per env) | Exclusive lock on ADO environments |
+| **Concurrency Control** | `concurrency` groups (one deploy or integration-test per env, shared `azure-${env}` group) | Exclusive lock on ADO environments |
 | **Least Privilege** | `permissions:` block scopes GitHub token | Service connection authorization scopes access |
 | **Token Refresh** | Background OIDC refresh every 4 min | Not needed (`AzureCLI@2` manages lifecycle) |
 | **Credential Isolation** | `persist-credentials: false` on checkout | `persistCredentials: false` on checkout |
@@ -379,7 +379,8 @@ See [ADO architecture](#ado-architecture) for the Azure DevOps equivalent.
 │                                                             │
 │  GitHub Actions:                                            │
 │  • Environment protection rules (approvals, branch gates)   │
-│  • Concurrency prevents parallel deploys to same env        │
+│  • Concurrency prevents parallel deploys or integration-tests│
+│    to the same env                                          │
 │  • Minimal permissions (contents: read, id-token: write)    │
 │                                                             │
 │  Azure DevOps:                                              │

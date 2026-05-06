@@ -215,8 +215,9 @@ pytest tests/integration/ -v -m integration
 | Pytest collects 0 integration tests | Selector does not match the rendered site, or `SITEOPS_EXTRA_SITES_DIRS` is unset. | Check `INTEGRATION_SELECTOR` equals the rendered site's `name:` field. |
 | Rendered output still contains `${...}` | Template references a variable not in `ALL_VARS`. | Add it to `REQUIRED_VARS` or `OPTIONAL_VARS` in `scripts/render-e2e-site.py`. |
 | AIO deploy fails with `AuthorizationFailed` on role assignment | SP is `Contributor`, not `Owner`. | Escalate to `Owner` on sub (ephemeral) or RG (persistent). |
-| Persistent-mode teardown leaves resources | The snapshot step failed or was skipped. | Inspect the step summary warning and the `Snapshot RG resources` step log; clean up residual resources manually. |
-| connect-arc times out waiting for `Connected` | OIDC issuer service is not reachable or Custom Locations RP object ID is wrong. | Verify prerequisite 2; re-run with `skip-teardown: true` and inspect `az connectedk8s show`. |
+| Persistent-mode teardown leaves resources | The snapshot step failed or was skipped. | Inspect the step summary warning and the `Snapshot RG resources` step log. Clean up residual resources manually. |
+| Step summary shows `incomplete in RG ... (N residual resource(s))` | One or more delta deletes did not converge in 5 retry passes. | Inspect the `[delete-failed pass=*]` warnings in the teardown step log. Clean up the named resources manually. For a connectedCluster, use `az connectedk8s delete -n <name> -g <rg> --yes --force`. |
+| connect-arc times out waiting for `Connected` | OIDC issuer service is not reachable or Custom Locations RP object ID is wrong. | Verify prerequisite 2. Re-run with `skip-teardown: true` and inspect `az connectedk8s show`. |
 
 ## Related docs
 

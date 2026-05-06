@@ -122,6 +122,8 @@ def cmd_validate(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     # `deploy` will hard-error without targeting. Surfacing this here
     # eliminates the validate-passes-then-deploy-fails confusion class.
     is_library_no_selector = False
+    import yaml as _yaml
+
     from siteops.models import Manifest as _Manifest
     try:
         _m = _Manifest.from_file(manifest_path, workspace_root=args.workspace)
@@ -134,12 +136,13 @@ def cmd_validate(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
                 "Pass `-l <key>=<value>` at deploy time, or run "
                 "`siteops validate <manifest> -l ...` to exercise resolution.\n"
             )
-    except Exception:
-        # Manifest parse already passed (we're past the errors block);
-        # any failure here is best-effort and shouldn't change exit code.
+    except (ValueError, OSError, _yaml.YAMLError):
+        # Manifest parse already passed in `validate` above; any failure
+        # here is best-effort and should not change the exit code.
+        # Programmer errors (AttributeError, RuntimeError) still propagate.
         pass
 
-    # Skip the plan render for a library manifest with no selector;
+    # Skip the plan render for a library manifest with no selector.
     # show_plan re-resolves and would re-raise NoTargetingError.
     if verbose and not is_library_no_selector:
         orchestrator.show_plan(manifest_path, selector=selector)

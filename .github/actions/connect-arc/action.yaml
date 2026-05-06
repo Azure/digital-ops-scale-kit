@@ -1,3 +1,6 @@
+# Used by e2e-test.yaml. Assumes a runner-local k3s installed by
+# create-k3s-cluster. Not a general-purpose Arc onboarding action.
+#
 # Connect a local Kubernetes cluster to Azure Arc and (optionally) configure
 # workload identity by reconfiguring the kube-apiserver's service-account-issuer.
 #
@@ -21,7 +24,7 @@
 # `~/.kube/config` points at the k3s cluster.
 
 name: Connect cluster to Azure Arc
-description: Internal E2E composite. az connectedk8s connect + optional workload-identity flow.
+description: Used by e2e-test.yaml. az connectedk8s connect + optional workload-identity flow.
 
 inputs:
   cluster-name:

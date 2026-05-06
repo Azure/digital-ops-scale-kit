@@ -74,6 +74,10 @@ jobs:
                 installDev: true
 
             - script: |
+                # set -o pipefail so a jq failure on malformed
+                # SITE_OVERRIDES surfaces as a step failure instead of
+                # silently leaving values unmasked while pytest runs.
+                set -o pipefail
                 if [[ -n "$SITE_OVERRIDES" ]]; then
                   echo "$SITE_OVERRIDES" | jq -r '.. | strings' | while IFS= read -r val; do
                     [[ -n "$val" ]] && echo "##vso[task.setvariable variable=masked;issecret=true]${val}"

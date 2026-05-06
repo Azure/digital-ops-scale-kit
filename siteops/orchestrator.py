@@ -2410,7 +2410,11 @@ class Orchestrator:
             selector: Parsed selector dict (from `parse_selector`).
 
         Returns:
-            Sorted list of matching sites, deduplicated by Site.name.
+            Matching Site instances. When the selector has a `name` key,
+            results are sorted by `Site.name` and deduplicated so a name
+            appearing in both the trusted-file and fallback sweeps is
+            returned once. Other selectors return the underlying
+            `load_all_sites()` order without an additional sort.
         """
         # When the operator explicitly names sites via `name=X` (or
         # repeated `name=X,name=Y`), route every name whose filename

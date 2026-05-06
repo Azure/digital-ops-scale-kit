@@ -168,11 +168,11 @@ To sync secrets as part of a manifest, add a step after enablement:
 ```
 templates/
 ├── aio/
-│   ├── resolve-aio.bicep                    # Read-only instance → CL → cluster resolution (router)
+│   ├── resolve-aio.bicep                    # Read-only instance → CL → cluster resolution (dispatcher)
 │   └── modules/
 │       ├── resolve-instance-2025-10-01.bicep  # Per-API-version instance read
 │       ├── resolve-instance-2026-03-01.bicep  # Per-API-version instance read
-│       └── update-instance.bicep            # Shared safe instance PUT (router); used by the secretsync flow
+│       └── update-instance.bicep            # Shared safe instance PUT (dispatcher) used by the secretsync flow
 ├── common/
 │   └── modules/
 │       ├── resolve-custom-location.bicep    # CL resource ID → name, namespace, hostResourceId
@@ -186,7 +186,7 @@ templates/
 
 ### Resolve modules
 
-`resolve-aio.bicep` is the entry point. It is a router on `aioApiVersion` (sourced from `parameters/aio-releases/<release>.yaml`) that dispatches the instance read to a per-API-version inner module, then chains the (version-stable) custom-location and connected-cluster lookups:
+`resolve-aio.bicep` is the entry point. It is a dispatcher on `aioApiVersion` (sourced from `parameters/aio-releases/<release>.yaml`) that dispatches the instance read to a per-API-version inner module, then chains the (version-stable) custom-location and connected-cluster lookups:
 
 | Module | Input | Outputs |
 |--------|-------|---------|
