@@ -635,28 +635,37 @@ jobs:
             echo "- Persistent-mode teardown skipped for RG \`$RG\` (snapshot missing)" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          # `az connectedk8s delete` and `az resource delete` against a
-          # connectedCluster both have caveats:
-          # - `connectedk8s delete` (without `--force`) reaches into the
-          #   cluster via the Arc proxy at 127.0.0.1:47021. The proxy
-          #   typically expires before teardown on long runs, so without
-          #   `--force` the call fails with "Connection refused".
-          # - `az resource delete` against `connectedClusters/<name>`
-          #   returns `ResourceDeletionValidateFailed` because the RP
-          #   requires the dedicated cluster-delete verb.
-          # `--force` skips the Arc-proxy-dependent path the CLI normally
-          # takes for in-cluster cleanup. It still loads the local
-          # kubeconfig (which is fine, the runner's k3s kubeconfig is
-          # still valid here) but tolerates the Arc-proxy expiry that
-          # caused the swallowed failures.
-          delete_arc_cluster() {
+          # `az connectedk8s delete` reaches into the cluster via the Arc
+          # proxy at 127.0.0.1:47021 to clean up agent CRDs. Even with
+          # `--force`, the CLI still runs a kube-connectivity check before
+          # the ARM call. The proxy expires before teardown on long runs
+          # (>70 minutes), so the connectivity check fails with
+          # "Connection refused" and the ARM delete never executes.
+          # `az resource delete` is also a dead end: the RP rejects the
+          # generic delete verb on connectedClusters with
+          # `ResourceDeletionValidateFailed`.
+          #
+          # Bypass both by calling the ARM REST API directly. The cluster
+          # is on a throwaway runner that dies with the job, so the
+          # in-cluster cleanup the CLI was trying to do is unnecessary.
+          # `az rest` defaults to `https://management.azure.com` when the
+          # `--uri` is a relative path, and uses the current az login
+          # token. The ARM DELETE is async (returns 202); the retry loop
+          # below re-lists and confirms the cluster eventually disappears.
+          delete_arc_cluster_arm() {
             local rg="$1" cluster="$2"
-            local out
-            if out=$(az connectedk8s delete -n "$cluster" -g "$rg" --force --yes --only-show-errors 2>&1); then
-              echo "[connectedk8s delete] $cluster (succeeded)"
+            local sub uri out
+            sub=$(az account show --query id -o tsv 2>/dev/null)
+            if [[ -z "$sub" ]]; then
+              echo "::warning::[connectedk8s delete] cannot resolve subscription id"
+              return 1
+            fi
+            uri="/subscriptions/${sub}/resourceGroups/${rg}/providers/Microsoft.Kubernetes/connectedClusters/${cluster}?api-version=2024-01-01"
+            if out=$(az rest --method DELETE --uri "$uri" --only-show-errors 2>&1); then
+              echo "[connectedk8s delete] $cluster (ARM DELETE accepted)"
               return 0
             fi
-            echo "::warning::[connectedk8s delete] $cluster failed; will retry via parallel delete pass"
+            echo "::warning::[connectedk8s delete] $cluster ARM DELETE failed; will retry via parallel delete pass"
             printf '%s\n' "$out" | sed "s/^/[connectedk8s delete $cluster] /"
             return 1
           }
@@ -666,7 +675,7 @@ jobs:
           if grep -qiE "/providers/Microsoft\.Kubernetes/connectedClusters/${CLUSTER}$" "$PRE_FILE"; then
             echo "Skipping cluster delete: Arc resource '$CLUSTER' pre-existed the snapshot (operator-owned)."
           else
-            delete_arc_cluster "$RG" "$CLUSTER"
+            delete_arc_cluster_arm "$RG" "$CLUSTER"
           fi
           LIST_OK=0
           redact() { sed -E 's/eyJ[A-Za-z0-9_.=-]{10,}/<redacted-jwt>/g' "$1"; }
@@ -695,20 +704,20 @@ jobs:
             # warning instead of silently swallowing it with `|| true`.
             #
             # connectedClusters cannot be removed via `az resource delete`
-            # (RP rejects with `ResourceDeletionValidateFailed`). Route
-            # those IDs through `az connectedk8s delete --force` instead.
-            # Match the top-level cluster only, not child resources under
-            # it (extensions, configurations, etc.) which the regex anchor
-            # excludes via the trailing `[^/]+$` shape inside the [[ ]].
+            # (RP rejects with `ResourceDeletionValidateFailed`) and
+            # `az connectedk8s delete` requires kube connectivity that has
+            # expired by teardown. Route those IDs through the ARM REST
+            # API directly. Match the top-level cluster only, not child
+            # resources under it (extensions, configurations, etc.) which
+            # the regex anchor excludes via the trailing `[^/]+$` shape.
             printf '%s\n' "$DELTA" | xargs -r -P 10 -I{} bash -c '
               id="$1"
               short="${id##*/}"
               if [[ "$id" =~ /providers/Microsoft\.Kubernetes/connectedClusters/[^/]+$ ]]; then
-                rg=$(printf "%s" "$id" | sed -E "s|.*/resourceGroups/([^/]+)/.*|\1|")
-                if out=$(az connectedk8s delete -n "$short" -g "$rg" --force --yes --only-show-errors 2>&1); then
-                  echo "[delete-ok pass=$2] $short (connectedk8s)"
+                if out=$(az rest --method DELETE --uri "${id}?api-version=2024-01-01" --only-show-errors 2>&1); then
+                  echo "[delete-ok pass=$2] $short (connectedk8s ARM)"
                 else
-                  echo "::warning::[delete-failed pass=$2] $short (connectedk8s)"
+                  echo "::warning::[delete-failed pass=$2] $short (connectedk8s ARM)"
                   printf "%s\n" "$out" | sed "s/^/[delete-failed $short] /"
                 fi
               elif out=$(az resource delete --ids "$id" --verbose 2>&1); then
