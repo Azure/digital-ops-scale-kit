@@ -225,6 +225,7 @@ CI runs automatically on pushes to main and PRs that modify:
 - `siteops/**`
 - `workspaces/**`
 - `tests/**`
+- `scripts/**`
 - `pyproject.toml`
 
 Can also be triggered manually from **Actions → CI → Run workflow** (GHA) or **Pipelines → CI → Run pipeline** (ADO).
@@ -530,6 +531,7 @@ stages:
 |-------|---------|-------------|
 | `python-version` | `3.11` | Python version to install |
 | `install-dev` | `false` | Include dev dependencies (pytest, pytest-cov) |
+| `siteops-source` | (empty) | pip install spec for siteops. Empty = local editable install. Set to `git+https://github.com/.../digital-ops-scale-kit@<ref>` to pin a release. |
 
 ```yaml
 - uses: ./.github/actions/setup-siteops
@@ -543,6 +545,8 @@ stages:
 |-----------|---------|-------------|
 | `pythonVersion` | `'3.11'` | Python version to install |
 | `installDev` | `false` | Include dev dependencies (pytest, pytest-cov) |
+| `siteopsSource` | (empty) | pip install spec for siteops. Empty = local editable install. |
+| `enableCache` | `true` | Cache the pip wheel directory across pipeline runs. Disable in deployment jobs (no cache scope available). |
 
 ```yaml
 - template: templates/setup-siteops.yaml
@@ -594,7 +598,7 @@ In ADO → **Pipelines → Environments** → create `dev`, `staging`, `prod`.
 | `staging` | 1 approver | Yes |
 | `prod` | 2 approvers | Yes |
 
-Exclusive lock ensures one deployment per environment at a time (equivalent to GitHub `concurrency` groups).
+Exclusive lock ensures one deployment per environment at a time. The GitHub Actions equivalent is the shared `azure-${env}` `concurrency` group on `deploy.yaml` and `integration-test.yaml`, so a deploy and an integration test against the same environment serialize on both platforms.
 
 To configure: **Environments → (select env) → Approvals and checks → + → Exclusive lock** and **+ → Approvals**.
 

@@ -60,7 +60,7 @@ on:
         type: string
         default: ""
       scenarios:
-        description: Comma-separated subset of scenarios to deploy + test. Empty = run all. Valid values; aio-install, secretsync, opc-ua-solution, aio-upgrade. Use this to keep the cluster focused for demos / interactive sessions (combine with keep-cluster-alive-minutes).
+        description: "Comma-separated subset of scenarios to deploy + test. Empty = run all. Valid values: aio-install, secretsync, opc-ua-solution, aio-upgrade. Use this to keep the cluster focused for demos or interactive sessions (combine with keep-cluster-alive-minutes)."
         type: string
         default: ""
 
@@ -301,8 +301,10 @@ jobs:
         # Snapshot BEFORE any Azure-side creation (connect-arc, AIO deploy,
         # etc.) so every resource this run creates is in the teardown delta.
         # Otherwise Arc resources would be treated as pre-existing, and if
-        # `az connectedk8s delete` fails in teardown they would silently
-        # survive. Atomic write guards against a truncated snapshot.
+        # `az connectedk8s delete` failed in teardown they would silently
+        # survive. The teardown step now surfaces such failures as warnings
+        # in the GHA log, but the delta-vs-snapshot mechanism is still the
+        # primary safety net. Atomic write guards against a truncated snapshot.
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/e2e-teardown"
@@ -620,7 +622,7 @@ jobs:
           CLUSTER: "${{ steps.names.outputs.cluster }}"
         # Deletes only resources that did not exist in the pre-run snapshot
         # (see `Snapshot RG resources` step). If the snapshot file is missing
-        # we refuse to compute a delta and skip cleanup; an operator must
+        # we refuse to compute a delta and skip cleanup. An operator must
         # clean up manually. Cluster delete runs first (when this run owns
         # it) so Arc extensions cascade out cleanly. Role assignments (proxy
         # resources) are not listed by `az resource list` and are cleaned
@@ -629,17 +631,42 @@ jobs:
           set +e
           PRE_FILE="$RUNNER_TEMP/e2e-teardown/pre-ids.txt"
           if [[ ! -f "$PRE_FILE" ]]; then
-            echo "::warning::Snapshot file missing; skipping delta cleanup. Inspect RG $RG manually."
+            echo "::warning::Snapshot file missing. Skipping delta cleanup. Inspect RG $RG manually."
             echo "- Persistent-mode teardown skipped for RG \`$RG\` (snapshot missing)" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+          # `az connectedk8s delete` and `az resource delete` against a
+          # connectedCluster both have caveats:
+          # - `connectedk8s delete` (without `--force`) reaches into the
+          #   cluster via the Arc proxy at 127.0.0.1:47021. The proxy
+          #   typically expires before teardown on long runs, so without
+          #   `--force` the call fails with "Connection refused".
+          # - `az resource delete` against `connectedClusters/<name>`
+          #   returns `ResourceDeletionValidateFailed` because the RP
+          #   requires the dedicated cluster-delete verb.
+          # `--force` skips the Arc-proxy-dependent path the CLI normally
+          # takes for in-cluster cleanup. It still loads the local
+          # kubeconfig (which is fine, the runner's k3s kubeconfig is
+          # still valid here) but tolerates the Arc-proxy expiry that
+          # caused the swallowed failures.
+          delete_arc_cluster() {
+            local rg="$1" cluster="$2"
+            local out
+            if out=$(az connectedk8s delete -n "$cluster" -g "$rg" --force --yes --only-show-errors 2>&1); then
+              echo "[connectedk8s delete] $cluster (succeeded)"
+              return 0
+            fi
+            echo "::warning::[connectedk8s delete] $cluster failed; will retry via parallel delete pass"
+            printf '%s\n' "$out" | sed "s/^/[connectedk8s delete $cluster] /"
+            return 1
+          }
           # Only delete the Arc cluster if it was created by THIS run: grep
           # the pre-snapshot for a matching connectedClusters/<name> id. If
           # it was already there, the operator owns it. Skip.
           if grep -qiE "/providers/Microsoft\.Kubernetes/connectedClusters/${CLUSTER}$" "$PRE_FILE"; then
             echo "Skipping cluster delete: Arc resource '$CLUSTER' pre-existed the snapshot (operator-owned)."
           else
-            az connectedk8s delete -n "$CLUSTER" -g "$RG" --yes --only-show-errors || true
+            delete_arc_cluster "$RG" "$CLUSTER"
           fi
           LIST_OK=0
           redact() { sed -E 's/eyJ[A-Za-z0-9_.=-]{10,}/<redacted-jwt>/g' "$1"; }
@@ -663,16 +690,31 @@ jobs:
             echo "::endgroup::"
             # Parallel deletes (-P 10) with per-resource stdout/stderr
             # prefixing so the GHA log shows which delete emitted what.
-            # Dependency-order failures on the first pass are expected; the
-            # retry loop handles them. We surface each failure as a warning
-            # instead of silently swallowing it with `|| true`.
+            # Dependency-order failures on the first pass are expected.
+            # The retry loop handles them. We surface each failure as a
+            # warning instead of silently swallowing it with `|| true`.
+            #
+            # connectedClusters cannot be removed via `az resource delete`
+            # (RP rejects with `ResourceDeletionValidateFailed`). Route
+            # those IDs through `az connectedk8s delete --force` instead.
+            # Match the top-level cluster only, not child resources under
+            # it (extensions, configurations, etc.) which the regex anchor
+            # excludes via the trailing `[^/]+$` shape inside the [[ ]].
             printf '%s\n' "$DELTA" | xargs -r -P 10 -I{} bash -c '
               id="$1"
               short="${id##*/}"
-              if out=$(az resource delete --ids "$id" --verbose 2>&1); then
-                echo "[delete-ok pass='"$2"'] $short"
+              if [[ "$id" =~ /providers/Microsoft\.Kubernetes/connectedClusters/[^/]+$ ]]; then
+                rg=$(printf "%s" "$id" | sed -E "s|.*/resourceGroups/([^/]+)/.*|\1|")
+                if out=$(az connectedk8s delete -n "$short" -g "$rg" --force --yes --only-show-errors 2>&1); then
+                  echo "[delete-ok pass=$2] $short (connectedk8s)"
+                else
+                  echo "::warning::[delete-failed pass=$2] $short (connectedk8s)"
+                  printf "%s\n" "$out" | sed "s/^/[delete-failed $short] /"
+                fi
+              elif out=$(az resource delete --ids "$id" --verbose 2>&1); then
+                echo "[delete-ok pass=$2] $short"
               else
-                echo "::warning::[delete-failed pass='"$2"'] $short"
+                echo "::warning::[delete-failed pass=$2] $short"
                 printf "%s\n" "$out" | sed "s/^/[delete-failed $short] /"
               fi
             ' _ {} "$i"
