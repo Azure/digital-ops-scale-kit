@@ -21,8 +21,8 @@ from siteops.models import (
     Manifest,
     ParallelConfig,
     Site,
-    parse_selector,
     _validate_resource,
+    parse_selector,
 )
 
 

@@ -1588,6 +1588,7 @@ labels:
         )
 
         from argparse import Namespace
+
         from siteops.cli import cmd_sites
         from siteops.orchestrator import Orchestrator
 
@@ -1624,6 +1625,7 @@ location: eastus
         )
 
         from argparse import Namespace
+
         from siteops.cli import cmd_sites
         from siteops.orchestrator import Orchestrator
 

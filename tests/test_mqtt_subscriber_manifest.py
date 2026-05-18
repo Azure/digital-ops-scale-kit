@@ -14,7 +14,6 @@ import yaml
 
 from tests.integration.helpers.mqtt import mqtt_subscriber_pod_manifest
 
-
 DEFAULT_KWARGS = {
     "sa_name": "mqtt-test-sa",
     "pod_name": "mqtt-test-pod",

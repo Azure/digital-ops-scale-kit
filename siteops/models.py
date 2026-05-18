@@ -14,11 +14,11 @@ Resources support K8s-style apiVersion/kind validation:
 - kind is validated if present, but optional
 """
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import re
 import yaml
 
 VALID_SCOPES = {"subscription", "resourceGroup"}

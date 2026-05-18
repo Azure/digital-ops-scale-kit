@@ -5,7 +5,6 @@ from pathlib import Path
 
 import yaml
 
-
 # Pattern to extract step references: {{ steps.<step_name>.outputs.<path> }}
 STEP_OUTPUT_PATTERN = re.compile(r"\{\{\s*steps\.([^.]+)\.outputs\.(\S+?)\s*\}\}")
 

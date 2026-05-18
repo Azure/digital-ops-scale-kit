@@ -16,10 +16,10 @@ import pytest
 import yaml
 
 from siteops.models import (
+    MAX_INCLUDE_DEPTH,
     DeploymentStep,
     IncludeError,
     KubectlStep,
-    MAX_INCLUDE_DEPTH,
     Manifest,
 )
 

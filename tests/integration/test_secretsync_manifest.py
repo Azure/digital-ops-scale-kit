@@ -2,6 +2,7 @@
 
 import pytest
 
+from tests.integration.conftest import WORKSPACE_PATH
 from tests.integration.helpers.assertions import (
     assert_output_exists,
     assert_output_starts_with,
@@ -9,7 +10,6 @@ from tests.integration.helpers.assertions import (
     find_step,
 )
 from tests.integration.helpers.kube import KubectlError, kubectl_json
-from tests.integration.conftest import WORKSPACE_PATH
 
 pytestmark = [pytest.mark.integration]
 

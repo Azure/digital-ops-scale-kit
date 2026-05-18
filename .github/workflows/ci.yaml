@@ -25,6 +25,27 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Site Ops
+        uses: ./.github/actions/setup-siteops
+        with:
+          install-dev: "true"
+
+      - name: Run ruff
+        run: ruff check siteops tests scripts
+
   test:
     name: Unit Tests
     runs-on: ubuntu-latest

@@ -7,7 +7,6 @@ import yaml
 
 from siteops.orchestrator import Orchestrator
 
-
 # All deployOptions defined in base-site.yaml
 EXPECTED_DEPLOY_OPTIONS = {
     "enableGlobalSite",

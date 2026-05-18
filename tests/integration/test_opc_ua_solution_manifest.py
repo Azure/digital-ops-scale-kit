@@ -5,6 +5,7 @@ import time
 
 import pytest
 
+from tests.integration.conftest import WORKSPACE_PATH
 from tests.integration.helpers.assertions import (
     assert_output_exists,
     assert_step_succeeded,
@@ -22,7 +23,6 @@ from tests.integration.helpers.kube import (
 )
 from tests.integration.helpers.mqtt import mqtt_subscriber_pod_manifest
 from tests.integration.helpers.opcua import dump_opc_ua_connector_status
-from tests.integration.conftest import WORKSPACE_PATH
 
 pytestmark = [pytest.mark.integration]
 

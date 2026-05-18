@@ -5,11 +5,11 @@ parameters, sites, templates) is internally consistent. They use the real
 workspaces/iot-operations/ directory, not synthetic fixtures.
 """
 
-import pytest
 from pathlib import Path
 
-from siteops.orchestrator import Orchestrator
+import pytest
 
+from siteops.orchestrator import Orchestrator
 
 WORKSPACE_PATH = Path(__file__).parent.parent.parent / "workspaces" / "iot-operations"
 
