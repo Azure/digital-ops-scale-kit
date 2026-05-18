@@ -1,14 +1,17 @@
 """Integration tests for the aio-install.yaml manifest."""
 
+import time
+
 import pytest
 
+from tests.integration.conftest import WORKSPACE_PATH
 from tests.integration.helpers.assertions import (
     assert_output_exists,
     assert_step_skipped,
     assert_step_succeeded,
     find_step,
 )
-from tests.integration.conftest import WORKSPACE_PATH
+from tests.integration.helpers.kube import is_pod_ready, list_pods
 
 pytestmark = [pytest.mark.integration]
 
@@ -153,3 +156,51 @@ class TestAioInstallIdempotency:
                     f"Site '{name}': {output_name} resource ID changed on redeploy "
                     f"({id1!r} -> {id2!r})"
                 )
+
+
+class TestAioInstallClusterHealth:
+    """Validate AIO operator pods landed on the cluster after install.
+
+    Catches the class of regressions where ARM resources are created
+    successfully but the cluster-side operators fail to deploy or
+    reconcile (CRD crash, image pull failure, RBAC misconfiguration).
+    Assertions are intentionally loose (presence of pods plus at least
+    one Ready) so the check does not flake on per-release changes to the
+    AIO operator pod set.
+    """
+
+    def test_aio_operators_present(
+        self, aio_install_result, aio_namespace, kubectl_available
+    ):
+        """The AIO namespace must contain operator pods after install.
+        An empty namespace after a successful ARM deploy indicates the
+        cluster-side operators did not land at all."""
+        pods = list_pods(aio_namespace)
+        assert pods, (
+            f"AIO namespace '{aio_namespace}' has no pods after install. "
+            f"ARM deploy succeeded but cluster operators did not land."
+        )
+
+    def test_at_least_one_aio_pod_ready(
+        self, aio_install_result, aio_namespace, kubectl_available
+    ):
+        """At least one AIO operator pod must reach Ready within a
+        bounded timeout. Stricter `all pods Ready` assertions flake
+        because AIO ships short-lived Job pods alongside long-running
+        operators."""
+        deadline = time.monotonic() + 300
+        while time.monotonic() < deadline:
+            pods = list_pods(aio_namespace)
+            for p in pods:
+                if p.get("status", {}).get("phase") == "Running" and is_pod_ready(p):
+                    return
+            time.sleep(5)
+        pods = list_pods(aio_namespace)
+        summary = [
+            (p["metadata"]["name"], p.get("status", {}).get("phase"))
+            for p in pods
+        ]
+        pytest.fail(
+            f"No Running and Ready pod observed in '{aio_namespace}' after 300s. "
+            f"Pods: {summary}"
+        )

@@ -8,13 +8,13 @@ Configuration is provided via:
   - Local: sites.local/ overlay files (hand-written YAML, one per site)
   - CI integration suite: SITE_OVERRIDES env var (JSON → auto-generates sites.local/ overlays)
   - E2E suite: SITEOPS_EXTRA_SITES_DIRS env var (os.pathsep-joined dirs
-    containing rendered site files; orthogonal to sites.local/)
+    containing rendered site files, orthogonal to sites.local/)
 
 Behavior when no site config is present:
   - Tests are skipped at collection time (`has_config` check).
 Behavior when site config is present but the selector resolves to zero sites:
   - Tests ERROR at fixture time with a diagnostic message. A zero-site
-    deployment is never a legitimate integration-test outcome; silent
+    deployment is never a legitimate integration-test outcome. Silent
     vacuous passes would mask real misconfigurations (wrong selector,
     broken inherits chain, mismatched labels) that were discovered
     previously in exactly this way.
@@ -44,7 +44,7 @@ _UPGRADE_PHASE_INSTALL_SENTINEL = {"_upgrade_phase_sentinel": True}
 # Allowlisted classes must not consume `aio_install_result` content (the
 # sentinel has no `sites`/`summary` keys, so direct access would KeyError
 # with a non-obvious traceback). Depending on the fixture for ordering only
-# is fine; reading from it is not.
+# is fine. Reading from it is not.
 _UPGRADE_PHASE_ALLOWED_CLASSES = frozenset({
     "TestAioUpgradeDeployment",
     "TestAioUpgradeResolveExtensions",
@@ -269,4 +269,77 @@ def aio_upgrade_result(
         manifest=manifest,
         sites=sites,
     )
+
+
+@pytest.fixture(scope="session")
+def sync_secret_result(
+    orchestrator: Orchestrator, selector: str | None, aio_install_result: dict
+) -> dict:
+    """Deploy samples/secretsync-sample/manifest.yaml after AIO is installed.
+
+    The sample composes resolve-aio + enable-secretsync + sync-secrets,
+    exercising the full secret-sync data path through to the cluster.
+    Cluster-side assertions live in test_sync_secrets_manifest.py and
+    individually depend on the `kubectl_available` fixture so a missing
+    kubectl on local runs only skips the cluster reads, not the deploy.
+    """
+    manifest_path = WORKSPACE_PATH / "samples" / "secretsync-sample" / "manifest.yaml"
+    manifest, sites = _resolve_or_fail(orchestrator, manifest_path, selector)
+    return orchestrator.deploy(
+        manifest_path=manifest_path,
+        manifest=manifest,
+        sites=sites,
+    )
+
+
+@pytest.fixture(scope="session")
+def kubectl_available() -> None:
+    """Skip (or hard-fail in CI) if `kubectl` cannot reach a cluster.
+
+    Tests that read from the cluster (custom resources, materialized
+    Secrets, pod readiness) depend on this fixture. Local development
+    without a cluster gets a clean skip. CI must never silently skip
+    because a misconfigured workflow could otherwise drop the entire
+    new test surface without anyone noticing.
+    """
+    from tests.integration.helpers.kube import is_available
+
+    if is_available():
+        return
+    in_ci = os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
+    if in_ci:
+        pytest.fail(
+            "kubectl is required in CI but is unavailable or cannot reach a "
+            "cluster. Check the runner's kubeconfig and that k3s is running. "
+            "Skipping these tests in CI is not allowed."
+        )
+    pytest.skip("kubectl unavailable, skipping cluster-dependent tests")
+
+
+@pytest.fixture(scope="session")
+def aio_namespace(aio_install_result: dict) -> str:
+    """The namespace where AIO operators and SecretSync targets live.
+
+    Extracted from the resolve-aio step's customLocationNamespace output
+    so the fixture tracks the actual deployment rather than a hardcoded
+    constant. Falls back to `azure-iot-operations` (the AIO RP convention)
+    when resolve-aio did not run (e.g., enableSecretSync=false sites or
+    upgrade-phase sentinel).
+    """
+    from tests.integration.helpers.assertions import find_step
+
+    DEFAULT = "azure-iot-operations"
+    sites = aio_install_result.get("sites", {})
+    if not sites:
+        return DEFAULT
+    site_name = next(iter(sites))
+    try:
+        resolve_step = find_step(aio_install_result, site_name, "resolve-aio")
+    except (ValueError, KeyError):
+        return DEFAULT
+    outputs = resolve_step.get("outputs", {})
+    ns = outputs.get("customLocationNamespace")
+    if isinstance(ns, dict):
+        ns = ns.get("value")
+    return ns or DEFAULT
 

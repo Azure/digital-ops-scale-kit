@@ -60,7 +60,7 @@ on:
         type: string
         default: ""
       scenarios:
-        description: "Comma-separated subset of scenarios to deploy + test. Empty = run all. Valid values: aio-install, secretsync, opc-ua-solution, aio-upgrade. Use this to keep the cluster focused for demos or interactive sessions (combine with keep-cluster-alive-minutes)."
+        description: "Comma-separated subset of scenarios to deploy + test. Empty = run all. Valid values: aio-install, secretsync, secretsync-sample, opc-ua-solution, aio-upgrade. Use this to keep the cluster focused for demos or interactive sessions (combine with keep-cluster-alive-minutes)."
         type: string
         default: ""
 
@@ -155,6 +155,7 @@ jobs:
           scenario_map = {
               "aio-install": "tests/integration/test_aio_install_manifest.py",
               "secretsync": "tests/integration/test_secretsync_manifest.py",
+              "secretsync-sample": "tests/integration/test_sync_secrets_manifest.py",
               "opc-ua-solution": "tests/integration/test_opc_ua_solution_manifest.py",
               "aio-upgrade": "tests/integration/test_aio_upgrade_manifest.py",
           }
@@ -476,6 +477,15 @@ jobs:
           INTEGRATION_SELECTOR: name=${{ steps.names.outputs.site_name }}
           AIO_RELEASE: ${{ matrix.aio-release }}
           PYTEST_PATHS: ${{ needs.prep.outputs.pytest-paths }}
+          # Test helpers (tests/integration/helpers/kube.py) read this env
+          # var and pass --kubeconfig=<path> to every kubectl invocation.
+          # This isolates direct-kubectl reads from siteops's writable
+          # ~/.kube/config, which the orchestrator's `arc:` kubectl steps
+          # mutate via `az connectedk8s proxy`. Without this, every
+          # cluster-touching test would hit the dead proxy URL left in
+          # ~/.kube/config after each deploy step exits. The k3s admin
+          # file is created with mode 0644 by create-k3s-cluster.
+          SITEOPS_TEST_KUBECONFIG: /etc/rancher/k3s/k3s.yaml
         # AIO_RELEASE is routed through env (not ${{ }} interpolated into the
         # shell line) so a workflow_dispatch input containing shell metachars
         # cannot break out of the command. PYTEST_PATHS comes from prep, which
@@ -524,6 +534,8 @@ jobs:
           AIO_RELEASE_FROM: ${{ matrix.aio-release }}
           AIO_RELEASE_TO: ${{ needs.prep.outputs.upgrade-to }}
           PYTEST_PATHS: ${{ needs.prep.outputs.pytest-paths }}
+          # See the comment on the prior "Run E2E integration tests" step.
+          SITEOPS_TEST_KUBECONFIG: /etc/rancher/k3s/k3s.yaml
         # SITEOPS_E2E_UPGRADE_PHASE is the contract with conftest.py:
         #   - aio_install_result becomes a sentinel (re-running install on
         #     an existing instance at a new release is unsupported).
