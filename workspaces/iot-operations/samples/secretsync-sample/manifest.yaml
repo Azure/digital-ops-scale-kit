@@ -1,0 +1,36 @@
+apiVersion: siteops/v1
+kind: Manifest
+name: secretsync-sample
+
+description: |
+  Reference scenario that synchronizes a set of Key Vault secrets to
+  Kubernetes Secrets on the target AIO cluster. Demonstrates the full
+  secret-sync data path: scalekit provisions the secretsync infrastructure
+  (managed identity, Key Vault, role assignments, federated identity
+  credential, default Secret Provider Class wired into the AIO instance),
+  writes the configured Key Vault secrets, and creates one SecretSync ARM
+  resource per entry. The cluster-side SecretSync controller then
+  materializes each value as a Kubernetes Secret in the AIO namespace.
+
+  The defaults in `parameters/inputs/sync-secrets.yaml` are obvious sample
+  values. For real use, override `secrets` and `secretValues`. Supply
+  `secretValues` via a CI secret or sites.local/ overlay. Do not commit real
+  values.
+
+  Prerequisites:
+    - AIO instance must be deployed and running (run aio-install first)
+    - The site's aioRelease must point to a parameters/aio-releases/<release>.yaml file
+
+parallel: 3
+
+# Default selector. Override at the CLI with `-l <key>=<value>`.
+selector: "environment=dev"
+
+parameters:
+  - parameters/common/common.yaml
+  - "parameters/aio-releases/{{ site.properties.aioRelease }}.yaml"
+
+steps:
+  - include: ../../manifests/_resolve-aio.yaml
+  - include: ../../manifests/_secretsync.yaml
+  - include: _partial.yaml

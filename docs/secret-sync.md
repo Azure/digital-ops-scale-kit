@@ -120,30 +120,44 @@ When an existing Key Vault is provided:
 
 ## Syncing secrets to the cluster
 
-After enablement, use `sync-secret.bicep` to synchronize individual Key Vault secrets to Kubernetes secrets:
+After enablement, use `sync-secrets.bicep` to synchronize one or more Key Vault secrets to Kubernetes Secrets in a single deploy:
 
 ```
 az deployment group create -g <rg> \
-  -f templates/secretsync/sync-secret.bicep \
+  -f templates/secretsync/sync-secrets.bicep \
   -p keyVaultName=<kv> customLocationName=<cl> spcName=<spc> \
-     secretName=my-secret secretValue=<value>
+     managedIdentityClientId=<clientId> instanceLocation=<region> \
+     secrets='[{"secretName":"my-secret"},{"secretName":"existing","createInKv":false}]' \
+     secretValues='{"my-secret":"<value>"}'
 ```
+
+The template treats the `secrets` array as the desired state. Each deploy PUTs the SPC with the union of all entries' object names and creates one SecretSync per entry.
 
 ### Parameters
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
 | `keyVaultName` | Yes | Key Vault name (from enablement outputs) |
-| `customLocationName` | Yes | Custom location name |
+| `customLocationName` | Yes | Custom location name (from `resolve-aio` outputs) |
 | `spcName` | Yes | Default SPC name (from enablement outputs) |
-| `secretName` | Yes | Name of the Key Vault secret to create |
-| `secretValue` | Yes | **`@secure()`**, provided at deploy time, never in git |
-| `kubernetesSecretName` | No | K8s secret name (defaults to `secretName`) |
-| `kubernetesSecretKey` | No | Key within the K8s secret (defaults to `secretName`) |
+| `managedIdentityClientId` | Yes | Secretsync MI client ID (from enablement outputs) |
+| `instanceLocation` | Yes | AIO instance location (from `resolve-aio` outputs) |
+| `secrets` | Yes | Array of per-secret metadata, see below |
+| `secretValues` | No | **`@secure()`** object keyed by `secretName`, required for entries with `createInKv` true |
+| `tags` | No | Tags applied to the SPC, KV secrets, and SecretSync resources |
+
+Per-entry fields in `secrets`:
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `secretName` | Yes | | Key Vault secret name (must be unique within the array) |
+| `kubernetesSecretName` | No | `secretName` | Kubernetes Secret name when the consuming workload expects a different name |
+| `kubernetesSecretKey` | No | `secretName` | Key inside the Kubernetes Secret |
+| `createInKv` | No | `true` | Set `false` to sync a secret already present in the Key Vault |
 
 ### Security model
 
-The `secretValue` parameter is decorated with `@secure()` so ARM never logs it in deployment history or outputs. Provide secret values via:
+The `secretValues` parameter is decorated with `@secure()` so ARM never logs values in deployment history or outputs. Provide values via:
 
 - **`sites.local/`** parameter overrides (gitignored), the standard siteops pattern for local development
 - **CI/CD secrets** such as GitHub Actions secrets or Azure DevOps variable groups
@@ -154,14 +168,27 @@ The `secretValue` parameter is decorated with `@secure()` so ARM never logs it i
 To sync secrets as part of a manifest, add a step after enablement:
 
 ```yaml
-- name: sync-my-secret
-  template: templates/secretsync/sync-secret.bicep
+- name: sync-secrets
+  template: templates/secretsync/sync-secrets.bicep
   scope: resourceGroup
   parameters:
-    - parameters/inputs/secretsync.yaml
-    # secretValue comes from sites.local/ or CI secrets
+    - parameters/inputs/sync-secrets.yaml
+    # secretValues come from sites.local/ or CI secrets
   when: "{{ site.properties.deployOptions.enableSecretSync }}"
 ```
+
+### Removing a secret
+
+Remove its entry from `secrets` and re-deploy. The SPC will be PUT without that entry, so the cluster-side controller stops syncing it. Bicep Incremental mode does NOT delete the corresponding `Microsoft.SecretSyncController/secretSyncs` ARM resource. To fully clean up, run `az resource delete --ids <secretSyncResourceId>` after the redeploy.
+
+### Authoritative writes to the SPC
+
+`sync-secrets.bicep` is authoritative for the default SPC's `properties.objects` field: each deploy PUTs the SPC with the union of every entry in the `secrets` array, replacing whatever was there before.
+
+Two implications worth knowing:
+
+- **Re-running enablement clears the SPC objects.** `enable-secretsync.bicep` (composed by `manifests/secretsync.yaml` and by `aio-install.yaml` when `enableSecretSync` is true) PUTs the same SPC without an `objects` field. If you redeploy enablement after `sync-secrets`, the cluster controller stops materializing every Kubernetes Secret with the controller error `the secretproviderclass parameters does not have a valid objects field`. Re-run `sync-secrets` after any enablement redeploy to restore the field.
+- **CLI-managed entries are dropped on Bicep redeploy.** Entries added out of band via `az iot ops secretsync secret set` are removed from the SPC the next time `sync-secrets` deploys. Prefer one source of truth per cluster.
 
 ## Template reference
 
@@ -179,7 +206,7 @@ templates/
 │       └── resolve-cluster.bicep            # Cluster resource ID → name, OIDC issuer URLs
 └── secretsync/
     ├── enable-secretsync.bicep              # Creates MI, KV, roles, FIC, SPC, instance update
-    ├── sync-secret.bicep                    # Syncs a KV secret to a K8s secret
+    ├── sync-secrets.bicep                   # Syncs N KV secrets to K8s secrets in one deploy
     └── modules/
         └── keyvault-roles.bicep             # KV role assignments (cross-RG capable)
 ```

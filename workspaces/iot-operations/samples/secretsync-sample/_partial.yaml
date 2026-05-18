@@ -1,0 +1,15 @@
+apiVersion: siteops/v1
+kind: Manifest
+name: secretsync-sample-step
+
+description: |
+  Internal partial. Defines the sync-secrets step that writes the sample
+  Key Vault secrets and the SecretSync ARM resources. Composed by the
+  secretsync-sample scenario manifest.
+
+steps:
+  - name: sync-secrets
+    template: templates/secretsync/sync-secrets.bicep
+    scope: resourceGroup
+    parameters:
+      - parameters/inputs/sync-secrets.yaml
