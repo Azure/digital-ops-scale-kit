@@ -14,7 +14,6 @@ from tests.integration.helpers.kube import (
     KubectlError,
     apply_manifest,
     delete_resource,
-    dump_opc_ua_connector_status,
     get_pod_logs,
     kubectl_json,
     wait_for_deployment_ready,
@@ -22,6 +21,7 @@ from tests.integration.helpers.kube import (
     wait_for_service_endpoints,
 )
 from tests.integration.helpers.mqtt import mqtt_subscriber_pod_manifest
+from tests.integration.helpers.opcua import dump_opc_ua_connector_status
 from tests.integration.conftest import WORKSPACE_PATH
 
 pytestmark = [pytest.mark.integration]

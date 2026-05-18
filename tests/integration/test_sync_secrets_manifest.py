@@ -11,9 +11,14 @@ to Bicep.
 """
 
 import base64
+import json
+import subprocess
+import sys
+import uuid
 
 import pytest
 
+from siteops.models import Manifest
 from tests.integration.conftest import WORKSPACE_PATH
 from tests.integration.helpers.assertions import (
     assert_output_exists,
@@ -22,11 +27,12 @@ from tests.integration.helpers.assertions import (
 from tests.integration.helpers.kube import (
     KubectlError,
     assert_secret_value_equals,
-    dump_secretsync_status,
+    delete_resource,
     get_secret,
     kubectl_json,
     wait_for_secret,
 )
+from tests.integration.helpers.secretsync import dump_secretsync_status
 
 pytestmark = [pytest.mark.integration]
 
@@ -280,5 +286,340 @@ class TestSyncSecretsIdempotency:
                         f"Site='{site_name}' Secret='{k8s_name}' Key='{k8s_key}' "
                         f"(after redeploy)"
                     ),
+                )
+
+
+class TestSyncSecretsExistingKvSecret:
+    """Cover the `createInKv: false` branch of sync-secrets.bicep.
+
+    The default sample exercises only `createInKv: true` (write to Key Vault
+    then sync to the cluster). Customers who already manage Key Vault
+    secrets out of band need the inverse path: scalekit must update the SPC
+    objects list and create a SecretSync ARM resource pointing at the
+    pre-existing Key Vault secret without re-writing it. This test
+    pre-creates the Key Vault secret directly, then re-deploys
+    sync-secrets.bicep with the full sample set plus the new entry marked
+    `createInKv: false`, and asserts the value materializes on the cluster.
+
+    The sample manifest cannot exercise this branch because siteops
+    resolves chaining parameter files workspace-relative and we do not put
+    test-only fixtures into the customer-facing workspace. The deploy is
+    therefore driven via `az deployment group create` against the same
+    bicep the customer-facing path uses.
+
+    Cluster-state contract: this test runs the SPC through two PUTs. The
+    first PUT writes SAMPLE_SECRETS + the new test entry. The second
+    (cleanup) PUT writes SAMPLE_SECRETS only, restoring baseline before
+    the test-only KV secret is purged so the SPC never carries a dangling
+    objectName referencing a deleted secret. Existing tags on the SPC are
+    read upfront and round-tripped through both PUTs so they are not
+    wiped. Not safe to run under pytest-xdist alongside other secret-sync
+    tests because the SPC name is global.
+    """
+
+    def test_existing_kv_secret_materializes(
+        self,
+        orchestrator,
+        selector,
+        sync_secret_result,
+        aio_namespace,
+        kubectl_available,
+        tmp_path,
+    ):
+        manifest_path = (
+            WORKSPACE_PATH / "samples" / "secretsync-sample" / "manifest.yaml"
+        )
+        manifest = Manifest.from_file(manifest_path, workspace_root=WORKSPACE_PATH)
+        sites = orchestrator.resolve_sites(manifest, selector)
+        site_by_name = {s.name: s for s in sites}
+
+        # First site only. Multi-site materialization is already covered by
+        # TestSyncSecretsMaterialize. A per-site loop would double the
+        # deploy cost without adding coverage of the createInKv branch.
+        site_name = next(iter(sync_secret_result["sites"]))
+        site = site_by_name[site_name]
+
+        resolve_aio_step = assert_step_succeeded(
+            sync_secret_result, site_name, "resolve-aio"
+        )
+        custom_location_name = assert_output_exists(
+            resolve_aio_step, "customLocationName"
+        )
+        instance_location = assert_output_exists(resolve_aio_step, "instanceLocation")
+
+        secretsync_step = assert_step_succeeded(
+            sync_secret_result, site_name, "secretsync"
+        )
+        kv_name = assert_output_exists(secretsync_step, "keyVaultName")
+        spc_name = assert_output_exists(secretsync_step, "spcResourceName")
+        mi_client_id = assert_output_exists(
+            secretsync_step, "managedIdentityClientId"
+        )
+
+        # Round-trip the SPC's current tags so the PUT does not strip
+        # whatever the prior siteops deploy stamped. The bicep applies one
+        # tags object to the SPC, the KV writes, and every SecretSync, so
+        # the SPC's tags are a faithful representation of baseline state.
+        spc_resource_id = (
+            f"/subscriptions/{site.subscription}"
+            f"/resourceGroups/{site.resource_group}"
+            f"/providers/Microsoft.SecretSyncController"
+            f"/azureKeyVaultSecretProviderClasses/{spc_name}"
+        )
+        spc_show = subprocess.run(
+            [
+                "az",
+                "resource",
+                "show",
+                "--ids",
+                spc_resource_id,
+                "--api-version",
+                "2024-08-21-preview",
+                "-o",
+                "json",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        spc_tags = json.loads(spc_show.stdout).get("tags") or {}
+
+        suffix = uuid.uuid4().hex[:8]
+        kv_secret_name = f"existing-test-{suffix}"
+        k8s_secret_name = f"existing-test-{suffix}"
+        k8s_secret_key = "value"
+        secret_value = f"existing-value-{suffix}"
+
+        bicep_path = (
+            WORKSPACE_PATH / "templates" / "secretsync" / "sync-secrets.bicep"
+        )
+        sample_secrets_input = [
+            {
+                "secretName": s["secretName"],
+                "kubernetesSecretName": s["kubernetesSecretName"],
+                "kubernetesSecretKey": s["kubernetesSecretKey"],
+            }
+            for s in SAMPLE_SECRETS
+        ]
+        sample_values_input = {
+            s["secretName"]: s["value"] for s in SAMPLE_SECRETS
+        }
+
+        def _az_deploy_sync_secrets(secrets, values, label):
+            params = {
+                "$schema": (
+                    "https://schema.management.azure.com/schemas/2019-04-01/"
+                    "deploymentParameters.json#"
+                ),
+                "contentVersion": "1.0.0.0",
+                "parameters": {
+                    "keyVaultName": {"value": kv_name},
+                    "customLocationName": {"value": custom_location_name},
+                    "spcName": {"value": spc_name},
+                    "managedIdentityClientId": {"value": mi_client_id},
+                    "instanceLocation": {"value": instance_location},
+                    "secrets": {"value": secrets},
+                    "secretValues": {"value": values},
+                    "tags": {"value": spc_tags},
+                },
+            }
+            params_path = tmp_path / f"sync-secrets-{label}.params.json"
+            params_path.write_text(json.dumps(params))
+            subprocess.run(
+                [
+                    "az",
+                    "deployment",
+                    "group",
+                    "create",
+                    "-g",
+                    site.resource_group,
+                    "--subscription",
+                    site.subscription,
+                    "-f",
+                    str(bicep_path),
+                    "-p",
+                    f"@{params_path}",
+                    "-o",
+                    "none",
+                    "--name",
+                    f"sync-secrets-test-{suffix}-{label}",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+
+        try:
+            subprocess.run(
+                [
+                    "az",
+                    "keyvault",
+                    "secret",
+                    "set",
+                    "--vault-name",
+                    kv_name,
+                    "--name",
+                    kv_secret_name,
+                    "--value",
+                    secret_value,
+                    "--subscription",
+                    site.subscription,
+                    "-o",
+                    "none",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+
+            # PUT the SPC with SAMPLE_SECRETS plus the new createInKv:false
+            # entry. The full union preserves the sample SecretSyncs already
+            # established by sync_secret_result so they are not orphaned mid
+            # test.
+            test_secrets = sample_secrets_input + [
+                {
+                    "secretName": kv_secret_name,
+                    "kubernetesSecretName": k8s_secret_name,
+                    "kubernetesSecretKey": k8s_secret_key,
+                    "createInKv": False,
+                }
+            ]
+            _az_deploy_sync_secrets(
+                test_secrets, sample_values_input, "with-existing"
+            )
+
+            try:
+                secret = wait_for_secret(
+                    k8s_secret_name,
+                    aio_namespace,
+                    expected_key=k8s_secret_key,
+                    timeout=600,
+                    interval=10,
+                )
+            except TimeoutError as e:
+                diagnostic = dump_secretsync_status(
+                    k8s_secret_name, spc_name, aio_namespace
+                )
+                pytest.fail(f"{e}\n\n{diagnostic}")
+            encoded = secret["data"][k8s_secret_key]
+            actual = base64.b64decode(encoded).decode("utf-8")
+            assert_secret_value_equals(
+                actual,
+                secret_value,
+                context=(
+                    f"Site='{site_name}' Secret='{k8s_secret_name}' "
+                    f"Key='{k8s_secret_key}' (createInKv:false)"
+                ),
+            )
+        finally:
+            # Restore the SPC objects list to baseline BEFORE deleting the
+            # KV secret so the SPC never references a missing object name
+            # (the SecretSync controller would error on the dangling ref
+            # and pollute subsequent test status reads).
+            try:
+                _az_deploy_sync_secrets(
+                    sample_secrets_input, sample_values_input, "restore"
+                )
+            except subprocess.CalledProcessError as e:
+                sys.stderr.write(
+                    f"[cleanup] baseline SPC restore failed (exit "
+                    f"{e.returncode}): {e.stderr}\n"
+                )
+
+            secretsync_resource_id = (
+                f"/subscriptions/{site.subscription}"
+                f"/resourceGroups/{site.resource_group}"
+                f"/providers/Microsoft.SecretSyncController"
+                f"/secretSyncs/{k8s_secret_name}"
+            )
+            try:
+                subprocess.run(
+                    [
+                        "az",
+                        "resource",
+                        "delete",
+                        "--ids",
+                        secretsync_resource_id,
+                        "-o",
+                        "none",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+            except subprocess.CalledProcessError as e:
+                sys.stderr.write(
+                    f"[cleanup] SecretSync ARM delete failed (exit "
+                    f"{e.returncode}): {e.stderr}\n"
+                )
+
+            try:
+                delete_resource("secret", k8s_secret_name, aio_namespace)
+            except KubectlError as e:
+                sys.stderr.write(
+                    f"[cleanup] K8s Secret delete failed: {e}\n"
+                )
+
+            try:
+                subprocess.run(
+                    [
+                        "az",
+                        "keyvault",
+                        "secret",
+                        "delete",
+                        "--vault-name",
+                        kv_name,
+                        "--name",
+                        kv_secret_name,
+                        "--subscription",
+                        site.subscription,
+                        "-o",
+                        "none",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+            except subprocess.CalledProcessError as e:
+                sys.stderr.write(
+                    f"[cleanup] KV secret delete failed (exit "
+                    f"{e.returncode}): {e.stderr}\n"
+                )
+
+            # Purge is best-effort. Without the
+            # Microsoft.KeyVault/vaults/secrets/purge/action permission the
+            # secret stays soft-deleted for the vault's retention period.
+            # The uuid suffix makes collision on a re-run effectively
+            # impossible regardless.
+            try:
+                subprocess.run(
+                    [
+                        "az",
+                        "keyvault",
+                        "secret",
+                        "purge",
+                        "--vault-name",
+                        kv_name,
+                        "--name",
+                        kv_secret_name,
+                        "--subscription",
+                        site.subscription,
+                        "-o",
+                        "none",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+            except subprocess.CalledProcessError as e:
+                sys.stderr.write(
+                    f"[cleanup] KV secret purge failed (exit "
+                    f"{e.returncode}): {e.stderr}\n"
                 )
 

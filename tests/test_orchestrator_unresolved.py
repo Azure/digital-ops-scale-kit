@@ -23,7 +23,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from siteops.models import DeploymentStep, Manifest, Site
+from siteops.models import Manifest, Site
 from siteops.orchestrator import Orchestrator
 
 

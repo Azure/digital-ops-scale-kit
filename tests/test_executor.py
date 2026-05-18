@@ -689,7 +689,7 @@ class TestArcProxyPortAllocation:
 
     def test_release_and_reallocate(self):
         port1 = _allocate_arc_port_slot()
-        port2 = _allocate_arc_port_slot()
+        _allocate_arc_port_slot()  # consume slot 1 so the released slot is reused first
 
         _release_arc_port_slot(port1)
 

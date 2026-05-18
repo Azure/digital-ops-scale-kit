@@ -5,7 +5,6 @@ from pathlib import Path
 import yaml
 
 from siteops.models import Manifest
-from siteops.orchestrator import Orchestrator
 
 
 def _all_manifest_files(workspace: Path) -> list[Path]:

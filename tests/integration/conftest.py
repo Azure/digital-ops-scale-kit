@@ -18,6 +18,19 @@ Behavior when site config is present but the selector resolves to zero sites:
     vacuous passes would mask real misconfigurations (wrong selector,
     broken inherits chain, mismatched labels) that were discovered
     previously in exactly this way.
+
+Cluster-side reads (direct kubectl) require a kubeconfig that routes to
+the cluster the AIO instance was deployed onto:
+  - Local: standard kubectl discovery (~/.kube/config or KUBECONFIG)
+  - E2E suite: SITEOPS_TEST_KUBECONFIG env var. Required because the
+    siteops orchestrator's `arc:` kubectl steps mutate ~/.kube/config
+    via `az connectedk8s proxy` (adding a proxy-context entry that
+    points at a local port and switching current-context to it). The
+    proxy process exits after each deploy step, leaving the kubeconfig
+    pointing at a dead URL. Point SITEOPS_TEST_KUBECONFIG at the k3s
+    admin file (mode 0644 from create-k3s-cluster) and helpers in
+    tests/integration/helpers/kube.py inject --kubeconfig=<path> on
+    every kubectl invocation.
 """
 
 import os

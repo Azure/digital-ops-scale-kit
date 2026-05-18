@@ -10,20 +10,17 @@ Reference scenario that synchronizes a set of Key Vault secrets to Kubernetes Se
 
 The cluster-side SecretSync controller resolves each SecretSync, exchanges its OIDC token for an Azure AD token via the federated identity credential, reads the Key Vault secret using the managed identity, and writes the value into a Kubernetes Secret on the cluster. Materialized Secrets are consumable by AIO workloads in the AIO namespace.
 
-## Deploy
+## Prerequisites
 
-```bash
-siteops -w workspaces/iot-operations deploy samples/secretsync-sample/manifest.yaml -l environment=dev
-```
+- AIO must be installed on the target cluster. Run `aio-install` first.
+- The site's `aioRelease` must point to a release config under `parameters/aio-releases/`.
 
-The defaults in `parameters/inputs/sync-secrets.yaml` use obvious sample values, so the sample is deployable as-is to verify the data path on a fresh AIO install.
+## Configure before deploying
 
-## Customizing for real use
-
-The sync-secrets template treats the `secrets` array as the desired state. Each deploy PUTs the SPC with the union of all entries and creates one SecretSync per entry.
+The sync-secrets template treats the `secrets` array as the desired state. Each deploy PUTs the SPC with the union of all entries and creates one SecretSync per entry. Edit `parameters/inputs/sync-secrets.yaml` (or override in a `sites.local/` overlay) to declare the secrets you want synced and supply their values.
 
 ```yaml
-# parameters/inputs/sync-secrets.yaml (or override in sites.local/)
+# parameters/inputs/sync-secrets.yaml (or sites.local/ overlay)
 secrets:
   - secretName: db-password
   - secretName: api-key
@@ -45,7 +42,25 @@ Per-entry fields:
 - **`kubernetesSecretKey`** (optional): override when the consuming workload expects a different key inside the Secret.
 - **`createInKv`** (optional, default `true`): set `false` to sync a secret that already exists in the Key Vault. Skip the corresponding entry in `secretValues`.
 
-For real values, supply `secretValues` via a `sites.local/` overlay or a CI/CD secret store. Do not commit real values to source control.
+Supply `secretValues` via a `sites.local/` overlay or a CI/CD secret store. Do not commit real values to source control.
+
+## Deploy
+
+```bash
+siteops -w workspaces/iot-operations deploy samples/secretsync-sample/manifest.yaml -l environment=dev
+```
+
+The defaults shipped in `parameters/inputs/sync-secrets.yaml` are placeholder values intended for a first-run smoke test against a throwaway environment. Override them per the section above before deploying anywhere you care about.
+
+## Verifying the result
+
+After deploy, inspect a materialized Kubernetes Secret with `kubectl`:
+
+```bash
+kubectl get secret <kubernetesSecretName> -n azure-iot-operations -o yaml
+```
+
+The integration test `tests/integration/test_sync_secrets_manifest.py` asserts every configured secret materializes with the value supplied at deploy time.
 
 ## Removing a secret
 
@@ -61,18 +76,3 @@ az resource delete --ids <secretSyncResourceId>
 
 - **Re-running enablement clears the SPC objects.** Redeploying `enable-secretsync` (or composing manifests like `secretsync.yaml` standalone, or `aio-install.yaml` with `enableSecretSync` true) PUTs the SPC without an `objects` field, so the controller stops materializing every Kubernetes Secret with the error `the secretproviderclass parameters does not have a valid objects field`. Re-run the sample after any enablement redeploy.
 - **CLI-managed entries are dropped on Bicep redeploy.** Entries added out of band via `az iot ops secretsync secret set` are removed the next time this sample runs. Pick one source of truth per cluster.
-
-## Prerequisites
-
-- AIO must be installed on the target cluster. Run `aio-install` first.
-- The site's `aioRelease` must point to a release config under `parameters/aio-releases/`.
-
-## Verifying the result
-
-After deploy, inspect a materialized Kubernetes Secret with `kubectl`:
-
-```bash
-kubectl get secret <kubernetesSecretName> -n azure-iot-operations -o yaml
-```
-
-The integration test `tests/integration/test_sync_secrets_manifest.py` asserts every configured secret materializes with the value supplied at deploy time.

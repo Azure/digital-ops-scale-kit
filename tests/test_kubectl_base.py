@@ -9,8 +9,6 @@ is unit-tested here.
 
 from __future__ import annotations
 
-import pytest
-
 from tests.integration.helpers.kube import _kubectl_base
 
 

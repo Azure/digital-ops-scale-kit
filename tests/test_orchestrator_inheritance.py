@@ -459,7 +459,7 @@ class TestSiteInheritance:
 
         orchestrator = Orchestrator(tmp_workspace)
         original_safe_load = yaml.safe_load
-        with patch("siteops.orchestrator.yaml.safe_load", side_effect=original_safe_load) as m:
+        with patch("siteops.orchestrator.yaml.safe_load", side_effect=original_safe_load):
             for i in range(5):
                 orchestrator.load_site(f"site-{i}")
 

@@ -11,7 +11,7 @@ The enablement template (`enable-secretsync.bicep`) creates:
 | Resource | Purpose |
 |----------|---------|
 | User-Assigned Managed Identity | Authenticates the cluster to Key Vault |
-| Key Vault (optional) | Stores secrets; skipped if you bring your own |
+| Key Vault (optional) | Stores secrets, skipped if you bring your own |
 | Key Vault role assignments | Grants the MI `Key Vault Secrets User` + `Key Vault Reader` |
 | Federated Identity Credential | Binds the MI to the cluster's secret sync service account via OIDC |
 | SecretProviderClass (SPC) | Cluster-side resource linking the MI, Key Vault, and tenant |
