@@ -392,11 +392,11 @@ jobs:
         shell: bash
         # Any `type: kubectl` step in the workspace will dispatch through the
         # Arc proxy and need namespace RBAC for the workflow SP. Skip the
-        # binding when no such step exists. Walks manifests/, samples/, and
-        # scenarios/ since any of them can declare kubectl steps.
+        # binding when no such step exists. Walks manifests/ and samples/
+        # since either can declare kubectl steps.
         run: |
           set -euo pipefail
-          if grep -rqE '^\s*type:\s*kubectl\s*$' workspaces/*/manifests/ workspaces/*/samples/ workspaces/*/scenarios/ 2>/dev/null; then
+          if grep -rqE '^\s*type:\s*kubectl\s*$' workspaces/*/manifests/ workspaces/*/samples/ 2>/dev/null; then
             echo "needed=true" >> "$GITHUB_OUTPUT"
           else
             echo "needed=false" >> "$GITHUB_OUTPUT"

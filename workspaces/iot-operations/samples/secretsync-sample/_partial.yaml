@@ -5,7 +5,7 @@ name: secretsync-sample-step
 description: |
   Internal partial. Defines the sync-secrets step that writes the sample
   Key Vault secrets and the SecretSync ARM resources. Composed by the
-  secretsync-sample scenario manifest.
+  secretsync-sample manifest.
 
 steps:
   - name: sync-secrets

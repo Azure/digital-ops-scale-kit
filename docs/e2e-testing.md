@@ -51,7 +51,7 @@ No Azure-specific site file is committed. The E2E site is rendered at run time f
 | Mode | Resource group | SP scope | When to use |
 |------|---------------|----------|-------------|
 | ephemeral (default) | Workflow creates and deletes per run. | Subscription-level `Owner`. | Routine CI validation, fully automated. |
-| persistent | Operator supplies a pre-existing RG; only resources created during the run are deleted (snapshot delta). The cluster itself is always a fresh k3s on the runner (bring-your-own-cluster is not supported). | RG-level `Owner`. | Restricted subscriptions where sub-level Owner is not acceptable. Multi-release matrices are serialized in the shared RG. |
+| persistent | Operator supplies a pre-existing RG. Only resources created during the run are deleted (snapshot delta). The cluster itself is always a fresh k3s on the runner (bring-your-own-cluster is not supported). | RG-level `Owner`. | Restricted subscriptions where sub-level Owner is not acceptable. Multi-release matrices are serialized in the shared RG. |
 
 `Owner` is required (not `Contributor`) because AIO deployments make role assignments (for example, schema registry and Key Vault). `Contributor` cannot grant roles.
 
@@ -104,22 +104,22 @@ From the **Actions** tab, dispatch **E2E Tests** with the defaults to run a sing
 
 | Input | Typical value | Notes |
 |-------|--------------|-------|
-| `aio-releases` | `2603` or `2603,2604` | Comma-separated. Ephemeral fans out in parallel; persistent serializes cells in the same RG. See [aio-releases.md](aio-releases.md) for how releases are defined and pinned. |
+| `aio-releases` | `2603` or `2603,2604` | Comma-separated. Ephemeral fans out in parallel. Persistent serializes cells in the same RG. See [aio-releases.md](aio-releases.md) for how releases are defined and pinned. |
 | `environment` | `dev` | GitHub Environment whose secrets/approvers apply. |
-| `location` | `eastus2` | ephemeral mode only; persistent derives from the RG. |
+| `location` | `eastus2` | ephemeral mode only. Persistent derives from the RG. |
 | `resource-group` | empty (ephemeral) or existing RG (persistent) | |
 | `cluster-name` | empty | Arc cluster name to register. auto-generated if empty. |
 | `custom-locations-oid` | tenant value | See prerequisite 2. |
 | `skip-teardown` | false | Preserve the deployment for inspection. Scope depends on mode (see below). |
 | `keep-cluster-alive-minutes` | `0` | Hold the runner for N min before teardown for debugging. Max 300. Nothing should be added to the persistent RG during the hold (it'll be deleted by teardown). |
-| `scenarios` | empty (run all) or `aio-install,secretsync` | Comma-separated allowlist of scenario manifests to deploy. Valid values: `aio-install`, `secretsync`, `opc-ua-solution`, `aio-upgrade`. Useful for demos and focused debugging when paired with `keep-cluster-alive-minutes`. |
+| `scenarios` | empty (run all) or `aio-install,secretsync` | Comma-separated allowlist of test scenarios to deploy. Valid values: `aio-install`, `secretsync`, `secretsync-sample`, `opc-ua-solution`, `aio-upgrade`. Useful for demos and focused debugging when paired with `keep-cluster-alive-minutes`. |
 | `upgrade-to` | empty or `2604` | Optional AIO release to upgrade to after install-phase tests pass. Empty skips the upgrade phase. Per-cell skip when equal to the cell's `aio-releases` value. Requires `aio-upgrade` to be in the `scenarios` allowlist (or `scenarios` empty). |
 
 ### What `skip-teardown` leaves behind
 
 | Mode | Normal teardown | With `skip-teardown: true` |
 |------|----------------|----------------------------|
-| ephemeral | `az group delete` on the workflow-created RG. | **Entire RG and every resource inside it persist.** You are responsible for deleting the RG afterwards; otherwise orphan RGs accumulate and bill indefinitely. |
+| ephemeral | `az group delete` on the workflow-created RG. | **Entire RG and every resource inside it persist.** You are responsible for deleting the RG afterwards. Otherwise orphan RGs accumulate and bill indefinitely. |
 | persistent | `az connectedk8s delete` (only if the Arc cluster was created by this run) + snapshot-delta deletion of resources created during the run. RG itself is never touched. | Arc cluster + resources created by this run persist inside the operator's RG. Anything that existed before the run is untouched in either case. |
 
 ### Teardown safety guarantees
@@ -194,7 +194,7 @@ You must already be logged in (`az login`) and have the cluster registered with 
 To exercise the cross-release upgrade locally, install at one release first (block above), then re-render the site at the upgrade target and run the upgrade-only test classes:
 
 ```bash
-# Re-render with the upgrade target; same E2E_SITE_NAME so the file overwrites in place.
+# Re-render with the upgrade target. Same E2E_SITE_NAME so the file overwrites in place.
 export E2E_AIO_RELEASE=2604
 python scripts/render-e2e-site.py --output-dir "$SITES_DIR"
 

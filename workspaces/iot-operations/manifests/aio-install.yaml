@@ -11,15 +11,16 @@ description: |
     - enableGlobalSite        subscription-scoped edge site (deployed once per subscription)
     - enableEdgeSite          RG-scoped edge site (deployed per RG)
 
-  To add a sample on top of this install, see `scenarios/` (e.g.
-  `aio-with-opc-ua.yaml`).
+  To add a sample on top of this install, see `samples/aio-with-opc-ua/manifest.yaml`
+  for an example that composes this install with the OPC UA sample in one
+  deploy.
 
 # Max concurrent sites. 0 = unlimited, 1 = serial.
 parallel: 3
 
-# Default selector; override at the CLI with `-l <key>=<value>`.
+# Default selector. Override at the CLI with `-l <key>=<value>`.
 # Subscription-scoped sites (e.g. contoso-global) use different labels and are
-# intentionally excluded here; target them with `-l scope=subscription`.
+# intentionally excluded here. Target them with `-l scope=subscription`.
 selector: "environment=dev"
 
 steps:

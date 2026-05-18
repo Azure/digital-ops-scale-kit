@@ -5,8 +5,8 @@ description: |
   OPC UA solution sample steps without the resolve-aio prerequisite.
 
   Internal partial (filename prefixed `_`). Not deployed directly. Composed
-  by the standalone `manifest.yaml` next to this file and by scenarios
-  under `scenarios/`.
+  by the standalone `manifest.yaml` next to this file and by compositional
+  samples (e.g. `samples/aio-with-opc-ua/manifest.yaml`).
 
 steps:
   - name: opc-ua-solution

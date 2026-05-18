@@ -23,7 +23,7 @@ Extended documentation for the Digital Operations Scale Kit.
 
 | Term | Meaning |
 |------|---------|
-| **Workspace** | A directory under `workspaces/` containing the standard subdirs (`sites/`, `manifests/`, `parameters/`, `templates/`) plus optional `samples/`, `scenarios/`, `sites.local/`. |
+| **Workspace** | A directory under `workspaces/` containing the standard subdirs (`sites/`, `manifests/`, `parameters/`, `templates/`) plus optional `samples/`, `sites.local/`. |
 | **Site** | A deployment target (`kind: Site`). Has subscription, optional resource group, location, labels, parameters, properties. |
 | **SiteTemplate** | A reusable site base (`kind: SiteTemplate`). Cannot be deployed directly. Referenced via `inherits:`. |
 | **Manifest** | A `kind: Manifest` YAML defining ordered steps + parameters + a site selector. The unit of `siteops deploy`. |

@@ -7,8 +7,8 @@ description: |
   chain off the resolved values regardless of naming convention.
 
   Internal partial (filename prefixed `_`). Not deployed directly. Composed
-  by manifests and scenarios that add secret sync or samples on top of an
-  existing AIO install.
+  by manifests and samples that add secret sync or capabilities on top of
+  an existing AIO install.
 
 steps:
   - name: resolve-aio

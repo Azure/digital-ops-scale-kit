@@ -3,27 +3,27 @@
 A manifest can splice another manifest's steps into its own step list using a step-level `include:` directive. This makes one manifest viewable two ways: standalone, or as a partial composed into a larger pipeline.
 
 ```yaml
-# scenarios/aio-with-opc-ua.yaml
+# samples/aio-with-opc-ua/manifest.yaml
 apiVersion: siteops/v1
 kind: Manifest
 name: aio-with-opc-ua
 description: Compose AIO fundamentals with the OPC UA sample.
 
 steps:
-  - include: ../manifests/_aio-fundamentals.yaml
-  - include: ../manifests/_resolve-aio.yaml
-  - include: ../samples/opc-ua-solution/_partial.yaml
+  - include: ../../manifests/_aio-fundamentals.yaml
+  - include: ../../manifests/_resolve-aio.yaml
+  - include: ../opc-ua-solution/_partial.yaml
 ```
 
 After resolution, the parent's step list is a flat sequence of every step the included manifests contribute, in declared order, interleaved with any inline steps the parent defines.
 
-The standalone-vs-partial distinction matters for composition: scenarios should include the leaf partials, not standalone manifests. See [Standalone manifests vs partials](#standalone-manifests-vs-partials) and `scenarios/README.md`.
+The standalone-vs-partial distinction matters for composition. Compositions should include the leaf `_partial.yaml`s, not standalone `manifest.yaml`s. Composing two standalone manifests will collide on the `resolve-aio` step name. See [Standalone manifests vs partials](#standalone-manifests-vs-partials) and `workspaces/<workspace>/samples/README.md`.
 
 ## Step shape
 
 ```yaml
 - include: <path>           # required, string, workspace-relative
-  when: "{{ ... }}"         # optional condition; see "Conditional includes"
+  when: "{{ ... }}"         # optional condition. See "Conditional includes"
 ```
 
 No other keys are allowed alongside `include:`. Adding `name`, `template`, `type`, `arc`, `files`, `operation`, `parameters`, or `scope` to an include step is a parse error.
@@ -52,7 +52,7 @@ If the included manifest defines manifest-level `parameters:`, the include canno
 
 Includes may include further includes. Cycles are detected (a manifest cannot, directly or indirectly, include itself) and reported with the full include chain. Maximum include depth is 8.
 
-A partial shared by two siblings (A includes B and C, both B and C include D) is allowed. Cycle detection tracks the current depth-first path, not a global visited set. Step-name collisions in the resulting flat list are still rejected. Ensure shared partials contribute uniquely-named steps. This is the main reason scenarios should compose `_partial.yaml` files rather than two standalone manifests that each include the same partial.
+A partial shared by two siblings (A includes B and C, both B and C include D) is allowed. Cycle detection tracks the current depth-first path, not a global visited set. Step-name collisions in the resulting flat list are still rejected. Ensure shared partials contribute uniquely-named steps. This is the main reason compositions should compose `_partial.yaml` files rather than two standalone manifests that each include the same partial.
 
 ## Step name uniqueness
 

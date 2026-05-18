@@ -9,8 +9,8 @@ description: |
   Reads target versions from parameters/aio-releases/<release>.yaml, the same
   source aio-install.yaml uses for the initial deployment. Operators select the
   target version per site via site.properties.aioRelease (re-pin the site to
-  the new release, then run this manifest). Drives only Arc extension bumps;
-  the AIO instance ARM resource has no writable version property and is not
+  the new release, then run this manifest). Drives only Arc extension bumps.
+  The AIO instance ARM resource has no writable version property and is not
   mutated.
 
   cert-manager is upgraded only when the site declares
@@ -30,7 +30,7 @@ description: |
 # Max concurrent sites. 0 = unlimited, 1 = serial.
 parallel: 3
 
-# Default selector; override at the CLI with `-l <key>=<value>`.
+# Default selector. Override at the CLI with `-l <key>=<value>`.
 selector: "environment=dev"
 
 parameters:

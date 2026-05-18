@@ -22,7 +22,7 @@ parameters:
       - manifests/aio-upgrade.yaml
       - manifests/secretsync.yaml
       - samples/opc-ua-solution/manifest.yaml
-      - scenarios/aio-with-opc-ua.yaml
+      - samples/aio-with-opc-ua/manifest.yaml
 
   - name: environment
     displayName: Target environment
@@ -90,7 +90,7 @@ stages:
                 echo "##vso[task.logissue type=error]Manifest not found: $MANIFEST_PATH"
                 echo ""
                 echo "Available manifests:"
-                { find "workspaces/${{ parameters.workspace }}/manifests" "workspaces/${{ parameters.workspace }}/scenarios" -maxdepth 1 \
+                { find "workspaces/${{ parameters.workspace }}/manifests" -maxdepth 1 \
                     \( -name "*.yaml" -o -name "*.yml" \) -not -name "_*" 2>/dev/null
                   find "workspaces/${{ parameters.workspace }}/samples" -mindepth 2 -maxdepth 2 \
                     \( -name "manifest.yaml" -o -name "manifest.yml" \) 2>/dev/null

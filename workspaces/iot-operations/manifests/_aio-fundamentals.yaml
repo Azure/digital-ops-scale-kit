@@ -7,8 +7,8 @@ description: |
   no samples.
 
   Internal partial (filename prefixed `_`). Not deployed directly. Composed
-  by `aio-install.yaml` (which adds the secret sync step) and by scenarios
-  under `scenarios/` (which add samples on top).
+  by `aio-install.yaml` (which adds the secret sync step) and by compositional
+  samples (which add capabilities on top).
 
 # Shared parameters applied to all steps (auto-filtered per template). The
 # aio-releases YAML lives at the manifest level so any step that declares
@@ -19,7 +19,7 @@ parameters:
   - "parameters/aio-releases/{{ site.properties.aioRelease }}.yaml"
 
 steps:
-  # Edge Site (Global) - subscription-scoped; deployed once per subscription.
+  # Edge Site (Global) - subscription-scoped. Deployed once per subscription.
   # RG-level sites resolve outputs via cross-scope output chaining.
   - name: global-edge-site
     template: templates/edge-site/subscription.bicep

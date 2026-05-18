@@ -32,7 +32,7 @@ on:
                     - manifests/aio-upgrade.yaml
                     - manifests/secretsync.yaml
                     - samples/opc-ua-solution/manifest.yaml
-                    - scenarios/aio-with-opc-ua.yaml
+                    - samples/aio-with-opc-ua/manifest.yaml
                 default: "manifests/aio-install.yaml"
             environment:
                 description: "Target environment"
@@ -118,7 +118,7 @@ jobs:
                     echo "::error::Manifest not found: $INPUT_WORKSPACE/$INPUT_MANIFEST"
                     echo ""
                     echo "Available manifests:"
-                    { find "$INPUT_WORKSPACE/manifests" "$INPUT_WORKSPACE/scenarios" -maxdepth 1 \
+                    { find "$INPUT_WORKSPACE/manifests" -maxdepth 1 \
                         \( -name "*.yaml" -o -name "*.yml" \) -not -name "_*" 2>/dev/null
                       find "$INPUT_WORKSPACE/samples" -mindepth 2 -maxdepth 2 \
                         \( -name "manifest.yaml" -o -name "manifest.yml" \) 2>/dev/null

@@ -17,13 +17,13 @@ Standalone manifests and their internal partials for the AIO platform.
 
 - **`_` prefix** marks an internal partial. Not deployed directly. Composed via `include:`. The `test_partial_files_use_underscore_prefix` workspace test enforces this (a manifest authored to be included must start with `_`).
 - **Standalone manifests** are convenience entry points for `siteops deploy`. They re-include the partials they depend on.
-- **Composed manifests live in `scenarios/`**, not here. A scenario that pulls in two standalone manifests will collide on shared step names (e.g. `resolve-aio`). Compose the underlying `_partial.yaml` files instead.
+- **Composed manifests live in `samples/<name>/manifest.yaml`**, next to the partials they compose. A composition that pulls in two standalone manifests will collide on shared step names (e.g. `resolve-aio`). Compose the underlying `_partial.yaml` files instead. See `samples/README.md` for the full composition rules.
 
 ## Authoring a new partial
 
 1. Name the file `_<topic>.yaml` (leading underscore).
 2. Set `kind: Manifest`. The engine has no separate Partial kind.
-3. Include only the steps that ARE the topic. Do not pull prerequisites; the parent decides ordering.
+3. Include only the steps that ARE the topic. Do not pull prerequisites. The parent decides ordering.
 4. If the partial needs values from upstream steps, reference them as `{{ steps.<name>.outputs.<key> }}` and document the expected upstream step in the description.
 
 See `docs/manifest-includes.md` for the full include contract.

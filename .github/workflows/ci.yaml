@@ -147,16 +147,15 @@ jobs:
         env:
           WORKSPACE_DIR: workspaces/iot-operations
         # Discover every standalone Manifest YAML across the standard top-level
-        # dirs so CI validates standalone manifests (manifests/), sample
-        # entry points (samples/<name>/manifest.yaml), and composed scenarios
-        # (scenarios/) consistently. Excludes:
+        # dirs so CI validates standalone manifests (manifests/) and sample
+        # entry points (samples/<name>/manifest.yaml) consistently. Excludes:
         #   - partials (filename prefixed `_`), which fail standalone validation
         #     by design when they reference outputs from a parent's earlier steps.
         #   - parameters files in samples (inputs.yaml, outputs.yaml, etc.),
         #     which are not manifests.
         run: |
           MANIFESTS=$(
-            { find "$WORKSPACE_DIR/manifests" "$WORKSPACE_DIR/scenarios" -maxdepth 1 \
+            { find "$WORKSPACE_DIR/manifests" -maxdepth 1 \
                 \( -name "*.yaml" -o -name "*.yml" \) -not -name "_*" 2>/dev/null
               find "$WORKSPACE_DIR/samples" -mindepth 2 -maxdepth 2 \
                 \( -name "manifest.yaml" -o -name "manifest.yml" \) 2>/dev/null

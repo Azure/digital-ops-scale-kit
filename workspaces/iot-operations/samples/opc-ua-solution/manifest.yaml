@@ -4,8 +4,9 @@ name: opc-ua-solution
 description: |
   Sample OPC UA solution: device + asset, Event Hub destination with managed
   identity, and a dataflow mapping oven telemetry from the broker to Event Hub.
-  Designed to deploy on top of an existing AIO instance (use the
-  `aio-with-opc-ua` scenario for a combined install + sample deployment).
+  Designed to deploy on top of an existing AIO instance. The composed
+  `aio-with-opc-ua` sample (`samples/aio-with-opc-ua/manifest.yaml`) wires
+  install plus this sample into one deploy.
 
   Discovers actual deployed names (custom location, ADR namespace) from the
   AIO instance via resolve-aio, so the manifest works against any AIO install
@@ -19,7 +20,7 @@ description: |
 # Max concurrent sites. 0 = unlimited, 1 = serial.
 parallel: 3
 
-# Default selector; override at the CLI with `-l <key>=<value>`.
+# Default selector. Override at the CLI with `-l <key>=<value>`.
 selector: "environment=dev"
 
 parameters:

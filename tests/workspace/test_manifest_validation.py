@@ -8,7 +8,7 @@ from siteops.models import Manifest
 
 
 def _all_manifest_files(workspace: Path) -> list[Path]:
-    """Discover every Manifest YAML across `manifests/`, `samples/`, `scenarios/`.
+    """Discover every Manifest YAML across `manifests/` and `samples/`.
 
     Centralized so validation and structural tests stay aligned as the layout
     grows. The samples sweep filters to the manifest convention
@@ -16,10 +16,11 @@ def _all_manifest_files(workspace: Path) -> list[Path]:
     `inputs.yaml` and `outputs.yaml`.
     """
     found: list[Path] = []
-    for sub in ("manifests", "scenarios"):
-        d = workspace / sub
-        if d.is_dir():
-            found.extend(sorted(d.glob("*.yaml")) + sorted(d.glob("*.yml")))
+    manifests = workspace / "manifests"
+    if manifests.is_dir():
+        found.extend(
+            sorted(manifests.glob("*.yaml")) + sorted(manifests.glob("*.yml"))
+        )
     samples = workspace / "samples"
     if samples.is_dir():
         for sample_dir in sorted(samples.iterdir()):
@@ -68,10 +69,12 @@ class TestManifestValidation:
         errors = orchestrator.validate(workspace / "samples" / "opc-ua-solution" / "manifest.yaml")
         assert errors == [], f"opc-ua-solution validation errors: {errors}"
 
-    def test_aio_with_opc_ua_scenario_validates(self, workspace, orchestrator):
-        """scenarios/aio-with-opc-ua.yaml should validate (composes via include)."""
-        errors = orchestrator.validate(workspace / "scenarios" / "aio-with-opc-ua.yaml")
-        assert errors == [], f"aio-with-opc-ua scenario validation errors: {errors}"
+    def test_aio_with_opc_ua_validates(self, workspace, orchestrator):
+        """samples/aio-with-opc-ua/manifest.yaml should validate (composes via include)."""
+        errors = orchestrator.validate(
+            workspace / "samples" / "aio-with-opc-ua" / "manifest.yaml"
+        )
+        assert errors == [], f"aio-with-opc-ua validation errors: {errors}"
 
     def test_no_duplicate_step_names_in_any_manifest(self, workspace, orchestrator):
         """No manifest (post-include flatten) should have duplicate step names."""
@@ -93,9 +96,9 @@ class TestManifestValidation:
         for `siteops deploy`) do not start with `_`. The same applies to
         `samples/<name>/_partial.yaml`.
 
-        Detection: walk every manifest under `manifests/`, `scenarios/`, and
-        `samples/<name>/`; collect the include targets; assert each target's
-        basename starts with `_`.
+        Detection: walk every manifest under `manifests/` and
+        `samples/<name>/`, collect the include targets, and assert each
+        target's basename starts with `_`.
         """
         offenders: list[str] = []
         for manifest_path in _all_manifest_files(workspace):
@@ -114,7 +117,7 @@ class TestManifestValidation:
                 if not resolved.name.startswith("_"):
                     offenders.append(
                         f"{manifest_path.relative_to(workspace)} includes "
-                        f"{target!r} (resolved: {resolved.name}); included "
+                        f"{target!r} (resolved: {resolved.name}). Included "
                         f"files must be partials with the `_` prefix"
                     )
         assert offenders == [], "Partial-prefix violations:\n" + "\n".join(offenders)

@@ -288,7 +288,7 @@ The iot-operations workspace demonstrates key Site Ops capabilities:
 | 2 | `manifests/aio-install.yaml` | `dev` | munich-dev, seattle-dev | Parallel deployment |
 | 3 | `manifests/aio-install.yaml` | `prod` | munich-prod, seattle-prod | Parallel deployment |
 | 4 | `samples/opc-ua-solution/manifest.yaml` | `staging` | chicago-staging | OPC UA sample on existing AIO |
-| 5 | `scenarios/aio-with-opc-ua.yaml` | any | any | Composed install + sample in one shot |
+| 5 | `samples/aio-with-opc-ua/manifest.yaml` | any | any | Composed install + sample in one shot |
 | 6 | `manifests/aio-upgrade.yaml` | any | any AIO-installed site | Upgrade an existing AIO instance to the site's current `aioRelease` (bump the site's `aioRelease` first, then dispatch) |
 
 ### Site configuration
@@ -317,7 +317,7 @@ gh workflow run deploy.yaml -f workspace="iot-operations" -f manifest="manifests
 gh workflow run deploy.yaml -f workspace="iot-operations" -f manifest="samples/opc-ua-solution/manifest.yaml" -f environment="staging"
 
 # Step 5: Composed install + sample in one shot (alternative to steps 1+4)
-gh workflow run deploy.yaml -f workspace="iot-operations" -f manifest="scenarios/aio-with-opc-ua.yaml" -f environment="staging"
+gh workflow run deploy.yaml -f workspace="iot-operations" -f manifest="samples/aio-with-opc-ua/manifest.yaml" -f environment="staging"
 ```
 
 ## Workflow Architecture
@@ -420,8 +420,7 @@ To add a new manifest to the deployment workflows:
 
 1. Create your manifest at the appropriate location in the workspace:
    - Standalone day-2 manifests under `workspaces/<workspace>/manifests/`
-   - Self-contained workload bundles under `workspaces/<workspace>/samples/<name>/`
-   - Composed (include-based) manifests under `workspaces/<workspace>/scenarios/`
+   - Workload bundles or composed manifests under `workspaces/<workspace>/samples/<name>/`
 2. Update the workflow/pipeline to add the path to the dropdown:
 
 **GitHub Actions** (`.github/workflows/deploy.yaml`):
@@ -435,7 +434,7 @@ manifest:
         - manifests/aio-upgrade.yaml
         - manifests/secretsync.yaml
         - samples/opc-ua-solution/manifest.yaml
-        - scenarios/aio-with-opc-ua.yaml
+        - samples/aio-with-opc-ua/manifest.yaml
         - manifests/my-new-manifest.yaml  # Add here (full path)
 ```
 
@@ -450,7 +449,7 @@ manifest:
     - manifests/aio-upgrade.yaml
     - manifests/secretsync.yaml
     - samples/opc-ua-solution/manifest.yaml
-    - scenarios/aio-with-opc-ua.yaml
+    - samples/aio-with-opc-ua/manifest.yaml
     - manifests/my-new-manifest.yaml  # Add here (full path)
 ```
 
@@ -623,7 +622,7 @@ Same as GitHub Actions, see [Assign Azure roles](#3-assign-azure-roles). The ser
 3. Select branch/tag from the branch picker
 4. Fill in parameters:
    - **Workspace**: `iot-operations`
-   - **Manifest**: path relative to the workspace root (e.g., `manifests/aio-install.yaml`, `samples/opc-ua-solution/manifest.yaml`, `scenarios/aio-with-opc-ua.yaml`)
+   - **Manifest**: path relative to the workspace root (e.g., `manifests/aio-install.yaml`, `samples/opc-ua-solution/manifest.yaml`, `samples/aio-with-opc-ua/manifest.yaml`)
    - **Target environment**: `dev`, `staging`, or `prod`
    - **Additional site selector**: e.g., `country=US,name=seattle-dev` (optional)
    - **Dry run**: Check to preview without deploying
