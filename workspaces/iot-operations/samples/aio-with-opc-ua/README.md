@@ -12,3 +12,5 @@ sequence and `samples/README.md` for the rules every composition follows.
 ```bash
 siteops -w workspaces/iot-operations deploy samples/aio-with-opc-ua/manifest.yaml -l environment=dev
 ```
+
+See `../README.md` (samples authoring guide) for the composition pattern and the conventions every sample follows.

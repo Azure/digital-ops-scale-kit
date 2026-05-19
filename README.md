@@ -144,6 +144,7 @@ digital-ops-scale-kit/
 │       ├── sites/                # Site definitions
 │       ├── manifests/            # Deployment orchestration
 │       ├── parameters/           # Parameter files
+│       ├── samples/              # Deployable examples (bundles + compositions)
 │       └── templates/            # Bicep templates
 ├── docs/                         # Extended documentation
 │   ├── aio-releases.md           # AIO release pinning, upgrades, adding a new release

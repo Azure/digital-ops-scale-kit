@@ -3,7 +3,7 @@ kind: Manifest
 name: secretsync-sample
 
 description: |
-  Reference scenario that synchronizes a set of Key Vault secrets to
+  Reference sample that synchronizes a set of Key Vault secrets to
   Kubernetes Secrets on the target AIO cluster. Demonstrates the full
   secret-sync data path: scalekit provisions the secretsync infrastructure
   (managed identity, Key Vault, role assignments, federated identity

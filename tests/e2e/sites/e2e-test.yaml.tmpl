@@ -1,5 +1,5 @@
 # E2E test site template. This is the primary live-subscription validation of
-# the siteops engine and the scalekit scenarios it drives.
+# the siteops engine and the scalekit samples it drives.
 #
 # Rendered at runtime (workflow or local shell) by `scripts/render-e2e-site.py`
 # into a writable directory; that directory is then supplied via
@@ -18,7 +18,7 @@
 #
 # deployOptions are pinned explicitly (not inherited) so changes to
 # base-site.yaml defaults can never silently alter the E2E run cost, runtime,
-# or scope. Individual scenarios that specifically exercise a disabled path
+# or scope. Individual test phases that specifically exercise a disabled path
 # can override this via their own site file.
 #
 # Expected environment variables (all required at render time):

@@ -112,8 +112,8 @@ From the **Actions** tab, dispatch **E2E Tests** with the defaults to run a sing
 | `custom-locations-oid` | tenant value | See prerequisite 2. |
 | `skip-teardown` | false | Preserve the deployment for inspection. Scope depends on mode (see below). |
 | `keep-cluster-alive-minutes` | `0` | Hold the runner for N min before teardown for debugging. Max 300. Nothing should be added to the persistent RG during the hold (it'll be deleted by teardown). |
-| `scenarios` | empty (run all) or `aio-install,secretsync` | Comma-separated allowlist of test scenarios to deploy. Valid values: `aio-install`, `secretsync`, `secretsync-sample`, `opc-ua-solution`, `aio-upgrade`. Useful for demos and focused debugging when paired with `keep-cluster-alive-minutes`. |
-| `upgrade-to` | empty or `2604` | Optional AIO release to upgrade to after install-phase tests pass. Empty skips the upgrade phase. Per-cell skip when equal to the cell's `aio-releases` value. Requires `aio-upgrade` to be in the `scenarios` allowlist (or `scenarios` empty). |
+| `tests` | empty (run all) or `aio-install,secretsync` | Comma-separated allowlist of test phases to deploy and run. Valid values: `aio-install`, `secretsync`, `secretsync-sample`, `opc-ua-solution`, `aio-upgrade`. Useful for demos and focused debugging when paired with `keep-cluster-alive-minutes`. |
+| `upgrade-to` | empty or `2604` | Optional AIO release to upgrade to after install-phase tests pass. Empty skips the upgrade phase. Per-cell skip when equal to the cell's `aio-releases` value. Requires `aio-upgrade` to be in the `tests` allowlist (or `tests` empty). |
 
 ### What `skip-teardown` leaves behind
 

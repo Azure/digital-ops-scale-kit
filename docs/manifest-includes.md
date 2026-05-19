@@ -15,6 +15,8 @@ steps:
   - include: ../opc-ua-solution/_partial.yaml
 ```
 
+Include paths are resolved relative to the including manifest's directory. From `samples/<name>/manifest.yaml`, partials under `manifests/` are two levels up (`../../manifests/`) and sibling samples are one level up (`../<other-sample>/`).
+
 After resolution, the parent's step list is a flat sequence of every step the included manifests contribute, in declared order, interleaved with any inline steps the parent defines.
 
 The standalone-vs-partial distinction matters for composition. Compositions should include the leaf `_partial.yaml`s, not standalone `manifest.yaml`s. Composing two standalone manifests will collide on the `resolve-aio` step name. See [Standalone manifests vs partials](#standalone-manifests-vs-partials) and `workspaces/<workspace>/samples/README.md`.
@@ -22,7 +24,7 @@ The standalone-vs-partial distinction matters for composition. Compositions shou
 ## Step shape
 
 ```yaml
-- include: <path>           # required, string, workspace-relative
+- include: <path>           # required, string, file-relative
   when: "{{ ... }}"         # optional condition. See "Conditional includes"
 ```
 

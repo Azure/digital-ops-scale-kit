@@ -59,8 +59,8 @@ on:
         description: Optional AIO release to upgrade to after the install-phase tests pass. Empty = skip the upgrade phase. Each matrix cell whose `aio-releases` value differs from this re-renders the site at the upgrade-to release and runs aio-upgrade.yaml + the upgrade-only integration tests.
         type: string
         default: ""
-      scenarios:
-        description: "Comma-separated subset of scenarios to deploy + test. Empty = run all. Valid values: aio-install, secretsync, secretsync-sample, opc-ua-solution, aio-upgrade. Use this to keep the cluster focused for demos or interactive sessions (combine with keep-cluster-alive-minutes)."
+      tests:
+        description: "Comma-separated subset of test phases to deploy + run. Empty = run all. Valid values: aio-install, secretsync, secretsync-sample, opc-ua-solution, aio-upgrade. Use this to keep the cluster focused for demos or interactive sessions (combine with keep-cluster-alive-minutes)."
         type: string
         default: ""
 
@@ -92,7 +92,7 @@ jobs:
           INPUT_RG: "${{ inputs.resource-group }}"
           INPUT_CLUSTER: "${{ inputs.cluster-name }}"
           INPUT_UPGRADE_TO: "${{ inputs.upgrade-to }}"
-          INPUT_SCENARIOS: "${{ inputs.scenarios }}"
+          INPUT_TESTS: "${{ inputs.tests }}"
           RUN_ID: "${{ github.run_id }}"
         run: |
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
@@ -141,48 +141,48 @@ jobs:
                   f"Same-version round-trip is already covered by the install-phase "
                   f"test_aio_upgrade_manifest tests."
               )
-          # Resolve the scenarios input into a pytest path list. Empty = the
+          # Resolve the tests input into a pytest path list. Empty = the
           # full integration suite (preserves prior behavior). A non-empty
           # subset narrows pytest collection to just those test files, which
           # also narrows fixture chains so only the requested manifests get
           # deployed onto the cluster (e.g. `aio-install,secretsync` keeps
           # OPC UA off the cluster for a focused demo session).
-          scenarios_in = [s.strip() for s in os.environ["INPUT_SCENARIOS"].split(",") if s.strip()]
-          # Map of scenario -> integration test file. The convention
-          # `<scenario>` -> `tests/integration/test_<scenario_underscored>_manifest.py`
+          tests_in = [s.strip() for s in os.environ["INPUT_TESTS"].split(",") if s.strip()]
+          # Map of test phase -> integration test file. The convention
+          # `<phase>` -> `tests/integration/test_<phase_underscored>_manifest.py`
           # is enforced by the integration suite layout. Keep this list in
-          # sync if a new scenario test file is added.
-          scenario_map = {
+          # sync if a new test phase file is added.
+          test_map = {
               "aio-install": "tests/integration/test_aio_install_manifest.py",
               "secretsync": "tests/integration/test_secretsync_manifest.py",
               "secretsync-sample": "tests/integration/test_sync_secrets_manifest.py",
               "opc-ua-solution": "tests/integration/test_opc_ua_solution_manifest.py",
               "aio-upgrade": "tests/integration/test_aio_upgrade_manifest.py",
           }
-          if scenarios_in:
+          if tests_in:
               # Dedupe while preserving order so the surfaced "Available" list
               # in error messages matches what the operator typed.
               seen = set()
               ordered = []
-              for s in scenarios_in:
+              for s in tests_in:
                   if s not in seen:
                       seen.add(s)
                       ordered.append(s)
-              unknown = [s for s in ordered if s not in scenario_map]
+              unknown = [s for s in ordered if s not in test_map]
               if unknown:
                   sys.exit(
-                      f"scenarios entries not recognized: {unknown}. "
-                      f"Valid: {sorted(scenario_map)}."
+                      f"tests entries not recognized: {unknown}. "
+                      f"Valid: {sorted(test_map)}."
                   )
               if upgrade_to and "aio-upgrade" not in ordered:
                   sys.exit(
-                      f"upgrade-to '{upgrade_to}' is set but `scenarios` "
-                      f"({ordered}) does not include 'aio-upgrade'; the "
+                      f"upgrade-to '{upgrade_to}' is set but `tests` "
+                      f"({ordered}) does not include 'aio-upgrade'. The "
                       f"upgrade-phase pytest step would collect zero tests "
                       f"and silently 'pass'. Either add 'aio-upgrade' to "
-                      f"scenarios or unset upgrade-to."
+                      f"tests or unset upgrade-to."
                   )
-              pytest_paths = " ".join(scenario_map[s] for s in ordered)
+              pytest_paths = " ".join(test_map[s] for s in ordered)
           else:
               pytest_paths = "tests/integration/"
           print(f"versions={json.dumps(rs)}")
@@ -489,7 +489,7 @@ jobs:
         # AIO_RELEASE is routed through env (not ${{ }} interpolated into the
         # shell line) so a workflow_dispatch input containing shell metachars
         # cannot break out of the command. PYTEST_PATHS comes from prep, which
-        # validated it against a known scenario allowlist.
+        # validated it against a known test-phase allowlist.
         run: |
           set -euo pipefail
           pytest $PYTEST_PATHS -v -m integration --tb=long \

@@ -1,6 +1,6 @@
 # secretsync-sample
 
-Reference scenario that synchronizes a set of Key Vault secrets to Kubernetes Secrets on the target AIO cluster. Demonstrates the full secret-sync data path end to end, including multiple secrets in one deploy and the pattern for syncing a secret that already exists in the Key Vault.
+Reference sample that synchronizes a set of Key Vault secrets to Kubernetes Secrets on the target AIO cluster. Demonstrates the full secret-sync data path end to end, including multiple secrets in one deploy and the pattern for syncing a secret that already exists in the Key Vault.
 
 ## What this sample does
 
@@ -76,3 +76,7 @@ az resource delete --ids <secretSyncResourceId>
 
 - **Re-running enablement clears the SPC objects.** Redeploying `enable-secretsync` (or composing manifests like `secretsync.yaml` standalone, or `aio-install.yaml` with `enableSecretSync` true) PUTs the SPC without an `objects` field, so the controller stops materializing every Kubernetes Secret with the error `the secretproviderclass parameters does not have a valid objects field`. Re-run the sample after any enablement redeploy.
 - **CLI-managed entries are dropped on Bicep redeploy.** Entries added out of band via `az iot ops secretsync secret set` are removed the next time this sample runs. Pick one source of truth per cluster.
+
+## Writing your own sample
+
+See `../README.md` for sample bundle conventions and how to add a new sample to this workspace.

@@ -72,3 +72,13 @@ Omit `_resolve-aio.yaml` when the composition has no downstream consumer of the 
 1. **Compose partials, not standalone manifests.** `manifests/aio-install.yaml` and `samples/<name>/manifest.yaml` are standalone entry points that re-include `_resolve-aio.yaml` so they can be deployed on their own. Composing two of them in one parent will collide on the `resolve-aio` step name. Compose the underlying `_partial.yaml` files instead.
 2. **Step names must be unique** across the post-include flat step list. Collision is a parse-time error.
 3. **Site selectors and parallel settings** declared on the composing manifest apply at the composition level. The same fields on included partials are silently ignored.
+
+## Samples in this workspace
+
+| Sample | Shape | Composes |
+|---|---|---|
+| `secretsync-sample/` | Bundle | template + inputs + partial |
+| `opc-ua-solution/` | Bundle | template + inputs + partial |
+| `aio-with-opc-ua/` | Composition | `_aio-fundamentals` + `_resolve-aio` + `opc-ua-solution/_partial` |
+
+See each sample's own `README.md` for what it deploys, prerequisites, and how to configure before deploying.
