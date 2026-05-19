@@ -12,8 +12,10 @@ to Bicep.
 
 import base64
 import json
+import os
 import subprocess
 import sys
+import time
 import uuid
 
 import pytest
@@ -289,6 +291,84 @@ class TestSyncSecretsIdempotency:
                 )
 
 
+def _run_az(
+    args: list[str], *, timeout: int = 120, redact: tuple[str, ...] = ()
+) -> subprocess.CompletedProcess:
+    """Run an `az` CLI command with leak-proof error handling.
+
+    Uses `check=False` so the args list is never exposed via
+    `CalledProcessError.cmd` in pytest's traceback. On non-zero exit,
+    raises a `RuntimeError` whose message carries only the program name,
+    the first arg, the exit code, and stderr with any value in `redact`
+    substituted with `***`. The chained CalledProcessError is suppressed
+    via `from None` so frame locals from this helper are the only
+    surface, and pytest's default tb output never sees the raw args.
+
+    Args:
+        args: full argv (typically starts with `az`).
+        timeout: subprocess timeout in seconds.
+        redact: values to substitute with `***` in stderr before raising,
+            for defense in depth when a secret could appear in stderr
+            from a misbehaving CLI. The args list is already not exposed
+            on failure since the caller passes secret material via file
+            or stdin, never as a CLI arg.
+
+    Returns:
+        CompletedProcess on success.
+
+    Raises:
+        RuntimeError: on non-zero exit. Carries redacted stderr only.
+    """
+    proc = subprocess.run(args, check=False, capture_output=True, text=True, timeout=timeout)
+    if proc.returncode != 0:
+        stderr = proc.stderr or ""
+        for value in redact:
+            if value:
+                stderr = stderr.replace(value, "***")
+        program = args[0] if args else "<empty>"
+        first_arg = args[1] if len(args) > 1 else ""
+        raise RuntimeError(
+            f"{program} {first_arg} failed (exit {proc.returncode}): "
+            f"{stderr.strip()}"
+        ) from None
+    return proc
+
+
+def _discover_caller_principal() -> tuple[str, str]:
+    """Return `(object_id, assignee_principal_type)` for the current `az` caller.
+
+    Dispatches on `az account show --query user.type`:
+
+    - `user`: query Graph for the signed-in user's object id.
+    - `servicePrincipal` (also returned for managed identities): query the
+      service principal by its appId.
+
+    Returns:
+        (object_id, principal_type) where principal_type is one of
+        `"User"` or `"ServicePrincipal"`, suitable for
+        `--assignee-principal-type` on `az role assignment create`.
+
+    Raises:
+        RuntimeError: if `az account show` returns an unsupported `type`.
+    """
+    account = json.loads(_run_az(
+        ["az", "account", "show", "--query", "user", "-o", "json"]
+    ).stdout)
+    user_name = account.get("name", "")
+    user_type = account.get("type", "")
+    if user_type == "user":
+        oid = _run_az(
+            ["az", "ad", "signed-in-user", "show", "--query", "id", "-o", "tsv"]
+        ).stdout.strip()
+        return oid, "User"
+    if user_type == "servicePrincipal":
+        oid = _run_az(
+            ["az", "ad", "sp", "show", "--id", user_name, "--query", "id", "-o", "tsv"]
+        ).stdout.strip()
+        return oid, "ServicePrincipal"
+    raise RuntimeError(f"Unsupported az caller type: {user_type!r}")
+
+
 class TestSyncSecretsExistingKvSecret:
     """Cover the `createInKv: false` branch of sync-secrets.bicep.
 
@@ -315,6 +395,20 @@ class TestSyncSecretsExistingKvSecret:
     read upfront and round-tripped through both PUTs so they are not
     wiped. Not safe to run under pytest-xdist alongside other secret-sync
     tests because the SPC name is global.
+
+    RBAC: enable-secretsync.bicep grants only the secretsync managed
+    identity on the vault (read-only). The running `az` caller has no
+    data-plane role by default, so the test grants itself `Key Vault
+    Secrets Officer` scoped to the vault for the duration of the test,
+    then deletes the assignment in cleanup. The assignment uses a per-run
+    uuid name so parallel runners do not race on the same (principal,
+    role, scope) tuple.
+
+    Secret-value hygiene: the test value never enters argv. It is staged
+    to a 0600 file in tmp_path and passed via `az keyvault secret set
+    --file`. All `az` calls go through a local wrapper that uses
+    `check=False` and raises a redacted RuntimeError on failure so a
+    misbehaving CLI that echoes input on stderr cannot leak the value.
     """
 
     def test_existing_kv_secret_materializes(
@@ -366,23 +460,12 @@ class TestSyncSecretsExistingKvSecret:
             f"/providers/Microsoft.SecretSyncController"
             f"/azureKeyVaultSecretProviderClasses/{spc_name}"
         )
-        spc_show = subprocess.run(
-            [
-                "az",
-                "resource",
-                "show",
-                "--ids",
-                spc_resource_id,
-                "--api-version",
-                "2024-08-21-preview",
-                "-o",
-                "json",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
+        spc_show = _run_az([
+            "az", "resource", "show",
+            "--ids", spc_resource_id,
+            "--api-version", "2024-08-21-preview",
+            "-o", "json",
+        ])
         spc_tags = json.loads(spc_show.stdout).get("tags") or {}
 
         suffix = uuid.uuid4().hex[:8]
@@ -390,6 +473,47 @@ class TestSyncSecretsExistingKvSecret:
         k8s_secret_name = f"existing-test-{suffix}"
         k8s_secret_key = "value"
         secret_value = f"existing-value-{suffix}"
+
+        # Grant the running az caller `Key Vault Secrets Officer` on the
+        # vault so the test can write the pre-existing secret out of band.
+        # enable-secretsync.bicep grants only the secretsync managed
+        # identity (read-only) on the vault. The role assignment uses a
+        # per-run uuid name so parallel runners do not race on (principal,
+        # role, scope). Cleanup deletes by --ids and never touches another
+        # runner's assignment.
+        caller_oid, caller_principal_type = _discover_caller_principal()
+        vault_id = (
+            f"/subscriptions/{site.subscription}"
+            f"/resourceGroups/{site.resource_group}"
+            f"/providers/Microsoft.KeyVault/vaults/{kv_name}"
+        )
+        role_assignment_name = str(uuid.uuid4())
+        _run_az([
+            "az", "role", "assignment", "create",
+            "--assignee-object-id", caller_oid,
+            "--assignee-principal-type", caller_principal_type,
+            "--role", "Key Vault Secrets Officer",
+            "--scope", vault_id,
+            "--name", role_assignment_name,
+            "-o", "none",
+        ])
+
+        # Verify the assignment exists before polling. If `create` succeeded
+        # but `list` returns empty, the management-plane projection is
+        # lagging and we surface a distinct error to keep "propagation
+        # in progress" from being conflated with "grant never happened".
+        assignment_list = json.loads(_run_az([
+            "az", "role", "assignment", "list",
+            "--assignee", caller_oid,
+            "--scope", vault_id,
+            "--role", "Key Vault Secrets Officer",
+            "-o", "json",
+        ]).stdout)
+        if not assignment_list:
+            raise RuntimeError(
+                "Role assignment created but does not appear in list query. "
+                "Management-plane projection may be lagging."
+            )
 
         bicep_path = (
             WORKSPACE_PATH / "templates" / "secretsync" / "sync-secrets.bicep"
@@ -406,7 +530,9 @@ class TestSyncSecretsExistingKvSecret:
             s["secretName"]: s["value"] for s in SAMPLE_SECRETS
         }
 
-        def _az_deploy_sync_secrets(secrets, values, label):
+        deploy_param_files: list[os.PathLike] = []
+
+        def _az_deploy_sync_secrets(secrets, values, label, *, redact=()):
             params = {
                 "$schema": (
                     "https://schema.management.azure.com/schemas/2019-04-01/"
@@ -426,54 +552,68 @@ class TestSyncSecretsExistingKvSecret:
             }
             params_path = tmp_path / f"sync-secrets-{label}.params.json"
             params_path.write_text(json.dumps(params))
-            subprocess.run(
+            # 0600 prevents any other user on the runner from reading the
+            # secretValues block while the file is on disk. tmp_path is
+            # already in a per-user dir on GH runners; this is defense
+            # in depth.
+            os.chmod(params_path, 0o600)
+            deploy_param_files.append(params_path)
+            _run_az(
                 [
-                    "az",
-                    "deployment",
-                    "group",
-                    "create",
-                    "-g",
-                    site.resource_group,
-                    "--subscription",
-                    site.subscription,
-                    "-f",
-                    str(bicep_path),
-                    "-p",
-                    f"@{params_path}",
-                    "-o",
-                    "none",
-                    "--name",
-                    f"sync-secrets-test-{suffix}-{label}",
+                    "az", "deployment", "group", "create",
+                    "-g", site.resource_group,
+                    "--subscription", site.subscription,
+                    "-f", str(bicep_path),
+                    "-p", f"@{params_path}",
+                    "-o", "none",
+                    "--name", f"sync-secrets-test-{suffix}-{label}",
                 ],
-                check=True,
-                capture_output=True,
-                text=True,
                 timeout=600,
+                redact=redact,
             )
 
+        # Stage the secret value in a 0600 file so it never enters argv
+        # (argv would otherwise show up in `ps`, in any subprocess error
+        # chain, and in pytest --showlocals frame dumps).
+        secret_value_path = tmp_path / "kv-secret-value.txt"
+        secret_value_path.write_text(secret_value)
+        os.chmod(secret_value_path, 0o600)
+
         try:
-            subprocess.run(
-                [
-                    "az",
-                    "keyvault",
-                    "secret",
-                    "set",
-                    "--vault-name",
-                    kv_name,
-                    "--name",
-                    kv_secret_name,
-                    "--value",
-                    secret_value,
-                    "--subscription",
-                    site.subscription,
-                    "-o",
-                    "none",
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
+            # Poll-until-success on the actual KV write. Azure RBAC
+            # propagation is typically 30 to 90 seconds. The KV `set` is
+            # idempotent, so using it as the readiness probe is safe.
+            deadline = time.monotonic() + 90.0
+            last_error: str | None = None
+            while time.monotonic() < deadline:
+                try:
+                    _run_az(
+                        [
+                            "az", "keyvault", "secret", "set",
+                            "--vault-name", kv_name,
+                            "--name", kv_secret_name,
+                            "--file", str(secret_value_path),
+                            "--encoding", "utf-8",
+                            "--subscription", site.subscription,
+                            "-o", "none",
+                        ],
+                        redact=(secret_value,),
+                    )
+                    last_error = None
+                    break
+                except RuntimeError as e:
+                    last_error = str(e)
+                    if (
+                        "Forbidden" not in last_error
+                        and "AuthorizationFailed" not in last_error
+                    ):
+                        raise
+                    time.sleep(10)
+            if last_error is not None:
+                raise RuntimeError(
+                    "Role assignment grant did not propagate within 90s. "
+                    f"Last KV set error: {last_error}"
+                )
 
             # PUT the SPC with SAMPLE_SECRETS plus the new createInKv:false
             # entry. The full union preserves the sample SecretSyncs already
@@ -488,7 +628,10 @@ class TestSyncSecretsExistingKvSecret:
                 }
             ]
             _az_deploy_sync_secrets(
-                test_secrets, sample_values_input, "with-existing"
+                test_secrets,
+                sample_values_input,
+                "with-existing",
+                redact=tuple(sample_values_input.values()),
             )
 
             try:
@@ -521,13 +664,13 @@ class TestSyncSecretsExistingKvSecret:
             # and pollute subsequent test status reads).
             try:
                 _az_deploy_sync_secrets(
-                    sample_secrets_input, sample_values_input, "restore"
+                    sample_secrets_input,
+                    sample_values_input,
+                    "restore",
+                    redact=tuple(sample_values_input.values()),
                 )
-            except subprocess.CalledProcessError as e:
-                sys.stderr.write(
-                    f"[cleanup] baseline SPC restore failed (exit "
-                    f"{e.returncode}): {e.stderr}\n"
-                )
+            except RuntimeError as e:
+                sys.stderr.write(f"[cleanup] baseline SPC restore failed: {e}\n")
 
             secretsync_resource_id = (
                 f"/subscriptions/{site.subscription}"
@@ -536,90 +679,65 @@ class TestSyncSecretsExistingKvSecret:
                 f"/secretSyncs/{k8s_secret_name}"
             )
             try:
-                subprocess.run(
-                    [
-                        "az",
-                        "resource",
-                        "delete",
-                        "--ids",
-                        secretsync_resource_id,
-                        "-o",
-                        "none",
-                    ],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                )
-            except subprocess.CalledProcessError as e:
-                sys.stderr.write(
-                    f"[cleanup] SecretSync ARM delete failed (exit "
-                    f"{e.returncode}): {e.stderr}\n"
-                )
+                _run_az([
+                    "az", "resource", "delete",
+                    "--ids", secretsync_resource_id,
+                    "-o", "none",
+                ])
+            except RuntimeError as e:
+                sys.stderr.write(f"[cleanup] SecretSync ARM delete failed: {e}\n")
 
             try:
                 delete_resource("secret", k8s_secret_name, aio_namespace)
             except KubectlError as e:
-                sys.stderr.write(
-                    f"[cleanup] K8s Secret delete failed: {e}\n"
-                )
+                sys.stderr.write(f"[cleanup] K8s Secret delete failed: {e}\n")
 
             try:
-                subprocess.run(
-                    [
-                        "az",
-                        "keyvault",
-                        "secret",
-                        "delete",
-                        "--vault-name",
-                        kv_name,
-                        "--name",
-                        kv_secret_name,
-                        "--subscription",
-                        site.subscription,
-                        "-o",
-                        "none",
-                    ],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                )
-            except subprocess.CalledProcessError as e:
+                _run_az([
+                    "az", "keyvault", "secret", "delete",
+                    "--vault-name", kv_name,
+                    "--name", kv_secret_name,
+                    "--subscription", site.subscription,
+                    "-o", "none",
+                ])
+            except RuntimeError as e:
+                sys.stderr.write(f"[cleanup] KV secret delete failed: {e}\n")
+
+            # Purge so a re-run with the same uuid (vanishingly unlikely)
+            # would not collide on the soft-delete tombstone.
+            # `Key Vault Secrets Officer` includes the purge data action.
+            # Purge protection is not set on the vault by
+            # enable-secretsync.bicep, so this is expected to succeed.
+            try:
+                _run_az([
+                    "az", "keyvault", "secret", "purge",
+                    "--vault-name", kv_name,
+                    "--name", kv_secret_name,
+                    "--subscription", site.subscription,
+                    "-o", "none",
+                ])
+            except RuntimeError as e:
+                sys.stderr.write(f"[cleanup] KV secret purge failed: {e}\n")
+
+            try:
+                _run_az([
+                    "az", "role", "assignment", "delete",
+                    "--ids",
+                    f"{vault_id}/providers/Microsoft.Authorization"
+                    f"/roleAssignments/{role_assignment_name}",
+                    "-o", "none",
+                ])
+            except RuntimeError as e:
                 sys.stderr.write(
-                    f"[cleanup] KV secret delete failed (exit "
-                    f"{e.returncode}): {e.stderr}\n"
+                    f"[cleanup] role assignment delete failed: {e}\n"
                 )
 
-            # Purge is best-effort. Without the
-            # Microsoft.KeyVault/vaults/secrets/purge/action permission the
-            # secret stays soft-deleted for the vault's retention period.
-            # The uuid suffix makes collision on a re-run effectively
-            # impossible regardless.
-            try:
-                subprocess.run(
-                    [
-                        "az",
-                        "keyvault",
-                        "secret",
-                        "purge",
-                        "--vault-name",
-                        kv_name,
-                        "--name",
-                        kv_secret_name,
-                        "--subscription",
-                        site.subscription,
-                        "-o",
-                        "none",
-                    ],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                )
-            except subprocess.CalledProcessError as e:
-                sys.stderr.write(
-                    f"[cleanup] KV secret purge failed (exit "
-                    f"{e.returncode}): {e.stderr}\n"
-                )
+            # Explicit unlink for the on-disk secret material. tmp_path is
+            # cleaned by pytest but defense in depth removes the files
+            # immediately so they cannot be read after the test body exits.
+            for path in (secret_value_path, *deploy_param_files):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
 

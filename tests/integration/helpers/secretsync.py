@@ -43,8 +43,7 @@ def dump_secretsync_status(
         ),
         (
             f"Pods in `{controller_namespace}`",
-            ["get", "pods", "-n", controller_namespace,
-             "--no-headers", "-o", "wide"],
+            ["get", "pods", "-n", controller_namespace, "--no-headers"],
         ),
     ]
     parts: list[str] = []
