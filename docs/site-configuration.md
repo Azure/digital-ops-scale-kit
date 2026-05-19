@@ -133,12 +133,12 @@ workspace defines its own conventions.
 
 ```yaml
 properties:
-  # Pinned AIO release (workspace convention; selects which
-  # `parameters/aio-releases/<release>.yaml` gets loaded).
+  # Pinned AIO release (workspace convention). Selects which
+  # `parameters/aio-releases/<release>.yaml` gets loaded.
   aioRelease: "2603"
 
   # Capability gates evaluated by manifest `when:` conditions
-  # (workspace convention; the `enable*` prefix is a workspace style).
+  # (workspace convention). The `enable*` prefix is a workspace style.
   deployOptions:
     enableGlobalSite: false
     enableEdgeSite: false
@@ -340,10 +340,10 @@ The fallback searches `<workspace>/sites/` only (never across extras
 dirs), so there is no implicit shared-template namespace between trusted
 directories.
 
-> **Trust model.** `inherits:` is author-trusted and not filesystem-sandboxed;
-> it may point to a sibling `shared/` dir or an absolute path. The control is
+> **Trust model.** `inherits:` is author-trusted and not filesystem-sandboxed.
+> It may point to a sibling `shared/` dir or an absolute path. The control is
 > *who may author files in trusted sites locations* (`workspace/sites/` and
-> extras dirs); anyone who can write an `inherits:` value can already set any
+> extras dirs). Anyone who can write an `inherits:` value can already set any
 > other site field. `sites.local/` overlays strip `inherits:`, so runtime
 > overlays cannot introduce new inheritance targets.
 

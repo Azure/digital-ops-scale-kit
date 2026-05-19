@@ -31,6 +31,7 @@ on:
                     - manifests/aio-install.yaml
                     - manifests/aio-upgrade.yaml
                     - manifests/secretsync.yaml
+                    - samples/secretsync-sample/manifest.yaml
                     - samples/opc-ua-solution/manifest.yaml
                     - samples/aio-with-opc-ua/manifest.yaml
                 default: "manifests/aio-install.yaml"

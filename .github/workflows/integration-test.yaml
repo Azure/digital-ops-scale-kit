@@ -34,10 +34,13 @@ env:
 concurrency:
   # Shared `azure-${env}` lock so a deploy and an integration test
   # against the same environment serialize. They both touch live Azure
-  # resources and an integration test mid-deploy can flake. Tests can
-  # be safely superseded by a newer run on the same env.
+  # resources and an integration test mid-deploy can flake. Both
+  # workflows use `cancel-in-progress: false` so a manually dispatched
+  # integration test does not cancel an in-flight deploy on the shared
+  # lock (cancel-in-progress applies at the group level, not per-
+  # workflow).
   group: azure-${{ inputs.environment }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   integration-test:

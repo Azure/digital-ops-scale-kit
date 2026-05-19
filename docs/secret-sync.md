@@ -179,16 +179,7 @@ To sync secrets as part of a manifest, add a step after enablement:
 
 ### Removing a secret
 
-Remove its entry from `secrets` and re-deploy. The SPC will be PUT without that entry, so the cluster-side controller stops syncing it. Bicep Incremental mode does NOT delete the corresponding `Microsoft.SecretSyncController/secretSyncs` ARM resource. To fully clean up, run `az resource delete --ids <secretSyncResourceId>` after the redeploy.
-
-### Authoritative writes to the SPC
-
-`sync-secrets.bicep` is authoritative for the default SPC's `properties.objects` field: each deploy PUTs the SPC with the union of every entry in the `secrets` array, replacing whatever was there before.
-
-Two implications worth knowing:
-
-- **Re-running enablement clears the SPC objects.** `enable-secretsync.bicep` (composed by `manifests/secretsync.yaml` and by `aio-install.yaml` when `enableSecretSync` is true) PUTs the same SPC without an `objects` field. If you redeploy enablement after `sync-secrets`, the cluster controller stops materializing every Kubernetes Secret with the controller error `the secretproviderclass parameters does not have a valid objects field`. Re-run `sync-secrets` after any enablement redeploy to restore the field.
-- **CLI-managed entries are dropped on Bicep redeploy.** Entries added out of band via `az iot ops secretsync secret set` are removed from the SPC the next time `sync-secrets` deploys. Prefer one source of truth per cluster.
+See [secretsync-sample/README.md](../workspaces/iot-operations/samples/secretsync-sample/README.md#removing-a-secret) for the operational steps. The SPC PUT semantics and SecretSync ARM-resource cleanup are documented there alongside the sample they apply to.
 
 ## Template reference
 

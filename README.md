@@ -64,6 +64,41 @@ Site Ops deploys infrastructure through Azure Resource Manager, the native contr
 
 ---
 
+## Prerequisites
+
+Local tools:
+
+- Python 3.10+
+- [Azure CLI](https://docs.microsoft.com/cli/azure/install-azure-cli) installed and authenticated
+- For kubectl steps: `kubectl` in PATH
+
+Azure resources (per target cluster):
+
+- An Arc-connected Kubernetes cluster with **OIDC issuer** and **workload identity** enabled. See [Connect an existing Kubernetes cluster](https://learn.microsoft.com/azure/azure-arc/kubernetes/quickstart-connect-cluster).
+- **Cluster Connect** enabled (`az connectedk8s enable-features --features cluster-connect`).
+- Subscription **Owner** principal (or `User Access Administrator` plus `Contributor`). AIO deploys make role assignments.
+
+## Override for your subscription
+
+Sites in `workspaces/iot-operations/sites/` ship with placeholder subscription IDs (each site inherits `subscription: "00000000-..."` from `shared/<region>.yaml`). You replace the placeholder via a `sites.local/` overlay (for local runs) or the `SITE_OVERRIDES` secret (for CI runs). Both paths below assume this is in place.
+
+For a local override of `munich-dev`, create `workspaces/iot-operations/sites.local/munich-dev.yaml`:
+
+```yaml
+apiVersion: siteops/v1
+kind: Site
+name: munich-dev
+subscription: "<your-subscription-id>"
+```
+
+`sites.local/` is gitignored. The overlay merges into `sites/munich-dev.yaml` at load time. The base `munich-dev.yaml` already has working `resourceGroup` and `parameters.clusterName` values. Override them here only if you want different values. Verify the resolved shape before deploying:
+
+```bash
+siteops -w workspaces/iot-operations sites munich-dev --render
+```
+
+For CI, see [docs/ci-cd-setup.md](docs/ci-cd-setup.md) for the `SITE_OVERRIDES` JSON shape that replaces the local overlay.
+
 ## Quick start
 
 ### Option 1: Run locally
@@ -79,21 +114,16 @@ pip install -e .
 # Authenticate with Azure
 az login
 
-# Run from the repo root. siteops auto-discovers the workspace
-# under `./workspaces/`. Pass `-w <dir>` to point it elsewhere.
+# Discover sites in the shipped workspace
 siteops -w workspaces/iot-operations sites
 
-# Subsequent commands can drop -w when run from the repo root.
-siteops validate manifests/aio-install.yaml
-siteops deploy manifests/aio-install.yaml --dry-run
-siteops deploy manifests/aio-install.yaml -l environment=dev
+# Validate, preview, deploy. After the `sites.local/<site>.yaml` overlay
+# from "Override for your subscription" is in place, deploy against just
+# that site:
+siteops -w workspaces/iot-operations validate manifests/aio-install.yaml
+siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml -l name=munich-dev --dry-run
+siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml -l name=munich-dev
 ```
-
-### Prerequisites
-
-- Python 3.10+
-- [Azure CLI](https://docs.microsoft.com/cli/azure/install-azure-cli) installed and authenticated
-- For kubectl steps: `kubectl` in PATH
 
 ### Option 2: Use as a GitHub template
 
@@ -354,18 +384,7 @@ See [docs/ci-cd-setup.md](docs/ci-cd-setup.md) for detailed configuration.
 
 ## Documentation
 
-| Document | Description |
-|----------|-------------|
-| [docs/site-configuration.md](docs/site-configuration.md) | Site definitions, inheritance, overlays |
-| [docs/targeting.md](docs/targeting.md) | Selector grammar, site identity, no-match diagnostic |
-| [docs/manifest-reference.md](docs/manifest-reference.md) | Manifest syntax, step types, conditions |
-| [docs/manifest-includes.md](docs/manifest-includes.md) | Splicing one manifest into another via `include:` |
-| [docs/parameter-resolution.md](docs/parameter-resolution.md) | Template variables, output chaining, auto-filtering |
-| [docs/aio-releases.md](docs/aio-releases.md) | Pinning an AIO release per site, in-place upgrades, adding a new release |
-| [docs/secret-sync.md](docs/secret-sync.md) | Secret sync enablement and usage |
-| [docs/ci-cd-setup.md](docs/ci-cd-setup.md) | GitHub Actions, Azure DevOps, OIDC, secrets configuration |
-| [docs/e2e-testing.md](docs/e2e-testing.md) | End-to-end live-subscription test workflow |
-| [docs/troubleshooting.md](docs/troubleshooting.md) | Common issues and solutions |
+See [`docs/README.md`](docs/README.md) for the full index and glossary.
 
 ---
 

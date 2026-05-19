@@ -433,6 +433,7 @@ manifest:
         - manifests/aio-install.yaml
         - manifests/aio-upgrade.yaml
         - manifests/secretsync.yaml
+        - samples/secretsync-sample/manifest.yaml
         - samples/opc-ua-solution/manifest.yaml
         - samples/aio-with-opc-ua/manifest.yaml
         - manifests/my-new-manifest.yaml  # Add here (full path)
@@ -448,6 +449,7 @@ manifest:
     - manifests/aio-install.yaml
     - manifests/aio-upgrade.yaml
     - manifests/secretsync.yaml
+    - samples/secretsync-sample/manifest.yaml
     - samples/opc-ua-solution/manifest.yaml
     - samples/aio-with-opc-ua/manifest.yaml
     - manifests/my-new-manifest.yaml  # Add here (full path)

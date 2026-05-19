@@ -54,7 +54,7 @@ A step that has both fan-in inputs and fan-out outputs gets two files: one under
 
 When one chaining file would be shared by multiple consumer steps **within the same manifest**, prefer one file per consumer step named `<manifest>-<step>.yaml` (e.g. `inputs/aio-upgrade-resolve-extensions.yaml`, `inputs/aio-upgrade-update-extensions.yaml`). A single shared file ends up with `{{ steps.X.outputs.Y }}` references that look forward from the perspective of the earliest consumer, which structural validation correctly rejects.
 
-Samples co-locate their input and output files inside `samples/<name>/` rather than `parameters/`. The roles are the same; only the location differs.
+Samples co-locate their input and output files inside `samples/<name>/` rather than `parameters/`. The roles are the same. Only the location differs.
 
 ## Cross-scope output chaining
 

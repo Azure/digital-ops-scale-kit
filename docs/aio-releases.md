@@ -113,7 +113,7 @@ This policy applies only to samples. Fundamentals (`templates/aio/`, `templates/
 
 ## Validation summary
 
-Four layers catch release misconfigurations before they reach production:
+Release misconfigurations surface at four points:
 
 | Layer | Check | When it runs |
 |-------|-------|--------------|
@@ -124,7 +124,7 @@ Four layers catch release misconfigurations before they reach production:
 
 ## See also
 
-- [Site configuration](site-configuration.md): the `aioRelease` field lives in `properties:`; inheritance and overlays apply normally.
+- [Site configuration](site-configuration.md): the `aioRelease` field lives in `properties:`. Inheritance and overlays apply normally.
 - [Parameter resolution](parameter-resolution.md): how release YAML values are auto-forwarded to Bicep.
 - [E2E testing](e2e-testing.md): how to dispatch a matrix over multiple releases.
 - `templates/aio/instance.bicep` and `templates/aio/modules/update-instance.bicep`: dispatcher checklists embedded at the top of each file.

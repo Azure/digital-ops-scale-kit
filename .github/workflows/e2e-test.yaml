@@ -60,7 +60,7 @@ on:
         type: string
         default: ""
       tests:
-        description: "Comma-separated subset of test phases to deploy + run. Empty = run all. Valid values: aio-install, secretsync, secretsync-sample, opc-ua-solution, aio-upgrade. Use this to keep the cluster focused for demos or interactive sessions (combine with keep-cluster-alive-minutes)."
+        description: "Subset of integration test files to run, comma-separated. Each value maps to one tests/integration/test_<value>_manifest.py file and narrows which manifest gets deployed onto the cluster. Empty = run all. Valid values: aio-install, secretsync, secretsync-sample, opc-ua-solution, aio-upgrade. Useful for demos and focused debugging when paired with keep-cluster-alive-minutes."
         type: string
         default: ""
 
@@ -273,7 +273,9 @@ jobs:
         # ~5 minutes and Azure access tokens after ~60-90 minutes. Without this,
         # long-running e2e jobs (upgrade phase, keep-cluster-alive, ephemeral
         # teardown) silently fail az commands once the token expires, leaking
-        # Azure resources. Mirrors the pattern in _siteops-deploy.yaml.
+        # Azure resources. Same shape as the loop in _siteops-deploy.yaml, but
+        # the PID is not persisted because this runner is single-use: the loop
+        # dies with the job and no explicit teardown is needed.
         run: |
           (
             while true; do
