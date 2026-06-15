@@ -121,7 +121,7 @@ function script:Compact-PSSource {
         if ($line -match '^\s*$') { continue }
         $kept.Add($line.Trim())
     }
-    return ($kept -join "`r`n")
+    return ($kept -join "`n")
 }
 
 if ($worker -match "(?m)^@['""]") {
@@ -142,9 +142,11 @@ $minified = [regex]::Replace(
     { param($match) return $minAksTemplate })
 
 $minBanner = "# Generated minified launcher. Edit Build-Launcher.ps1 sources, not this file."
-$minContent = $minBanner + "`r`n" + $minified
+$minContent = $minBanner + "`n" + $minified
 
-Set-Content -Path $minPath -Value $minContent -Encoding UTF8
+# WriteAllText keeps the LF bytes verbatim (Set-Content appends CRLF). The minified
+# launcher is pinned to LF in .gitattributes.
+[System.IO.File]::WriteAllText($minPath, $minContent, [System.Text.UTF8Encoding]::new($true))
 
 $minTokens = $null; $minErrors = $null
 [System.Management.Automation.Language.Parser]::ParseFile($minPath, [ref]$minTokens, [ref]$minErrors) | Out-Null

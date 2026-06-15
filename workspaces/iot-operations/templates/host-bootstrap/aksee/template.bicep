@@ -4,9 +4,10 @@
 // script body locally with the supplied parameters, and reports back into
 // the resource's instanceView.
 //
-// The launcher writes the worker + AKS EE config template to disk, creates a
-// local admin user, registers a Scheduled Task running as that user, starts
-// the task, and returns `REGISTERED`. ARM sees the runCommand succeed at
+// The launcher writes the worker + AKS EE config template to disk, registers a
+// Scheduled Task that drives the worker (running as SYSTEM by default, or as a
+// created local admin when runAsDedicatedAdmin is set), starts the task, and
+// returns `REGISTERED`. ARM sees the runCommand succeed at
 // that point. The actual bootstrap (Hyper-V enable, reboot, cluster deploy,
 // Arc-connect) happens inside the Scheduled Task asynchronously. The worker
 // writes a `siteops.bootstrap.state` tag on the Arc machine when it finishes,
@@ -15,13 +16,12 @@
 //
 // Prerequisites on the target VM (one-time per VM, outside this Bicep):
 //   1. Server is Arc-connected (e.g., via `OnboardingScript.ps1`).
-//   2. SP referenced by `spAppId` has `Kubernetes Cluster - Azure Arc
-//      Onboarding` (or broader Contributor) on the target resource group.
-//      This SP is required by AKS Edge Essentials' install cmdlet to
-//      register the new cluster with Arc as part of cluster creation.
-//   3. The Arc machine's system-assigned identity has the same role.
-//      Phase 3 (Arc operations after cluster create) authenticates as the
-//      machine identity by default.
+//   2. The Arc machine's system-assigned managed identity has access on the
+//      resource group. The worker authenticates as this identity for the
+//      Phase 3 Arc-connect, the AIO feature enablement, and the Phase 99 tag
+//      write. No service principal is used (Phase 2 is an AioDeploy cluster-
+//      only build). Use `Contributor` (simplest), or `Kubernetes Cluster -
+//      Azure Arc Onboarding` plus `Tag Contributor` for least privilege.
 //
 // Usage as a scalekit step:
 //   - name: aksee-bootstrap
@@ -51,24 +51,17 @@ param targetSubscription string = subscription().subscriptionId
 @description('Azure region for the connectedClusters and custom-location resources the worker creates inside the VM.')
 param targetLocation string = resourceGroup().location
 
-@description('Azure AD tenant ID for the service principal.')
-param tenantId string = subscription().tenantId
-
 @description('Tenant-wide object ID for the Custom Locations RP service principal. Use `az ad sp show --id bc313c14-388c-4e7d-a58e-70017303ee3b --query id -o tsv` to retrieve.')
 param customLocationsOid string
-
-@description('Service principal application ID, paired with spPassword. The AKS Edge Essentials install cmdlet demands SP credentials to register the cluster with Arc and offers no flag to skip that, so this Bicep requires them.')
-param spAppId string
-
-@secure()
-@description('Service principal client secret, paired with spAppId. Marked @secure so Azure encrypts it in transit and keeps it out of deployment history, and the launcher encrypts it at rest on the VM. The Connected Machine Agent passes it to the launcher as a CLI argument, so characters outside [A-Za-z0-9._-] can break command-line parsing. Generate or rotate the secret to stay within that set.')
-param spPassword string
 
 @description('URL of the AKS Edge Essentials MSI to install. Default is the official latest-K3s aka.ms shortcut. To pin a version, host the MSI yourself and point this at it.')
 param aksEdgeMsiUrl string = 'https://aka.ms/aks-edge/k3s-msi'
 
 @description('When true, Phase 3 enables the OIDC issuer and workload identity on the Arc-connected cluster and patches the K3s apiserver `service-account-issuer`. Required only when downstream AIO components use workload-identity-backed secret sync. Defaults to false.')
 param enableWorkloadIdentity bool = false
+
+@description('When true, the worker Scheduled Task runs as a created local admin account with an on-box generated password instead of the built-in SYSTEM account. Leave false unless a hardened environment forbids SYSTEM-context tasks. Defaults to false.')
+param runAsDedicatedAdmin bool = false
 
 @description('Timeout in seconds for the runCommand. It bounds only the synchronous launcher, which returns quickly after registering the Scheduled Task. The bootstrap itself runs asynchronously inside that task.')
 param runCommandTimeoutSeconds int = 600
@@ -101,21 +94,13 @@ resource bootstrapCommand 'Microsoft.HybridCompute/machines/runCommands@2024-11-
       { name: 'ResourceGroup',      value: targetResourceGroup }
       { name: 'Subscription',       value: targetSubscription }
       { name: 'Location',           value: targetLocation }
-      { name: 'TenantId',           value: tenantId }
       { name: 'CustomLocationsOid', value: customLocationsOid }
-      { name: 'SpAppId',            value: spAppId }
       { name: 'AksEdgeMsiUrl',      value: aksEdgeMsiUrl }
       // The launcher param is [string]. string() yields 'true' or 'false',
       // which the launcher parses case-insensitively. A bool value here
       // would be rejected by the runCommand's string-typed parameter.
       { name: 'EnableWorkloadIdentity', value: string(enableWorkloadIdentity) }
-    ]
-    protectedParameters: [
-      // Azure encrypts these in transit and excludes them from any output
-      // surfaced via instanceView.output. The launcher receives the value
-      // as the -SpPassword parameter and encrypts it at rest via DPAPI
-      // (LocalMachine scope) before writing to config.json.
-      { name: 'SpPassword', value: spPassword }
+      { name: 'RunAsDedicatedAdmin',    value: string(runAsDedicatedAdmin) }
     ]
   }
 }

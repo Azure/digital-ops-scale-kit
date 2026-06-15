@@ -1,19 +1,18 @@
 # Parameter inputs for the aksee-bootstrap step.
 # Consumed by `templates/host-bootstrap/aksee/template.bicep`.
 #
-# The five `aksee` fields are required. `targetLocation` is mapped to
-# `site.location` so the cluster co-locates with the AIO resources, which also
-# derive their region from `site.location`. The template otherwise defaults it
-# to the resource group's location.
+# The `aksee` fields (machineName, clusterName, customLocationsOid) are
+# required. `targetLocation` is mapped to `site.location` so the cluster
+# co-locates with the AIO resources, which also derive their region from
+# `site.location`. The template otherwise defaults it to the resource group's
+# location.
 #
-# Override per-site in `sites/<site>.yaml` (committable) or `sites.local/`
-# (gitignored, for spPassword). See `templates/host-bootstrap/aksee/README.md`.
+# Override per-site in `sites/<site>.yaml`. See
+# `templates/host-bootstrap/aksee/README.md`.
 
 machineName:        "{{ site.parameters.aksee.machineName }}"
 clusterName:        "{{ site.parameters.aksee.clusterName }}"
 customLocationsOid: "{{ site.parameters.aksee.customLocationsOid }}"
-spAppId:            "{{ site.parameters.aksee.spAppId }}"
-spPassword:         "{{ site.parameters.aksee.spPassword }}"
 
 # Cluster + custom-location region. Tracks site.location to match AIO resources.
 targetLocation:     "{{ site.location }}"

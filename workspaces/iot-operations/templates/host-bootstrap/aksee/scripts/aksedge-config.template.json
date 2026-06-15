@@ -1,9 +1,10 @@
 {
-  "_comment": "AKS Edge Essentials single-node K3s cluster config. The bootstrap substitutes the Arc block (ClusterName, Location, ResourceGroupName, SubscriptionId, TenantId, ClientId, ClientSecret) from runtime parameters before deploying, so the nulls here are placeholders. Cluster sizing (CpuCount, MemoryInMB, DataSizeInGB, LogSizeInGB) is fixed in this file. Rebuild the launcher with Build-Launcher.ps1 after editing.",
+  "_comment": "AKS Edge Essentials single-node K3s cluster config. AioDeploy builds the cluster without Arc-connecting (no service principal). The worker substitutes only Arc.ClusterName. The other Arc fields stay null. Rebuild the launcher with Build-Launcher.ps1 after editing.",
 
   "SchemaVersion": "1.16",
   "Version": "1.0",
   "DeploymentType": "SingleMachineCluster",
+  "AioDeploy": true,
 
   "Init": {
     "ServiceIPRangeSize": 10

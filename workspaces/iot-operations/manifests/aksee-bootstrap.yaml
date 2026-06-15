@@ -14,11 +14,11 @@ description: |
 
   Prerequisites per target VM (one-time):
     - Server is Arc-connected (e.g., via `OnboardingScript.ps1`).
-    - The service principal referenced by `spAppId` has
-      `Kubernetes Cluster - Azure Arc Onboarding` (or broader Contributor)
-      on the resource group.
-    - The Arc machine system-assigned identity has the same role.
-      Phase 3 Arc operations authenticate as the machine identity.
+    - The Arc machine system-assigned managed identity has access on the
+      resource group. The worker authenticates as it for the Phase 3
+      Arc-connect, the AIO feature enablement, and the tag write. No service
+      principal is used. Use `Contributor`, or `Kubernetes Cluster - Azure Arc
+      Onboarding` plus `Tag Contributor` for least privilege.
 
 # Max concurrent sites. 0 = unlimited, 1 = serial.
 parallel: 3

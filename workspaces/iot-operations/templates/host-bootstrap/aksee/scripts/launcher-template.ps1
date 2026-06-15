@@ -14,14 +14,12 @@ as a single `Microsoft.HybridCompute/machines/runCommands` script body.
 Steps:
   1. Verify admin privileges and tighten ACLs on the config directory.
   2. Write the embedded worker and template to the config directory.
-  3. Create (or refresh) a dedicated local admin user for the Scheduled
-     Task. The password is generated on-box and never transmitted.
-  4. Encrypt the caller-supplied service principal password via DPAPI
-     (LocalMachine scope) so it does not sit in plaintext on disk.
-  5. Write `config.json` and the initial `state.json` (phase=0).
-  6. Register a Scheduled Task with at-startup + immediate triggers that
-     runs `worker.ps1` as the local admin user.
-  7. Start the task and return `REGISTERED` so the caller sees success.
+  3. Under -RunAsDedicatedAdmin, create (or refresh) a local admin user with
+     an on-box generated password. The default (SYSTEM) needs no account.
+  4. Write `config.json` and the initial `state.json` (phase=0).
+  5. Register a Scheduled Task with at-startup + immediate triggers that runs
+     `worker.ps1` as SYSTEM (or the local admin under -RunAsDedicatedAdmin).
+  6. Start the task and return `REGISTERED` so the caller sees success.
 
 The Scheduled Task survives reboots (at-startup trigger) so Phase 1's
 Hyper-V enablement does not lose state.
@@ -40,23 +38,8 @@ Subscription ID.
 .PARAMETER Location
 Azure region for the connectedClusters and custom-location resources.
 
-.PARAMETER TenantId
-Azure AD tenant ID for the service principal.
-
 .PARAMETER CustomLocationsOid
 Tenant-wide object ID for the Custom Locations RP service principal.
-
-.PARAMETER SpAppId
-Service principal application ID. AKS Edge Essentials requires SP credentials
-to create the cluster (Phase 2), so this is part of the standard happy path.
-Leave empty only when running the bootstrap against an already-existing
-cluster (Phase 2 short-circuits via deployment detection, and Phase 3 falls
-through to the machine's managed identity). Must be paired with SpPassword.
-
-.PARAMETER SpPassword
-Service principal client secret. Required when SpAppId is set. Encrypted
-at rest before the worker reads it back. The launcher reads this once and
-discards the plaintext after encryption.
 
 .PARAMETER AksEdgeMsiUrl
 URL of the AKS Edge Essentials MSI to install. Pin a known-good version.
@@ -75,29 +58,14 @@ The launcher creates the user (or resets its password) and adds it to
 the local Administrators group.
 
 .EXAMPLE
-    # Standard happy path. SP creates the cluster in Phase 2. Phase 3
-    # operations use the Arc machine's managed identity by default.
+    # The worker deploys the cluster (AioDeploy, no SP) and Arc-connects it
+    # with the Arc machine's managed identity. Grant that identity Contributor
+    # on the resource group first.
     .\Install-AksEeBootstrap.ps1 `
         -ClusterName        aksee-cluster1 `
         -ResourceGroup      aksee-rg `
         -Subscription       00000000-0000-0000-0000-000000000000 `
         -Location           westus3 `
-        -TenantId           00000000-0000-0000-0000-000000000000 `
-        -CustomLocationsOid 00000000-0000-0000-0000-000000000000 `
-        -SpAppId            00000000-0000-0000-0000-000000000000 `
-        -SpPassword         <secret> `
-        -AksEdgeMsiUrl      https://aka.ms/aks-edge/k3s-msi
-
-.EXAMPLE
-    # Advanced: run against an already-existing cluster. Phase 2 detects
-    # the existing cluster and short-circuits, so SP is not needed. Phase 3
-    # uses the Arc machine's managed identity for the Arc operations.
-    .\Install-AksEeBootstrap.ps1 `
-        -ClusterName        aksee-cluster1 `
-        -ResourceGroup      aksee-rg `
-        -Subscription       00000000-0000-0000-0000-000000000000 `
-        -Location           westus3 `
-        -TenantId           00000000-0000-0000-0000-000000000000 `
         -CustomLocationsOid 00000000-0000-0000-0000-000000000000 `
         -AksEdgeMsiUrl      https://aka.ms/aks-edge/k3s-msi
 
@@ -113,15 +81,7 @@ param(
     [Parameter(Mandatory)] [string]$ResourceGroup,
     [Parameter(Mandatory)] [string]$Subscription,
     [Parameter(Mandatory)] [string]$Location,
-    [Parameter(Mandatory)] [string]$TenantId,
     [Parameter(Mandatory)] [string]$CustomLocationsOid,
-    # AKS Edge Essentials requires SP credentials to create the cluster in
-    # Phase 2. Both or neither: omit both only when running against an
-    # already-existing cluster, where Phase 2 skips the create and Phase 3
-    # falls through to the machine's managed identity. The launcher rejects a
-    # half-populated SP config.
-    [string]$SpAppId = '',
-    [string]$SpPassword = '',
     [Parameter(Mandatory)] [string]$AksEdgeMsiUrl,
     [string]$ConfigDir         = 'C:\ProgramData\siteops\aksee-bootstrap',
     [string]$ScheduledTaskName = 'SiteOpsAksEeBootstrap',
@@ -134,7 +94,13 @@ param(
     # Refuse to re-init when state.json shows an in-flight bootstrap.
     # Pass -Force to reset state to phase=0 and re-register the task
     # (destroys progress of any concurrent run).
-    [switch]$Force
+    [switch]$Force,
+    # The worker Scheduled Task runs as NT AUTHORITY\SYSTEM by default, so no
+    # local account or password is created. Set 'true' to instead create the
+    # $LocalAdminUser account with an on-box generated password and run the task
+    # as it (a hardened-environment fallback). A string, not a switch, so the
+    # Arc Run Command can deliver it (matching EnableWorkloadIdentity).
+    [string]$RunAsDedicatedAdmin = 'false'
 )
 
 Set-StrictMode -Version Latest
@@ -142,10 +108,9 @@ $ErrorActionPreference = 'Stop'
 $ConfirmPreference = 'None'
 $ProgressPreference = 'SilentlyContinue'
 
-# DPAPI LocalMachine encryption (Protect-StringMachine below) uses
-# .NET Framework System.Security types present only under Windows
-# PowerShell 5.1 ("Desktop"). PowerShell 7+ ("Core") would fail at
-# Add-Type, so refuse to run under it.
+# The bootstrap targets Windows PowerShell 5.1 ("Desktop"). The worker's
+# AksEdge module and the scheduled task both run under powershell.exe, so
+# keep the launcher on the same edition and refuse PowerShell 7+ ("Core").
 if ($PSVersionTable.PSEdition -ne 'Desktop') {
     throw "Install-AksEeBootstrap.ps1 requires Windows PowerShell 5.1 (Desktop). Detected: $($PSVersionTable.PSEdition) $($PSVersionTable.PSVersion). Re-run with 'powershell.exe -File Install-AksEeBootstrap.ps1 ...' instead of pwsh."
 }
@@ -164,20 +129,6 @@ function Test-IsAdmin {
     $id = [System.Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object System.Security.Principal.WindowsPrincipal($id)
     return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
-}
-
-function Protect-StringMachine {
-    # Encrypts a string with DPAPI bound to the LocalMachine scope so any
-    # admin on this host (including the Scheduled Task's local admin user)
-    # can decrypt. Off-box exfiltration of the file cannot decrypt.
-    param([string]$Plain)
-    Add-Type -AssemblyName System.Security
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Plain)
-    $protected = [System.Security.Cryptography.ProtectedData]::Protect(
-        $bytes,
-        $null,
-        [System.Security.Cryptography.DataProtectionScope]::LocalMachine)
-    return [Convert]::ToBase64String($protected)
 }
 
 function New-RandomPassword {
@@ -215,15 +166,15 @@ function New-RandomPassword {
 function Set-StrictAcl {
     # Lock the config dir to Administrators + SYSTEM only. Removes the
     # inherited Users-read grant from ProgramData so non-admin local users
-    # cannot read the (encrypted) SP secret blob.
+    # cannot read the cluster kubeconfig (a bearer token) or the az token cache.
     #
     # icacls is a native binary, so a non-zero exit does NOT raise under
     # $ErrorActionPreference='Stop'. Check $LASTEXITCODE explicitly after
     # each call. A silent /inheritance:r failure here would leave the
     # default ProgramData ACL in place (BUILTIN\Users: ReadAndExecute +
     # Write), and the subsequent /grant would only ADD entries without
-    # stripping the inherited Users grant, breaking the secret-at-rest
-    # guarantee the README describes.
+    # stripping the inherited Users grant, breaking the at-rest protection
+    # the README describes.
     param([string]$Path)
     $inheritOut = & icacls $Path /inheritance:r 2>&1
     if ($LASTEXITCODE -ne 0) {
@@ -364,16 +315,14 @@ Set-Content -Path $workerPath   -Value $EmbeddedWorker   -Encoding UTF8
 Set-Content -Path $templatePath -Value $EmbeddedTemplate -Encoding UTF8
 Write-Log "Wrote $workerPath and $templatePath"
 
-$adminPassword = New-RandomPassword
-Set-LocalAdminUser -Username $LocalAdminUser -Password $adminPassword
-
-$encryptedSpPassword = ''
-$useMi = -not $SpAppId -and -not $SpPassword
-if ((-not $useMi) -and (-not $SpAppId -or -not $SpPassword)) {
-    throw "SpAppId and SpPassword must be provided together (SP auth) or both omitted (MI auth)."
-}
-if (-not $useMi) {
-    $encryptedSpPassword = Protect-StringMachine -Plain $SpPassword
+$runAsSystem = ($RunAsDedicatedAdmin -ine 'true')
+$adminPassword = $null
+if (-not $runAsSystem) {
+    $adminPassword = New-RandomPassword
+    Set-LocalAdminUser -Username $LocalAdminUser -Password $adminPassword
+    Write-Log "Worker task will run as local admin $LocalAdminUser"
+} else {
+    Write-Log 'Worker task will run as NT AUTHORITY\SYSTEM (no local account created)'
 }
 
 $config = [pscustomobject]@{
@@ -381,19 +330,15 @@ $config = [pscustomobject]@{
     resourceGroup          = $ResourceGroup
     subscription           = $Subscription
     location               = $Location
-    tenantId               = $TenantId
     customLocationsOid     = $CustomLocationsOid
-    spAppId                = $SpAppId
-    spPassword             = $encryptedSpPassword
-    spPasswordEncrypted    = (-not $useMi)
     aksEdgeMsiUrl          = $AksEdgeMsiUrl
     scheduledTaskName      = $ScheduledTaskName
     localAdminUser         = $LocalAdminUser
+    runAsSystem            = $runAsSystem
     enableWorkloadIdentity = ($EnableWorkloadIdentity -ieq 'true')
 }
 $config | ConvertTo-Json | Set-Content -Path $configPath -Encoding UTF8
-$authNote = if ($useMi) { 'managed identity' } else { 'SP password encrypted via DPAPI LocalMachine' }
-Write-Log "Wrote $configPath (auth=$authNote, WI=$($EnableWorkloadIdentity -ieq 'true'))"
+Write-Log "Wrote $configPath (auth=managed identity, WI=$($EnableWorkloadIdentity -ieq 'true'))"
 
 $initialState = [pscustomobject]@{
     phase       = 0
@@ -415,10 +360,19 @@ $action = New-ScheduledTaskAction `
 $startupTrigger = New-ScheduledTaskTrigger -AtStartup
 $onceTrigger    = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddSeconds(30))
 
-$principal = New-ScheduledTaskPrincipal `
-    -UserId "$env:COMPUTERNAME\$LocalAdminUser" `
-    -LogonType Password `
-    -RunLevel Highest
+# Default: run as the built-in SYSTEM service account (no credential to store).
+# -RunAsDedicatedAdmin instead runs as the created local admin (password logon).
+if ($runAsSystem) {
+    $principal = New-ScheduledTaskPrincipal `
+        -UserId 'NT AUTHORITY\SYSTEM' `
+        -LogonType ServiceAccount `
+        -RunLevel Highest
+} else {
+    $principal = New-ScheduledTaskPrincipal `
+        -UserId "$env:COMPUTERNAME\$LocalAdminUser" `
+        -LogonType Password `
+        -RunLevel Highest
+}
 
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
@@ -440,12 +394,19 @@ $task = New-ScheduledTask `
     -Principal $principal `
     -Settings $settings
 
-Register-ScheduledTask `
-    -TaskName $ScheduledTaskName `
-    -InputObject $task `
-    -User "$env:COMPUTERNAME\$LocalAdminUser" `
-    -Password $adminPassword `
-    -Force | Out-Null
+if ($runAsSystem) {
+    Register-ScheduledTask `
+        -TaskName $ScheduledTaskName `
+        -InputObject $task `
+        -Force | Out-Null
+} else {
+    Register-ScheduledTask `
+        -TaskName $ScheduledTaskName `
+        -InputObject $task `
+        -User "$env:COMPUTERNAME\$LocalAdminUser" `
+        -Password $adminPassword `
+        -Force | Out-Null
+}
 Write-Log "Registered Scheduled Task $ScheduledTaskName"
 
 Start-ScheduledTask -TaskName $ScheduledTaskName

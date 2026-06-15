@@ -26,26 +26,17 @@ Three entry shapes:
 
 The VM must already be Arc-onboarded as a `Microsoft.HybridCompute/machines` resource before the bootstrap runs. Use the [official onboarding flow](https://learn.microsoft.com/azure/azure-arc/servers/onboard-portal) or your existing onboarding script. The bootstrap targets the VM by its Arc machine name.
 
-### 2. Service principal with cluster Arc-onboarding rights
+### 2. Grant the Arc machine identity access to the resource group
 
-AKS Edge Essentials' install cmdlet requires a service principal to register the new cluster with Arc as part of cluster create. The SP needs `Kubernetes Cluster - Azure Arc Onboarding` (or broader Contributor) on the target resource group.
-
-```bash
-az ad sp create-for-rbac --name "aksee-bootstrap-sp" --role "Kubernetes Cluster - Azure Arc Onboarding" --scopes "/subscriptions/<sub>/resourceGroups/<rg>"
-```
-
-Save the `appId` and `password` returned. Pin or rotate the secret to characters in `[A-Za-z0-9._-]` (the secret is passed as a CLI argument to the launcher by the Connected Machine Agent, so characters outside that range can break command-line parsing).
-
-### 3. Grant the Arc machine identity access to the resource group
-
-The Arc machine's system-assigned identity authenticates the AIO-specific Arc operations after cluster create (`az connectedk8s enable-features`, OIDC issuer wiring when workload identity is requested). It needs the same role on the resource group.
+The bootstrap uses no service principal. The worker authenticates as the Arc machine's system-assigned managed identity for everything it does in Azure: the Phase 3 Arc-connect, the AIO feature enablement, and the Phase 99 state-tag write. Grant that identity access on the target resource group, either `Contributor` (simplest) or, for least privilege, `Kubernetes Cluster - Azure Arc Onboarding` (connect + enable-features) plus `Tag Contributor` (for the `Microsoft.Resources/tags/write` the tag needs).
 
 ```bash
 ARC_PRINCIPAL_ID=$(az resource show -g <rg> -n <vm-name> --resource-type Microsoft.HybridCompute/machines --query "identity.principalId" -o tsv)
+# Simplest: one Contributor grant on the resource group.
 az role assignment create --assignee-object-id $ARC_PRINCIPAL_ID --assignee-principal-type ServicePrincipal --role "Contributor" --scope "/subscriptions/<sub>/resourceGroups/<rg>"
 ```
 
-### 4. Resource providers registered on the subscription
+### 3. Resource providers registered on the subscription
 
 ```bash
 az provider register --namespace Microsoft.HybridCompute
@@ -57,10 +48,10 @@ az provider register --namespace Microsoft.IoTOperations
 
 ## Site configuration
 
-Add an `aksee` section under your site's `parameters`. Split the secret from the rest so the secret stays out of the committable `sites/` tree:
+Add an `aksee` section under your site's `parameters`. The bootstrap uses no secret, so the whole config lives in the committable `sites/` tree:
 
 ```yaml
-# sites/<site>.yaml (committable, no secrets)
+# sites/<site>.yaml (committable)
 name: my-site
 subscription: <subscription-id>
 resourceGroup: <rg-name>
@@ -72,15 +63,6 @@ parameters:
     machineName: my-arc-windows-vm
     clusterName: my-aksee-cluster
     customLocationsOid: <custom-locations RP object id>
-    spAppId: <SP application id>
-```
-
-```yaml
-# sites.local/<site>.yaml (gitignored, holds the SP secret)
-name: my-site
-parameters:
-  aksee:
-    spPassword: <SP client secret>
 ```
 
 Required fields:
@@ -90,8 +72,6 @@ Required fields:
 | `machineName` | The Arc-onboarded VM's machine resource name. |
 | `clusterName` | Name to register the new K3s cluster as in Arc. New per site. |
 | `customLocationsOid` | `az ad sp show --id bc313c14-388c-4e7d-a58e-70017303ee3b --query id -o tsv`. Tenant-wide. |
-| `spAppId` | The service principal created in prereq #2. |
-| `spPassword` | The service principal secret. Source from a CI Key Vault binding in production. |
 
 ## Run
 
@@ -140,7 +120,7 @@ Get-Content $log.FullName -Tail 50 -Wait
 
 ## Verify
 
-On the VM after `state.json` shows `phase=99 status=succeeded`. The bootstrap writes the kubeconfig under the bootstrap user's profile (which Phase 99 removes) and copies it to the shared ACL-locked path below. Open an admin PowerShell and point `KUBECONFIG` at the shared copy:
+On the VM after `state.json` shows `phase=99 status=succeeded`. The bootstrap copies the cluster kubeconfig to the shared ACL-locked path below (the original under the task account's profile is purged in Phase 99). Open an admin PowerShell and point `KUBECONFIG` at the shared copy:
 
 ```powershell
 $env:KUBECONFIG = 'C:\ProgramData\siteops\aksee-bootstrap\kubeconfig'
@@ -163,7 +143,7 @@ az connectedk8s show --name <cluster-name> --resource-group <rg> --query "{oidc:
 
 ### Monitoring shells need admin
 
-`C:\ProgramData\siteops\aksee-bootstrap\` has ACLs locked to Administrators + SYSTEM at launcher time (the directory holds the encrypted SP secret). A non-admin PowerShell session cannot read the state file, the worker transcripts, or the msiexec log. Open monitoring shells as Administrator.
+`C:\ProgramData\siteops\aksee-bootstrap\` has ACLs locked to Administrators + SYSTEM at launcher time (the directory holds the cluster kubeconfig and the az token cache). A non-admin PowerShell session cannot read the state file, the worker transcripts, or the msiexec log. Open monitoring shells as Administrator.
 
 ### Bootstrap stuck on a phase
 
@@ -199,7 +179,7 @@ Get-WinEvent -LogName 'Microsoft-Windows-TaskScheduler/Operational' -MaxEvents 5
 
 ### Re-apply against an already-bootstrapped host
 
-Re-running the bootstrap against a host that already finished is a safe no-op. The launcher sees `state.json` at `status=succeeded`, leaves the cluster, scheduled task, and bootstrap user untouched, and returns `ALREADY-BOOTSTRAPPED`. In a composition the wait step then passes immediately on the existing `succeeded` tag. Pass `-Force` to the launcher (or use the clean-restart block below) to re-bootstrap from scratch.
+Re-running the bootstrap against a host that already finished is a safe no-op. The launcher sees `state.json` at `status=succeeded`, leaves the cluster and scheduled task untouched, and returns `ALREADY-BOOTSTRAPPED`. In a composition the wait step then passes immediately on the existing `succeeded` tag. Pass `-Force` to the launcher (or use the clean-restart block below) to re-bootstrap from scratch.
 
 ### Re-run a failed phase (keeps existing task and user)
 
@@ -242,9 +222,9 @@ Remove-AksEdgeDeployment -Confirm:$false -ErrorAction SilentlyContinue
 |---|---|---|
 | 0  | Pre-flight: admin, OS, memory, disk, nested virt | No |
 | 1  | MSI install + `Install-AksEdgeHostFeatures` | Yes (Hyper-V enable) |
-| 2  | Substitute the Arc block in the rendered cluster config from runtime parameters, then create the single-node K3s cluster (AKS Edge Essentials Arc-connects the cluster as part of this step) | No |
-| 3  | Install Azure CLI if missing, authenticate (managed identity by default, service principal as fallback), enable `cluster-connect` and `custom-locations`, and (when `enableWorkloadIdentity` is requested) wire the OIDC issuer through the K3s apiserver | No |
-| 99 | Cleanup (unregister scheduled task, remove bootstrap user, remove rendered config). Write `siteops.bootstrap.state` tag on the Arc machine. | No |
+| 2  | Render the cluster config (AioDeploy cluster-only, no service principal) and create the single-node K3s cluster | No |
+| 3  | Install Azure CLI if missing, authenticate with the Arc machine managed identity, Arc-connect the cluster, enable `cluster-connect` and `custom-locations`, and (when `enableWorkloadIdentity` is requested) wire the OIDC issuer through the K3s apiserver | No |
+| 99 | Cleanup (unregister scheduled task, purge the task account's kubeconfig and az token cache, remove the rendered config, and remove the bootstrap user if one was created). Write `siteops.bootstrap.state` tag on the Arc machine. | No |
 
 Each phase is idempotent so a worker re-run from any state is safe. Phase 1 writes the next phase to `state.json` BEFORE calling `Install-AksEdgeHostFeatures` so the at-startup scheduled-task trigger resumes at Phase 2 after the reboot.
 
@@ -259,10 +239,10 @@ The worker writes a tag on the Arc machine resource that signals terminal bootst
 
 Downstream automation reads this tag to gate on actual bootstrap completion. A siteops `type: wait` step is the intended primary consumer. A CI script polling via `az tag list` works the same way.
 
-The worker writes the tag using the Phase 3 identity (managed identity by default, service principal as fallback). The required permission is `Microsoft.Resources/tags/write` on the Arc machine resource.
+The worker writes the tag using the Arc machine managed identity (the same identity it uses for all Phase 3 Azure operations). The required permission is `Microsoft.Resources/tags/write` on the Arc machine resource.
 
-- If you completed [prereq #3](#3-grant-the-arc-machine-identity-access-to-the-resource-group) with the default `Contributor` grant, no additional grant is needed.
-- If you scoped the Arc machine identity to the narrow `Kubernetes Cluster - Azure Arc Onboarding` role instead of `Contributor`, you need an additional `Tag Contributor` assignment on the Arc machine resource:
+- If you granted the identity `Contributor` in [prereq #2](#2-grant-the-arc-machine-identity-access-to-the-resource-group), no extra grant is needed.
+- If you scoped it to the narrow `Kubernetes Cluster - Azure Arc Onboarding` role instead, add a `Tag Contributor` assignment on the Arc machine resource:
 
 ```bash
 az role assignment create \
@@ -287,13 +267,17 @@ az tag list --resource-id "/subscriptions/<sub>/resourceGroups/<rg>/providers/Mi
 
 Set it per site via `deployOptions.enableWorkloadIdentity: true` (paired with `enableSecretSync`). For direct launcher invocation, pass `-EnableWorkloadIdentity true`.
 
-## Secret handling
+## Security
 
-- **In transit:** the operator passes the SP secret as a manifest parameter, ultimately delivered to the launcher as a `protectedParameter` on the Arc Run Command resource. Azure encrypts the value in transit and excludes it from instance-view output. Source from a CI Key Vault binding in production.
-- **At rest:** the launcher encrypts the SP password via Windows DPAPI (LocalMachine scope) before writing to `config.json`. The worker decrypts on read. Off-box exfiltration of `config.json` cannot decrypt because the DPAPI key is bound to the machine.
+- **No secret:** the bootstrap uses no service principal. The worker authenticates with the Arc machine's system-assigned managed identity (short-lived HIMDS tokens), so there is no credential to deliver, encrypt, store, or clean up.
 - **ACLs:** `C:\ProgramData\siteops\aksee-bootstrap\` has inherited ACLs removed and re-granted to Administrators + SYSTEM only.
-- **Local admin user password:** generated on-box, never transmitted, written only to the Scheduled Task registration via `Register-ScheduledTask -User -Password`. The password does not persist in `config.json` or any other file the worker reads.
-- **Phase 2 rendered config:** the worker writes a rendered AKS Edge config to disk that carries the plaintext SP secret while the install cmdlet reads it. A `try/finally` wraps the cmdlet invocation and always deletes the rendered file after the cmdlet returns. Phase 99 zeros the SP blob in `config.json` after the bootstrap succeeds.
+- **Task identity:** by default the worker Scheduled Task runs as `NT AUTHORITY\SYSTEM`, so no local account or password is created. With `runAsDedicatedAdmin` the launcher instead creates a local admin with an on-box generated password, written only to the task registration via `Register-ScheduledTask -User -Password` and never persisted to any file the worker reads.
+- **az token cache:** Phase 3 scopes `AZURE_CONFIG_DIR` into the ACL-locked working directory so the az tokens stay behind the Administrators + SYSTEM ACL. Phase 99 removes the cache on success.
+- **Cluster kubeconfig:** Phase 2 copies the cluster kubeconfig (a long-lived bearer token) into the ACL-locked working directory and Phase 99 keeps it there for the operator, behind the Administrators + SYSTEM ACL.
+
+## Installer integrity
+
+The worker Authenticode-verifies each installer MSI (AKS Edge Essentials, Azure CLI) before running it. The signature must be `Valid` (signed, untampered, chain-trusted) and the signer organization must be Microsoft, so a poisoned `aka.ms` redirect to a differently-signed binary is rejected. The default revocation check reaches the CRL or OCSP endpoint over the same network used for the download, so a fully air-gapped host may report a non-`Valid` status and need a revocation exception.
 
 ## Run directly (advanced)
 
@@ -301,6 +285,5 @@ The scalekit path delivers the launcher via Bicep + Arc Run Command. For debuggi
 
 ## Known limitations
 
-- The Bicep `spAppId` and `spPassword` are required (no managed-identity-only path for cluster creation). AKS Edge Essentials' install cmdlet hard-requires SP credentials and there is no flag to skip its own Arc-connect. Tracked upstream.
-- The bootstrap registers a Scheduled Task that runs as a dedicated local admin user the launcher creates. Hardened environments that disallow new local users would need a `LocalAdminUser` override pointing at a pre-existing account.
+- The worker Scheduled Task runs as `NT AUTHORITY\SYSTEM` by default, so no local account or password is created. For hardened environments that disallow SYSTEM-context tasks, the Bicep `runAsDedicatedAdmin` parameter (launcher `-RunAsDedicatedAdmin`) runs it as a launcher-created local admin instead.
 - The Run Command resource returns `executionState=Succeeded` the moment the launcher returns `REGISTERED`, NOT when the worker reaches `phase=99 status=succeeded`. Use the [bootstrap state tag](#bootstrap-state-tag) to gate downstream pipeline steps on actual bootstrap completion.

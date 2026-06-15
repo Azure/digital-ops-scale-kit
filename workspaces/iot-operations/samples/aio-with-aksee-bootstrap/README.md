@@ -24,7 +24,7 @@ After the deploy completes, the cluster is registered with Arc, has custom locat
 
 ## Prerequisites
 
-The bootstrap prerequisites apply (Arc-onboarded VM, service principal with cluster Arc-onboarding rights, Arc machine identity with role on the resource group, resource providers registered). See [`../../templates/host-bootstrap/aksee/README.md`](../../templates/host-bootstrap/aksee/README.md) for the one-time setup walkthrough, including the tag-write permission the wait step depends on.
+The bootstrap prerequisites apply (Arc-onboarded VM, the Arc machine managed identity granted access on the resource group, resource providers registered). See [`../../templates/host-bootstrap/aksee/README.md`](../../templates/host-bootstrap/aksee/README.md) for the one-time setup walkthrough, including the tag-write permission the wait step depends on.
 
 The site must carry both the `aksee` parameter section the bootstrap needs and any per-release AIO parameters the fundamentals expect (`properties.aioRelease` pointing at a file under `parameters/aio-releases/`).
 
