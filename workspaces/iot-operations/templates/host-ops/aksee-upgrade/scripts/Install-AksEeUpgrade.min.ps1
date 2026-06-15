@@ -228,6 +228,8 @@ throw "az account set --subscription $sub failed: $accountSetOut. The Arc machin
 function Set-WorkerKubeconfig {
 $kubeCandidates = @(
 (Join-Path $ConfigDir 'kubeconfig'),
+(Join-Path (Split-Path $ConfigDir -Parent) 'aksee-bootstrap\kubeconfig'),
+'C:\ProgramData\siteops\aksee-bootstrap\kubeconfig',
 (Join-Path $env:USERPROFILE '.kube\config'),
 (Join-Path $env:SystemRoot 'System32\config\systemprofile\.kube\config'),
 (Join-Path $env:SystemRoot 'SysWOW64\config\systemprofile\.kube\config')
@@ -366,6 +368,26 @@ return
 }
 Write-Log "Wrote tag siteops.aksee.upgrade.state=$Value (runId=$runId appliedVersion=$AppliedVersion) on $arcId"
 }
+function Wait-Until {
+param(
+[Parameter(Mandatory)] [string]$Label,
+[Parameter(Mandatory)] [scriptblock]$Condition,
+[int]$RetrySeconds = 15,
+[int]$MaxRetries   = 40
+)
+for ($i = 1; $i -le $MaxRetries; $i++) {
+if (& $Condition) {
+Write-Log "$Label satisfied (attempt $i/$MaxRetries)."
+return $true
+}
+if ($i -lt $MaxRetries) {
+Write-Log "$Label not satisfied yet (attempt $i/$MaxRetries). Retrying in ${RetrySeconds}s."
+Start-Sleep -Seconds $RetrySeconds
+}
+}
+Write-Log "$Label not satisfied within $($MaxRetries * $RetrySeconds)s."
+return $false
+}
 function Invoke-Phase0 {
 param($config)
 Write-Log 'Phase 0: preflight + pre-upgrade snapshot'
@@ -434,14 +456,13 @@ param($config)
 Write-Log 'Phase 3: verify upgrade'
 Connect-MachineIdentity -config $config
 $null = Set-WorkerKubeconfig
-if (-not (Test-NodesReady)) {
-throw 'Verification failed: cluster nodes are not Ready (/readyz or node conditions). The cluster did not return healthy after the update.'
+if (-not (Wait-Until -Label 'cluster nodes Ready' -Condition { Test-NodesReady })) {
+throw 'Verification failed: cluster nodes did not return Ready (/readyz or node conditions) within the verification window after the update.'
 }
 $deployed = Get-DeployedK8sVersion
 Write-Log "Deployed Kubernetes version after update: $deployed"
-$arcConnected = Test-ArcConnectedChild -Label 'arc-check-post'
-if (-not $arcConnected) {
-throw 'Verification failed: Test-AksEdgeArcConnection reports the cluster is not Arc-connected after the update.'
+if (-not (Wait-Until -Label 'Arc connection' -Condition { Test-ArcConnectedChild -Label 'arc-check-post' })) {
+throw 'Verification failed: Test-AksEdgeArcConnection did not report the cluster Arc-connected within the verification window after the update.'
 }
 Write-Log 'Arc connection verified after update'
 Set-State -Phase 99 -Status 'running'
