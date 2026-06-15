@@ -1,0 +1,57 @@
+apiVersion: siteops/v1
+kind: Manifest
+name: aksee-upgrade
+description: |
+  In-place PATCH update of an existing single-node AKS Edge Essentials cluster,
+  delivered remotely via Arc Run Command. Mirrors the host bootstrap's
+  runCommand-worker pattern because AKS EE has no cloud-driven upgrade channel.
+
+  The upgrade step returns shortly after the Connected Machine Agent picks up
+  the launcher (~90 seconds), then the worker stages, applies, and verifies the
+  update on the VM asynchronously (the inner node VM reboots during apply,
+  workloads are down for that window). The wait step gates completion on the
+  `siteops.aksee.upgrade.state` tag the worker writes, so one `siteops deploy`
+  blocks until the upgrade actually succeeds or fails.
+
+  Scope: patch updates within the current Kubernetes minor version on a
+  single-node cluster.
+
+  The worker verifies the cluster after applying and reports the outcome through
+  the completion tag:
+    - The node-VM update can intermittently fail to finalize, surfaced as the
+      tag value `failed-needs-remediation`. The fix is a manual VM-console step.
+      See the README.
+    - The worker re-checks node health and the Arc connection after the update
+      and fails the deploy if either regressed.
+
+  Prerequisites per target VM (one-time):
+    - An AKS EE single-node cluster is already deployed and Arc-connected.
+    - The Arc machine system-assigned managed identity has access on the
+      resource group (the worker authenticates as it for the verification and
+      the tag write). Use `Contributor`, or `Kubernetes Cluster - Azure Arc
+      Onboarding` plus `Tag Contributor` for least privilege.
+
+# Max concurrent sites. 0 = unlimited, 1 = serial.
+parallel: 3
+
+# Default selector. Override at the CLI with `-l <key>=<value>`.
+selector: "environment=dev"
+
+steps:
+  - include: ../templates/host-ops/aksee-upgrade/_partial.yaml
+
+  # Gate completion on the worker reaching its terminal state. The worker writes
+  # siteops.aksee.upgrade.state=succeeded on the Arc machine resource at the end
+  # of Phase 99 (or failed-phase-N / failed-needs-remediation on failure). The
+  # launcher sets the tag to `running` synchronously before this step polls, so
+  # a stale `succeeded` from a previous run cannot pass the gate early.
+  - name: wait-for-upgrade
+    type: wait
+    condition:
+      type: arm-tag
+      resourceId: "/subscriptions/{{ site.subscription }}/resourceGroups/{{ site.resourceGroup }}/providers/Microsoft.HybridCompute/machines/{{ site.parameters.aksee.machineName }}"
+      tagKey: "siteops.aksee.upgrade.state"
+      expectedValue: "succeeded"
+      failurePattern: "failed-*"
+    timeoutMinutes: 90
+    pollIntervalSeconds: 30

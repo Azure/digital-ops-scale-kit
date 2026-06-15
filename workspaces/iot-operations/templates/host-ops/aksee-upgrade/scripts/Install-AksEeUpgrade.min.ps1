@@ -1,0 +1,631 @@
+﻿# Generated minified launcher. Edit Build-Launcher.ps1 sources, not this file.
+[CmdletBinding()]
+param(
+[Parameter(Mandatory)] [string]$ResourceGroup,
+[Parameter(Mandatory)] [string]$Subscription,
+[Parameter(Mandatory)] [string]$ClusterName,
+[Parameter(Mandatory)] [string]$RunId,
+[string]$ConfigDir         = 'C:\ProgramData\siteops\aksee-upgrade',
+[string]$ScheduledTaskName = 'SiteOpsAksEeUpgrade',
+[string]$LocalAdminUser    = 'siteops-upgrade',
+[string]$AllowKubernetesMinorUpgrade = 'false',
+[switch]$Force,
+[string]$RunAsDedicatedAdmin = 'false'
+)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$ConfirmPreference = 'None'
+$ProgressPreference = 'SilentlyContinue'
+if ($PSVersionTable.PSEdition -ne 'Desktop') {
+throw "Install-AksEeUpgrade.ps1 requires Windows PowerShell 5.1 (Desktop). Detected: $($PSVersionTable.PSEdition) $($PSVersionTable.PSVersion). Re-run with 'powershell.exe -File Install-AksEeUpgrade.ps1 ...' instead of pwsh."
+}
+function Write-Log {
+param([string]$Message)
+$ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+Write-Host "[$ts] [launcher] $Message"
+}
+function Test-IsAdmin {
+$id = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = New-Object System.Security.Principal.WindowsPrincipal($id)
+return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+function New-RandomPassword {
+$upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ'
+$lower = 'abcdefghijkmnpqrstuvwxyz'
+$digit = '23456789'
+$symbol = '!@#$%^&*()-_=+'
+$all = $upper + $lower + $digit + $symbol
+$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+try {
+$idx = {
+param([int]$max)
+$b = New-Object 'byte[]' 1; $cap = 256 - (256 % $max)
+do { $rng.GetBytes($b) } while ($b[0] -ge $cap)
+$b[0] % $max
+}
+$chars = @($upper[(& $idx $upper.Length)], $lower[(& $idx $lower.Length)], $digit[(& $idx $digit.Length)], $symbol[(& $idx $symbol.Length)])
+for ($i = 0; $i -lt 20; $i++) { $chars += $all[(& $idx $all.Length)] }
+for ($i = $chars.Count - 1; $i -gt 0; $i--) { $j = & $idx ($i + 1); $t = $chars[$i]; $chars[$i] = $chars[$j]; $chars[$j] = $t }
+return -join $chars
+} finally {
+$rng.Dispose()
+}
+}
+function Set-StrictAcl {
+param([string]$Path)
+$inheritOut = & icacls $Path /inheritance:r 2>&1
+if ($LASTEXITCODE -ne 0) {
+throw "icacls /inheritance:r failed on ${Path} with exit ${LASTEXITCODE}: $inheritOut"
+}
+$grantOut = & icacls $Path /grant 'Administrators:(OI)(CI)F' 'SYSTEM:(OI)(CI)F' 2>&1
+if ($LASTEXITCODE -ne 0) {
+throw "icacls /grant failed on ${Path} with exit ${LASTEXITCODE}: $grantOut"
+}
+Write-Log "Locked ACLs on $Path to Administrators + SYSTEM"
+}
+function Set-LocalAdminUser {
+param([string]$Username, [string]$Password)
+$secure = ConvertTo-SecureString $Password -AsPlainText -Force
+$user = Get-LocalUser -Name $Username -ErrorAction SilentlyContinue
+if ($null -eq $user) {
+Write-Log "Creating local user $Username"
+New-LocalUser -Name $Username -Password $secure -AccountNeverExpires -PasswordNeverExpires -UserMayNotChangePassword | Out-Null
+} else {
+Write-Log "Resetting password on existing local user $Username"
+Set-LocalUser -Name $Username -Password $secure
+}
+$group = Get-LocalGroupMember -Group 'Administrators' -Member $Username -ErrorAction SilentlyContinue
+if ($null -eq $group) {
+Write-Log "Adding $Username to local Administrators group"
+Add-LocalGroupMember -Group 'Administrators' -Member $Username
+}
+}
+function Set-RunningTag {
+param([string]$Subscription, [string]$ResourceGroup, [string]$RunId)
+if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
+Write-Log 'Skipping in-progress tag write: az CLI not installed (the worker will set it).'
+return
+}
+try {
+$env:AZURE_CONFIG_DIR = Join-Path $ConfigDir '.azure'
+foreach ($name in @('IDENTITY_ENDPOINT', 'IMDS_ENDPOINT')) {
+if (-not [Environment]::GetEnvironmentVariable($name)) {
+$machineVal = [Environment]::GetEnvironmentVariable($name, 'Machine')
+if ($machineVal) { Set-Item -Path "Env:$name" -Value $machineVal }
+}
+}
+& az login --identity --only-show-errors 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) { Write-Log 'In-progress tag write skipped: az login --identity failed (the worker will retry).'; return }
+$name = $env:COMPUTERNAME
+$arcId = "/subscriptions/$Subscription/resourceGroups/$ResourceGroup/providers/Microsoft.HybridCompute/machines/$name"
+& az tag update --resource-id $arcId --operation merge --tags "siteops.aksee.upgrade.state=running" "siteops.aksee.upgrade.runId=$RunId" --only-show-errors 2>&1 | Out-Null
+if ($LASTEXITCODE -eq 0) { Write-Log "Set siteops.aksee.upgrade.state=running on $arcId (runId=$RunId)" }
+else { Write-Log 'In-progress tag write returned non-zero (the worker will retry).' }
+} catch {
+Write-Log "In-progress tag write skipped due to error: $_ (the worker will retry)."
+}
+}
+$EmbeddedWorker = @'
+[CmdletBinding()]
+param(
+[Parameter(Mandatory)] [string]$ConfigDir
+)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$ConfirmPreference = 'None'
+$ProgressPreference = 'SilentlyContinue'
+if ($PSVersionTable.PSEdition -ne 'Desktop') {
+throw "worker.ps1 requires Windows PowerShell 5.1 (Desktop). Detected: $($PSVersionTable.PSEdition) $($PSVersionTable.PSVersion). The AksEdge module runs under powershell.exe."
+}
+$script:StatePath    = Join-Path $ConfigDir 'state.json'
+$script:ConfigPath   = Join-Path $ConfigDir 'config.json'
+$script:SnapshotPath = Join-Path $ConfigDir 'snapshot.json'
+function Write-Log {
+param([string]$Message)
+$ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+Write-Host "[$ts] $Message"
+}
+function Get-State {
+if (-not (Test-Path $script:StatePath)) {
+throw "State file not found at $script:StatePath. The launcher writes the initial state file."
+}
+return Get-Content -Raw -Path $script:StatePath | ConvertFrom-Json
+}
+function Set-State {
+param(
+[Parameter(Mandatory)] [int]$Phase,
+[Parameter(Mandatory)] [ValidateSet('running', 'pending-reboot', 'succeeded', 'failed')] [string]$Status,
+[string]$ErrorText
+)
+$state = [pscustomobject]@{
+phase       = $Phase
+status      = $Status
+lastUpdated = (Get-Date).ToString('o')
+error       = $ErrorText
+}
+$tmpPath = "$script:StatePath.tmp"
+$state | ConvertTo-Json | Set-Content -Path $tmpPath -Encoding UTF8
+Move-Item -Path $tmpPath -Destination $script:StatePath -Force
+}
+function Get-Config {
+if (-not (Test-Path $script:ConfigPath)) {
+throw "Config file not found at $script:ConfigPath. The launcher writes the config from caller-supplied parameters."
+}
+return Get-Content -Raw -Path $script:ConfigPath | ConvertFrom-Json
+}
+function Get-Prop {
+param($Obj, [string]$Name, $Default = $null)
+if ($null -ne $Obj -and $Obj.PSObject.Properties.Name -contains $Name) { return $Obj.$Name }
+return $Default
+}
+function Test-IsAdmin {
+$id = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = New-Object System.Security.Principal.WindowsPrincipal($id)
+return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+function Test-AksEdgeModuleInstalled {
+return $null -ne (Get-Module -ListAvailable -Name AksEdge)
+}
+function Get-AksEeHostVersion {
+$mod = Get-Module -ListAvailable -Name AksEdge | Sort-Object Version -Descending | Select-Object -First 1
+if ($null -eq $mod) { return $null }
+return $mod.Version.ToString()
+}
+function Assert-MicrosoftSignedFile {
+param([string]$Path)
+$sig = Get-AuthenticodeSignature -FilePath $Path
+if ($sig.Status -ne 'Valid') {
+throw "Authenticode check failed for ${Path}: status=$($sig.Status) ($($sig.StatusMessage))."
+}
+if ($sig.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
+throw "Unexpected signer for ${Path}: $($sig.SignerCertificate.Subject). Expected O=Microsoft Corporation."
+}
+}
+function Install-AzCliIfMissing {
+if (Get-Command az -ErrorAction SilentlyContinue) {
+Write-Log 'az CLI already on PATH'
+return
+}
+$msiUrl  = 'https://aka.ms/installazurecliwindowsx64'
+$msiPath = Join-Path $ConfigDir 'azure-cli.msi'
+$log     = Join-Path $ConfigDir 'az-msiexec.log'
+Write-Log "az CLI not on PATH. Downloading MSI from $msiUrl"
+Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath -UseBasicParsing
+Assert-MicrosoftSignedFile -Path $msiPath
+Write-Log "Installing az CLI MSI via msiexec /quiet, log at $log"
+$proc = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
+'/i', $msiPath, '/quiet', '/norestart', '/L*V', $log
+)
+if ($proc.ExitCode -ne 0) {
+throw "az CLI MSI install failed with exit $($proc.ExitCode). See $log."
+}
+$azDir = Join-Path ${env:ProgramFiles} 'Microsoft SDKs\Azure\CLI2\wbin'
+if (Test-Path $azDir) { $env:PATH = "$azDir;$env:PATH" }
+if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
+throw "az CLI still not on PATH after install. Checked $azDir."
+}
+Remove-Item -Path $msiPath -Force -ErrorAction SilentlyContinue
+}
+function Connect-MachineIdentity {
+param($config)
+foreach ($name in @('IDENTITY_ENDPOINT', 'IMDS_ENDPOINT')) {
+if (-not [Environment]::GetEnvironmentVariable($name)) {
+$machineVal = [Environment]::GetEnvironmentVariable($name, 'Machine')
+if ($machineVal) { Set-Item -Path "Env:$name" -Value $machineVal }
+}
+}
+Write-Log 'Authenticating with Arc machine managed identity (az login --identity)'
+$loginOut = & az login --identity --only-show-errors 2>&1
+if ($LASTEXITCODE -ne 0) {
+throw "az login --identity failed: $loginOut. Ensure the Arc machine identity has a role on the resource group (Contributor, or Kubernetes Cluster - Azure Arc Onboarding plus Tag Contributor)."
+}
+$sub = $config.subscription
+$accountSetOut = & az account set --subscription $sub 2>&1
+if ($LASTEXITCODE -ne 0) {
+throw "az account set --subscription $sub failed: $accountSetOut. The Arc machine managed identity likely lacks access to subscription $sub."
+}
+}
+function Set-WorkerKubeconfig {
+$kubeCandidates = @(
+(Join-Path $ConfigDir 'kubeconfig'),
+(Join-Path $env:USERPROFILE '.kube\config'),
+(Join-Path $env:SystemRoot 'System32\config\systemprofile\.kube\config'),
+(Join-Path $env:SystemRoot 'SysWOW64\config\systemprofile\.kube\config')
+)
+$kubeconfig = $kubeCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $kubeconfig) {
+throw "No kubeconfig found. Checked: $($kubeCandidates -join '; '). Is the AKS EE cluster deployed on this host?"
+}
+$env:KUBECONFIG = $kubeconfig
+$akseeKubectl = Join-Path ${env:ProgramFiles} 'AksEdge\kubectl\kubectl.exe'
+if (Test-Path $akseeKubectl) { $env:KUBECTL_CLIENT_PATH = $akseeKubectl }
+Write-Log "Using kubeconfig $kubeconfig"
+return $kubeconfig
+}
+function Invoke-Kubectl {
+param([string[]]$KubectlArgs)
+$exe = if ($env:KUBECTL_CLIENT_PATH -and (Test-Path $env:KUBECTL_CLIENT_PATH)) { $env:KUBECTL_CLIENT_PATH } else { 'kubectl' }
+return & $exe @KubectlArgs 2>&1
+}
+function Get-DeployedK8sVersion {
+$json = Invoke-Kubectl @('get', 'nodes', '-o', 'json')
+if ($LASTEXITCODE -ne 0) { return $null }
+try {
+$obj = ($json -join "`n") | ConvertFrom-Json
+$node = $obj.items | Select-Object -First 1
+return $node.status.nodeInfo.kubeletVersion
+} catch {
+return $null
+}
+}
+function Get-NodeCount {
+$json = Invoke-Kubectl @('get', 'nodes', '-o', 'json')
+if ($LASTEXITCODE -ne 0) { return 0 }
+try {
+$obj = ($json -join "`n") | ConvertFrom-Json
+return @($obj.items).Count
+} catch {
+return 0
+}
+}
+function Test-AioPresent {
+$null = Invoke-Kubectl @('get', 'namespace', 'azure-iot-operations')
+return $LASTEXITCODE -eq 0
+}
+function Test-NodesReady {
+$ready = Invoke-Kubectl @('get', '--raw=/readyz')
+if ($LASTEXITCODE -ne 0 -or (($ready -join '') -notmatch 'ok')) { return $false }
+$json = Invoke-Kubectl @('get', 'nodes', '-o', 'json')
+if ($LASTEXITCODE -ne 0) { return $false }
+try {
+$obj = ($json -join "`n") | ConvertFrom-Json
+foreach ($n in $obj.items) {
+$readyCond = $n.status.conditions | Where-Object { $_.type -eq 'Ready' } | Select-Object -First 1
+if ($null -eq $readyCond -or $readyCond.status -ne 'True') { return $false }
+}
+return $true
+} catch {
+return $false
+}
+}
+function Invoke-ChildAksEeCommand {
+param(
+[Parameter(Mandatory)] [string]$Label,
+[Parameter(Mandatory)] [string]$Script
+)
+$childScript = "$Script; exit `$LASTEXITCODE"
+$bytes   = [System.Text.Encoding]::Unicode.GetBytes($childScript)
+$encoded = [Convert]::ToBase64String($bytes)
+$psExe   = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$stamp   = Get-Date -Format 'yyyyMMdd-HHmmss'
+$childLog    = Join-Path $ConfigDir ("aksee-{0}-{1}.log" -f $Label, $stamp)
+$childErrLog = "$childLog.err"
+Write-Log "Running $Label in child PowerShell. stdout=$childLog stderr=$childErrLog"
+$proc = Start-Process -FilePath $psExe `
+-ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded) `
+-Wait -PassThru -NoNewWindow `
+-RedirectStandardOutput $childLog -RedirectStandardError $childErrLog
+Write-Log "$Label child exited with code $($proc.ExitCode)"
+if ($proc.ExitCode -ne 0) {
+$tailOut = if (Test-Path $childLog)    { (Get-Content $childLog    -Tail 40 -ErrorAction SilentlyContinue) -join "`n" } else { '' }
+$tailErr = if (Test-Path $childErrLog) { (Get-Content $childErrLog -Tail 40 -ErrorAction SilentlyContinue) -join "`n" } else { '' }
+$err = "$Label exited with code $($proc.ExitCode).`nstdout tail:`n$tailOut`nstderr tail:`n$tailErr`nFull logs at $childLog and $childErrLog."
+if (("$tailOut`n$tailErr") -match 'bootx64\.efi|trident|/EFI/AZLB') {
+throw "TRIDENT-REMEDIATION-REQUIRED: $err"
+}
+throw $err
+}
+return $childLog
+}
+function Invoke-ChildCheck {
+param(
+[Parameter(Mandatory)] [string]$Label,
+[Parameter(Mandatory)] [string]$Script
+)
+$bytes   = [System.Text.Encoding]::Unicode.GetBytes($Script)
+$encoded = [Convert]::ToBase64String($bytes)
+$psExe   = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$proc = Start-Process -FilePath $psExe `
+-ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded) `
+-Wait -PassThru -NoNewWindow
+Write-Log "$Label child exited with code $($proc.ExitCode)"
+return $proc.ExitCode
+}
+function Test-ArcConnectedChild {
+param([string]$Label)
+$exit = Invoke-ChildCheck -Label $Label -Script 'Import-Module AksEdge -Force; if (Test-AksEdgeArcConnection) { exit 0 } else { exit 1 }'
+return ($exit -eq 0)
+}
+function Write-UpgradeStateTag {
+param(
+[Parameter(Mandatory)] $config,
+[Parameter(Mandatory)] [string]$Value,
+[string]$AppliedVersion,
+[string]$FromVersion
+)
+if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
+Write-Log 'Skipping upgrade-state tag write: az CLI not installed.'
+return
+}
+$sub  = $config.subscription
+$rg   = $config.resourceGroup
+$name = $env:COMPUTERNAME
+if (-not $sub -or -not $rg -or -not $name) {
+Write-Log 'Skipping upgrade-state tag write: missing subscription / resourceGroup / COMPUTERNAME.'
+return
+}
+$runId = [string](Get-Prop $config 'runId' '')
+$tags = @("siteops.aksee.upgrade.state=$Value", "siteops.aksee.upgrade.runId=$runId")
+if ($AppliedVersion) { $tags += "siteops.aksee.upgrade.appliedVersion=$AppliedVersion" }
+if ($FromVersion)    { $tags += "siteops.aksee.upgrade.fromVersion=$FromVersion" }
+$arcId = "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.HybridCompute/machines/$name"
+$tagOut = & az tag update --resource-id $arcId --operation merge --tags @tags --only-show-errors 2>&1
+if ($LASTEXITCODE -ne 0) {
+Write-Log "WARNING: tag write failed on $arcId (exit $LASTEXITCODE): $tagOut. See README Prerequisites for the required Microsoft.Resources/tags/write grant."
+return
+}
+Write-Log "Wrote tag siteops.aksee.upgrade.state=$Value (runId=$runId appliedVersion=$AppliedVersion) on $arcId"
+}
+function Invoke-Phase0 {
+param($config)
+Write-Log 'Phase 0: preflight + pre-upgrade snapshot'
+if (-not (Test-IsAdmin)) { throw 'Worker must run as Administrator (or SYSTEM).' }
+if (-not (Test-AksEdgeModuleInstalled)) {
+throw 'AKS Edge Essentials is not installed on this host. The upgrade worker targets an existing AKS EE cluster.'
+}
+Install-AzCliIfMissing
+Connect-MachineIdentity -config $config
+try { Write-UpgradeStateTag -config $config -Value 'running' } catch { Write-Log "WARNING: in-progress tag write failed: $_" }
+$kubeconfig = Set-WorkerKubeconfig
+$nodeCount = Get-NodeCount
+if ($nodeCount -ne 1) {
+throw "Expected a single-node AKS EE cluster, found $nodeCount nodes. This worker supports single-node clusters only."
+}
+$fromK8s  = Get-DeployedK8sVersion
+$fromHost = Get-AksEeHostVersion
+$aio      = Test-AioPresent
+$arcConnected = Test-ArcConnectedChild -Label 'arc-check-pre'
+$snapshot = [pscustomobject]@{
+capturedAt      = (Get-Date).ToString('o')
+fromK8sVersion  = $fromK8s
+fromHostVersion = $fromHost
+nodeCount       = $nodeCount
+aioPresent      = $aio
+arcConnected    = $arcConnected
+kubeconfig      = $kubeconfig
+}
+$snapshot | ConvertTo-Json | Set-Content -Path $script:SnapshotPath -Encoding UTF8
+Write-Log "Snapshot: K8s=$fromK8s hostVersion=$fromHost nodes=$nodeCount aio=$aio arcConnected=$arcConnected"
+Set-State -Phase 1 -Status 'running'
+Write-Log 'Phase 0: complete'
+}
+function Invoke-Phase1 {
+param($config)
+Write-Log 'Phase 1: stage AKS EE patch update'
+$hostBefore = Get-AksEeHostVersion
+$allowMinor = [bool](Get-Prop $config 'allowKubernetesMinorUpgrade' $false)
+if ($allowMinor) {
+throw 'allowKubernetesMinorUpgrade is true. This worker applies patch updates only and does not support minor-version upgrades.'
+}
+Invoke-ChildAksEeCommand -Label 'set-upgrade'   -Script 'Import-Module AksEdge -Force; Set-AksEdgeUpgrade -AcceptUpgrade $false' | Out-Null
+$stageLog = Invoke-ChildAksEeCommand -Label 'stage-update' -Script 'Import-Module AksEdge -Force; Start-AksEdgeUpdate -Force'
+$hostAfter = Get-AksEeHostVersion
+$stageText = if (Test-Path $stageLog) { (Get-Content $stageLog -Raw -ErrorAction SilentlyContinue) } else { '' }
+$stagedSomething = ($hostBefore -ne $hostAfter) -or ($stageText -notmatch '(?i)up.to.date|no update|already.*latest|nothing to')
+if (-not $stagedSomething) {
+Write-Log "Phase 1: no newer AKS EE update available (host version $hostBefore unchanged). Skipping apply."
+Set-State -Phase 3 -Status 'running'
+} else {
+Write-Log "Phase 1: update staged (host version $hostBefore -> $hostAfter). Proceeding to apply."
+Set-State -Phase 2 -Status 'running'
+}
+Write-Log 'Phase 1: complete'
+}
+function Invoke-Phase2 {
+param($config)
+Write-Log 'Phase 2: apply control-plane update (single-node)'
+Invoke-ChildAksEeCommand -Label 'apply-update' `
+-Script 'Import-Module AksEdge -Force; Start-AksEdgeControlPlaneUpdate -firstControlPlane $true -Force' | Out-Null
+Set-State -Phase 3 -Status 'running'
+Write-Log 'Phase 2: complete'
+}
+function Invoke-Phase3 {
+param($config)
+Write-Log 'Phase 3: verify upgrade'
+Connect-MachineIdentity -config $config
+$null = Set-WorkerKubeconfig
+if (-not (Test-NodesReady)) {
+throw 'Verification failed: cluster nodes are not Ready (/readyz or node conditions). The cluster did not return healthy after the update.'
+}
+$deployed = Get-DeployedK8sVersion
+Write-Log "Deployed Kubernetes version after update: $deployed"
+$arcConnected = Test-ArcConnectedChild -Label 'arc-check-post'
+if (-not $arcConnected) {
+throw 'Verification failed: Test-AksEdgeArcConnection reports the cluster is not Arc-connected after the update.'
+}
+Write-Log 'Arc connection verified after update'
+Set-State -Phase 99 -Status 'running'
+Write-Log 'Phase 3: complete (verification passed)'
+}
+function Invoke-Phase99 {
+param($config)
+Write-Log 'Phase 99: finalize'
+$snapshot = if (Test-Path $script:SnapshotPath) { Get-Content -Raw -Path $script:SnapshotPath | ConvertFrom-Json } else { $null }
+$fromVersion = [string](Get-Prop $snapshot 'fromK8sVersion' '')
+$appliedVersion = ''
+try {
+$null = Set-WorkerKubeconfig
+$appliedVersion = [string](Get-DeployedK8sVersion)
+} catch {
+Write-Log "WARNING: could not read deployed version for the tag: $_"
+}
+try {
+Write-UpgradeStateTag -config $config -Value 'succeeded' -AppliedVersion $appliedVersion -FromVersion $fromVersion
+} catch {
+Write-Log "WARNING: tag write helper threw: $_. Non-fatal."
+}
+if ($env:AZURE_CONFIG_DIR -and (Test-Path $env:AZURE_CONFIG_DIR)) {
+Remove-Item -Path $env:AZURE_CONFIG_DIR -Recurse -Force -ErrorAction SilentlyContinue
+Write-Log "Removed az token cache at $env:AZURE_CONFIG_DIR"
+}
+Set-State -Phase 99 -Status 'succeeded'
+Write-Log "Phase 99: complete. Upgrade finished. fromVersion=$fromVersion appliedVersion=$appliedVersion"
+}
+if (-not (Test-Path $ConfigDir)) {
+New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null
+}
+$env:AZURE_CONFIG_DIR = Join-Path $ConfigDir '.azure'
+$logPath = Join-Path $ConfigDir "worker-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+Start-Transcript -Path $logPath -Append | Out-Null
+try {
+Write-Log "Upgrade worker started. ConfigDir=$ConfigDir Log=$logPath"
+while ($true) {
+$state  = Get-State
+$config = Get-Config
+$startPhase = $state.phase
+Write-Log "Resuming at phase=$startPhase status=$($state.status)"
+try {
+switch ($state.phase) {
+0  { Invoke-Phase0  -config $config }
+1  { Invoke-Phase1  -config $config }
+2  { Invoke-Phase2  -config $config }
+3  { Invoke-Phase3  -config $config }
+99 { Invoke-Phase99 -config $config }
+default { throw "Unknown phase: $($state.phase)" }
+}
+} catch {
+$errText = $_.ToString()
+Write-Log "ERROR in phase ${startPhase}: $errText"
+Set-State -Phase $startPhase -Status 'failed' -ErrorText $errText
+$tagValue = if ($errText -match 'TRIDENT-REMEDIATION-REQUIRED') { 'failed-needs-remediation' } else { "failed-phase-$startPhase" }
+try {
+Write-UpgradeStateTag -config $config -Value $tagValue
+} catch {
+Write-Log "WARNING: tag write helper threw on failure path: $_. Original phase error re-raised below."
+}
+throw
+}
+$newState = Get-State
+if ($newState.phase -eq 99 -and $newState.status -eq 'succeeded') {
+Write-Log 'Upgrade complete.'
+break
+}
+if ($newState.status -eq 'pending-reboot') {
+Write-Log 'Pending reboot. Worker exits.'
+break
+}
+if ($newState.phase -eq $startPhase) {
+Write-Log "Phase $startPhase did not advance. Stopping cascade to avoid infinite loop."
+break
+}
+}
+} finally {
+Stop-Transcript | Out-Null
+}
+'@
+if (-not (Test-IsAdmin)) {
+throw 'Install-AksEeUpgrade.ps1 must run as Administrator.'
+}
+Write-Log "Preparing AKS EE patch update for cluster $ClusterName in $ResourceGroup (runId=$RunId)"
+if (-not (Test-Path $ConfigDir)) {
+New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null
+Write-Log "Created $ConfigDir"
+}
+Set-StrictAcl -Path $ConfigDir
+$workerPath = Join-Path $ConfigDir 'worker.ps1'
+$configPath = Join-Path $ConfigDir 'config.json'
+$statePath  = Join-Path $ConfigDir 'state.json'
+if ((Test-Path $statePath) -and -not $Force) {
+$existingPhase = $null
+$existingStatus = $null
+try {
+$existing = Get-Content -Raw -Path $statePath | ConvertFrom-Json
+if ($existing.PSObject.Properties.Name -contains 'status') {
+$existingStatus = $existing.status
+if ($existing.PSObject.Properties.Name -contains 'phase') { $existingPhase = $existing.phase }
+}
+} catch {
+Write-Log "WARNING: existing state.json could not be parsed. Re-initializing. ($_)"
+}
+if ($existingStatus -in @('running', 'pending-reboot')) {
+throw "Upgrade already in flight (state.json shows phase=$existingPhase status=$existingStatus). Pass -Force to reset state and re-register the task, or wait for the existing run to complete."
+}
+}
+Set-Content -Path $workerPath -Value $EmbeddedWorker -Encoding UTF8
+Write-Log "Wrote $workerPath"
+$runAsSystem = ($RunAsDedicatedAdmin -ine 'true')
+$adminPassword = $null
+if (-not $runAsSystem) {
+$adminPassword = New-RandomPassword
+Set-LocalAdminUser -Username $LocalAdminUser -Password $adminPassword
+Write-Log "Worker task will run as local admin $LocalAdminUser"
+} else {
+Write-Log 'Worker task will run as NT AUTHORITY\SYSTEM (no local account created)'
+}
+$config = [pscustomobject]@{
+resourceGroup               = $ResourceGroup
+subscription                = $Subscription
+clusterName                 = $ClusterName
+runId                       = $RunId
+allowKubernetesMinorUpgrade = ($AllowKubernetesMinorUpgrade -ieq 'true')
+scheduledTaskName           = $ScheduledTaskName
+localAdminUser              = $LocalAdminUser
+runAsSystem                 = $runAsSystem
+}
+$config | ConvertTo-Json | Set-Content -Path $configPath -Encoding UTF8
+Write-Log "Wrote $configPath (auth=managed identity, patch-only)"
+$initialState = [pscustomobject]@{
+phase       = 0
+status      = 'running'
+lastUpdated = (Get-Date).ToString('o')
+error       = $null
+}
+$initialStateTmp = "$statePath.tmp"
+$initialState | ConvertTo-Json | Set-Content -Path $initialStateTmp -Encoding UTF8
+Move-Item -Path $initialStateTmp -Destination $statePath -Force
+Write-Log "Wrote $statePath (phase=0)"
+Set-RunningTag -Subscription $Subscription -ResourceGroup $ResourceGroup -RunId $RunId
+$action = New-ScheduledTaskAction `
+-Execute 'powershell.exe' `
+-Argument "-NoProfile -ExecutionPolicy Bypass -File `"$workerPath`" -ConfigDir `"$ConfigDir`""
+$startupTrigger = New-ScheduledTaskTrigger -AtStartup
+$onceTrigger    = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddSeconds(30))
+if ($runAsSystem) {
+$principal = New-ScheduledTaskPrincipal `
+-UserId 'NT AUTHORITY\SYSTEM' `
+-LogonType ServiceAccount `
+-RunLevel Highest
+} else {
+$principal = New-ScheduledTaskPrincipal `
+-UserId "$env:COMPUTERNAME\$LocalAdminUser" `
+-LogonType Password `
+-RunLevel Highest
+}
+$settings = New-ScheduledTaskSettingsSet `
+-AllowStartIfOnBatteries `
+-DontStopIfGoingOnBatteries `
+-StartWhenAvailable `
+-ExecutionTimeLimit (New-TimeSpan -Hours 6) `
+-MultipleInstances IgnoreNew
+$task = New-ScheduledTask `
+-Action $action `
+-Trigger @($startupTrigger, $onceTrigger) `
+-Principal $principal `
+-Settings $settings
+if ($runAsSystem) {
+Register-ScheduledTask `
+-TaskName $ScheduledTaskName `
+-InputObject $task `
+-Force | Out-Null
+} else {
+Register-ScheduledTask `
+-TaskName $ScheduledTaskName `
+-InputObject $task `
+-User "$env:COMPUTERNAME\$LocalAdminUser" `
+-Password $adminPassword `
+-Force | Out-Null
+}
+Write-Log "Registered Scheduled Task $ScheduledTaskName"
+Start-ScheduledTask -TaskName $ScheduledTaskName
+Write-Log "Started $ScheduledTaskName"
+Write-Output 'REGISTERED'

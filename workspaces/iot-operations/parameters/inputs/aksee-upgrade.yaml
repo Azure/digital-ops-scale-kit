@@ -1,0 +1,12 @@
+# Parameter inputs for the aksee-upgrade step.
+# Consumed by `templates/host-ops/aksee-upgrade/template.bicep`.
+#
+# Only machineName and clusterName are required. The Bicep derives the
+# subscription and resource group from the site context, defaults runId to the
+# deploy time, and keeps allowKubernetesMinorUpgrade false (patch updates only).
+#
+# Override per-site in `sites/<site>.yaml`. See
+# `templates/host-ops/aksee-upgrade/README.md`.
+
+machineName: "{{ site.parameters.aksee.machineName }}"
+clusterName: "{{ site.parameters.aksee.clusterName }}"

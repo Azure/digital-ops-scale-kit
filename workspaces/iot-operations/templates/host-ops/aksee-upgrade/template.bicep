@@ -1,0 +1,116 @@
+// Delivers the AKS EE patch-update launcher to an Arc-connected Windows VM via
+// `Microsoft.HybridCompute/machines/runCommands`. The Connected Machine agent on
+// the VM polls Azure, picks up the runCommand, executes the launcher locally,
+// and reports back into the resource's instanceView.
+//
+// The launcher writes the worker to disk, registers a Scheduled Task that drives
+// it (running as SYSTEM by default, or as a created local admin when
+// runAsDedicatedAdmin is set), sets the in-progress completion tag, starts the
+// task, and returns `REGISTERED`. ARM sees the runCommand succeed at that point.
+// The actual upgrade (stage, apply, inner node-VM reboot, verify) happens inside
+// the Scheduled Task asynchronously. The worker writes a
+// `siteops.aksee.upgrade.state` tag on the Arc machine when it finishes, and a
+// siteops `type: wait` step gates downstream steps on that tag.
+//
+// Scope: patch updates within the current Kubernetes minor version on a
+// single-node cluster. The worker applies patch updates only and rejects true,
+// so leave allowKubernetesMinorUpgrade false.
+//
+// Prerequisites on the target VM (one-time per VM, outside this Bicep):
+//   1. An AKS Edge Essentials single-node cluster is already deployed and
+//      Arc-connected (e.g., by the host-bootstrap/aksee bootstrap).
+//   2. The Arc machine's system-assigned managed identity has access on the
+//      resource group. The worker authenticates as this identity for the
+//      post-upgrade verification and the completion tag. No service principal is
+//      used. Use `Contributor` (simplest), or `Kubernetes Cluster - Azure Arc
+//      Onboarding` plus `Tag Contributor` for least privilege.
+//
+// Usage as a scalekit step:
+//   - name: aksee-upgrade
+//     template: templates/host-ops/aksee-upgrade/template.bicep
+//     scope: resourceGroup
+//     parameters:
+//       - parameters/inputs/aksee-upgrade.yaml
+
+@description('Name of the existing Arc-enabled Windows machine resource (Microsoft.HybridCompute/machines).')
+param machineName string
+
+@description('Name to assign the runCommands child resource. Use a stable name so re-deploys overwrite the existing command rather than accumulating history entries.')
+param runCommandName string = 'aksee-upgrade'
+
+@description('Location for the runCommands resource. Defaults to the resource group location, which typically matches the machine location.')
+param location string = resourceGroup().location
+
+@description('Name of the AKS Edge Essentials cluster on the target host. Recorded in the launcher log for context.')
+param clusterName string
+
+@description('Resource group that holds the Arc-connected server and the connected cluster. Typically the same RG that holds this runCommand.')
+param targetResourceGroup string = resourceGroup().name
+
+@description('Subscription ID where the Arc machine and connected cluster live.')
+param targetSubscription string = subscription().subscriptionId
+
+@description('Opaque per-deploy identifier recorded in the completion tag (siteops.aksee.upgrade.runId). Defaults to the deploy time so each deploy is correlatable. Re-deploys with a fresh value re-run the worker, which no-ops when no newer patch is available.')
+param runId string = utcNow()
+
+@description('Reserved. The worker applies patch updates only and rejects true. Leave false.')
+param allowKubernetesMinorUpgrade bool = false
+
+@description('When true, the worker Scheduled Task runs as a created local admin account with an on-box generated password instead of the built-in SYSTEM account. Leave false unless a hardened environment forbids SYSTEM-context tasks. Defaults to false.')
+param runAsDedicatedAdmin bool = false
+
+@description('Timeout in seconds for the runCommand. It bounds only the synchronous launcher, which returns quickly after registering the Scheduled Task. The upgrade itself runs asynchronously inside that task.')
+param runCommandTimeoutSeconds int = 600
+
+resource machine 'Microsoft.HybridCompute/machines@2024-11-10-preview' existing = {
+  name: machineName
+}
+
+resource upgradeCommand 'Microsoft.HybridCompute/machines/runCommands@2024-11-10-preview' = {
+  parent: machine
+  name: runCommandName
+  location: location
+  properties: {
+    source: {
+      // loadTextContent inlines the launcher at compile time. The minified
+      // launcher (comments, blank lines, leading whitespace stripped) keeps the
+      // inline script body within the runCommands size limit. scriptUri delivery
+      // (a blob URL) is the durable fix when the inline body no longer fits.
+      script: loadTextContent('./scripts/Install-AksEeUpgrade.min.ps1')
+    }
+    // asyncExecution=false makes ARM block until the launcher exits. The launcher
+    // returns quickly. The long-running upgrade is the Scheduled Task it
+    // registers, which runs after ARM has already seen success.
+    asyncExecution: false
+    timeoutInSeconds: runCommandTimeoutSeconds
+    parameters: [
+      { name: 'ResourceGroup', value: targetResourceGroup }
+      { name: 'Subscription',  value: targetSubscription }
+      { name: 'ClusterName',   value: clusterName }
+      { name: 'RunId',         value: runId }
+      // The launcher params are [string]. string() yields 'true'/'false', which
+      // the launcher parses case-insensitively. A bool value would be rejected
+      // by the runCommand's string-typed parameter.
+      { name: 'AllowKubernetesMinorUpgrade', value: string(allowKubernetesMinorUpgrade) }
+      { name: 'RunAsDedicatedAdmin',         value: string(runAsDedicatedAdmin) }
+    ]
+  }
+}
+
+@description('Final execution state of the launcher script (typically `Succeeded` when the launcher registered the Scheduled Task). Independent of the actual upgrade outcome, which the Scheduled Task drives asynchronously and reports via the siteops.aksee.upgrade.state tag.')
+output executionState string = upgradeCommand.properties.instanceView.executionState
+
+@description('Exit code from the launcher script. 0 = launcher returned REGISTERED. Non-zero = launcher failed before registering the Scheduled Task.')
+output exitCode int = upgradeCommand.properties.instanceView.exitCode
+
+@description('Stdout captured from the launcher. Typically contains the per-step launcher log lines and the final REGISTERED marker.')
+output stdout string = upgradeCommand.properties.instanceView.output
+
+@description('Stderr captured from the launcher. Typically empty on success, populated on launcher failure.')
+output errorOutput string = upgradeCommand.properties.instanceView.error
+
+@description('Fully qualified resource ID of the Arc machine that hosts the upgrade. Useful for chaining the wait step that polls the upgrade-state tag.')
+output machineId string = machine.id
+
+@description('The runId recorded in the completion tag for this deploy.')
+output runId string = runId
