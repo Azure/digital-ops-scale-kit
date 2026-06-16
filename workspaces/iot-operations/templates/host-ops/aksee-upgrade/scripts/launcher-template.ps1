@@ -35,10 +35,6 @@ Resource group that holds the Arc-connected server and the connected cluster.
 .PARAMETER Subscription
 Subscription ID.
 
-.PARAMETER ClusterName
-Name of the AKS Edge Essentials cluster on the target host. Recorded in the
-launcher log for context.
-
 .PARAMETER RunId
 Opaque per-deploy identifier written into the completion tag so the wait step
 and operators can correlate a tag with a specific deploy.
@@ -60,7 +56,6 @@ Local user the Scheduled Task runs as under -RunAsDedicatedAdmin. Defaults to
     .\Install-AksEeUpgrade.ps1 `
         -ResourceGroup aksee-rg `
         -Subscription  00000000-0000-0000-0000-000000000000 `
-        -ClusterName   aksee-cluster1 `
         -RunId         2026-06-15T180000Z
 
 .NOTES
@@ -72,7 +67,6 @@ Regenerate after editing either source.
 param(
     [Parameter(Mandatory)] [string]$ResourceGroup,
     [Parameter(Mandatory)] [string]$Subscription,
-    [Parameter(Mandatory)] [string]$ClusterName,
     [Parameter(Mandatory)] [string]$RunId,
     # The Arc machine resource name the wait step targets for the completion tag.
     # Defaults to the hostname. The Bicep passes the actual machine resource name.
@@ -228,7 +222,7 @@ if (-not (Test-IsAdmin)) {
     throw 'Install-AksEeUpgrade.ps1 must run as Administrator.'
 }
 
-Write-Log "Preparing AKS EE patch update for cluster $ClusterName in $ResourceGroup (runId=$RunId)"
+Write-Log "Preparing AKS EE patch update on $MachineName in $ResourceGroup (runId=$RunId)"
 
 if (-not (Test-Path $ConfigDir)) {
     New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null
@@ -278,7 +272,6 @@ $config = [pscustomobject]@{
     resourceGroup               = $ResourceGroup
     subscription                = $Subscription
     machineName                 = $MachineName
-    clusterName                 = $ClusterName
     runId                       = $RunId
     allowKubernetesMinorUpgrade = ($AllowKubernetesMinorUpgrade -ieq 'true')
     scheduledTaskName           = $ScheduledTaskName

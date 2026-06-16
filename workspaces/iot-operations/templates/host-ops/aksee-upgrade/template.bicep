@@ -41,9 +41,6 @@ param runCommandName string = 'aksee-upgrade'
 @description('Location for the runCommands resource. Defaults to the resource group location, which typically matches the machine location.')
 param location string = resourceGroup().location
 
-@description('Name of the AKS Edge Essentials cluster on the target host. Recorded in the launcher log for context.')
-param clusterName string
-
 @description('Resource group that holds the Arc-connected server and the connected cluster. Typically the same RG that holds this runCommand.')
 param targetResourceGroup string = resourceGroup().name
 
@@ -87,7 +84,6 @@ resource upgradeCommand 'Microsoft.HybridCompute/machines/runCommands@2024-11-10
       { name: 'ResourceGroup', value: targetResourceGroup }
       { name: 'Subscription',  value: targetSubscription }
       { name: 'MachineName',   value: machineName }
-      { name: 'ClusterName',   value: clusterName }
       { name: 'RunId',         value: runId }
       // The launcher params are [string]. string() yields 'true'/'false', which
       // the launcher parses case-insensitively. A bool value would be rejected

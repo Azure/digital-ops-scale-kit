@@ -77,8 +77,8 @@ az role assignment create --assignee-object-id $ARC_PRINCIPAL_ID --assignee-prin
 
 ## Site configuration
 
-The upgrade reuses the same `aksee` parameter section the bootstrap uses. Only
-`machineName` and `clusterName` are required:
+The upgrade reuses the same `aksee` parameter section the bootstrap uses, and
+needs only `machineName` from it:
 
 ```yaml
 # sites/<site>.yaml
@@ -89,7 +89,6 @@ location: <region>
 parameters:
   aksee:
     machineName: my-arc-windows-vm
-    clusterName: my-aksee-cluster
 ```
 
 ## Run

@@ -3,7 +3,6 @@
 param(
 [Parameter(Mandatory)] [string]$ResourceGroup,
 [Parameter(Mandatory)] [string]$Subscription,
-[Parameter(Mandatory)] [string]$ClusterName,
 [Parameter(Mandatory)] [string]$RunId,
 [string]$MachineName       = $env:COMPUTERNAME,
 [string]$ConfigDir         = 'C:\ProgramData\siteops\aksee-upgrade',
@@ -571,7 +570,7 @@ Stop-Transcript | Out-Null
 if (-not (Test-IsAdmin)) {
 throw 'Install-AksEeUpgrade.ps1 must run as Administrator.'
 }
-Write-Log "Preparing AKS EE patch update for cluster $ClusterName in $ResourceGroup (runId=$RunId)"
+Write-Log "Preparing AKS EE patch update on $MachineName in $ResourceGroup (runId=$RunId)"
 if (-not (Test-Path $ConfigDir)) {
 New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null
 Write-Log "Created $ConfigDir"
@@ -611,7 +610,6 @@ $config = [pscustomobject]@{
 resourceGroup               = $ResourceGroup
 subscription                = $Subscription
 machineName                 = $MachineName
-clusterName                 = $ClusterName
 runId                       = $RunId
 allowKubernetesMinorUpgrade = ($AllowKubernetesMinorUpgrade -ieq 'true')
 scheduledTaskName           = $ScheduledTaskName

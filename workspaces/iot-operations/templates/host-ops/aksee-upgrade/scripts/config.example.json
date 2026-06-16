@@ -3,7 +3,7 @@
 
   "resourceGroup": "aksee-rg",
   "subscription": "00000000-0000-0000-0000-000000000000",
-  "clusterName": "aksee-cluster1",
+  "machineName": "my-arc-windows-vm",
 
   "_runIdNote": "Opaque per-deploy identifier recorded in the completion tag (siteops.aksee.upgrade.runId) so a tag can be correlated with a specific deploy. The Bicep defaults it to the deploy time.",
   "runId": "2026-06-15T180000Z",
