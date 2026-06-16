@@ -27,3 +27,9 @@ parameters:
     memoryProfile: Medium
   # Default dataflow instance count
   defaultDataflowInstanceCount: 1
+  # AKS Edge Essentials host bootstrap defaults
+  aksee:
+    # MSI the bootstrap installs. Default is the latest K3s build. Override
+    # per-site with a versioned MSI URL (Microsoft Download Center) to pin a
+    # specific AKS Edge Essentials release.
+    aksEdgeMsiUrl: "https://aka.ms/aks-edge/k3s-msi"
