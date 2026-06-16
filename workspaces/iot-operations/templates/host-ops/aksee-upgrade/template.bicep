@@ -86,6 +86,7 @@ resource upgradeCommand 'Microsoft.HybridCompute/machines/runCommands@2024-11-10
     parameters: [
       { name: 'ResourceGroup', value: targetResourceGroup }
       { name: 'Subscription',  value: targetSubscription }
+      { name: 'MachineName',   value: machineName }
       { name: 'ClusterName',   value: clusterName }
       { name: 'RunId',         value: runId }
       // The launcher params are [string]. string() yields 'true'/'false', which

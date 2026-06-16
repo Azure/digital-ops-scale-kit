@@ -5,6 +5,7 @@ param(
 [Parameter(Mandatory)] [string]$Subscription,
 [Parameter(Mandatory)] [string]$ClusterName,
 [Parameter(Mandatory)] [string]$RunId,
+[string]$MachineName       = $env:COMPUTERNAME,
 [string]$ConfigDir         = 'C:\ProgramData\siteops\aksee-upgrade',
 [string]$ScheduledTaskName = 'SiteOpsAksEeUpgrade',
 [string]$LocalAdminUser    = 'siteops-upgrade',
@@ -81,7 +82,7 @@ Add-LocalGroupMember -Group 'Administrators' -Member $Username
 }
 }
 function Set-RunningTag {
-param([string]$Subscription, [string]$ResourceGroup, [string]$RunId)
+param([string]$Subscription, [string]$ResourceGroup, [string]$MachineName, [string]$RunId)
 if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
 Write-Log 'Skipping in-progress tag write: az CLI not installed (the worker will set it).'
 return
@@ -96,8 +97,7 @@ if ($machineVal) { Set-Item -Path "Env:$name" -Value $machineVal }
 }
 & az login --identity --only-show-errors 2>&1 | Out-Null
 if ($LASTEXITCODE -ne 0) { Write-Log 'In-progress tag write skipped: az login --identity failed (the worker will retry).'; return }
-$name = $env:COMPUTERNAME
-$arcId = "/subscriptions/$Subscription/resourceGroups/$ResourceGroup/providers/Microsoft.HybridCompute/machines/$name"
+$arcId = "/subscriptions/$Subscription/resourceGroups/$ResourceGroup/providers/Microsoft.HybridCompute/machines/$MachineName"
 & az tag update --resource-id $arcId --operation merge --tags "siteops.aksee.upgrade.state=running" "siteops.aksee.upgrade.runId=$RunId" --only-show-errors 2>&1 | Out-Null
 if ($LASTEXITCODE -eq 0) { Write-Log "Set siteops.aksee.upgrade.state=running on $arcId (runId=$RunId)" }
 else { Write-Log 'In-progress tag write returned non-zero (the worker will retry).' }
@@ -247,7 +247,7 @@ return $kubeconfig
 function Invoke-Kubectl {
 param([string[]]$KubectlArgs)
 $exe = if ($env:KUBECTL_CLIENT_PATH -and (Test-Path $env:KUBECTL_CLIENT_PATH)) { $env:KUBECTL_CLIENT_PATH } else { 'kubectl' }
-return & $exe @KubectlArgs 2>&1
+return & $exe @KubectlArgs --request-timeout=10s 2>&1
 }
 function Get-DeployedK8sVersion {
 $json = Invoke-Kubectl @('get', 'nodes', '-o', 'json')
@@ -276,12 +276,14 @@ return $LASTEXITCODE -eq 0
 }
 function Test-NodesReady {
 $ready = Invoke-Kubectl @('get', '--raw=/readyz')
-if ($LASTEXITCODE -ne 0 -or (($ready -join '') -notmatch 'ok')) { return $false }
+if ($LASTEXITCODE -ne 0 -or (($ready -join '').Trim() -ne 'ok')) { return $false }
 $json = Invoke-Kubectl @('get', 'nodes', '-o', 'json')
 if ($LASTEXITCODE -ne 0) { return $false }
 try {
 $obj = ($json -join "`n") | ConvertFrom-Json
-foreach ($n in $obj.items) {
+$nodes = @($obj.items)
+if ($nodes.Count -lt 1) { return $false }
+foreach ($n in $nodes) {
 $readyCond = $n.status.conditions | Where-Object { $_.type -eq 'Ready' } | Select-Object -First 1
 if ($null -eq $readyCond -or $readyCond.status -ne 'True') { return $false }
 }
@@ -351,9 +353,10 @@ return
 }
 $sub  = $config.subscription
 $rg   = $config.resourceGroup
-$name = $env:COMPUTERNAME
+$name = [string](Get-Prop $config 'machineName' $env:COMPUTERNAME)
+if (-not $name) { $name = $env:COMPUTERNAME }
 if (-not $sub -or -not $rg -or -not $name) {
-Write-Log 'Skipping upgrade-state tag write: missing subscription / resourceGroup / COMPUTERNAME.'
+Write-Log 'Skipping upgrade-state tag write: missing subscription / resourceGroup / machine name.'
 return
 }
 $runId = [string](Get-Prop $config 'runId' '')
@@ -361,32 +364,39 @@ $tags = @("siteops.aksee.upgrade.state=$Value", "siteops.aksee.upgrade.runId=$ru
 if ($AppliedVersion) { $tags += "siteops.aksee.upgrade.appliedVersion=$AppliedVersion" }
 if ($FromVersion)    { $tags += "siteops.aksee.upgrade.fromVersion=$FromVersion" }
 $arcId = "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.HybridCompute/machines/$name"
+for ($attempt = 1; $attempt -le 3; $attempt++) {
 $tagOut = & az tag update --resource-id $arcId --operation merge --tags @tags --only-show-errors 2>&1
-if ($LASTEXITCODE -ne 0) {
-Write-Log "WARNING: tag write failed on $arcId (exit $LASTEXITCODE): $tagOut. See README Prerequisites for the required Microsoft.Resources/tags/write grant."
+if ($LASTEXITCODE -eq 0) {
+Write-Log "Wrote tag siteops.aksee.upgrade.state=$Value (runId=$runId appliedVersion=$AppliedVersion) on $arcId"
 return
 }
-Write-Log "Wrote tag siteops.aksee.upgrade.state=$Value (runId=$runId appliedVersion=$AppliedVersion) on $arcId"
+Write-Log "WARNING: tag write attempt $attempt/3 failed on $arcId (exit $LASTEXITCODE): $tagOut"
+if ($attempt -lt 3) { Start-Sleep -Seconds 5 }
+}
+Write-Log "WARNING: tag write did not succeed after 3 attempts on $arcId. See README Prerequisites for the required Microsoft.Resources/tags/write grant."
 }
 function Wait-Until {
 param(
 [Parameter(Mandatory)] [string]$Label,
 [Parameter(Mandatory)] [scriptblock]$Condition,
-[int]$RetrySeconds = 15,
-[int]$MaxRetries   = 40
+[int]$RetrySeconds   = 15,
+[int]$TimeoutSeconds = 600
 )
-for ($i = 1; $i -le $MaxRetries; $i++) {
+$deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+$attempt = 0
+while ($true) {
+$attempt++
 if (& $Condition) {
-Write-Log "$Label satisfied (attempt $i/$MaxRetries)."
+Write-Log "$Label satisfied (attempt $attempt)."
 return $true
 }
-if ($i -lt $MaxRetries) {
-Write-Log "$Label not satisfied yet (attempt $i/$MaxRetries). Retrying in ${RetrySeconds}s."
+if ((Get-Date) -ge $deadline) {
+Write-Log "$Label not satisfied within ${TimeoutSeconds}s ($attempt attempts)."
+return $false
+}
+Write-Log "$Label not satisfied yet (attempt $attempt). Retrying in ${RetrySeconds}s."
 Start-Sleep -Seconds $RetrySeconds
 }
-}
-Write-Log "$Label not satisfied within $($MaxRetries * $RetrySeconds)s."
-return $false
 }
 function Invoke-Phase0 {
 param($config)
@@ -397,6 +407,9 @@ throw 'AKS Edge Essentials is not installed on this host. The upgrade worker tar
 }
 Install-AzCliIfMissing
 Connect-MachineIdentity -config $config
+if ([bool](Get-Prop $config 'allowKubernetesMinorUpgrade' $false)) {
+throw 'allowKubernetesMinorUpgrade is true, but this worker applies patch updates only and does not support minor Kubernetes version upgrades. Set it to false.'
+}
 try { Write-UpgradeStateTag -config $config -Value 'running' } catch { Write-Log "WARNING: in-progress tag write failed: $_" }
 $kubeconfig = Set-WorkerKubeconfig
 $nodeCount = Get-NodeCount
@@ -425,10 +438,6 @@ function Invoke-Phase1 {
 param($config)
 Write-Log 'Phase 1: stage AKS EE patch update'
 $hostBefore = Get-AksEeHostVersion
-$allowMinor = [bool](Get-Prop $config 'allowKubernetesMinorUpgrade' $false)
-if ($allowMinor) {
-throw 'allowKubernetesMinorUpgrade is true. This worker applies patch updates only and does not support minor-version upgrades.'
-}
 Invoke-ChildAksEeCommand -Label 'set-upgrade'   -Script 'Import-Module AksEdge -Force; Set-AksEdgeUpgrade -AcceptUpgrade $false' | Out-Null
 $stageLog = Invoke-ChildAksEeCommand -Label 'stage-update' -Script 'Import-Module AksEdge -Force; Start-AksEdgeUpdate -Force'
 $hostAfter = Get-AksEeHostVersion
@@ -471,6 +480,7 @@ Write-Log 'Phase 3: complete (verification passed)'
 function Invoke-Phase99 {
 param($config)
 Write-Log 'Phase 99: finalize'
+Connect-MachineIdentity -config $config
 $snapshot = if (Test-Path $script:SnapshotPath) { Get-Content -Raw -Path $script:SnapshotPath | ConvertFrom-Json } else { $null }
 $fromVersion = [string](Get-Prop $snapshot 'fromK8sVersion' '')
 $appliedVersion = ''
@@ -490,6 +500,15 @@ Remove-Item -Path $env:AZURE_CONFIG_DIR -Recurse -Force -ErrorAction SilentlyCon
 Write-Log "Removed az token cache at $env:AZURE_CONFIG_DIR"
 }
 Set-State -Phase 99 -Status 'succeeded'
+$taskName = [string](Get-Prop $config 'scheduledTaskName' '')
+if ($taskName) {
+try {
+Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop
+Write-Log "Unregistered Scheduled Task $taskName"
+} catch {
+Write-Log "WARNING: could not unregister Scheduled Task ${taskName}: $_. Non-fatal."
+}
+}
 Write-Log "Phase 99: complete. Upgrade finished. fromVersion=$fromVersion appliedVersion=$appliedVersion"
 }
 if (-not (Test-Path $ConfigDir)) {
@@ -500,6 +519,11 @@ $logPath = Join-Path $ConfigDir "worker-$(Get-Date -Format 'yyyyMMdd-HHmmss').lo
 Start-Transcript -Path $logPath -Append | Out-Null
 try {
 Write-Log "Upgrade worker started. ConfigDir=$ConfigDir Log=$logPath"
+$bootState = Get-State
+if ($bootState.status -in @('succeeded', 'failed')) {
+Write-Log "State is terminal (phase=$($bootState.phase) status=$($bootState.status)). Nothing to resume. Re-deploy the manifest to run again. Exiting."
+return
+}
 while ($true) {
 $state  = Get-State
 $config = Get-Config
@@ -586,6 +610,7 @@ Write-Log 'Worker task will run as NT AUTHORITY\SYSTEM (no local account created
 $config = [pscustomobject]@{
 resourceGroup               = $ResourceGroup
 subscription                = $Subscription
+machineName                 = $MachineName
 clusterName                 = $ClusterName
 runId                       = $RunId
 allowKubernetesMinorUpgrade = ($AllowKubernetesMinorUpgrade -ieq 'true')
@@ -605,7 +630,7 @@ $initialStateTmp = "$statePath.tmp"
 $initialState | ConvertTo-Json | Set-Content -Path $initialStateTmp -Encoding UTF8
 Move-Item -Path $initialStateTmp -Destination $statePath -Force
 Write-Log "Wrote $statePath (phase=0)"
-Set-RunningTag -Subscription $Subscription -ResourceGroup $ResourceGroup -RunId $RunId
+Set-RunningTag -Subscription $Subscription -ResourceGroup $ResourceGroup -MachineName $MachineName -RunId $RunId
 $action = New-ScheduledTaskAction `
 -Execute 'powershell.exe' `
 -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$workerPath`" -ConfigDir `"$ConfigDir`""

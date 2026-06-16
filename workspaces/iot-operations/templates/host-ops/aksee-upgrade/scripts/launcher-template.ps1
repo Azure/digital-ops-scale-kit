@@ -74,6 +74,9 @@ param(
     [Parameter(Mandatory)] [string]$Subscription,
     [Parameter(Mandatory)] [string]$ClusterName,
     [Parameter(Mandatory)] [string]$RunId,
+    # The Arc machine resource name the wait step targets for the completion tag.
+    # Defaults to the hostname. The Bicep passes the actual machine resource name.
+    [string]$MachineName       = $env:COMPUTERNAME,
     [string]$ConfigDir         = 'C:\ProgramData\siteops\aksee-upgrade',
     [string]$ScheduledTaskName = 'SiteOpsAksEeUpgrade',
     [string]$LocalAdminUser    = 'siteops-upgrade',
@@ -183,7 +186,7 @@ function Set-RunningTag {
     # `succeeded` from a previous run. Runs in the runCommand context (SYSTEM),
     # which can reach HIMDS for the machine identity. Skips silently if az is
     # absent or the login fails, in which case the worker sets the tag instead.
-    param([string]$Subscription, [string]$ResourceGroup, [string]$RunId)
+    param([string]$Subscription, [string]$ResourceGroup, [string]$MachineName, [string]$RunId)
     if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
         Write-Log 'Skipping in-progress tag write: az CLI not installed (the worker will set it).'
         return
@@ -198,8 +201,7 @@ function Set-RunningTag {
         }
         & az login --identity --only-show-errors 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) { Write-Log 'In-progress tag write skipped: az login --identity failed (the worker will retry).'; return }
-        $name = $env:COMPUTERNAME
-        $arcId = "/subscriptions/$Subscription/resourceGroups/$ResourceGroup/providers/Microsoft.HybridCompute/machines/$name"
+        $arcId = "/subscriptions/$Subscription/resourceGroups/$ResourceGroup/providers/Microsoft.HybridCompute/machines/$MachineName"
         & az tag update --resource-id $arcId --operation merge --tags "siteops.aksee.upgrade.state=running" "siteops.aksee.upgrade.runId=$RunId" --only-show-errors 2>&1 | Out-Null
         if ($LASTEXITCODE -eq 0) { Write-Log "Set siteops.aksee.upgrade.state=running on $arcId (runId=$RunId)" }
         else { Write-Log 'In-progress tag write returned non-zero (the worker will retry).' }
@@ -275,6 +277,7 @@ if (-not $runAsSystem) {
 $config = [pscustomobject]@{
     resourceGroup               = $ResourceGroup
     subscription                = $Subscription
+    machineName                 = $MachineName
     clusterName                 = $ClusterName
     runId                       = $RunId
     allowKubernetesMinorUpgrade = ($AllowKubernetesMinorUpgrade -ieq 'true')
@@ -297,7 +300,7 @@ Move-Item -Path $initialStateTmp -Destination $statePath -Force
 Write-Log "Wrote $statePath (phase=0)"
 
 # Close the stale-tag race before the runCommand returns.
-Set-RunningTag -Subscription $Subscription -ResourceGroup $ResourceGroup -RunId $RunId
+Set-RunningTag -Subscription $Subscription -ResourceGroup $ResourceGroup -MachineName $MachineName -RunId $RunId
 
 $action = New-ScheduledTaskAction `
     -Execute 'powershell.exe' `

@@ -223,7 +223,9 @@ function Invoke-Kubectl {
     # Check $LASTEXITCODE at the call site.
     param([string[]]$KubectlArgs)
     $exe = if ($env:KUBECTL_CLIENT_PATH -and (Test-Path $env:KUBECTL_CLIENT_PATH)) { $env:KUBECTL_CLIENT_PATH } else { 'kubectl' }
-    return & $exe @KubectlArgs 2>&1
+    # Cap each call so a hung apiserver cannot stall a Wait-Until attempt past its
+    # wall-clock budget. The flag is global, so it is safe on every verb.
+    return & $exe @KubectlArgs --request-timeout=10s 2>&1
 }
 
 function Get-DeployedK8sVersion {
@@ -261,14 +263,18 @@ function Test-AioPresent {
 }
 
 function Test-NodesReady {
-    # All nodes report Ready. /readyz on the apiserver plus node conditions.
+    # All nodes report Ready. /readyz must return exactly 'ok', every node
+    # condition Ready=True, and there must be at least one node (an empty list is
+    # not Ready).
     $ready = Invoke-Kubectl @('get', '--raw=/readyz')
-    if ($LASTEXITCODE -ne 0 -or (($ready -join '') -notmatch 'ok')) { return $false }
+    if ($LASTEXITCODE -ne 0 -or (($ready -join '').Trim() -ne 'ok')) { return $false }
     $json = Invoke-Kubectl @('get', 'nodes', '-o', 'json')
     if ($LASTEXITCODE -ne 0) { return $false }
     try {
         $obj = ($json -join "`n") | ConvertFrom-Json
-        foreach ($n in $obj.items) {
+        $nodes = @($obj.items)
+        if ($nodes.Count -lt 1) { return $false }
+        foreach ($n in $nodes) {
             $readyCond = $n.status.conditions | Where-Object { $_.type -eq 'Ready' } | Select-Object -First 1
             if ($null -eq $readyCond -or $readyCond.status -ne 'True') { return $false }
         }
@@ -347,13 +353,13 @@ function Test-ArcConnectedChild {
 }
 
 function Write-UpgradeStateTag {
-    # Generation-aware tag write on this Arc machine resource. Phase 99 writes
+    # Write the upgrade-state tag on this Arc machine resource. Phase 99 writes
     # 'succeeded' with the applied/from versions and the run id. The per-phase
     # catch writes 'failed-phase-N' (or 'failed-needs-remediation' for the
     # Trident case). A siteops `type: wait` step polls siteops.aksee.upgrade.state
     # to gate downstream steps. Safe to call before az is authenticated: logs
     # and returns without throwing. Requires Microsoft.Resources/tags/write on
-    # the Arc machine resource. Assumes the resource name equals COMPUTERNAME.
+    # the Arc machine resource, which is named by config.machineName.
     param(
         [Parameter(Mandatory)] $config,
         [Parameter(Mandatory)] [string]$Value,
@@ -366,9 +372,12 @@ function Write-UpgradeStateTag {
     }
     $sub  = $config.subscription
     $rg   = $config.resourceGroup
-    $name = $env:COMPUTERNAME
+    # The Arc machine resource name, which the wait step also targets. Falls back
+    # to the hostname only when the launcher did not pass a machine name.
+    $name = [string](Get-Prop $config 'machineName' $env:COMPUTERNAME)
+    if (-not $name) { $name = $env:COMPUTERNAME }
     if (-not $sub -or -not $rg -or -not $name) {
-        Write-Log 'Skipping upgrade-state tag write: missing subscription / resourceGroup / COMPUTERNAME.'
+        Write-Log 'Skipping upgrade-state tag write: missing subscription / resourceGroup / machine name.'
         return
     }
     $runId = [string](Get-Prop $config 'runId' '')
@@ -376,38 +385,49 @@ function Write-UpgradeStateTag {
     if ($AppliedVersion) { $tags += "siteops.aksee.upgrade.appliedVersion=$AppliedVersion" }
     if ($FromVersion)    { $tags += "siteops.aksee.upgrade.fromVersion=$FromVersion" }
     $arcId = "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.HybridCompute/machines/$name"
-    $tagOut = & az tag update --resource-id $arcId --operation merge --tags @tags --only-show-errors 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Log "WARNING: tag write failed on $arcId (exit $LASTEXITCODE): $tagOut. See README Prerequisites for the required Microsoft.Resources/tags/write grant."
-        return
+    # Retry transient tag-write failures. The wait step gates on this tag, so a
+    # terminal write that never lands would hang the deploy until its timeout.
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $tagOut = & az tag update --resource-id $arcId --operation merge --tags @tags --only-show-errors 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Log "Wrote tag siteops.aksee.upgrade.state=$Value (runId=$runId appliedVersion=$AppliedVersion) on $arcId"
+            return
+        }
+        Write-Log "WARNING: tag write attempt $attempt/3 failed on $arcId (exit $LASTEXITCODE): $tagOut"
+        if ($attempt -lt 3) { Start-Sleep -Seconds 5 }
     }
-    Write-Log "Wrote tag siteops.aksee.upgrade.state=$Value (runId=$runId appliedVersion=$AppliedVersion) on $arcId"
+    Write-Log "WARNING: tag write did not succeed after 3 attempts on $arcId. See README Prerequisites for the required Microsoft.Resources/tags/write grant."
 }
 
 function Wait-Until {
-    # Poll a boolean scriptblock until it returns true or the attempt budget is
-    # spent. The node VM restarts during apply and Arc transiently disconnects
+    # Poll a boolean scriptblock until it returns true or a wall-clock deadline
+    # passes. The node VM restarts during apply and Arc transiently disconnects
     # while it comes back, so the post-update verify checks need to tolerate a
-    # settling window rather than fail on the first transient negative. Mirrors
-    # the bootstrap's Wait-ArcClusterReady budget (about 10 minutes).
+    # settling window rather than fail on the first transient negative. The
+    # deadline is wall-clock (not an attempt count) so a slow condition eval
+    # cannot push the total past the intended budget. Mirrors the bootstrap's
+    # Wait-ArcClusterReady budget (about 10 minutes).
     param(
         [Parameter(Mandatory)] [string]$Label,
         [Parameter(Mandatory)] [scriptblock]$Condition,
-        [int]$RetrySeconds = 15,
-        [int]$MaxRetries   = 40
+        [int]$RetrySeconds   = 15,
+        [int]$TimeoutSeconds = 600
     )
-    for ($i = 1; $i -le $MaxRetries; $i++) {
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $attempt = 0
+    while ($true) {
+        $attempt++
         if (& $Condition) {
-            Write-Log "$Label satisfied (attempt $i/$MaxRetries)."
+            Write-Log "$Label satisfied (attempt $attempt)."
             return $true
         }
-        if ($i -lt $MaxRetries) {
-            Write-Log "$Label not satisfied yet (attempt $i/$MaxRetries). Retrying in ${RetrySeconds}s."
-            Start-Sleep -Seconds $RetrySeconds
+        if ((Get-Date) -ge $deadline) {
+            Write-Log "$Label not satisfied within ${TimeoutSeconds}s ($attempt attempts)."
+            return $false
         }
+        Write-Log "$Label not satisfied yet (attempt $attempt). Retrying in ${RetrySeconds}s."
+        Start-Sleep -Seconds $RetrySeconds
     }
-    Write-Log "$Label not satisfied within $($MaxRetries * $RetrySeconds)s."
-    return $false
 }
 
 # ---------------------------------------------------------------------------
@@ -425,6 +445,14 @@ function Invoke-Phase0 {
 
     Install-AzCliIfMissing
     Connect-MachineIdentity -config $config
+
+    # Patch-only guardrail. Reject a minor-upgrade request up front, after auth so
+    # the failure still surfaces as a tag, rather than after the snapshot work.
+    # Set-AksEdgeUpgrade -AcceptUpgrade $false in Phase 1 is the cmdlet-level
+    # enforcement that backs this.
+    if ([bool](Get-Prop $config 'allowKubernetesMinorUpgrade' $false)) {
+        throw 'allowKubernetesMinorUpgrade is true, but this worker applies patch updates only and does not support minor Kubernetes version upgrades. Set it to false.'
+    }
 
     # Mark in-progress so a stale tag from a previous run cannot pass the wait
     # gate before this run finishes.
@@ -465,10 +493,7 @@ function Invoke-Phase1 {
     $hostBefore = Get-AksEeHostVersion
 
     # AcceptUpgrade $false keeps the Kubernetes minor version fixed (patch-only).
-    $allowMinor = [bool](Get-Prop $config 'allowKubernetesMinorUpgrade' $false)
-    if ($allowMinor) {
-        throw 'allowKubernetesMinorUpgrade is true. This worker applies patch updates only and does not support minor-version upgrades.'
-    }
+    # Phase 0 preflight already rejected a minor-upgrade request.
     Invoke-ChildAksEeCommand -Label 'set-upgrade'   -Script 'Import-Module AksEdge -Force; Set-AksEdgeUpgrade -AcceptUpgrade $false' | Out-Null
     $stageLog = Invoke-ChildAksEeCommand -Label 'stage-update' -Script 'Import-Module AksEdge -Force; Start-AksEdgeUpdate -Force'
 
@@ -535,6 +560,11 @@ function Invoke-Phase99 {
     param($config)
     Write-Log 'Phase 99: finalize'
 
+    # Re-establish the managed-identity login defensively. On a host-reboot resume
+    # this phase can run in a fresh process whose Phase 3 token is gone, and the
+    # terminal tag write below must succeed for the wait step to release.
+    Connect-MachineIdentity -config $config
+
     $snapshot = if (Test-Path $script:SnapshotPath) { Get-Content -Raw -Path $script:SnapshotPath | ConvertFrom-Json } else { $null }
     $fromVersion = [string](Get-Prop $snapshot 'fromK8sVersion' '')
     $appliedVersion = ''
@@ -560,6 +590,21 @@ function Invoke-Phase99 {
     }
 
     Set-State -Phase 99 -Status 'succeeded'
+
+    # Unregister the Scheduled Task so the at-startup trigger does not re-run this
+    # worker on a later host reboot. A failed run intentionally leaves the task in
+    # place for diagnostics. The main-loop terminal-state guard stops it from
+    # re-running there.
+    $taskName = [string](Get-Prop $config 'scheduledTaskName' '')
+    if ($taskName) {
+        try {
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction Stop
+            Write-Log "Unregistered Scheduled Task $taskName"
+        } catch {
+            Write-Log "WARNING: could not unregister Scheduled Task ${taskName}: $_. Non-fatal."
+        }
+    }
+
     Write-Log "Phase 99: complete. Upgrade finished. fromVersion=$fromVersion appliedVersion=$appliedVersion"
 }
 
@@ -580,6 +625,16 @@ $logPath = Join-Path $ConfigDir "worker-$(Get-Date -Format 'yyyyMMdd-HHmmss').lo
 Start-Transcript -Path $logPath -Append | Out-Null
 try {
     Write-Log "Upgrade worker started. ConfigDir=$ConfigDir Log=$logPath"
+
+    # Terminal-state guard. The at-startup trigger re-runs this worker on every
+    # host reboot. If the previous run already reached a terminal state, do not
+    # re-dispatch: a 'failed' state must not silently retry, and 'succeeded' must
+    # not re-run Phase 99. A deliberate re-deploy resets state to phase 0.
+    $bootState = Get-State
+    if ($bootState.status -in @('succeeded', 'failed')) {
+        Write-Log "State is terminal (phase=$($bootState.phase) status=$($bootState.status)). Nothing to resume. Re-deploy the manifest to run again. Exiting."
+        return
+    }
 
     while ($true) {
         $state  = Get-State
