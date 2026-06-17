@@ -1,4 +1,4 @@
-// Delivers the AKS EE patch-update launcher to an Arc-connected Windows VM via
+// Delivers the AKS EE upgrade launcher to an Arc-connected Windows VM via
 // `Microsoft.HybridCompute/machines/runCommands`. The Connected Machine agent on
 // the VM polls Azure, picks up the runCommand, executes the launcher locally,
 // and reports back into the resource's instanceView.
@@ -12,9 +12,12 @@
 // `siteops.aksee.upgrade.state` tag on the Arc machine when it finishes, and a
 // siteops `type: wait` step gates downstream steps on that tag.
 //
-// Scope: patch updates within the current Kubernetes minor version on a
-// single-node cluster. The worker applies patch updates only and rejects true,
-// so leave allowKubernetesMinorUpgrade false.
+// Two upgrade modes are supported via `allowKubernetesMinorUpgrade`:
+//   false (default): patch updates within the current Kubernetes minor version.
+//   true: sequential minor-version hops. `AcceptUpgrade` is set true only for
+//   the run and re-pinned false on completion or failure. Use
+//   `targetKubernetesVersion` to stop at a specific minor version. The wait
+//   step timeout should be raised for multi-hop runs.
 //
 // Prerequisites on the target VM (one-time per VM, outside this Bicep):
 //   1. An AKS Edge Essentials single-node cluster is already deployed and
@@ -50,8 +53,11 @@ param targetSubscription string = subscription().subscriptionId
 @description('Opaque per-deploy identifier recorded in the completion tag (siteops.aksee.upgrade.runId). Defaults to the deploy time so each deploy is correlatable. Re-deploys with a fresh value re-run the worker, which no-ops when no newer patch is available.')
 param runId string = utcNow()
 
-@description('Reserved. The worker applies patch updates only and rejects true. Leave false.')
+@description('When false (default), the worker applies patch updates within the current Kubernetes minor version. When true, the worker performs sequential minor-version hops. `AcceptUpgrade` is scoped to the run and re-pinned false on completion or failure.')
 param allowKubernetesMinorUpgrade bool = false
+
+@description('Optional target Kubernetes minor version for minor-mode upgrades, e.g. `1.33` or `v1.33.5+k3s1`. The worker normalizes to major.minor and stops hopping once the deployed minor reaches this value. Empty string means no explicit target.')
+param targetKubernetesVersion string = ''
 
 @description('When true, the worker Scheduled Task runs as a created local admin account with an on-box generated password instead of the built-in SYSTEM account. Leave false unless a hardened environment forbids SYSTEM-context tasks. Defaults to false.')
 param runAsDedicatedAdmin bool = false
@@ -89,6 +95,7 @@ resource upgradeCommand 'Microsoft.HybridCompute/machines/runCommands@2024-11-10
       // the launcher parses case-insensitively. A bool value would be rejected
       // by the runCommand's string-typed parameter.
       { name: 'AllowKubernetesMinorUpgrade', value: string(allowKubernetesMinorUpgrade) }
+      { name: 'TargetKubernetesVersion',    value: targetKubernetesVersion }
       { name: 'RunAsDedicatedAdmin',         value: string(runAsDedicatedAdmin) }
     ]
   }

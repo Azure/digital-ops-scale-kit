@@ -74,9 +74,14 @@ param(
     [string]$ConfigDir         = 'C:\ProgramData\siteops\aksee-upgrade',
     [string]$ScheduledTaskName = 'SiteOpsAksEeUpgrade',
     [string]$LocalAdminUser    = 'siteops-upgrade',
-    # A string, not a switch, so the Arc Run Command can deliver it. The worker
-    # applies patch updates only and rejects 'true'.
+    # A string, not a switch, so the Arc Run Command can deliver it. When false
+    # (default), the worker applies patch updates only. When true, the worker
+    # performs sequential minor-version hops with AcceptUpgrade scoped to the run.
     [string]$AllowKubernetesMinorUpgrade = 'false',
+    # Optional target Kubernetes version for minor-mode upgrades (e.g. '1.33').
+    # The worker stops hopping once the deployed minor matches this value.
+    # Empty string means no explicit target (upgrade to the latest available).
+    [string]$TargetKubernetesVersion = '',
     # Refuse to re-init when state.json shows an in-flight upgrade. Pass -Force
     # to reset state to phase=0 and re-register the task.
     [switch]$Force,
@@ -274,12 +279,13 @@ $config = [pscustomobject]@{
     machineName                 = $MachineName
     runId                       = $RunId
     allowKubernetesMinorUpgrade = ($AllowKubernetesMinorUpgrade -ieq 'true')
+    targetKubernetesVersion     = $TargetKubernetesVersion
     scheduledTaskName           = $ScheduledTaskName
     localAdminUser              = $LocalAdminUser
     runAsSystem                 = $runAsSystem
 }
 $config | ConvertTo-Json | Set-Content -Path $configPath -Encoding UTF8
-Write-Log "Wrote $configPath (auth=managed identity, patch-only)"
+Write-Log "Wrote $configPath (auth=managed identity)"
 
 $initialState = [pscustomobject]@{
     phase       = 0
@@ -320,7 +326,7 @@ $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
     -StartWhenAvailable `
-    -ExecutionTimeLimit (New-TimeSpan -Hours 6) `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 12) `
     -MultipleInstances IgnoreNew
 
 $task = New-ScheduledTask `

@@ -20,6 +20,7 @@ properties:
     enableSecretSync: false
     enableWorkloadIdentity: false # OIDC issuer + WLIF on the AKS EE host bootstrap (paired with enableSecretSync)
     enableCertManager: true      # cert-manager Arc extension on the cluster
+    allowAkseeMinorUpgrade: false # Minor Kubernetes version hops in the aksee-upgrade worker
 
 parameters:
   # AIO broker configuration defaults
@@ -33,3 +34,6 @@ parameters:
     # per-site with a versioned MSI URL (Microsoft Download Center) to pin a
     # specific AKS Edge Essentials release.
     aksEdgeMsiUrl: "https://aka.ms/aks-edge/k3s-msi"
+    # Optional target Kubernetes minor version for the aksee-upgrade worker
+    # (e.g. "1.33"). Empty means no explicit target.
+    targetKubernetesVersion: ""

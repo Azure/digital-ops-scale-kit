@@ -2,26 +2,31 @@ apiVersion: siteops/v1
 kind: Manifest
 name: aksee-upgrade
 description: |
-  In-place PATCH update of an existing single-node AKS Edge Essentials cluster,
+  In-place upgrade of an existing single-node AKS Edge Essentials cluster,
   delivered remotely via Arc Run Command. Mirrors the host bootstrap's
   runCommand-worker pattern because AKS EE has no cloud-driven upgrade channel.
 
+  Supports two modes via `site.properties.deployOptions.allowAkseeMinorUpgrade`:
+  - Patch mode (default, false): one hop within the current Kubernetes minor
+    version. The worker no-ops when no newer patch is available.
+  - Minor mode (true): sequential multi-hop loop, each hop advancing one
+    Kubernetes minor version. An optional `site.parameters.aksee.targetKubernetesVersion`
+    stops the loop at a specific minor version. `AcceptUpgrade` is set true only
+    for the run and re-pinned false on completion or failure.
+
   The upgrade step returns shortly after the Connected Machine Agent picks up
   the launcher (~90 seconds), then the worker stages, applies, and verifies the
-  update on the VM asynchronously (the inner node VM reboots during apply,
+  update on the VM asynchronously (the inner node VM reboots during each apply,
   workloads are down for that window). The wait step gates completion on the
   `siteops.aksee.upgrade.state` tag the worker writes, so one `siteops deploy`
-  blocks until the upgrade actually succeeds or fails.
+  blocks until all hops complete or the upgrade fails.
 
-  Scope: patch updates within the current Kubernetes minor version on a
-  single-node cluster.
-
-  The worker verifies the cluster after applying and reports the outcome through
+  The worker verifies the cluster after each hop and reports the outcome through
   the completion tag:
     - The node-VM update can intermittently fail to finalize, surfaced as the
       tag value `failed-needs-remediation`. The fix is a manual VM-console step.
       See the README.
-    - The worker re-checks node health and the Arc connection after the update
+    - The worker re-checks node health and the Arc connection after each hop
       and fails the deploy if either regressed.
 
   Prerequisites per target VM (one-time):
@@ -53,5 +58,5 @@ steps:
       tagKey: "siteops.aksee.upgrade.state"
       expectedValue: "succeeded"
       failurePattern: "failed-*"
-    timeoutMinutes: 90
+    timeoutMinutes: 240
     pollIntervalSeconds: 30

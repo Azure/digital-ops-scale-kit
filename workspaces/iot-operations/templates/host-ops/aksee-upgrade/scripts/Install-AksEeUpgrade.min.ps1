@@ -9,6 +9,7 @@ param(
 [string]$ScheduledTaskName = 'SiteOpsAksEeUpgrade',
 [string]$LocalAdminUser    = 'siteops-upgrade',
 [string]$AllowKubernetesMinorUpgrade = 'false',
+[string]$TargetKubernetesVersion = '',
 [switch]$Force,
 [string]$RunAsDedicatedAdmin = 'false'
 )
@@ -119,6 +120,7 @@ throw "worker.ps1 requires Windows PowerShell 5.1 (Desktop). Detected: $($PSVers
 $script:StatePath    = Join-Path $ConfigDir 'state.json'
 $script:ConfigPath   = Join-Path $ConfigDir 'config.json'
 $script:SnapshotPath = Join-Path $ConfigDir 'snapshot.json'
+$script:ProgressPath = Join-Path $ConfigDir 'progress.json'
 function Write-Log {
 param([string]$Message)
 $ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
@@ -306,8 +308,14 @@ $childErrLog = "$childLog.err"
 Write-Log "Running $Label in child PowerShell. stdout=$childLog stderr=$childErrLog"
 $proc = Start-Process -FilePath $psExe `
 -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded) `
--Wait -PassThru -NoNewWindow `
+-PassThru -NoNewWindow `
 -RedirectStandardOutput $childLog -RedirectStandardError $childErrLog
+$timeoutMs = 60 * 60 * 1000
+$exited = $proc.WaitForExit($timeoutMs)
+if (-not $exited) {
+try { $proc.Kill() } catch {}
+throw "$Label child did not exit within 60 minutes and was killed. Full logs at $childLog and $childErrLog."
+}
 Write-Log "$Label child exited with code $($proc.ExitCode)"
 if ($proc.ExitCode -ne 0) {
 $tailOut = if (Test-Path $childLog)    { (Get-Content $childLog    -Tail 40 -ErrorAction SilentlyContinue) -join "`n" } else { '' }
@@ -330,7 +338,14 @@ $encoded = [Convert]::ToBase64String($bytes)
 $psExe   = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $proc = Start-Process -FilePath $psExe `
 -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded) `
--Wait -PassThru -NoNewWindow
+-PassThru -NoNewWindow
+$timeoutMs = 60 * 60 * 1000
+$exited = $proc.WaitForExit($timeoutMs)
+if (-not $exited) {
+try { $proc.Kill() } catch {}
+Write-Log "$Label child did not exit within 60 minutes and was killed. Treating as failure."
+return 1
+}
 Write-Log "$Label child exited with code $($proc.ExitCode)"
 return $proc.ExitCode
 }
@@ -397,6 +412,79 @@ Write-Log "$Label not satisfied yet (attempt $attempt). Retrying in ${RetrySecon
 Start-Sleep -Seconds $RetrySeconds
 }
 }
+function Get-K8sMinor {
+param([string]$Version)
+if (-not $Version) { return $null }
+$v = $Version.TrimStart('v') -replace '\+.*$', ''
+$parts = $v -split '\.'
+if ($parts.Count -lt 2) { return $null }
+$major = $parts[0]; $minor = $parts[1]
+if ($major -notmatch '^\d+$' -or $minor -notmatch '^\d+$') { return $null }
+return "$major.$minor"
+}
+function Compare-K8sMinor {
+param([string]$A, [string]$B)
+$ap = $A -split '\.'; $bp = $B -split '\.'
+$md = [int]$ap[0] - [int]$bp[0]
+if ($md -ne 0) { return $md }
+return [int]$ap[1] - [int]$bp[1]
+}
+function Set-AcceptUpgrade {
+param([bool]$Accept)
+$val = if ($Accept) { '$true' } else { '$false' }
+Invoke-ChildAksEeCommand -Label 'set-accept-upgrade' -Script "Import-Module AksEdge -Force; Set-AksEdgeUpgrade -AcceptUpgrade $val" | Out-Null
+}
+function Get-Progress {
+if (-not (Test-Path $script:ProgressPath)) { return $null }
+return Get-Content -Raw -Path $script:ProgressPath | ConvertFrom-Json
+}
+function Set-Progress {
+param([Parameter(Mandatory)] [pscustomobject]$Progress)
+$tmpPath = "$script:ProgressPath.tmp"
+$Progress | ConvertTo-Json | Set-Content -Path $tmpPath -Encoding UTF8
+Move-Item -Path $tmpPath -Destination $script:ProgressPath -Force
+}
+function Invoke-ChildStage {
+param(
+[Parameter(Mandatory)] [string]$Label,
+[Parameter(Mandatory)] [string]$Script
+)
+$noUpdatePattern = '(?i)up.?to.?date|no update available|no updates available|already.{0,12}latest|nothing to update'
+$tridentPattern  = 'bootx64\.efi|trident|/EFI/AZLB'
+$childScript = "$Script; exit `$LASTEXITCODE"
+$bytes   = [System.Text.Encoding]::Unicode.GetBytes($childScript)
+$encoded = [Convert]::ToBase64String($bytes)
+$psExe   = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$stamp   = Get-Date -Format 'yyyyMMdd-HHmmss'
+$childLog    = Join-Path $ConfigDir ("aksee-{0}-{1}.log" -f $Label, $stamp)
+$childErrLog = "$childLog.err"
+Write-Log "Running $Label (stage classifier) in child PowerShell. stdout=$childLog stderr=$childErrLog"
+$proc = Start-Process -FilePath $psExe `
+-ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded) `
+-PassThru -NoNewWindow `
+-RedirectStandardOutput $childLog -RedirectStandardError $childErrLog
+$timeoutMs = 60 * 60 * 1000
+$exited = $proc.WaitForExit($timeoutMs)
+if (-not $exited) {
+try { $proc.Kill() } catch {}
+return [pscustomobject]@{ result = 'failed'; log = $childLog; output = "Stage child timed out after 60 minutes and was killed." }
+}
+Write-Log "$Label child exited with code $($proc.ExitCode)"
+$tailOut  = if (Test-Path $childLog)    { (Get-Content $childLog    -Tail 40 -ErrorAction SilentlyContinue) -join "`n" } else { '' }
+$tailErr  = if (Test-Path $childErrLog) { (Get-Content $childErrLog -Tail 40 -ErrorAction SilentlyContinue) -join "`n" } else { '' }
+$combined = "$tailOut`n$tailErr"
+if ($proc.ExitCode -ne 0 -and $combined -match $tridentPattern) {
+$tail = "stdout tail:`n$tailOut`nstderr tail:`n$tailErr`nFull logs at $childLog and $childErrLog."
+throw "TRIDENT-REMEDIATION-REQUIRED: $Label exited with code $($proc.ExitCode).`n$tail"
+}
+if ($combined -match $noUpdatePattern) {
+return [pscustomobject]@{ result = 'noUpdate'; log = $childLog; output = $combined }
+}
+if ($proc.ExitCode -eq 0) {
+return [pscustomobject]@{ result = 'staged'; log = $childLog; output = $combined }
+}
+return [pscustomobject]@{ result = 'failed'; log = $childLog; output = $combined }
+}
 function Invoke-Phase0 {
 param($config)
 Write-Log 'Phase 0: preflight + pre-upgrade snapshot'
@@ -406,18 +494,15 @@ throw 'AKS Edge Essentials is not installed on this host. The upgrade worker tar
 }
 Install-AzCliIfMissing
 Connect-MachineIdentity -config $config
-if ([bool](Get-Prop $config 'allowKubernetesMinorUpgrade' $false)) {
-throw 'allowKubernetesMinorUpgrade is true, but this worker applies patch updates only and does not support minor Kubernetes version upgrades. Set it to false.'
-}
 try { Write-UpgradeStateTag -config $config -Value 'running' } catch { Write-Log "WARNING: in-progress tag write failed: $_" }
 $kubeconfig = Set-WorkerKubeconfig
 $nodeCount = Get-NodeCount
 if ($nodeCount -ne 1) {
 throw "Expected a single-node AKS EE cluster, found $nodeCount nodes. This worker supports single-node clusters only."
 }
-$fromK8s  = Get-DeployedK8sVersion
-$fromHost = Get-AksEeHostVersion
-$aio      = Test-AioPresent
+$fromK8s      = Get-DeployedK8sVersion
+$fromHost     = Get-AksEeHostVersion
+$aio          = Test-AioPresent
 $arcConnected = Test-ArcConnectedChild -Label 'arc-check-pre'
 $snapshot = [pscustomobject]@{
 capturedAt      = (Get-Date).ToString('o')
@@ -430,24 +515,87 @@ kubeconfig      = $kubeconfig
 }
 $snapshot | ConvertTo-Json | Set-Content -Path $script:SnapshotPath -Encoding UTF8
 Write-Log "Snapshot: K8s=$fromK8s hostVersion=$fromHost nodes=$nodeCount aio=$aio arcConnected=$arcConnected"
+$allowMinor = [bool](Get-Prop $config 'allowKubernetesMinorUpgrade' $false)
+$targetRaw  = [string](Get-Prop $config 'targetKubernetesVersion' '')
+$normalizedTarget = ''
+if ($targetRaw) {
+$parsed = Get-K8sMinor $targetRaw
+if ($null -eq $parsed) {
+throw "targetKubernetesVersion '$targetRaw' could not be parsed to a major.minor version. Use a format like '1.33' or 'v1.33.5+k3s1'."
+}
+$normalizedTarget = $parsed
+}
+if (-not $allowMinor) { $normalizedTarget = '' }
+if ($allowMinor -and $normalizedTarget) {
+$currentMinor = if ($fromK8s) { Get-K8sMinor $fromK8s } else { $null }
+if ($currentMinor -and (Compare-K8sMinor $normalizedTarget $currentMinor) -lt 0) {
+throw "targetKubernetesVersion $normalizedTarget is older than the currently deployed version $currentMinor. Upgrades are forward-only."
+}
+}
+$maxHops = if ($allowMinor) { 6 } else { 1 }
+$initProgress = [pscustomobject]@{
+hopCount            = 0
+beforeVersion       = ''
+pendingApply        = $false
+verifyOnly          = $false
+originalFromVersion = if ($fromK8s) { $fromK8s } else { '' }
+target              = $normalizedTarget
+maxHops             = $maxHops
+}
+Set-Progress $initProgress
+Write-Log "Progress initialized: allowMinor=$allowMinor target=$($initProgress.target) maxHops=$maxHops originalFrom=$($initProgress.originalFromVersion)"
+Set-AcceptUpgrade -Accept $allowMinor
 Set-State -Phase 1 -Status 'running'
 Write-Log 'Phase 0: complete'
 }
 function Invoke-Phase1 {
 param($config)
-Write-Log 'Phase 1: stage AKS EE patch update'
-$hostBefore = Get-AksEeHostVersion
-Invoke-ChildAksEeCommand -Label 'set-upgrade'   -Script 'Import-Module AksEdge -Force; Set-AksEdgeUpgrade -AcceptUpgrade $false' | Out-Null
-$stageLog = Invoke-ChildAksEeCommand -Label 'stage-update' -Script 'Import-Module AksEdge -Force; Start-AksEdgeUpdate -Force'
-$hostAfter = Get-AksEeHostVersion
-$stageText = if (Test-Path $stageLog) { (Get-Content $stageLog -Raw -ErrorAction SilentlyContinue) } else { '' }
-$stagedSomething = ($hostBefore -ne $hostAfter) -or ($stageText -notmatch '(?i)up.to.date|no update|already.*latest|nothing to')
-if (-not $stagedSomething) {
-Write-Log "Phase 1: no newer AKS EE update available (host version $hostBefore unchanged). Skipping apply."
-Set-State -Phase 3 -Status 'running'
-} else {
-Write-Log "Phase 1: update staged (host version $hostBefore -> $hostAfter). Proceeding to apply."
+Write-Log 'Phase 1: stage one hop'
+$null = Set-WorkerKubeconfig
+$prog   = Get-Progress
+$target = if ($prog) { [string](Get-Prop $prog 'target' '') } else { '' }
+if ($prog -and [bool](Get-Prop $prog 'pendingApply' $false)) {
+Write-Log 'Phase 1: a staged hop is pending apply (resume). Proceeding to apply.'
 Set-State -Phase 2 -Status 'running'
+Write-Log 'Phase 1: complete'
+return
+}
+$before = Get-DeployedK8sVersion
+if ($target -and $before) {
+$currentMinor = Get-K8sMinor $before
+if ($currentMinor -and $currentMinor -eq $target) {
+Write-Log "Phase 1: target minor $target already reached (current $before). Verifying then finalizing."
+if ($prog) { $prog.verifyOnly = $true; Set-Progress $prog }
+Set-State -Phase 3 -Status 'running'
+Write-Log 'Phase 1: complete'
+return
+}
+}
+$classified = Invoke-ChildStage -Label 'stage-update' -Script 'Import-Module AksEdge -Force; Start-AksEdgeUpdate -Force'
+switch ($classified.result) {
+'staged' {
+Write-Log "Phase 1: update staged. Persisting hop progress (before=$before)."
+if ($prog) {
+$prog.beforeVersion = if ($before) { $before } else { '' }
+$prog.pendingApply  = $true
+Set-Progress $prog
+}
+Set-State -Phase 2 -Status 'running'
+}
+'noUpdate' {
+if ($target -and $before) {
+$currentMinor = Get-K8sMinor $before
+if ($currentMinor -and $currentMinor -ne $target) {
+throw "Premature no-update at $before but target minor $target is not yet reached. The target version may not be available yet from the AKS EE channel."
+}
+}
+Write-Log "Phase 1: no newer AKS EE update available (current $before). Verifying then finalizing."
+if ($prog) { $prog.verifyOnly = $true; Set-Progress $prog }
+Set-State -Phase 3 -Status 'running'
+}
+'failed' {
+throw "Stage step failed. Output tail:`n$($classified.output)"
+}
 }
 Write-Log 'Phase 1: complete'
 }
@@ -461,33 +609,92 @@ Write-Log 'Phase 2: complete'
 }
 function Invoke-Phase3 {
 param($config)
-Write-Log 'Phase 3: verify upgrade'
+Write-Log 'Phase 3: verify hop + decide next step'
 Connect-MachineIdentity -config $config
 $null = Set-WorkerKubeconfig
 if (-not (Wait-Until -Label 'cluster nodes Ready' -Condition { Test-NodesReady })) {
 throw 'Verification failed: cluster nodes did not return Ready (/readyz or node conditions) within the verification window after the update.'
 }
-$deployed = Get-DeployedK8sVersion
-Write-Log "Deployed Kubernetes version after update: $deployed"
 if (-not (Wait-Until -Label 'Arc connection' -Condition { Test-ArcConnectedChild -Label 'arc-check-post' })) {
 throw 'Verification failed: Test-AksEdgeArcConnection did not report the cluster Arc-connected within the verification window after the update.'
 }
 Write-Log 'Arc connection verified after update'
+$after = Get-DeployedK8sVersion
+if (-not $after) {
+throw 'Verification failed: could not read deployed Kubernetes version after apply. The cluster may not be healthy.'
+}
+Write-Log "Deployed Kubernetes version after hop: $after"
+$prog = Get-Progress
+if ($prog -and [bool](Get-Prop $prog 'verifyOnly' $false)) {
+Write-Log 'Verify-only (no hop applied). Cluster verified healthy. Finalizing.'
 Set-State -Phase 99 -Status 'running'
-Write-Log 'Phase 3: complete (verification passed)'
+Write-Log 'Phase 3: complete (verify-only)'
+return
+}
+$before     = if ($prog) { [string](Get-Prop $prog 'beforeVersion' '') } else { '' }
+$allowMinor = [bool](Get-Prop $config 'allowKubernetesMinorUpgrade' $false)
+$afterMinor = Get-K8sMinor $after
+if ($allowMinor -and $before) {
+$beforeMinor = Get-K8sMinor $before
+if ($afterMinor -and $beforeMinor -and (Compare-K8sMinor $afterMinor $beforeMinor) -le 0) {
+throw "Hop did not advance the Kubernetes minor version: before=$before after=$after."
+}
+}
+if ($prog) {
+$prog.hopCount     = [int](Get-Prop $prog 'hopCount' 0) + 1
+$prog.pendingApply = $false
+Set-Progress $prog
+}
+$hopCount = if ($prog) { [int]$prog.hopCount } else { 1 }
+$target   = if ($prog) { [string](Get-Prop $prog 'target' '') } else { '' }
+$maxHops  = if ($prog) { [int](Get-Prop $prog 'maxHops' 1) } else { 1 }
+Write-Log "Hop $hopCount complete. after=$after target=$target maxHops=$maxHops"
+if ($target -and $afterMinor) {
+$cmp = Compare-K8sMinor $afterMinor $target
+if ($cmp -eq 0) {
+Write-Log "Target minor $target reached (after=$after). Moving to finalize."
+Set-State -Phase 99 -Status 'running'
+Write-Log 'Phase 3: complete'
+return
+}
+if ($cmp -gt 0) {
+throw "Overshoot: deployed version $after (minor $afterMinor) exceeds target $target. Manual review required."
+}
+}
+if (-not $allowMinor) {
+Set-State -Phase 99 -Status 'running'
+Write-Log 'Phase 3: complete (patch mode, single hop)'
+return
+}
+if ($hopCount -ge $maxHops) {
+throw "Maximum hops reached: completed $hopCount of $maxHops allowed, current version is $after but target has not been reached."
+}
+Set-State -Phase 1 -Status 'running'
+Write-Log 'Phase 3: complete. Looping back for next hop.'
 }
 function Invoke-Phase99 {
 param($config)
 Write-Log 'Phase 99: finalize'
 Connect-MachineIdentity -config $config
-$snapshot = if (Test-Path $script:SnapshotPath) { Get-Content -Raw -Path $script:SnapshotPath | ConvertFrom-Json } else { $null }
-$fromVersion = [string](Get-Prop $snapshot 'fromK8sVersion' '')
+$snapshot    = if (Test-Path $script:SnapshotPath) { Get-Content -Raw -Path $script:SnapshotPath | ConvertFrom-Json } else { $null }
+$prog        = Get-Progress
+$fromVersion = if ($prog) { [string](Get-Prop $prog 'originalFromVersion' '') } else { '' }
+if (-not $fromVersion) { $fromVersion = [string](Get-Prop $snapshot 'fromK8sVersion' '') }
+$hopCount    = if ($prog) { [int](Get-Prop $prog 'hopCount' 0) } else { 0 }
 $appliedVersion = ''
 try {
 $null = Set-WorkerKubeconfig
 $appliedVersion = [string](Get-DeployedK8sVersion)
 } catch {
 Write-Log "WARNING: could not read deployed version for the tag: $_"
+}
+if ([bool](Get-Prop $config 'allowKubernetesMinorUpgrade' $false)) {
+try {
+Set-AcceptUpgrade -Accept $false
+Write-Log 'Re-pinned Set-AksEdgeUpgrade -AcceptUpgrade $false after upgrade completion.'
+} catch {
+Write-Log "WARNING: re-pin Set-AksEdgeUpgrade -AcceptUpgrade false failed: $_. Non-fatal."
+}
 }
 try {
 Write-UpgradeStateTag -config $config -Value 'succeeded' -AppliedVersion $appliedVersion -FromVersion $fromVersion
@@ -508,7 +715,7 @@ Write-Log "Unregistered Scheduled Task $taskName"
 Write-Log "WARNING: could not unregister Scheduled Task ${taskName}: $_. Non-fatal."
 }
 }
-Write-Log "Phase 99: complete. Upgrade finished. fromVersion=$fromVersion appliedVersion=$appliedVersion"
+Write-Log "Phase 99: complete. Upgrade finished. fromVersion=$fromVersion appliedVersion=$appliedVersion hopCount=$hopCount"
 }
 if (-not (Test-Path $ConfigDir)) {
 New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null
@@ -546,6 +753,14 @@ try {
 Write-UpgradeStateTag -config $config -Value $tagValue
 } catch {
 Write-Log "WARNING: tag write helper threw on failure path: $_. Original phase error re-raised below."
+}
+if ([bool](Get-Prop $config 'allowKubernetesMinorUpgrade' $false)) {
+try {
+Set-AcceptUpgrade -Accept $false
+Write-Log 'Re-pinned Set-AksEdgeUpgrade -AcceptUpgrade $false after phase failure.'
+} catch {
+Write-Log "WARNING: re-pin Set-AksEdgeUpgrade -AcceptUpgrade false failed on error path: $_. Original error re-raised below."
+}
 }
 throw
 }
@@ -612,12 +827,13 @@ subscription                = $Subscription
 machineName                 = $MachineName
 runId                       = $RunId
 allowKubernetesMinorUpgrade = ($AllowKubernetesMinorUpgrade -ieq 'true')
+targetKubernetesVersion     = $TargetKubernetesVersion
 scheduledTaskName           = $ScheduledTaskName
 localAdminUser              = $LocalAdminUser
 runAsSystem                 = $runAsSystem
 }
 $config | ConvertTo-Json | Set-Content -Path $configPath -Encoding UTF8
-Write-Log "Wrote $configPath (auth=managed identity, patch-only)"
+Write-Log "Wrote $configPath (auth=managed identity)"
 $initialState = [pscustomobject]@{
 phase       = 0
 status      = 'running'
@@ -649,7 +865,7 @@ $settings = New-ScheduledTaskSettingsSet `
 -AllowStartIfOnBatteries `
 -DontStopIfGoingOnBatteries `
 -StartWhenAvailable `
--ExecutionTimeLimit (New-TimeSpan -Hours 6) `
+-ExecutionTimeLimit (New-TimeSpan -Hours 12) `
 -MultipleInstances IgnoreNew
 $task = New-ScheduledTask `
 -Action $action `

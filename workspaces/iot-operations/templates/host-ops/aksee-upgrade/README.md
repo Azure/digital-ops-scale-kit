@@ -13,12 +13,22 @@ at [`../../host-bootstrap/aksee/README.md`](../../host-bootstrap/aksee/README.md
 
 ## Scope
 
-Applies AKS EE patch updates within the current Kubernetes minor version on a
-single-node cluster (`Set-AksEdgeUpgrade -AcceptUpgrade $false`). Minor
-Kubernetes version upgrades are not supported, and the worker rejects
-`allowKubernetesMinorUpgrade: true`.
+Two upgrade modes are supported, selected by `allowKubernetesMinorUpgrade` in the site config:
 
-The worker verifies the cluster after applying and reports the outcome through
+**Patch mode** (default, `false`): applies AKS EE patch updates within the
+current Kubernetes minor version on a single-node cluster. `AcceptUpgrade`
+stays false throughout.
+
+**Minor mode** (`true`): performs sequential multi-hop upgrades, advancing one
+Kubernetes minor version per hop (e.g. k3s 1.31 -> 1.32 -> 1.33). Each hop
+runs the full stage/apply/verify cycle. `AcceptUpgrade` is set true only for
+the duration of the run and is re-pinned false on completion or failure.
+
+Set `site.parameters.aksee.targetKubernetesVersion` (e.g. `"1.33"`) to stop at
+a specific minor version. Leave it empty to upgrade to the latest available
+version (up to the 10-hop maximum).
+
+The worker verifies the cluster after each hop and reports the outcome through
 the completion tag:
 
 - The node-VM update can intermittently fail to finalize (the node cannot find
@@ -41,11 +51,11 @@ worker runs asynchronously:
 
 | Phase | What it does | Inner reboot |
 |---|---|---|
-| 0 | Preflight + snapshot: admin, AKS EE installed, single-node topology, install az if missing (signature-verified), `az login --identity`, set shared kubeconfig + pin AKS EE kubectl, detect AIO, capture the pre-upgrade snapshot (deployed Kubernetes version, host AKS EE version, node count, Arc + AIO state) | No |
-| 1 | Stage: `Set-AksEdgeUpgrade -AcceptUpgrade $false` then `Start-AksEdgeUpdate -Force`. Skips the apply when nothing newer is staged | No |
+| 0 | Preflight + snapshot: admin, AKS EE installed, single-node topology, install az if missing (signature-verified), `az login --identity`, set shared kubeconfig + pin AKS EE kubectl, detect AIO, capture the pre-upgrade snapshot (deployed Kubernetes version, host AKS EE version, node count, Arc + AIO state), validate target version if set, initialize `progress.json`, set `AcceptUpgrade` for the run | No |
+| 1 | Stage one hop: check whether the target minor is already met, then stage `Start-AksEdgeUpdate -Force` via the `Invoke-ChildStage` classifier. Goes to Phase 2 when staged, Phase 99 when nothing is available | No |
 | 2 | Apply: `Import-Module AksEdge -Force` then `Start-AksEdgeControlPlaneUpdate -firstControlPlane $true -Force` | Yes (node VM) |
-| 3 | Verify: deployed Kubernetes version, `/readyz`, nodes Ready, `Test-AksEdgeArcConnection` | No |
-| 99 | Finalize: write `siteops.aksee.upgrade.state=succeeded` (with `appliedVersion`, `fromVersion`, `runId`), remove the az token cache | No |
+| 3 | Verify hop + decide: deployed Kubernetes version, `/readyz`, nodes Ready, `Test-AksEdgeArcConnection`. Decide: target reached -> Phase 99, patch mode -> Phase 99, max hops exceeded -> fail, else loop back to Phase 1 | No |
+| 99 | Finalize: re-pin `AcceptUpgrade $false` (best-effort), write `siteops.aksee.upgrade.state=succeeded` (with `appliedVersion`, `fromVersion`, `hopCount`, `runId`), remove the az token cache | No |
 
 The host does not reboot during the upgrade (only the inner node VM does), so
 the worker normally runs straight through. The at-startup Scheduled Task trigger
@@ -77,8 +87,7 @@ az role assignment create --assignee-object-id $ARC_PRINCIPAL_ID --assignee-prin
 
 ## Site configuration
 
-The upgrade reuses the same `aksee` parameter section the bootstrap uses, and
-needs only `machineName` from it:
+The upgrade reuses the same `aksee` parameter section the bootstrap uses:
 
 ```yaml
 # sites/<site>.yaml
@@ -89,6 +98,12 @@ location: <region>
 parameters:
   aksee:
     machineName: my-arc-windows-vm
+    # Optional. Set for minor-mode upgrades to stop at a specific version.
+    targetKubernetesVersion: "1.33"
+properties:
+  deployOptions:
+    # Set true to enable sequential minor-version hops. Default is false (patch only).
+    allowAkseeMinorUpgrade: true
 ```
 
 ## Run
@@ -166,13 +181,15 @@ Start-ScheduledTask -TaskName SiteOpsAksEeUpgrade
 
 ## Known limitations
 
-- **Patch-only.** Minor Kubernetes version upgrades are not supported.
 - **Single-node only.** The worker fails preflight on a multi-node cluster.
-- **Workloads are down during apply.** The in-place A/B update stops the node
-  VM, updates its OS partition, and restarts it. AIO does not support live
+- **Workloads are down during each apply.** The in-place A/B update stops the
+  node VM, updates its OS partition, and restarts it. AIO does not support live
   upgrades and expects downtime.
 - **AIO health is not verified.** The worker checks the cluster platform (nodes
   Ready, Arc connected) but not AIO. Confirm AIO after the upgrade.
 - **The runCommand returns early.** `executionState=Succeeded` means the
   launcher registered the task, not that the upgrade finished. Gate on the
   `wait` step, never on the runCommand result.
+- **Minor upgrades are sequential.** AKS EE cannot skip a minor version. A
+  three-hop upgrade (1.31 -> 1.32 -> 1.33) takes three full stage/apply/verify
+  cycles, each with an inner node-VM reboot. Plan for extended downtime.
