@@ -22,11 +22,12 @@ stays false throughout.
 **Minor mode** (`true`): performs sequential multi-hop upgrades, advancing one
 Kubernetes minor version per hop (e.g. k3s 1.31 -> 1.32 -> 1.33). Each hop
 runs the full stage/apply/verify cycle. `AcceptUpgrade` is set true only for
-the duration of the run and is re-pinned false on completion or failure.
+the duration of the run and is re-pinned false on success. A failed run leaves
+it set so the staged update-cache survives for a re-deploy to resume.
 
 Set `site.parameters.aksee.targetKubernetesVersion` (e.g. `"1.33"`) to stop at
 a specific minor version. Leave it empty to upgrade to the latest available
-version (up to the 10-hop maximum).
+version (up to the 6-hop maximum).
 
 The worker verifies the cluster after each hop and reports the outcome through
 the completion tag:
@@ -52,7 +53,7 @@ worker runs asynchronously:
 | Phase | What it does | Inner reboot |
 |---|---|---|
 | 0 | Preflight + snapshot: admin, AKS EE installed, single-node topology, install az if missing (signature-verified), `az login --identity`, set shared kubeconfig + pin AKS EE kubectl, detect AIO, capture the pre-upgrade snapshot (deployed Kubernetes version, host AKS EE version, node count, Arc + AIO state), validate target version if set, initialize `progress.json`, set `AcceptUpgrade` for the run | No |
-| 1 | Stage one hop: check whether the target minor is already met, then stage `Start-AksEdgeUpdate -Force` via the `Invoke-ChildStage` classifier. Goes to Phase 2 when staged, Phase 99 when nothing is available | No |
+| 1 | Stage one hop: check whether the target minor is already met, then stage the next AKS EE update from Microsoft Update (a Windows Update scan, download, and install that self-extracts into the update-cache) and install the cached MSI with `Start-AksEdgeUpdate -Force`. Goes to Phase 2 when staged, Phase 3 to verify and finalize when Microsoft Update offers nothing | No |
 | 2 | Apply: `Import-Module AksEdge -Force` then `Start-AksEdgeControlPlaneUpdate -firstControlPlane $true -Force` | Yes (node VM) |
 | 3 | Verify hop + decide: deployed Kubernetes version, `/readyz`, nodes Ready, `Test-AksEdgeArcConnection`. Decide: target reached -> Phase 99, patch mode -> Phase 99, max hops exceeded -> fail, else loop back to Phase 1 | No |
 | 99 | Finalize: re-pin `AcceptUpgrade $false` (best-effort), write `siteops.aksee.upgrade.state=succeeded` (with `appliedVersion`, `fromVersion`, `hopCount`, `runId`), remove the az token cache | No |
@@ -84,6 +85,12 @@ early.
 ARC_PRINCIPAL_ID=$(az resource show -g <rg> -n <vm-name> --resource-type Microsoft.HybridCompute/machines --query "identity.principalId" -o tsv)
 az role assignment create --assignee-object-id $ARC_PRINCIPAL_ID --assignee-principal-type ServicePrincipal --role "Contributor" --scope "/subscriptions/<sub>/resourceGroups/<rg>"
 ```
+
+3. **The host can reach Microsoft Update with the Microsoft Update opt-in
+   enabled.** Each hop is staged from Microsoft Update. The worker starts the
+   Windows Update service and scans for the next AKS EE update, so enable
+   "receive updates for other Microsoft products" on the host. An air-gapped
+   offline staging path is not yet supported.
 
 ## Site configuration
 
@@ -130,9 +137,10 @@ $log = Get-ChildItem (Join-Path $dir 'worker-*.log') | Sort-Object LastWriteTime
 Get-Content $log.FullName -Tail 40 -Wait
 ```
 
-The staged/applied AKS EE cmdlet output is captured per call in
-`aksee-stage-update-*.log`, `aksee-apply-update-*.log`, and their `.err`
-siblings.
+The AKS EE cmdlet output is captured per call in `aksee-install-msi-*.log`,
+`aksee-apply-update-*.log`, `aksee-set-accept-upgrade-*.log`, and their `.err`
+siblings. The Windows Update staging runs inline and is logged in the
+`worker-*.log`.
 
 ## Verify
 

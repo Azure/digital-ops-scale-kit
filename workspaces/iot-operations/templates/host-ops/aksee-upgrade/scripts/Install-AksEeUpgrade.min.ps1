@@ -298,7 +298,7 @@ param(
 [Parameter(Mandatory)] [string]$Label,
 [Parameter(Mandatory)] [string]$Script
 )
-$childScript = "$Script; exit `$LASTEXITCODE"
+$childScript = $Script
 $bytes   = [System.Text.Encoding]::Unicode.GetBytes($childScript)
 $encoded = [Convert]::ToBase64String($bytes)
 $psExe   = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -432,7 +432,8 @@ return [int]$ap[1] - [int]$bp[1]
 function Set-AcceptUpgrade {
 param([bool]$Accept)
 $val = if ($Accept) { '$true' } else { '$false' }
-Invoke-ChildAksEeCommand -Label 'set-accept-upgrade' -Script "Import-Module AksEdge -Force; Set-AksEdgeUpgrade -AcceptUpgrade $val" | Out-Null
+$script = "Import-Module AksEdge -Force; `$r = @(Set-AksEdgeUpgrade -AcceptUpgrade $val); if (`$r[-1] -eq 'OK') { exit 0 } else { Write-Output `$r[-1]; exit 1 }"
+Invoke-ChildAksEeCommand -Label 'set-accept-upgrade' -Script $script | Out-Null
 }
 function Get-Progress {
 if (-not (Test-Path $script:ProgressPath)) { return $null }
@@ -444,46 +445,53 @@ $tmpPath = "$script:ProgressPath.tmp"
 $Progress | ConvertTo-Json | Set-Content -Path $tmpPath -Encoding UTF8
 Move-Item -Path $tmpPath -Destination $script:ProgressPath -Force
 }
-function Invoke-ChildStage {
+function Invoke-OnlineStage {
 param(
-[Parameter(Mandatory)] [string]$Label,
-[Parameter(Mandatory)] [string]$Script
+[Parameter(Mandatory)] [string]$CurrentMinor,
+[bool]$AllowMinor
 )
-$noUpdatePattern = '(?i)up.?to.?date|no update available|no updates available|already.{0,12}latest|nothing to update'
-$tridentPattern  = 'bootx64\.efi|trident|/EFI/AZLB'
-$childScript = "$Script; exit `$LASTEXITCODE"
-$bytes   = [System.Text.Encoding]::Unicode.GetBytes($childScript)
-$encoded = [Convert]::ToBase64String($bytes)
-$psExe   = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-$stamp   = Get-Date -Format 'yyyyMMdd-HHmmss'
-$childLog    = Join-Path $ConfigDir ("aksee-{0}-{1}.log" -f $Label, $stamp)
-$childErrLog = "$childLog.err"
-Write-Log "Running $Label (stage classifier) in child PowerShell. stdout=$childLog stderr=$childErrLog"
-$proc = Start-Process -FilePath $psExe `
--ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded) `
--PassThru -NoNewWindow `
--RedirectStandardOutput $childLog -RedirectStandardError $childErrLog
-$timeoutMs = 60 * 60 * 1000
-$exited = $proc.WaitForExit($timeoutMs)
-if (-not $exited) {
-try { $proc.Kill() } catch {}
-return [pscustomobject]@{ result = 'failed'; log = $childLog; output = "Stage child timed out after 60 minutes and was killed." }
+$fail = [pscustomobject]@{ result = 'failed';   expectedMinor = $null }
+$none = [pscustomobject]@{ result = 'noUpdate'; expectedMinor = $null }
+if ((Get-Service wuauserv -ErrorAction SilentlyContinue).Status -ne 'Running') {
+try { Start-Service wuauserv } catch { Write-Log "Online stage: could not start wuauserv: $_"; return $fail }
 }
-Write-Log "$Label child exited with code $($proc.ExitCode)"
-$tailOut  = if (Test-Path $childLog)    { (Get-Content $childLog    -Tail 40 -ErrorAction SilentlyContinue) -join "`n" } else { '' }
-$tailErr  = if (Test-Path $childErrLog) { (Get-Content $childErrLog -Tail 40 -ErrorAction SilentlyContinue) -join "`n" } else { '' }
-$combined = "$tailOut`n$tailErr"
-if ($proc.ExitCode -ne 0 -and $combined -match $tridentPattern) {
-$tail = "stdout tail:`n$tailOut`nstderr tail:`n$tailErr`nFull logs at $childLog and $childErrLog."
-throw "TRIDENT-REMEDIATION-REQUIRED: $Label exited with code $($proc.ExitCode).`n$tail"
+try {
+$session  = New-Object -ComObject Microsoft.Update.Session
+$searcher = $session.CreateUpdateSearcher()
+$searcher.ServerSelection = 3                                # ssOthers
+$searcher.ServiceID = '7971f918-a847-4430-9279-4a52d1efe18d' # Microsoft Update
+$found = @($searcher.Search('IsInstalled=0 and IsHidden=0').Updates | Where-Object { $_.Title -match 'AKS Edge' })
+} catch { Write-Log "Online stage: Windows Update search failed: $_"; return $fail }
+if ($found.Count -eq 0) { return $none }
+$cands = @(foreach ($u in $found) {
+if ($u.Title -match 'k3s-(\d+)\.(\d+)') { [pscustomobject]@{ update = $u; minor = "$($matches[1]).$($matches[2])" } }
+})
+if ($cands.Count -eq 0) {
+Write-Log "Online stage: offered AKS updates carry no parseable k3s version: $($found.Title -join '; ')"
+return $fail
 }
-if ($combined -match $noUpdatePattern) {
-return [pscustomobject]@{ result = 'noUpdate'; log = $childLog; output = $combined }
+if ($AllowMinor) {
+$sel = @($cands | Where-Object { (Compare-K8sMinor $_.minor $CurrentMinor) -gt 0 } | Sort-Object { [int]($_.minor.Split('.')[1]) })
+} else {
+$sel = @($cands | Where-Object { $_.minor -eq $CurrentMinor })
 }
-if ($proc.ExitCode -eq 0) {
-return [pscustomobject]@{ result = 'staged'; log = $childLog; output = $combined }
+if ($sel.Count -eq 0) { return $none }
+$u = $sel[0].update
+try {
+if (-not $u.EulaAccepted) { $u.AcceptEula() }
+$coll = New-Object -ComObject Microsoft.Update.UpdateColl
+[void]$coll.Add($u)
+if (-not $u.IsDownloaded) {
+$dl = $session.CreateUpdateDownloader(); $dl.Updates = $coll
+if ($dl.Download().ResultCode -ne 2) { Write-Log "Online stage: download failed for '$($u.Title)'"; return $fail }
 }
-return [pscustomobject]@{ result = 'failed'; log = $childLog; output = $combined }
+$inst = $session.CreateUpdateInstaller(); $inst.Updates = $coll
+$ir = $inst.Install()
+if ($ir.RebootRequired) { Write-Log "Online stage: Windows Update reports reboot required after staging '$($u.Title)'. Not rebooting (staging only)." }
+if ($ir.ResultCode -ne 2) { Write-Log "Online stage: install result code $($ir.ResultCode) for '$($u.Title)'"; return $fail }
+} catch { Write-Log "Online stage: Windows Update download/install failed: $_"; return $fail }
+Write-Log "Online stage: staged '$($u.Title)' (advances to k3s $($sel[0].minor))."
+return [pscustomobject]@{ result = 'staged'; expectedMinor = $sel[0].minor }
 }
 function Invoke-Phase0 {
 param($config)
@@ -536,7 +544,7 @@ $maxHops = if ($allowMinor) { 6 } else { 1 }
 $initProgress = [pscustomobject]@{
 hopCount            = 0
 beforeVersion       = ''
-hostBeforeVersion   = ''
+expectedMinor       = ''
 pendingApply        = $false
 verifyOnly          = $false
 originalFromVersion = if ($fromK8s) { $fromK8s } else { '' }
@@ -545,6 +553,13 @@ maxHops             = $maxHops
 }
 Set-Progress $initProgress
 Write-Log "Progress initialized: allowMinor=$allowMinor target=$($initProgress.target) maxHops=$maxHops originalFrom=$($initProgress.originalFromVersion)"
+if ($allowMinor) {
+$muRegistered = $false
+try { $muRegistered = [bool]((New-Object -ComObject Microsoft.Update.ServiceManager).Services | Where-Object { $_.ServiceID -eq '7971f918-a847-4430-9279-4a52d1efe18d' }) } catch {}
+if (-not $muRegistered) {
+throw 'Microsoft Update is not registered on this host. Enable "receive updates for other Microsoft products" so AKS EE upgrade packages are offered by Windows Update.'
+}
+}
 Set-AcceptUpgrade -Accept $allowMinor
 Set-State -Phase 1 -Status 'running'
 Write-Log 'Phase 0: complete'
@@ -553,50 +568,56 @@ function Invoke-Phase1 {
 param($config)
 Write-Log 'Phase 1: stage one hop'
 $null = Set-WorkerKubeconfig
-$prog   = Get-Progress
-$target = if ($prog) { [string](Get-Prop $prog 'target' '') } else { '' }
+$prog       = Get-Progress
+$target     = if ($prog) { [string](Get-Prop $prog 'target' '') } else { '' }
+$allowMinor = [bool](Get-Prop $config 'allowKubernetesMinorUpgrade' $false)
 if ($prog -and [bool](Get-Prop $prog 'pendingApply' $false)) {
 Write-Log 'Phase 1: a staged hop is pending apply (resume). Proceeding to apply.'
 Set-State -Phase 2 -Status 'running'
 Write-Log 'Phase 1: complete'
 return
 }
-$before = Get-DeployedK8sVersion
-if ($target -and $before) {
-$currentMinor = Get-K8sMinor $before
-if ($currentMinor -and $currentMinor -eq $target) {
+$before       = Get-DeployedK8sVersion
+$currentMinor = if ($before) { Get-K8sMinor $before } else { $null }
+if (-not $currentMinor) { throw 'Phase 1: could not read the current deployed Kubernetes version from the cluster.' }
+if ($target -and $currentMinor -eq $target) {
 Write-Log "Phase 1: target minor $target already reached (current $before). Verifying then finalizing."
 if ($prog) { $prog.verifyOnly = $true; Set-Progress $prog }
 Set-State -Phase 3 -Status 'running'
 Write-Log 'Phase 1: complete'
 return
 }
+$staged   = $null
+$attempts = if ($target) { 4 } else { 1 }
+for ($a = 1; $a -le $attempts; $a++) {
+$staged = Invoke-OnlineStage -CurrentMinor $currentMinor -AllowMinor $allowMinor
+if ($staged.result -ne 'noUpdate' -or -not $target) { break }
+Write-Log "Phase 1: no AKS EE update offered yet (attempt $a/$attempts, current $currentMinor, target $target). Retrying in 30s."
+Start-Sleep -Seconds 30
 }
-$classified = Invoke-ChildStage -Label 'stage-update' -Script 'Import-Module AksEdge -Force; Start-AksEdgeUpdate -Force'
-switch ($classified.result) {
+switch ($staged.result) {
 'staged' {
-Write-Log "Phase 1: update staged. Persisting hop progress (before=$before)."
+Invoke-ChildAksEeCommand -Label 'install-msi' `
+-Script 'Import-Module AksEdge -Force; $r = @(Start-AksEdgeUpdate -Force); if ($r[-1] -eq $true) { exit 0 } else { exit 1 }' | Out-Null
+Write-Log "Phase 1: MSI installed from cache. Persisting hop progress (before=$before expected=$($staged.expectedMinor))."
 if ($prog) {
-$prog.beforeVersion     = if ($before) { $before } else { '' }
-$prog.hostBeforeVersion = [string](Get-AksEeHostVersion)
-$prog.pendingApply      = $true
+$prog.beforeVersion = if ($before) { $before } else { '' }
+$prog.expectedMinor = [string]$staged.expectedMinor
+$prog.pendingApply  = $true
 Set-Progress $prog
 }
 Set-State -Phase 2 -Status 'running'
 }
 'noUpdate' {
-if ($target -and $before) {
-$currentMinor = Get-K8sMinor $before
-if ($currentMinor -and $currentMinor -ne $target) {
-throw "Premature no-update at $before but target minor $target is not yet reached. The target version may not be available yet from the AKS EE channel."
-}
+if ($target -and $currentMinor -ne $target) {
+throw "No AKS EE update offered by Microsoft Update at $before, but target minor $target is not reached. The target may not be published yet, or Microsoft Update access / AcceptUpgrade gating is the cause."
 }
 Write-Log "Phase 1: no newer AKS EE update available (current $before). Verifying then finalizing."
 if ($prog) { $prog.verifyOnly = $true; Set-Progress $prog }
 Set-State -Phase 3 -Status 'running'
 }
-'failed' {
-throw "Stage step failed. Output tail:`n$($classified.output)"
+default {
+throw 'Online staging failed. See the worker log for the Windows Update error detail.'
 }
 }
 Write-Log 'Phase 1: complete'
@@ -605,7 +626,7 @@ function Invoke-Phase2 {
 param($config)
 Write-Log 'Phase 2: apply control-plane update (single-node)'
 Invoke-ChildAksEeCommand -Label 'apply-update' `
--Script 'Import-Module AksEdge -Force; Start-AksEdgeControlPlaneUpdate -firstControlPlane $true -Force' | Out-Null
+-Script 'Import-Module AksEdge -Force; $r = @(Start-AksEdgeControlPlaneUpdate -firstControlPlane $true -Force); if ($r[-1] -eq $true) { exit 0 } else { exit 1 }' | Out-Null
 Set-State -Phase 3 -Status 'running'
 Write-Log 'Phase 2: complete'
 }
@@ -634,23 +655,17 @@ Write-Log 'Phase 3: complete (verify-only)'
 return
 }
 $before     = if ($prog) { [string](Get-Prop $prog 'beforeVersion' '') } else { '' }
-$hostBefore = if ($prog) { [string](Get-Prop $prog 'hostBeforeVersion' '') } else { '' }
+$expected   = if ($prog) { [string](Get-Prop $prog 'expectedMinor' '') } else { '' }
 $allowMinor = [bool](Get-Prop $config 'allowKubernetesMinorUpgrade' $false)
 $afterMinor = Get-K8sMinor $after
-$hostAfter  = [string](Get-AksEeHostVersion)
-if ($allowMinor -and $before) {
+if ($allowMinor -and $expected) {
+if ($afterMinor -ne $expected) {
+throw "Hop did not reach the staged version: expected k3s minor $expected after the apply, but the cluster reports $after (minor $afterMinor)."
+}
+} elseif ($allowMinor -and $before) {
 $beforeMinor = Get-K8sMinor $before
-$minorAdvanced = ($afterMinor -and $beforeMinor -and (Compare-K8sMinor $afterMinor $beforeMinor) -gt 0)
-$buildAdvanced = $false
-if ($hostBefore -and $hostAfter) {
-try { $buildAdvanced = ([version]$hostAfter -gt [version]$hostBefore) }
-catch { $buildAdvanced = ($hostAfter -ne $hostBefore) }
-}
-if (-not $minorAdvanced -and -not $buildAdvanced) {
-throw "Hop did not advance: Kubernetes version stayed $after and AKS EE build stayed $hostAfter. The apply did not move the cluster forward."
-}
-if (-not $minorAdvanced) {
-Write-Log "Hop advanced the AKS EE build ($hostBefore -> $hostAfter) without a Kubernetes minor change. Continuing toward the target."
+if ($beforeMinor -and $afterMinor -and (Compare-K8sMinor $afterMinor $beforeMinor) -le 0) {
+throw "Hop did not advance: Kubernetes version stayed $after after the apply."
 }
 }
 if ($prog) {
@@ -766,14 +781,6 @@ try {
 Write-UpgradeStateTag -config $config -Value $tagValue
 } catch {
 Write-Log "WARNING: tag write helper threw on failure path: $_. Original phase error re-raised below."
-}
-if ([bool](Get-Prop $config 'allowKubernetesMinorUpgrade' $false)) {
-try {
-Set-AcceptUpgrade -Accept $false
-Write-Log 'Re-pinned Set-AksEdgeUpgrade -AcceptUpgrade $false after phase failure.'
-} catch {
-Write-Log "WARNING: re-pin Set-AksEdgeUpgrade -AcceptUpgrade false failed on error path: $_. Original error re-raised below."
-}
 }
 throw
 }
