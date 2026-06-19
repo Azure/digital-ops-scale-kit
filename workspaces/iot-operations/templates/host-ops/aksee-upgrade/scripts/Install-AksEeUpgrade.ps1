@@ -848,6 +848,7 @@ function Invoke-Phase0 {
     $initProgress = [pscustomobject]@{
         hopCount            = 0
         beforeVersion       = ''
+        hostBeforeVersion   = ''
         pendingApply        = $false
         verifyOnly          = $false
         originalFromVersion = if ($fromK8s) { $fromK8s } else { '' }
@@ -902,8 +903,9 @@ function Invoke-Phase1 {
         'staged' {
             Write-Log "Phase 1: update staged. Persisting hop progress (before=$before)."
             if ($prog) {
-                $prog.beforeVersion = if ($before) { $before } else { '' }
-                $prog.pendingApply  = $true
+                $prog.beforeVersion     = if ($before) { $before } else { '' }
+                $prog.hostBeforeVersion = [string](Get-AksEeHostVersion)
+                $prog.pendingApply      = $true
                 Set-Progress $prog
             }
             Set-State -Phase 2 -Status 'running'
@@ -981,14 +983,29 @@ function Invoke-Phase3 {
     }
 
     $before     = if ($prog) { [string](Get-Prop $prog 'beforeVersion' '') } else { '' }
+    $hostBefore = if ($prog) { [string](Get-Prop $prog 'hostBeforeVersion' '') } else { '' }
     $allowMinor = [bool](Get-Prop $config 'allowKubernetesMinorUpgrade' $false)
     $afterMinor = Get-K8sMinor $after
+    $hostAfter  = [string](Get-AksEeHostVersion)
 
-    # In minor mode, each hop must advance the Kubernetes minor version.
+    # In minor mode, each hop must make forward progress, but not always as a
+    # Kubernetes minor bump. Some chains apply a same-minor AKS EE servicing
+    # build before the minor hop, so accept either a Kubernetes minor advance or
+    # an AKS EE build-version advance. Fail only when neither moved, which means
+    # the apply did not move the cluster forward.
     if ($allowMinor -and $before) {
         $beforeMinor = Get-K8sMinor $before
-        if ($afterMinor -and $beforeMinor -and (Compare-K8sMinor $afterMinor $beforeMinor) -le 0) {
-            throw "Hop did not advance the Kubernetes minor version: before=$before after=$after."
+        $minorAdvanced = ($afterMinor -and $beforeMinor -and (Compare-K8sMinor $afterMinor $beforeMinor) -gt 0)
+        $buildAdvanced = $false
+        if ($hostBefore -and $hostAfter) {
+            try { $buildAdvanced = ([version]$hostAfter -gt [version]$hostBefore) }
+            catch { $buildAdvanced = ($hostAfter -ne $hostBefore) }
+        }
+        if (-not $minorAdvanced -and -not $buildAdvanced) {
+            throw "Hop did not advance: Kubernetes version stayed $after and AKS EE build stayed $hostAfter. The apply did not move the cluster forward."
+        }
+        if (-not $minorAdvanced) {
+            Write-Log "Hop advanced the AKS EE build ($hostBefore -> $hostAfter) without a Kubernetes minor change. Continuing toward the target."
         }
     }
 

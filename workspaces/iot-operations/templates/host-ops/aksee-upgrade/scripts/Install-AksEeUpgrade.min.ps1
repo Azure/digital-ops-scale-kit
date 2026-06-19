@@ -536,6 +536,7 @@ $maxHops = if ($allowMinor) { 6 } else { 1 }
 $initProgress = [pscustomobject]@{
 hopCount            = 0
 beforeVersion       = ''
+hostBeforeVersion   = ''
 pendingApply        = $false
 verifyOnly          = $false
 originalFromVersion = if ($fromK8s) { $fromK8s } else { '' }
@@ -576,8 +577,9 @@ switch ($classified.result) {
 'staged' {
 Write-Log "Phase 1: update staged. Persisting hop progress (before=$before)."
 if ($prog) {
-$prog.beforeVersion = if ($before) { $before } else { '' }
-$prog.pendingApply  = $true
+$prog.beforeVersion     = if ($before) { $before } else { '' }
+$prog.hostBeforeVersion = [string](Get-AksEeHostVersion)
+$prog.pendingApply      = $true
 Set-Progress $prog
 }
 Set-State -Phase 2 -Status 'running'
@@ -632,12 +634,23 @@ Write-Log 'Phase 3: complete (verify-only)'
 return
 }
 $before     = if ($prog) { [string](Get-Prop $prog 'beforeVersion' '') } else { '' }
+$hostBefore = if ($prog) { [string](Get-Prop $prog 'hostBeforeVersion' '') } else { '' }
 $allowMinor = [bool](Get-Prop $config 'allowKubernetesMinorUpgrade' $false)
 $afterMinor = Get-K8sMinor $after
+$hostAfter  = [string](Get-AksEeHostVersion)
 if ($allowMinor -and $before) {
 $beforeMinor = Get-K8sMinor $before
-if ($afterMinor -and $beforeMinor -and (Compare-K8sMinor $afterMinor $beforeMinor) -le 0) {
-throw "Hop did not advance the Kubernetes minor version: before=$before after=$after."
+$minorAdvanced = ($afterMinor -and $beforeMinor -and (Compare-K8sMinor $afterMinor $beforeMinor) -gt 0)
+$buildAdvanced = $false
+if ($hostBefore -and $hostAfter) {
+try { $buildAdvanced = ([version]$hostAfter -gt [version]$hostBefore) }
+catch { $buildAdvanced = ($hostAfter -ne $hostBefore) }
+}
+if (-not $minorAdvanced -and -not $buildAdvanced) {
+throw "Hop did not advance: Kubernetes version stayed $after and AKS EE build stayed $hostAfter. The apply did not move the cluster forward."
+}
+if (-not $minorAdvanced) {
+Write-Log "Hop advanced the AKS EE build ($hostBefore -> $hostAfter) without a Kubernetes minor change. Continuing toward the target."
 }
 }
 if ($prog) {
