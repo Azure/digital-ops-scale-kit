@@ -182,8 +182,12 @@ function Install-AzCliIfMissing {
 function Connect-MachineIdentity {
     # Authenticate as the Arc machine's system-assigned managed identity. HIMDS
     # only releases the token to a local administrator, which the SYSTEM task
-    # satisfies. Refresh the HIMDS endpoints from Machine scope defensively in
-    # case a fresh worker process did not inherit them.
+    # satisfies. Refresh the HIMDS endpoints from Machine scope in case a fresh
+    # worker process did not inherit them. Retry the login: right after a host
+    # reboot (the at-startup resume path) HIMDS can be slow to come up, and a
+    # partial token cache from an interrupted run can make az fail, so reset the
+    # scoped cache between attempts. The az calls are wrapped because az can
+    # surface a transient failure as a terminating error under the strict settings.
     param($config)
     foreach ($name in @('IDENTITY_ENDPOINT', 'IMDS_ENDPOINT')) {
         if (-not [Environment]::GetEnvironmentVariable($name)) {
@@ -191,16 +195,31 @@ function Connect-MachineIdentity {
             if ($machineVal) { Set-Item -Path "Env:$name" -Value $machineVal }
         }
     }
-    Write-Log 'Authenticating with Arc machine managed identity (az login --identity)'
-    $loginOut = & az login --identity --only-show-errors 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "az login --identity failed: $loginOut. Ensure the Arc machine identity has a role on the resource group (Contributor, or Kubernetes Cluster - Azure Arc Onboarding plus Tag Contributor)."
-    }
     $sub = $config.subscription
-    $accountSetOut = & az account set --subscription $sub 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "az account set --subscription $sub failed: $accountSetOut. The Arc machine managed identity likely lacks access to subscription $sub."
+    $lastErr = ''
+    for ($a = 1; $a -le 6; $a++) {
+        Write-Log "Authenticating with Arc machine managed identity (az login --identity), attempt $a/6"
+        try {
+            $loginOut = & az login --identity --only-show-errors 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                $setOut = & az account set --subscription $sub 2>&1
+                if ($LASTEXITCODE -eq 0) { Write-Log 'Managed-identity login established.'; return }
+                $lastErr = "az account set failed: $setOut"
+            } else {
+                $lastErr = "az login --identity failed: $loginOut"
+            }
+        } catch {
+            $lastErr = "az invocation error: $_"
+        }
+        Write-Log "Managed-identity auth attempt $a/6 failed: $lastErr"
+        # Reset the scoped token cache so a partial or corrupt state from an
+        # interrupted run does not poison the retry, then let HIMDS settle.
+        if ($env:AZURE_CONFIG_DIR -and (Test-Path $env:AZURE_CONFIG_DIR)) {
+            Remove-Item -Path $env:AZURE_CONFIG_DIR -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        if ($a -lt 6) { Start-Sleep -Seconds 30 }
     }
+    throw "Managed-identity authentication failed after 6 attempts: $lastErr. Ensure the Arc machine identity has a role on the resource group (Contributor, or Kubernetes Cluster - Azure Arc Onboarding plus Tag Contributor) and that the Connected Machine Agent is running."
 }
 
 function Set-WorkerKubeconfig {

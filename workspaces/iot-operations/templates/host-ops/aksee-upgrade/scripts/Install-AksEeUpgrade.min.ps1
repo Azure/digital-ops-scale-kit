@@ -174,16 +174,29 @@ $machineVal = [Environment]::GetEnvironmentVariable($name, 'Machine')
 if ($machineVal) { Set-Item -Path "Env:$name" -Value $machineVal }
 }
 }
-Write-Log 'Authenticating with Arc machine managed identity (az login --identity)'
-$loginOut = & az login --identity --only-show-errors 2>&1
-if ($LASTEXITCODE -ne 0) {
-throw "az login --identity failed: $loginOut. Ensure the Arc machine identity has a role on the resource group (Contributor, or Kubernetes Cluster - Azure Arc Onboarding plus Tag Contributor)."
-}
 $sub = $config.subscription
-$accountSetOut = & az account set --subscription $sub 2>&1
-if ($LASTEXITCODE -ne 0) {
-throw "az account set --subscription $sub failed: $accountSetOut. The Arc machine managed identity likely lacks access to subscription $sub."
+$lastErr = ''
+for ($a = 1; $a -le 6; $a++) {
+Write-Log "Authenticating with Arc machine managed identity (az login --identity), attempt $a/6"
+try {
+$loginOut = & az login --identity --only-show-errors 2>&1
+if ($LASTEXITCODE -eq 0) {
+$setOut = & az account set --subscription $sub 2>&1
+if ($LASTEXITCODE -eq 0) { Write-Log 'Managed-identity login established.'; return }
+$lastErr = "az account set failed: $setOut"
+} else {
+$lastErr = "az login --identity failed: $loginOut"
 }
+} catch {
+$lastErr = "az invocation error: $_"
+}
+Write-Log "Managed-identity auth attempt $a/6 failed: $lastErr"
+if ($env:AZURE_CONFIG_DIR -and (Test-Path $env:AZURE_CONFIG_DIR)) {
+Remove-Item -Path $env:AZURE_CONFIG_DIR -Recurse -Force -ErrorAction SilentlyContinue
+}
+if ($a -lt 6) { Start-Sleep -Seconds 30 }
+}
+throw "Managed-identity authentication failed after 6 attempts: $lastErr. Ensure the Arc machine identity has a role on the resource group (Contributor, or Kubernetes Cluster - Azure Arc Onboarding plus Tag Contributor) and that the Connected Machine Agent is running."
 }
 function Set-WorkerKubeconfig {
 $kubeCandidates = @(
