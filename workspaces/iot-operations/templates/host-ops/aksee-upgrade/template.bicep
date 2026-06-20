@@ -4,9 +4,8 @@
 // and reports back into the resource's instanceView.
 //
 // The launcher writes the worker to disk, registers a Scheduled Task that drives
-// it (running as SYSTEM by default, or as a created local admin when
-// runAsDedicatedAdmin is set), sets the in-progress completion tag, starts the
-// task, and returns `REGISTERED`. ARM sees the runCommand succeed at that point.
+// it (running as NT AUTHORITY\SYSTEM), sets the in-progress completion tag, starts
+// the task, and returns `REGISTERED`. ARM sees the runCommand succeed at that point.
 // The actual upgrade (stage, apply, inner node-VM reboot, verify) happens inside
 // the Scheduled Task asynchronously. The worker writes a
 // `siteops.aksee.upgrade.state` tag on the Arc machine when it finishes, and a
@@ -59,9 +58,6 @@ param allowKubernetesMinorUpgrade bool = false
 @description('Optional target Kubernetes minor version for minor-mode upgrades, e.g. `1.33` or `v1.33.5+k3s1`. The worker normalizes to major.minor and stops hopping once the deployed minor reaches this value. Empty string means no explicit target.')
 param targetKubernetesVersion string = ''
 
-@description('When true, the worker Scheduled Task runs as a created local admin account with an on-box generated password instead of the built-in SYSTEM account. Leave false unless a hardened environment forbids SYSTEM-context tasks. Defaults to false.')
-param runAsDedicatedAdmin bool = false
-
 @description('Timeout in seconds for the runCommand. It bounds only the synchronous launcher, which returns quickly after registering the Scheduled Task. The upgrade itself runs asynchronously inside that task.')
 param runCommandTimeoutSeconds int = 600
 
@@ -96,7 +92,6 @@ resource upgradeCommand 'Microsoft.HybridCompute/machines/runCommands@2024-11-10
       // by the runCommand's string-typed parameter.
       { name: 'AllowKubernetesMinorUpgrade', value: string(allowKubernetesMinorUpgrade) }
       { name: 'TargetKubernetesVersion',    value: targetKubernetesVersion }
-      { name: 'RunAsDedicatedAdmin',         value: string(runAsDedicatedAdmin) }
     ]
   }
 }

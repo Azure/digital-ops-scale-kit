@@ -7,11 +7,9 @@ param(
 [string]$MachineName       = $env:COMPUTERNAME,
 [string]$ConfigDir         = 'C:\ProgramData\siteops\aksee-upgrade',
 [string]$ScheduledTaskName = 'SiteOpsAksEeUpgrade',
-[string]$LocalAdminUser    = 'siteops-upgrade',
 [string]$AllowKubernetesMinorUpgrade = 'false',
 [string]$TargetKubernetesVersion = '',
-[switch]$Force,
-[string]$RunAsDedicatedAdmin = 'false'
+[switch]$Force
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -30,28 +28,6 @@ $id = [System.Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object System.Security.Principal.WindowsPrincipal($id)
 return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
 }
-function New-RandomPassword {
-$upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ'
-$lower = 'abcdefghijkmnpqrstuvwxyz'
-$digit = '23456789'
-$symbol = '!@#$%^&*()-_=+'
-$all = $upper + $lower + $digit + $symbol
-$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-try {
-$idx = {
-param([int]$max)
-$b = New-Object 'byte[]' 1; $cap = 256 - (256 % $max)
-do { $rng.GetBytes($b) } while ($b[0] -ge $cap)
-$b[0] % $max
-}
-$chars = @($upper[(& $idx $upper.Length)], $lower[(& $idx $lower.Length)], $digit[(& $idx $digit.Length)], $symbol[(& $idx $symbol.Length)])
-for ($i = 0; $i -lt 20; $i++) { $chars += $all[(& $idx $all.Length)] }
-for ($i = $chars.Count - 1; $i -gt 0; $i--) { $j = & $idx ($i + 1); $t = $chars[$i]; $chars[$i] = $chars[$j]; $chars[$j] = $t }
-return -join $chars
-} finally {
-$rng.Dispose()
-}
-}
 function Set-StrictAcl {
 param([string]$Path)
 $inheritOut = & icacls $Path /inheritance:r 2>&1
@@ -63,23 +39,6 @@ if ($LASTEXITCODE -ne 0) {
 throw "icacls /grant failed on ${Path} with exit ${LASTEXITCODE}: $grantOut"
 }
 Write-Log "Locked ACLs on $Path to Administrators + SYSTEM"
-}
-function Set-LocalAdminUser {
-param([string]$Username, [string]$Password)
-$secure = ConvertTo-SecureString $Password -AsPlainText -Force
-$user = Get-LocalUser -Name $Username -ErrorAction SilentlyContinue
-if ($null -eq $user) {
-Write-Log "Creating local user $Username"
-New-LocalUser -Name $Username -Password $secure -AccountNeverExpires -PasswordNeverExpires -UserMayNotChangePassword | Out-Null
-} else {
-Write-Log "Resetting password on existing local user $Username"
-Set-LocalUser -Name $Username -Password $secure
-}
-$group = Get-LocalGroupMember -Group 'Administrators' -Member $Username -ErrorAction SilentlyContinue
-if ($null -eq $group) {
-Write-Log "Adding $Username to local Administrators group"
-Add-LocalGroupMember -Group 'Administrators' -Member $Username
-}
 }
 function Set-RunningTag {
 param([string]$Subscription, [string]$ResourceGroup, [string]$MachineName, [string]$RunId)
@@ -835,15 +794,7 @@ throw "Upgrade already in flight (state.json shows phase=$existingPhase status=$
 }
 Set-Content -Path $workerPath -Value $EmbeddedWorker -Encoding UTF8
 Write-Log "Wrote $workerPath"
-$runAsSystem = ($RunAsDedicatedAdmin -ine 'true')
-$adminPassword = $null
-if (-not $runAsSystem) {
-$adminPassword = New-RandomPassword
-Set-LocalAdminUser -Username $LocalAdminUser -Password $adminPassword
-Write-Log "Worker task will run as local admin $LocalAdminUser"
-} else {
-Write-Log 'Worker task will run as NT AUTHORITY\SYSTEM (no local account created)'
-}
+Write-Log 'Worker task will run as NT AUTHORITY\SYSTEM'
 $config = [pscustomobject]@{
 resourceGroup               = $ResourceGroup
 subscription                = $Subscription
@@ -852,8 +803,6 @@ runId                       = $RunId
 allowKubernetesMinorUpgrade = ($AllowKubernetesMinorUpgrade -ieq 'true')
 targetKubernetesVersion     = $TargetKubernetesVersion
 scheduledTaskName           = $ScheduledTaskName
-localAdminUser              = $LocalAdminUser
-runAsSystem                 = $runAsSystem
 }
 $config | ConvertTo-Json | Set-Content -Path $configPath -Encoding UTF8
 Write-Log "Wrote $configPath (auth=managed identity)"
@@ -873,17 +822,10 @@ $action = New-ScheduledTaskAction `
 -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$workerPath`" -ConfigDir `"$ConfigDir`""
 $startupTrigger = New-ScheduledTaskTrigger -AtStartup
 $onceTrigger    = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddSeconds(30))
-if ($runAsSystem) {
 $principal = New-ScheduledTaskPrincipal `
 -UserId 'NT AUTHORITY\SYSTEM' `
 -LogonType ServiceAccount `
 -RunLevel Highest
-} else {
-$principal = New-ScheduledTaskPrincipal `
--UserId "$env:COMPUTERNAME\$LocalAdminUser" `
--LogonType Password `
--RunLevel Highest
-}
 $settings = New-ScheduledTaskSettingsSet `
 -AllowStartIfOnBatteries `
 -DontStopIfGoingOnBatteries `
@@ -895,19 +837,10 @@ $task = New-ScheduledTask `
 -Trigger @($startupTrigger, $onceTrigger) `
 -Principal $principal `
 -Settings $settings
-if ($runAsSystem) {
 Register-ScheduledTask `
 -TaskName $ScheduledTaskName `
 -InputObject $task `
 -Force | Out-Null
-} else {
-Register-ScheduledTask `
--TaskName $ScheduledTaskName `
--InputObject $task `
--User "$env:COMPUTERNAME\$LocalAdminUser" `
--Password $adminPassword `
--Force | Out-Null
-}
 Write-Log "Registered Scheduled Task $ScheduledTaskName"
 Start-ScheduledTask -TaskName $ScheduledTaskName
 Write-Log "Started $ScheduledTaskName"
