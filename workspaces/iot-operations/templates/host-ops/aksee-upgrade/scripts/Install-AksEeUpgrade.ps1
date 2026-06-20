@@ -574,44 +574,19 @@ function Invoke-ChildAksEeCommand {
     return $childLog
 }
 
-function Invoke-ChildCheck {
-    # Run a boolean-check script in a fresh child powershell.exe (EAP-safe, like
-    # the update cmdlets) and return its exit code WITHOUT throwing. The script
-    # is responsible for `exit 0` (true) / `exit 1` (false). Use for checks where
-    # a non-zero result is an expected negative, not an error. Note that AksEdge
-    # cmdlets like Test-AksEdgeArcConnection return a value rather than setting
-    # $LASTEXITCODE, so the script must translate the return into an exit code.
-    param(
-        [Parameter(Mandatory)] [string]$Label,
-        [Parameter(Mandatory)] [string]$Script
-    )
-    $bytes   = [System.Text.Encoding]::Unicode.GetBytes($Script)
-    $encoded = [Convert]::ToBase64String($bytes)
-    $psExe   = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $proc = Start-Process -FilePath $psExe `
-        -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded) `
-        -PassThru -NoNewWindow
-    # Cache the native handle so ExitCode survives WaitForExit (see the note in
-    # Invoke-ChildAksEeCommand).
-    try { $null = $proc.Handle } catch {}
-    $timeoutMs = 60 * 60 * 1000
-    $exited = $proc.WaitForExit($timeoutMs)
-    if (-not $exited) {
-        try { $proc.Kill() } catch {}
-        Write-Log "$Label child did not exit within 60 minutes and was killed. Treating as failure."
-        return 1
-    }
-    Write-Log "$Label child exited with code $($proc.ExitCode)"
-    return $proc.ExitCode
-}
-
 function Test-ArcConnectedChild {
     # Test-AksEdgeArcConnection returns a boolean (and may emit diagnostic stderr
-    # under the worker's strict settings), so run it in a child process and map
-    # the return to an exit code.
+    # under the worker's strict settings), so run it in a child process. The child
+    # maps the boolean to an exit code, and Invoke-ChildAksEeCommand throws on a
+    # non-zero exit, so a not-connected result (exit 1) surfaces as a caught
+    # exception that we translate back to $false.
     param([string]$Label)
-    $exit = Invoke-ChildCheck -Label $Label -Script 'Import-Module AksEdge -Force; if (Test-AksEdgeArcConnection) { exit 0 } else { exit 1 }'
-    return ($exit -eq 0)
+    try {
+        Invoke-ChildAksEeCommand -Label $Label -Script 'Import-Module AksEdge -Force; if (Test-AksEdgeArcConnection) { exit 0 } else { exit 1 }' | Out-Null
+        return $true
+    } catch {
+        return $false
+    }
 }
 
 function Write-UpgradeStateTag {
@@ -770,6 +745,19 @@ function Invoke-OnlineStage {
     )
     $fail = [pscustomobject]@{ result = 'failed';   expectedMinor = $null }
     $none = [pscustomobject]@{ result = 'noUpdate'; expectedMinor = $null }
+    # Reuse an already-staged update. A prior run that staged the package but failed
+    # at the MSI install leaves it in update-cache, and Windows Update would now
+    # report it installed and offer nothing on a re-search. The MSI name carries the
+    # k3s minor, so detect and reuse it directly.
+    $cacheBase = @('AksEdge', 'AKS-Edge') | ForEach-Object { Join-Path ${env:ProgramFiles} "$_\update-cache" } | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ($cacheBase) {
+        $msi = Get-ChildItem $cacheBase -Filter '*.msi' -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($msi -and $msi.Name -match 'k3s-?(\d+)\.(\d+)') {
+            $m = "$($matches[1]).$($matches[2])"
+            Write-Log "Online stage: reusing staged package '$($msi.Name)' (k3s $m). Skipping the Windows Update search."
+            return [pscustomobject]@{ result = 'staged'; expectedMinor = $m }
+        }
+    }
     if ((Get-Service wuauserv -ErrorAction SilentlyContinue).Status -ne 'Running') {
         try { Start-Service wuauserv } catch { Write-Log "Online stage: could not start wuauserv: $_"; return $fail }
     }
@@ -969,10 +957,22 @@ function Invoke-Phase1 {
 
     switch ($staged.result) {
         'staged' {
-            # Install the staged MSI from update-cache. The cmdlet returns a boolean
-            # and never sets $LASTEXITCODE, so the child translates it to an exit code.
-            Invoke-ChildAksEeCommand -Label 'install-msi' `
-                -Script 'Import-Module AksEdge -Force; $r = @(Start-AksEdgeUpdate -Force); if ($r[-1] -eq $true) { exit 0 } else { exit 1 }' | Out-Null
+            # Install the staged MSI from update-cache. The node-management agent can
+            # be briefly unreachable right after staging (a transient nodectl or
+            # wssdagent error), so retry across a short settling window. The cache
+            # persists and the cmdlet resets updateState on failure, so a retry is safe.
+            $ok = $false
+            for ($a = 1; $a -le 4 -and -not $ok; $a++) {
+                try {
+                    Invoke-ChildAksEeCommand -Label "install-msi-$a" `
+                        -Script 'Import-Module AksEdge -Force; $r = @(Start-AksEdgeUpdate -Force); if ($r[-1] -eq $true) { exit 0 } else { exit 1 }' | Out-Null
+                    $ok = $true
+                } catch {
+                    Write-Log "Phase 1: MSI install attempt $a/4 failed: $_"
+                    if ($a -lt 4) { Write-Log 'Phase 1: waiting 30s for the node agent to settle before retry.'; Start-Sleep -Seconds 30 }
+                }
+            }
+            if (-not $ok) { throw 'Phase 1: Start-AksEdgeUpdate failed to install the staged MSI after retries. See the aksee-install-msi-*.log child logs.' }
             Write-Log "Phase 1: MSI installed from cache. Persisting hop progress (before=$before expected=$($staged.expectedMinor))."
             if ($prog) {
                 $prog.beforeVersion = if ($before) { $before } else { '' }
