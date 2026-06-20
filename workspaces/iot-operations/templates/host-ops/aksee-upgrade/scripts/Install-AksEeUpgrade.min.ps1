@@ -310,6 +310,7 @@ $proc = Start-Process -FilePath $psExe `
 -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded) `
 -PassThru -NoNewWindow `
 -RedirectStandardOutput $childLog -RedirectStandardError $childErrLog
+try { $null = $proc.Handle } catch {}
 $timeoutMs = 60 * 60 * 1000
 $exited = $proc.WaitForExit($timeoutMs)
 if (-not $exited) {
@@ -339,6 +340,7 @@ $psExe   = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell
 $proc = Start-Process -FilePath $psExe `
 -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded) `
 -PassThru -NoNewWindow
+try { $null = $proc.Handle } catch {}
 $timeoutMs = 60 * 60 * 1000
 $exited = $proc.WaitForExit($timeoutMs)
 if (-not $exited) {

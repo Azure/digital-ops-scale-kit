@@ -547,6 +547,12 @@ function Invoke-ChildAksEeCommand {
         -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded) `
         -PassThru -NoNewWindow `
         -RedirectStandardOutput $childLog -RedirectStandardError $childErrLog
+    # Cache the native handle so $proc.ExitCode is still readable after WaitForExit.
+    # Without -Wait, Start-Process -PassThru releases the handle for a fast-exiting
+    # child, and ExitCode then reads $null, which would misclassify a clean exit 0
+    # as a failure. Guarded because accessing Handle can throw if the child already
+    # exited.
+    try { $null = $proc.Handle } catch {}
     $timeoutMs = 60 * 60 * 1000
     $exited = $proc.WaitForExit($timeoutMs)
     if (-not $exited) {
@@ -585,6 +591,9 @@ function Invoke-ChildCheck {
     $proc = Start-Process -FilePath $psExe `
         -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded) `
         -PassThru -NoNewWindow
+    # Cache the native handle so ExitCode survives WaitForExit (see the note in
+    # Invoke-ChildAksEeCommand).
+    try { $null = $proc.Handle } catch {}
     $timeoutMs = 60 * 60 * 1000
     $exited = $proc.WaitForExit($timeoutMs)
     if (-not $exited) {
