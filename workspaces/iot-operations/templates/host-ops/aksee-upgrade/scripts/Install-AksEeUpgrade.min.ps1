@@ -80,8 +80,6 @@ $script:StatePath = Join-Path $ConfigDir 'state.json'
 $script:ConfigPath = Join-Path $ConfigDir 'config.json'
 $script:SnapshotPath = Join-Path $ConfigDir 'snapshot.json'
 $script:ProgressPath = Join-Path $ConfigDir 'progress.json'
-$script:NodectlPath = Join-Path ${env:ProgramFiles} 'AksEdge\nodectl.exe'
-$script:NodeLoginPath = Join-Path $env:ProgramData 'wssdagent\nodelogin.yaml'
 function Write-Log {
 param([string]$Message)
 $ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
@@ -267,35 +265,11 @@ return $true
 return $false
 }
 }
-function Test-NodeAgentHealthy {
-[OutputType([bool])]
-param()
-if (-not (Test-Path $script:NodectlPath)) { return $true }
-try { & $script:NodectlPath security login --loginpath $script:NodeLoginPath --identity 2>&1 | Out-Null } catch {}
-$probe = try { (& $script:NodectlPath compute vm list -o tsv 2>&1) | Out-String } catch { "$_" }
-return ($probe -notmatch 'rpc error|tls:|x509|does not exist' -and $probe.Trim().Length -gt 0)
-}
-function Restore-NodeAgent {
-[OutputType([bool])]
-param([int]$MaxRestarts = 2)
-if (Test-NodeAgentHealthy) { return $true }
-for ($i = 1; $i -le $MaxRestarts; $i++) {
-Write-Log "Node agent unreachable (nodectl handshake failing). Restarting wssdagent to re-establish the node certificate chain (attempt $i/$MaxRestarts)."
-try { Restart-Service wssdagent -Force -ErrorAction Stop } catch { Write-Log "Restart-Service wssdagent failed: $_" }
-$deadline = (Get-Date).AddSeconds(120)
-while ((Get-Date) -lt $deadline -and (Get-Service wssdagent -ErrorAction SilentlyContinue).Status -ne 'Running') { Start-Sleep -Seconds 3 }
-Start-Sleep -Seconds 30
-if (Test-NodeAgentHealthy) { Write-Log "Node agent healthy after wssdagent restart (attempt $i)."; return $true }
-}
-Write-Log "Node agent still unreachable after $MaxRestarts wssdagent restart(s)."
-return $false
-}
 function Invoke-ChildAksEeCommand {
 param(
 [Parameter(Mandatory)] [string]$Label,
 [Parameter(Mandatory)] [string]$Script
 )
-if (Test-Path $script:NodectlPath) { $null = Restore-NodeAgent }
 $childScript = $Script
 $bytes = [System.Text.Encoding]::Unicode.GetBytes($childScript)
 $encoded = [Convert]::ToBase64String($bytes)
@@ -322,6 +296,9 @@ $tailErr = if (Test-Path $childErrLog) { (Get-Content $childErrLog -Tail 40 -Err
 $err = "$Label exited with code $($proc.ExitCode).`nstdout tail:`n$tailOut`nstderr tail:`n$tailErr`nFull logs at $childLog and $childErrLog."
 if (("$tailOut`n$tailErr") -match 'bootx64\.efi|trident|/EFI/AZLB') {
 throw "TRIDENT-REMEDIATION-REQUIRED: $err"
+}
+if (("$tailOut`n$tailErr") -match 'tls: bad certificate|certificate signed by unknown authority|LinuxAndWindows configuration does not exist') {
+throw "NODE-AGENT-CERT-UNREACHABLE: wssdagent rejected nodectl over mTLS (an AKS EE/MOC node certificate failure, commonly after a host shutdown and resume), so the cmdlet could not reach the node. The Kubernetes cluster is unaffected. Redeploy the host to recover. $err"
 }
 throw $err
 }
@@ -589,17 +566,22 @@ Start-Sleep -Seconds 30
 switch ($staged.result) {
 'staged' {
 $ok = $false
+$lastErr = $null
 for ($a = 1; $a -le 4 -and -not $ok; $a++) {
 try {
 Invoke-ChildAksEeCommand -Label "install-msi-$a" `
 -Script 'Import-Module AksEdge -Force; $r = @(Start-AksEdgeUpdate -Force); if ($r[-1] -eq $true) { exit 0 } else { exit 1 }' | Out-Null
 $ok = $true
 } catch {
+$lastErr = $_.ToString()
 Write-Log "Phase 1: MSI install attempt $a/4 failed: $_"
 if ($a -lt 4) { Write-Log 'Phase 1: waiting 30s for the node agent to settle before retry.'; Start-Sleep -Seconds 30 }
 }
 }
-if (-not $ok) { throw 'Phase 1: Start-AksEdgeUpdate failed to install the staged MSI after retries. See the aksee-install-msi-*.log child logs.' }
+if (-not $ok) {
+if ($lastErr -match 'NODE-AGENT-CERT-UNREACHABLE') { throw $lastErr }
+throw 'Phase 1: Start-AksEdgeUpdate failed to install the staged MSI after retries. See the aksee-install-msi-*.log child logs.'
+}
 Write-Log "Phase 1: MSI installed from cache. Persisting hop progress (before=$before expected=$($staged.expectedMinor))."
 if ($prog) {
 $prog.beforeVersion = if ($before) { $before } else { '' }
@@ -777,7 +759,13 @@ default { throw "Unknown phase: $($state.phase)" }
 $errText = $_.ToString()
 Write-Log "ERROR in phase ${startPhase}: $errText"
 Set-State -Phase $startPhase -Status 'failed' -ErrorText $errText
-$tagValue = if ($errText -match 'TRIDENT-REMEDIATION-REQUIRED') { 'failed-needs-remediation' } else { "failed-phase-$startPhase" }
+$tagValue = if ($errText -match 'TRIDENT-REMEDIATION-REQUIRED') {
+'failed-needs-remediation'
+} elseif ($errText -match 'NODE-AGENT-CERT-UNREACHABLE') {
+'failed-node-agent-cert'
+} else {
+"failed-phase-$startPhase"
+}
 try {
 Write-UpgradeStateTag -config $config -Value $tagValue
 } catch {

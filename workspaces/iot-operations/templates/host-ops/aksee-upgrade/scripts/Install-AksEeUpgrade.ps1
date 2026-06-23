@@ -242,17 +242,6 @@ $script:ConfigPath   = Join-Path $ConfigDir 'config.json'
 $script:SnapshotPath = Join-Path $ConfigDir 'snapshot.json'
 $script:ProgressPath = Join-Path $ConfigDir 'progress.json'
 
-# MOC node-login paths. nodectl authenticates to the wssdagent node agent with a
-# short-lived (about one hour) login token. Once it lapses, nodectl's mTLS
-# handshake fails with "x509: certificate signed by unknown authority" and every
-# node-dependent AKS EE cmdlet (Start-AksEdgeUpdate's readiness check, the
-# control-plane apply, the Arc check) fails, even though the Kubernetes cluster
-# itself stays healthy. Invoke-ChildAksEeCommand refreshes the token with
-# `nodectl security login --identity` before each cmdlet to keep it current
-# across a long multi-hop run.
-$script:NodectlPath   = Join-Path ${env:ProgramFiles} 'AksEdge\nodectl.exe'
-$script:NodeLoginPath = Join-Path $env:ProgramData 'wssdagent\nodelogin.yaml'
-
 function Write-Log {
     param([string]$Message)
     $ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
@@ -496,48 +485,6 @@ function Test-NodesReady {
     }
 }
 
-function Test-NodeAgentHealthy {
-    # True when nodectl can reach the wssdagent node agent. Refreshes the MOC node
-    # login first (its token lapses after about an hour), then probes with
-    # `compute vm list`. nodectl runs directly in the worker, which is SYSTEM, the
-    # context the node login requires. Native-exe stderr does not trip the worker's
-    # strict error mode, so a direct call is safe here (unlike the AksEdge cmdlets).
-    [OutputType([bool])]
-    param()
-    if (-not (Test-Path $script:NodectlPath)) { return $true }
-    try { & $script:NodectlPath security login --loginpath $script:NodeLoginPath --identity 2>&1 | Out-Null } catch {}
-    $probe = try { (& $script:NodectlPath compute vm list -o tsv 2>&1) | Out-String } catch { "$_" }
-    return ($probe -notmatch 'rpc error|tls:|x509|does not exist' -and $probe.Trim().Length -gt 0)
-}
-
-function Restore-NodeAgent {
-    # Ensure the MOC node path (nodectl -> wssdagent) is healthy before a
-    # node-dependent AKS EE cmdlet. Two distinct failures occur. A lapsed node
-    # login fails with "x509: certificate signed by unknown authority" (the client
-    # not trusting the agent), which the re-login in Test-NodeAgentHealthy fixes.
-    # Staging an AKS EE update through Windows Update perturbs the wssdagent
-    # node-agent certificates, after which nodectl fails with "tls: bad certificate"
-    # (the agent rejecting the client) and a re-login alone does NOT recover it;
-    # restarting wssdagent re-establishes a consistent certificate chain, the same
-    # way a host reboot does. Probe first so a healthy agent is left untouched, then
-    # restart and re-probe across a bounded number of attempts. Returns the final
-    # health so the caller can still attempt the cmdlet (its error is the source of
-    # truth) rather than abort here.
-    [OutputType([bool])]
-    param([int]$MaxRestarts = 2)
-    if (Test-NodeAgentHealthy) { return $true }
-    for ($i = 1; $i -le $MaxRestarts; $i++) {
-        Write-Log "Node agent unreachable (nodectl handshake failing). Restarting wssdagent to re-establish the node certificate chain (attempt $i/$MaxRestarts)."
-        try { Restart-Service wssdagent -Force -ErrorAction Stop } catch { Write-Log "Restart-Service wssdagent failed: $_" }
-        $deadline = (Get-Date).AddSeconds(120)
-        while ((Get-Date) -lt $deadline -and (Get-Service wssdagent -ErrorAction SilentlyContinue).Status -ne 'Running') { Start-Sleep -Seconds 3 }
-        Start-Sleep -Seconds 30
-        if (Test-NodeAgentHealthy) { Write-Log "Node agent healthy after wssdagent restart (attempt $i)."; return $true }
-    }
-    Write-Log "Node agent still unreachable after $MaxRestarts wssdagent restart(s)."
-    return $false
-}
-
 function Invoke-ChildAksEeCommand {
     # Run an AksEdge cmdlet in a fresh child powershell.exe. The AKS EE module
     # resets $ErrorActionPreference='Stop' in its own scope, turning the native
@@ -549,13 +496,6 @@ function Invoke-ChildAksEeCommand {
         [Parameter(Mandatory)] [string]$Label,
         [Parameter(Mandatory)] [string]$Script
     )
-    # Ensure the node path is healthy before the cmdlet. This refreshes the MOC
-    # node login (a fix for a lapsed token) and restarts wssdagent if a staging
-    # perturbation left the agent rejecting nodectl. The login it performs writes
-    # the shared nodelogin.yaml, which the child cmdlet's own nodectl calls read,
-    # so the child inherits the refreshed credential. Best-effort: a still-unhealthy
-    # agent does not abort here, so the cmdlet runs and surfaces the genuine error.
-    if (Test-Path $script:NodectlPath) { $null = Restore-NodeAgent }
     # The caller's script owns its exit code, translating the AKS EE cmdlet's
     # boolean (or string) return into 0 for success or non-zero for failure. These
     # cmdlets do not set $LASTEXITCODE, so we must not rely on it here.
@@ -592,6 +532,15 @@ function Invoke-ChildAksEeCommand {
         # actionable signal rather than a generic phase failure.
         if (("$tailOut`n$tailErr") -match 'bootx64\.efi|trident|/EFI/AZLB') {
             throw "TRIDENT-REMEDIATION-REQUIRED: $err"
+        }
+        # The MOC node-management agent (wssdagent) rejected nodectl over mTLS, so
+        # the AKS EE cmdlet could not query the node. This is an AKS EE platform
+        # certificate failure, not an upgrade-logic fault, and is seen most after a
+        # host shutdown and resume desyncs the node certificate chain. The
+        # Kubernetes cluster and its workloads keep running. Surface it distinctly
+        # so the operator recovers the node agent rather than chasing the upgrade.
+        if (("$tailOut`n$tailErr") -match 'tls: bad certificate|certificate signed by unknown authority|LinuxAndWindows configuration does not exist') {
+            throw "NODE-AGENT-CERT-UNREACHABLE: wssdagent rejected nodectl over mTLS (an AKS EE/MOC node certificate failure, commonly after a host shutdown and resume), so the cmdlet could not reach the node. The Kubernetes cluster is unaffected. Redeploy the host to recover. $err"
         }
         throw $err
     }
@@ -981,25 +930,28 @@ function Invoke-Phase1 {
 
     switch ($staged.result) {
         'staged' {
-            # Install the staged MSI from update-cache. Invoke-ChildAksEeCommand
-            # restores the node agent before each attempt: staging an update through
-            # Windows Update perturbs the wssdagent certificates, so the first
-            # install would otherwise fail with "tls: bad certificate". The recovery
-            # restarts wssdagent to re-establish trust. Retry across a short window
+            # Install the staged MSI from update-cache. Retry across a short window
             # because the cache persists and the cmdlet resets updateState on
-            # failure, so a retry is safe.
+            # failure, so a retry is safe. Preserve the last child error so a node
+            # agent certificate failure (a platform-layer fault the retries cannot
+            # clear) is re-raised with its distinct signal, not the generic message.
             $ok = $false
+            $lastErr = $null
             for ($a = 1; $a -le 4 -and -not $ok; $a++) {
                 try {
                     Invoke-ChildAksEeCommand -Label "install-msi-$a" `
                         -Script 'Import-Module AksEdge -Force; $r = @(Start-AksEdgeUpdate -Force); if ($r[-1] -eq $true) { exit 0 } else { exit 1 }' | Out-Null
                     $ok = $true
                 } catch {
+                    $lastErr = $_.ToString()
                     Write-Log "Phase 1: MSI install attempt $a/4 failed: $_"
                     if ($a -lt 4) { Write-Log 'Phase 1: waiting 30s for the node agent to settle before retry.'; Start-Sleep -Seconds 30 }
                 }
             }
-            if (-not $ok) { throw 'Phase 1: Start-AksEdgeUpdate failed to install the staged MSI after retries. See the aksee-install-msi-*.log child logs.' }
+            if (-not $ok) {
+                if ($lastErr -match 'NODE-AGENT-CERT-UNREACHABLE') { throw $lastErr }
+                throw 'Phase 1: Start-AksEdgeUpdate failed to install the staged MSI after retries. See the aksee-install-msi-*.log child logs.'
+            }
             Write-Log "Phase 1: MSI installed from cache. Persisting hop progress (before=$before expected=$($staged.expectedMinor))."
             if ($prog) {
                 $prog.beforeVersion = if ($before) { $before } else { '' }
@@ -1259,9 +1211,17 @@ try {
             $errText = $_.ToString()
             Write-Log "ERROR in phase ${startPhase}: $errText"
             Set-State -Phase $startPhase -Status 'failed' -ErrorText $errText
-            # The known Trident/EFI finalize failure needs a human at the box, so
-            # surface it as a distinct tag value the wait step can route on.
-            $tagValue = if ($errText -match 'TRIDENT-REMEDIATION-REQUIRED') { 'failed-needs-remediation' } else { "failed-phase-$startPhase" }
+            # The Trident/EFI finalize failure and the MOC node-agent certificate
+            # failure each need a distinct operator response, so route them to their
+            # own tag values the wait step can surface, rather than a generic phase
+            # failure.
+            $tagValue = if ($errText -match 'TRIDENT-REMEDIATION-REQUIRED') {
+                'failed-needs-remediation'
+            } elseif ($errText -match 'NODE-AGENT-CERT-UNREACHABLE') {
+                'failed-node-agent-cert'
+            } else {
+                "failed-phase-$startPhase"
+            }
             try {
                 Write-UpgradeStateTag -config $config -Value $tagValue
             } catch {
