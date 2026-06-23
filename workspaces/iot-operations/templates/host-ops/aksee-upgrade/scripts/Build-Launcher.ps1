@@ -101,8 +101,10 @@ function script:Compact-PSSource {
 }
 
 # The per-file minifier strips leading whitespace and would corrupt here-string
-# bodies. worker.ps1 must not contain a here-string opener.
-if ($worker -match "(?m)^@['""]") {
+# bodies. worker.ps1 must not contain a here-string opener. A here-string opener
+# (`@"` or `@'`) is always the last token on its line, so match it anywhere on a
+# line, not only at column 0, to catch indented openers too.
+if ($worker -match "(?m)@['""]\s*$") {
     throw "worker.ps1 contains a here-string opener. The per-file minifier strips leading whitespace and can silently corrupt here-string bodies. Either remove the here-string from worker.ps1 or upgrade Compact-PSSource to skip string tokens."
 }
 

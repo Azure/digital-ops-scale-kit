@@ -80,6 +80,8 @@ $script:StatePath    = Join-Path $ConfigDir 'state.json'
 $script:ConfigPath   = Join-Path $ConfigDir 'config.json'
 $script:SnapshotPath = Join-Path $ConfigDir 'snapshot.json'
 $script:ProgressPath = Join-Path $ConfigDir 'progress.json'
+$script:NodectlPath   = Join-Path ${env:ProgramFiles} 'AksEdge\nodectl.exe'
+$script:NodeLoginPath = Join-Path $env:ProgramData 'wssdagent\nodelogin.yaml'
 function Write-Log {
 param([string]$Message)
 $ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
@@ -270,7 +272,11 @@ param(
 [Parameter(Mandatory)] [string]$Label,
 [Parameter(Mandatory)] [string]$Script
 )
-$childScript = $Script
+$loginPreamble = ''
+if (Test-Path $script:NodectlPath) {
+$loginPreamble = "try { `$loginOut = & '$($script:NodectlPath)' security login --loginpath '$($script:NodeLoginPath)' --identity 2>&1; Write-Output ('[node-login] security login exit=' + `$LASTEXITCODE + ' ' + (`$loginOut -join ' ')) } catch { Write-Output ('[node-login] security login threw: ' + `$_) }`n"
+}
+$childScript = $loginPreamble + $Script
 $bytes   = [System.Text.Encoding]::Unicode.GetBytes($childScript)
 $encoded = [Convert]::ToBase64String($bytes)
 $psExe   = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'

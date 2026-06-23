@@ -73,6 +73,17 @@ $script:ConfigPath   = Join-Path $ConfigDir 'config.json'
 $script:SnapshotPath = Join-Path $ConfigDir 'snapshot.json'
 $script:ProgressPath = Join-Path $ConfigDir 'progress.json'
 
+# MOC node-login paths. nodectl authenticates to the wssdagent node agent with a
+# short-lived (about one hour) login token. Once it lapses, nodectl's mTLS
+# handshake fails with "x509: certificate signed by unknown authority" and every
+# node-dependent AKS EE cmdlet (Start-AksEdgeUpdate's readiness check, the
+# control-plane apply, the Arc check) fails, even though the Kubernetes cluster
+# itself stays healthy. Invoke-ChildAksEeCommand refreshes the token with
+# `nodectl security login --identity` before each cmdlet to keep it current
+# across a long multi-hop run.
+$script:NodectlPath   = Join-Path ${env:ProgramFiles} 'AksEdge\nodectl.exe'
+$script:NodeLoginPath = Join-Path $env:ProgramData 'wssdagent\nodelogin.yaml'
+
 function Write-Log {
     param([string]$Message)
     $ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
@@ -330,7 +341,23 @@ function Invoke-ChildAksEeCommand {
     # The caller's script owns its exit code, translating the AKS EE cmdlet's
     # boolean (or string) return into 0 for success or non-zero for failure. These
     # cmdlets do not set $LASTEXITCODE, so we must not rely on it here.
-    $childScript = $Script
+    #
+    # Refresh the MOC node-login token first. The token has a short (about one
+    # hour) lifetime. Once it lapses, nodectl's handshake to the wssdagent node
+    # agent fails with "x509: certificate signed by unknown authority", and the
+    # AKS EE cmdlet's own nodectl calls fail with it. A fresh `nodectl security
+    # login --identity` re-establishes it. The login is SYSTEM-scoped (it reads
+    # the admin-only nodelogin.yaml), which the child inherits from the SYSTEM
+    # task. Best-effort: the login output is logged for diagnostics and a hiccup
+    # (for example the node VM mid-reboot) does not abort here, so the real cmdlet
+    # still surfaces any genuine failure. Kept as a single-line string, not a
+    # here-string: the minifier trims every line and would corrupt a here-string
+    # body, so worker.ps1 must not contain one.
+    $loginPreamble = ''
+    if (Test-Path $script:NodectlPath) {
+        $loginPreamble = "try { `$loginOut = & '$($script:NodectlPath)' security login --loginpath '$($script:NodeLoginPath)' --identity 2>&1; Write-Output ('[node-login] security login exit=' + `$LASTEXITCODE + ' ' + (`$loginOut -join ' ')) } catch { Write-Output ('[node-login] security login threw: ' + `$_) }`n"
+    }
+    $childScript = $loginPreamble + $Script
     $bytes   = [System.Text.Encoding]::Unicode.GetBytes($childScript)
     $encoded = [Convert]::ToBase64String($bytes)
     $psExe   = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
