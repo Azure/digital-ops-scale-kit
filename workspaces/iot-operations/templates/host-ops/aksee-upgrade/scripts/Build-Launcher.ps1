@@ -100,6 +100,58 @@ function script:Compact-PSSource {
     return ($kept -join "`n")
 }
 
+function script:Compress-InterTokenWhitespace {
+    # Collapse runs of horizontal whitespace (two or more spaces or tabs) that sit
+    # BETWEEN tokens down to a single space, removing the cosmetic alignment padding
+    # the line strip leaves behind (for example `$a    = 1`). Whitespace inside
+    # String and Comment tokens is left untouched: PSParser reports each string
+    # literal, including an expandable string with internal spaces and subexpressions,
+    # as one token. Newlines are preserved, and no separating space is ever inserted
+    # or fully removed, so the result is semantically identical (PowerShell never
+    # requires more than one separating space). Self-verifying: the String and
+    # Comment literals must be byte-identical before and after, or it throws rather
+    # than risk shipping a corrupt minified launcher.
+    param([string]$Source)
+    $errs = $null
+    $toks = [System.Management.Automation.PSParser]::Tokenize($Source, [ref]$errs)
+    if ($errs -and $errs.Count -gt 0) { return $Source }
+
+    $protected = @($toks |
+        Where-Object { $_.Type -eq 'String' -or $_.Type -eq 'Comment' } |
+        ForEach-Object { [pscustomobject]@{ Start = $_.Start; End = $_.Start + $_.Length } } |
+        Sort-Object Start)
+
+    $sb = [System.Text.StringBuilder]::new($Source.Length)
+    $i = 0; $n = $Source.Length; $pIdx = 0
+    while ($i -lt $n) {
+        while ($pIdx -lt $protected.Count -and $protected[$pIdx].End -le $i) { $pIdx++ }
+        if ($pIdx -lt $protected.Count -and $i -ge $protected[$pIdx].Start -and $i -lt $protected[$pIdx].End) {
+            [void]$sb.Append($Source.Substring($i, $protected[$pIdx].End - $i))
+            $i = $protected[$pIdx].End
+            continue
+        }
+        $c = $Source[$i]
+        if ($c -eq ' ' -or $c -eq "`t") {
+            [void]$sb.Append(' ')
+            while ($i -lt $n -and ($Source[$i] -eq ' ' -or $Source[$i] -eq "`t")) { $i++ }
+        } else {
+            [void]$sb.Append($c); $i++
+        }
+    }
+    $result = $sb.ToString()
+
+    $rErrs = $null
+    $rToks = [System.Management.Automation.PSParser]::Tokenize($result, [ref]$rErrs)
+    if ($rErrs -and $rErrs.Count -gt 0) { throw 'Compress-InterTokenWhitespace produced unparseable output. Aborting minify.' }
+    $before = @($toks  | Where-Object { $_.Type -eq 'String' -or $_.Type -eq 'Comment' } | ForEach-Object { $_.Content })
+    $after  = @($rToks | Where-Object { $_.Type -eq 'String' -or $_.Type -eq 'Comment' } | ForEach-Object { $_.Content })
+    if ($before.Count -ne $after.Count) { throw "Compress-InterTokenWhitespace changed the string/comment token count ($($before.Count) -> $($after.Count)). Aborting minify." }
+    for ($k = 0; $k -lt $before.Count; $k++) {
+        if ($before[$k] -ne $after[$k]) { throw "Compress-InterTokenWhitespace altered a string/comment literal ('$($before[$k])' -> '$($after[$k])'). Aborting minify." }
+    }
+    return $result
+}
+
 # The per-file minifier strips leading whitespace and would corrupt here-string
 # bodies. worker.ps1 must not contain a here-string opener. A here-string opener
 # (`@"` or `@'`) is always the last token on its line, so match it anywhere on a
@@ -108,8 +160,12 @@ if ($worker -match "(?m)@['""]\s*$") {
     throw "worker.ps1 contains a here-string opener. The per-file minifier strips leading whitespace and can silently corrupt here-string bodies. Either remove the here-string from worker.ps1 or upgrade Compact-PSSource to skip string tokens."
 }
 
-$minLauncherWrapper = script:Compact-PSSource $template
-$minWorker          = script:Compact-PSSource $worker
+# Strip per-line indentation and blank lines, then collapse the remaining
+# inter-token alignment padding. Run on the template and worker separately, before
+# embedding, so the worker is not yet inside the launcher's here-string (its body
+# would otherwise be one protected String token and escape collapsing).
+$minLauncherWrapper = script:Compress-InterTokenWhitespace (script:Compact-PSSource $template)
+$minWorker          = script:Compress-InterTokenWhitespace (script:Compact-PSSource $worker)
 
 $minified = [regex]::Replace(
     $minLauncherWrapper,

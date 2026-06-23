@@ -4,8 +4,8 @@ param(
 [Parameter(Mandatory)] [string]$ResourceGroup,
 [Parameter(Mandatory)] [string]$Subscription,
 [Parameter(Mandatory)] [string]$RunId,
-[string]$MachineName       = $env:COMPUTERNAME,
-[string]$ConfigDir         = 'C:\ProgramData\siteops\aksee-upgrade',
+[string]$MachineName = $env:COMPUTERNAME,
+[string]$ConfigDir = 'C:\ProgramData\siteops\aksee-upgrade',
 [string]$ScheduledTaskName = 'SiteOpsAksEeUpgrade',
 [string]$AllowKubernetesMinorUpgrade = 'false',
 [string]$TargetKubernetesVersion = '',
@@ -76,11 +76,11 @@ $ProgressPreference = 'SilentlyContinue'
 if ($PSVersionTable.PSEdition -ne 'Desktop') {
 throw "worker.ps1 requires Windows PowerShell 5.1 (Desktop). Detected: $($PSVersionTable.PSEdition) $($PSVersionTable.PSVersion). The AksEdge module runs under powershell.exe."
 }
-$script:StatePath    = Join-Path $ConfigDir 'state.json'
-$script:ConfigPath   = Join-Path $ConfigDir 'config.json'
+$script:StatePath = Join-Path $ConfigDir 'state.json'
+$script:ConfigPath = Join-Path $ConfigDir 'config.json'
 $script:SnapshotPath = Join-Path $ConfigDir 'snapshot.json'
 $script:ProgressPath = Join-Path $ConfigDir 'progress.json'
-$script:NodectlPath   = Join-Path ${env:ProgramFiles} 'AksEdge\nodectl.exe'
+$script:NodectlPath = Join-Path ${env:ProgramFiles} 'AksEdge\nodectl.exe'
 $script:NodeLoginPath = Join-Path $env:ProgramData 'wssdagent\nodelogin.yaml'
 function Write-Log {
 param([string]$Message)
@@ -100,10 +100,10 @@ param(
 [string]$ErrorText
 )
 $state = [pscustomobject]@{
-phase       = $Phase
-status      = $Status
+phase = $Phase
+status = $Status
 lastUpdated = (Get-Date).ToString('o')
-error       = $ErrorText
+error = $ErrorText
 }
 $tmpPath = "$script:StatePath.tmp"
 $state | ConvertTo-Json | Set-Content -Path $tmpPath -Encoding UTF8
@@ -148,9 +148,9 @@ if (Get-Command az -ErrorAction SilentlyContinue) {
 Write-Log 'az CLI already on PATH'
 return
 }
-$msiUrl  = 'https://aka.ms/installazurecliwindowsx64'
+$msiUrl = 'https://aka.ms/installazurecliwindowsx64'
 $msiPath = Join-Path $ConfigDir 'azure-cli.msi'
-$log     = Join-Path $ConfigDir 'az-msiexec.log'
+$log = Join-Path $ConfigDir 'az-msiexec.log'
 Write-Log "az CLI not on PATH. Downloading MSI from $msiUrl"
 Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath -UseBasicParsing
 Assert-MicrosoftSignedFile -Path $msiPath
@@ -267,21 +267,41 @@ return $true
 return $false
 }
 }
+function Test-NodeAgentHealthy {
+[OutputType([bool])]
+param()
+if (-not (Test-Path $script:NodectlPath)) { return $true }
+try { & $script:NodectlPath security login --loginpath $script:NodeLoginPath --identity 2>&1 | Out-Null } catch {}
+$probe = try { (& $script:NodectlPath compute vm list -o tsv 2>&1) | Out-String } catch { "$_" }
+return ($probe -notmatch 'rpc error|tls:|x509|does not exist' -and $probe.Trim().Length -gt 0)
+}
+function Restore-NodeAgent {
+[OutputType([bool])]
+param([int]$MaxRestarts = 2)
+if (Test-NodeAgentHealthy) { return $true }
+for ($i = 1; $i -le $MaxRestarts; $i++) {
+Write-Log "Node agent unreachable (nodectl handshake failing). Restarting wssdagent to re-establish the node certificate chain (attempt $i/$MaxRestarts)."
+try { Restart-Service wssdagent -Force -ErrorAction Stop } catch { Write-Log "Restart-Service wssdagent failed: $_" }
+$deadline = (Get-Date).AddSeconds(120)
+while ((Get-Date) -lt $deadline -and (Get-Service wssdagent -ErrorAction SilentlyContinue).Status -ne 'Running') { Start-Sleep -Seconds 3 }
+Start-Sleep -Seconds 30
+if (Test-NodeAgentHealthy) { Write-Log "Node agent healthy after wssdagent restart (attempt $i)."; return $true }
+}
+Write-Log "Node agent still unreachable after $MaxRestarts wssdagent restart(s)."
+return $false
+}
 function Invoke-ChildAksEeCommand {
 param(
 [Parameter(Mandatory)] [string]$Label,
 [Parameter(Mandatory)] [string]$Script
 )
-$loginPreamble = ''
-if (Test-Path $script:NodectlPath) {
-$loginPreamble = "try { `$loginOut = & '$($script:NodectlPath)' security login --loginpath '$($script:NodeLoginPath)' --identity 2>&1; Write-Output ('[node-login] security login exit=' + `$LASTEXITCODE + ' ' + (`$loginOut -join ' ')) } catch { Write-Output ('[node-login] security login threw: ' + `$_) }`n"
-}
-$childScript = $loginPreamble + $Script
-$bytes   = [System.Text.Encoding]::Unicode.GetBytes($childScript)
+if (Test-Path $script:NodectlPath) { $null = Restore-NodeAgent }
+$childScript = $Script
+$bytes = [System.Text.Encoding]::Unicode.GetBytes($childScript)
 $encoded = [Convert]::ToBase64String($bytes)
-$psExe   = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-$stamp   = Get-Date -Format 'yyyyMMdd-HHmmss'
-$childLog    = Join-Path $ConfigDir ("aksee-{0}-{1}.log" -f $Label, $stamp)
+$psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+$childLog = Join-Path $ConfigDir ("aksee-{0}-{1}.log" -f $Label, $stamp)
 $childErrLog = "$childLog.err"
 Write-Log "Running $Label in child PowerShell. stdout=$childLog stderr=$childErrLog"
 $proc = Start-Process -FilePath $psExe `
@@ -297,7 +317,7 @@ throw "$Label child did not exit within 60 minutes and was killed. Full logs at 
 }
 Write-Log "$Label child exited with code $($proc.ExitCode)"
 if ($proc.ExitCode -ne 0) {
-$tailOut = if (Test-Path $childLog)    { (Get-Content $childLog    -Tail 40 -ErrorAction SilentlyContinue) -join "`n" } else { '' }
+$tailOut = if (Test-Path $childLog) { (Get-Content $childLog -Tail 40 -ErrorAction SilentlyContinue) -join "`n" } else { '' }
 $tailErr = if (Test-Path $childErrLog) { (Get-Content $childErrLog -Tail 40 -ErrorAction SilentlyContinue) -join "`n" } else { '' }
 $err = "$Label exited with code $($proc.ExitCode).`nstdout tail:`n$tailOut`nstderr tail:`n$tailErr`nFull logs at $childLog and $childErrLog."
 if (("$tailOut`n$tailErr") -match 'bootx64\.efi|trident|/EFI/AZLB') {
@@ -327,8 +347,8 @@ if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
 Write-Log 'Skipping upgrade-state tag write: az CLI not installed.'
 return
 }
-$sub  = $config.subscription
-$rg   = $config.resourceGroup
+$sub = $config.subscription
+$rg = $config.resourceGroup
 $name = [string](Get-Prop $config 'machineName' $env:COMPUTERNAME)
 if (-not $name) { $name = $env:COMPUTERNAME }
 if (-not $sub -or -not $rg -or -not $name) {
@@ -338,7 +358,7 @@ return
 $runId = [string](Get-Prop $config 'runId' '')
 $tags = @("siteops.aksee.upgrade.state=$Value", "siteops.aksee.upgrade.runId=$runId")
 if ($AppliedVersion) { $tags += "siteops.aksee.upgrade.appliedVersion=$AppliedVersion" }
-if ($FromVersion)    { $tags += "siteops.aksee.upgrade.fromVersion=$FromVersion" }
+if ($FromVersion) { $tags += "siteops.aksee.upgrade.fromVersion=$FromVersion" }
 $arcId = "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.HybridCompute/machines/$name"
 for ($attempt = 1; $attempt -le 3; $attempt++) {
 $tagOut = & az tag update --resource-id $arcId --operation merge --tags @tags --only-show-errors 2>&1
@@ -355,7 +375,7 @@ function Wait-Until {
 param(
 [Parameter(Mandatory)] [string]$Label,
 [Parameter(Mandatory)] [scriptblock]$Condition,
-[int]$RetrySeconds   = 15,
+[int]$RetrySeconds = 15,
 [int]$TimeoutSeconds = 600
 )
 $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
@@ -412,7 +432,7 @@ param(
 [Parameter(Mandatory)] [string]$CurrentMinor,
 [bool]$AllowMinor
 )
-$fail = [pscustomobject]@{ result = 'failed';   expectedMinor = $null }
+$fail = [pscustomobject]@{ result = 'failed'; expectedMinor = $null }
 $none = [pscustomobject]@{ result = 'noUpdate'; expectedMinor = $null }
 $cacheBase = @('AksEdge', 'AKS-Edge') | ForEach-Object { Join-Path ${env:ProgramFiles} "$_\update-cache" } | Where-Object { Test-Path $_ } | Select-Object -First 1
 if ($cacheBase) {
@@ -427,9 +447,9 @@ if ((Get-Service wuauserv -ErrorAction SilentlyContinue).Status -ne 'Running') {
 try { Start-Service wuauserv } catch { Write-Log "Online stage: could not start wuauserv: $_"; return $fail }
 }
 try {
-$session  = New-Object -ComObject Microsoft.Update.Session
+$session = New-Object -ComObject Microsoft.Update.Session
 $searcher = $session.CreateUpdateSearcher()
-$searcher.ServerSelection = 3                                # ssOthers
+$searcher.ServerSelection = 3 # ssOthers
 $searcher.ServiceID = '7971f918-a847-4430-9279-4a52d1efe18d' # Microsoft Update
 $found = @($searcher.Search('IsInstalled=0 and IsHidden=0').Updates | Where-Object { $_.Title -match 'AKS Edge' })
 } catch { Write-Log "Online stage: Windows Update search failed: $_"; return $fail }
@@ -479,23 +499,23 @@ $nodeCount = Get-NodeCount
 if ($nodeCount -ne 1) {
 throw "Expected a single-node AKS EE cluster, found $nodeCount nodes. This worker supports single-node clusters only."
 }
-$fromK8s      = Get-DeployedK8sVersion
-$fromHost     = Get-AksEeHostVersion
-$aio          = Test-AioPresent
+$fromK8s = Get-DeployedK8sVersion
+$fromHost = Get-AksEeHostVersion
+$aio = Test-AioPresent
 $arcConnected = Test-ArcConnectedChild -Label 'arc-check-pre'
 $snapshot = [pscustomobject]@{
-capturedAt      = (Get-Date).ToString('o')
-fromK8sVersion  = $fromK8s
+capturedAt = (Get-Date).ToString('o')
+fromK8sVersion = $fromK8s
 fromHostVersion = $fromHost
-nodeCount       = $nodeCount
-aioPresent      = $aio
-arcConnected    = $arcConnected
-kubeconfig      = $kubeconfig
+nodeCount = $nodeCount
+aioPresent = $aio
+arcConnected = $arcConnected
+kubeconfig = $kubeconfig
 }
 $snapshot | ConvertTo-Json | Set-Content -Path $script:SnapshotPath -Encoding UTF8
 Write-Log "Snapshot: K8s=$fromK8s hostVersion=$fromHost nodes=$nodeCount aio=$aio arcConnected=$arcConnected"
 $allowMinor = [bool](Get-Prop $config 'allowKubernetesMinorUpgrade' $false)
-$targetRaw  = [string](Get-Prop $config 'targetKubernetesVersion' '')
+$targetRaw = [string](Get-Prop $config 'targetKubernetesVersion' '')
 $normalizedTarget = ''
 if ($targetRaw) {
 $parsed = Get-K8sMinor $targetRaw
@@ -513,14 +533,14 @@ throw "targetKubernetesVersion $normalizedTarget is older than the currently dep
 }
 $maxHops = if ($allowMinor) { 6 } else { 1 }
 $initProgress = [pscustomobject]@{
-hopCount            = 0
-beforeVersion       = ''
-expectedMinor       = ''
-pendingApply        = $false
-verifyOnly          = $false
+hopCount = 0
+beforeVersion = ''
+expectedMinor = ''
+pendingApply = $false
+verifyOnly = $false
 originalFromVersion = if ($fromK8s) { $fromK8s } else { '' }
-target              = $normalizedTarget
-maxHops             = $maxHops
+target = $normalizedTarget
+maxHops = $maxHops
 }
 Set-Progress $initProgress
 Write-Log "Progress initialized: allowMinor=$allowMinor target=$($initProgress.target) maxHops=$maxHops originalFrom=$($initProgress.originalFromVersion)"
@@ -539,8 +559,8 @@ function Invoke-Phase1 {
 param($config)
 Write-Log 'Phase 1: stage one hop'
 $null = Set-WorkerKubeconfig
-$prog       = Get-Progress
-$target     = if ($prog) { [string](Get-Prop $prog 'target' '') } else { '' }
+$prog = Get-Progress
+$target = if ($prog) { [string](Get-Prop $prog 'target' '') } else { '' }
 $allowMinor = [bool](Get-Prop $config 'allowKubernetesMinorUpgrade' $false)
 if ($prog -and [bool](Get-Prop $prog 'pendingApply' $false)) {
 Write-Log 'Phase 1: a staged hop is pending apply (resume). Proceeding to apply.'
@@ -548,7 +568,7 @@ Set-State -Phase 2 -Status 'running'
 Write-Log 'Phase 1: complete'
 return
 }
-$before       = Get-DeployedK8sVersion
+$before = Get-DeployedK8sVersion
 $currentMinor = if ($before) { Get-K8sMinor $before } else { $null }
 if (-not $currentMinor) { throw 'Phase 1: could not read the current deployed Kubernetes version from the cluster.' }
 if ($target -and $currentMinor -eq $target) {
@@ -558,7 +578,7 @@ Set-State -Phase 3 -Status 'running'
 Write-Log 'Phase 1: complete'
 return
 }
-$staged   = $null
+$staged = $null
 $attempts = if ($target) { 4 } else { 1 }
 for ($a = 1; $a -le $attempts; $a++) {
 $staged = Invoke-OnlineStage -CurrentMinor $currentMinor -AllowMinor $allowMinor
@@ -584,7 +604,7 @@ Write-Log "Phase 1: MSI installed from cache. Persisting hop progress (before=$b
 if ($prog) {
 $prog.beforeVersion = if ($before) { $before } else { '' }
 $prog.expectedMinor = [string]$staged.expectedMinor
-$prog.pendingApply  = $true
+$prog.pendingApply = $true
 Set-Progress $prog
 }
 Set-State -Phase 2 -Status 'running'
@@ -635,8 +655,8 @@ Set-State -Phase 99 -Status 'running'
 Write-Log 'Phase 3: complete (verify-only)'
 return
 }
-$before     = if ($prog) { [string](Get-Prop $prog 'beforeVersion' '') } else { '' }
-$expected   = if ($prog) { [string](Get-Prop $prog 'expectedMinor' '') } else { '' }
+$before = if ($prog) { [string](Get-Prop $prog 'beforeVersion' '') } else { '' }
+$expected = if ($prog) { [string](Get-Prop $prog 'expectedMinor' '') } else { '' }
 $allowMinor = [bool](Get-Prop $config 'allowKubernetesMinorUpgrade' $false)
 $afterMinor = Get-K8sMinor $after
 if ($allowMinor -and $expected) {
@@ -650,13 +670,13 @@ throw "Hop did not advance: Kubernetes version stayed $after after the apply."
 }
 }
 if ($prog) {
-$prog.hopCount     = [int](Get-Prop $prog 'hopCount' 0) + 1
+$prog.hopCount = [int](Get-Prop $prog 'hopCount' 0) + 1
 $prog.pendingApply = $false
 Set-Progress $prog
 }
 $hopCount = if ($prog) { [int]$prog.hopCount } else { 1 }
-$target   = if ($prog) { [string](Get-Prop $prog 'target' '') } else { '' }
-$maxHops  = if ($prog) { [int](Get-Prop $prog 'maxHops' 1) } else { 1 }
+$target = if ($prog) { [string](Get-Prop $prog 'target' '') } else { '' }
+$maxHops = if ($prog) { [int](Get-Prop $prog 'maxHops' 1) } else { 1 }
 Write-Log "Hop $hopCount complete. after=$after target=$target maxHops=$maxHops"
 if ($target -and $afterMinor) {
 $cmp = Compare-K8sMinor $afterMinor $target
@@ -685,11 +705,11 @@ function Invoke-Phase99 {
 param($config)
 Write-Log 'Phase 99: finalize'
 Connect-MachineIdentity -config $config
-$snapshot    = if (Test-Path $script:SnapshotPath) { Get-Content -Raw -Path $script:SnapshotPath | ConvertFrom-Json } else { $null }
-$prog        = Get-Progress
+$snapshot = if (Test-Path $script:SnapshotPath) { Get-Content -Raw -Path $script:SnapshotPath | ConvertFrom-Json } else { $null }
+$prog = Get-Progress
 $fromVersion = if ($prog) { [string](Get-Prop $prog 'originalFromVersion' '') } else { '' }
 if (-not $fromVersion) { $fromVersion = [string](Get-Prop $snapshot 'fromK8sVersion' '') }
-$hopCount    = if ($prog) { [int](Get-Prop $prog 'hopCount' 0) } else { 0 }
+$hopCount = if ($prog) { [int](Get-Prop $prog 'hopCount' 0) } else { 0 }
 $appliedVersion = ''
 try {
 $null = Set-WorkerKubeconfig
@@ -740,16 +760,16 @@ Write-Log "State is terminal (phase=$($bootState.phase) status=$($bootState.stat
 return
 }
 while ($true) {
-$state  = Get-State
+$state = Get-State
 $config = Get-Config
 $startPhase = $state.phase
 Write-Log "Resuming at phase=$startPhase status=$($state.status)"
 try {
 switch ($state.phase) {
-0  { Invoke-Phase0  -config $config }
-1  { Invoke-Phase1  -config $config }
-2  { Invoke-Phase2  -config $config }
-3  { Invoke-Phase3  -config $config }
+0 { Invoke-Phase0 -config $config }
+1 { Invoke-Phase1 -config $config }
+2 { Invoke-Phase2 -config $config }
+3 { Invoke-Phase3 -config $config }
 99 { Invoke-Phase99 -config $config }
 default { throw "Unknown phase: $($state.phase)" }
 }
@@ -794,7 +814,7 @@ Write-Log "Created $ConfigDir"
 Set-StrictAcl -Path $ConfigDir
 $workerPath = Join-Path $ConfigDir 'worker.ps1'
 $configPath = Join-Path $ConfigDir 'config.json'
-$statePath  = Join-Path $ConfigDir 'state.json'
+$statePath = Join-Path $ConfigDir 'state.json'
 if ((Test-Path $statePath) -and -not $Force) {
 $existingPhase = $null
 $existingStatus = $null
@@ -815,21 +835,21 @@ Set-Content -Path $workerPath -Value $EmbeddedWorker -Encoding UTF8
 Write-Log "Wrote $workerPath"
 Write-Log 'Worker task will run as NT AUTHORITY\SYSTEM'
 $config = [pscustomobject]@{
-resourceGroup               = $ResourceGroup
-subscription                = $Subscription
-machineName                 = $MachineName
-runId                       = $RunId
+resourceGroup = $ResourceGroup
+subscription = $Subscription
+machineName = $MachineName
+runId = $RunId
 allowKubernetesMinorUpgrade = ($AllowKubernetesMinorUpgrade -ieq 'true')
-targetKubernetesVersion     = $TargetKubernetesVersion
-scheduledTaskName           = $ScheduledTaskName
+targetKubernetesVersion = $TargetKubernetesVersion
+scheduledTaskName = $ScheduledTaskName
 }
 $config | ConvertTo-Json | Set-Content -Path $configPath -Encoding UTF8
 Write-Log "Wrote $configPath (auth=managed identity)"
 $initialState = [pscustomobject]@{
-phase       = 0
-status      = 'running'
+phase = 0
+status = 'running'
 lastUpdated = (Get-Date).ToString('o')
-error       = $null
+error = $null
 }
 $initialStateTmp = "$statePath.tmp"
 $initialState | ConvertTo-Json | Set-Content -Path $initialStateTmp -Encoding UTF8
@@ -840,7 +860,7 @@ $action = New-ScheduledTaskAction `
 -Execute 'powershell.exe' `
 -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$workerPath`" -ConfigDir `"$ConfigDir`""
 $startupTrigger = New-ScheduledTaskTrigger -AtStartup
-$onceTrigger    = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddSeconds(30))
+$onceTrigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddSeconds(30))
 $principal = New-ScheduledTaskPrincipal `
 -UserId 'NT AUTHORITY\SYSTEM' `
 -LogonType ServiceAccount `

@@ -327,6 +327,48 @@ function Test-NodesReady {
     }
 }
 
+function Test-NodeAgentHealthy {
+    # True when nodectl can reach the wssdagent node agent. Refreshes the MOC node
+    # login first (its token lapses after about an hour), then probes with
+    # `compute vm list`. nodectl runs directly in the worker, which is SYSTEM, the
+    # context the node login requires. Native-exe stderr does not trip the worker's
+    # strict error mode, so a direct call is safe here (unlike the AksEdge cmdlets).
+    [OutputType([bool])]
+    param()
+    if (-not (Test-Path $script:NodectlPath)) { return $true }
+    try { & $script:NodectlPath security login --loginpath $script:NodeLoginPath --identity 2>&1 | Out-Null } catch {}
+    $probe = try { (& $script:NodectlPath compute vm list -o tsv 2>&1) | Out-String } catch { "$_" }
+    return ($probe -notmatch 'rpc error|tls:|x509|does not exist' -and $probe.Trim().Length -gt 0)
+}
+
+function Restore-NodeAgent {
+    # Ensure the MOC node path (nodectl -> wssdagent) is healthy before a
+    # node-dependent AKS EE cmdlet. Two distinct failures occur. A lapsed node
+    # login fails with "x509: certificate signed by unknown authority" (the client
+    # not trusting the agent), which the re-login in Test-NodeAgentHealthy fixes.
+    # Staging an AKS EE update through Windows Update perturbs the wssdagent
+    # node-agent certificates, after which nodectl fails with "tls: bad certificate"
+    # (the agent rejecting the client) and a re-login alone does NOT recover it;
+    # restarting wssdagent re-establishes a consistent certificate chain, the same
+    # way a host reboot does. Probe first so a healthy agent is left untouched, then
+    # restart and re-probe across a bounded number of attempts. Returns the final
+    # health so the caller can still attempt the cmdlet (its error is the source of
+    # truth) rather than abort here.
+    [OutputType([bool])]
+    param([int]$MaxRestarts = 2)
+    if (Test-NodeAgentHealthy) { return $true }
+    for ($i = 1; $i -le $MaxRestarts; $i++) {
+        Write-Log "Node agent unreachable (nodectl handshake failing). Restarting wssdagent to re-establish the node certificate chain (attempt $i/$MaxRestarts)."
+        try { Restart-Service wssdagent -Force -ErrorAction Stop } catch { Write-Log "Restart-Service wssdagent failed: $_" }
+        $deadline = (Get-Date).AddSeconds(120)
+        while ((Get-Date) -lt $deadline -and (Get-Service wssdagent -ErrorAction SilentlyContinue).Status -ne 'Running') { Start-Sleep -Seconds 3 }
+        Start-Sleep -Seconds 30
+        if (Test-NodeAgentHealthy) { Write-Log "Node agent healthy after wssdagent restart (attempt $i)."; return $true }
+    }
+    Write-Log "Node agent still unreachable after $MaxRestarts wssdagent restart(s)."
+    return $false
+}
+
 function Invoke-ChildAksEeCommand {
     # Run an AksEdge cmdlet in a fresh child powershell.exe. The AKS EE module
     # resets $ErrorActionPreference='Stop' in its own scope, turning the native
@@ -338,26 +380,17 @@ function Invoke-ChildAksEeCommand {
         [Parameter(Mandatory)] [string]$Label,
         [Parameter(Mandatory)] [string]$Script
     )
+    # Ensure the node path is healthy before the cmdlet. This refreshes the MOC
+    # node login (a fix for a lapsed token) and restarts wssdagent if a staging
+    # perturbation left the agent rejecting nodectl. The login it performs writes
+    # the shared nodelogin.yaml, which the child cmdlet's own nodectl calls read,
+    # so the child inherits the refreshed credential. Best-effort: a still-unhealthy
+    # agent does not abort here, so the cmdlet runs and surfaces the genuine error.
+    if (Test-Path $script:NodectlPath) { $null = Restore-NodeAgent }
     # The caller's script owns its exit code, translating the AKS EE cmdlet's
     # boolean (or string) return into 0 for success or non-zero for failure. These
     # cmdlets do not set $LASTEXITCODE, so we must not rely on it here.
-    #
-    # Refresh the MOC node-login token first. The token has a short (about one
-    # hour) lifetime. Once it lapses, nodectl's handshake to the wssdagent node
-    # agent fails with "x509: certificate signed by unknown authority", and the
-    # AKS EE cmdlet's own nodectl calls fail with it. A fresh `nodectl security
-    # login --identity` re-establishes it. The login is SYSTEM-scoped (it reads
-    # the admin-only nodelogin.yaml), which the child inherits from the SYSTEM
-    # task. Best-effort: the login output is logged for diagnostics and a hiccup
-    # (for example the node VM mid-reboot) does not abort here, so the real cmdlet
-    # still surfaces any genuine failure. Kept as a single-line string, not a
-    # here-string: the minifier trims every line and would corrupt a here-string
-    # body, so worker.ps1 must not contain one.
-    $loginPreamble = ''
-    if (Test-Path $script:NodectlPath) {
-        $loginPreamble = "try { `$loginOut = & '$($script:NodectlPath)' security login --loginpath '$($script:NodeLoginPath)' --identity 2>&1; Write-Output ('[node-login] security login exit=' + `$LASTEXITCODE + ' ' + (`$loginOut -join ' ')) } catch { Write-Output ('[node-login] security login threw: ' + `$_) }`n"
-    }
-    $childScript = $loginPreamble + $Script
+    $childScript = $Script
     $bytes   = [System.Text.Encoding]::Unicode.GetBytes($childScript)
     $encoded = [Convert]::ToBase64String($bytes)
     $psExe   = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
@@ -779,10 +812,13 @@ function Invoke-Phase1 {
 
     switch ($staged.result) {
         'staged' {
-            # Install the staged MSI from update-cache. The node-management agent can
-            # be briefly unreachable right after staging (a transient nodectl or
-            # wssdagent error), so retry across a short settling window. The cache
-            # persists and the cmdlet resets updateState on failure, so a retry is safe.
+            # Install the staged MSI from update-cache. Invoke-ChildAksEeCommand
+            # restores the node agent before each attempt: staging an update through
+            # Windows Update perturbs the wssdagent certificates, so the first
+            # install would otherwise fail with "tls: bad certificate". The recovery
+            # restarts wssdagent to re-establish trust. Retry across a short window
+            # because the cache persists and the cmdlet resets updateState on
+            # failure, so a retry is safe.
             $ok = $false
             for ($a = 1; $a -le 4 -and -not $ok; $a++) {
                 try {
