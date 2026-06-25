@@ -31,10 +31,11 @@ description: |
 
   Prerequisites per target VM (one-time):
     - An AKS EE single-node cluster is already deployed and Arc-connected.
-    - The Arc machine system-assigned managed identity has access on the
-      resource group (the worker authenticates as it for the verification and
-      the tag write). Use `Contributor`, or `Kubernetes Cluster - Azure Arc
-      Onboarding` plus `Tag Contributor` for least privilege.
+    - The Arc machine system-assigned managed identity can write tags on the Arc
+      machine resource (`Microsoft.Resources/tags/write`, via `Tag Contributor`
+      scoped to the machine or its resource group, or `Contributor`). The worker
+      uses it only for the completion tag. The verification runs on-box. A VM
+      bootstrapped by `host-bootstrap/aksee` already holds a broader grant.
 
 # Max concurrent sites. 0 = unlimited, 1 = serial.
 parallel: 3

@@ -74,16 +74,22 @@ early.
 
 1. **An AKS EE single-node cluster is already deployed and Arc-connected** on
    the target VM (for example by the `host-bootstrap/aksee` bootstrap).
-2. **The Arc machine's system-assigned managed identity has a role on the
-   resource group.** The worker authenticates as this identity for the
-   post-upgrade verification and the completion tag. There is no service
-   principal fallback. Grant `Contributor` (simplest), or `Kubernetes Cluster -
-   Azure Arc Onboarding` plus `Tag Contributor` (for the
-   `Microsoft.Resources/tags/write` the tag needs) for least privilege.
+2. **The Arc machine's system-assigned managed identity can write tags on the
+   Arc machine resource.** The worker authenticates as this identity only to write
+   the completion tag. The post-upgrade verification runs on-box through AKS EE
+   cmdlets (`Test-AksEdgeArcConnection`) and `kubectl`, so it needs no Azure
+   permission. There is no service principal fallback. The single permission the
+   upgrade needs is `Microsoft.Resources/tags/write` on the Arc machine resource,
+   granted by `Tag Contributor` scoped to the machine or its resource group.
+   `Contributor` also works. A VM bootstrapped by `host-bootstrap/aksee` already
+   holds a broader grant (it Arc-connected the cluster), so no extra assignment is
+   needed there.
 
 ```bash
-ARC_PRINCIPAL_ID=$(az resource show -g <rg> -n <vm-name> --resource-type Microsoft.HybridCompute/machines --query "identity.principalId" -o tsv)
-az role assignment create --assignee-object-id $ARC_PRINCIPAL_ID --assignee-principal-type ServicePrincipal --role "Contributor" --scope "/subscriptions/<sub>/resourceGroups/<rg>"
+ARC_ID=$(az resource show -g <rg> -n <vm-name> --resource-type Microsoft.HybridCompute/machines --query id -o tsv)
+PRINCIPAL_ID=$(az resource show --ids "$ARC_ID" --query "identity.principalId" -o tsv)
+# Least privilege: Tag Contributor scoped to the Arc machine resource.
+az role assignment create --assignee-object-id $PRINCIPAL_ID --assignee-principal-type ServicePrincipal --role "Tag Contributor" --scope "$ARC_ID"
 ```
 
 3. **The host can reach Microsoft Update with the Microsoft Update opt-in

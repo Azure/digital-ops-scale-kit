@@ -21,11 +21,14 @@
 // Prerequisites on the target VM (one-time per VM, outside this Bicep):
 //   1. An AKS Edge Essentials single-node cluster is already deployed and
 //      Arc-connected (e.g., by the host-bootstrap/aksee bootstrap).
-//   2. The Arc machine's system-assigned managed identity has access on the
-//      resource group. The worker authenticates as this identity for the
-//      post-upgrade verification and the completion tag. No service principal is
-//      used. Use `Contributor` (simplest), or `Kubernetes Cluster - Azure Arc
-//      Onboarding` plus `Tag Contributor` for least privilege.
+//   2. The Arc machine's system-assigned managed identity can write tags on the
+//      Arc machine resource. The worker uses it only for the completion tag. The
+//      post-upgrade verification runs on-box (Test-AksEdgeArcConnection, kubectl)
+//      and needs no Azure permission. No service principal is used. The single
+//      permission is `Microsoft.Resources/tags/write` on the Arc machine resource,
+//      via `Tag Contributor` scoped to the machine or its resource group, or
+//      `Contributor`. A VM bootstrapped by host-bootstrap/aksee already holds a
+//      broader resource-group grant, so no extra assignment is needed there.
 //
 // Usage as a scalekit step:
 //   - name: aksee-upgrade
