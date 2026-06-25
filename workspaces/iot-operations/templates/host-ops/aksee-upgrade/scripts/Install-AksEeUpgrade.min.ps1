@@ -28,17 +28,21 @@ $id = [System.Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object System.Security.Principal.WindowsPrincipal($id)
 return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
 }
+function Invoke-IcaclsOrThrow {
+param([string[]]$IcaclsArgs)
+$out = & icacls @IcaclsArgs 2>&1
+if ($LASTEXITCODE -ne 0) { throw "icacls $($IcaclsArgs -join ' ') failed (exit ${LASTEXITCODE}): $out" }
+}
 function Set-StrictAcl {
 param([string]$Path)
-$inheritOut = & icacls $Path /inheritance:r 2>&1
-if ($LASTEXITCODE -ne 0) {
-throw "icacls /inheritance:r failed on ${Path} with exit ${LASTEXITCODE}: $inheritOut"
+Invoke-IcaclsOrThrow @($Path, '/setowner', 'Administrators')
+Invoke-IcaclsOrThrow @($Path, '/inheritance:r')
+Invoke-IcaclsOrThrow @($Path, '/grant', 'Administrators:(OI)(CI)F', 'SYSTEM:(OI)(CI)F')
+$ownerSid = ((Get-Acl -Path $Path).GetOwner([System.Security.Principal.SecurityIdentifier])).Value
+if ($ownerSid -notin @('S-1-5-32-544', 'S-1-5-18')) {
+throw "Refusing to use ${Path}: owner SID '$ownerSid' is not Administrators or SYSTEM after hardening."
 }
-$grantOut = & icacls $Path /grant 'Administrators:(OI)(CI)F' 'SYSTEM:(OI)(CI)F' 2>&1
-if ($LASTEXITCODE -ne 0) {
-throw "icacls /grant failed on ${Path} with exit ${LASTEXITCODE}: $grantOut"
-}
-Write-Log "Locked ACLs on $Path to Administrators + SYSTEM"
+Write-Log "Locked ACLs and reclaimed ownership on $Path"
 }
 function Set-RunningTag {
 param([string]$Subscription, [string]$ResourceGroup, [string]$MachineName, [string]$RunId)
@@ -103,9 +107,7 @@ status = $Status
 lastUpdated = (Get-Date).ToString('o')
 error = $ErrorText
 }
-$tmpPath = "$script:StatePath.tmp"
-$state | ConvertTo-Json | Set-Content -Path $tmpPath -Encoding UTF8
-Move-Item -Path $tmpPath -Destination $script:StatePath -Force
+Write-JsonAtomic $state $script:StatePath
 }
 function Get-Config {
 if (-not (Test-Path $script:ConfigPath)) {
@@ -117,6 +119,27 @@ function Get-Prop {
 param($Obj, [string]$Name, $Default = $null)
 if ($null -ne $Obj -and $Obj.PSObject.Properties.Name -contains $Name) { return $Obj.$Name }
 return $Default
+}
+function Write-JsonAtomic {
+param([Parameter(Mandatory)] $Object, [Parameter(Mandatory)] [string]$Path)
+$tmp = "$Path.tmp"
+$Object | ConvertTo-Json | Set-Content -Path $tmp -Encoding UTF8
+Move-Item -Path $tmp -Destination $Path -Force
+}
+function Read-JsonOrNull {
+param([Parameter(Mandatory)] [string]$Path)
+if (Test-Path $Path) { Get-Content -Raw -Path $Path | ConvertFrom-Json } else { $null }
+}
+function Clear-AzTokenCache {
+if ($env:AZURE_CONFIG_DIR -and (Test-Path $env:AZURE_CONFIG_DIR)) {
+Remove-Item -Path $env:AZURE_CONFIG_DIR -Recurse -Force -ErrorAction SilentlyContinue
+Write-Log "Removed az token cache at $env:AZURE_CONFIG_DIR"
+}
+}
+function Get-NodesObj {
+$json = Invoke-Kubectl @('get', 'nodes', '-o', 'json')
+if ($LASTEXITCODE -ne 0) { return $null }
+try { return ($json -join "`n") | ConvertFrom-Json } catch { return $null }
 }
 function Test-IsAdmin {
 $id = [System.Security.Principal.WindowsIdentity]::GetCurrent()
@@ -191,9 +214,7 @@ $lastErr = "az login --identity failed: $loginOut"
 $lastErr = "az invocation error: $_"
 }
 Write-Log "Managed-identity auth attempt $a/6 failed: $lastErr"
-if ($env:AZURE_CONFIG_DIR -and (Test-Path $env:AZURE_CONFIG_DIR)) {
-Remove-Item -Path $env:AZURE_CONFIG_DIR -Recurse -Force -ErrorAction SilentlyContinue
-}
+Clear-AzTokenCache
 if ($a -lt 6) { Start-Sleep -Seconds 30 }
 }
 throw "Managed-identity authentication failed after 6 attempts: $lastErr. Ensure the Arc machine identity has a role on the resource group (Contributor, or Kubernetes Cluster - Azure Arc Onboarding plus Tag Contributor) and that the Connected Machine Agent is running."
@@ -223,10 +244,9 @@ $exe = if ($env:KUBECTL_CLIENT_PATH -and (Test-Path $env:KUBECTL_CLIENT_PATH)) {
 return & $exe @KubectlArgs --request-timeout=10s 2>&1
 }
 function Get-DeployedK8sVersion {
-$json = Invoke-Kubectl @('get', 'nodes', '-o', 'json')
-if ($LASTEXITCODE -ne 0) { return $null }
+$obj = Get-NodesObj
+if ($null -eq $obj) { return $null }
 try {
-$obj = ($json -join "`n") | ConvertFrom-Json
 $node = $obj.items | Select-Object -First 1
 return $node.status.nodeInfo.kubeletVersion
 } catch {
@@ -234,14 +254,9 @@ return $null
 }
 }
 function Get-NodeCount {
-$json = Invoke-Kubectl @('get', 'nodes', '-o', 'json')
-if ($LASTEXITCODE -ne 0) { return 0 }
-try {
-$obj = ($json -join "`n") | ConvertFrom-Json
-return @($obj.items).Count
-} catch {
-return 0
-}
+$obj = Get-NodesObj
+if ($null -eq $obj) { return 0 }
+try { return @($obj.items).Count } catch { return 0 }
 }
 function Test-AioPresent {
 $null = Invoke-Kubectl @('get', 'namespace', 'azure-iot-operations')
@@ -250,10 +265,9 @@ return $LASTEXITCODE -eq 0
 function Test-NodesReady {
 $ready = Invoke-Kubectl @('get', '--raw=/readyz')
 if ($LASTEXITCODE -ne 0 -or (($ready -join '').Trim() -ne 'ok')) { return $false }
-$json = Invoke-Kubectl @('get', 'nodes', '-o', 'json')
-if ($LASTEXITCODE -ne 0) { return $false }
+$obj = Get-NodesObj
+if ($null -eq $obj) { return $false }
 try {
-$obj = ($json -join "`n") | ConvertFrom-Json
 $nodes = @($obj.items)
 if ($nodes.Count -lt 1) { return $false }
 foreach ($n in $nodes) {
@@ -395,14 +409,11 @@ $script = "Import-Module AksEdge -Force; `$r = @(Set-AksEdgeUpgrade -AcceptUpgra
 Invoke-ChildAksEeCommand -Label 'set-accept-upgrade' -Script $script | Out-Null
 }
 function Get-Progress {
-if (-not (Test-Path $script:ProgressPath)) { return $null }
-return Get-Content -Raw -Path $script:ProgressPath | ConvertFrom-Json
+return Read-JsonOrNull $script:ProgressPath
 }
 function Set-Progress {
 param([Parameter(Mandatory)] [pscustomobject]$Progress)
-$tmpPath = "$script:ProgressPath.tmp"
-$Progress | ConvertTo-Json | Set-Content -Path $tmpPath -Encoding UTF8
-Move-Item -Path $tmpPath -Destination $script:ProgressPath -Force
+Write-JsonAtomic $Progress $script:ProgressPath
 }
 function Invoke-OnlineStage {
 param(
@@ -416,8 +427,12 @@ if ($cacheBase) {
 $msi = Get-ChildItem $cacheBase -Filter '*.msi' -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($msi -and $msi.Name -match 'k3s-?(\d+)\.(\d+)') {
 $m = "$($matches[1]).$($matches[2])"
+$reusable = if ($AllowMinor) { (Compare-K8sMinor $m $CurrentMinor) -gt 0 } else { $m -eq $CurrentMinor }
+if ($reusable) {
 Write-Log "Online stage: reusing staged package '$($msi.Name)' (k3s $m). Skipping the Windows Update search."
 return [pscustomobject]@{ result = 'staged'; expectedMinor = $m }
+}
+Write-Log "Online stage: cached '$($msi.Name)' (k3s $m) is not a valid next step from $CurrentMinor. Searching Windows Update."
 }
 }
 if ((Get-Service wuauserv -ErrorAction SilentlyContinue).Status -ne 'Running') {
@@ -439,7 +454,7 @@ Write-Log "Online stage: offered AKS updates carry no parseable k3s version: $($
 return $fail
 }
 if ($AllowMinor) {
-$sel = @($cands | Where-Object { (Compare-K8sMinor $_.minor $CurrentMinor) -gt 0 } | Sort-Object { [int]($_.minor.Split('.')[1]) })
+$sel = @($cands | Where-Object { (Compare-K8sMinor $_.minor $CurrentMinor) -gt 0 } | Sort-Object { [int]($_.minor.Split('.')[0]) }, { [int]($_.minor.Split('.')[1]) })
 } else {
 $sel = @($cands | Where-Object { $_.minor -eq $CurrentMinor })
 }
@@ -489,7 +504,7 @@ aioPresent = $aio
 arcConnected = $arcConnected
 kubeconfig = $kubeconfig
 }
-$snapshot | ConvertTo-Json | Set-Content -Path $script:SnapshotPath -Encoding UTF8
+Write-JsonAtomic $snapshot $script:SnapshotPath
 Write-Log "Snapshot: K8s=$fromK8s hostVersion=$fromHost nodes=$nodeCount aio=$aio arcConnected=$arcConnected"
 $allowMinor = [bool](Get-Prop $config 'allowKubernetesMinorUpgrade' $false)
 $targetRaw = [string](Get-Prop $config 'targetKubernetesVersion' '')
@@ -650,6 +665,15 @@ $beforeMinor = Get-K8sMinor $before
 if ($beforeMinor -and $afterMinor -and (Compare-K8sMinor $afterMinor $beforeMinor) -le 0) {
 throw "Hop did not advance: Kubernetes version stayed $after after the apply."
 }
+} elseif (-not $allowMinor -and $before) {
+$snap = Read-JsonOrNull $script:SnapshotPath
+$beforeHost = [string](Get-Prop $snap 'fromHostVersion' '')
+$afterHost = [string](Get-AksEeHostVersion)
+if ($after -eq $before -and $afterHost -eq $beforeHost) {
+Write-Log "WARNING: patch apply changed neither Kubernetes ($after) nor AKS EE host ($afterHost) version. The host may already be current."
+} else {
+Write-Log "Patch applied: Kubernetes $before -> $after, AKS EE host $beforeHost -> $afterHost."
+}
 }
 if ($prog) {
 $prog.hopCount = [int](Get-Prop $prog 'hopCount' 0) + 1
@@ -687,7 +711,7 @@ function Invoke-Phase99 {
 param($config)
 Write-Log 'Phase 99: finalize'
 Connect-MachineIdentity -config $config
-$snapshot = if (Test-Path $script:SnapshotPath) { Get-Content -Raw -Path $script:SnapshotPath | ConvertFrom-Json } else { $null }
+$snapshot = Read-JsonOrNull $script:SnapshotPath
 $prog = Get-Progress
 $fromVersion = if ($prog) { [string](Get-Prop $prog 'originalFromVersion' '') } else { '' }
 if (-not $fromVersion) { $fromVersion = [string](Get-Prop $snapshot 'fromK8sVersion' '') }
@@ -712,10 +736,7 @@ Write-UpgradeStateTag -config $config -Value 'succeeded' -AppliedVersion $applie
 } catch {
 Write-Log "WARNING: tag write helper threw: $_. Non-fatal."
 }
-if ($env:AZURE_CONFIG_DIR -and (Test-Path $env:AZURE_CONFIG_DIR)) {
-Remove-Item -Path $env:AZURE_CONFIG_DIR -Recurse -Force -ErrorAction SilentlyContinue
-Write-Log "Removed az token cache at $env:AZURE_CONFIG_DIR"
-}
+Clear-AzTokenCache
 Set-State -Phase 99 -Status 'succeeded'
 $taskName = [string](Get-Prop $config 'scheduledTaskName' '')
 if ($taskName) {
@@ -795,7 +816,16 @@ if (-not (Test-IsAdmin)) {
 throw 'Install-AksEeUpgrade.ps1 must run as Administrator.'
 }
 Write-Log "Preparing AKS EE patch update on $MachineName in $ResourceGroup (runId=$RunId)"
-if (-not (Test-Path $ConfigDir)) {
+if (Test-Path $ConfigDir) {
+$existing = Get-Item -LiteralPath $ConfigDir -Force
+if ($existing.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+throw "Refusing to use ${ConfigDir}: it is a reparse point (possible pre-creation by a non-admin)."
+}
+$existingOwner = ((Get-Acl -LiteralPath $ConfigDir).GetOwner([System.Security.Principal.SecurityIdentifier])).Value
+if ($existingOwner -notin @('S-1-5-32-544', 'S-1-5-18')) {
+throw "Refusing to use ${ConfigDir}: pre-existing owner SID '$existingOwner' is not Administrators or SYSTEM (possible pre-creation by a non-admin)."
+}
+} else {
 New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null
 Write-Log "Created $ConfigDir"
 }

@@ -1,6 +1,6 @@
-# AKS Edge Essentials patch update (host-ops)
+# AKS Edge Essentials upgrade (host-ops)
 
-In-place patch update of an existing single-node AKS Edge Essentials cluster,
+In-place upgrade of an existing single-node AKS Edge Essentials cluster,
 delivered remotely from Azure via an Arc Run Command. It mirrors the host
 bootstrap's runCommand-worker pattern because AKS EE has no cloud-driven upgrade
 channel: the only way to drive an upgrade remotely is to invoke the on-box
@@ -13,7 +13,8 @@ at [`../../host-bootstrap/aksee/README.md`](../../host-bootstrap/aksee/README.md
 
 ## Scope
 
-Two upgrade modes are supported, selected by `allowKubernetesMinorUpgrade` in the site config:
+Two upgrade modes are supported, selected by `allowAkseeMinorUpgrade` under
+`deployOptions` in the site config:
 
 **Patch mode** (default, `false`): applies AKS EE patch updates within the
 current Kubernetes minor version on a single-node cluster. `AcceptUpgrade`
@@ -46,8 +47,8 @@ cluster runs it.
 
 The upgrade is delivered as a `Microsoft.HybridCompute/machines/runCommands`
 resource that inlines the minified launcher. The Connected Machine Agent runs
-the launcher, which registers a Scheduled Task (running as `NT AUTHORITY\SYSTEM`
-by default) that drives the worker, then returns `REGISTERED` (~90 seconds). The
+the launcher, which registers a Scheduled Task (running as `NT AUTHORITY\SYSTEM`)
+that drives the worker, then returns `REGISTERED` (~90 seconds). The
 worker runs asynchronously:
 
 | Phase | What it does | Inner reboot |
@@ -126,9 +127,10 @@ siteops -w workspaces/iot-operations deploy manifests/aksee-upgrade.yaml -l name
 ```
 
 The deploy blocks on the wait step until the worker reaches its terminal state,
-so a green deploy means the patch update applied and verified, and a failed
+so a green deploy means the upgrade applied and verified, and a failed
 deploy carries the tag value that failed (`failed-phase-N` or
-`failed-needs-remediation`).
+`failed-needs-remediation`). Minor-mode multi-hop runs take longer, so the
+manifest's wait step allows up to 240 minutes.
 
 ## Monitor
 

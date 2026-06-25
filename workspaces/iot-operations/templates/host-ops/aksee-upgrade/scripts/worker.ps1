@@ -98,11 +98,7 @@ function Set-State {
         lastUpdated = (Get-Date).ToString('o')
         error       = $ErrorText
     }
-    # Atomic write: serialize to a sibling .tmp then Move-Item (atomic on NTFS),
-    # so a concurrent reader never sees truncated JSON.
-    $tmpPath = "$script:StatePath.tmp"
-    $state | ConvertTo-Json | Set-Content -Path $tmpPath -Encoding UTF8
-    Move-Item -Path $tmpPath -Destination $script:StatePath -Force
+    Write-JsonAtomic $state $script:StatePath
 }
 
 function Get-Config {
@@ -117,6 +113,39 @@ function Get-Prop {
     param($Obj, [string]$Name, $Default = $null)
     if ($null -ne $Obj -and $Obj.PSObject.Properties.Name -contains $Name) { return $Obj.$Name }
     return $Default
+}
+
+function Write-JsonAtomic {
+    # Atomic JSON write so a concurrent reader never sees truncated JSON: serialize to
+    # a sibling .tmp then Move-Item (atomic on NTFS).
+    param([Parameter(Mandatory)] $Object, [Parameter(Mandatory)] [string]$Path)
+    $tmp = "$Path.tmp"
+    $Object | ConvertTo-Json | Set-Content -Path $tmp -Encoding UTF8
+    Move-Item -Path $tmp -Destination $Path -Force
+}
+
+function Read-JsonOrNull {
+    # Read and parse a JSON file. Returns $null when the file does not exist.
+    param([Parameter(Mandatory)] [string]$Path)
+    if (Test-Path $Path) { Get-Content -Raw -Path $Path | ConvertFrom-Json } else { $null }
+}
+
+function Clear-AzTokenCache {
+    # Remove the scoped az token cache when present. Used on an auth retry to clear
+    # partial state and in Phase 99 cleanup.
+    if ($env:AZURE_CONFIG_DIR -and (Test-Path $env:AZURE_CONFIG_DIR)) {
+        Remove-Item -Path $env:AZURE_CONFIG_DIR -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Log "Removed az token cache at $env:AZURE_CONFIG_DIR"
+    }
+}
+
+function Get-NodesObj {
+    # Run `kubectl get nodes -o json` and parse it. Returns the parsed object, or $null
+    # when the call fails or the output is not valid JSON. Callers guard their own
+    # property-chain reads to stay StrictMode-safe.
+    $json = Invoke-Kubectl @('get', 'nodes', '-o', 'json')
+    if ($LASTEXITCODE -ne 0) { return $null }
+    try { return ($json -join "`n") | ConvertFrom-Json } catch { return $null }
 }
 
 function Test-IsAdmin {
@@ -183,11 +212,11 @@ function Connect-MachineIdentity {
     # Authenticate as the Arc machine's system-assigned managed identity. HIMDS
     # only releases the token to a local administrator, which the SYSTEM task
     # satisfies. Refresh the HIMDS endpoints from Machine scope in case a fresh
-    # worker process did not inherit them. Retry the login: right after a host
-    # reboot (the at-startup resume path) HIMDS can be slow to come up, and a
-    # partial token cache from an interrupted run can make az fail, so reset the
-    # scoped cache between attempts. The az calls are wrapped because az can
-    # surface a transient failure as a terminating error under the strict settings.
+    # worker process did not inherit them. Retry the login: after a host reboot
+    # (the at-startup resume path) HIMDS can be slow to come up, and a partial
+    # token cache from an interrupted run can make az fail, so reset the scoped
+    # cache between attempts. Wrap the az calls because az can surface a transient
+    # failure as a terminating error under the strict settings.
     param($config)
     foreach ($name in @('IDENTITY_ENDPOINT', 'IMDS_ENDPOINT')) {
         if (-not [Environment]::GetEnvironmentVariable($name)) {
@@ -214,9 +243,7 @@ function Connect-MachineIdentity {
         Write-Log "Managed-identity auth attempt $a/6 failed: $lastErr"
         # Reset the scoped token cache so a partial or corrupt state from an
         # interrupted run does not poison the retry, then let HIMDS settle.
-        if ($env:AZURE_CONFIG_DIR -and (Test-Path $env:AZURE_CONFIG_DIR)) {
-            Remove-Item -Path $env:AZURE_CONFIG_DIR -Recurse -Force -ErrorAction SilentlyContinue
-        }
+        Clear-AzTokenCache
         if ($a -lt 6) { Start-Sleep -Seconds 30 }
     }
     throw "Managed-identity authentication failed after 6 attempts: $lastErr. Ensure the Arc machine identity has a role on the resource group (Contributor, or Kubernetes Cluster - Azure Arc Onboarding plus Tag Contributor) and that the Connected Machine Agent is running."
@@ -264,10 +291,9 @@ function Get-DeployedK8sVersion {
     # Source-of-truth version: the Kubernetes version reported by the control
     # plane node, NOT the host AKS EE module version. Returns e.g. 'v1.30.6+k3s1'
     # or $null when unreadable.
-    $json = Invoke-Kubectl @('get', 'nodes', '-o', 'json')
-    if ($LASTEXITCODE -ne 0) { return $null }
+    $obj = Get-NodesObj
+    if ($null -eq $obj) { return $null }
     try {
-        $obj = ($json -join "`n") | ConvertFrom-Json
         $node = $obj.items | Select-Object -First 1
         return $node.status.nodeInfo.kubeletVersion
     } catch {
@@ -276,14 +302,9 @@ function Get-DeployedK8sVersion {
 }
 
 function Get-NodeCount {
-    $json = Invoke-Kubectl @('get', 'nodes', '-o', 'json')
-    if ($LASTEXITCODE -ne 0) { return 0 }
-    try {
-        $obj = ($json -join "`n") | ConvertFrom-Json
-        return @($obj.items).Count
-    } catch {
-        return 0
-    }
+    $obj = Get-NodesObj
+    if ($null -eq $obj) { return 0 }
+    try { return @($obj.items).Count } catch { return 0 }
 }
 
 function Test-AioPresent {
@@ -300,10 +321,9 @@ function Test-NodesReady {
     # not Ready).
     $ready = Invoke-Kubectl @('get', '--raw=/readyz')
     if ($LASTEXITCODE -ne 0 -or (($ready -join '').Trim() -ne 'ok')) { return $false }
-    $json = Invoke-Kubectl @('get', 'nodes', '-o', 'json')
-    if ($LASTEXITCODE -ne 0) { return $false }
+    $obj = Get-NodesObj
+    if ($null -eq $obj) { return $false }
     try {
-        $obj = ($json -join "`n") | ConvertFrom-Json
         $nodes = @($obj.items)
         if ($nodes.Count -lt 1) { return $false }
         foreach ($n in $nodes) {
@@ -517,27 +537,24 @@ function Set-AcceptUpgrade {
 
 function Get-Progress {
     # Read the hop-progress file. Returns $null when the file does not exist yet.
-    if (-not (Test-Path $script:ProgressPath)) { return $null }
-    return Get-Content -Raw -Path $script:ProgressPath | ConvertFrom-Json
+    return Read-JsonOrNull $script:ProgressPath
 }
 
 function Set-Progress {
     # Atomically persist the hop-progress object to progress.json.
     param([Parameter(Mandatory)] [pscustomobject]$Progress)
-    $tmpPath = "$script:ProgressPath.tmp"
-    $Progress | ConvertTo-Json | Set-Content -Path $tmpPath -Encoding UTF8
-    Move-Item -Path $tmpPath -Destination $script:ProgressPath -Force
+    Write-JsonAtomic $Progress $script:ProgressPath
 }
 
 function Invoke-OnlineStage {
     # Stage the next AKS EE hop into the local update-cache through Microsoft
-    # Update. The AksEdge module never downloads. `Start-AksEdgeUpdate` installs
-    # whatever Windows Update has already placed in update-cache, so this drives a
-    # Windows Update scan for the single applicable AKS EE update and downloads and
-    # installs it. Installing runs the AKS EE update handler, which self-extracts
+    # Update. The AksEdge module never downloads. `Start-AksEdgeUpdate` only
+    # installs whatever Windows Update has already placed in update-cache, so this
+    # drives a Windows Update scan for the single applicable AKS EE update and
+    # installs it. That install runs the AKS EE update handler, which self-extracts
     # the package into update-cache. The caller then runs `Start-AksEdgeUpdate` to
-    # install the staged MSI. This runs in the worker session, not a child process.
-    # The Windows Update COM calls raise terminating exceptions we catch, so the
+    # install the staged MSI. Runs in the worker session, not a child process. The
+    # Windows Update COM calls raise terminating exceptions we catch, so the
     # worker's strict error settings do not interfere.
     #
     # Returns a PSCustomObject:
@@ -558,8 +575,17 @@ function Invoke-OnlineStage {
         $msi = Get-ChildItem $cacheBase -Filter '*.msi' -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($msi -and $msi.Name -match 'k3s-?(\d+)\.(\d+)') {
             $m = "$($matches[1]).$($matches[2])"
-            Write-Log "Online stage: reusing staged package '$($msi.Name)' (k3s $m). Skipping the Windows Update search."
-            return [pscustomobject]@{ result = 'staged'; expectedMinor = $m }
+            # Reuse a leftover MSI only if it is a valid next step from the current
+            # version, using the same rule as the Windows Update search below. Minor
+            # mode takes a minor above the current one, patch mode takes the current
+            # minor. A stale cross-minor MSI from an aborted run is ignored so it cannot
+            # install out of order or stall the hop loop on a no-op reinstall.
+            $reusable = if ($AllowMinor) { (Compare-K8sMinor $m $CurrentMinor) -gt 0 } else { $m -eq $CurrentMinor }
+            if ($reusable) {
+                Write-Log "Online stage: reusing staged package '$($msi.Name)' (k3s $m). Skipping the Windows Update search."
+                return [pscustomobject]@{ result = 'staged'; expectedMinor = $m }
+            }
+            Write-Log "Online stage: cached '$($msi.Name)' (k3s $m) is not a valid next step from $CurrentMinor. Searching Windows Update."
         }
     }
     if ((Get-Service wuauserv -ErrorAction SilentlyContinue).Status -ne 'Running') {
@@ -588,7 +614,7 @@ function Invoke-OnlineStage {
         return $fail
     }
     if ($AllowMinor) {
-        $sel = @($cands | Where-Object { (Compare-K8sMinor $_.minor $CurrentMinor) -gt 0 } | Sort-Object { [int]($_.minor.Split('.')[1]) })
+        $sel = @($cands | Where-Object { (Compare-K8sMinor $_.minor $CurrentMinor) -gt 0 } | Sort-Object { [int]($_.minor.Split('.')[0]) }, { [int]($_.minor.Split('.')[1]) })
     } else {
         $sel = @($cands | Where-Object { $_.minor -eq $CurrentMinor })
     }
@@ -656,7 +682,9 @@ function Invoke-Phase0 {
         arcConnected    = $arcConnected
         kubeconfig      = $kubeconfig
     }
-    $snapshot | ConvertTo-Json | Set-Content -Path $script:SnapshotPath -Encoding UTF8
+    # Atomic write, matching Set-State / Set-Progress, so the Phase 99 reader never
+    # sees truncated JSON.
+    Write-JsonAtomic $snapshot $script:SnapshotPath
     Write-Log "Snapshot: K8s=$fromK8s hostVersion=$fromHost nodes=$nodeCount aio=$aio arcConnected=$arcConnected"
 
     $allowMinor = [bool](Get-Prop $config 'allowKubernetesMinorUpgrade' $false)
@@ -883,6 +911,19 @@ function Invoke-Phase3 {
         if ($beforeMinor -and $afterMinor -and (Compare-K8sMinor $afterMinor $beforeMinor) -le 0) {
             throw "Hop did not advance: Kubernetes version stayed $after after the apply."
         }
+    } elseif (-not $allowMinor -and $before) {
+        # Patch mode: no minor change to assert, so confirm the apply moved the build.
+        # A servicing patch can advance the AKS EE host version without changing the
+        # kubelet version, so count either as progress. Warn rather than fail when
+        # neither moved: the cluster is healthy and a redundant re-apply is not an error.
+        $snap = Read-JsonOrNull $script:SnapshotPath
+        $beforeHost = [string](Get-Prop $snap 'fromHostVersion' '')
+        $afterHost  = [string](Get-AksEeHostVersion)
+        if ($after -eq $before -and $afterHost -eq $beforeHost) {
+            Write-Log "WARNING: patch apply changed neither Kubernetes ($after) nor AKS EE host ($afterHost) version. The host may already be current."
+        } else {
+            Write-Log "Patch applied: Kubernetes $before -> $after, AKS EE host $beforeHost -> $afterHost."
+        }
     }
 
     # Increment hop count and clear the in-flight flag.
@@ -936,7 +977,7 @@ function Invoke-Phase99 {
     # terminal tag write below must succeed for the wait step to release.
     Connect-MachineIdentity -config $config
 
-    $snapshot    = if (Test-Path $script:SnapshotPath) { Get-Content -Raw -Path $script:SnapshotPath | ConvertFrom-Json } else { $null }
+    $snapshot    = Read-JsonOrNull $script:SnapshotPath
     $prog        = Get-Progress
     $fromVersion = if ($prog) { [string](Get-Prop $prog 'originalFromVersion' '') } else { '' }
     if (-not $fromVersion) { $fromVersion = [string](Get-Prop $snapshot 'fromK8sVersion' '') }
@@ -970,10 +1011,7 @@ function Invoke-Phase99 {
     }
 
     # Remove the scoped az token cache. The tag write above was the last az call.
-    if ($env:AZURE_CONFIG_DIR -and (Test-Path $env:AZURE_CONFIG_DIR)) {
-        Remove-Item -Path $env:AZURE_CONFIG_DIR -Recurse -Force -ErrorAction SilentlyContinue
-        Write-Log "Removed az token cache at $env:AZURE_CONFIG_DIR"
-    }
+    Clear-AzTokenCache
 
     Set-State -Phase 99 -Status 'succeeded'
 

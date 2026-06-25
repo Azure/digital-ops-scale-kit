@@ -101,13 +101,13 @@ function script:Compact-PSSource {
 }
 
 function script:Compress-InterTokenWhitespace {
-    # Collapse runs of horizontal whitespace (two or more spaces or tabs) that sit
-    # BETWEEN tokens down to a single space, removing the cosmetic alignment padding
-    # the line strip leaves behind (for example `$a    = 1`). Whitespace inside
-    # String and Comment tokens is left untouched: PSParser reports each string
-    # literal, including an expandable string with internal spaces and subexpressions,
-    # as one token. Newlines are preserved, and no separating space is ever inserted
-    # or fully removed, so the result is semantically identical (PowerShell never
+    # Collapse runs of horizontal whitespace (two or more spaces or tabs) between
+    # tokens down to a single space, removing the cosmetic alignment padding the
+    # line strip leaves behind (for example `$a    = 1`). Whitespace inside String
+    # and Comment tokens is left untouched: PSParser reports each string literal,
+    # including an expandable string with internal spaces and subexpressions, as
+    # one token. Newlines are preserved and no separating space is ever inserted or
+    # fully removed, so the result is semantically identical (PowerShell never
     # requires more than one separating space). Self-verifying: the String and
     # Comment literals must be byte-identical before and after, or it throws rather
     # than risk shipping a corrupt minified launcher.

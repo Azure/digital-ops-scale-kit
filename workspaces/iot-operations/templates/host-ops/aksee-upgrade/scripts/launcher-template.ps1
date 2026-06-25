@@ -108,20 +108,32 @@ function Test-IsAdmin {
     return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+function Invoke-IcaclsOrThrow {
+    # icacls is native: a non-zero exit does not raise under the strict settings, so
+    # check $LASTEXITCODE explicitly.
+    param([string[]]$IcaclsArgs)
+    $out = & icacls @IcaclsArgs 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "icacls $($IcaclsArgs -join ' ') failed (exit ${LASTEXITCODE}): $out" }
+}
+
 function Set-StrictAcl {
-    # Lock the config dir to Administrators + SYSTEM only. Removes the inherited
-    # Users-read grant from ProgramData so non-admin local users cannot read the
-    # cluster kubeconfig or the az token cache.
+    # Lock the config dir to Administrators + SYSTEM and reclaim ownership. The caller
+    # has already rejected a pre-existing reparse point or non-admin-owned directory,
+    # so this never recurses and no junction is ever followed. Strip the inherited
+    # Users-read grant, which would expose the kubeconfig and az token cache, grant
+    # Administrators + SYSTEM, then set ownership to the Administrators group so a
+    # dedicated local-admin runAs works as well as the SYSTEM default. Verify the owner
+    # by SID.
     param([string]$Path)
-    $inheritOut = & icacls $Path /inheritance:r 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "icacls /inheritance:r failed on ${Path} with exit ${LASTEXITCODE}: $inheritOut"
+    Invoke-IcaclsOrThrow @($Path, '/setowner', 'Administrators')
+    Invoke-IcaclsOrThrow @($Path, '/inheritance:r')
+    Invoke-IcaclsOrThrow @($Path, '/grant', 'Administrators:(OI)(CI)F', 'SYSTEM:(OI)(CI)F')
+    # Verify by SID (locale-independent): Administrators S-1-5-32-544, SYSTEM S-1-5-18.
+    $ownerSid = ((Get-Acl -Path $Path).GetOwner([System.Security.Principal.SecurityIdentifier])).Value
+    if ($ownerSid -notin @('S-1-5-32-544', 'S-1-5-18')) {
+        throw "Refusing to use ${Path}: owner SID '$ownerSid' is not Administrators or SYSTEM after hardening."
     }
-    $grantOut = & icacls $Path /grant 'Administrators:(OI)(CI)F' 'SYSTEM:(OI)(CI)F' 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "icacls /grant failed on ${Path} with exit ${LASTEXITCODE}: $grantOut"
-    }
-    Write-Log "Locked ACLs on $Path to Administrators + SYSTEM"
+    Write-Log "Locked ACLs and reclaimed ownership on $Path"
 }
 
 function Set-RunningTag {
@@ -174,7 +186,22 @@ if (-not (Test-IsAdmin)) {
 
 Write-Log "Preparing AKS EE patch update on $MachineName in $ResourceGroup (runId=$RunId)"
 
-if (-not (Test-Path $ConfigDir)) {
+if (Test-Path $ConfigDir) {
+    # A pre-existing config dir under the world-writable ProgramData may have been
+    # planted by a non-admin. Reject a reparse point (a junction would redirect the
+    # later ownership and ACL operations to an arbitrary target) or a directory owned
+    # by a non-admin (its owner keeps implicit WRITE_DAC to tamper with the worker). A
+    # legitimate resume dir is owned by Administrators or SYSTEM and passes. No
+    # recursion is used here or in Set-StrictAcl, so a junction is never followed.
+    $existing = Get-Item -LiteralPath $ConfigDir -Force
+    if ($existing.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+        throw "Refusing to use ${ConfigDir}: it is a reparse point (possible pre-creation by a non-admin)."
+    }
+    $existingOwner = ((Get-Acl -LiteralPath $ConfigDir).GetOwner([System.Security.Principal.SecurityIdentifier])).Value
+    if ($existingOwner -notin @('S-1-5-32-544', 'S-1-5-18')) {
+        throw "Refusing to use ${ConfigDir}: pre-existing owner SID '$existingOwner' is not Administrators or SYSTEM (possible pre-creation by a non-admin)."
+    }
+} else {
     New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null
     Write-Log "Created $ConfigDir"
 }
