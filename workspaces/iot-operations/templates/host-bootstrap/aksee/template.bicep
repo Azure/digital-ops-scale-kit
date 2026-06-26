@@ -5,9 +5,8 @@
 // the resource's instanceView.
 //
 // The launcher writes the worker + AKS EE config template to disk, registers a
-// Scheduled Task that drives the worker (running as SYSTEM by default, or as a
-// created local admin when runAsDedicatedAdmin is set), starts the task, and
-// returns `REGISTERED`. ARM sees the runCommand succeed at
+// Scheduled Task that drives the worker (running as NT AUTHORITY\SYSTEM), starts
+// the task, and returns `REGISTERED`. ARM sees the runCommand succeed at
 // that point. The actual bootstrap (Hyper-V enable, reboot, cluster deploy,
 // Arc-connect) happens inside the Scheduled Task asynchronously. The worker
 // writes a `siteops.bootstrap.state` tag on the Arc machine when it finishes,
@@ -60,9 +59,6 @@ param aksEdgeMsiUrl string = 'https://aka.ms/aks-edge/k3s-msi'
 @description('When true, Phase 3 enables the OIDC issuer and workload identity on the Arc-connected cluster and patches the K3s apiserver `service-account-issuer`. Required only when downstream AIO components use workload-identity-backed secret sync. Defaults to false.')
 param enableWorkloadIdentity bool = false
 
-@description('When true, the worker Scheduled Task runs as a created local admin account with an on-box generated password instead of the built-in SYSTEM account. Leave false unless a hardened environment forbids SYSTEM-context tasks. Defaults to false.')
-param runAsDedicatedAdmin bool = false
-
 @description('Timeout in seconds for the runCommand. It bounds only the synchronous launcher, which returns quickly after registering the Scheduled Task. The bootstrap itself runs asynchronously inside that task.')
 param runCommandTimeoutSeconds int = 600
 
@@ -100,7 +96,6 @@ resource bootstrapCommand 'Microsoft.HybridCompute/machines/runCommands@2024-11-
       // which the launcher parses case-insensitively. A bool value here
       // would be rejected by the runCommand's string-typed parameter.
       { name: 'EnableWorkloadIdentity', value: string(enableWorkloadIdentity) }
-      { name: 'RunAsDedicatedAdmin',    value: string(runAsDedicatedAdmin) }
     ]
   }
 }

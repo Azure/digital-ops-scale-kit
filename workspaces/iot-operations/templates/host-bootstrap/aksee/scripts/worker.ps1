@@ -588,9 +588,11 @@ function Invoke-Phase2 {
         }
 
         # New-AksEdgeDeployment writes the kubeconfig to the invoking user's
-        # profile: the dedicated-admin profile, or either WoW64 systemprofile
-        # tree when the task runs as SYSTEM. Copy the first hit to the ACL-locked
-        # shared path so downstream phases and the operator use one location.
+        # profile. The task runs as SYSTEM, so that is the systemprofile tree.
+        # Check $env:USERPROFILE (the systemprofile path under SYSTEM) plus both
+        # WoW64 systemprofile variants explicitly, since a 32-bit child lands in
+        # the SysWOW64 tree. Copy the first hit to the ACL-locked shared path so
+        # downstream phases and the operator use one location.
         $kubeCandidates = @(
             (Join-Path $env:USERPROFILE '.kube\config'),
             (Join-Path $env:SystemRoot 'System32\config\systemprofile\.kube\config'),
@@ -777,9 +779,8 @@ function Invoke-Phase99 {
     Write-Log 'Phase 99: cleanup'
 
     # Write the bootstrap-state tag first, while the Phase 3 az login is still
-    # valid. The cleanup below removes the az token cache (and the bootstrap
-    # user's profile under dedicated-admin), which would strip the managed-
-    # identity auth context this tag write depends on.
+    # valid. The cleanup below removes the az token cache, which would strip the
+    # managed-identity auth context this tag write depends on.
     try {
         Write-BootstrapStateTag -config $config -Value 'succeeded'
     } catch {
@@ -795,33 +796,8 @@ function Invoke-Phase99 {
         Write-Log "Scheduled task $taskName not found, nothing to unregister"
     }
 
-    # Remove the bootstrap local admin AND the profile directory it
-    # leaves behind. `Remove-LocalUser` only deletes the SAM entry. The
-    # profile dir holds the kubeconfig with a long-lived cluster bearer
-    # token. Capture the SID first so the profile-by-SID lookup works
-    # after the account is gone. Also defensively remove the rendered
-    # AKS EE config in case Phase 2's finally block was skipped.
-    $bootstrapUser = Get-Prop $config 'localAdminUser' 'siteops-bootstrap'
-    $user = Get-LocalUser -Name $bootstrapUser -ErrorAction SilentlyContinue
-    $bootstrapSid = $null
-    if ($null -ne $user) {
-        $bootstrapSid = $user.SID.Value
-        Write-Log "Removing local user $bootstrapUser (SID $bootstrapSid)"
-        Remove-LocalUser -Name $bootstrapUser
-    } else {
-        Write-Log "Local user $bootstrapUser not found, nothing to remove"
-    }
-    if ($bootstrapSid) {
-        $profile = Get-CimInstance -ClassName Win32_UserProfile -Filter "SID='$bootstrapSid'" -ErrorAction SilentlyContinue
-        if ($null -ne $profile) {
-            try {
-                Remove-CimInstance -InputObject $profile -ErrorAction Stop
-                Write-Log "Removed user profile $($profile.LocalPath)"
-            } catch {
-                Write-Log "WARNING: failed to remove user profile $($profile.LocalPath): $_. The kubeconfig under .kube\config persists on disk. Remove manually if needed."
-            }
-        }
-    }
+    # Defensively remove the rendered AKS EE config in case Phase 2's finally
+    # block was skipped.
     $renderedPath = Join-Path $ConfigDir 'aksedge-config.json'
     if (Test-Path $renderedPath) {
         Remove-Item -Path $renderedPath -Force -ErrorAction SilentlyContinue
@@ -831,7 +807,7 @@ function Invoke-Phase99 {
     # SYSTEM has no user profile to remove, but New-AksEdgeDeployment still
     # wrote a kubeconfig with a bearer token into the systemprofile tree. Purge
     # both WoW64 variants. The retained ConfigDir\kubeconfig is the canonical
-    # copy. No-op in dedicated-admin mode.
+    # copy.
     foreach ($sysKube in @(
             (Join-Path $env:SystemRoot 'System32\config\systemprofile\.kube'),
             (Join-Path $env:SystemRoot 'SysWOW64\config\systemprofile\.kube'))) {

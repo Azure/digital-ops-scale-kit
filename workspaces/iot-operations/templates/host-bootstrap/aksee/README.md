@@ -206,7 +206,6 @@ Use when something fundamental needs to change (different SP, different cluster 
 Stop-ScheduledTask       -TaskName SiteOpsAksEeBootstrap -ErrorAction SilentlyContinue
 Unregister-ScheduledTask -TaskName SiteOpsAksEeBootstrap -Confirm:$false -ErrorAction SilentlyContinue
 Remove-Item -Recurse -Force 'C:\ProgramData\siteops\aksee-bootstrap\' -ErrorAction SilentlyContinue
-Remove-LocalUser -Name siteops-bootstrap -ErrorAction SilentlyContinue
 
 # Then re-run `siteops deploy ...`
 ```
@@ -277,7 +276,7 @@ Set it per site via `deployOptions.enableWorkloadIdentity: true` (paired with `e
 
 - **No secret:** the bootstrap uses no service principal. The worker authenticates with the Arc machine's system-assigned managed identity (short-lived HIMDS tokens), so there is no credential to deliver, encrypt, store, or clean up.
 - **ACLs:** `C:\ProgramData\siteops\aksee-bootstrap\` has inherited ACLs removed and re-granted to Administrators + SYSTEM only.
-- **Task identity:** by default the worker Scheduled Task runs as `NT AUTHORITY\SYSTEM`, so no local account or password is created. With `runAsDedicatedAdmin` the launcher instead creates a local admin with an on-box generated password, written only to the task registration via `Register-ScheduledTask -User -Password` and never persisted to any file the worker reads.
+- **Task identity:** the worker Scheduled Task runs as `NT AUTHORITY\SYSTEM`, so no local account or password is created or stored. SYSTEM uses a `ServiceAccount` logon, which needs no stored credential to survive the bootstrap's reboot.
 - **az token cache:** Phase 3 scopes `AZURE_CONFIG_DIR` into the ACL-locked working directory so the az tokens stay behind the Administrators + SYSTEM ACL. Phase 99 removes the cache on success.
 - **Cluster kubeconfig:** Phase 2 copies the cluster kubeconfig (a long-lived bearer token) into the ACL-locked working directory and Phase 99 keeps it there for the operator, behind the Administrators + SYSTEM ACL.
 
@@ -291,5 +290,4 @@ The scalekit path delivers the launcher via Bicep + Arc Run Command. For debuggi
 
 ## Known limitations
 
-- The worker Scheduled Task runs as `NT AUTHORITY\SYSTEM` by default, so no local account or password is created. For hardened environments that disallow SYSTEM-context tasks, the Bicep `runAsDedicatedAdmin` parameter (launcher `-RunAsDedicatedAdmin`) runs it as a launcher-created local admin instead.
 - The Run Command resource returns `executionState=Succeeded` the moment the launcher returns `REGISTERED`, NOT when the worker reaches `phase=99 status=succeeded`. Use the [bootstrap state tag](#bootstrap-state-tag) to gate downstream pipeline steps on actual bootstrap completion.
