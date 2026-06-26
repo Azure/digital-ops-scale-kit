@@ -32,6 +32,7 @@ on:
                     - manifests/aio-upgrade.yaml
                     - manifests/secretsync.yaml
                     - manifests/aksee-bootstrap.yaml
+                    - manifests/aksee-upgrade.yaml
                     - samples/secretsync-sample/manifest.yaml
                     - samples/opc-ua-solution/manifest.yaml
                     - samples/aio-with-opc-ua/manifest.yaml

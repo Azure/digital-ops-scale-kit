@@ -64,6 +64,11 @@ class TestManifestValidation:
         errors = orchestrator.validate(workspace / "manifests" / "aio-upgrade.yaml")
         assert errors == [], f"aio-upgrade.yaml validation errors: {errors}"
 
+    def test_aksee_upgrade_validates(self, workspace, orchestrator):
+        """aksee-upgrade.yaml (host-ops patch update + wait gate) should validate."""
+        errors = orchestrator.validate(workspace / "manifests" / "aksee-upgrade.yaml")
+        assert errors == [], f"aksee-upgrade.yaml validation errors: {errors}"
+
     def test_opc_ua_solution_validates(self, workspace, orchestrator):
         """samples/opc-ua-solution/manifest.yaml should validate."""
         errors = orchestrator.validate(workspace / "samples" / "opc-ua-solution" / "manifest.yaml")

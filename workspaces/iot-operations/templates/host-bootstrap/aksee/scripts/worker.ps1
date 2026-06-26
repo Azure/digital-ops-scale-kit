@@ -146,7 +146,7 @@ function Test-AksEdgeDeployed {
 
 function Get-Prop {
     # StrictMode-safe property read. Returns $Obj.$Name when present, else
-    # $Default. Replaces the repeated PSObject.Properties.Name -contains guard.
+    # $Default.
     param($Obj, [string]$Name, $Default = $null)
     if ($null -ne $Obj -and $Obj.PSObject.Properties.Name -contains $Name) { return $Obj.$Name }
     return $Default
@@ -204,14 +204,12 @@ function Install-AzCliIfMissing {
 function Write-BootstrapStateTag {
     # Idempotent tag write on this Arc machine resource. Phase 99 writes
     # 'succeeded'. The per-phase catch writes 'failed-phase-N'. A siteops
-    # `type: wait` step polls this tag to gate downstream steps on actual
-    # bootstrap completion.
-    #
-    # Safe to call before az CLI is installed or authenticated. Logs and
-    # returns without throwing, and a failed tag write does not fail the
-    # bootstrap. Requires `Microsoft.Resources/tags/write` on the Arc
-    # machine resource (see README "Bootstrap state tag"). Assumes the
-    # resource name equals `$env:COMPUTERNAME`. The constructed ID is
+    # `type: wait` step polls this tag to gate downstream steps on real
+    # bootstrap completion. Safe to call before az CLI is installed or
+    # authenticated: it logs and returns without throwing, and a failed tag
+    # write does not fail the bootstrap. Requires `Microsoft.Resources/tags/write`
+    # on the Arc machine resource (see README "Bootstrap state tag"). Assumes
+    # the resource name equals `$env:COMPUTERNAME`. The constructed ID is
     # logged for manual tagging.
     param(
         [Parameter(Mandatory)] $config,
@@ -312,9 +310,9 @@ function Patch-K3sApiServer {
     Invoke-AksEdgeNodeCommand -command "sudo sed -i 's|service-account-issuer.*|service-account-issuer=$IssuerUrl|' /home/aksedge-user/k3s-config.yml" | Out-Null
     Invoke-AksEdgeNodeCommand -command "sudo cp /home/aksedge-user/k3s-config.yml /var/.eflow/config/k3s/k3s-config.yml" | Out-Null
 
-    # Verification: grep the patched line out and check the URL is there.
-    # A silent sed no-op must fail loudly rather than letting
-    # Wait-K3sApiServerReady report success on an unpatched apiserver.
+    # Grep the patched line back out so a silent sed no-op fails loudly here
+    # instead of letting Wait-K3sApiServerReady report success on an unpatched
+    # apiserver.
     $verify = Invoke-AksEdgeNodeCommand -command 'sudo grep service-account-issuer /var/.eflow/config/k3s/k3s-config.yml'
     if ($verify -notmatch [regex]::Escape($IssuerUrl)) {
         throw "Patch-K3sApiServer verification failed. Expected `'service-account-issuer=$IssuerUrl`' in k3s-config.yml but observed: $verify"
@@ -557,16 +555,13 @@ function Invoke-Phase2 {
         $cfg = $null
 
         # Spawn New-AksEdgeDeployment in a fresh child PowerShell process.
-        # In-place ErrorActionPreference relaxation does NOT work because the
-        # AKS EE module's internal functions reset $ErrorActionPreference='Stop'
-        # in their own scope. With strict EAP in effect, the cmdlet's native
-        # helper calls have their normal diagnostic stderr converted into
-        # terminating errors, which breaks cluster creation. A child process
-        # started with default settings (no StrictMode, default EAP=Continue)
-        # runs the cmdlet in the environment the module was tested against.
-        #
-        # Use -EncodedCommand for the child invocation to avoid PowerShell
-        # quoting hazards across the process boundary.
+        # In-place ErrorActionPreference relaxation does not work: the AKS EE
+        # module's internal functions reset $ErrorActionPreference='Stop' in
+        # their own scope, so strict EAP turns the cmdlet's diagnostic stderr
+        # into terminating errors and breaks cluster creation. A child process
+        # with default settings (no StrictMode, EAP=Continue) runs the cmdlet
+        # in the environment the module was tested against. -EncodedCommand
+        # avoids PowerShell quoting hazards across the process boundary.
         Write-Log "Calling New-AksEdgeDeployment in child PowerShell (this typically takes 10-15 minutes)"
         $childScript = "Import-Module AksEdge; New-AksEdgeDeployment -JsonConfigFilePath '$renderedPath' -Confirm:`$false -Force; exit `$LASTEXITCODE"
         $bytes = [System.Text.Encoding]::Unicode.GetBytes($childScript)

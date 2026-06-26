@@ -1,0 +1,20 @@
+apiVersion: siteops/v1
+kind: Manifest
+name: aksee-upgrade
+description: |
+  AKS Edge Essentials patch-update step. Delivers and runs the upgrade launcher
+  on the target Arc-onboarded Windows VM via Arc Run Command. The launcher
+  registers a Scheduled Task that drives the worker state machine through
+  preflight + snapshot, stage, apply (inner node-VM reboot), verify, and the
+  completion tag.
+
+  Internal partial (filename prefixed `_`). Not deployed directly. Composed by
+  the standalone `manifests/aksee-upgrade.yaml` (which adds the `type: wait`
+  gate) and by any composition that adds a patch update step.
+
+steps:
+  - name: aksee-upgrade
+    template: templates/host-ops/aksee-upgrade/template.bicep
+    scope: resourceGroup
+    parameters:
+      - parameters/inputs/aksee-upgrade.yaml

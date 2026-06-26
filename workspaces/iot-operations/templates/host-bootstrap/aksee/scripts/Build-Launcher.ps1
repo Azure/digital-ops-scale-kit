@@ -96,20 +96,20 @@ $lines = (Get-Content -Path $outputPath).Count
 Write-Host "Generated $outputPath ($lines lines, parse OK)"
 
 # Also emit a minified variant for Arc Run Command delivery. The
-# Microsoft.HybridCompute runCommands API enforces a size limit on the
-# inline `script` body, and JSON encoding plus request overhead push the
-# wire size above the raw script size. Stripping comments, blank lines, and
-# leading whitespace keeps the minified launcher within the limit where the
-# full source would not. The full launcher remains for operator-direct use.
+# Microsoft.HybridCompute runCommands API caps the inline `script` body, and
+# JSON encoding plus request overhead push the wire size above the raw script
+# size. Stripping comments, blank lines, and leading whitespace keeps the
+# minified launcher under the limit where the full source would not. The full
+# launcher remains for operator-direct use.
 #
-# Long-term scalability fix: switch to `scriptUri` (a blob URL) on the
-# runCommands resource. It removes the inline size ceiling but adds a
-# storage account dependency to the deploy chain. Tracked separately.
+# Long-term fix: switch to `scriptUri` (a blob URL) on the runCommands
+# resource. It removes the inline size ceiling but adds a storage account
+# dependency to the deploy chain. Tracked separately.
 #
 # Minify each source file independently so the comment-strip regex never
 # traverses here-string bodies (a `#` at the start of a here-string line
-# would otherwise be stripped as a comment). The assertion below refuses
-# to minify if a future edit adds a here-string to worker.ps1.
+# would be stripped as a comment). The assertion below refuses to minify if
+# a future edit adds a here-string to worker.ps1.
 $minPath = Join-Path $ScriptDir 'Install-AksEeBootstrap.min.ps1'
 
 function script:Compact-PSSource {

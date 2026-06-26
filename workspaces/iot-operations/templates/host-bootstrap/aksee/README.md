@@ -73,6 +73,12 @@ Required fields:
 | `clusterName` | Name to register the new K3s cluster as in Arc. New per site. |
 | `customLocationsOid` | `az ad sp show --id bc313c14-388c-4e7d-a58e-70017303ee3b --query id -o tsv`. Tenant-wide. |
 
+Optional fields:
+
+| Field | Default | Source |
+|---|---|---|
+| `aksEdgeMsiUrl` | latest K3s build (`base-site`) | A versioned AKS EE MSI URL (Microsoft Download Center) to pin a specific release. Microsoft publishes no per-version `aka.ms` link, so use the direct download URL. |
+
 ## Run
 
 ```bash

@@ -53,17 +53,21 @@ return -join $chars
 $rng.Dispose()
 }
 }
+function Invoke-IcaclsOrThrow {
+param([string[]]$IcaclsArgs)
+$out = & icacls @IcaclsArgs 2>&1
+if ($LASTEXITCODE -ne 0) { throw "icacls $($IcaclsArgs -join ' ') failed (exit ${LASTEXITCODE}): $out" }
+}
 function Set-StrictAcl {
 param([string]$Path)
-$inheritOut = & icacls $Path /inheritance:r 2>&1
-if ($LASTEXITCODE -ne 0) {
-throw "icacls /inheritance:r failed on ${Path} with exit ${LASTEXITCODE}: $inheritOut"
+Invoke-IcaclsOrThrow @($Path, '/setowner', 'Administrators')
+Invoke-IcaclsOrThrow @($Path, '/inheritance:r')
+Invoke-IcaclsOrThrow @($Path, '/grant', 'Administrators:(OI)(CI)F', 'SYSTEM:(OI)(CI)F')
+$ownerSid = ((Get-Acl -Path $Path).GetOwner([System.Security.Principal.SecurityIdentifier])).Value
+if ($ownerSid -notin @('S-1-5-32-544', 'S-1-5-18')) {
+throw "Refusing to use ${Path}: owner SID '$ownerSid' is not Administrators or SYSTEM after hardening."
 }
-$grantOut = & icacls $Path /grant 'Administrators:(OI)(CI)F' 'SYSTEM:(OI)(CI)F' 2>&1
-if ($LASTEXITCODE -ne 0) {
-throw "icacls /grant failed on ${Path} with exit ${LASTEXITCODE}: $grantOut"
-}
-Write-Log "Locked ACLs on $Path to Administrators + SYSTEM"
+Write-Log "Locked ACLs and reclaimed ownership on $Path"
 }
 function Set-LocalAdminUser {
 param([string]$Username, [string]$Password)
@@ -695,7 +699,16 @@ throw "MSI URL returned Content-Length $cl bytes (expected > 50MB). The URL like
 } catch {
 throw "AKS EE MSI URL preflight failed for ${AksEdgeMsiUrl}: $_"
 }
-if (-not (Test-Path $ConfigDir)) {
+if (Test-Path $ConfigDir) {
+$existing = Get-Item -LiteralPath $ConfigDir -Force
+if ($existing.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+throw "Refusing to use ${ConfigDir}: it is a reparse point (possible pre-creation by a non-admin)."
+}
+$existingOwner = ((Get-Acl -LiteralPath $ConfigDir).GetOwner([System.Security.Principal.SecurityIdentifier])).Value
+if ($existingOwner -notin @('S-1-5-32-544', 'S-1-5-18')) {
+throw "Refusing to use ${ConfigDir}: pre-existing owner SID '$existingOwner' is not Administrators or SYSTEM (possible pre-creation by a non-admin)."
+}
+} else {
 New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null
 Write-Log "Created $ConfigDir"
 }
