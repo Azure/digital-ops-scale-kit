@@ -2,7 +2,7 @@
 #
 # UI: Actions tab → "Deploy Infrastructure" → Run workflow
 # API: POST /repos/{owner}/{repo}/actions/workflows/deploy.yaml/dispatches
-#      Body: {"ref": "main", "inputs": {"workspace": "iot-operations", "manifest": "aio-install", "environment": "dev"}}
+#      Body: {"ref": "main", "inputs": {"workspace": "iot-operations", "manifest": "manifests/aio-install.yaml", "environment": "dev"}}
 
 name: Deploy Infrastructure
 
@@ -24,13 +24,20 @@ on:
                     - iot-operations
                 default: "iot-operations"
             manifest:
-                description: "Manifest to deploy"
+                description: "Manifest to deploy (path relative to the workspace root)"
                 required: true
                 type: choice
                 options:
-                    - aio-install
-                    - opc-ua-solution
-                default: "aio-install"
+                    - manifests/aio-install.yaml
+                    - manifests/aio-upgrade.yaml
+                    - manifests/secretsync.yaml
+                    - manifests/aksee-bootstrap.yaml
+                    - manifests/aksee-upgrade.yaml
+                    - samples/secretsync-sample/manifest.yaml
+                    - samples/opc-ua-solution/manifest.yaml
+                    - samples/aio-with-opc-ua/manifest.yaml
+                    - samples/aio-with-aksee-bootstrap/manifest.yaml
+                default: "manifests/aio-install.yaml"
             environment:
                 description: "Target environment"
                 required: true
@@ -49,13 +56,18 @@ on:
                 required: false
                 type: boolean
                 default: false
+            siteops-source:
+                description: "siteops install source (e.g. git+https://github.com/.../digital-ops-scale-kit@<tag>). Empty = local editable install."
+                required: false
+                type: string
+                default: ""
 
 env:
     PYTHONUNBUFFERED: "1"
 
-# Prevent concurrent deployments to the same environment
+# Serialize per-environment work across deploy and integration-test
 concurrency:
-    group: deploy-${{ inputs.environment }}
+    group: azure-${{ inputs.environment }}
     cancel-in-progress: false
 
 permissions:
@@ -75,20 +87,23 @@ jobs:
             INPUT_ENVIRONMENT: ${{ inputs.environment }}
             INPUT_SELECTOR: ${{ inputs.selector }}
             INPUT_WORKSPACE: "workspaces/${{ inputs.workspace }}"
-            INPUT_MANIFEST: "manifests/${{ inputs.manifest }}.yaml"
+            INPUT_MANIFEST: ${{ inputs.manifest }}
             INPUT_REF: ${{ inputs.ref }}
+            CURRENT_REF: ${{ github.ref }}
         steps:
             - name: Resolve git ref
               id: resolve-ref
               shell: bash
               run: |
-                  # Use provided ref, or fall back to the branch/tag that triggered the workflow
+                  # Use provided ref, or fall back to the branch/tag that triggered the workflow.
+                  # CURRENT_REF is routed through env (not interpolated into shell) because
+                  # branch names allow shell metacharacters and would otherwise be injectable.
                   if [[ -n "$INPUT_REF" ]]; then
                     echo "ref=$INPUT_REF" >> $GITHUB_OUTPUT
                     echo "✓ Using specified ref: $INPUT_REF"
                   else
-                    echo "ref=${{ github.ref }}" >> $GITHUB_OUTPUT
-                    echo "✓ Using current ref: ${{ github.ref }}"
+                    echo "ref=$CURRENT_REF" >> $GITHUB_OUTPUT
+                    echo "✓ Using current ref: $CURRENT_REF"
                   fi
 
             - name: Checkout repository
@@ -107,7 +122,11 @@ jobs:
                     echo "::error::Manifest not found: $INPUT_WORKSPACE/$INPUT_MANIFEST"
                     echo ""
                     echo "Available manifests:"
-                    find "$INPUT_WORKSPACE/manifests" -name "*.yaml" -o -name "*.yml" 2>/dev/null || echo "  (none found)"
+                    { find "$INPUT_WORKSPACE/manifests" -maxdepth 1 \
+                        \( -name "*.yaml" -o -name "*.yml" \) -not -name "_*" 2>/dev/null
+                      find "$INPUT_WORKSPACE/samples" -mindepth 2 -maxdepth 2 \
+                        \( -name "manifest.yaml" -o -name "manifest.yml" \) 2>/dev/null
+                    } || echo "  (none found)"
                     exit 1
                   fi
                   echo "✓ Manifest found: $INPUT_MANIFEST"
@@ -153,4 +172,5 @@ jobs:
             dry-run: ${{ inputs.dry-run }}
             environment: ${{ needs.prepare.outputs.github-environment }}
             ref: ${{ needs.prepare.outputs.ref }}
+            siteops-source: ${{ inputs.siteops-source }}
         secrets: inherit

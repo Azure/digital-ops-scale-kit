@@ -1,0 +1,14 @@
+# Fan-in inputs into the update-extensions step of aio-upgrade.yaml. See
+# docs/parameter-resolution.md for the inputs/outputs convention.
+# Consumed by: update-extensions (in aio-upgrade.yaml)
+
+# Cluster identity for the extension PUTs (each extension is scoped at the
+# connected cluster).
+connectedClusterName: "{{ steps.resolve-aio.outputs.connectedClusterName }}"
+
+# Resolved extension snapshots. cert-manager ownership is driven by site
+# config (deployOptions.enableCertManager), not a runtime probe.
+aio: "{{ steps.resolve-extensions.outputs.aio }}"
+secretStore: "{{ steps.resolve-extensions.outputs.secretStore }}"
+certManager: "{{ steps.resolve-extensions.outputs.certManager }}"
+enableCertManager: "{{ site.properties.deployOptions.enableCertManager }}"

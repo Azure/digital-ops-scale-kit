@@ -49,21 +49,28 @@ def expand_dot_notation(flat: dict) -> dict:
     return nested
 
 
-def generate_overlays(overrides: dict, sites_local: Path) -> list[Path]:
+def generate_overlays(overrides: dict, sites_local: Path) -> tuple[list[Path], list[str]]:
     """Generate sites.local/ YAML overlay files from an overrides dict.
+
+    Pre-existing overlays are preserved (not overwritten): a hand-authored
+    site in sites.local/ always wins over a CI-supplied override of the
+    same name. The caller receives both the generated paths and the names
+    of any skipped sites so it can surface a diagnostic if SITE_OVERRIDES
+    silently has no effect.
 
     Args:
         overrides: Dict mapping site names to their override key/value pairs.
         sites_local: Path to the sites.local/ directory.
 
     Returns:
-        List of generated file paths.
+        Tuple of (generated file paths, skipped site names).
 
     Raises:
         ValueError: If a site name contains invalid characters.
     """
     sites_local.mkdir(parents=True, exist_ok=True)
-    generated = []
+    generated: list[Path] = []
+    skipped: list[str] = []
 
     for site_name, values in overrides.items():
         if not SITE_NAME_PATTERN.match(site_name):
@@ -73,14 +80,14 @@ def generate_overlays(overrides: dict, sites_local: Path) -> list[Path]:
 
         output_path = sites_local / f"{site_name}.yaml"
         if output_path.exists():
+            skipped.append(site_name)
             continue
 
         expanded = expand_dot_notation(values)
-        output_path = sites_local / f"{site_name}.yaml"
         output_path.write_text(yaml.safe_dump(expanded, default_flow_style=False))
         generated.append(output_path)
 
-    return generated
+    return generated, skipped
 
 
 def main() -> None:
@@ -115,7 +122,7 @@ def main() -> None:
     sites_local = Path(args.workspace) / "sites.local"
 
     try:
-        generated = generate_overlays(overrides, sites_local)
+        generated, skipped = generate_overlays(overrides, sites_local)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -123,6 +130,12 @@ def main() -> None:
     for path in generated:
         print(f"  {path.name}")
     print(f"Generated {len(generated)} site override(s)")
+    if skipped:
+        print(
+            f"Skipped {len(skipped)} site(s) with pre-existing overlays in "
+            f"sites.local/: {', '.join(sorted(skipped))} "
+            f"(hand-authored overlays are never overwritten)"
+        )
 
 
 if __name__ == "__main__":

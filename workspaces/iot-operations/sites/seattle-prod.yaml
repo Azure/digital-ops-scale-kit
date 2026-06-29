@@ -12,11 +12,6 @@ labels:
   environment: prod
   city: Seattle
 
-properties:
-  deployOptions:
-    includeSolution: true
-    includeOpcPlcSimulator: false
-
 parameters:
   clusterName: seattle-prod-arc
   brokerConfig:
@@ -26,4 +21,3 @@ parameters:
     backendWorkers: 4
     backendPartitions: 2
     memoryProfile: Medium
-  defaultDataflowInstanceCount: 1

@@ -28,9 +28,13 @@ parameters:
     displayName: siteops install source (empty = local editable install)
     type: string
     default: ''
+  - name: stageName
+    displayName: Stage id (override when including this template more than once)
+    type: string
+    default: deploy
 
 stages:
-  - stage: deploy
+  - stage: ${{ parameters.stageName }}
     variables:
       PYTHONUNBUFFERED: '1'
     jobs:
@@ -75,6 +79,10 @@ stages:
                     SELECTOR: ${{ parameters.selector }}
 
                 - script: |
+                    # ADO `script:` does not set pipefail by default. Without it
+                    # a python or jq failure in this pipeline would silently
+                    # leave overrides not written or values not masked.
+                    set -o pipefail
                     if [[ -z "$SITE_OVERRIDES" ]]; then
                       echo "No site overrides configured, using committed sites"
                       exit 0
@@ -92,6 +100,11 @@ stages:
                     SITE_OVERRIDES: $(SITE_OVERRIDES)
 
                 - script: |
+                    # set -o pipefail so `siteops validate ... | tee` returns
+                    # siteops's exit code, not tee's. Otherwise a validation
+                    # failure passes silently and Deploy runs against a manifest
+                    # that did not validate.
+                    set -o pipefail
                     CMD_ARGS=(-w "$WORKSPACE" validate "$MANIFEST")
                     [[ -n "$SELECTOR" ]] && CMD_ARGS+=(-l "$SELECTOR")
                     CMD_ARGS+=(-v)

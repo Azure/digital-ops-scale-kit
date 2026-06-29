@@ -179,6 +179,73 @@ class TestCmdValidate:
         assert "Sites" in captured.out
         assert "Steps" in captured.out
 
+    def test_validate_library_manifest_prints_note(self, complete_workspace, capsys):
+        """A library/partial manifest (no `sites:` and no `selector:`)
+        validates ✓ but prints a Note explaining `-l` will be required
+        at deploy time. Eliminates the validate-passes-then-deploy-
+        fails surprise class."""
+        from siteops.orchestrator import Orchestrator
+
+        manifest_data = {
+            "name": "library",
+            "steps": [{"name": "step1", "template": "templates/test.bicep"}],
+        }
+        manifest_path = complete_workspace / "manifests" / "library.yaml"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            yaml.dump(manifest_data, f)
+
+        orchestrator = Orchestrator(complete_workspace)
+
+        args = MagicMock()
+        args.manifest = manifest_path
+        args.workspace = complete_workspace
+        args.selector = None
+        args.verbose = False
+
+        exit_code = cmd_validate(args, orchestrator)
+
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "Manifest is valid" in captured.out
+        assert "library manifest" in captured.out
+        assert "-l" in captured.out
+
+    def test_validate_verbose_library_manifest_no_traceback(
+        self, complete_workspace, capsys
+    ):
+        """`validate -v` on a library manifest (no `sites:` and no
+        `selector:`) prints ✓ + Note and exits 0. Previously
+        `show_plan` re-resolved sites and re-raised NoTargetingError
+        as a traceback after the success print."""
+        from siteops.orchestrator import Orchestrator
+
+        manifest_data = {
+            "name": "library",
+            "steps": [{"name": "step1", "template": "templates/test.bicep"}],
+        }
+        manifest_path = complete_workspace / "manifests" / "library.yaml"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            yaml.dump(manifest_data, f)
+
+        orchestrator = Orchestrator(complete_workspace)
+
+        args = MagicMock()
+        args.manifest = manifest_path
+        args.workspace = complete_workspace
+        args.selector = None
+        args.verbose = True
+
+        exit_code = cmd_validate(args, orchestrator)
+
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "Manifest is valid" in captured.out
+        assert "library manifest" in captured.out
+        # No traceback or NoTargetingError leaked from show_plan.
+        assert "Traceback" not in captured.out and "Traceback" not in captured.err
+        assert "NoTargetingError" not in captured.out
+        assert "NoTargetingError" not in captured.err
+
     def test_validate_verbose_not_shown_on_failure(self, complete_workspace, capsys):
         """Test plan is not shown when validation fails."""
         from siteops.orchestrator import Orchestrator
@@ -242,6 +309,7 @@ class TestCmdSites:
         orchestrator = Orchestrator(complete_workspace)
 
         args = MagicMock()
+        args.name = None
         args.workspace = complete_workspace
         args.selector = None
         args.verbose = False
@@ -260,6 +328,7 @@ class TestCmdSites:
         orchestrator = Orchestrator(multi_site_workspace)
 
         args = MagicMock()
+        args.name = None
         args.workspace = multi_site_workspace
         args.selector = "environment=dev"
         args.verbose = False
@@ -273,21 +342,61 @@ class TestCmdSites:
         assert "prod-eastus" not in captured.out
 
     def test_sites_no_match(self, complete_workspace, capsys):
-        """Test no sites matched selector."""
+        """When the operator passed a selector and got nothing, exit
+        non-zero so wrapper scripts surface the failure. Bare `sites`
+        on an empty workspace stays exit 0."""
         from siteops.orchestrator import Orchestrator
 
         orchestrator = Orchestrator(complete_workspace)
 
         args = MagicMock()
+        args.name = None
         args.workspace = complete_workspace
         args.selector = "nonexistent=value"
         args.verbose = False
 
         exit_code = cmd_sites(args, orchestrator)
 
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "No sites matched" in captured.err
+
+    def test_sites_path_form_name_resolves(self, tmp_path, capsys):
+        """`siteops sites regions/eu/munich-dev` resolves the nested
+        site via the trusted-file fast path. Without parity to deploy,
+        the path-form would compare against `Site.name` (basename only)
+        and return no match."""
+        from siteops.orchestrator import Orchestrator
+
+        # Build a workspace with one nested site.
+        sites = tmp_path / "sites" / "regions" / "eu"
+        sites.mkdir(parents=True)
+        (tmp_path / "manifests").mkdir()
+        (sites / "munich-dev.yaml").write_text(
+            "apiVersion: siteops/v1\n"
+            "kind: Site\n"
+            "name: munich-dev\n"
+            "subscription: 00000000-0000-0000-0000-000000000000\n"
+            "resourceGroup: rg-munich-dev\n"
+            "location: westeurope\n",
+            encoding="utf-8",
+        )
+
+        orchestrator = Orchestrator(tmp_path)
+
+        args = MagicMock()
+        args.name = "regions/eu/munich-dev"
+        args.workspace = tmp_path
+        args.selector = None
+        args.verbose = False
+        args.render = False
+        args.show_sources = False
+
+        exit_code = cmd_sites(args, orchestrator)
+
         assert exit_code == 0
         captured = capsys.readouterr()
-        assert "No sites matched" in captured.out
+        assert "munich-dev" in captured.out
 
     def test_sites_empty_workspace(self, tmp_path, capsys):
         """Test no sites in workspace."""
@@ -300,6 +409,7 @@ class TestCmdSites:
         orchestrator = Orchestrator(tmp_path)
 
         args = MagicMock()
+        args.name = None
         args.workspace = tmp_path
         args.selector = None
         args.verbose = False
@@ -325,6 +435,7 @@ class TestCmdSites:
         orchestrator = Orchestrator(complete_workspace)
 
         args = MagicMock()
+        args.name = None
         args.workspace = complete_workspace
         args.selector = None
         args.verbose = False
@@ -351,6 +462,7 @@ class TestCmdSites:
         orchestrator = Orchestrator(complete_workspace)
 
         args = MagicMock()
+        args.name = None
         args.workspace = complete_workspace
         args.selector = None
         args.verbose = False
@@ -361,6 +473,47 @@ class TestCmdSites:
         captured = capsys.readouterr()
         assert "properties:" in captured.out
         assert "mqtt" in captured.out
+
+    def test_sites_positional_name(self, multi_site_workspace, capsys):
+        """Positional name scopes to one site, equivalent to -l name=<NAME>."""
+        from siteops.orchestrator import Orchestrator
+
+        orchestrator = Orchestrator(multi_site_workspace)
+
+        args = MagicMock()
+        args.name = None
+        args.workspace = multi_site_workspace
+        args.name = "dev-eastus"
+        args.selector = None
+        args.verbose = False
+        args.render = False
+
+        exit_code = cmd_sites(args, orchestrator)
+
+        assert exit_code == 0
+        captured = capsys.readouterr()
+        assert "dev-eastus" in captured.out
+        assert "dev-westus" not in captured.out
+        assert "prod-eastus" not in captured.out
+
+    def test_sites_positional_and_selector_rejected(self, multi_site_workspace, capsys):
+        """Combining positional name and -l name= is rejected to avoid ambiguity."""
+        from siteops.orchestrator import Orchestrator
+
+        orchestrator = Orchestrator(multi_site_workspace)
+
+        args = MagicMock()
+        args.name = None
+        args.workspace = multi_site_workspace
+        args.name = "dev-eastus"
+        args.selector = "name=prod-eastus"
+        args.verbose = False
+        args.render = False
+
+        exit_code = cmd_sites(args, orchestrator)
+
+        assert exit_code == 1
+        assert "either the positional `name` or `-l name=" in capsys.readouterr().err
 
 
 class TestCmdDeploy:
@@ -433,6 +586,179 @@ class TestCmdDeploy:
         assert exit_code == 0
         captured = capsys.readouterr()
         assert "No sites matched" in captured.out
+
+    def test_deploy_generic_manifest_no_selector_errors(self, complete_workspace, capsys):
+        """Generic manifest (no targeting) without `-l` is a hard error."""
+        from siteops.orchestrator import Orchestrator
+
+        manifest_data = {
+            "name": "generic",
+            "steps": [{"name": "step1", "template": "templates/test.bicep"}],
+        }
+        manifest_path = complete_workspace / "manifests" / "generic.yaml"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            yaml.dump(manifest_data, f)
+
+        orchestrator = Orchestrator(complete_workspace)
+
+        args = MagicMock()
+        args.manifest = manifest_path
+        args.workspace = complete_workspace
+        args.selector = None
+        args.parallel = None
+
+        exit_code = cmd_deploy(args, orchestrator)
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "has no targeting" in captured.err
+
+    def test_deploy_duplicate_non_name_selector_key_errors(self, complete_workspace, capsys):
+        """Duplicate non-name selector key surfaces as exit 1 with clear error."""
+        from siteops.orchestrator import Orchestrator
+
+        manifest_data = {
+            "name": "test",
+            "sites": ["test-site"],
+            "steps": [{"name": "step1", "template": "templates/test.bicep"}],
+        }
+        manifest_path = complete_workspace / "manifests" / "test.yaml"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            yaml.dump(manifest_data, f)
+
+        orchestrator = Orchestrator(complete_workspace)
+
+        args = MagicMock()
+        args.manifest = manifest_path
+        args.workspace = complete_workspace
+        args.selector = "env=prod,env=dev"
+        args.parallel = None
+
+        exit_code = cmd_deploy(args, orchestrator)
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "may only appear once" in captured.err
+
+    def test_deploy_unresolved_site_in_manifest_exits_cleanly(self, complete_workspace, capsys):
+        """A manifest `sites:` entry that does not resolve to a workspace
+        file must surface as a clean error and exit 1, not a Python
+        traceback. `FileNotFoundError` is `OSError`, not `ValueError`."""
+        from siteops.orchestrator import Orchestrator
+
+        manifest_data = {
+            "name": "missing-site",
+            "sites": ["does-not-exist"],
+            "steps": [{"name": "step1", "template": "templates/test.bicep"}],
+        }
+        manifest_path = complete_workspace / "manifests" / "missing-site.yaml"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            yaml.dump(manifest_data, f)
+
+        orchestrator = Orchestrator(complete_workspace)
+
+        args = MagicMock()
+        args.manifest = manifest_path
+        args.workspace = complete_workspace
+        args.selector = None
+        args.parallel = None
+
+        exit_code = cmd_deploy(args, orchestrator)
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "does-not-exist" in captured.err
+
+    def test_deploy_malformed_yaml_exits_cleanly(self, complete_workspace, capsys):
+        """A manifest with broken YAML must exit 1 with a one-line
+        Error, not a 30-line yaml.YAMLError traceback. Manifest.from_file
+        raises yaml.YAMLError before resolve_sites; widen the try."""
+        from siteops.orchestrator import Orchestrator
+
+        # Tab inside indentation breaks the YAML parser.
+        manifest_path = complete_workspace / "manifests" / "broken.yaml"
+        manifest_path.write_text(
+            "name: broken\nsites:\n\t- test-site\nsteps:\n  - name: x\n    template: t.bicep\n",
+            encoding="utf-8",
+        )
+
+        orchestrator = Orchestrator(complete_workspace)
+
+        args = MagicMock()
+        args.manifest = manifest_path
+        args.workspace = complete_workspace
+        args.selector = None
+        args.parallel = None
+
+        exit_code = cmd_deploy(args, orchestrator)
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "Error" in captured.err
+        assert "Traceback" not in captured.err
+
+    def test_deploy_cli_selector_no_match_errors_with_diagnostic(self, complete_workspace, capsys):
+        """CLI selector matching zero workspace sites exits 1 with a
+        diagnostic listing the workspace label values."""
+        from siteops.orchestrator import Orchestrator
+
+        # Manifest exists; CLI selector overrides and matches nothing.
+        manifest_data = {
+            "name": "test",
+            "sites": ["test-site"],
+            "steps": [{"name": "step1", "template": "templates/test.bicep"}],
+        }
+        manifest_path = complete_workspace / "manifests" / "test.yaml"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            yaml.dump(manifest_data, f)
+
+        orchestrator = Orchestrator(complete_workspace)
+
+        args = MagicMock()
+        args.manifest = manifest_path
+        args.workspace = complete_workspace
+        args.selector = "nonexistent=value"
+        args.parallel = None
+
+        exit_code = cmd_deploy(args, orchestrator)
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "matched no sites" in captured.err
+        # Diagnostic should mention the missing label so the operator
+        # sees the typo.
+        assert "nonexistent" in captured.err
+
+    def test_deploy_cli_name_typo_errors_with_workspace_names(
+        self, complete_workspace, capsys
+    ):
+        """CLI `-l name=X` for an unknown name lists workspace site names."""
+        from siteops.orchestrator import Orchestrator
+
+        manifest_data = {
+            "name": "test",
+            "sites": ["test-site"],
+            "steps": [{"name": "step1", "template": "templates/test.bicep"}],
+        }
+        manifest_path = complete_workspace / "manifests" / "test.yaml"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            yaml.dump(manifest_data, f)
+
+        orchestrator = Orchestrator(complete_workspace)
+
+        args = MagicMock()
+        args.manifest = manifest_path
+        args.workspace = complete_workspace
+        args.selector = "name=does-not-exist"
+        args.parallel = None
+
+        exit_code = cmd_deploy(args, orchestrator)
+
+        assert exit_code == 1
+        captured = capsys.readouterr()
+        assert "does-not-exist" in captured.err
+        # The diagnostic should list at least one real workspace site.
+        assert "test-site" in captured.err
 
     def test_deploy_no_steps(self, complete_workspace, capsys):
         """Test deploy with no steps returns exit code 0."""
@@ -509,23 +835,66 @@ class TestCmdDeploy:
             assert call_kwargs["parallel_override"] == 3
 
     def test_deploy_negative_parallel_rejected(self, complete_workspace, capsys):
-        """Test negative --parallel value is rejected."""
-        from siteops.orchestrator import Orchestrator
+        """Negative --parallel value is rejected at argparse time."""
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "siteops",
+                "-w",
+                str(complete_workspace),
+                "deploy",
+                "manifests/test-manifest.yaml",
+                "--parallel",
+                "-1",
+            ],
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+        assert exc_info.value.code == 2  # argparse error exit code
+        assert "--parallel must be >= 0" in capsys.readouterr().err
 
-        orchestrator = Orchestrator(complete_workspace)
-        manifest_path = complete_workspace / "manifests" / "test-manifest.yaml"
+    def test_deploy_parallel_max_alias(self, complete_workspace):
+        """`--parallel max` is accepted and parses to the same value as `0`."""
+        for alias in ("max", "auto", "0"):
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "siteops",
+                    "-w",
+                    str(complete_workspace),
+                    "deploy",
+                    "manifests/test-manifest.yaml",
+                    "--parallel",
+                    alias,
+                ],
+            ):
+                with patch("siteops.cli.cmd_deploy") as mock_cmd:
+                    mock_cmd.return_value = 0
+                    with pytest.raises(SystemExit):
+                        main()
+                    args = mock_cmd.call_args[0][0]
+                    assert args.parallel == 0, f"alias {alias!r} did not parse to 0"
 
-        args = MagicMock()
-        args.manifest = manifest_path
-        args.workspace = complete_workspace
-        args.selector = None
-        args.parallel = -1
-
-        exit_code = cmd_deploy(args, orchestrator)
-
-        assert exit_code == 1
-        captured = capsys.readouterr()
-        assert "--parallel must be >= 0" in captured.err
+    def test_deploy_parallel_invalid_string_rejected(self, complete_workspace, capsys):
+        """A non-int, non-alias string for --parallel is rejected."""
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "siteops",
+                "-w",
+                str(complete_workspace),
+                "deploy",
+                "manifests/test-manifest.yaml",
+                "--parallel",
+                "bogus",
+            ],
+        ):
+            with pytest.raises(SystemExit):
+                main()
+        assert "must be a non-negative integer or 'max' / 'auto'" in capsys.readouterr().err
 
     def test_deploy_with_selector(self, complete_workspace):
         """Test deploy passes selector to orchestrator."""
@@ -680,6 +1049,37 @@ class TestMainArgumentParsing:
                 args = mock_cmd.call_args[0][0]
                 assert args.selector == "env=prod"
 
+    def test_deploy_selector_flag_repeatable(self, complete_workspace):
+        """Multiple -l flags merge into a single comma-joined string."""
+        manifest_path = complete_workspace / "manifests" / "test-manifest.yaml"
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "siteops",
+                "-w",
+                str(complete_workspace),
+                "deploy",
+                str(manifest_path),
+                "-l",
+                "name=a",
+                "-l",
+                "name=b",
+                "-l",
+                "env=prod",
+            ],
+        ):
+            with patch("siteops.cli.cmd_deploy") as mock_cmd:
+                mock_cmd.return_value = 0
+                with pytest.raises(SystemExit):
+                    main()
+
+                args = mock_cmd.call_args[0][0]
+                # Joined in CLI order; downstream parse_selector applies
+                # name-OR / non-name-error rules.
+                assert args.selector == "name=a,name=b,env=prod"
+
     def test_validate_verbose_flag(self, complete_workspace):
         """Test validate -v flag is parsed correctly."""
         manifest_path = complete_workspace / "manifests" / "test-manifest.yaml"
@@ -747,8 +1147,9 @@ class TestMainArgumentParsing:
                 args = mock_cmd.call_args[0][0]
                 assert args.selector == "region=eastus"
 
-    def test_workspace_default_cwd(self):
-        """Test workspace defaults to current directory."""
+    def test_workspace_default_when_no_discovery(self, tmp_path, monkeypatch):
+        """When -w is omitted and cwd has no workspaces/ shape, defaults to cwd."""
+        monkeypatch.chdir(tmp_path)
         with patch.object(
             sys,
             "argv",
@@ -760,7 +1161,49 @@ class TestMainArgumentParsing:
                     main()
 
                 args = mock_cmd.call_args[0][0]
-                assert args.workspace == Path.cwd().resolve()
+                assert args.workspace == tmp_path.resolve()
+
+    def test_workspace_auto_discovered_from_workspaces_dir(self, tmp_path, monkeypatch):
+        """When cwd has workspaces/<single>/ with workspace shape, auto-discover it."""
+        ws = tmp_path / "workspaces" / "iot-operations"
+        (ws / "sites").mkdir(parents=True)
+        (ws / "manifests").mkdir()
+        monkeypatch.chdir(tmp_path)
+        with patch.object(
+            sys,
+            "argv",
+            ["siteops", "sites"],
+        ):
+            with patch("siteops.cli.cmd_sites") as mock_cmd:
+                mock_cmd.return_value = 0
+                with pytest.raises(SystemExit):
+                    main()
+
+                args = mock_cmd.call_args[0][0]
+                assert args.workspace == ws.resolve()
+
+    def test_workspace_auto_discovery_ambiguous_falls_back(self, tmp_path, monkeypatch):
+        """When workspaces/ contains multiple workspace-shaped dirs, fall back to cwd."""
+        for name in ("a", "b"):
+            ws = tmp_path / "workspaces" / name
+            (ws / "sites").mkdir(parents=True)
+            (ws / "manifests").mkdir()
+        monkeypatch.chdir(tmp_path)
+        with patch.object(
+            sys,
+            "argv",
+            ["siteops", "sites"],
+        ):
+            with patch("siteops.cli.cmd_sites") as mock_cmd:
+                mock_cmd.return_value = 0
+                with pytest.raises(SystemExit):
+                    main()
+
+                args = mock_cmd.call_args[0][0]
+                # Ambiguous discovery: caller falls back to cwd, which here
+                # is not itself a valid workspace but is still passed through
+                # for the orchestrator to error on (preserves prior behavior).
+                assert args.workspace == tmp_path.resolve()
 
 
 class TestUserAgentConfiguration:
@@ -1109,3 +1552,88 @@ parameters:
         assert "00000000-0000-0000-0000-000000000000" not in captured.out
         assert "rg-placeholder" not in captured.out
         assert "placeholder-cluster" not in captured.out
+
+
+class TestCmdSitesVerboseProvenance:
+    """`-v` annotates every leaf with its source file."""
+
+    def test_verbose_shows_provenance_per_leaf(self, tmp_path, capsys):
+        workspace = tmp_path / "workspace"
+        (workspace / "sites" / "shared").mkdir(parents=True)
+        (workspace / "sites" / "shared" / "base.yaml").write_text(
+            """
+apiVersion: siteops/v1
+kind: SiteTemplate
+name: base
+subscription: shared-sub
+labels:
+  team: platform
+properties:
+  defaultRelease: r1
+""",
+            encoding="utf-8",
+        )
+        (workspace / "sites" / "munich.yaml").write_text(
+            """
+apiVersion: siteops/v1
+kind: Site
+name: munich
+inherits: shared/base.yaml
+resourceGroup: rg-munich
+location: eastus
+labels:
+  environment: dev
+""",
+            encoding="utf-8",
+        )
+
+        from argparse import Namespace
+
+        from siteops.cli import cmd_sites
+        from siteops.orchestrator import Orchestrator
+
+        orchestrator = Orchestrator(workspace)
+        args = Namespace(name=None, selector="name=munich", verbose=True, render=False)
+
+        cmd_sites(args, orchestrator)
+
+        captured = capsys.readouterr()
+        # Inherited values point at the shared template.
+        assert "subscription:   shared-sub" in captured.out
+        assert "shared/base.yaml" in captured.out
+        # Site-defined values point at the leaf file.
+        assert "rg-munich" in captured.out
+        assert "sites/munich.yaml" in captured.out
+        # Inherited and site-defined labels are both annotated.
+        assert "team: platform" in captured.out
+        assert "environment: dev" in captured.out
+
+    def test_non_verbose_skips_provenance(self, tmp_path, capsys):
+        """The bare listing skips the provenance walk to stay fast."""
+        workspace = tmp_path / "workspace"
+        (workspace / "sites").mkdir(parents=True)
+        (workspace / "sites" / "munich.yaml").write_text(
+            """
+apiVersion: siteops/v1
+kind: Site
+name: munich
+subscription: "00000000-0000-0000-0000-000000000000"
+resourceGroup: rg
+location: eastus
+""",
+            encoding="utf-8",
+        )
+
+        from argparse import Namespace
+
+        from siteops.cli import cmd_sites
+        from siteops.orchestrator import Orchestrator
+
+        orchestrator = Orchestrator(workspace)
+        args = Namespace(name=None, selector=None, verbose=False, render=False)
+
+        cmd_sites(args, orchestrator)
+
+        captured = capsys.readouterr()
+        # No origin annotation in non-verbose output.
+        assert "# sites/" not in captured.out

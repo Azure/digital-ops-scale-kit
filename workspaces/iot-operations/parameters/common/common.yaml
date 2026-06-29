@@ -1,0 +1,53 @@
+# Common parameters applied to all steps via manifest-level parameters.
+# Auto-filtering ensures each template only receives parameters it accepts.
+#
+# This file lives under `parameters/common/` (not at `parameters/` root) so
+# the dir mirrors the {common, inputs, outputs, aio-releases} convention
+# documented in `parameters/README.md`.
+
+# ─────────────────────────────────────────────────────────────
+# Site Identity
+# ─────────────────────────────────────────────────────────────
+siteName: "{{ site.name }}"
+location: "{{ site.location }}"
+clusterLocation: "{{ site.location }}"
+
+# ─────────────────────────────────────────────────────────────
+# Resource Naming: {{ site.name }}-<suffix>
+# ─────────────────────────────────────────────────────────────
+customLocationName: "{{ site.name }}-cl"
+aioInstanceName: "{{ site.name }}-aio"
+schemaRegistryName: "{{ site.name }}-sr"
+adrNamespaceName: "{{ site.name }}-ns"
+
+# ─────────────────────────────────────────────────────────────
+# Edge Site Parameters (for edge-site templates)
+# ─────────────────────────────────────────────────────────────
+siteAddress:
+  country: "{{ site.labels.country }}"
+  city: "{{ site.labels.city }}"
+# `labels` here populates the Microsoft.Edge/sites `labels` Bicep param
+# (distinct from `site.labels` used for selectors / template substitution).
+labels:
+  managedBy: siteops
+
+# ─────────────────────────────────────────────────────────────
+# AIO Configuration
+# ─────────────────────────────────────────────────────────────
+trustConfig:
+  source: SelfSigned
+
+# cert-manager ownership flag. Drives both the install gate
+# (enablement.bicep) and the upgrade gate (resolve-extensions.bicep,
+# update-extensions.bicep). Sourced from site config so trust source and
+# cert-manager ownership remain orthogonal capabilities.
+enableCertManager: "{{ site.properties.deployOptions.enableCertManager }}"
+
+# ─────────────────────────────────────────────────────────────
+# Resource Metadata (auto-filtered per template)
+# ─────────────────────────────────────────────────────────────
+tags:
+  environment: "{{ site.labels.environment }}"
+  site: "{{ site.name }}"
+  country: "{{ site.labels.country }}"
+  managedBy: siteops

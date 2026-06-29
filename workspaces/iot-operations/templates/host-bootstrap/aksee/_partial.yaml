@@ -1,0 +1,21 @@
+apiVersion: siteops/v1
+kind: Manifest
+name: aksee-bootstrap
+description: |
+  AKS Edge Essentials host bootstrap step. Delivers and runs the bootstrap
+  launcher on the target Arc-onboarded Windows VM via Arc Run Command. The
+  launcher registers a Scheduled Task that drives the worker state machine
+  through preflight, MSI install + Hyper-V enable (may reboot), single-node
+  K3s cluster create, Arc-connect with custom locations, and cleanup.
+
+  Internal partial (filename prefixed `_`). Not deployed directly. Composed
+  by the standalone `manifests/aksee-bootstrap.yaml` and by compositions
+  that add a host bootstrap step before AIO install (e.g.,
+  `samples/aio-with-aksee-bootstrap/manifest.yaml`).
+
+steps:
+  - name: aksee-bootstrap
+    template: templates/host-bootstrap/aksee/template.bicep
+    scope: resourceGroup
+    parameters:
+      - parameters/inputs/aksee-bootstrap.yaml

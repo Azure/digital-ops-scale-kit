@@ -1,0 +1,5 @@
+# Fan-in inputs into the opc-ua-solution step, pulled from the resolve-aio upstream.
+# See docs/parameter-resolution.md for the inputs/outputs convention.
+
+customLocationName: "{{ steps.resolve-aio.outputs.customLocationName }}"
+adrNamespaceName: "{{ steps.resolve-aio.outputs.adrNamespaceName }}"

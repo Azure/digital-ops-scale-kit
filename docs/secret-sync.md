@@ -11,7 +11,7 @@ The enablement template (`enable-secretsync.bicep`) creates:
 | Resource | Purpose |
 |----------|---------|
 | User-Assigned Managed Identity | Authenticates the cluster to Key Vault |
-| Key Vault (optional) | Stores secrets; skipped if you bring your own |
+| Key Vault (optional) | Stores secrets, skipped if you bring your own |
 | Key Vault role assignments | Grants the MI `Key Vault Secrets User` + `Key Vault Reader` |
 | Federated Identity Credential | Binds the MI to the cluster's secret sync service account via OIDC |
 | SecretProviderClass (SPC) | Cluster-side resource linking the MI, Key Vault, and tenant |
@@ -39,15 +39,11 @@ resolve-aio                          enable-secretsync
 └──────────────────────────┘         └──────────────────────────────────┘
 ```
 
-**Step 1, Resolve**: `resolve-aio.bicep` reads the existing IoT Operations instance and resolves the full infrastructure chain (instance → custom location → connected cluster) without creating or modifying any resources. It outputs everything downstream templates need.
-
-**Step 2, Enable**: `enable-secretsync.bicep` receives all resolved values via [output chaining](parameter-resolution.md#output-chaining) and provisions the secret sync resources.
-
-This pattern keeps templates portable. `enable-secretsync.bicep` never makes assumptions about naming conventions or directory layout.
+`resolve-aio.bicep` is read-only and outputs everything downstream needs. `enable-secretsync.bicep` receives those values via [output chaining](parameter-resolution.md#output-chaining) and provisions the secret sync resources. The split keeps `enable-secretsync.bicep` portable across naming conventions.
 
 ### Output chaining
 
-The parameter file `parameters/secretsync-chaining.yaml` maps outputs from the resolve step to the enablement step's inputs:
+The parameter file `parameters/inputs/secretsync.yaml` maps outputs from the resolve step to the enablement step's inputs:
 
 ```yaml
 # Resolved infrastructure names
@@ -124,30 +120,72 @@ When an existing Key Vault is provided:
 
 ## Syncing secrets to the cluster
 
-After enablement, use `sync-secret.bicep` to synchronize individual Key Vault secrets to Kubernetes secrets:
+After enablement, use `sync-secrets.bicep` to synchronize one or more Key Vault secrets to Kubernetes Secrets in a single deploy:
 
 ```
 az deployment group create -g <rg> \
-  -f templates/iot-ops/secretsync/sync-secret.bicep \
+  -f templates/secretsync/sync-secrets.bicep \
   -p keyVaultName=<kv> customLocationName=<cl> spcName=<spc> \
-     secretName=my-secret secretValue=<value>
+     managedIdentityClientId=<clientId> instanceLocation=<region> \
+     secrets='[{"secretName":"my-secret"},{"secretName":"existing","createInKv":false}]' \
+     secretValues='{"my-secret":"<value>"}'
 ```
+
+The template treats the `secrets` array as the desired state. Each deploy PUTs the SPC with the union of all entries' object names and creates one SecretSync per distinct `kubernetesSecretName` (defaulting to `secretName`). Entries that share a `kubernetesSecretName` are grouped into one multi-key Kubernetes Secret. See [Multi-key Secrets](#multi-key-secrets) below.
 
 ### Parameters
 
 | Parameter | Required | Description |
 |-----------|----------|-------------|
 | `keyVaultName` | Yes | Key Vault name (from enablement outputs) |
-| `customLocationName` | Yes | Custom location name |
+| `customLocationName` | Yes | Custom location name (from `resolve-aio` outputs) |
 | `spcName` | Yes | Default SPC name (from enablement outputs) |
-| `secretName` | Yes | Name of the Key Vault secret to create |
-| `secretValue` | Yes | **`@secure()`**, provided at deploy time, never in git |
-| `kubernetesSecretName` | No | K8s secret name (defaults to `secretName`) |
-| `kubernetesSecretKey` | No | Key within the K8s secret (defaults to `secretName`) |
+| `managedIdentityClientId` | Yes | Secretsync MI client ID (from enablement outputs) |
+| `instanceLocation` | Yes | AIO instance location (from `resolve-aio` outputs) |
+| `secrets` | Yes | Array of per-secret metadata, see below |
+| `secretValues` | No | **`@secure()`** object keyed by `secretName`, required for entries with `createInKv` true |
+| `tags` | No | Tags applied to the SPC, KV secrets, and SecretSync resources |
+
+Per-entry fields in `secrets`:
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `secretName` | Yes | | Key Vault secret name. Must be unique within the array. |
+| `kubernetesSecretName` | No | `secretName` | Kubernetes Secret name. Multiple entries that set the same value are grouped into one multi-key Secret. |
+| `kubernetesSecretKey` | No | `secretName` | Key inside the Kubernetes Secret. Must be unique within a group of entries that share a `kubernetesSecretName`. |
+| `createInKv` | No | `true` | Set `false` to sync a secret already present in the Key Vault |
+
+### Multi-key Secrets
+
+Workloads often consume related credentials as a single multi-key Kubernetes Secret (e.g., a `database-credentials` Secret with `host`, `username`, and `password` keys). Express this by setting the same `kubernetesSecretName` on each entry and a distinct `kubernetesSecretKey`:
+
+```yaml
+secrets:
+  - secretName: my-db-host-kv
+    kubernetesSecretName: database-credentials
+    kubernetesSecretKey: host
+  - secretName: my-db-username-kv
+    kubernetesSecretName: database-credentials
+    kubernetesSecretKey: username
+  - secretName: my-db-password-kv
+    kubernetesSecretName: database-credentials
+    kubernetesSecretKey: password
+```
+
+This produces:
+
+- Three Key Vault secrets (`my-db-host-kv`, `my-db-username-kv`, `my-db-password-kv`)
+- One SecretSync ARM resource named `database-credentials` with three `objectSecretMapping` entries
+- One Kubernetes Secret `database-credentials` on the cluster with three keys (`host`, `username`, `password`)
+
+Constraints:
+
+- Each `secretName` must be unique across the array. Each entry corresponds to one Key Vault secret.
+- Within a group of entries sharing a `kubernetesSecretName`, each `kubernetesSecretKey` must also be unique. Like any duplicate-key situation in YAML, two entries claiming the same `(kubernetesSecretName, kubernetesSecretKey)` pair both write to the same Kubernetes Secret slot and the cluster-side reconcile order decides which value wins.
 
 ### Security model
 
-The `secretValue` parameter is decorated with `@secure()` so ARM never logs it in deployment history or outputs. Provide secret values via:
+The `secretValues` parameter is decorated with `@secure()` so ARM never logs values in deployment history or outputs. Provide values via:
 
 - **`sites.local/`** parameter overrides (gitignored), the standard siteops pattern for local development
 - **CI/CD secrets** such as GitHub Actions secrets or Azure DevOps variable groups
@@ -158,41 +196,50 @@ The `secretValue` parameter is decorated with `@secure()` so ARM never logs it i
 To sync secrets as part of a manifest, add a step after enablement:
 
 ```yaml
-- name: sync-my-secret
-  template: templates/iot-ops/secretsync/sync-secret.bicep
+- name: sync-secrets
+  template: templates/secretsync/sync-secrets.bicep
   scope: resourceGroup
   parameters:
-    - parameters/secretsync-chaining.yaml
-    # secretValue comes from sites.local/ or CI secrets
+    - parameters/inputs/sync-secrets.yaml
+    # secretValues come from sites.local/ or CI secrets
   when: "{{ site.properties.deployOptions.enableSecretSync }}"
 ```
+
+### Removing a secret
+
+See [secretsync-sample/README.md](../workspaces/iot-operations/samples/secretsync-sample/README.md#removing-a-secret) for the operational steps. The SPC PUT semantics and SecretSync ARM-resource cleanup are documented there alongside the sample they apply to.
 
 ## Template reference
 
 ```
-templates/iot-ops/
+templates/
+├── aio/
+│   ├── resolve-aio.bicep                    # Read-only instance → CL → cluster resolution (dispatcher)
+│   └── modules/
+│       ├── resolve-instance-2025-10-01.bicep  # Per-API-version instance read
+│       ├── resolve-instance-2026-03-01.bicep  # Per-API-version instance read
+│       └── update-instance.bicep            # Shared safe instance PUT (dispatcher) used by the secretsync flow
 ├── common/
-│   ├── resolve-aio.bicep                    # Read-only instance → CL → cluster resolution
 │   └── modules/
 │       ├── resolve-custom-location.bicep    # CL resource ID → name, namespace, hostResourceId
 │       └── resolve-cluster.bicep            # Cluster resource ID → name, OIDC issuer URLs
-├── secretsync/
-│   ├── enable-secretsync.bicep              # Creates MI, KV, roles, FIC, SPC, instance update
-│   ├── sync-secret.bicep                    # Syncs a KV secret to a K8s secret
-│   └── modules/
-│       ├── update-instance.bicep            # Safe instance PUT with identity forwarding
-│       └── keyvault-roles.bicep             # KV role assignments (cross-RG capable)
+└── secretsync/
+    ├── enable-secretsync.bicep              # Creates MI, KV, roles, FIC, SPC, instance update
+    ├── sync-secrets.bicep                   # Syncs N KV secrets to K8s secrets in one deploy
+    └── modules/
+        └── keyvault-roles.bicep             # KV role assignments (cross-RG capable)
 ```
 
 ### Resolve modules
 
-The `common/` directory contains reusable resolution templates. `resolve-aio.bicep` is the entry point and chains through co-located modules:
+`resolve-aio.bicep` is the entry point. It is a dispatcher on `aioApiVersion` (sourced from `parameters/aio-releases/<release>.yaml`) that dispatches the instance read to a per-API-version inner module, then chains the (version-stable) custom-location and connected-cluster lookups:
 
 | Module | Input | Outputs |
 |--------|-------|---------|
-| `resolve-aio.bicep` | `aioInstanceName` | All infrastructure names + instance properties |
-| `resolve-custom-location.bicep` | CL resource ID | `name`, `namespace`, `hostResourceId` |
-| `resolve-cluster.bicep` | Cluster resource ID | `name`, `oidcIssuerUrl`, `selfHostedIssuerUrl` |
+| `aio/resolve-aio.bicep` | `aioInstanceName`, `aioApiVersion` | All infrastructure names + instance properties |
+| `aio/modules/resolve-instance-<v>.bicep` | `aioInstanceName` | Instance fields read at API version `<v>` |
+| `common/modules/resolve-custom-location.bicep` | CL resource ID | `name`, `namespace`, `hostResourceId` |
+| `common/modules/resolve-cluster.bicep` | Cluster resource ID | `name`, `oidcIssuerUrl`, `selfHostedIssuerUrl` |
 
 These modules use Bicep's **module boundary** pattern: runtime resource IDs passed as module parameters become compile-time values inside the module, enabling chained `existing` resource lookups.
 
@@ -200,8 +247,8 @@ These modules use Bicep's **module boundary** pattern: runtime resource IDs pass
 
 | Module | Purpose |
 |--------|---------|
-| `update-instance.bicep` | Safe instance PUT that forwards all writable properties for the pinned API version, with conditional identity handling |
-| `keyvault-roles.bicep` | Key Vault role assignments via module scope, supporting cross-resource-group Key Vaults |
+| `aio/modules/update-instance.bicep` | Safe instance PUT that forwards all writable properties for the pinned API version, with conditional identity handling |
+| `secretsync/modules/keyvault-roles.bicep` | Key Vault role assignments via module scope, supporting cross-resource-group Key Vaults |
 
 ## Troubleshooting
 
@@ -227,7 +274,7 @@ If `resolve-aio` fails with an error about a property not existing on the instan
 
 ### Role assignment conflicts
 
-Role assignments use deterministic names via `guid(keyVault.id, principalId, roleId)`. Re-running the deployment is idempotent; existing assignments are confirmed in place, not duplicated.
+Role assignments use deterministic names via `guid(keyVault.id, principalId, roleId)`. Re-running the deployment is idempotent. Existing assignments are confirmed in place, not duplicated.
 
 ### Key Vault RBAC not enabled
 

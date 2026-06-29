@@ -8,6 +8,7 @@ Covers:
 - Output path resolution
 """
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -358,6 +359,116 @@ class TestResolveSites:
         assert len(sites) == 2
         assert all(s.labels["region"] == "eastus" for s in sites)
 
+    def test_no_targeting_anywhere_raises(self, multi_site_workspace):
+        """Generic manifest (no `sites:`/`selector:`) with no CLI selector
+        is a hard deploy-time error."""
+        orchestrator = Orchestrator(multi_site_workspace)
+        manifest = Manifest(name="generic", description="", sites=[], steps=[])
+
+        import pytest
+        with pytest.raises(ValueError, match="has no targeting"):
+            orchestrator.resolve_sites(manifest)
+
+    def test_generic_manifest_with_cli_selector_resolves(self, multi_site_workspace):
+        """Generic manifest is targetable from the CLI."""
+        orchestrator = Orchestrator(multi_site_workspace)
+        manifest = Manifest(name="generic", description="", sites=[], steps=[])
+
+        sites = orchestrator.resolve_sites(manifest, cli_selector="environment=dev")
+
+        assert len(sites) == 2
+        assert all(s.labels["environment"] == "dev" for s in sites)
+
+    def test_cli_selector_name_or_combines_multiple_sites(self, multi_site_workspace):
+        """`-l name=a,name=b` resolves both sites via load_site fast-path."""
+        orchestrator = Orchestrator(multi_site_workspace)
+        manifest = Manifest(name="generic", description="", sites=[], steps=[])
+
+        sites = orchestrator.resolve_sites(
+            manifest, cli_selector="name=dev-eastus,name=dev-westus"
+        )
+
+        assert {s.name for s in sites} == {"dev-eastus", "dev-westus"}
+
+    def test_cli_selector_name_or_dedupes_repeated(self, multi_site_workspace):
+        """Repeated name values dedup at parse time."""
+        orchestrator = Orchestrator(multi_site_workspace)
+        manifest = Manifest(name="generic", description="", sites=[], steps=[])
+
+        sites = orchestrator.resolve_sites(
+            manifest, cli_selector="name=dev-eastus,name=dev-eastus"
+        )
+
+        assert len(sites) == 1
+        assert sites[0].name == "dev-eastus"
+
+    def test_cli_selector_duplicate_non_name_key_raises(self, multi_site_workspace):
+        """Repeating any non-name key in the same selector raises."""
+        orchestrator = Orchestrator(multi_site_workspace)
+        manifest = Manifest(name="generic", description="", sites=[], steps=[])
+
+        import pytest
+        with pytest.raises(ValueError, match="may only appear once"):
+            orchestrator.resolve_sites(
+                manifest, cli_selector="environment=dev,environment=prod"
+            )
+
+
+class TestExplainNoMatch:
+    """`explain_no_match` produces operator-friendly diagnostics for
+    CLI selectors that filter the workspace down to zero sites."""
+
+    def test_label_typo_lists_actual_workspace_values(self, multi_site_workspace):
+        orchestrator = Orchestrator(multi_site_workspace)
+        msg = orchestrator.explain_no_match("environment=prdo")
+        assert "matched no sites" in msg
+        assert "environment=prdo" in msg
+        # Diagnostic should list the actual `environment` values present.
+        assert "dev" in msg or "prod" in msg
+
+    def test_unknown_label_says_so(self, multi_site_workspace):
+        orchestrator = Orchestrator(multi_site_workspace)
+        msg = orchestrator.explain_no_match("nonexistent=value")
+        assert "nonexistent" in msg
+        assert "no site declares" in msg or "Workspace" in msg
+
+    def test_name_typo_lists_workspace_site_names(self, multi_site_workspace):
+        orchestrator = Orchestrator(multi_site_workspace)
+        msg = orchestrator.explain_no_match("name=does-not-exist")
+        assert "does-not-exist" in msg
+        # At least one real site name should appear in the diagnostic.
+        all_sites = orchestrator.load_all_sites()
+        assert any(s.name in msg for s in all_sites)
+
+    def test_none_selector_returns_generic_message(self, multi_site_workspace):
+        orchestrator = Orchestrator(multi_site_workspace)
+        msg = orchestrator.explain_no_match(None)
+        assert "manifest" in msg.lower() or "matched" in msg.lower()
+
+    def test_empty_workspace(self, tmp_workspace):
+        orchestrator = Orchestrator(tmp_workspace)
+        msg = orchestrator.explain_no_match("env=dev")
+        assert "No sites in workspace" in msg
+
+    def test_invalid_selector_surfaces_parse_error(self, multi_site_workspace):
+        orchestrator = Orchestrator(multi_site_workspace)
+        msg = orchestrator.explain_no_match("env=dev,env=prod")
+        assert "invalid" in msg.lower()
+        assert "may only appear once" in msg
+
+    def test_name_matches_but_other_key_filters_explains(self, multi_site_workspace):
+        """When `name=X` matches a real site but another selector key
+        filters it out, the diagnostic must say so rather than fall
+        back to the generic 'matched no sites' line."""
+        orchestrator = Orchestrator(multi_site_workspace)
+        all_sites = orchestrator.load_all_sites()
+        real_name = all_sites[0].name
+        msg = orchestrator.explain_no_match(f"name={real_name},nonexistent=value")
+        assert "matched no sites" in msg
+        assert real_name in msg
+        # Tells the operator the name matched but another key filtered.
+        assert "matched a workspace site but" in msg or "another selector key" in msg
+
 
 class TestDeploymentNameGeneration:
     """Tests for deployment name truncation and hashing."""
@@ -437,7 +548,7 @@ steps:
 """
         )
 
-        manifest = Manifest.from_file(manifest_path)
+        manifest = Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
 
         assert manifest.parallel.sites == 2
         assert manifest.parallel.max_workers == 2
@@ -883,6 +994,334 @@ class TestGetAllSiteNames:
         names = orchestrator._get_all_site_names()
 
         assert names == []
+
+
+class TestSiteIdentityResolution:
+    """Sites can be resolved by either filename or internal `name:`.
+
+    Today most workspace sites use a `name:` that matches the filename.
+    The bilingual lookup lets an operator declare a different `name:`
+    (for renames or human-readable identifiers) and still have the site
+    resolve from CLI selectors and `Orchestrator.load_site`.
+    """
+
+    def _write_site(self, workspace, filename, internal_name, **extra):
+        body = {
+            "apiVersion": "siteops/v1",
+            "kind": "Site",
+            "name": internal_name,
+            "subscription": "00000000-0000-0000-0000-000000000000",
+            "resourceGroup": "rg-test",
+            "location": "eastus",
+            **extra,
+        }
+        path = workspace / "sites" / filename
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.dump(body, f)
+        return path
+
+    def test_load_by_filename_stem_when_name_matches(self, tmp_workspace):
+        """The common case: name matches the filename. Filename fast path wins."""
+        self._write_site(tmp_workspace, "munich-dev.yaml", "munich-dev")
+        orchestrator = Orchestrator(tmp_workspace)
+        site = orchestrator.load_site("munich-dev")
+        assert site.name == "munich-dev"
+
+    def test_load_by_filename_stem_when_name_overridden(self, tmp_workspace):
+        """Filename still resolves even when internal name differs."""
+        self._write_site(tmp_workspace, "seattle.yaml", "contoso-edge")
+        orchestrator = Orchestrator(tmp_workspace)
+        site = orchestrator.load_site("seattle")
+        assert site.name == "contoso-edge"
+
+    def test_load_by_internal_name_when_overridden(self, tmp_workspace):
+        """Internal name resolves via the lazy index fallback."""
+        self._write_site(tmp_workspace, "seattle.yaml", "contoso-edge")
+        orchestrator = Orchestrator(tmp_workspace)
+        site = orchestrator.load_site("contoso-edge")
+        assert site.name == "contoso-edge"
+
+    def test_load_by_internal_name_caches_under_both_forms(self, tmp_workspace):
+        """A subsequent load via the other form is a cache hit, not a re-resolve."""
+        self._write_site(tmp_workspace, "seattle.yaml", "contoso-edge")
+        orchestrator = Orchestrator(tmp_workspace)
+        site_by_internal = orchestrator.load_site("contoso-edge")
+        site_by_stem = orchestrator.load_site("seattle")
+        assert site_by_internal is site_by_stem  # same cached instance
+
+    def test_unknown_identifier_raises_file_not_found(self, tmp_workspace):
+        self._write_site(tmp_workspace, "seattle.yaml", "contoso-edge")
+        orchestrator = Orchestrator(tmp_workspace)
+        with pytest.raises(FileNotFoundError):
+            orchestrator.load_site("nonexistent")
+
+    def test_two_sites_same_internal_name_rejected(self, tmp_workspace):
+        """A workspace cannot have two files claiming the same internal name."""
+        self._write_site(tmp_workspace, "seattle.yaml", "contoso-edge")
+        self._write_site(tmp_workspace, "tacoma.yaml", "contoso-edge")
+        orchestrator = Orchestrator(tmp_workspace)
+        # Filename fast path still works for either file directly. The
+        # collision only surfaces when the index is built (on internal-
+        # name lookup or any path that triggers the fallback).
+        with pytest.raises(ValueError, match="Two sites declare the same"):
+            orchestrator.load_site("contoso-edge")
+
+    def test_internal_name_shadowing_another_stem_rejected(self, tmp_workspace):
+        """A site cannot set `name: X` if `X.yaml` is another file in the workspace."""
+        # File `seattle.yaml` declares `name: tacoma`. Another file
+        # `tacoma.yaml` exists. The identifier "tacoma" is now ambiguous:
+        # filename lookup returns tacoma.yaml, internal-name lookup would
+        # return seattle.yaml. Reject at index-build time.
+        self._write_site(tmp_workspace, "seattle.yaml", "tacoma")
+        self._write_site(tmp_workspace, "tacoma.yaml", "tacoma")
+        orchestrator = Orchestrator(tmp_workspace)
+        with pytest.raises(ValueError, match="collides with file"):
+            orchestrator.load_site("does-not-matter")
+
+    def test_index_skips_sites_where_name_matches_stem(self, tmp_workspace):
+        """Common-case sites do not appear in the internal-name index."""
+        self._write_site(tmp_workspace, "munich-dev.yaml", "munich-dev")
+        self._write_site(tmp_workspace, "seattle.yaml", "contoso-edge")
+        orchestrator = Orchestrator(tmp_workspace)
+        # Force build via a fallback lookup.
+        orchestrator.load_site("contoso-edge")
+        # Only the overridden site should be indexed.
+        assert set(orchestrator._internal_name_index.keys()) == {"contoso-edge"}
+
+    def test_collision_caught_via_stem_fast_path(self, tmp_workspace):
+        """Collision detection fires even when every lookup hits the
+        filename fast path. Without eager index build, a workspace with
+        two sites declaring the same internal `name:` would silently
+        pass any command that only resolves by filename.
+        """
+        self._write_site(tmp_workspace, "site-a.yaml", "shared")
+        self._write_site(tmp_workspace, "site-b.yaml", "shared")
+        orchestrator = Orchestrator(tmp_workspace)
+        # Both files have filenames that resolve via the fast path. The
+        # collision is in their internal `name:` fields. The eager
+        # index build (triggered by _find_trusted_site_file) must
+        # surface the drift even though we never miss the filename path.
+        with pytest.raises(ValueError, match="Two sites declare the same"):
+            orchestrator.load_site("site-a")
+
+    def test_shadow_caught_via_stem_fast_path(self, tmp_workspace):
+        """`name:` shadowing another file's filename is rejected at load
+        time even when every operator lookup happens to hit the filename
+        fast path."""
+        self._write_site(tmp_workspace, "tacoma.yaml", "tacoma")
+        self._write_site(tmp_workspace, "seattle.yaml", "tacoma")
+        orchestrator = Orchestrator(tmp_workspace)
+        with pytest.raises(ValueError, match="collides with file"):
+            orchestrator.load_site("seattle")
+
+    def test_site_template_not_indexed(self, tmp_workspace):
+        """SiteTemplates are skipped when building the internal-name index."""
+        body = {
+            "apiVersion": "siteops/v1",
+            "kind": "SiteTemplate",
+            "name": "shared-prod",
+            "labels": {"environment": "prod"},
+        }
+        with open(tmp_workspace / "sites" / "base.yaml", "w", encoding="utf-8") as f:
+            yaml.dump(body, f)
+        self._write_site(tmp_workspace, "seattle.yaml", "contoso-edge")
+        orchestrator = Orchestrator(tmp_workspace)
+        orchestrator.load_site("contoso-edge")
+        assert "shared-prod" not in orchestrator._internal_name_index
+
+
+class TestNestedSiteDiscovery:
+    """Sites under nested subdirectories of `sites/` are discoverable.
+
+    Discovery walks every subdirectory. Identity for a nested file is
+    its relative path under the trusted dir (e.g.,
+    `regions/eu/munich-dev`), AND its basename (e.g., `munich-dev`). The
+    basename is unique by workspace invariant so the shorthand is always
+    unambiguous.
+    """
+
+    def _write_site(self, root, rel, internal_name):
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        body = {
+            "apiVersion": "siteops/v1",
+            "kind": "Site",
+            "name": internal_name,
+            "subscription": "00000000-0000-0000-0000-000000000000",
+            "resourceGroup": "rg-test",
+            "location": "eastus",
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.dump(body, f)
+        return path
+
+    def test_load_nested_site_by_basename(self, tmp_workspace):
+        self._write_site(
+            tmp_workspace, Path("sites/regions/eu/munich-dev.yaml"), "munich-dev"
+        )
+        orchestrator = Orchestrator(tmp_workspace)
+        site = orchestrator.load_site("munich-dev")
+        assert site.name == "munich-dev"
+
+    def test_load_nested_site_by_rel_path(self, tmp_workspace):
+        self._write_site(
+            tmp_workspace, Path("sites/regions/eu/munich-dev.yaml"), "munich-dev"
+        )
+        orchestrator = Orchestrator(tmp_workspace)
+        site = orchestrator.load_site("regions/eu/munich-dev")
+        assert site.name == "munich-dev"
+
+    def test_get_all_site_names_recurses(self, tmp_workspace):
+        self._write_site(
+            tmp_workspace, Path("sites/regions/eu/munich-dev.yaml"), "munich-dev"
+        )
+        self._write_site(
+            tmp_workspace, Path("sites/regions/us/seattle-dev.yaml"), "seattle-dev"
+        )
+        self._write_site(tmp_workspace, Path("sites/flat-site.yaml"), "flat-site")
+        orchestrator = Orchestrator(tmp_workspace)
+        names = orchestrator._get_all_site_names()
+        assert names == ["flat-site", "munich-dev", "seattle-dev"]
+
+    def test_load_all_sites_returns_nested(self, tmp_workspace):
+        self._write_site(
+            tmp_workspace, Path("sites/regions/eu/munich-dev.yaml"), "munich-dev"
+        )
+        self._write_site(
+            tmp_workspace, Path("sites/regions/us/seattle-dev.yaml"), "seattle-dev"
+        )
+        orchestrator = Orchestrator(tmp_workspace)
+        sites = orchestrator.load_all_sites()
+        assert {s.name for s in sites} == {"munich-dev", "seattle-dev"}
+
+    def test_basename_collision_within_dir_rejected(self, tmp_workspace):
+        """Two nested files in one trusted dir sharing a basename are
+        rejected at load time."""
+        self._write_site(
+            tmp_workspace, Path("sites/regions/eu/munich.yaml"), "munich-eu"
+        )
+        self._write_site(
+            tmp_workspace, Path("sites/regions/us/munich.yaml"), "munich-us"
+        )
+        orchestrator = Orchestrator(tmp_workspace)
+        with pytest.raises(ValueError, match="share basename `munich`"):
+            orchestrator.load_site("munich-eu")
+
+    def test_nested_overlay_in_sites_local(self, tmp_workspace):
+        """`sites.local/regions/eu/munich.yaml` overlays the trusted file."""
+        self._write_site(
+            tmp_workspace, Path("sites/regions/eu/munich.yaml"), "munich"
+        )
+        local_path = tmp_workspace / "sites.local" / "regions" / "eu" / "munich.yaml"
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(local_path, "w", encoding="utf-8") as f:
+            yaml.dump(
+                {
+                    "subscription": "11111111-1111-1111-1111-111111111111",
+                    "resourceGroup": "rg-overlay",
+                },
+                f,
+            )
+        orchestrator = Orchestrator(tmp_workspace)
+        site = orchestrator.load_site("munich")
+        assert site.subscription == "11111111-1111-1111-1111-111111111111"
+        assert site.resource_group == "rg-overlay"
+
+    def test_internal_name_shadowing_rel_path_rejected(self, tmp_workspace):
+        """A site with `name: regions/eu/munich` collides with the
+        path-form identifier of the actual nested file."""
+        self._write_site(
+            tmp_workspace, Path("sites/regions/eu/munich.yaml"), "munich"
+        )
+        # Another flat site declares a `name:` that matches the nested
+        # relative-path identifier. The internal-name index build must reject.
+        flat = tmp_workspace / "sites" / "alias.yaml"
+        with open(flat, "w", encoding="utf-8") as f:
+            yaml.dump(
+                {
+                    "apiVersion": "siteops/v1",
+                    "kind": "Site",
+                    "name": "regions/eu/munich",
+                    "subscription": "00000000-0000-0000-0000-000000000000",
+                    "resourceGroup": "rg-test",
+                    "location": "eastus",
+                },
+                f,
+            )
+        orchestrator = Orchestrator(tmp_workspace)
+        with pytest.raises(ValueError, match="collides with the path-form"):
+            orchestrator.load_site("munich")
+
+    def test_cross_dir_basename_collision_with_different_rel_path_rejected(
+        self, tmp_workspace, tmp_path
+    ):
+        """Two trusted dirs cannot have the same basename at different
+        relative paths. That would let the basename refer to two distinct
+        sites."""
+        self._write_site(
+            tmp_workspace, Path("sites/regions/eu/munich.yaml"), "munich-eu"
+        )
+        extras = tmp_path / "extras-dir"
+        self._write_site(extras, Path("factories/munich.yaml"), "munich-factory")
+        orchestrator = Orchestrator(tmp_workspace, extra_trusted_sites_dirs=[extras])
+        with pytest.raises(ValueError, match="Cross-directory basename"):
+            orchestrator.load_site("munich-eu")
+
+    def test_cross_dir_basename_collision_same_rel_path_is_overlay(
+        self, tmp_workspace, tmp_path
+    ):
+        """Same basename at the same relative path across trusted dirs
+        is a legitimate overlay. The overlay restates the same name
+        (matches the base) and merges other fields on top."""
+        self._write_site(
+            tmp_workspace, Path("sites/regions/eu/munich.yaml"), "munich"
+        )
+        # Overlay file has same name as base (allowed). Use a custom
+        # write so we can supply a divergent label without touching name.
+        extras = tmp_path / "extras-dir"
+        overlay_path = extras / "regions" / "eu" / "munich.yaml"
+        overlay_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(overlay_path, "w", encoding="utf-8") as f:
+            yaml.dump(
+                {
+                    "apiVersion": "siteops/v1",
+                    "kind": "Site",
+                    "name": "munich",
+                    "subscription": "11111111-1111-1111-1111-111111111111",
+                    "labels": {"overlay": "yes"},
+                },
+                f,
+            )
+        orchestrator = Orchestrator(tmp_workspace, extra_trusted_sites_dirs=[extras])
+        site = orchestrator.load_site("munich")
+        # Identity preserved from base; overlay fields applied on top.
+        assert site.name == "munich"
+        assert site.subscription == "11111111-1111-1111-1111-111111111111"
+        assert site.labels.get("overlay") == "yes"
+
+    def test_overlay_renaming_site_rejected(self, tmp_workspace, tmp_path):
+        """Overlay that tries to CHANGE the site name (vs. restate it)
+        is rejected at load time. Renaming a site via overlay would
+        produce identity unfindable through any workspace index."""
+        self._write_site(
+            tmp_workspace, Path("sites/regions/eu/munich.yaml"), "munich"
+        )
+        extras = tmp_path / "extras-dir"
+        self._write_site(extras, Path("regions/eu/munich.yaml"), "munich-overlay")
+        orchestrator = Orchestrator(tmp_workspace, extra_trusted_sites_dirs=[extras])
+        with pytest.raises(ValueError, match="cannot rename the site"):
+            orchestrator.load_site("munich")
+
+    def test_path_form_lookup_normalizes_backslash(self, tmp_workspace):
+        """`load_site` accepts Windows-style path separators."""
+        self._write_site(
+            tmp_workspace, Path("sites/regions/eu/munich.yaml"), "munich"
+        )
+        orchestrator = Orchestrator(tmp_workspace)
+        # Both forms hit the same cached site instance.
+        site_forward = orchestrator.load_site("regions/eu/munich")
+        site_backslash = orchestrator.load_site("regions\\eu\\munich")
+        assert site_forward is site_backslash
 
 
 class TestGetStepTypeLabel:

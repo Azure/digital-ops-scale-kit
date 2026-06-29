@@ -2,20 +2,52 @@
 
 from pathlib import Path
 
-from siteops.orchestrator import Orchestrator
+import yaml
+
+from siteops.models import Manifest
+
+
+def _all_manifest_files(workspace: Path) -> list[Path]:
+    """Discover every Manifest YAML across `manifests/` and `samples/`.
+
+    Centralized so validation and structural tests stay aligned as the layout
+    grows. The samples sweep filters to the manifest convention
+    (`manifest.yaml` + `_*.yaml` partials) and skips parameter files like
+    `inputs.yaml` and `outputs.yaml`.
+    """
+    found: list[Path] = []
+    manifests = workspace / "manifests"
+    if manifests.is_dir():
+        found.extend(
+            sorted(manifests.glob("*.yaml")) + sorted(manifests.glob("*.yml"))
+        )
+    samples = workspace / "samples"
+    if samples.is_dir():
+        for sample_dir in sorted(samples.iterdir()):
+            if not sample_dir.is_dir():
+                continue
+            for ext in ("yaml", "yml"):
+                # Standalone sample manifest.
+                manifest = sample_dir / f"manifest.{ext}"
+                if manifest.is_file():
+                    found.append(manifest)
+                # Partials in the sample dir (filename prefixed `_`).
+                found.extend(sorted(sample_dir.glob(f"_*.{ext}")))
+    return found
 
 
 class TestManifestValidation:
     """Every manifest in the workspace should validate without errors."""
 
-    def _get_manifest_files(self, workspace: Path) -> list[Path]:
-        manifests_dir = workspace / "manifests"
-        return sorted(manifests_dir.glob("*.yaml")) + sorted(manifests_dir.glob("*.yml"))
-
     def test_all_manifests_discovered(self, workspace):
         """Sanity check: workspace has manifests to validate."""
-        manifests = self._get_manifest_files(workspace)
+        manifests = _all_manifest_files(workspace)
         assert len(manifests) >= 1, "No manifests found in workspace"
+
+    def test_aio_fundamentals_validates(self, workspace, orchestrator):
+        """_aio-fundamentals.yaml (internal partial) should validate with no errors."""
+        errors = orchestrator.validate(workspace / "manifests" / "_aio-fundamentals.yaml")
+        assert errors == [], f"_aio-fundamentals.yaml validation errors: {errors}"
 
     def test_aio_install_validates(self, workspace, orchestrator):
         """aio-install.yaml should validate with no errors."""
@@ -27,19 +59,107 @@ class TestManifestValidation:
         errors = orchestrator.validate(workspace / "manifests" / "secretsync.yaml")
         assert errors == [], f"secretsync.yaml validation errors: {errors}"
 
+    def test_aio_upgrade_validates(self, workspace, orchestrator):
+        """aio-upgrade.yaml should validate with no errors."""
+        errors = orchestrator.validate(workspace / "manifests" / "aio-upgrade.yaml")
+        assert errors == [], f"aio-upgrade.yaml validation errors: {errors}"
+
+    def test_aksee_upgrade_validates(self, workspace, orchestrator):
+        """aksee-upgrade.yaml (host-ops patch update + wait gate) should validate."""
+        errors = orchestrator.validate(workspace / "manifests" / "aksee-upgrade.yaml")
+        assert errors == [], f"aksee-upgrade.yaml validation errors: {errors}"
+
     def test_opc_ua_solution_validates(self, workspace, orchestrator):
-        """opc-ua-solution.yaml should validate with no errors."""
-        errors = orchestrator.validate(workspace / "manifests" / "opc-ua-solution.yaml")
-        assert errors == [], f"opc-ua-solution.yaml validation errors: {errors}"
+        """samples/opc-ua-solution/manifest.yaml should validate."""
+        errors = orchestrator.validate(workspace / "samples" / "opc-ua-solution" / "manifest.yaml")
+        assert errors == [], f"opc-ua-solution validation errors: {errors}"
+
+    def test_aio_with_opc_ua_validates(self, workspace, orchestrator):
+        """samples/aio-with-opc-ua/manifest.yaml should validate (composes via include)."""
+        errors = orchestrator.validate(
+            workspace / "samples" / "aio-with-opc-ua" / "manifest.yaml"
+        )
+        assert errors == [], f"aio-with-opc-ua validation errors: {errors}"
 
     def test_no_duplicate_step_names_in_any_manifest(self, workspace, orchestrator):
-        """No manifest should have duplicate step names."""
-        from siteops.models import Manifest
-
-        for manifest_path in self._get_manifest_files(workspace):
-            manifest = Manifest.from_file(manifest_path)
+        """No manifest (post-include flatten) should have duplicate step names."""
+        for manifest_path in _all_manifest_files(workspace):
+            manifest = Manifest.from_file(manifest_path, workspace_root=workspace)
             step_names = [s.name for s in manifest.steps]
             duplicates = [n for n in step_names if step_names.count(n) > 1]
             assert duplicates == [], (
-                f"{manifest_path.name} has duplicate step names: {set(duplicates)}"
+                f"{manifest_path.relative_to(workspace)} has duplicate step "
+                f"names: {set(duplicates)}"
             )
+
+    def test_partial_manifests_use_underscore_prefix(self, workspace):
+        """A manifest authored to be `include:`-d (a partial) must use the `_`
+        filename prefix.
+
+        Convention: any YAML in `manifests/` that is `include:`-d by another
+        manifest must be named `_<topic>.yaml`. Standalone manifests (intended
+        for `siteops deploy`) do not start with `_`. The same applies to
+        `samples/<name>/_partial.yaml`.
+
+        Detection: walk every manifest under `manifests/` and
+        `samples/<name>/`, collect the include targets, and assert each
+        target's basename starts with `_`.
+        """
+        offenders: list[str] = []
+        for manifest_path in _all_manifest_files(workspace):
+            with open(manifest_path, "r", encoding="utf-8") as fh:
+                raw = yaml.safe_load(fh)
+            if not raw:
+                continue
+            for step in raw.get("steps", []) or []:
+                if not isinstance(step, dict):
+                    continue
+                target = step.get("include")
+                if not target:
+                    continue
+                # Resolve relative to including manifest's directory.
+                resolved = (manifest_path.parent / target).resolve()
+                if not resolved.name.startswith("_"):
+                    offenders.append(
+                        f"{manifest_path.relative_to(workspace)} includes "
+                        f"{target!r} (resolved: {resolved.name}). Included "
+                        f"files must be partials with the `_` prefix"
+                    )
+        assert offenders == [], "Partial-prefix violations:\n" + "\n".join(offenders)
+
+    def test_every_partial_is_composed_somewhere(self, workspace):
+        """Every leaf partial (`_*.yaml`) must be `include:`-d by at least one
+        other manifest. A partial with no consumers is dead code.
+
+        Detection: collect every `_*.yaml` file across `manifests/` and
+        `samples/<name>/`, then collect every `include:` target referenced
+        anywhere. Assert each partial appears in the referenced set.
+
+        Why: partials are never deployed standalone (their `_` prefix marks
+        them as composable fragments only). An orphaned partial silently
+        accumulates and tests / refactors keep updating it without anyone
+        noticing it's unreferenced.
+        """
+        all_partials: set[Path] = set()
+        all_includes: set[Path] = set()
+        for manifest_path in _all_manifest_files(workspace):
+            if manifest_path.name.startswith("_"):
+                all_partials.add(manifest_path.resolve())
+            with open(manifest_path, "r", encoding="utf-8") as fh:
+                raw = yaml.safe_load(fh)
+            if not raw:
+                continue
+            for step in raw.get("steps", []) or []:
+                if not isinstance(step, dict):
+                    continue
+                target = step.get("include")
+                if not target:
+                    continue
+                resolved = (manifest_path.parent / target).resolve()
+                all_includes.add(resolved)
+
+        orphans = sorted(p.relative_to(workspace) for p in all_partials - all_includes)
+        assert not orphans, (
+            "Orphaned partials (no manifest composes them):\n"
+            + "\n".join(f"  {p}" for p in orphans)
+        )

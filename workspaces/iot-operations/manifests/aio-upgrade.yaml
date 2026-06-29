@@ -1,0 +1,55 @@
+apiVersion: siteops/v1
+kind: Manifest
+name: aio-upgrade
+description: |
+  Bump Arc extension versions for cert-manager, azure-secret-store, and AIO on
+  existing Azure IoT Operations instances, preserving each extension's existing
+  configurationSettings, releaseTrain, and identity.
+
+  Reads target versions from parameters/aio-releases/<release>.yaml, the same
+  source aio-install.yaml uses for the initial deployment. Operators select the
+  target version per site via site.properties.aioRelease (re-pin the site to
+  the new release, then run this manifest). Drives only Arc extension bumps.
+  The AIO instance ARM resource has no writable version property and is not
+  mutated.
+
+  cert-manager is upgraded only when the site declares
+  `deployOptions.enableCertManager: true`. Sites that delegate cert-manager
+  to a customer-managed install set the flag false to leave the existing
+  extension untouched. Custom or partial overrides can be applied via
+  standard parameter overrides.
+
+  Prerequisites:
+    - AIO instance must be deployed and running
+    - The site's aioRelease must point to a parameters/aio-releases/<release>.yaml file
+
+  Out of scope (not yet supported):
+    - New child resource types introduced by future AIO releases (instance
+      properties, broker, dataflow profile, etc. are not mutated by this manifest)
+
+# Max concurrent sites. 0 = unlimited, 1 = serial.
+parallel: 3
+
+# Default selector. Override at the CLI with `-l <key>=<value>`.
+selector: "environment=dev"
+
+parameters:
+  - parameters/common/common.yaml
+  - "parameters/aio-releases/{{ site.properties.aioRelease }}.yaml"
+
+steps:
+  - name: resolve-aio
+    template: templates/aio/resolve-aio.bicep
+    scope: resourceGroup
+
+  - name: resolve-extensions
+    template: templates/aio/upgrade/resolve-extensions.bicep
+    scope: resourceGroup
+    parameters:
+      - parameters/inputs/aio-upgrade-resolve-extensions.yaml
+
+  - name: update-extensions
+    template: templates/aio/upgrade/update-extensions.bicep
+    scope: resourceGroup
+    parameters:
+      - parameters/inputs/aio-upgrade-update-extensions.yaml

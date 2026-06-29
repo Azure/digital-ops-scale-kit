@@ -1,4 +1,7 @@
 # Chicago Staging Site
+#
+# Target with: -l environment=staging   (the default `environment=dev` selector
+# in aio-install.yaml does not match this site.)
 
 apiVersion: siteops/v1
 kind: Site
@@ -11,11 +14,6 @@ resourceGroup: rg-iot-chicago-staging
 labels:
   environment: staging
   city: Chicago
-
-properties:
-  deployOptions:
-    includeSolution: false
-    includeOpcPlcSimulator: false
 
 parameters:
   clusterName: chicago-staging-arc

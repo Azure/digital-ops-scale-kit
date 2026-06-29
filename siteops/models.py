@@ -14,16 +14,91 @@ Resources support K8s-style apiVersion/kind validation:
 - kind is validated if present, but optional
 """
 
+import re
 from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
-import re
 import yaml
 
 VALID_SCOPES = {"subscription", "resourceGroup"}
 DEFAULT_API_VERSION = "siteops/v1"
 SUPPORTED_API_VERSIONS = {"siteops/v1"}
+
+# Maximum depth of recursive `include:` resolution. Anything deeper is a smell;
+# the cap exists to surface mistakes early rather than to bound real designs.
+MAX_INCLUDE_DEPTH = 8
+
+# Reserved keys for the `include:` step shape. Any other key on an include step
+# is an authoring error.
+_INCLUDE_ALLOWED_KEYS = {"include", "when"}
+
+# Allowed top-level keys on a flat-shape Manifest (most common form). Any
+# other key triggers a parse-time error with a "did you mean?" hint when the
+# unknown key is close to a known one. Catches typos like `site:` (singular)
+# or `selctor:` that today silently degrade to "missing field".
+_MANIFEST_FLAT_KNOWN_KEYS = {
+    "apiVersion",
+    "kind",
+    "name",
+    "description",
+    "sites",
+    "selector",
+    "siteSelector",
+    "parallel",
+    "parameters",
+    "steps",
+}
+
+# K8s-style nested envelope. Top-level allows only the four envelope keys.
+# `metadata` carries name/description/labels. `spec` carries everything else.
+_MANIFEST_NESTED_TOP_KEYS = {"apiVersion", "kind", "metadata", "spec"}
+_MANIFEST_NESTED_METADATA_KEYS = {"name", "description", "labels"}
+_MANIFEST_NESTED_SPEC_KEYS = _MANIFEST_FLAT_KNOWN_KEYS - {"apiVersion", "kind", "name", "description"}
+
+
+def _suggest_known_key(unknown: str, known: set[str]) -> str | None:
+    """Return a 'did you mean X?' suggestion for a typo if there is a close match."""
+    import difflib
+    matches = difflib.get_close_matches(unknown, sorted(known), n=1, cutoff=0.7)
+    return matches[0] if matches else None
+
+
+def _validate_known_keys(
+    actual: dict, allowed: set[str], path: Path, context: str
+) -> None:
+    """Reject any keys in `actual` that are not in `allowed`.
+
+    Args:
+        actual: The dict whose keys to validate.
+        allowed: The closed set of permitted keys.
+        path: Source file path, used in the error message.
+        context: Where in the manifest this dict lives (e.g. "top-level",
+            "spec", "metadata"), used to disambiguate the error.
+    """
+    unknown = sorted(set(actual.keys()) - allowed)
+    if not unknown:
+        return
+    parts = []
+    for key in unknown:
+        suggestion = _suggest_known_key(key, allowed)
+        if suggestion:
+            parts.append(f"`{key}` (did you mean `{suggestion}`?)")
+        else:
+            parts.append(f"`{key}`")
+    raise ValueError(
+        f"Manifest '{path}' has unknown {context} key(s): {', '.join(parts)}. "
+        f"Allowed: {sorted(allowed)}."
+    )
+
+
+class IncludeError(ValueError):
+    """Raised when a manifest `include:` directive cannot be resolved.
+
+    Subclass of ValueError so existing callers that catch ValueError still work.
+    """
+
 
 # Pattern for condition expressions in 'when' clauses
 # Supports:
@@ -38,33 +113,165 @@ CONDITION_PATTERN = re.compile(
 # Supported kubectl operations (extensible for future operations like 'wait', 'delete')
 KUBECTL_OPERATIONS = {"apply"}
 
+# Supported wait-step condition types. The first is `arm-tag` (poll an Azure
+# tag on an ARM resource). The dispatch shape accommodates future condition
+# types (e.g. arm-resource-property, kubectl-resource-ready) without a manifest
+# contract change.
+VALID_WAIT_CONDITION_TYPES = {"arm-tag"}
 
-def parse_selector(selector: str | None) -> dict[str, str]:
-    """Parse a label selector string into key-value pairs.
+
+class NoTargetingError(ValueError):
+    """Raised when neither the manifest nor the CLI provides any targeting.
+
+    Distinct from generic `ValueError` so callers can differentiate the
+    "generic library manifest with no CLI selector" case from selector
+    parse errors. `validate()` treats this as structurally OK and skips
+    site-dependent checks. `cmd_deploy` surfaces it as a hard error.
+    """
+
+
+class SelectorParseError(ValueError):
+    """Raised when a `-l/--selector` string fails to parse.
+
+    Distinct from generic `ValueError` so `validate()` can attribute
+    the failure to selector input (and skip the redundant no-match
+    diagnostic) without substring-matching the error message.
+    """
+
+
+def parse_selector(selector: str | None) -> dict[str, list[str]]:
+    """Parse a label selector string into key to value-list pairs.
+
+    Within a single selector string, comma-separated `key=value` pairs are
+    AND-combined across distinct keys. Duplicate keys follow these rules:
+
+    - The special `name` key may repeat. Repeated values OR-combine and
+      duplicates are deduped (preserving first-seen order).
+    - Any non-name key may only appear once. Duplicate non-name keys
+      raise `SelectorParseError`. This matches kubectl, Terraform, and
+      Ansible label-selector grammars where AND across distinct keys is
+      the rule.
 
     Args:
-        selector: Comma-separated key=value pairs (e.g., 'environment=prod,region=eastus'),
-                  or None/empty string for no filtering.
+        selector: Comma-separated `key=value` pairs (e.g.,
+            `environment=prod,region=eastus`), or None/empty for no
+            filtering.
 
     Returns:
-        Dict of label key-value pairs (empty dict if selector is None/empty)
+        Dict mapping each key to a list of allowed values. Non-name keys
+        always map to a single-element list. The `name` key may map to
+        multiple values (OR-combined). Empty dict if `selector` is None
+        or empty.
+
+    Raises:
+        SelectorParseError: If a non-name key appears more than once.
 
     Example:
         >>> parse_selector('environment=prod,region=eastus')
-        {'environment': 'prod', 'region': 'eastus'}
+        {'environment': ['prod'], 'region': ['eastus']}
+        >>> parse_selector('name=a,name=b,name=a')
+        {'name': ['a', 'b']}
         >>> parse_selector(None)
         {}
     """
     if not selector:
         return {}
 
-    labels = {}
+    labels: dict[str, list[str]] = {}
     for part in selector.split(","):
         part = part.strip()
-        if "=" in part:
-            key, value = part.split("=", 1)
-            labels[key.strip()] = value.strip()
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            raise SelectorParseError(
+                f"Selector term `{part}` has empty key. Use `key=value` form."
+            )
+        if not value:
+            raise SelectorParseError(
+                f"Selector key `{key}` has empty value. Use `{key}=<value>`."
+            )
+        if key in labels:
+            if key != "name":
+                raise SelectorParseError(
+                    f"Selector key `{key}` may only appear once. Selectors "
+                    f"AND across keys, so duplicating a key would always "
+                    f"match zero sites. Only `name=` supports multiple "
+                    f"values (OR-combined)."
+                )
+            if value not in labels[key]:
+                labels[key].append(value)
+        else:
+            labels[key] = [value]
     return labels
+
+
+def _merge_selector_strings(strings: list[str] | None) -> str | None:
+    """Merge multiple selector strings into a single comma-separated string.
+
+    Used by the CLI to flatten repeated `-l/--selector` flags into a single
+    string before parsing. The grammar is associative under comma joining:
+    `parse_selector(",".join(parts))` enforces the same name-OR /
+    non-name-error rules across the merged input.
+    """
+    if not strings:
+        return None
+    merged = ",".join(s for s in strings if s)
+    return merged or None
+
+
+def _normalize_site_identifier(identifier: str) -> str:
+    """Validate and normalize a site identifier or path-form identifier.
+
+    Accepts:
+    - Bare basename (`munich-dev`)
+    - Forward-slash relative path (`regions/eu/munich-dev`)
+    - Backslash relative path (normalized to forward slashes)
+
+    Rejects (raises `ValueError`):
+    - Empty string
+    - Leading `./`
+    - Leading `/` (absolute path)
+    - Trailing `/`
+    - `..` path segments (path traversal)
+    - `.` path segments
+    - Empty path segments (e.g., `a//b`)
+
+    Returns the normalized form (forward-slash separators, no leading or
+    trailing slash).
+    """
+    if not identifier:
+        raise ValueError("Site identifier must not be empty")
+    normalized = identifier.replace("\\", "/")
+    if normalized.startswith("./"):
+        raise ValueError(
+            f"Site identifier '{identifier}' must not start with `./`. "
+            f"Use the relative form (e.g., `regions/eu/munich`)."
+        )
+    if normalized.startswith("/"):
+        raise ValueError(
+            f"Site identifier '{identifier}' must be relative (no leading `/`)."
+        )
+    if normalized.endswith("/"):
+        raise ValueError(
+            f"Site identifier '{identifier}' must not end with `/`."
+        )
+    parts = normalized.split("/")
+    if any(p == ".." for p in parts):
+        raise ValueError(
+            f"Site identifier '{identifier}' must not contain `..` segments."
+        )
+    if any(p == "." for p in parts):
+        raise ValueError(
+            f"Site identifier '{identifier}' must not contain `.` segments."
+        )
+    if any(not p for p in parts):
+        raise ValueError(
+            f"Site identifier '{identifier}' must not contain empty path segments."
+        )
+    return normalized
 
 
 def _validate_resource(data: dict[str, Any], expected_kind: str | list[str], path: Path) -> str:
@@ -222,27 +429,31 @@ class Site:
     properties: dict[str, Any] = field(default_factory=dict)
     parameters: dict[str, Any] = field(default_factory=dict)
 
-    def matches_selector(self, selector: dict[str, str]) -> bool:
+    def matches_selector(self, selector: dict[str, list[str]]) -> bool:
         """Check if site matches all selector criteria.
 
         Supports:
-        - name=<value>: Match site name exactly
-        - <label>=<value>: Match label value
+        - `name`: site name must be one of the listed values (OR-combined)
+        - any other `<label>`: site label value must equal the single
+          listed value
 
         Args:
-            selector: Dictionary of key=value pairs to match
+            selector: Dict mapping each key to a list of allowed values.
+                Non-name keys must map to a single-element list (enforced
+                by `parse_selector`).
 
         Returns:
-            True if all selector criteria match
+            True if all selector criteria match.
         """
-        for key, value in selector.items():
+        for key, values in selector.items():
             if key == "name":
-                # Special case: match site name
-                if self.name != value:
+                if self.name not in values:
                     return False
             else:
-                # Match against labels
-                if self.labels.get(key) != value:
+                # Non-name keys carry a single value (enforced upstream).
+                # Use list containment so a malformed multi-value list still
+                # produces deterministic match behavior.
+                if self.labels.get(key) not in values:
                     return False
         return True
 
@@ -293,6 +504,11 @@ class Site:
 
         Raises:
             ValueError: If file is empty, invalid, or missing required fields
+
+        Note:
+            This is a low-level loader. It does NOT apply `inherits:` chains
+            or overlays from `sites.local/` / extras dirs. Use
+            `Orchestrator.load_site(name)` for fully-resolved sites.
         """
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
@@ -448,8 +664,121 @@ class KubectlStep:
             )
 
 
+@dataclass(frozen=True)
+class ArmTagCondition:
+    """Wait condition that polls a tag on an ARM resource.
+
+    The condition is satisfied when the resource's `tag_key` tag reaches
+    `expected_value`. When `failure_pattern` is set, a tag value matching that
+    glob aborts the wait immediately instead of waiting for the timeout.
+
+    This is pure data. Evaluation (running `az` and classifying the result)
+    lives in the executor.
+
+    Attributes:
+        type: Condition discriminator. Always `arm-tag` for this class.
+        resource_id: Full ARM resource ID whose tags are polled. Supports
+            template variables and step-output references, resolved per site.
+        tag_key: Name of the tag to read.
+        expected_value: Tag value that satisfies the wait. Azure tag values are
+            strings, so this is compared as a string.
+        failure_pattern: Optional fnmatch glob. A tag value matching it aborts
+            the wait fast. Omit for a plain wait-until-expected-or-timeout.
+    """
+
+    type: str
+    resource_id: str
+    tag_key: str
+    expected_value: str
+    failure_pattern: str | None = None
+
+    def __post_init__(self) -> None:
+        for field_name, value in (
+            ("resourceId", self.resource_id),
+            ("tagKey", self.tag_key),
+            ("expectedValue", self.expected_value),
+        ):
+            if not value or not str(value).strip():
+                raise ValueError(f"arm-tag condition requires a non-empty '{field_name}'")
+
+        # A failure glob that also matches the success value would classify a
+        # satisfied wait as failed. Catch the authoring error at parse time.
+        if self.failure_pattern and fnmatchcase(str(self.expected_value), self.failure_pattern):
+            raise ValueError(
+                f"arm-tag condition expectedValue '{self.expected_value}' also matches "
+                f"failurePattern '{self.failure_pattern}'. The success value must not match the "
+                f"failure glob."
+            )
+
+
+# Union type for wait conditions. One concrete type today. Future condition
+# types join this union.
+WaitCondition = ArmTagCondition
+
+
+@dataclass
+class WaitStep:
+    """A wait step that gates downstream steps on an Azure condition.
+
+    Blocks the per-site step sequence until `condition` is satisfied, polling
+    every `poll_interval_seconds` up to `timeout_minutes`. A gate produces no
+    outputs. A timeout or a terminal failure fails the step, which skips the
+    site's remaining steps (the standard step-failure behavior).
+
+    Attributes:
+        name: Unique name for the step.
+        condition: The wait condition (currently ArmTagCondition).
+        timeout_minutes: Maximum minutes to wait before failing the step.
+        poll_interval_seconds: Seconds between condition checks.
+        when: Optional condition expression (same syntax as other steps).
+
+    Example manifest usage:
+        ```yaml
+        - name: wait-for-bootstrap
+          type: wait
+          condition:
+            type: arm-tag
+            resourceId: "/subscriptions/{{ site.subscription }}/resourceGroups/{{ site.resourceGroup }}/providers/Microsoft.HybridCompute/machines/{{ site.parameters.aksee.machineName }}"
+            tagKey: "siteops.bootstrap.state"
+            expectedValue: "succeeded"
+            failurePattern: "failed-*"
+          timeoutMinutes: 45
+          pollIntervalSeconds: 30
+        ```
+    """
+
+    name: str
+    condition: WaitCondition
+    timeout_minutes: int = 30
+    poll_interval_seconds: int = 30
+    when: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.timeout_minutes <= 0:
+            raise ValueError(
+                f"WaitStep '{self.name}' timeoutMinutes must be positive, got {self.timeout_minutes}"
+            )
+        if self.poll_interval_seconds <= 0:
+            raise ValueError(
+                f"WaitStep '{self.name}' pollIntervalSeconds must be positive, got {self.poll_interval_seconds}"
+            )
+        if self.poll_interval_seconds > self.timeout_minutes * 60:
+            raise ValueError(
+                f"WaitStep '{self.name}' pollIntervalSeconds ({self.poll_interval_seconds}) exceeds "
+                f"timeoutMinutes ({self.timeout_minutes} = {self.timeout_minutes * 60}s). The condition "
+                f"would be checked only once."
+            )
+
+        if self.when and not CONDITION_PATTERN.fullmatch(self.when.strip()):
+            raise ValueError(
+                f"Invalid 'when' condition syntax: {self.when}. "
+                "Expected: {{ site.labels.X == 'value' }}, {{ site.properties.path == true }}, "
+                "or {{ site.properties.path }} (truthy check)"
+            )
+
+
 # Union type for manifest steps - allows type checking to distinguish step types
-ManifestStep = DeploymentStep | KubectlStep
+ManifestStep = DeploymentStep | KubectlStep | WaitStep
 
 
 @dataclass
@@ -491,8 +820,12 @@ class Manifest:
     parameters: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_file(cls, path: Path) -> "Manifest":
+    def from_file(cls, path: Path, *, workspace_root: Path) -> "Manifest":
         """Load a manifest from a YAML file.
+
+        Resolves any `- include: <path>` steps recursively, splicing the
+        included manifests' steps into this one's step list at the include's
+        position. See docs/manifest-includes.md for the full include contract.
 
         Example manifest:
             ```yaml
@@ -524,88 +857,70 @@ class Manifest:
             ```
 
         Args:
-            path: Path to the YAML file
+            path: Path to the YAML file.
+            workspace_root: Workspace root directory. Required, keyword-only.
+                Used as the anti-traversal boundary when resolving any
+                `include:` step paths and to scope all workspace-relative
+                references. In production this is `Orchestrator.workspace`;
+                in tests, pass the workspace fixture (or `manifest_path.parent`
+                for a self-contained synthetic manifest).
 
         Returns:
-            Manifest instance
+            Manifest instance with all includes resolved into a flat step list.
 
         Raises:
-            ValueError: If file is empty, invalid, or steps are misconfigured
+            ValueError: If file is empty, invalid, or steps are misconfigured.
+            IncludeError: If an include cycles, exceeds depth, escapes the
+                workspace root, names a missing or non-Manifest file,
+                conflicts with a step's own `when:`, or contributes zero steps.
         """
-        with open(path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+        path = Path(path)
+        root = Path(workspace_root)
 
-        if not data:
-            raise ValueError(f"Empty or invalid YAML file: {path}")
-
-        _validate_resource(data, "Manifest", path)
-
-        if "spec" in data:
-            metadata = data.get("metadata", {})
-            spec = data["spec"]
-            name = metadata.get("name", path.stem)
-            description = metadata.get("description", "")
-        else:
-            spec = data
-            name = data.get("name", path.stem)
-            description = data.get("description", "")
+        spec, name, description = _read_manifest_spec(path)
 
         sites = []
         for item in spec.get("sites", []):
             if isinstance(item, str):
-                sites.append(item)
+                try:
+                    sites.append(_normalize_site_identifier(item))
+                except ValueError as e:
+                    raise ValueError(
+                        f"Invalid site identifier in `{path}` `sites:` list: {e}"
+                    ) from e
 
-        site_selector = spec.get("siteSelector")
+        # `selector:` is the preferred manifest field. `siteSelector:` is
+        # accepted for backward compatibility but logs a one-time deprecation
+        # notice per file. Both refer to the same label expression.
+        if "selector" in spec and "siteSelector" in spec:
+            raise ValueError(
+                f"Manifest '{path}' declares both `selector:` and "
+                f"`siteSelector:`. Use `selector:` only."
+            )
+        if "siteSelector" in spec:
+            import logging as _logging
+            _logging.getLogger("siteops.models").warning(
+                "%s uses deprecated `siteSelector:`. Rename to `selector:`.",
+                path,
+            )
+            site_selector = spec.get("siteSelector")
+        else:
+            site_selector = spec.get("selector")
         parallel = ParallelConfig.from_value(spec.get("parallel"))
 
-        steps: list[ManifestStep] = []
-        for i, step_data in enumerate(spec.get("steps", [])):
-            if "name" not in step_data:
-                raise ValueError(f"Step {i+1} missing required field 'name' in manifest: {path}")
+        # Recursive include resolution. The recursion stack tracks the current
+        # DFS path so a fragment shared by two siblings is not flagged as a
+        # cycle. The include chain captures the full provenance for diagnostics.
+        steps, parameters = _resolve_steps_and_params(
+            spec=spec,
+            manifest_path=path,
+            workspace_root=root.resolve(),
+            recursion_stack=[path.resolve()],
+            include_chain=[path],
+            depth=0,
+        )
 
-            step_type = step_data.get("type", "deployment")
-
-            if step_type == "kubectl":
-                if "operation" not in step_data:
-                    raise ValueError(
-                        f"Step '{step_data['name']}' (type: kubectl) missing 'operation' in manifest: {path}"
-                    )
-                if "arc" not in step_data:
-                    raise ValueError(
-                        f"Step '{step_data['name']}' (type: kubectl) missing 'arc' configuration in manifest: {path}"
-                    )
-                arc_data = step_data["arc"]
-                if "name" not in arc_data or "resourceGroup" not in arc_data:
-                    raise ValueError(
-                        f"Step '{step_data['name']}' arc config must have 'name' and 'resourceGroup': {path}"
-                    )
-                if "files" not in step_data or not step_data["files"]:
-                    raise ValueError(f"Step '{step_data['name']}' (type: kubectl) missing 'files' in manifest: {path}")
-
-                steps.append(
-                    KubectlStep(
-                        name=step_data["name"],
-                        operation=step_data["operation"],
-                        arc=ArcCluster(
-                            name=arc_data["name"],
-                            resource_group=arc_data["resourceGroup"],
-                        ),
-                        files=step_data["files"],
-                        when=step_data.get("when"),
-                    )
-                )
-            else:
-                if "template" not in step_data:
-                    raise ValueError(f"Step '{step_data['name']}' missing 'template' in manifest: {path}")
-                steps.append(
-                    DeploymentStep(
-                        name=step_data["name"],
-                        template=step_data["template"],
-                        parameters=step_data.get("parameters", []),
-                        scope=step_data.get("scope", "resourceGroup"),
-                        when=step_data.get("when"),
-                    )
-                )
+        _validate_no_step_name_collisions(steps)
 
         return cls(
             name=name,
@@ -614,7 +929,7 @@ class Manifest:
             steps=steps,
             site_selector=site_selector,
             parallel=parallel,
-            parameters=spec.get("parameters", []),
+            parameters=parameters,
         )
 
     def resolve_parameter_path(self, param_path: str, site: "Site") -> str:
@@ -626,6 +941,7 @@ class Manifest:
         - {{ site.resourceGroup }} - Site resource group
         - {{ site.subscription }} - Site subscription
         - {{ site.labels.<key> }} - Site label value
+        - {{ site.properties.<path> }} - Site property value (nested paths supported)
 
         Args:
             param_path: Parameter file path with optional template variables
@@ -643,4 +959,365 @@ class Manifest:
         for key, value in site.labels.items():
             result = result.replace(f"{{{{ site.labels.{key} }}}}", value)
 
+        # Resolve {{ site.properties.<path> }} templates
+        for match in re.finditer(r"\{\{\s*site\.properties\.(\S+?)\s*\}\}", result):
+            prop_path = match.group(1)
+            value = site.properties
+            for part in prop_path.split("."):
+                if isinstance(value, dict) and part in value:
+                    value = value[part]
+                else:
+                    value = None
+                    break
+            if value is not None:
+                result = result.replace(match.group(0), str(value))
+
         return result
+
+
+# ---------------------------------------------------------------------------
+# Manifest loading helpers (include resolution, step parsing)
+# ---------------------------------------------------------------------------
+
+
+def _read_manifest_spec(path: Path) -> tuple[dict[str, Any], str, str]:
+    """Read a manifest YAML file and return (spec, name, description).
+
+    Validates apiVersion + kind, rejects unknown top-level keys with a
+    "did you mean?" hint, and unwraps the K8s-style `spec:` envelope when
+    present. Raises ValueError on empty files, wrong kind, or unknown
+    top-level keys.
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+
+    if not data:
+        raise ValueError(f"Empty or invalid YAML file: {path}")
+
+    _validate_resource(data, "Manifest", path)
+
+    if "spec" in data:
+        _validate_known_keys(data, _MANIFEST_NESTED_TOP_KEYS, path, "top-level")
+        metadata = data.get("metadata", {}) or {}
+        if metadata:
+            _validate_known_keys(metadata, _MANIFEST_NESTED_METADATA_KEYS, path, "metadata")
+        spec = data["spec"] or {}
+        if isinstance(spec, dict):
+            _validate_known_keys(spec, _MANIFEST_NESTED_SPEC_KEYS, path, "spec")
+        name = metadata.get("name", path.stem)
+        description = metadata.get("description", "")
+    else:
+        _validate_known_keys(data, _MANIFEST_FLAT_KNOWN_KEYS, path, "top-level")
+        spec = data
+        name = data.get("name", path.stem)
+        description = data.get("description", "")
+
+    return spec, name, description
+
+
+def _is_include_step(step_data: dict[str, Any]) -> bool:
+    return isinstance(step_data, dict) and "include" in step_data
+
+
+def _format_include_chain(chain: list[Path]) -> str:
+    return " -> ".join(str(p) for p in chain)
+
+
+def _validate_include_step(step_data: dict[str, Any], parent_path: Path, index: int) -> str:
+    """Validate an `include:` step shape and return the path string."""
+    extra = set(step_data.keys()) - _INCLUDE_ALLOWED_KEYS
+    if extra:
+        raise IncludeError(
+            f"Step {index + 1} in '{parent_path}' has unexpected keys alongside "
+            f"`include:`: {sorted(extra)}. Only `include` and `when` are allowed."
+        )
+    target = step_data.get("include")
+    if not isinstance(target, str) or not target.strip():
+        raise IncludeError(
+            f"Step {index + 1} in '{parent_path}' must provide a non-empty "
+            f"string path for `include`."
+        )
+    return target
+
+
+def _resolve_include_path(raw: str, parent_path: Path, workspace_root: Path) -> Path:
+    """Resolve a relative include path under the workspace root.
+
+    The resolved absolute path must be a descendant of workspace_root.
+    Site-driven (Mustache) include paths are not supported in v1 and will
+    fail the workspace-root check or the file-exists check.
+    """
+    candidate = (parent_path.parent / raw).resolve()
+    try:
+        candidate.relative_to(workspace_root)
+    except ValueError:
+        raise IncludeError(
+            f"Include path '{raw}' in '{parent_path}' resolves outside the "
+            f"workspace root '{workspace_root}'."
+        ) from None
+    if not candidate.exists():
+        raise IncludeError(
+            f"Include path '{raw}' in '{parent_path}' does not exist "
+            f"(resolved to '{candidate}')."
+        )
+    return candidate
+
+
+def _propagate_when(step: "ManifestStep", include_when: str | None, source: Path) -> None:
+    """Apply an include's `when:` to a spliced step.
+
+    Raises IncludeError if the step already has its own `when:`. Combining
+    two expressions is not supported in v1.
+    """
+    if include_when is None:
+        return
+    if step.when:
+        raise IncludeError(
+            f"Step '{step.name}' from '{source}' already has a `when:` "
+            f"and the parent include also sets one. Consolidate into a "
+            f"single condition on either the include or the step."
+        )
+    step.when = include_when
+
+
+def _parse_inline_step(step_data: dict[str, Any], source_path: Path, index: int) -> "ManifestStep":
+    """Parse a single non-include step into a DeploymentStep or KubectlStep."""
+    if "name" not in step_data:
+        raise ValueError(f"Step {index + 1} missing required field 'name' in manifest: {source_path}")
+
+    step_type = step_data.get("type", "deployment")
+
+    if step_type == "kubectl":
+        if "operation" not in step_data:
+            raise ValueError(
+                f"Step '{step_data['name']}' (type: kubectl) missing 'operation' in manifest: {source_path}"
+            )
+        if "arc" not in step_data:
+            raise ValueError(
+                f"Step '{step_data['name']}' (type: kubectl) missing 'arc' configuration in manifest: {source_path}"
+            )
+        arc_data = step_data["arc"]
+        if "name" not in arc_data or "resourceGroup" not in arc_data:
+            raise ValueError(
+                f"Step '{step_data['name']}' arc config must have 'name' and 'resourceGroup': {source_path}"
+            )
+        if "files" not in step_data or not step_data["files"]:
+            raise ValueError(
+                f"Step '{step_data['name']}' (type: kubectl) missing 'files' in manifest: {source_path}"
+            )
+        return KubectlStep(
+            name=step_data["name"],
+            operation=step_data["operation"],
+            arc=ArcCluster(
+                name=arc_data["name"],
+                resource_group=arc_data["resourceGroup"],
+            ),
+            files=step_data["files"],
+            when=step_data.get("when"),
+        )
+
+    if step_type == "wait":
+        return _parse_wait_step(step_data, source_path)
+
+    if "template" not in step_data:
+        raise ValueError(f"Step '{step_data['name']}' missing 'template' in manifest: {source_path}")
+    return DeploymentStep(
+        name=step_data["name"],
+        template=step_data["template"],
+        parameters=step_data.get("parameters", []),
+        scope=step_data.get("scope", "resourceGroup"),
+        when=step_data.get("when"),
+    )
+
+
+def _coerce_step_int(value: Any, field_name: str, step_name: str, source_path: Path) -> int:
+    """Coerce a manifest numeric field to int with a clear error on failure."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"Step '{step_name}' (type: wait) field '{field_name}' must be an integer, got {value!r} "
+            f"in manifest: {source_path}"
+        )
+
+
+def _parse_wait_step(step_data: dict[str, Any], source_path: Path) -> "WaitStep":
+    """Parse a `type: wait` step into a WaitStep with its condition.
+
+    Dispatches on `condition.type`. Unknown condition types fail here so the
+    error surfaces at manifest-load time rather than at deploy time.
+    """
+    name = step_data["name"]
+    condition_data = step_data.get("condition")
+    if not isinstance(condition_data, dict):
+        raise ValueError(
+            f"Step '{name}' (type: wait) requires a 'condition' mapping in manifest: {source_path}"
+        )
+
+    condition_type = condition_data.get("type")
+    if not condition_type:
+        raise ValueError(
+            f"Step '{name}' (type: wait) condition requires a 'type' field in manifest: {source_path}"
+        )
+    if condition_type not in VALID_WAIT_CONDITION_TYPES:
+        raise ValueError(
+            f"Step '{name}' (type: wait) has unknown condition type '{condition_type}'. "
+            f"Supported: {', '.join(sorted(VALID_WAIT_CONDITION_TYPES))} (manifest: {source_path})"
+        )
+
+    condition = _parse_arm_tag_condition(name, condition_data, source_path)
+    return WaitStep(
+        name=name,
+        condition=condition,
+        timeout_minutes=_coerce_step_int(
+            step_data.get("timeoutMinutes", 30), "timeoutMinutes", name, source_path
+        ),
+        poll_interval_seconds=_coerce_step_int(
+            step_data.get("pollIntervalSeconds", 30), "pollIntervalSeconds", name, source_path
+        ),
+        when=step_data.get("when"),
+    )
+
+
+def _parse_arm_tag_condition(step_name: str, condition_data: dict[str, Any], source_path: Path) -> "ArmTagCondition":
+    """Parse the body of an arm-tag wait condition."""
+    for required in ("resourceId", "tagKey", "expectedValue"):
+        if required not in condition_data:
+            raise ValueError(
+                f"Step '{step_name}' arm-tag condition missing '{required}' in manifest: {source_path}"
+            )
+
+    failure_pattern = condition_data.get("failurePattern")
+    return ArmTagCondition(
+        type="arm-tag",
+        resource_id=condition_data["resourceId"],
+        tag_key=condition_data["tagKey"],
+        # Azure tag values are strings. YAML may parse `expectedValue: true` to a
+        # bool, so coerce to str for a consistent comparison.
+        expected_value=str(condition_data["expectedValue"]),
+        failure_pattern=str(failure_pattern) if failure_pattern is not None else None,
+    )
+
+
+def _merge_parameters(parent: list[str], fragment: list[str]) -> list[str]:
+    """Append fragment parameters after parent's, deduplicating by raw path.
+
+    Parent wins on duplicate paths. Comparison is on the normalized POSIX
+    string of the raw path, not on the resolved-with-Mustache path.
+    """
+    seen = {Path(p).as_posix() for p in parent}
+    merged = list(parent)
+    for p in fragment:
+        key = Path(p).as_posix()
+        if key not in seen:
+            merged.append(p)
+            seen.add(key)
+    return merged
+
+
+def _resolve_steps_and_params(
+    spec: dict[str, Any],
+    manifest_path: Path,
+    workspace_root: Path,
+    recursion_stack: list[Path],
+    include_chain: list[Path],
+    depth: int,
+) -> tuple[list["ManifestStep"], list[str]]:
+    """Recursively resolve `include:` steps into a flat (steps, parameters) pair.
+
+    Args:
+        spec: The current manifest's parsed `spec` dict (i.e., the body
+            holding `steps:` and `parameters:`).
+        manifest_path: Path of the manifest whose spec is being processed.
+        workspace_root: Resolved absolute workspace root for traversal checks.
+        recursion_stack: Resolved paths of manifests on the current DFS path.
+            Used for cycle detection (NOT a global visited set).
+        include_chain: Human-readable include chain for diagnostics.
+        depth: Current recursion depth, capped by MAX_INCLUDE_DEPTH.
+    """
+    if depth > MAX_INCLUDE_DEPTH:
+        raise IncludeError(
+            f"Include depth exceeded {MAX_INCLUDE_DEPTH} levels at "
+            f"{_format_include_chain(include_chain)}."
+        )
+
+    steps: list[ManifestStep] = []
+    parameters: list[str] = list(spec.get("parameters", []))
+
+    raw_steps = spec.get("steps") or []
+    for index, step_data in enumerate(raw_steps):
+        if not isinstance(step_data, dict):
+            raise ValueError(
+                f"Step {index + 1} in '{manifest_path}' is not a mapping."
+            )
+
+        if not _is_include_step(step_data):
+            steps.append(_parse_inline_step(step_data, manifest_path, index))
+            continue
+
+        raw_target = _validate_include_step(step_data, manifest_path, index)
+        include_when = step_data.get("when")
+
+        target_path = _resolve_include_path(raw_target, manifest_path, workspace_root)
+
+        if target_path in recursion_stack:
+            cycle = include_chain + [target_path]
+            raise IncludeError(
+                f"Include cycle detected: {_format_include_chain(cycle)}."
+            )
+
+        try:
+            sub_spec, _, _ = _read_manifest_spec(target_path)
+        except ValueError as exc:
+            raise IncludeError(
+                f"Include '{raw_target}' in '{manifest_path}' could not be loaded as a Manifest: {exc}"
+            ) from exc
+
+        sub_steps, sub_params = _resolve_steps_and_params(
+            spec=sub_spec,
+            manifest_path=target_path,
+            workspace_root=workspace_root,
+            recursion_stack=recursion_stack + [target_path],
+            include_chain=include_chain + [target_path],
+            depth=depth + 1,
+        )
+
+        # Manifest-level parameters merge unconditionally into every parent
+        # step. A gated include that contributes parameters would silently
+        # affect ungated parent steps. Check sub_params (post-recursion) so a
+        # fragment that only includes another fragment with parameters is
+        # still caught.
+        if include_when and sub_params:
+            raise IncludeError(
+                f"Include '{raw_target}' in '{manifest_path}' has a `when:` "
+                f"but its include subtree contributes manifest-level "
+                f"`parameters:`. Drop the `when:` or move the parameters onto "
+                f"individual fragment steps."
+            )
+
+        if not sub_steps:
+            raise IncludeError(
+                f"Include '{raw_target}' in '{manifest_path}' contributed "
+                f"zero steps. An include must define at least one step."
+            )
+
+        for sub_step in sub_steps:
+            _propagate_when(sub_step, include_when, target_path)
+
+        steps.extend(sub_steps)
+        parameters = _merge_parameters(parameters, sub_params)
+
+    return steps, parameters
+
+
+def _validate_no_step_name_collisions(steps: list["ManifestStep"]) -> None:
+    """Reject duplicate step names in the post-flatten step list."""
+    seen: set[str] = set()
+    for step in steps:
+        if step.name in seen:
+            raise ValueError(
+                f"Duplicate step name '{step.name}' after include flattening. "
+                f"Step names must be unique across the entire flattened "
+                f"pipeline (parent steps and all included fragments)."
+            )
+        seen.add(step.name)

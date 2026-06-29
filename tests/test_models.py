@@ -21,8 +21,8 @@ from siteops.models import (
     Manifest,
     ParallelConfig,
     Site,
-    parse_selector,
     _validate_resource,
+    parse_selector,
 )
 
 
@@ -38,29 +38,169 @@ class TestParseSelector:
 
     def test_single_label(self):
         result = parse_selector("environment=prod")
-        assert result == {"environment": "prod"}
+        assert result == {"environment": ["prod"]}
 
     def test_multiple_labels(self):
         result = parse_selector("environment=prod,region=eastus")
-        assert result == {"environment": "prod", "region": "eastus"}
+        assert result == {"environment": ["prod"], "region": ["eastus"]}
 
     def test_labels_with_spaces(self):
         result = parse_selector(" environment = prod , region = eastus ")
-        assert result == {"environment": "prod", "region": "eastus"}
+        assert result == {"environment": ["prod"], "region": ["eastus"]}
 
     def test_value_with_special_chars(self):
         result = parse_selector("cluster=my-cluster-01")
-        assert result == {"cluster": "my-cluster-01"}
+        assert result == {"cluster": ["my-cluster-01"]}
 
     def test_value_with_equals_sign(self):
         # Second = should be part of value
         result = parse_selector("tag=key=value")
-        assert result == {"tag": "key=value"}
+        assert result == {"tag": ["key=value"]}
 
     def test_key_without_value(self):
         # Edge case: key without = should be ignored
         result = parse_selector("valid=yes,invalid")
-        assert result == {"valid": "yes"}
+        assert result == {"valid": ["yes"]}
+
+    def test_name_or_combines_duplicate_values(self):
+        result = parse_selector("name=a,name=b")
+        assert result == {"name": ["a", "b"]}
+
+    def test_name_dedups_repeated_values(self):
+        result = parse_selector("name=a,name=b,name=a")
+        assert result == {"name": ["a", "b"]}
+
+    def test_non_name_duplicate_key_raises(self):
+        with pytest.raises(ValueError, match="may only appear once"):
+            parse_selector("env=prod,env=dev")
+
+    def test_non_name_duplicate_key_error_mentions_name_rule(self):
+        with pytest.raises(ValueError, match=r"`name=`"):
+            parse_selector("region=eastus,region=westus")
+
+    def test_name_and_other_keys_combine(self):
+        result = parse_selector("name=a,name=b,env=prod")
+        assert result == {"name": ["a", "b"], "env": ["prod"]}
+
+    def test_trailing_comma_ignored(self):
+        # Empty parts after comma split are silently skipped
+        result = parse_selector("env=prod,")
+        assert result == {"env": ["prod"]}
+
+    def test_double_comma_ignored(self):
+        result = parse_selector("env=prod,,name=a")
+        assert result == {"env": ["prod"], "name": ["a"]}
+
+    def test_empty_key_raises(self):
+        """A term like `=foo` has no key. Reject so a typo (e.g. an
+        unset shell variable) does not silently match zero sites."""
+        from siteops.models import SelectorParseError
+
+        with pytest.raises(SelectorParseError, match="empty key"):
+            parse_selector("=foo")
+
+    def test_empty_value_raises(self):
+        """A term like `name=` has no value. Reject so an empty
+        environment variable expansion (e.g. `-l env=`) is loud."""
+        from siteops.models import SelectorParseError
+
+        with pytest.raises(SelectorParseError, match="empty value"):
+            parse_selector("name=")
+
+
+class TestMergeSelectorStrings:
+    """Tests for the _merge_selector_strings helper."""
+
+    def test_none(self):
+        from siteops.models import _merge_selector_strings
+        assert _merge_selector_strings(None) is None
+
+    def test_empty_list(self):
+        from siteops.models import _merge_selector_strings
+        assert _merge_selector_strings([]) is None
+
+    def test_single_string(self):
+        from siteops.models import _merge_selector_strings
+        assert _merge_selector_strings(["env=prod"]) == "env=prod"
+
+    def test_multiple_strings(self):
+        from siteops.models import _merge_selector_strings
+        assert _merge_selector_strings(["env=prod", "name=a"]) == "env=prod,name=a"
+
+    def test_empty_strings_filtered(self):
+        from siteops.models import _merge_selector_strings
+        assert _merge_selector_strings(["", "env=prod", ""]) == "env=prod"
+
+    def test_all_empty_returns_none(self):
+        from siteops.models import _merge_selector_strings
+        assert _merge_selector_strings(["", ""]) is None
+
+    def test_round_trip_with_parse_enforces_name_rule(self):
+        """Repeated -l name= values across strings OR-combine via merged parse."""
+        from siteops.models import _merge_selector_strings
+        merged = _merge_selector_strings(["name=a", "name=b", "name=a"])
+        assert parse_selector(merged) == {"name": ["a", "b"]}
+
+    def test_round_trip_with_parse_enforces_non_name_error(self):
+        """Repeated non-name keys across strings raise via merged parse."""
+        from siteops.models import _merge_selector_strings
+        merged = _merge_selector_strings(["env=prod", "env=dev"])
+        with pytest.raises(ValueError, match="may only appear once"):
+            parse_selector(merged)
+
+
+class TestNormalizeSiteIdentifier:
+    """Tests for the _normalize_site_identifier helper."""
+
+    def test_basename_passthrough(self):
+        from siteops.models import _normalize_site_identifier
+        assert _normalize_site_identifier("munich-dev") == "munich-dev"
+
+    def test_relative_path_passthrough(self):
+        from siteops.models import _normalize_site_identifier
+        assert _normalize_site_identifier("regions/eu/munich") == "regions/eu/munich"
+
+    def test_backslash_normalized_to_forward_slash(self):
+        from siteops.models import _normalize_site_identifier
+        assert (
+            _normalize_site_identifier("regions\\eu\\munich")
+            == "regions/eu/munich"
+        )
+
+    def test_empty_string_rejected(self):
+        from siteops.models import _normalize_site_identifier
+        with pytest.raises(ValueError, match="must not be empty"):
+            _normalize_site_identifier("")
+
+    def test_leading_dot_slash_rejected(self):
+        from siteops.models import _normalize_site_identifier
+        with pytest.raises(ValueError, match=r"must not start with `\./`"):
+            _normalize_site_identifier("./regions/eu/munich")
+
+    def test_leading_slash_rejected(self):
+        from siteops.models import _normalize_site_identifier
+        with pytest.raises(ValueError, match="must be relative"):
+            _normalize_site_identifier("/regions/eu/munich")
+
+    def test_trailing_slash_rejected(self):
+        from siteops.models import _normalize_site_identifier
+        with pytest.raises(ValueError, match=r"must not end with `/`"):
+            _normalize_site_identifier("regions/eu/")
+
+    def test_dotdot_segment_rejected(self):
+        from siteops.models import _normalize_site_identifier
+        with pytest.raises(ValueError, match=r"must not contain `\.\.`"):
+            _normalize_site_identifier("regions/../etc/passwd")
+
+    def test_dot_segment_rejected(self):
+        from siteops.models import _normalize_site_identifier
+        with pytest.raises(ValueError, match=r"must not contain `\.`"):
+            _normalize_site_identifier("regions/./eu/munich")
+
+    def test_double_slash_rejected(self):
+        from siteops.models import _normalize_site_identifier
+        with pytest.raises(ValueError, match="empty path segments"):
+            _normalize_site_identifier("regions//eu/munich")
 
 
 class TestConditionPattern:
@@ -395,8 +535,8 @@ class TestSite:
             location="eastus",
             labels={"env": "dev", "region": "eastus"},
         )
-        assert site.matches_selector({"env": "dev"}) is True
-        assert site.matches_selector({"env": "dev", "region": "eastus"}) is True
+        assert site.matches_selector({"env": ["dev"]}) is True
+        assert site.matches_selector({"env": ["dev"], "region": ["eastus"]}) is True
 
     def test_matches_selector_no_match(self):
         site = Site(
@@ -406,8 +546,8 @@ class TestSite:
             location="eastus",
             labels={"env": "dev"},
         )
-        assert site.matches_selector({"env": "prod"}) is False
-        assert site.matches_selector({"nonexistent": "value"}) is False
+        assert site.matches_selector({"env": ["prod"]}) is False
+        assert site.matches_selector({"nonexistent": ["value"]}) is False
 
     def test_matches_selector_partial_match_fails(self):
         """All selector labels must match."""
@@ -419,7 +559,7 @@ class TestSite:
             labels={"env": "dev"},
         )
         # Matches env but not region
-        assert site.matches_selector({"env": "dev", "region": "westus"}) is False
+        assert site.matches_selector({"env": ["dev"], "region": ["westus"]}) is False
 
     def test_get_all_parameters_returns_copy(self):
         site = Site(
@@ -632,7 +772,7 @@ class TestManifest:
         with open(manifest_path, "w", encoding="utf-8") as f:
             yaml.dump(manifest_data, f)
 
-        manifest = Manifest.from_file(manifest_path)
+        manifest = Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
 
         assert manifest.name == "test-manifest"
         assert manifest.description == "Test description"
@@ -661,7 +801,7 @@ class TestManifest:
         with open(manifest_path, "w", encoding="utf-8") as f:
             yaml.dump(manifest_data, f)
 
-        manifest = Manifest.from_file(manifest_path)
+        manifest = Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
 
         assert len(manifest.steps) == 1
         assert isinstance(manifest.steps[0], KubectlStep)
@@ -687,7 +827,7 @@ class TestManifest:
         with open(manifest_path, "w", encoding="utf-8") as f:
             yaml.dump(manifest_data, f)
 
-        manifest = Manifest.from_file(manifest_path)
+        manifest = Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
 
         assert len(manifest.steps) == 2
         assert isinstance(manifest.steps[0], DeploymentStep)
@@ -703,9 +843,51 @@ class TestManifest:
         with open(manifest_path, "w", encoding="utf-8") as f:
             yaml.dump(manifest_data, f)
 
-        manifest = Manifest.from_file(manifest_path)
+        manifest = Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
         assert manifest.site_selector == "environment=prod"
         assert manifest.sites == []
+
+    def test_from_file_with_nested_path_in_sites(self, tmp_path):
+        """Path-form site identifiers in `sites:` are normalized."""
+        manifest_data = {
+            "name": "nested-manifest",
+            "sites": ["regions/eu/munich", "flat-site"],
+            "steps": [{"name": "step-1", "template": "test.bicep"}],
+        }
+        manifest_path = tmp_path / "manifest.yaml"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            yaml.dump(manifest_data, f)
+
+        manifest = Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
+        assert manifest.sites == ["regions/eu/munich", "flat-site"]
+
+    def test_from_file_normalizes_backslash_in_sites(self, tmp_path):
+        """Backslash paths in `sites:` are normalized to forward slashes."""
+        manifest_data = {
+            "name": "backslash-manifest",
+            "sites": ["regions\\eu\\munich"],
+            "steps": [{"name": "step-1", "template": "test.bicep"}],
+        }
+        manifest_path = tmp_path / "manifest.yaml"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            yaml.dump(manifest_data, f)
+
+        manifest = Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
+        assert manifest.sites == ["regions/eu/munich"]
+
+    def test_from_file_rejects_dotdot_in_sites(self, tmp_path):
+        """Path traversal in `sites:` raises a clear parse error."""
+        manifest_data = {
+            "name": "bad-manifest",
+            "sites": ["../escape"],
+            "steps": [{"name": "step-1", "template": "test.bicep"}],
+        }
+        manifest_path = tmp_path / "manifest.yaml"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            yaml.dump(manifest_data, f)
+
+        with pytest.raises(ValueError, match="Invalid site identifier"):
+            Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
 
     def test_from_file_parallel_mode(self, tmp_path):
         manifest_data = {
@@ -718,7 +900,7 @@ class TestManifest:
         with open(manifest_path, "w", encoding="utf-8") as f:
             yaml.dump(manifest_data, f)
 
-        manifest = Manifest.from_file(manifest_path)
+        manifest = Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
         assert manifest.parallel.is_unlimited is True
 
     def test_from_file_parallel_defaults_false(self, tmp_path):
@@ -731,7 +913,7 @@ class TestManifest:
         with open(manifest_path, "w", encoding="utf-8") as f:
             yaml.dump(manifest_data, f)
 
-        manifest = Manifest.from_file(manifest_path)
+        manifest = Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
         assert manifest.parallel.is_sequential is True
 
     def test_from_file_uses_filename_as_default_name(self, tmp_path):
@@ -743,7 +925,7 @@ class TestManifest:
         with open(manifest_path, "w", encoding="utf-8") as f:
             yaml.dump(manifest_data, f)
 
-        manifest = Manifest.from_file(manifest_path)
+        manifest = Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
         assert manifest.name == "my-deployment"
 
     def test_from_file_missing_step_name(self, tmp_path):
@@ -757,7 +939,7 @@ class TestManifest:
             yaml.dump(manifest_data, f)
 
         with pytest.raises(ValueError, match="missing required field 'name'"):
-            Manifest.from_file(manifest_path)
+            Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
 
     def test_from_file_deployment_missing_template(self, tmp_path):
         manifest_data = {
@@ -770,7 +952,7 @@ class TestManifest:
             yaml.dump(manifest_data, f)
 
         with pytest.raises(ValueError, match="missing 'template'"):
-            Manifest.from_file(manifest_path)
+            Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
 
     def test_from_file_kubectl_missing_arc(self, tmp_path):
         manifest_data = {
@@ -791,7 +973,7 @@ class TestManifest:
             yaml.dump(manifest_data, f)
 
         with pytest.raises(ValueError, match="missing 'arc' configuration"):
-            Manifest.from_file(manifest_path)
+            Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
 
     def test_from_file_kubectl_missing_files(self, tmp_path):
         manifest_data = {
@@ -812,7 +994,7 @@ class TestManifest:
             yaml.dump(manifest_data, f)
 
         with pytest.raises(ValueError, match="missing 'files'"):
-            Manifest.from_file(manifest_path)
+            Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
 
     def test_from_file_kubectl_missing_operation(self, tmp_path):
         """Kubectl step without operation field should raise ValueError."""
@@ -834,7 +1016,7 @@ class TestManifest:
             yaml.dump(manifest_data, f)
 
         with pytest.raises(ValueError, match="missing 'operation'"):
-            Manifest.from_file(manifest_path)
+            Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
 
     def test_from_file_kubectl_arc_missing_name(self, tmp_path):
         """Kubectl step with arc config missing name should raise ValueError."""
@@ -856,7 +1038,7 @@ class TestManifest:
             yaml.dump(manifest_data, f)
 
         with pytest.raises(ValueError, match="must have 'name' and 'resourceGroup'"):
-            Manifest.from_file(manifest_path)
+            Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
 
     def test_from_file_kubectl_arc_missing_resource_group(self, tmp_path):
         """Kubectl step with arc config missing resourceGroup should raise ValueError."""
@@ -878,14 +1060,106 @@ class TestManifest:
             yaml.dump(manifest_data, f)
 
         with pytest.raises(ValueError, match="must have 'name' and 'resourceGroup'"):
-            Manifest.from_file(manifest_path)
+            Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
 
     def test_from_file_empty_file(self, tmp_path):
         manifest_path = tmp_path / "empty.yaml"
         manifest_path.write_text("")
 
         with pytest.raises(ValueError, match="Empty or invalid"):
-            Manifest.from_file(manifest_path)
+            Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
+
+    def test_from_file_unknown_top_level_key_with_did_you_mean(self, tmp_path):
+        """A typo close to a known field should error with a `did you mean` hint."""
+        manifest_path = tmp_path / "typo.yaml"
+        manifest_path.write_text(
+            "apiVersion: siteops/v1\n"
+            "kind: Manifest\n"
+            "name: typo\n"
+            "site:\n"           # singular: typo for `sites:`
+            "  - munich-dev\n"
+            "steps:\n"
+            "  - name: x\n"
+            "    template: t.bicep\n"
+        )
+        with pytest.raises(ValueError) as exc:
+            Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
+        msg = str(exc.value)
+        assert "unknown top-level key" in msg
+        assert "`site`" in msg
+        assert "did you mean `sites`" in msg
+
+    def test_from_file_unknown_top_level_key_no_suggestion(self, tmp_path):
+        """A key with no close match should error without a suggestion."""
+        manifest_path = tmp_path / "novel.yaml"
+        manifest_path.write_text(
+            "apiVersion: siteops/v1\n"
+            "kind: Manifest\n"
+            "name: novel\n"
+            "completely_unrelated_field: 42\n"
+            "selector: env=dev\n"
+            "steps:\n"
+            "  - name: x\n"
+            "    template: t.bicep\n"
+        )
+        with pytest.raises(ValueError) as exc:
+            Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
+        msg = str(exc.value)
+        assert "`completely_unrelated_field`" in msg
+        # No suggestion since no known key is close to this string.
+        assert "did you mean" not in msg
+
+    def test_from_file_selector_typo_caught(self, tmp_path):
+        """`selctor:` (missing 'e') should suggest `selector`."""
+        manifest_path = tmp_path / "selctor.yaml"
+        manifest_path.write_text(
+            "apiVersion: siteops/v1\n"
+            "kind: Manifest\n"
+            "name: typo\n"
+            "selctor: env=dev\n"
+            "steps:\n"
+            "  - name: x\n"
+            "    template: t.bicep\n"
+        )
+        with pytest.raises(ValueError) as exc:
+            Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
+        assert "did you mean `selector`" in str(exc.value)
+
+    def test_from_file_unknown_metadata_key_in_nested_shape(self, tmp_path):
+        """K8s-style nested envelope: unknown metadata key is rejected too."""
+        manifest_path = tmp_path / "nested.yaml"
+        manifest_path.write_text(
+            "apiVersion: siteops/v1\n"
+            "kind: Manifest\n"
+            "metadata:\n"
+            "  name: nested\n"
+            "  annotations: {foo: bar}\n"   # unknown metadata key
+            "spec:\n"
+            "  selector: env=dev\n"
+            "  steps:\n"
+            "    - name: x\n"
+            "      template: t.bicep\n"
+        )
+        with pytest.raises(ValueError, match="unknown metadata key"):
+            Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
+
+    def test_from_file_unknown_spec_key_in_nested_shape(self, tmp_path):
+        """K8s-style nested envelope: unknown spec key is rejected."""
+        manifest_path = tmp_path / "nested.yaml"
+        manifest_path.write_text(
+            "apiVersion: siteops/v1\n"
+            "kind: Manifest\n"
+            "metadata:\n"
+            "  name: nested\n"
+            "spec:\n"
+            "  selector: env=dev\n"
+            "  steps:\n"
+            "    - name: x\n"
+            "      template: t.bicep\n"
+            "  bogus_spec_field: 42\n"
+        )
+        with pytest.raises(ValueError, match="unknown spec key"):
+            Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
 
     def test_resolve_parameter_path_simple(self):
         manifest = Manifest(
@@ -939,6 +1213,73 @@ class TestManifest:
         path = "{{ site.location }}/{{ site.resourceGroup }}/{{ site.subscription }}.yaml"
         result = manifest.resolve_parameter_path(path, site)
         assert result == "westus/rg-prod/sub-456.yaml"
+
+    def test_resolve_parameter_path_with_properties(self):
+        """Test {{ site.properties.<path> }} resolution in parameter file paths."""
+        manifest = Manifest(name="test", description="", sites=[], steps=[])
+        site = Site(
+            name="munich-dev",
+            subscription="sub-123",
+            resource_group="rg-dev",
+            location="eastus",
+            properties={"aioRelease": "2603"},
+        )
+
+        result = manifest.resolve_parameter_path(
+            "parameters/aio-releases/{{ site.properties.aioRelease }}.yaml",
+            site,
+        )
+        assert result == "parameters/aio-releases/2603.yaml"
+
+    def test_resolve_parameter_path_with_nested_properties(self):
+        """Test nested property path resolution."""
+        manifest = Manifest(name="test", description="", sites=[], steps=[])
+        site = Site(
+            name="munich-dev",
+            subscription="sub-123",
+            resource_group="rg-dev",
+            location="eastus",
+            properties={"config": {"variant": "standard"}},
+        )
+
+        result = manifest.resolve_parameter_path(
+            "parameters/{{ site.properties.config.variant }}/defaults.yaml",
+            site,
+        )
+        assert result == "parameters/standard/defaults.yaml"
+
+    def test_resolve_parameter_path_with_missing_property(self):
+        """Unresolvable property path should leave template as-is."""
+        manifest = Manifest(name="test", description="", sites=[], steps=[])
+        site = Site(
+            name="munich-dev",
+            subscription="sub-123",
+            resource_group="rg-dev",
+            location="eastus",
+            properties={},
+        )
+
+        path = "parameters/{{ site.properties.nonexistent }}/defaults.yaml"
+        result = manifest.resolve_parameter_path(path, site)
+        assert result == path
+
+    def test_resolve_parameter_path_mixed_templates(self):
+        """Test mixing site.properties with other template variables."""
+        manifest = Manifest(name="test", description="", sites=[], steps=[])
+        site = Site(
+            name="munich-dev",
+            subscription="sub-123",
+            resource_group="rg-dev",
+            location="eastus",
+            labels={"environment": "dev"},
+            properties={"aioRelease": "2603"},
+        )
+
+        result = manifest.resolve_parameter_path(
+            "parameters/{{ site.labels.environment }}/{{ site.properties.aioRelease }}.yaml",
+            site,
+        )
+        assert result == "parameters/dev/2603.yaml"
 
 
 class TestSiteProperties:
@@ -1043,7 +1384,7 @@ steps:
 """
         )
 
-        manifest = Manifest.from_file(manifest_file)
+        manifest = Manifest.from_file(manifest_file, workspace_root=manifest_file.parent)
 
         assert manifest.parameters == ["parameters/common.yaml", "parameters/shared.yaml"]
 
@@ -1067,7 +1408,7 @@ steps:
 """
         )
 
-        manifest = Manifest.from_file(manifest_file)
+        manifest = Manifest.from_file(manifest_file, workspace_root=manifest_file.parent)
 
         assert manifest.parameters == []
 
@@ -1093,7 +1434,7 @@ steps:
 """
         )
 
-        manifest = Manifest.from_file(manifest_file)
+        manifest = Manifest.from_file(manifest_file, workspace_root=manifest_file.parent)
 
         assert manifest.parameters == []
 
@@ -1208,7 +1549,7 @@ steps:
 """
         )
 
-        manifest = Manifest.from_file(manifest_file)
+        manifest = Manifest.from_file(manifest_file, workspace_root=manifest_file.parent)
         assert manifest.parallel.sites == 3
         assert manifest.parallel.max_workers == 3
 
@@ -1227,7 +1568,7 @@ steps:
 """
         )
 
-        manifest = Manifest.from_file(manifest_file)
+        manifest = Manifest.from_file(manifest_file, workspace_root=manifest_file.parent)
         assert manifest.parallel.is_unlimited is True
 
     def test_manifest_parallel_false(self, tmp_path):
@@ -1245,7 +1586,7 @@ steps:
 """
         )
 
-        manifest = Manifest.from_file(manifest_file)
+        manifest = Manifest.from_file(manifest_file, workspace_root=manifest_file.parent)
         assert manifest.parallel.is_sequential is True
 
     def test_manifest_parallel_object(self, tmp_path):
@@ -1264,7 +1605,7 @@ steps:
 """
         )
 
-        manifest = Manifest.from_file(manifest_file)
+        manifest = Manifest.from_file(manifest_file, workspace_root=manifest_file.parent)
         assert manifest.parallel.sites == 2
 
     def test_manifest_parallel_zero_unlimited(self, tmp_path):
@@ -1282,7 +1623,7 @@ steps:
 """
         )
 
-        manifest = Manifest.from_file(manifest_file)
+        manifest = Manifest.from_file(manifest_file, workspace_root=manifest_file.parent)
         assert manifest.parallel.is_unlimited is True
 
     def test_manifest_parallel_default_sequential(self, tmp_path):
@@ -1299,7 +1640,7 @@ steps:
 """
         )
 
-        manifest = Manifest.from_file(manifest_file)
+        manifest = Manifest.from_file(manifest_file, workspace_root=manifest_file.parent)
         assert manifest.parallel.is_sequential is True
 
 
@@ -1316,10 +1657,10 @@ class TestSiteSelector:
             labels={"environment": "dev", "region": "us"},
         )
 
-        assert site.matches_selector({"environment": "dev"}) is True
-        assert site.matches_selector({"environment": "prod"}) is False
-        assert site.matches_selector({"environment": "dev", "region": "us"}) is True
-        assert site.matches_selector({"environment": "dev", "region": "eu"}) is False
+        assert site.matches_selector({"environment": ["dev"]}) is True
+        assert site.matches_selector({"environment": ["prod"]}) is False
+        assert site.matches_selector({"environment": ["dev"], "region": ["us"]}) is True
+        assert site.matches_selector({"environment": ["dev"], "region": ["eu"]}) is False
 
     def test_matches_selector_by_name(self):
         """Test matching by site name."""
@@ -1331,8 +1672,21 @@ class TestSiteSelector:
             labels={"environment": "dev"},
         )
 
-        assert site.matches_selector({"name": "munich-dev"}) is True
-        assert site.matches_selector({"name": "seattle-dev"}) is False
+        assert site.matches_selector({"name": ["munich-dev"]}) is True
+        assert site.matches_selector({"name": ["seattle-dev"]}) is False
+
+    def test_matches_selector_by_name_or_combines(self):
+        """`name` accepts multiple values OR-combined."""
+        site = Site(
+            name="munich-dev",
+            subscription="sub-123",
+            resource_group="rg-test",
+            location="eastus",
+            labels={},
+        )
+
+        assert site.matches_selector({"name": ["munich-dev", "seattle-dev"]}) is True
+        assert site.matches_selector({"name": ["seattle-dev", "berlin-dev"]}) is False
 
     def test_matches_selector_name_and_label(self):
         """Test matching by both name and label."""
@@ -1344,9 +1698,9 @@ class TestSiteSelector:
             labels={"environment": "dev"},
         )
 
-        assert site.matches_selector({"name": "munich-dev", "environment": "dev"}) is True
-        assert site.matches_selector({"name": "munich-dev", "environment": "prod"}) is False
-        assert site.matches_selector({"name": "seattle-dev", "environment": "dev"}) is False
+        assert site.matches_selector({"name": ["munich-dev"], "environment": ["dev"]}) is True
+        assert site.matches_selector({"name": ["munich-dev"], "environment": ["prod"]}) is False
+        assert site.matches_selector({"name": ["seattle-dev"], "environment": ["dev"]}) is False
 
     def test_matches_selector_empty(self):
         """Test that empty selector matches all sites."""
@@ -1370,4 +1724,4 @@ class TestSiteSelector:
             labels={},
         )
 
-        assert site.matches_selector({"environment": "dev"}) is False
+        assert site.matches_selector({"environment": ["dev"]}) is False

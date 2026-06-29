@@ -1,0 +1,11 @@
+# AIO Release 2605 - Version Configuration
+# Source: https://github.com/Azure/azure-iot-ops-cli-extension/wiki/IoT-Operations-versions#2605
+
+aioVersion: "1.3.105"
+aioTrain: stable
+aioApiVersion: "2026-03-01"
+adrApiVersion: "2026-04-01"
+certManagerVersion: "0.12.0"
+certManagerTrain: stable
+secretStoreVersion: "1.4.1"
+secretStoreTrain: stable

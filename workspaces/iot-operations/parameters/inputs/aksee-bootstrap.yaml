@@ -1,0 +1,28 @@
+# Parameter inputs for the aksee-bootstrap step.
+# Consumed by `templates/host-bootstrap/aksee/template.bicep`.
+#
+# The `aksee` fields machineName, clusterName, and customLocationsOid are
+# required. aksEdgeMsiUrl is optional and defaults to the latest K3s build via
+# base-site. `targetLocation` is mapped to `site.location` so the cluster
+# co-locates with the AIO resources, which also derive their region from
+# `site.location`. The template otherwise defaults it to the resource group's
+# location.
+#
+# Override per-site in `sites/<site>.yaml`. See
+# `templates/host-bootstrap/aksee/README.md`.
+
+machineName:        "{{ site.parameters.aksee.machineName }}"
+clusterName:        "{{ site.parameters.aksee.clusterName }}"
+customLocationsOid: "{{ site.parameters.aksee.customLocationsOid }}"
+
+# AKS EE MSI to install. Defaults (via base-site) to the latest K3s build.
+# Override per-site with a versioned MSI URL to pin a specific release.
+aksEdgeMsiUrl:      "{{ site.parameters.aksee.aksEdgeMsiUrl }}"
+
+# Cluster + custom-location region. Tracks site.location to match AIO resources.
+targetLocation:     "{{ site.location }}"
+
+# OIDC issuer + workload identity (Phase 3). Bool from base-site deployOptions
+# (default false), same pattern as enableCertManager.
+enableWorkloadIdentity: "{{ site.properties.deployOptions.enableWorkloadIdentity }}"
+

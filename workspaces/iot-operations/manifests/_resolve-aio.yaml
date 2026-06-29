@@ -1,0 +1,16 @@
+apiVersion: siteops/v1
+kind: Manifest
+name: resolve-aio
+description: |
+  Shared resolve-aio partial. Reads instance and custom-location names from
+  the existing AIO instance so downstream steps (secret sync, samples) can
+  chain off the resolved values regardless of naming convention.
+
+  Internal partial (filename prefixed `_`). Not deployed directly. Composed
+  by manifests and samples that add secret sync or capabilities on top of
+  an existing AIO install.
+
+steps:
+  - name: resolve-aio
+    template: templates/aio/resolve-aio.bicep
+    scope: resourceGroup

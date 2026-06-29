@@ -870,7 +870,7 @@ steps:
         get_template_parameters.cache_clear()
 
         orchestrator = Orchestrator(workspace)
-        manifest = Manifest.from_file(workspace / "manifests" / "test.yaml")
+        manifest = Manifest.from_file(workspace / "manifests" / "test.yaml", workspace_root=workspace)
         site = orchestrator.load_site("test-site")
         step = manifest.steps[0]
 
@@ -935,7 +935,7 @@ steps:
         get_template_parameters.cache_clear()
 
         orchestrator = Orchestrator(workspace)
-        manifest = Manifest.from_file(workspace / "manifests" / "test.yaml")
+        manifest = Manifest.from_file(workspace / "manifests" / "test.yaml", workspace_root=workspace)
         site = orchestrator.load_site("test-site")
         step = manifest.steps[0]
 
@@ -990,7 +990,7 @@ steps:
         get_template_parameters.cache_clear()
 
         orchestrator = Orchestrator(workspace)
-        manifest = Manifest.from_file(workspace / "manifests" / "test.yaml")
+        manifest = Manifest.from_file(workspace / "manifests" / "test.yaml", workspace_root=workspace)
         site = orchestrator.load_site("test-site")
         step = manifest.steps[0]
 
@@ -1060,7 +1060,7 @@ steps:
         get_template_parameters.cache_clear()
 
         orchestrator = Orchestrator(workspace)
-        manifest = Manifest.from_file(workspace / "manifests" / "test.yaml")
+        manifest = Manifest.from_file(workspace / "manifests" / "test.yaml", workspace_root=workspace)
         site = orchestrator.load_site("test-site")
         step = manifest.steps[0]
 
@@ -1122,7 +1122,7 @@ steps:
         get_template_parameters.cache_clear()
 
         orchestrator = Orchestrator(workspace)
-        manifest = Manifest.from_file(workspace / "manifests" / "test.yaml")
+        manifest = Manifest.from_file(workspace / "manifests" / "test.yaml", workspace_root=workspace)
         site = orchestrator.load_site("test-site")
         step = manifest.steps[0]
 
@@ -1168,7 +1168,7 @@ steps:
         get_template_parameters.cache_clear()
 
         orchestrator = Orchestrator(workspace)
-        manifest = Manifest.from_file(workspace / "manifests" / "test.yaml")
+        manifest = Manifest.from_file(workspace / "manifests" / "test.yaml", workspace_root=workspace)
         site = orchestrator.load_site("test-site")
         step = manifest.steps[0]
 
@@ -1242,7 +1242,7 @@ steps:
         get_template_parameters.cache_clear()
 
         orchestrator = Orchestrator(workspace)
-        manifest = Manifest.from_file(workspace / "manifests" / "test.yaml")
+        manifest = Manifest.from_file(workspace / "manifests" / "test.yaml", workspace_root=workspace)
         site = orchestrator.load_site("test-site")
         step = manifest.steps[0]
 
@@ -1511,7 +1511,7 @@ steps:
         get_template_parameters.cache_clear()
 
         orchestrator = Orchestrator(workspace)
-        manifest = Manifest.from_file(workspace / "manifests" / "test.yaml")
+        manifest = Manifest.from_file(workspace / "manifests" / "test.yaml", workspace_root=workspace)
         site = orchestrator.load_site("test-site")
         step = manifest.steps[0]
 
@@ -1589,7 +1589,7 @@ steps:
         get_template_parameters.cache_clear()
 
         orchestrator = Orchestrator(workspace)
-        manifest = Manifest.from_file(workspace / "manifests" / "test.yaml")
+        manifest = Manifest.from_file(workspace / "manifests" / "test.yaml", workspace_root=workspace)
         site = orchestrator.load_site("test-site")
         step = manifest.steps[0]
 
@@ -1921,7 +1921,7 @@ steps:
 
         from siteops.models import Manifest
 
-        manifest = Manifest.from_file(manifest_path)
+        manifest = Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
         step_names = Orchestrator._get_subscription_step_names(manifest)
 
         assert step_names == {"sub-step-1", "sub-step-2"}
@@ -2001,7 +2001,7 @@ steps:
         orchestrator = Orchestrator(tmp_workspace)
         from siteops.models import Manifest
 
-        manifest = Manifest.from_file(manifest_path)
+        manifest = Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
         site = orchestrator.load_site("rg-site")
         sub_step_names = {"sub-step"}
 
@@ -2057,7 +2057,7 @@ steps:
         orchestrator = Orchestrator(tmp_workspace)
         from siteops.models import Manifest
 
-        manifest = Manifest.from_file(manifest_path)
+        manifest = Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
         site = orchestrator.load_site("rg-site")
         sub_step_names = {"sub-step"}
 
@@ -2109,7 +2109,7 @@ steps:
         orchestrator = Orchestrator(tmp_workspace)
         from siteops.models import Manifest
 
-        manifest = Manifest.from_file(manifest_path)
+        manifest = Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
         site = orchestrator.load_site("rg-site")
         sub_step_names = {"sub-step"}
 

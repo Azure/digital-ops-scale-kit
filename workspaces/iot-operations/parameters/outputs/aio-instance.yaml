@@ -1,0 +1,14 @@
+# Fan-out outputs from the aio-instance step, forwarded to later consumers.
+# See docs/parameter-resolution.md for the inputs/outputs convention.
+# Consumed by: schema-registry-role
+
+# AIO extension outputs (for role assignments)
+aioExtensionName: "{{ steps.aio-instance.outputs.aioExtension.name }}"
+aioExtensionPrincipalId: "{{ steps.aio-instance.outputs.aioExtension.identityPrincipalId }}"
+
+# AIO instance outputs
+aioInstanceName: "{{ steps.aio-instance.outputs.aio.name }}"
+
+# Custom location outputs
+customLocationId: "{{ steps.aio-instance.outputs.customLocation.id }}"
+customLocationName: "{{ steps.aio-instance.outputs.customLocation.name }}"

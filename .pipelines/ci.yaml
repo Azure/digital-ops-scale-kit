@@ -73,11 +73,23 @@ jobs:
         displayName: Validate Bicep templates
 
       - script: |
+          # set -o pipefail so `siteops ... | tee` returns siteops's exit
+          # code, not tee's. ADO `script:` does not set pipefail by default.
+          set -o pipefail
           WORKSPACE_DIR="workspaces/iot-operations"
-          MANIFESTS=$(find "$WORKSPACE_DIR/manifests" -name "*.yaml" -o -name "*.yml" 2>/dev/null | tr '\n' ' ' || echo "")
+          # Discover standalone Manifest YAML across the standard top-level dirs.
+          # Excludes partials (filename prefixed `_`) and non-manifest YAML
+          # under samples/ (inputs.yaml, outputs.yaml, etc.).
+          MANIFESTS=$(
+            { find "$WORKSPACE_DIR/manifests" -maxdepth 1 \
+                \( -name "*.yaml" -o -name "*.yml" \) -not -name "_*" 2>/dev/null
+              find "$WORKSPACE_DIR/samples" -mindepth 2 -maxdepth 2 \
+                \( -name "manifest.yaml" -o -name "manifest.yml" \) 2>/dev/null
+            } | tr '\n' ' '
+          )
 
           if [[ -z "$MANIFESTS" ]]; then
-            echo "##vso[task.logissue type=warning]No manifests found in $WORKSPACE_DIR/manifests"
+            echo "##vso[task.logissue type=warning]No standalone manifests found in $WORKSPACE_DIR"
             exit 0
           fi
 

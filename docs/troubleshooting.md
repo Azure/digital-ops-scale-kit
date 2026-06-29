@@ -12,7 +12,18 @@ Error: Site 'munich-dev' not found
 
 **Cause**: Site file doesn't exist or has wrong name.
 
-**Solution**: Check `sites/` directory. Site filename must match the name referenced in manifest.
+**Solution**: Check `sites/` directory. The site basename, relative path, or internal `name:` must match the identifier referenced in the manifest. See [targeting.md](targeting.md) for the identity model.
+
+### "CLI selector matched no sites"
+
+```
+Error: CLI selector `-l environment=prdo` matched no sites.
+`environment=prdo` requested. Workspace `environment` values: dev, prod, staging.
+```
+
+**Cause**: A typo in `-l/--selector`, or the requested label value does not exist on any site.
+
+**Solution**: The diagnostic lists the workspace's actual values for each requested key. Fix the typo or update the site labels. See [targeting.md](targeting.md) for the no-match diagnostic and selector grammar.
 
 ### "Template file not found"
 
@@ -33,6 +44,16 @@ Error: Step 'aio-instance' references unknown step 'schema-reg'
 **Cause**: Output chaining references a step that doesn't exist.
 
 **Solution**: Check step names in manifest match the references in parameter files.
+
+### Site looks wrong after inheritance / overlay
+
+When a site's resolved values disagree with what you expect (wrong location, missing label, an overlay in `sites.local/` or an extras dir not taking effect), preview the fully-resolved shape:
+
+```
+siteops -w <workspace> sites <name> --render
+```
+
+The output is the post-inherit + post-overlay site as a single YAML doc, with empty `resourceGroup:` omitted for subscription-scoped sites. Use it to verify which file contributed which field before re-running a deploy.
 
 ## Deployment errors
 
@@ -56,7 +77,7 @@ Error: Step 'aio-instance' references unknown step 'schema-reg'
 
 1. Check Azure portal for deployment error details
 2. Fix the issue
-3. Re-run—Bicep deployments are idempotent
+3. Re-run. Bicep deployments are idempotent.
 
 ## Arc proxy issues
 
@@ -84,8 +105,11 @@ siteops -w workspaces/iot-operations validate manifests/aio-install.yaml -v
 # Dry run to see exact commands
 siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml --dry-run
 
-# List sites with details
-siteops -w workspaces/iot-operations sites -v
+# Show every value's source file (post inherit + overlay merge)
+siteops -w workspaces/iot-operations sites <name> -v
+
+# Print the fully-resolved site as YAML
+siteops -w workspaces/iot-operations sites <name> --render
 
 # Check Azure CLI authentication
 az account show

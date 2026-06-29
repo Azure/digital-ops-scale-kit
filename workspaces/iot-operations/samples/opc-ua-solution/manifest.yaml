@@ -1,0 +1,33 @@
+apiVersion: siteops/v1
+kind: Manifest
+name: opc-ua-solution
+description: |
+  Sample OPC UA solution: device + asset, Event Hub destination with managed
+  identity, and a dataflow mapping oven telemetry from the broker to Event Hub.
+  Designed to deploy on top of an existing AIO instance. The composed
+  `aio-with-opc-ua` sample (`samples/aio-with-opc-ua/manifest.yaml`) wires
+  install plus this sample into one deploy.
+
+  Discovers actual deployed names (custom location, ADR namespace) from the
+  AIO instance via resolve-aio, so the manifest works against any AIO install
+  including those whose resource names diverge from the default
+  `<site>-aio` / `<site>-cl` / `<site>-ns` conventions.
+
+  Prerequisites:
+    - AIO instance must be deployed and running
+    - The site's aioRelease must point to a parameters/aio-releases/<release>.yaml file
+
+# Max concurrent sites. 0 = unlimited, 1 = serial.
+parallel: 3
+
+# Default selector. Override at the CLI with `-l <key>=<value>`.
+selector: "environment=dev"
+
+parameters:
+  - parameters/common/common.yaml
+  - "parameters/aio-releases/{{ site.properties.aioRelease }}.yaml"
+
+steps:
+  - include: ../../manifests/_resolve-aio.yaml
+  - include: _partial.yaml
+

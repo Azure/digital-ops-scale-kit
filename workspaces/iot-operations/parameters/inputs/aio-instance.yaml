@@ -1,0 +1,12 @@
+# Fan-in inputs into the aio-instance step, pulled from multiple upstream producers.
+# See docs/parameter-resolution.md for the inputs/outputs convention.
+# Consumed by: aio-instance
+
+# From schema-registry step
+schemaRegistryId: "{{ steps.schema-registry.outputs.schemaRegistry.id }}"
+
+# From adr-ns step
+adrNamespaceId: "{{ steps.adr-ns.outputs.adrNamespace.id }}"
+
+# From aio-enablement step
+clExtensionIds: "{{ steps.aio-enablement.outputs.clExtensionIds }}"

@@ -1,0 +1,25 @@
+apiVersion: siteops/v1
+kind: Manifest
+name: opc-ua-solution
+description: |
+  OPC UA solution sample steps without the resolve-aio prerequisite.
+
+  Internal partial (filename prefixed `_`). Not deployed directly. Composed
+  by the standalone `manifest.yaml` next to this file and by compositional
+  samples (e.g. `samples/aio-with-opc-ua/manifest.yaml`).
+
+steps:
+  - name: opc-ua-solution
+    template: samples/opc-ua-solution/template.bicep
+    scope: resourceGroup
+    parameters:
+      - samples/opc-ua-solution/inputs.yaml
+
+  - name: opc-plc-simulator
+    type: kubectl
+    operation: apply
+    arc:
+      name: "{{ site.parameters.clusterName }}"
+      resourceGroup: "{{ site.resourceGroup }}"
+    files:
+      - https://raw.githubusercontent.com/Azure-Samples/explore-iot-operations/0072eb6cdd3602bbd48858f21cf097e36a6b0b7e/samples/quickstarts/opc-plc-deployment.yaml

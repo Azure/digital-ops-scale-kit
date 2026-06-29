@@ -1,0 +1,50 @@
+apiVersion: siteops/v1
+kind: Manifest
+name: aio-with-aksee-bootstrap
+description: |
+  Composes the AKS Edge Essentials host bootstrap with AIO fundamentals as a
+  single deploy.
+
+  The bootstrap step returns shortly after the Connected Machine Agent picks up
+  the launcher (~90 seconds), then the cluster comes up on the VM asynchronously
+  for 25 to 40 minutes. The wait step gates AIO fundamentals on the bootstrap's
+  completion tag so the cluster-dependent steps run only once the cluster is
+  ready. One `siteops deploy` runs the whole chain.
+
+  Post-flatten step sequence (preview with `siteops sites --render`):
+    1. aksee-bootstrap          (Windows VM through K3s + Arc + custom locations)
+    2. wait-for-bootstrap       (gate on the siteops.bootstrap.state tag)
+    3. global-edge-site         (gated by enableGlobalSite)
+    4. edge-site                (gated by enableEdgeSite)
+    5. schema-registry
+    6. adr-ns
+    7. aio-enablement
+    8. aio-instance
+    9. schema-registry-role
+
+# Default selector. Override at the CLI with `-l <key>=<value>`.
+selector: "environment=dev"
+
+# Max concurrent sites. 0 = unlimited, 1 = serial.
+parallel: 3
+
+steps:
+  - include: ../../templates/host-bootstrap/aksee/_partial.yaml
+
+  # Gate AIO fundamentals on the bootstrap reaching its terminal state. The
+  # worker writes siteops.bootstrap.state=succeeded on the Arc machine resource
+  # at the end of Phase 99 (or failed-phase-N on failure). The machine resource
+  # name must equal the site's aksee.machineName, which the bootstrap also
+  # targets, so the same value identifies the resource here.
+  - name: wait-for-bootstrap
+    type: wait
+    condition:
+      type: arm-tag
+      resourceId: "/subscriptions/{{ site.subscription }}/resourceGroups/{{ site.resourceGroup }}/providers/Microsoft.HybridCompute/machines/{{ site.parameters.aksee.machineName }}"
+      tagKey: "siteops.bootstrap.state"
+      expectedValue: "succeeded"
+      failurePattern: "failed-*"
+    timeoutMinutes: 60
+    pollIntervalSeconds: 30
+
+  - include: ../../manifests/_aio-fundamentals.yaml

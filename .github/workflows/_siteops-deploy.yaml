@@ -126,7 +126,7 @@ jobs:
       - name: Validate and show target sites
         shell: bash
         run: |
-          # Use validate -v instead of sites — it shows only site names and
+          # Use validate -v instead of sites. It shows only site names and
           # locations, not subscription IDs, resource groups, or parameters
           # which may contain sensitive values from SITE_OVERRIDES.
           CMD_ARGS=(-w "$INPUT_WORKSPACE" validate "$INPUT_MANIFEST")
@@ -154,15 +154,28 @@ jobs:
           # Background service that refreshes OIDC token every 4 minutes.
           # GitHub OIDC tokens expire after ~5 minutes, so this keeps az cli
           # authenticated for long-running AIO deployments (which can take 20+ min).
+          # PID is written to disk so the Azure Logout step can kill the
+          # loop before clearing credentials. Otherwise the loop could
+          # tick once more between logout and runner cleanup, briefly
+          # re-establishing auth.
           (
             while true; do
               sleep 240
               token=$(curl -sH "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
                 "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange" | jq -r .value)
-              az login --service-principal -u "$AZURE_CLIENT_ID" -t "$AZURE_TENANT_ID" \
-                --federated-token "$token" --output none 2>/dev/null || true
+              if [[ -z "$token" || "$token" == "null" ]]; then
+                echo "::warning::OIDC token refresh failed: could not obtain token"
+                continue
+              fi
+              if az login --service-principal -u "$AZURE_CLIENT_ID" -t "$AZURE_TENANT_ID" \
+                --federated-token "$token" --output none 2>&1; then
+                echo "OIDC token refreshed successfully"
+              else
+                echo "::warning::OIDC token refresh failed: az login returned error"
+              fi
             done
           ) &
+          echo $! > "$RUNNER_TEMP/oidc-refresh.pid"
           echo "OIDC token refresh service started (PID: $!)"
 
       - name: Deploy
@@ -203,4 +216,13 @@ jobs:
       - name: Azure Logout
         if: always()
         shell: bash
-        run: az logout || true
+        run: |
+          # Stop the OIDC refresh first so it cannot re-auth post-logout.
+          # `kill <subshell-pid>` does not interrupt the loop's blocking
+          # `sleep`; kill the subshell's children too via pkill -P.
+          if [[ -f "$RUNNER_TEMP/oidc-refresh.pid" ]]; then
+            pid="$(cat "$RUNNER_TEMP/oidc-refresh.pid")"
+            pkill -TERM -P "$pid" 2>/dev/null || true
+            kill -TERM "$pid" 2>/dev/null || true
+          fi
+          az logout || true

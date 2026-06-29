@@ -1,0 +1,57 @@
+apiVersion: siteops/v1
+kind: Manifest
+name: aio-fundamentals
+description: |
+  AIO fundamentals partial: Arc extensions, custom location, instance, schema
+  registry, ADR namespace, plus optional global/edge sites. No secret sync,
+  no samples.
+
+  Internal partial (filename prefixed `_`). Not deployed directly. Composed
+  by `aio-install.yaml` (which adds the secret sync step) and by compositional
+  samples (which add capabilities on top).
+
+# Shared parameters applied to all steps (auto-filtered per template). The
+# aio-releases YAML lives at the manifest level so any step that declares
+# aioVersion / aioApiVersion / adrApiVersion / certManagerVersion /
+# secretStoreVersion (etc.) picks it up without per-step duplication.
+parameters:
+  - parameters/common/common.yaml
+  - "parameters/aio-releases/{{ site.properties.aioRelease }}.yaml"
+
+steps:
+  # Edge Site (Global) - subscription-scoped. Deployed once per subscription.
+  # RG-level sites resolve outputs via cross-scope output chaining.
+  - name: global-edge-site
+    template: templates/edge-site/subscription.bicep
+    scope: subscription
+    when: "{{ site.properties.deployOptions.enableGlobalSite }}"
+
+  # Edge Site (Per-RG) - deployed per resource group.
+  - name: edge-site
+    template: templates/edge-site/main.bicep
+    scope: resourceGroup
+    when: "{{ site.properties.deployOptions.enableEdgeSite }}"
+
+  - name: schema-registry
+    template: templates/deps/schema-registry.bicep
+    scope: resourceGroup
+
+  - name: adr-ns
+    template: templates/deps/adr-ns.bicep
+    scope: resourceGroup
+
+  - name: aio-enablement
+    template: templates/aio/enablement.bicep
+    scope: resourceGroup
+
+  - name: aio-instance
+    template: templates/aio/instance.bicep
+    scope: resourceGroup
+    parameters:
+      - parameters/inputs/aio-instance.yaml
+
+  - name: schema-registry-role
+    template: templates/deps/schema-registry-role.bicep
+    scope: resourceGroup
+    parameters:
+      - parameters/outputs/aio-instance.yaml

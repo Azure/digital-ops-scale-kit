@@ -1,3 +1,12 @@
+// main.bicep
+// -------------------------------------------------------------------------------------
+// Creates a Microsoft.Edge/sites resource at resource-group scope.
+// Pair with subscription.bicep when an edge site needs subscription scope instead.
+//
+// Inputs:  siteName, optional displayName/siteDescription/siteAddress/labels.
+// Outputs: site { id, name, displayName }.
+// -------------------------------------------------------------------------------------
+
 metadata description = 'Creates an Azure Edge site resource at resource group scope.'
 
 import { siteAddressType } from './types.bicep'

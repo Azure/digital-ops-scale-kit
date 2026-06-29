@@ -2,110 +2,31 @@ apiVersion: siteops/v1
 kind: Manifest
 name: aio-install
 description: |
-  Deploy Azure IoT Operations platform to Arc-enabled Kubernetes clusters.
+  Deploy the Azure IoT Operations platform with optional secret sync.
+  Composes `_aio-fundamentals.yaml` and adds workload-identity-backed secret
+  sync when the site enables it.
 
-  Deployment modes (controlled by site properties):
-    - Base platform only: deployOptions.includeSolution = false
-    - Base + solution: deployOptions.includeSolution = true
-    - With simulator: deployOptions.includeOpcPlcSimulator = true
+  Optional capabilities (each gated by a site `deployOptions.*` flag):
+    - enableSecretSync        workload-identity-backed secret sync
+    - enableGlobalSite        subscription-scoped edge site (deployed once per subscription)
+    - enableEdgeSite          RG-scoped edge site (deployed per RG)
 
-# Parallelization:
-#   0 = unlimited (all sites concurrently)
-#   1 = sequential (one at a time)
-#   N = max N concurrent sites
+  To add a sample on top of this install, see `samples/aio-with-opc-ua/manifest.yaml`
+  for an example that composes this install with the OPC UA sample in one
+  deploy.
+
+# Max concurrent sites. 0 = unlimited, 1 = serial.
 parallel: 3
 
-# Site selection (choose ONE method):
-#
-# Option 1: Explicit site list
-# sites:
-#   - munich-dev
-#   - seattle-dev
-#
-# Option 2: Label selector (matches all sites with matching labels)
-# Note: Subscription-scoped sites (e.g. contoso-global) use different labels
-# and are intentionally excluded here. Target them with: siteops deploy -l "scope=subscription"
-siteSelector: "environment=dev"
-
-# Shared parameters applied to all steps (auto-filtered per template)
-parameters:
-  - parameters/common.yaml
+# Default selector. Override at the CLI with `-l <key>=<value>`.
+# Subscription-scoped sites (e.g. contoso-global) use different labels and are
+# intentionally excluded here. Target them with `-l scope=subscription`.
+selector: "environment=dev"
 
 steps:
-  # ─────────────────────────────────────────────────────────────
-  # Base Platform Installation
-  # ─────────────────────────────────────────────────────────────
-
-  # Edge Site (Global) - deployed once per subscription via subscription-level site.
-  # RG-level sites resolve outputs via cross-scope output chaining.
-  - name: global-edge-site
-    template: templates/edge-site/subscription.bicep
-    scope: subscription
-    when: "{{ site.properties.deployOptions.includeGlobalSite }}"
-
-  # Edge Site (Per-RG) - deployed per resource group (original behavior)
-  - name: edge-site
-    template: templates/edge-site/main.bicep
-    scope: resourceGroup
-    when: "{{ site.properties.deployOptions.includeEdgeSite }}"
-
-  - name: schema-registry
-    template: templates/iot-ops/deps/schema-registry.bicep
-    scope: resourceGroup
-
-  - name: adr-ns
-    template: templates/iot-ops/deps/adr-ns.bicep
-    scope: resourceGroup
-
-  - name: aio-enablement
-    template: templates/iot-ops/install/2602/azure-iot-operations-enablement.bicep
-    scope: resourceGroup
-
-  - name: aio-instance
-    template: templates/iot-ops/install/2602/azure-iot-operations-instance.bicep
-    scope: resourceGroup
-    parameters:
-      - parameters/chaining.yaml
-
-  - name: schema-registry-role
-    template: templates/iot-ops/deps/schema-registry-role.bicep
-    scope: resourceGroup
-    parameters:
-      - parameters/post-instance.yaml
-
-  # ─────────────────────────────────────────────────────────────
-  # Secret Sync Enablement (conditional)
-  # ─────────────────────────────────────────────────────────────
-
-  - name: resolve-aio
-    template: templates/iot-ops/common/resolve-aio.bicep
-    scope: resourceGroup
+  - include: _aio-fundamentals.yaml
+  - include: _resolve-aio.yaml
+    when: "{{ site.properties.deployOptions.enableSecretSync }}"
+  - include: _secretsync.yaml
     when: "{{ site.properties.deployOptions.enableSecretSync }}"
 
-  - name: secretsync
-    template: templates/iot-ops/secretsync/enable-secretsync.bicep
-    scope: resourceGroup
-    parameters:
-      - parameters/secretsync-chaining.yaml
-    when: "{{ site.properties.deployOptions.enableSecretSync }}"
-
-  # ─────────────────────────────────────────────────────────────
-  # Solution Layer (conditional)
-  # ─────────────────────────────────────────────────────────────
-
-  - name: opc-ua-solution
-    template: templates/iot-ops/solutions/opc-ua-solution.bicep
-    scope: resourceGroup
-    parameters:
-      - parameters/post-instance.yaml
-    when: "{{ site.properties.deployOptions.includeSolution }}"
-
-  - name: opc-plc-simulator
-    type: kubectl
-    operation: apply
-    arc:
-      name: "{{ site.parameters.clusterName }}"
-      resourceGroup: "{{ site.resourceGroup }}"
-    files:
-      - https://raw.githubusercontent.com/Azure-Samples/explore-iot-operations/main/samples/quickstarts/opc-plc-deployment.yaml
-    when: "{{ site.properties.deployOptions.includeOpcPlcSimulator }}"

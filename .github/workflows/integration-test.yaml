@@ -31,6 +31,17 @@ on:
 env:
   PYTHONUNBUFFERED: "1"
 
+concurrency:
+  # Shared `azure-${env}` lock so a deploy and an integration test
+  # against the same environment serialize. They both touch live Azure
+  # resources and an integration test mid-deploy can flake. Both
+  # workflows use `cancel-in-progress: false` so a manually dispatched
+  # integration test does not cancel an in-flight deploy on the shared
+  # lock (cancel-in-progress applies at the group level, not per-
+  # workflow).
+  group: azure-${{ inputs.environment }}
+  cancel-in-progress: false
+
 jobs:
   integration-test:
     name: Integration Tests
@@ -61,8 +72,9 @@ jobs:
 
       - name: Select test scope
         id: scope
+        env:
+          MANIFEST: ${{ inputs.manifest }}
         run: |
-          MANIFEST="${{ inputs.manifest }}"
           if [[ "$MANIFEST" == "all" ]]; then
             echo "pytest_args=tests/integration/" >> $GITHUB_OUTPUT
           else
@@ -84,14 +96,15 @@ jobs:
           SITE_OVERRIDES: ${{ secrets.SITE_OVERRIDES }}
           INTEGRATION_SKIP_CLEANUP: ${{ inputs.skip-cleanup }}
           INTEGRATION_SELECTOR: ${{ inputs.selector }}
+          PYTEST_ARGS: ${{ steps.scope.outputs.pytest_args }}
         run: >
-          pytest ${{ steps.scope.outputs.pytest_args }}
+          pytest $PYTEST_ARGS
           -v --tb=long
           -m integration
           --junitxml=integration-results.xml
 
       - name: Publish test results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         if: always()
         with:
           name: integration-test-results

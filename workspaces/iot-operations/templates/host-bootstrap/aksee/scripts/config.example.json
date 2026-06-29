@@ -1,0 +1,23 @@
+{
+  "_comment": "Example config for worker.ps1. Copy to config.json in your ConfigDir and replace placeholder values.",
+
+  "clusterName": "aksee-cluster1",
+  "resourceGroup": "aksee-rg",
+  "subscription": "00000000-0000-0000-0000-000000000000",
+  "location": "westus2",
+  "customLocationsOid": "00000000-0000-0000-0000-000000000000",
+
+  "_aksEdgeMsiUrlNote": "Official aka.ms shortcut to the latest stable AKS Edge Essentials K3s MSI. Microsoft does not publish per-version aka.ms links, so to pin a specific version, host the MSI yourself and point this at it.",
+  "aksEdgeMsiUrl": "https://aka.ms/aks-edge/k3s-msi",
+
+  "_authNote": "Phase 3 authenticates with the Arc machine's system-assigned managed identity (az login --identity). Grant it Contributor on the resource group, or Kubernetes Cluster - Azure Arc Onboarding plus Tag Contributor for least privilege. No service principal is used.",
+
+  "_enableWorkloadIdentityNote": "Default false matches the validated AIO baseline. Set true when downstream AIO components need workload-identity-backed secret sync. Activates Phase 3 OIDC issuer enablement, K3s apiserver patch, and Arc agent restart.",
+  "enableWorkloadIdentity": false,
+
+  "_scheduledTaskNameNote": "Optional. Defaults to SiteOpsAksEeBootstrap when omitted. Set explicitly if you run multiple bootstraps in parallel on the same host (unusual).",
+  "scheduledTaskName": "SiteOpsAksEeBootstrap",
+
+  "_localAdminUserNote": "Only used in dedicated-admin mode. By default the worker task runs as NT AUTHORITY\\SYSTEM and no account is created. With RunAsDedicatedAdmin the launcher creates this user (default siteops-bootstrap) with an on-box generated password, runs the task as it, and removes it in Phase 99.",
+  "localAdminUser": "siteops-bootstrap"
+}

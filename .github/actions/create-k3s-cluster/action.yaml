@@ -1,0 +1,83 @@
+# Used by e2e-test.yaml. Mutates the runner with systemd k3s.
+#
+# Create a single-node k3s cluster on the runner.
+#
+# Reference (not a verbatim port): Azure/azure-iot-ops-cli-extension
+#   .github/actions/create-k3s-cluster/action.yml
+#
+# Improvements over the reference:
+#   - Uses the official k3s installer (systemd-managed unit) so we get
+#     structured logs (journalctl) and a deterministic restart story.
+#   - `set -euo pipefail` everywhere; no silent partial failures.
+#   - `kubectl wait --for=condition=Ready` instead of hand-rolled polling.
+#
+# Constraint: assumes a runner with systemd (GHA-hosted ubuntu-latest does).
+
+name: Create k3s cluster
+description: Used by e2e-test.yaml. Install and start a single-node k3s cluster, write kubeconfig.
+
+inputs:
+  version:
+    required: false
+    description: k3s version (must be a supported AIO minimum or higher).
+    default: "v1.31.1+k3s1"
+
+outputs:
+  kubeconfig:
+    description: Path to the generated kubeconfig.
+    value: ${{ steps.config.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install k3s
+      shell: bash
+      env:
+        K3S_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+        # Official installer: drops a systemd unit, generates kubeconfig
+        # at /etc/rancher/k3s/k3s.yaml, sets up CNI, etc.
+        # INSTALL_K3S_EXEC defines the server args; cluster-init makes this
+        # the bootstrap node of a (single-node) HA-capable cluster.
+        curl -sfL https://get.k3s.io \
+          | INSTALL_K3S_VERSION="${K3S_VERSION}" \
+            INSTALL_K3S_EXEC="server --cluster-init --write-kubeconfig-mode=644" \
+            sh -
+
+    - name: Wait for k3s API + node Ready
+      shell: bash
+      run: |
+        set -euo pipefail
+        export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+
+        # systemd reports the unit active before the API is necessarily
+        # serving. Poll for kubectl liveness, then wait for node Ready.
+        MAX_ATTEMPTS=30
+        SLEEP_SECONDS=10
+        for attempt in $(seq 1 $MAX_ATTEMPTS); do
+          if kubectl get --raw=/readyz >/dev/null 2>&1; then
+            echo "k3s API is ready (attempt ${attempt})."
+            break
+          fi
+          if [ "${attempt}" -eq "${MAX_ATTEMPTS}" ]; then
+            echo "::error::k3s API did not become ready within $((MAX_ATTEMPTS * SLEEP_SECONDS))s"
+            sudo journalctl -u k3s --no-pager --lines=200 || true
+            exit 1
+          fi
+          echo "Waiting for k3s API (${attempt}/${MAX_ATTEMPTS})..."
+          sleep "${SLEEP_SECONDS}"
+        done
+
+        kubectl wait --for=condition=Ready node --all --timeout=300s
+
+    - name: Write kubeconfig to ~/.kube/config
+      id: config
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "${HOME}/.kube"
+        sudo cp /etc/rancher/k3s/k3s.yaml "${HOME}/.kube/config"
+        sudo chown "$(id -u):$(id -g)" "${HOME}/.kube/config"
+        chmod 600 "${HOME}/.kube/config"
+        echo "path=${HOME}/.kube/config" >> "${GITHUB_OUTPUT}"

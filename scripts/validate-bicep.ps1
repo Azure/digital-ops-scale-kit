@@ -4,7 +4,7 @@
 # Usage:
 #   ./scripts/validate-bicep.ps1                          # All .bicep files under workspaces/
 #   ./scripts/validate-bicep.ps1 path/to/template.bicep   # Specific file(s)
-#   ./scripts/validate-bicep.ps1 workspaces/iot-operations/templates/iot-ops/secretsync/*.bicep
+#   ./scripts/validate-bicep.ps1 workspaces/iot-operations/templates/secretsync/*.bicep
 
 param(
     [Parameter(ValueFromRemainingArguments)]
@@ -39,7 +39,7 @@ $passed = 0
 foreach ($file in $bicepFiles) {
     $relPath = [System.IO.Path]::GetRelativePath($repoRoot, $file.FullName)
 
-    # Build to stdout (discarded) — errors go to stderr
+    # Build to stdout (discarded). Errors go to stderr.
     $output = az bicep build --file $file.FullName --stdout 2>&1
     if ($LASTEXITCODE -eq 0) {
         Write-Host "  OK    $relPath" -ForegroundColor Green

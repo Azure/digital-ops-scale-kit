@@ -1,0 +1,21 @@
+{
+  "_comment": "Example config for the AKS EE upgrade worker.ps1. Copy to config.json in your ConfigDir and replace placeholder values. The launcher writes this file from its parameters in the scalekit path.",
+
+  "resourceGroup": "aksee-rg",
+  "subscription": "00000000-0000-0000-0000-000000000000",
+  "machineName": "my-arc-windows-vm",
+
+  "_runIdNote": "Opaque per-deploy identifier recorded in the completion tag (siteops.aksee.upgrade.runId) so a tag can be correlated with a specific deploy. The Bicep defaults it to the deploy time.",
+  "runId": "2026-06-15T180000Z",
+
+  "_allowKubernetesMinorUpgradeNote": "When false (default), the worker applies patch updates only. When true, the worker performs sequential minor-version hops. AcceptUpgrade is scoped to the run and re-pinned false on completion or failure.",
+  "allowKubernetesMinorUpgrade": false,
+
+  "_targetKubernetesVersionNote": "Optional. When allowKubernetesMinorUpgrade is true, the worker stops hopping once the deployed Kubernetes minor version matches this value. Accepts formats like '1.33' or 'v1.33.5+k3s1'. Empty string means upgrade to the latest available.",
+  "targetKubernetesVersion": "",
+
+  "_authNote": "The worker authenticates with the Arc machine's system-assigned managed identity (az login --identity) for the post-upgrade verification and the completion tag. Grant it Contributor on the resource group, or Kubernetes Cluster - Azure Arc Onboarding plus Tag Contributor for least privilege. No service principal is used.",
+
+  "_scheduledTaskNameNote": "Optional. Defaults to SiteOpsAksEeUpgrade when omitted.",
+  "scheduledTaskName": "SiteOpsAksEeUpgrade"
+}

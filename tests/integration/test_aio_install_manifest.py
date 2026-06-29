@@ -1,13 +1,17 @@
 """Integration tests for the aio-install.yaml manifest."""
 
+import time
+
 import pytest
 
+from tests.integration.conftest import WORKSPACE_PATH
 from tests.integration.helpers.assertions import (
     assert_output_exists,
+    assert_step_skipped,
     assert_step_succeeded,
     find_step,
 )
-from tests.integration.conftest import WORKSPACE_PATH
+from tests.integration.helpers.kube import is_pod_ready, list_pods
 
 pytestmark = [pytest.mark.integration]
 
@@ -61,13 +65,142 @@ class TestAioInstallConditionalSteps:
                 f"Site '{name}': global-edge-site should be skipped for RG-level sites"
             )
 
+    def test_secretsync_steps_skipped_when_disabled(
+        self, aio_install_result, orchestrator
+    ):
+        """Sites with deployOptions.enableSecretSync=false should skip both
+        secretsync steps embedded in aio-install.yaml (a regression guard for
+        the E2E site template and anyone reusing the same deployOptions)."""
+        for name in aio_install_result["sites"]:
+            site = orchestrator.load_site(name)
+            enabled = site.properties.get("deployOptions", {}).get("enableSecretSync", True)
+            if enabled:
+                continue
+            assert_step_skipped(aio_install_result, name, "resolve-aio")
+            assert_step_skipped(aio_install_result, name, "secretsync")
+
+
+class TestAioInstallVersioning:
+    """Validate that the AIO extension Azure actually deployed matches the
+    versioned-templates contract (requested aioRelease selects a template dir
+    that pins the extension version)."""
+
+    def test_aio_extension_version_matches_version_config(
+        self, aio_install_result, orchestrator
+    ):
+        """The bicep output `aioExtension.version` reflects
+        `Microsoft.KubernetesConfiguration/extensions/.../properties/version`
+        from Azure. Cross-check it against the `aioVersion` declared in the
+        site's aio-releases config file (selected by the site's aioRelease).
+        This is the primary regression guard for versioned-templates wiring.
+        A drift here means the wrong template dispatched, even if everything
+        else looks green.
+        """
+        import yaml
+
+        for name in aio_install_result["sites"]:
+            step = assert_step_succeeded(aio_install_result, name, "aio-instance")
+            aio_extension = assert_output_exists(step, "aioExtension")
+            assert isinstance(aio_extension, dict), (
+                f"Site '{name}': aioExtension output is not an object: {aio_extension!r}"
+            )
+            deployed_version = aio_extension.get("version")
+            assert deployed_version, (
+                f"Site '{name}': aioExtension.version missing "
+                f"(keys: {sorted(aio_extension.keys())})"
+            )
+
+            site = orchestrator.load_site(name)
+            aio_release_key = site.properties.get("aioRelease")
+            assert aio_release_key, f"Site '{name}': missing properties.aioRelease"
+
+            version_config = (
+                WORKSPACE_PATH / "parameters" / "aio-releases" / f"{aio_release_key}.yaml"
+            )
+            assert version_config.is_file(), (
+                f"Site '{name}': version config not found: {version_config}"
+            )
+            expected = yaml.safe_load(version_config.read_text(encoding="utf-8"))["aioVersion"]
+            assert deployed_version == expected, (
+                f"Site '{name}': aio extension version drift. "
+                f"expected {expected!r} (from {version_config.name}), "
+                f"deployed {deployed_version!r}. The versioned-templates dispatch "
+                f"selected the wrong API version or the version YAML is stale."
+            )
+
 
 class TestAioInstallIdempotency:
     """Validate that re-deploying produces the same results."""
 
-    def test_redeploy_succeeds(self, orchestrator, selector, aio_install_result):
+    def test_redeploy_preserves_resource_ids(
+        self, orchestrator, selector, aio_install_result
+    ):
+        """Re-deploying must not recreate core AIO resources. Recreation would
+        break every downstream step (secretsync, opc-ua) that captured the
+        original IDs. Mirrors the stability guard in the secretsync suite."""
         result2 = orchestrator.deploy(
             manifest_path=WORKSPACE_PATH / "manifests" / "aio-install.yaml",
             selector=selector,
         )
         assert result2["summary"]["failed"] == 0
+
+        for name in aio_install_result["sites"]:
+            step1 = find_step(aio_install_result, name, "aio-instance")
+            step2 = find_step(result2, name, "aio-instance")
+            for output_name in ("aio", "customLocation", "aioExtension"):
+                v1 = assert_output_exists(step1, output_name)
+                v2 = assert_output_exists(step2, output_name)
+                id1 = v1.get("id") if isinstance(v1, dict) else v1
+                id2 = v2.get("id") if isinstance(v2, dict) else v2
+                assert id1 == id2, (
+                    f"Site '{name}': {output_name} resource ID changed on redeploy "
+                    f"({id1!r} -> {id2!r})"
+                )
+
+
+class TestAioInstallClusterHealth:
+    """Validate AIO operator pods landed on the cluster after install.
+
+    Catches the class of regressions where ARM resources are created
+    successfully but the cluster-side operators fail to deploy or
+    reconcile (CRD crash, image pull failure, RBAC misconfiguration).
+    Assertions are intentionally loose (presence of pods plus at least
+    one Ready) so the check does not flake on per-release changes to the
+    AIO operator pod set.
+    """
+
+    def test_aio_operators_present(
+        self, aio_install_result, aio_namespace, kubectl_available
+    ):
+        """The AIO namespace must contain operator pods after install.
+        An empty namespace after a successful ARM deploy indicates the
+        cluster-side operators did not land at all."""
+        pods = list_pods(aio_namespace)
+        assert pods, (
+            f"AIO namespace '{aio_namespace}' has no pods after install. "
+            f"ARM deploy succeeded but cluster operators did not land."
+        )
+
+    def test_at_least_one_aio_pod_ready(
+        self, aio_install_result, aio_namespace, kubectl_available
+    ):
+        """At least one AIO operator pod must reach Ready within a
+        bounded timeout. Stricter `all pods Ready` assertions flake
+        because AIO ships short-lived Job pods alongside long-running
+        operators."""
+        deadline = time.monotonic() + 300
+        while time.monotonic() < deadline:
+            pods = list_pods(aio_namespace)
+            for p in pods:
+                if p.get("status", {}).get("phase") == "Running" and is_pod_ready(p):
+                    return
+            time.sleep(5)
+        pods = list_pods(aio_namespace)
+        summary = [
+            (p["metadata"]["name"], p.get("status", {}).get("phase"))
+            for p in pods
+        ]
+        pytest.fail(
+            f"No Running and Ready pod observed in '{aio_namespace}' after 300s. "
+            f"Pods: {summary}"
+        )

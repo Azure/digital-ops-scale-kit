@@ -1,0 +1,56 @@
+{
+  "_comment": "AKS Edge Essentials single-node K3s cluster config. AioDeploy builds the cluster without Arc-connecting (no service principal). The worker substitutes only Arc.ClusterName. The other Arc fields stay null. Rebuild the launcher with Build-Launcher.ps1 after editing.",
+
+  "SchemaVersion": "1.16",
+  "Version": "1.0",
+  "DeploymentType": "SingleMachineCluster",
+  "AioDeploy": true,
+
+  "Init": {
+    "ServiceIPRangeSize": 10
+  },
+
+  "Arc": {
+    "ClusterName": null,
+    "Location": null,
+    "ResourceGroupName": null,
+    "SubscriptionId": null,
+    "TenantId": null,
+    "ClientId": null,
+    "ClientSecret": null
+  },
+
+  "Network": {
+    "NetworkPlugin": "flannel",
+    "Ip4AddressPrefix": null,
+    "InternetDisabled": false,
+    "SkipDnsCheck": false,
+    "Proxy": {
+      "Http": null,
+      "Https": null,
+      "No": "localhost,127.0.0.0/8,192.168.0.0/16,172.17.0.0/16,10.42.0.0/16,10.43.0.0/16,10.96.0.0/12,10.244.0.0/16,.svc"
+    }
+  },
+
+  "User": {
+    "AcceptEula": true,
+    "AcceptOptionalTelemetry": false
+  },
+
+  "Machines": [
+    {
+      "LinuxNode": {
+        "CpuCount": 4,
+        "MemoryInMB": 10240,
+        "MemoryHugePages": {
+          "Size": null,
+          "Count": null
+        },
+        "DataSizeInGB": 40,
+        "LogSizeInGB": 4,
+        "TimeoutSeconds": 300,
+        "TpmPassthrough": false
+      }
+    }
+  ]
+}

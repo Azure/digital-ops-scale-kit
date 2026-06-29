@@ -1,0 +1,768 @@
+# End-to-end test workflow.
+#
+# Runs the full scalekit stack (k3s cluster, Arc registration, siteops deploy,
+# integration tests) against a real Azure subscription. This is the primary
+# live-subscription validation for every AIO version we target.
+#
+# Modes (determined by whether `resource-group` input is set):
+#   - ephemeral (default):  Workflow creates a fresh RG per matrix entry and
+#                           deletes it at the end. Requires subscription-level
+#                           Owner on the service principal.
+#   - persistent:           Operator supplies a pre-existing RG via the
+#                           `resource-group` input. The RG is preserved; only
+#                           resources created during this run (delta vs. the
+#                           pre-run RG snapshot) are deleted. Requires
+#                           RG-level Owner on the SP.
+#
+# The E2E site itself is rendered at runtime via scripts/render-e2e-site.py
+# into $RUNNER_TEMP/e2e-sites/ and picked up by the orchestrator through
+# SITEOPS_EXTRA_SITES_DIRS, so we never commit an Azure-specific site file.
+
+name: E2E Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      aio-releases:
+        description: Comma-separated AIO releases to fan out over (e.g. "2604,2605").
+        type: string
+        default: "2605"
+      environment:
+        description: GitHub Environment whose secrets/approvers apply.
+        type: string
+        default: "dev"
+      location:
+        description: Azure region for ephemeral mode. Ignored in persistent mode (derived from the RG).
+        type: string
+        default: "eastus2"
+      resource-group:
+        description: Pre-existing RG (persistent mode). Empty = ephemeral mode.
+        type: string
+        default: ""
+      cluster-name:
+        description: Arc cluster name to register. Empty = auto-generated.
+        type: string
+        default: ""
+      custom-locations-oid:
+        description: Custom Locations RP object ID in the tenant (see docs/e2e-testing.md).
+        type: string
+        default: ""
+      skip-teardown:
+        description: Preserve the deployment for inspection. Use sparingly.
+        type: boolean
+        default: false
+      keep-cluster-alive-minutes:
+        description: Minutes to keep the runner (and k3s cluster) alive after tests, before teardown. 0 = skip. Capped at 300.
+        type: number
+        default: 0
+      upgrade-to:
+        description: Optional AIO release to upgrade to after the install-phase tests pass. Empty = skip the upgrade phase. Each matrix cell whose `aio-releases` value differs from this re-renders the site at the upgrade-to release and runs aio-upgrade.yaml + the upgrade-only integration tests.
+        type: string
+        default: ""
+      tests:
+        description: "Subset of integration test files to run, comma-separated. Each value maps to one tests/integration/test_<value>_manifest.py file and narrows which manifest gets deployed onto the cluster. Empty = run all. Valid values: aio-install, secretsync, secretsync-sample, opc-ua-solution, aio-upgrade. Useful for demos and focused debugging when paired with keep-cluster-alive-minutes."
+        type: string
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  prep:
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.v.outputs.versions }}
+      persistent: ${{ steps.v.outputs.persistent }}
+      rg-key: ${{ steps.v.outputs.rg_key }}
+      rg-in: ${{ steps.v.outputs.rg_in }}
+      cluster-in: ${{ steps.v.outputs.cluster_in }}
+      upgrade-to: ${{ steps.v.outputs.upgrade_to }}
+      pytest-paths: ${{ steps.v.outputs.pytest_paths }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Parse inputs
+        id: v
+        shell: bash
+        env:
+          INPUT_RELEASES: "${{ inputs.aio-releases }}"
+          INPUT_RG: "${{ inputs.resource-group }}"
+          INPUT_CLUSTER: "${{ inputs.cluster-name }}"
+          INPUT_UPGRADE_TO: "${{ inputs.upgrade-to }}"
+          INPUT_TESTS: "${{ inputs.tests }}"
+          RUN_ID: "${{ github.run_id }}"
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os, sys
+          from pathlib import Path
+          rs = [r.strip() for r in os.environ["INPUT_RELEASES"].split(",") if r.strip()]
+          if not rs:
+              sys.exit("aio-releases must be non-empty")
+          # Fail fast if any requested release lacks a shipped config YAML.
+          # Without this, a typo (e.g. "2606" when only "2605" is shipped)
+          # proceeds through k3s bring-up + Arc registration and only errors
+          # out at siteops deploy time.
+          releases_dir = Path("workspaces/iot-operations/parameters/aio-releases")
+          missing = [r for r in rs if not (releases_dir / f"{r}.yaml").is_file()]
+          if missing:
+              available = sorted(p.stem for p in releases_dir.glob("*.yaml"))
+              sys.exit(
+                  f"aio-releases entries without a matching "
+                  f"{releases_dir}/<release>.yaml: {missing}. "
+                  f"Available: {available}."
+              )
+          rg_in = os.environ["INPUT_RG"].strip()
+          cl_in = os.environ["INPUT_CLUSTER"].strip()
+          upgrade_to = os.environ["INPUT_UPGRADE_TO"].strip()
+          persistent = bool(rg_in)
+          if cl_in and len(rs) > 1:
+              sys.exit(
+                  "cluster-name cannot be combined with a multi-release "
+                  "aio-releases matrix (each matrix cell registers its own cluster)."
+              )
+          # Validate upgrade-to against shipped versions. Same-version cells
+          # are NOT a hard error here: a matrix like `aio-releases=2604,2605`
+          # with `upgrade-to=2605` is a legitimate "test 2604->2605 plus
+          # exercise 2605 install" shape. Each cell decides per-cell whether
+          # to skip the upgrade phase based on `matrix.aio-release == upgrade-to`.
+          if upgrade_to and not (releases_dir / f"{upgrade_to}.yaml").is_file():
+              available = sorted(p.stem for p in releases_dir.glob("*.yaml"))
+              sys.exit(
+                  f"upgrade-to '{upgrade_to}' has no matching "
+                  f"{releases_dir}/{upgrade_to}.yaml. Available: {available}."
+              )
+          if upgrade_to and all(r == upgrade_to for r in rs):
+              sys.exit(
+                  f"upgrade-to '{upgrade_to}' equals every entry in aio-releases "
+                  f"({rs}); the upgrade phase would be vacuous on every cell. "
+                  f"Same-version round-trip is already covered by the install-phase "
+                  f"test_aio_upgrade_manifest tests."
+              )
+          # Resolve the tests input into a pytest path list. Empty = the
+          # full integration suite (preserves prior behavior). A non-empty
+          # subset narrows pytest collection to just those test files, which
+          # also narrows fixture chains so only the requested manifests get
+          # deployed onto the cluster (e.g. `aio-install,secretsync` keeps
+          # OPC UA off the cluster for a focused demo session).
+          tests_in = [s.strip() for s in os.environ["INPUT_TESTS"].split(",") if s.strip()]
+          # Map of test phase -> integration test file. The convention
+          # `<phase>` -> `tests/integration/test_<phase_underscored>_manifest.py`
+          # is enforced by the integration suite layout. Keep this list in
+          # sync if a new test phase file is added.
+          test_map = {
+              "aio-install": "tests/integration/test_aio_install_manifest.py",
+              "secretsync": "tests/integration/test_secretsync_manifest.py",
+              "secretsync-sample": "tests/integration/test_sync_secrets_manifest.py",
+              "opc-ua-solution": "tests/integration/test_opc_ua_solution_manifest.py",
+              "aio-upgrade": "tests/integration/test_aio_upgrade_manifest.py",
+          }
+          if tests_in:
+              # Dedupe while preserving order so the surfaced "Available" list
+              # in error messages matches what the operator typed.
+              seen = set()
+              ordered = []
+              for s in tests_in:
+                  if s not in seen:
+                      seen.add(s)
+                      ordered.append(s)
+              unknown = [s for s in ordered if s not in test_map]
+              if unknown:
+                  sys.exit(
+                      f"tests entries not recognized: {unknown}. "
+                      f"Valid: {sorted(test_map)}."
+                  )
+              if upgrade_to and "aio-upgrade" not in ordered:
+                  sys.exit(
+                      f"upgrade-to '{upgrade_to}' is set but `tests` "
+                      f"({ordered}) does not include 'aio-upgrade'. The "
+                      f"upgrade-phase pytest step would collect zero tests "
+                      f"and silently 'pass'. Either add 'aio-upgrade' to "
+                      f"tests or unset upgrade-to."
+                  )
+              pytest_paths = " ".join(test_map[s] for s in ordered)
+          else:
+              pytest_paths = "tests/integration/"
+          print(f"versions={json.dumps(rs)}")
+          print(f"upgrade_to={upgrade_to}")
+          print(f"persistent={'true' if persistent else 'false'}")
+          # Emit trimmed operator inputs so downstream steps use the exact
+          # values the validation was done against (no trailing-whitespace
+          # mismatch between prep and `Compute names`).
+          print(f"rg_in={rg_in}")
+          print(f"cluster_in={cl_in}")
+          print(f"pytest_paths={pytest_paths}")
+          # Concurrency key:
+          #  - persistent: shared across all dispatches against the same RG
+          #    (regardless of operator-supplied cluster-name), so concurrent
+          #    persistent runs on one RG serialize. Prevents races where two
+          #    runs' delta snapshots each see the other's in-flight resources.
+          #  - ephemeral:  per-run key; matrix cells parallelize via the
+          #    matrix.aio-release suffix applied at the job level.
+          rg_key = f"persistent-{rg_in}" if persistent else f"ephemeral-{os.environ['RUN_ID']}"
+          print(f"rg_key={rg_key}")
+          PY
+
+  e2e:
+    needs: prep
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    timeout-minutes: ${{ (inputs.keep-cluster-alive-minutes > 0 || inputs.upgrade-to != '') && 360 || 120 }}
+    concurrency:
+      # Persistent: matrix cells share rg_key and omit the release suffix, so
+      # they serialize (same RG can only host one AIO deploy at a time).
+      # Ephemeral: rg_key is per-run and the release suffix distinguishes
+      # cells, so matrix fan-out runs in parallel.
+      group: e2e-${{ needs.prep.outputs.rg-key }}${{ needs.prep.outputs.persistent == 'true' && '-persistent' || format('-{0}', matrix.aio-release) }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        aio-release: ${{ fromJSON(needs.prep.outputs.versions) }}
+    env:
+      PERSISTENT_RG: ${{ needs.prep.outputs.persistent }}
+      DEBUG_USER_OID: ${{ secrets.DEBUG_USER_OID }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Compute names
+        id: names
+        shell: bash
+        env:
+          RG_IN: "${{ needs.prep.outputs.rg-in }}"
+          CL_IN: "${{ needs.prep.outputs.cluster-in }}"
+          RELEASE: "${{ matrix.aio-release }}"
+          RUN_SUFFIX: "${{ github.run_id }}-${{ github.run_attempt }}"
+        # Some AIO release strings may contain dots. Arc clusters
+        # and several AIO-derived resource names reject dots, so we derive a
+        # name-safe form (non-alphanumerics → `-`, trailing `-` trimmed) when
+        # generating RG / cluster / site names. E2E_AIO_RELEASE still carries
+        # the original string so release pinning inside the site is unaffected.
+        #
+        # site_name is always runtime-unique even in persistent mode so
+        # parallel runs against the same RG cannot silently merge sites.
+        run: |
+          set -euo pipefail
+          SAFE_VER=$(printf '%s' "$RELEASE" | tr -c 'a-zA-Z0-9' '-' | sed 's/-*$//')
+          SUFFIX="${RUN_SUFFIX}-${SAFE_VER}"
+          RG="${RG_IN:-rg-e2e-$SUFFIX}"
+          CL="${CL_IN:-e2e-$SUFFIX}"
+          SN="e2e-$SUFFIX"
+          echo "rg=$RG" >> "$GITHUB_OUTPUT"
+          echo "cluster=$CL" >> "$GITHUB_OUTPUT"
+          echo "site_name=$SN" >> "$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/create-k3s-cluster
+
+      - uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Start OIDC token refresh service
+        shell: bash
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        # Background re-auth every 4 minutes. GitHub OIDC tokens expire after
+        # ~5 minutes and Azure access tokens after ~60-90 minutes. Without this,
+        # long-running e2e jobs (upgrade phase, keep-cluster-alive, ephemeral
+        # teardown) silently fail az commands once the token expires, leaking
+        # Azure resources. Same shape as the loop in _siteops-deploy.yaml, but
+        # the PID is not persisted because this runner is single-use: the loop
+        # dies with the job and no explicit teardown is needed.
+        run: |
+          (
+            while true; do
+              sleep 240
+              token=$(curl -sH "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+                "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange" | jq -r .value)
+              if [[ -z "$token" || "$token" == "null" ]]; then
+                echo "::warning::OIDC token refresh failed: could not obtain token"
+                continue
+              fi
+              if az login --service-principal -u "$AZURE_CLIENT_ID" -t "$AZURE_TENANT_ID" \
+                --federated-token "$token" --output none 2>&1; then
+                echo "OIDC token refreshed successfully"
+              else
+                echo "::warning::OIDC token refresh failed: az login returned error"
+              fi
+            done
+          ) &
+          echo "OIDC token refresh service started (PID: $!)"
+
+      - name: Snapshot RG resources (persistent mode)
+        if: env.PERSISTENT_RG == 'true'
+        shell: bash
+        env:
+          RG: "${{ steps.names.outputs.rg }}"
+        # Snapshot BEFORE any Azure-side creation (connect-arc, AIO deploy,
+        # etc.) so every resource this run creates is in the teardown delta.
+        # Otherwise Arc resources would be treated as pre-existing, and if
+        # `az connectedk8s delete` failed in teardown they would silently
+        # survive. The teardown step now surfaces such failures as warnings
+        # in the GHA log, but the delta-vs-snapshot mechanism is still the
+        # primary safety net. Atomic write guards against a truncated snapshot.
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/e2e-teardown"
+          TMP="$RUNNER_TEMP/e2e-teardown/pre-ids.txt.partial"
+          az resource list -g "$RG" --query "[].id" -o tsv > "$TMP"
+          mv "$TMP" "$RUNNER_TEMP/e2e-teardown/pre-ids.txt"
+          count=$(wc -l < "$RUNNER_TEMP/e2e-teardown/pre-ids.txt")
+          echo "Snapshot: $count pre-existing resource(s) in RG $RG will be preserved."
+
+      - name: Create resource group (ephemeral mode)
+        if: env.PERSISTENT_RG != 'true'
+        shell: bash
+        env:
+          RG: ${{ steps.names.outputs.rg }}
+          LOCATION: ${{ inputs.location }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        # Ownership tags are what the teardown guard verifies before
+        # `az group delete`. run_id + run_attempt bind the tag set to THIS
+        # specific workflow run so a pre-existing RG that happens to match
+        # the name pattern cannot be deleted. Only an RG this run just
+        # created can pass the guard.
+        # Inputs are routed through env (not ${{ }} interpolated into the
+        # shell line) so a workflow_dispatch input containing shell metachars
+        # cannot break out of the command.
+        run: |
+          az group create \
+            --name "$RG" \
+            --location "$LOCATION" \
+            --tags \
+              managedBy=siteops-e2e \
+              ephemeral=true \
+              run_id="$RUN_ID" \
+              run_attempt="$RUN_ATTEMPT"
+
+      - name: Resolve E2E_LOCATION
+        id: loc
+        shell: bash
+        env:
+          AUTO_LOC: ${{ inputs.location }}
+          RG: ${{ steps.names.outputs.rg }}
+        # Persistent mode: the RG already has a region; using the operator
+        # input would create site/cluster/RG-region mismatches. Derive from
+        # `az group show` to keep them aligned.
+        run: |
+          set -euo pipefail
+          if [[ "$PERSISTENT_RG" == "true" ]]; then
+            LOC=$(az group show --name "$RG" --query location -o tsv)
+          else
+            LOC="$AUTO_LOC"
+          fi
+          echo "location=$LOC" >> "$GITHUB_OUTPUT"
+
+      - name: Preflight Arc cluster name is unused (persistent mode)
+        if: env.PERSISTENT_RG == 'true'
+        shell: bash
+        env:
+          RG: ${{ steps.names.outputs.rg }}
+          CLUSTER: ${{ steps.names.outputs.cluster }}
+        # Persistent mode still uses a fresh k3s on this runner; `connect-arc`
+        # registers it as a NEW Arc resource. An existing connectedClusters
+        # record cannot be reused (it's bound to a different k8s instance),
+        # so fail fast here with an actionable message instead of letting
+        # `az connectedk8s connect` error out opaquely.
+        run: |
+          set -euo pipefail
+          az extension add --name connectedk8s --upgrade --yes --only-show-errors
+          COUNT=$(az connectedk8s list -g "$RG" --query "length([?name=='$CLUSTER'])" -o tsv)
+          if [[ "$COUNT" != "0" ]]; then
+            echo "::error::Arc cluster '$CLUSTER' already exists in RG '$RG'. This workflow registers a fresh k3s under this name; re-using an existing registration is not supported. Delete the Arc resource (\`az connectedk8s delete -n $CLUSTER -g $RG\`) or pick an unused cluster-name."
+            exit 1
+          fi
+
+      - uses: ./.github/actions/connect-arc
+        with:
+          cluster-name: ${{ steps.names.outputs.cluster }}
+          resource-group: ${{ steps.names.outputs.rg }}
+          location: ${{ steps.loc.outputs.location }}
+          custom-locations-oid: ${{ inputs.custom-locations-oid }}
+          enable-workload-identity: "true"
+
+      - name: Check for kubectl manifest steps
+        id: rbac-check
+        shell: bash
+        # Any `type: kubectl` step in the workspace will dispatch through the
+        # Arc proxy and need namespace RBAC for the workflow SP. Skip the
+        # binding when no such step exists. Walks manifests/ and samples/
+        # since either can declare kubectl steps.
+        run: |
+          set -euo pipefail
+          if grep -rqE '^\s*type:\s*kubectl\s*$' workspaces/*/manifests/ workspaces/*/samples/ 2>/dev/null; then
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Grant SP namespace-admin on azure-iot-operations (e2e bootstrap)
+        if: steps.rbac-check.outputs.needed == 'true'
+        shell: bash
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_OID: ${{ secrets.AZURE_CLIENT_OID }}
+        # kubectl steps that go through the Arc proxy authenticate as the
+        # workflow SP. k3s has no record of that identity, so bind it to
+        # namespace-admin on azure-iot-operations via the runner's local
+        # kubeconfig before siteops runs. Provide AZURE_CLIENT_OID as a
+        # secret to skip the Graph lookup (some SPs lack Directory.Read).
+        # Idempotent across reruns.
+        run: |
+          set -euo pipefail
+          if [[ -n "$AZURE_CLIENT_OID" ]]; then
+            SP_OID="$AZURE_CLIENT_OID"
+          else
+            echo "AZURE_CLIENT_OID not set; falling back to Graph lookup."
+            SP_OID=$(az ad sp show --id "$AZURE_CLIENT_ID" --query id -o tsv 2>/dev/null || true)
+            if [[ -z "$SP_OID" ]]; then
+              echo "::error::Could not resolve SP object ID. Set AZURE_CLIENT_OID secret to the SP's object ID, or grant the SP Directory.Read.All on Microsoft Graph."
+              exit 1
+            fi
+          fi
+          kubectl create namespace azure-iot-operations \
+            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl create rolebinding e2e-sp-admin \
+            --clusterrole=admin \
+            --user="$SP_OID" \
+            --namespace=azure-iot-operations \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Grant debug user cluster-admin on k3s (Arc proxy access)
+        if: env.DEBUG_USER_OID != ''
+        shell: bash
+        # Bind a human user (or group) to cluster-admin so they can inspect
+        # the k3s cluster via `az connectedk8s proxy`. Cluster-admin is
+        # appropriate for live debugging; the cluster is ephemeral. Set the
+        # DEBUG_USER_OID secret to enable.
+        run: |
+          set -euo pipefail
+          kubectl create clusterrolebinding e2e-debug-admin \
+            --clusterrole=cluster-admin \
+            --user="$DEBUG_USER_OID" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - uses: ./.github/actions/setup-siteops
+        with:
+          install-dev: "true"
+
+      - name: Render E2E site
+        shell: bash
+        env:
+          E2E_SITE_NAME: ${{ steps.names.outputs.site_name }}
+          E2E_SUBSCRIPTION: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          E2E_RESOURCE_GROUP: ${{ steps.names.outputs.rg }}
+          E2E_LOCATION: ${{ steps.loc.outputs.location }}
+          E2E_CLUSTER_NAME: ${{ steps.names.outputs.cluster }}
+          E2E_AIO_RELEASE: ${{ matrix.aio-release }}
+        run: |
+          set -euo pipefail
+          python scripts/render-e2e-site.py \
+            --template tests/e2e/sites/e2e-test.yaml.tmpl \
+            --output-dir "$RUNNER_TEMP/e2e-sites"
+          echo "::group::Rendered site"
+          cat "$RUNNER_TEMP/e2e-sites/${E2E_SITE_NAME}.yaml"
+          echo "::endgroup::"
+
+      - name: Run E2E integration tests
+        shell: bash
+        env:
+          SITEOPS_EXTRA_SITES_DIRS: ${{ runner.temp }}/e2e-sites
+          INTEGRATION_SELECTOR: name=${{ steps.names.outputs.site_name }}
+          AIO_RELEASE: ${{ matrix.aio-release }}
+          PYTEST_PATHS: ${{ needs.prep.outputs.pytest-paths }}
+          # Test helpers (tests/integration/helpers/kube.py) read this env
+          # var and pass --kubeconfig=<path> to every kubectl invocation.
+          # This isolates direct-kubectl reads from siteops's writable
+          # ~/.kube/config, which the orchestrator's `arc:` kubectl steps
+          # mutate via `az connectedk8s proxy`. Without this, every
+          # cluster-touching test would hit the dead proxy URL left in
+          # ~/.kube/config after each deploy step exits. The k3s admin
+          # file is created with mode 0644 by create-k3s-cluster.
+          SITEOPS_TEST_KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+        # AIO_RELEASE is routed through env (not ${{ }} interpolated into the
+        # shell line) so a workflow_dispatch input containing shell metachars
+        # cannot break out of the command. PYTEST_PATHS comes from prep, which
+        # validated it against a known test-phase allowlist.
+        run: |
+          set -euo pipefail
+          pytest $PYTEST_PATHS -v -m integration --tb=long \
+            --junitxml="e2e-results-${AIO_RELEASE}.xml"
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        if: always()
+        with:
+          name: e2e-results-${{ matrix.aio-release }}
+          path: e2e-results-${{ matrix.aio-release }}.xml
+
+      - name: Re-render E2E site at upgrade-to
+        id: upgrade_render
+        if: success() && needs.prep.outputs.upgrade-to != '' && needs.prep.outputs.upgrade-to != matrix.aio-release
+        shell: bash
+        env:
+          E2E_SITE_NAME: ${{ steps.names.outputs.site_name }}
+          E2E_SUBSCRIPTION: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          E2E_RESOURCE_GROUP: ${{ steps.names.outputs.rg }}
+          E2E_LOCATION: ${{ steps.loc.outputs.location }}
+          E2E_CLUSTER_NAME: ${{ steps.names.outputs.cluster }}
+          E2E_AIO_RELEASE: ${{ needs.prep.outputs.upgrade-to }}
+        # Overwrites the rendered site at the same path (E2E_SITE_NAME is
+        # unchanged) so SITEOPS_EXTRA_SITES_DIRS still resolves the same
+        # site key but with the upgrade-to release pinned.
+        run: |
+          set -euo pipefail
+          python scripts/render-e2e-site.py \
+            --template tests/e2e/sites/e2e-test.yaml.tmpl \
+            --output-dir "$RUNNER_TEMP/e2e-sites"
+          echo "::group::Rendered site (upgrade-to ${E2E_AIO_RELEASE})"
+          cat "$RUNNER_TEMP/e2e-sites/${E2E_SITE_NAME}.yaml"
+          echo "::endgroup::"
+
+      - name: Run upgrade-phase integration tests
+        if: success() && needs.prep.outputs.upgrade-to != '' && needs.prep.outputs.upgrade-to != matrix.aio-release
+        shell: bash
+        env:
+          SITEOPS_EXTRA_SITES_DIRS: ${{ runner.temp }}/e2e-sites
+          INTEGRATION_SELECTOR: name=${{ steps.names.outputs.site_name }}
+          SITEOPS_E2E_UPGRADE_PHASE: "1"
+          AIO_RELEASE_FROM: ${{ matrix.aio-release }}
+          AIO_RELEASE_TO: ${{ needs.prep.outputs.upgrade-to }}
+          PYTEST_PATHS: ${{ needs.prep.outputs.pytest-paths }}
+          # See the comment on the prior "Run E2E integration tests" step.
+          SITEOPS_TEST_KUBECONFIG: /etc/rancher/k3s/k3s.yaml
+        # SITEOPS_E2E_UPGRADE_PHASE is the contract with conftest.py:
+        #   - aio_install_result becomes a sentinel (re-running install on
+        #     an existing instance at a new release is unsupported).
+        #   - pytest_collection_modifyitems narrows the run to the upgrade
+        #     test classes that operate purely on upgrade-step outputs.
+        run: |
+          set -euo pipefail
+          pytest $PYTEST_PATHS -v -m integration --tb=long \
+            --junitxml="e2e-results-${AIO_RELEASE_FROM}-to-${AIO_RELEASE_TO}.xml"
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        if: always() && needs.prep.outputs.upgrade-to != '' && needs.prep.outputs.upgrade-to != matrix.aio-release
+        with:
+          name: e2e-results-${{ matrix.aio-release }}-to-${{ needs.prep.outputs.upgrade-to }}
+          path: e2e-results-${{ matrix.aio-release }}-to-${{ needs.prep.outputs.upgrade-to }}.xml
+
+      - name: Keep cluster alive (pre-teardown hold)
+        if: always() && inputs.keep-cluster-alive-minutes > 0
+        shell: bash
+        env:
+          HOLD_MIN: "${{ inputs.keep-cluster-alive-minutes }}"
+          RG: "${{ steps.names.outputs.rg }}"
+          CLUSTER: "${{ steps.names.outputs.cluster }}"
+        # Sleep so the runner (and its k3s cluster + Arc connection) remain
+        # reachable for interactive debugging before teardown. Cap at 300min
+        # to leave headroom under the 360min job timeout. Cancel the run to
+        # exit early; teardown still runs via `if: always()`.
+        run: |
+          set -euo pipefail
+          MAX=300
+          MINS=$HOLD_MIN
+          if (( MINS > MAX )); then MINS=$MAX; fi
+          echo "Holding for $MINS minute(s) before teardown. Arc cluster: $CLUSTER in RG: $RG."
+          echo "- Keep-alive: holding cluster \`$CLUSTER\` for ${MINS}m before teardown" >> "$GITHUB_STEP_SUMMARY"
+          for ((i=1; i<=MINS; i++)); do
+            sleep 60
+            echo "keep-alive heartbeat: ${i}/${MINS} minute(s) elapsed"
+          done
+
+      - name: Teardown (ephemeral mode, delete RG)
+        if: always() && env.PERSISTENT_RG != 'true' && !inputs.skip-teardown
+        shell: bash
+        env:
+          RG: "${{ steps.names.outputs.rg }}"
+          EXPECTED_RUN_ID: "${{ github.run_id }}"
+          EXPECTED_RUN_ATTEMPT: "${{ github.run_attempt }}"
+        # Layered defense against ever deleting a non-ephemeral RG:
+        #   1. Name must match `rg-e2e-<run_id>-<attempt>-*`, the exact
+        #      shape `Compute names` emits in ephemeral mode.
+        #   2. RG must carry tags `managedBy=siteops-e2e`, `ephemeral=true`,
+        #      and a `run_id`/`run_attempt` that equal THIS run's values.
+        #      Class-only tags (without run provenance) are not enough; an
+        #      unrelated RG tagged ephemeral could otherwise pass.
+        #   3. If the RG is already gone (e.g. a prior retry cleaned up),
+        #      treat as idempotent success, not failure.
+        # Any other mismatch hard-fails the job so an unexpected state
+        # surfaces loudly rather than destroying data.
+        run: |
+          set -euo pipefail
+          EXPECTED_PREFIX="rg-e2e-${EXPECTED_RUN_ID}-${EXPECTED_RUN_ATTEMPT}-"
+          if [[ "$RG" != "$EXPECTED_PREFIX"* ]]; then
+            echo "::error::Refusing to delete RG '$RG': name does not match this run's ephemeral pattern '${EXPECTED_PREFIX}*'."
+            exit 1
+          fi
+          EXISTS=$(az group exists --name "$RG")
+          if [[ "$EXISTS" != "true" ]]; then
+            echo "RG '$RG' does not exist; teardown is a no-op."
+            echo "- Ephemeral RG already absent: \`$RG\`" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          TAGS_JSON=$(az group show --name "$RG" --query tags -o json)
+          MANAGED=$(echo "$TAGS_JSON" | python3 -c "import json,sys;print((json.load(sys.stdin) or {}).get('managedBy',''))")
+          EPHEMERAL=$(echo "$TAGS_JSON" | python3 -c "import json,sys;print((json.load(sys.stdin) or {}).get('ephemeral',''))")
+          TAG_RUN_ID=$(echo "$TAGS_JSON" | python3 -c "import json,sys;print((json.load(sys.stdin) or {}).get('run_id',''))")
+          TAG_RUN_ATTEMPT=$(echo "$TAGS_JSON" | python3 -c "import json,sys;print((json.load(sys.stdin) or {}).get('run_attempt',''))")
+          if [[ "$MANAGED" != "siteops-e2e" \
+             || "$EPHEMERAL" != "true" \
+             || "$TAG_RUN_ID" != "$EXPECTED_RUN_ID" \
+             || "$TAG_RUN_ATTEMPT" != "$EXPECTED_RUN_ATTEMPT" ]]; then
+            echo "::error::Refusing to delete RG '$RG': tag provenance check failed."
+            echo "  expected: managedBy=siteops-e2e ephemeral=true run_id=$EXPECTED_RUN_ID run_attempt=$EXPECTED_RUN_ATTEMPT"
+            echo "  actual:   managedBy=$MANAGED ephemeral=$EPHEMERAL run_id=$TAG_RUN_ID run_attempt=$TAG_RUN_ATTEMPT"
+            exit 1
+          fi
+          echo "Guards passed; deleting ephemeral RG '$RG'."
+          if ! az group delete --name "$RG" --yes --no-wait; then
+            echo "::warning::Ephemeral RG delete failed; RG $RG may linger."
+            echo "- Ephemeral RG delete failed: \`$RG\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Teardown (persistent mode, delta cleanup, keep RG)
+        if: always() && env.PERSISTENT_RG == 'true' && !inputs.skip-teardown
+        shell: bash
+        env:
+          RG: "${{ steps.names.outputs.rg }}"
+          CLUSTER: "${{ steps.names.outputs.cluster }}"
+        # Deletes only resources that did not exist in the pre-run snapshot
+        # (see `Snapshot RG resources` step). If the snapshot file is missing
+        # we refuse to compute a delta and skip cleanup. An operator must
+        # clean up manually. Cluster delete runs first (when this run owns
+        # it) so Arc extensions cascade out cleanly. Role assignments (proxy
+        # resources) are not listed by `az resource list` and are cleaned
+        # up implicitly when scoped resources are deleted.
+        run: |
+          set +e
+          PRE_FILE="$RUNNER_TEMP/e2e-teardown/pre-ids.txt"
+          if [[ ! -f "$PRE_FILE" ]]; then
+            echo "::warning::Snapshot file missing. Skipping delta cleanup. Inspect RG $RG manually."
+            echo "- Persistent-mode teardown skipped for RG \`$RG\` (snapshot missing)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # `az connectedk8s delete` reaches into the cluster via the Arc
+          # proxy at 127.0.0.1:47021 to clean up agent CRDs. Even with
+          # `--force`, the CLI still runs a kube-connectivity check before
+          # the ARM call. The proxy expires before teardown on long runs
+          # (>70 minutes), so the connectivity check fails with
+          # "Connection refused" and the ARM delete never executes.
+          # `az resource delete` is also a dead end: the RP rejects the
+          # generic delete verb on connectedClusters with
+          # `ResourceDeletionValidateFailed`.
+          #
+          # Bypass both by calling the ARM REST API directly. The cluster
+          # is on a throwaway runner that dies with the job, so the
+          # in-cluster cleanup the CLI was trying to do is unnecessary.
+          # `az rest` defaults to `https://management.azure.com` when the
+          # `--uri` is a relative path, and uses the current az login
+          # token. The ARM DELETE is async (returns 202); the retry loop
+          # below re-lists and confirms the cluster eventually disappears.
+          delete_arc_cluster_arm() {
+            local rg="$1" cluster="$2"
+            local sub uri out
+            sub=$(az account show --query id -o tsv 2>/dev/null)
+            if [[ -z "$sub" ]]; then
+              echo "::warning::[connectedk8s delete] cannot resolve subscription id"
+              return 1
+            fi
+            uri="/subscriptions/${sub}/resourceGroups/${rg}/providers/Microsoft.Kubernetes/connectedClusters/${cluster}?api-version=2024-01-01"
+            if out=$(az rest --method DELETE --uri "$uri" --only-show-errors 2>&1); then
+              echo "[connectedk8s delete] $cluster (ARM DELETE accepted)"
+              return 0
+            fi
+            echo "::warning::[connectedk8s delete] $cluster ARM DELETE failed; will retry via parallel delete pass"
+            printf '%s\n' "$out" | sed "s/^/[connectedk8s delete $cluster] /"
+            return 1
+          }
+          # Only delete the Arc cluster if it was created by THIS run: grep
+          # the pre-snapshot for a matching connectedClusters/<name> id. If
+          # it was already there, the operator owns it. Skip.
+          if grep -qiE "/providers/Microsoft\.Kubernetes/connectedClusters/${CLUSTER}$" "$PRE_FILE"; then
+            echo "Skipping cluster delete: Arc resource '$CLUSTER' pre-existed the snapshot (operator-owned)."
+          else
+            delete_arc_cluster_arm "$RG" "$CLUSTER"
+          fi
+          LIST_OK=0
+          redact() { sed -E 's/eyJ[A-Za-z0-9_.=-]{10,}/<redacted-jwt>/g' "$1"; }
+          for i in 1 2 3 4 5; do
+            LIST_ERR="$RUNNER_TEMP/e2e-teardown/list-err-$i.log"
+            POST_IDS=$(az resource list -g "$RG" --query "[].id" -o tsv 2>"$LIST_ERR")
+            if [[ $? -ne 0 ]]; then
+              echo "::warning::Teardown pass $i: az resource list failed; retrying."
+              echo "::group::az resource list stderr (pass $i)"
+              redact "$LIST_ERR"
+              echo "::endgroup::"
+              sleep 30
+              continue
+            fi
+            LIST_OK=1
+            DELTA=$(comm -23 <(printf '%s\n' "$POST_IDS" | sort -u) <(sort -u "$PRE_FILE") | sed '/^$/d')
+            [[ -z "$DELTA" ]] && break
+            count=$(printf '%s\n' "$DELTA" | wc -l)
+            echo "::group::Teardown pass $i: deleting $count resource(s) in parallel"
+            printf '%s\n' "$DELTA"
+            echo "::endgroup::"
+            # Parallel deletes (-P 10) with per-resource stdout/stderr
+            # prefixing so the GHA log shows which delete emitted what.
+            # Dependency-order failures on the first pass are expected.
+            # The retry loop handles them. We surface each failure as a
+            # warning instead of silently swallowing it with `|| true`.
+            #
+            # connectedClusters cannot be removed via `az resource delete`
+            # (RP rejects with `ResourceDeletionValidateFailed`) and
+            # `az connectedk8s delete` requires kube connectivity that has
+            # expired by teardown. Route those IDs through the ARM REST
+            # API directly. Match the top-level cluster only, not child
+            # resources under it (extensions, configurations, etc.) which
+            # the regex anchor excludes via the trailing `[^/]+$` shape.
+            printf '%s\n' "$DELTA" | xargs -r -P 10 -I{} bash -c '
+              id="$1"
+              short="${id##*/}"
+              if [[ "$id" =~ /providers/Microsoft\.Kubernetes/connectedClusters/[^/]+$ ]]; then
+                if out=$(az rest --method DELETE --uri "${id}?api-version=2024-01-01" --only-show-errors 2>&1); then
+                  echo "[delete-ok pass=$2] $short (connectedk8s ARM)"
+                else
+                  echo "::warning::[delete-failed pass=$2] $short (connectedk8s ARM)"
+                  printf "%s\n" "$out" | sed "s/^/[delete-failed $short] /"
+                fi
+              elif out=$(az resource delete --ids "$id" --verbose 2>&1); then
+                echo "[delete-ok pass=$2] $short"
+              else
+                echo "::warning::[delete-failed pass=$2] $short"
+                printf "%s\n" "$out" | sed "s/^/[delete-failed $short] /"
+              fi
+            ' _ {} "$i"
+            sleep 30
+          done
+          if [[ $LIST_OK -eq 0 ]]; then
+            echo "::error::Persistent-mode teardown could not enumerate RG $RG; delta cleanup did not run. Inspect the RG manually."
+            echo "- Persistent-mode teardown unable to enumerate RG \`$RG\` (az resource list failed)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          FINAL_ERR="$RUNNER_TEMP/e2e-teardown/list-err-final.log"
+          POST_IDS=$(az resource list -g "$RG" --query "[].id" -o tsv 2>"$FINAL_ERR")
+          if [[ $? -ne 0 ]]; then
+            echo "::warning::Final residual check: az resource list failed; residual state unknown."
+            echo "::group::az resource list stderr (final)"
+            redact "$FINAL_ERR"
+            echo "::endgroup::"
+            echo "- Persistent-mode teardown final check failed for RG \`$RG\`" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          FINAL_DELTA=$(comm -23 <(printf '%s\n' "$POST_IDS" | sort -u) <(sort -u "$PRE_FILE") | sed '/^$/d')
+          if [[ -n "$FINAL_DELTA" ]]; then
+            residual=$(printf '%s\n' "$FINAL_DELTA" | wc -l)
+            echo "::warning::Persistent-mode teardown left $residual resource(s) in RG $RG created by this run."
+            echo "- Persistent-mode teardown incomplete in RG \`$RG\` ($residual residual resource(s))" >> "$GITHUB_STEP_SUMMARY"
+            printf '%s\n' "$FINAL_DELTA"
+          fi
+

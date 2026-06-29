@@ -12,11 +12,6 @@ labels:
   environment: dev
   city: Munich
 
-properties:
-  deployOptions:
-    includeSolution: true
-    includeOpcPlcSimulator: true
-
 parameters:
   clusterName: munich-dev-arc
   brokerConfig:
@@ -26,4 +21,3 @@ parameters:
     backendWorkers: 1
     backendPartitions: 1
     memoryProfile: Low
-  defaultDataflowInstanceCount: 1

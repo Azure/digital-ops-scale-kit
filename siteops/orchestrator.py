@@ -18,9 +18,10 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import yaml
 
@@ -28,6 +29,7 @@ from siteops.executor import (
     AzCliExecutor,
     DeploymentResult,
     KubectlResult,
+    WaitResult,
     filter_parameters,
 )
 from siteops.models import (
@@ -36,8 +38,12 @@ from siteops.models import (
     KubectlStep,
     Manifest,
     ManifestStep,
+    NoTargetingError,
     ParallelConfig,
+    SelectorParseError,
     Site,
+    WaitStep,
+    _normalize_site_identifier,
     _validate_resource,
     parse_selector,
 )
@@ -56,8 +62,8 @@ SITE_PROPERTIES_PATTERN = re.compile(r"\{\{\s*site\.properties\.([a-zA-Z0-9_.\[\
 # Supports nested paths like: site.parameters.brokerConfig.memoryProfile
 SITE_PARAMETERS_PATTERN = re.compile(r"\{\{\s*site\.parameters\.([a-zA-Z0-9_.\[\]]+)\s*\}\}")
 
-# Result type that can be either a deployment or kubectl result
-StepResult = DeploymentResult | KubectlResult
+# Result type that can be a deployment, kubectl, or wait result
+StepResult = DeploymentResult | KubectlResult | WaitResult
 
 # Type alias for subscription-scoped outputs: subscription_id -> step_name -> outputs
 SubscriptionOutputs = dict[str, dict[str, dict[str, Any]]]
@@ -121,7 +127,12 @@ class Orchestrator:
         executor: The AzCliExecutor instance for running commands
     """
 
-    def __init__(self, workspace: Path, dry_run: bool = False):
+    def __init__(
+        self,
+        workspace: Path,
+        dry_run: bool = False,
+        extra_trusted_sites_dirs: list[Path] | None = None,
+    ):
         self.workspace = Path(workspace).resolve()
         self.dry_run = dry_run
         self.executor = AzCliExecutor(workspace=self.workspace, dry_run=dry_run)
@@ -129,6 +140,336 @@ class Orchestrator:
         self._params_cache_lock = threading.Lock()
         self._site_cache: dict[str, Site] = {}
         self._cache_lock = threading.Lock()
+        # Lazy site indexes built on first lookup. Workspace-load
+        # invariants enforced during build (see `_build_site_indexes`).
+        # - basename_index: `munich-dev` to abs path. Unique
+        #   workspace-wide so `-l name=munich-dev` resolves unambiguously
+        #   under nested `sites/` subdirectories.
+        # - rel_path_index: `regions/eu/munich-dev` to abs path. Used
+        #   for relative-path lookups (`sites: [regions/eu/munich-dev]`).
+        # - internal_name_index: declared `name:` to abs path. Lets a
+        #   site resolve by an internal name distinct from its filename.
+        self._basename_index: dict[str, Path] | None = None
+        self._rel_path_index: dict[str, Path] | None = None
+        self._internal_name_index: dict[str, Path] | None = None
+        self._internal_name_index_lock = threading.Lock()
+        # Memo of `_is_site_template(path)` keyed by resolved path.
+        # Avoids 3N+ YAML re-parses across `_get_all_site_names`,
+        # `_build_site_indexes`, and per-site `load_site` calls.
+        self._template_check_cache: dict[Path, bool] = {}
+        # Memo of the deduped site list returned by `load_all_sites`.
+        self._all_sites_cache: list[Site] | None = None
+        # Memo of `_load_inherited_data(path)` keyed by resolved path,
+        # used only when no provenance dict is being recorded. With N
+        # sites sharing one template, the template would otherwise be
+        # parsed N times. Returns are deepcopied to keep callers safe.
+        self._inherited_data_cache: dict[Path, dict[str, Any]] = {}
+        self._extra_trusted_sites_dirs = self._normalize_extra_sites_dirs(
+            extra_trusted_sites_dirs or []
+        )
+
+    def _normalize_extra_sites_dirs(self, dirs: list[Path]) -> list[Path]:
+        """Validate and deduplicate extra trusted site directories.
+
+        Extra trusted dirs are searched between the workspace's `sites/` and
+        `sites.local/` directories, and receive the same trust level as
+        `sites/`: site files in them are allowed to declare `inherits`.
+
+        Args:
+            dirs: Candidate directories to add to the trusted search path.
+
+        Returns:
+            Resolved, deduplicated, order-preserving list.
+
+        Raises:
+            FileNotFoundError: If any directory does not exist.
+            ValueError: If a directory collides with the workspace's own
+                `sites/` or `sites.local/`. A `sites.local/` collision
+                is specifically refused because registering it as trusted
+                would let overlays inject inheritance, breaking the overlay
+                security invariant.
+        """
+        primary = (self.workspace / "sites").resolve()
+        overlay = (self.workspace / "sites.local").resolve()
+        result: list[Path] = []
+        seen: set[Path] = set()
+        for candidate in dirs:
+            resolved = Path(candidate).resolve()
+            if not resolved.is_dir():
+                raise FileNotFoundError(
+                    f"Extra trusted site directory not found: {candidate}"
+                )
+            if resolved == primary:
+                raise ValueError(
+                    f"Extra site dir '{candidate}' is the workspace's "
+                    f"sites/ directory; already included by default."
+                )
+            if resolved == overlay:
+                raise ValueError(
+                    f"Extra site dir '{candidate}' is the workspace's "
+                    f"sites.local/ directory. Registering it as trusted "
+                    f"would allow overlays to inject inheritance; refused "
+                    f"for security."
+                )
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            result.append(resolved)
+        return result
+
+    @property
+    def _trusted_sites_dirs(self) -> list[Path]:
+        """All trusted site directories, in merge order.
+
+        Trusted means: `inherits` is honored in files from these dirs.
+        Excludes `sites.local/` (overlay, always strips `inherits`).
+        """
+        return [self.workspace / "sites", *self._extra_trusted_sites_dirs]
+
+    def _find_trusted_site_file(self, identifier: str) -> Path | None:
+        """Return the trusted file path for the named site.
+
+        Resolves `identifier` against three workspace indexes built on
+        first call:
+
+        1. Path-form index (`regions/eu/munich-dev`) for explicit
+           relative paths under any trusted `sites/` directory.
+        2. Basename index (`munich-dev`) for the common shorthand. The
+           basename invariant guarantees the basename maps to one file
+           workspace-wide.
+        3. Internal-name index for sites that declare a `name:` field
+           distinct from their filename.
+
+        The eager build catches workspace-wide drift (basename
+        collisions, internal-name shadows) on the first lookup, so the
+        invariants fire even for commands that only use the basename
+        path.
+
+        SiteTemplates are findable via a direct path probe so
+        `load_site` can surface a friendly "cannot deploy a template"
+        error rather than a generic "not found".
+
+        `sites.local/` is never searched. Sites must live in a
+        code-reviewed or caller-vouched-for trusted location.
+        """
+        self._ensure_site_indexes()
+        # Path-form lookup first. A `/` in the identifier signals an
+        # explicit relative path under a trusted `sites/` dir.
+        if "/" in identifier or "\\" in identifier:
+            try:
+                normalized = _normalize_site_identifier(identifier)
+            except ValueError:
+                return None
+            hit = self._rel_path_index.get(normalized)
+            if hit is not None:
+                return hit
+            return self._find_template_path(normalized)
+        # Basename lookup. The basename invariant makes this unambiguous.
+        if identifier in self._basename_index:
+            return self._basename_index[identifier]
+        # Internal `name:` fallback.
+        hit = self._internal_name_index.get(identifier)
+        if hit is not None:
+            return hit
+        return self._find_template_path(identifier)
+
+    def _find_template_path(self, identifier: str) -> Path | None:
+        """Locate a SiteTemplate file matching `identifier`.
+
+        Used by `_find_trusted_site_file` as a fallback so callers can
+        surface a clear "this is a SiteTemplate, not deployable" error
+        rather than a generic "not found". Walks subdirectories so a
+        nested template (e.g., `sites/shared/base.yaml` resolved as
+        `base`) gets the friendly error too.
+        """
+        for sites_dir in self._trusted_sites_dirs:
+            if not sites_dir.exists():
+                continue
+            # Direct path probe (path-form identifier).
+            for ext in (".yaml", ".yml"):
+                candidate = sites_dir / f"{identifier}{ext}"
+                if candidate.exists() and self._is_site_template(candidate):
+                    return candidate
+            # Recursive basename probe (so nested templates also hit
+            # the friendly error path).
+            if "/" not in identifier:
+                for ext in ("*.yaml", "*.yml"):
+                    for path in sorted(sites_dir.rglob(ext)):
+                        if path.stem == identifier and self._is_site_template(path):
+                            return path
+        return None
+
+    def _ensure_site_indexes(self) -> None:
+        """Build the trusted-site indexes if they have not been built yet.
+
+        Called by every site-touching entry point so the workspace
+        invariants are enforced regardless of which lookup path the
+        caller takes.
+        """
+        with self._internal_name_index_lock:
+            if self._internal_name_index is None:
+                basename, rel_path, internal = self._build_site_indexes()
+                self._basename_index = basename
+                self._rel_path_index = rel_path
+                self._internal_name_index = internal
+
+    def _iter_trusted_site_files(
+        self, include_templates: bool = False
+    ) -> Iterator[tuple[Path, Path]]:
+        """Yield `(sites_dir, abs_path)` for every Site file under a
+        trusted directory, walking subdirectories.
+
+        Skips SiteTemplates (`kind: SiteTemplate`) by default since
+        those are inheritance-only and never selectable. Pass
+        `include_templates=True` to keep them, useful when callers want
+        to surface a friendly error if the operator tries to load one
+        directly.
+        """
+        for sites_dir in self._trusted_sites_dirs:
+            if not sites_dir.exists():
+                continue
+            for ext in ("*.yaml", "*.yml"):
+                for path in sorted(sites_dir.rglob(ext)):
+                    if not include_templates and self._is_site_template(path):
+                        continue
+                    yield sites_dir, path
+
+    def _build_site_indexes(self) -> tuple[dict[str, Path], dict[str, Path], dict[str, Path]]:
+        """Walk trusted dirs and build the basename, relative-path, and
+        internal-name indexes.
+
+        Workspace-load invariants enforced during the build:
+
+        - Within any one trusted directory, every basename is unique
+          across all subdirectories. Lets `-l name=munich-dev` resolve
+          unambiguously when nested layouts are used.
+        - Across trusted directories, basename collisions are
+          legitimate overlays only when the relative path also matches.
+          Cross-directory collisions where the relative path differs
+          would create two distinct logical sites sharing one identifier
+          and are rejected.
+        - No internal `name:` collides with another file's basename.
+        - No internal `name:` collides with another file's relative path
+          (the path-form identifier).
+        - No two sites declare the same internal `name:`.
+
+        Returns:
+            `(basename_index, rel_path_index, internal_name_index)`.
+        """
+        basename_to_path: dict[str, Path] = {}
+        rel_path_to_path: dict[str, Path] = {}
+
+        # Group files by their owning trusted directory so the within-dir
+        # uniqueness check does not flag legitimate cross-dir overlays.
+        per_dir: dict[Path, list[Path]] = {}
+        for sites_dir, path in self._iter_trusted_site_files():
+            per_dir.setdefault(sites_dir, []).append(path)
+
+        for sites_dir, paths in per_dir.items():
+            dir_basenames: dict[str, Path] = {}
+            for path in paths:
+                rel_path = path.relative_to(sites_dir).with_suffix("").as_posix()
+                basename = path.stem
+
+                # Within-dir basename invariant. Catches nested
+                # collisions that would make `-l name=basename`
+                # ambiguous.
+                existing = dir_basenames.get(basename)
+                if existing is not None:
+                    raise ValueError(
+                        f"Two site files in `{sites_dir}` share basename "
+                        f"`{basename}`: `{existing}` and `{path}`. Every "
+                        f"basename must be unique within a trusted sites "
+                        f"directory so `-l name={basename}` resolves "
+                        f"unambiguously. Rename one of the files."
+                    )
+                dir_basenames[basename] = path
+                # Cross-directory basename collisions are only valid
+                # overlays when the relative path also matches. Otherwise
+                # the same identifier would refer to two distinct logical
+                # sites.
+                existing_basename = basename_to_path.get(basename)
+                if existing_basename is not None:
+                    existing_rel = self._canonical_site_id(existing_basename)
+                    if existing_rel != rel_path:
+                        raise ValueError(
+                            f"Cross-directory basename `{basename}` "
+                            f"collision between `{existing_basename}` "
+                            f"and `{path}`. Cross-directory basename "
+                            f"matches are valid only when the relative "
+                            f"path also matches (overlay). Different "
+                            f"relative paths would let `-l name={basename}` "
+                            f"refer to two distinct sites. Rename one of "
+                            f"the files."
+                        )
+                # First trusted dir wins on basename and relative path
+                # (overlay semantics).
+                basename_to_path.setdefault(basename, path)
+                rel_path_to_path.setdefault(rel_path, path)
+
+        internal_name_to_path: dict[str, Path] = {}
+        for path in basename_to_path.values():
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = yaml.safe_load(f) or {}
+            except (yaml.YAMLError, OSError):
+                # Defer parse errors to load_site() for context-rich reporting.
+                continue
+            internal_name = self._read_internal_name(data)
+            if not internal_name or internal_name == path.stem:
+                continue
+            collider = basename_to_path.get(internal_name)
+            if collider is not None and collider.resolve() != path.resolve():
+                raise ValueError(
+                    f"Site `{path}` declares `name: {internal_name}` "
+                    f"which collides with file basename `{collider.name}`. "
+                    f"Each site identity must resolve to exactly one file. "
+                    f"If `{path.name}` is a copy you forgot to update, "
+                    f"change its `name:` field to `{path.stem}`. Otherwise "
+                    f"rename one of the files."
+                )
+            collider = rel_path_to_path.get(internal_name)
+            if collider is not None and collider.resolve() != path.resolve():
+                raise ValueError(
+                    f"Site `{path}` declares `name: {internal_name}` "
+                    f"which collides with the path-form identifier of "
+                    f"file `{collider}`. Rename the `name:` field."
+                )
+            existing = internal_name_to_path.get(internal_name)
+            if existing is not None and existing.resolve() != path.resolve():
+                raise ValueError(
+                    f"Two sites declare the same `name: {internal_name}`: "
+                    f"`{existing}` and `{path}`. Site names must be "
+                    f"unique across the workspace."
+                )
+            internal_name_to_path[internal_name] = path
+        return basename_to_path, rel_path_to_path, internal_name_to_path
+
+    @staticmethod
+    def _read_internal_name(data: dict[str, Any]) -> str | None:
+        """Read the internal `name:` from a parsed site file.
+
+        Supports the flat shape (`name:` at top level) and the K8s-style
+        nested shape (`metadata.name:`). Returns None if neither is set.
+        """
+        if "spec" in data:
+            metadata = data.get("metadata") or {}
+            return metadata.get("name")
+        return data.get("name")
+
+    def _canonical_site_id(self, site_path: Path) -> str:
+        """Return the canonical relative-path identifier for a site file.
+
+        Used to key the overlay merge in `_load_site_data`. Falls back to
+        the basename when the path is not under any trusted directory
+        (defensive; should not happen in practice).
+        """
+        for sites_dir in self._trusted_sites_dirs:
+            try:
+                return site_path.relative_to(sites_dir).with_suffix("").as_posix()
+            except ValueError:
+                continue
+        return site_path.stem
 
     def _deep_merge(self, base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
         """Deep merge two dictionaries, with override taking precedence.
@@ -159,14 +500,121 @@ class Orchestrator:
                 result[key] = copy.deepcopy(value)
         return result
 
-    def _load_inherited_data(self, path: Path, seen: list[Path] | None = None) -> dict[str, Any]:
+    def _deep_merge_provenance(
+        self,
+        base: dict[str, Any],
+        override: dict[str, Any],
+        origin: str,
+        prov: dict[str, str],
+        prefix: str = "",
+    ) -> dict[str, Any]:
+        """Like `_deep_merge` but tracks per-key provenance.
+
+        For each leaf key in `override`, records `prov[<dotted-path>] = origin`.
+        Lists and scalars overwrite as a unit (matching `_deep_merge`'s
+        list-replacement semantic), so the whole key gets the new origin.
+        Nested dicts recurse so per-leaf attribution is preserved, even
+        when the dict subtree is new (not present in `base`).
+
+        `prov` is mutated in place. The returned dict is a new merged
+        result; neither input is modified.
+        """
+        result = copy.deepcopy(base)
+        for key, value in override.items():
+            full_key = f"{prefix}.{key}" if prefix else key
+            if isinstance(value, dict):
+                # Recurse whether or not the dict subtree exists in base.
+                # When base lacks the key the inner walk attributes every
+                # leaf; otherwise it merges and only re-attributes leaves
+                # the override actually touched.
+                base_subtree = result[key] if key in result and isinstance(result[key], dict) else {}
+                result[key] = self._deep_merge_provenance(
+                    base_subtree, value, origin, prov, full_key
+                )
+            else:
+                result[key] = copy.deepcopy(value)
+                prov[full_key] = origin
+        return result
+
+    def _resolve_inherits(self, child_path: Path, inherits_value: str) -> Path:
+        """Resolve an `inherits:` reference to an absolute path.
+
+        Resolution order:
+        1. Relative to the child file's directory (default, locality-preserving).
+        2. Narrow fallback: if the relative path does not exist AND
+           `inherits_value` is a bare filename (no path separators), look for
+           it in the workspace's `sites/` directory. This lets a site file
+           in an extra trusted dir reference a workspace-owned template
+           (e.g. `base-site.yaml`) without copying the template or inventing
+           a new syntax. The fallback is intentionally limited to
+           `workspace/sites/`. It does NOT search other extras or
+           `sites.local/`, so there is no cross-extra-dir shared namespace
+           and no way for an overlay to inject a new inheritance target.
+
+        `inherits:` is author-trusted: the value comes from a trusted site
+        file (workspace `sites/` or an operator-vouched extras dir), so the
+        resolver deliberately does NOT sandbox the resolved path to a
+        specific set of filesystem roots. The real control is who may
+        author files in those trusted locations. See the "Trust model"
+        section in docs/site-configuration.md.
+
+        Args:
+            child_path: Absolute path of the file that declares `inherits`.
+            inherits_value: The raw `inherits:` value from that file.
+
+        Returns:
+            Absolute, resolved path to the parent template.
+
+        Raises:
+            FileNotFoundError: If the parent cannot be resolved by either
+                strategy. The error lists every path that was probed so
+                the operator can see why fallback did not help.
+        """
+        tried: list[Path] = []
+
+        relative = (child_path.parent / inherits_value).resolve()
+        tried.append(relative)
+        if relative.exists():
+            return relative
+
+        if "/" not in inherits_value and "\\" not in inherits_value:
+            workspace_candidate = (self.workspace / "sites" / inherits_value).resolve()
+            if workspace_candidate != relative:
+                tried.append(workspace_candidate)
+                if workspace_candidate.exists():
+                    logger.debug(
+                        f"`inherits: {inherits_value}` in {child_path} resolved "
+                        f"via workspace fallback to {workspace_candidate}"
+                    )
+                    return workspace_candidate
+
+        searched = "\n  - ".join(str(p) for p in tried)
+        raise FileNotFoundError(
+            f"Inherited file not found for `inherits: {inherits_value}` "
+            f"declared in {child_path}. Searched:\n  - {searched}"
+        )
+
+    def _load_inherited_data(
+        self,
+        path: Path,
+        seen: list[Path] | None = None,
+        prov: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         """Load inherited site template with support for chained inheritance.
 
         Resolves the `inherits` field recursively, merging parent data first.
 
+        When called without a provenance dict, the merged result is
+        memoized on `path.resolve()` for the orchestrator's lifetime so
+        N sites sharing one template only parse it once. Provenance
+        callers bypass the cache because each call mutates `prov`.
+
         Args:
             path: Absolute path to the inherited file
             seen: List of visited paths for cycle detection (preserves order)
+            prov: Optional provenance dict. When supplied, every leaf key
+                gets its origin attributed to the file that contributed
+                the final value. Mutated in place.
 
         Returns:
             Merged data from inheritance chain (with metadata fields stripped)
@@ -185,60 +633,113 @@ class Orchestrator:
             raise ValueError(f"Circular inheritance detected: {cycle_path}")
         seen.append(normalized)
 
+        # Cache hit returns a deep copy so callers may mutate freely.
+        # Skip cache when prov is supplied because each provenance call
+        # mutates the caller's prov dict and is not idempotent.
+        if prov is None and normalized in self._inherited_data_cache:
+            return copy.deepcopy(self._inherited_data_cache[normalized])
+
         if not path.exists():
             raise FileNotFoundError(f"Inherited file not found: {path}")
 
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
 
-        # Validate kind if present (allow Site or SiteTemplate)
+        # Inherits parents must be SiteTemplates. A `kind: Site` parent
+        # would chain deployable sites together, where editing one would
+        # silently change the other; that is almost always an authoring
+        # mistake. Use SiteTemplate for any reusable base.
         kind = data.get("kind")
-        if kind is not None and kind not in ("Site", "SiteTemplate"):
-            raise ValueError(f"Cannot inherit from kind '{kind}' in {path}. " f"Expected 'Site' or 'SiteTemplate'")
+        if kind is not None and kind != "SiteTemplate":
+            raise ValueError(
+                f"Cannot inherit from kind '{kind}' in {path}. "
+                f"Inherits parents must be SiteTemplate."
+            )
 
         # Handle chained inheritance
         if "inherits" in data:
-            parent_path = (path.parent / data["inherits"]).resolve()
-            parent_data = self._load_inherited_data(parent_path, seen)
+            parent_path = self._resolve_inherits(path, data["inherits"])
+            parent_data = self._load_inherited_data(parent_path, seen, prov=prov)
             # Remove metadata fields before merging
-            child_data = {k: v for k, v in data.items() if k not in ("inherits", "kind", "apiVersion")}
-            data = self._deep_merge(parent_data, child_data)
+            child_data = {
+                k: v for k, v in data.items() if k not in ("inherits", "kind", "apiVersion")
+            }
+            if prov is not None:
+                data = self._deep_merge_provenance(
+                    parent_data, child_data, self._origin_label(path), prov
+                )
+            else:
+                data = self._deep_merge(parent_data, child_data)
         else:
             # Remove metadata fields from leaf template
-            data = {k: v for k, v in data.items() if k not in ("kind", "apiVersion")}
+            leaf_data = {k: v for k, v in data.items() if k not in ("kind", "apiVersion")}
+            if prov is not None:
+                # Attribute every leaf in the leaf template to itself.
+                data = self._deep_merge_provenance(
+                    {}, leaf_data, self._origin_label(path), prov
+                )
+            else:
+                data = leaf_data
+
+        if prov is None:
+            self._inherited_data_cache[normalized] = copy.deepcopy(data)
 
         logger.debug(f"Loaded inherited data from: {path}")
         return data
 
-    def _load_site_data(self, name: str) -> dict[str, Any]:
+    def _load_site_data(
+        self, name: str, prov: dict[str, str] | None = None
+    ) -> dict[str, Any]:
         """Load and merge site data with inheritance and overlay support.
 
         Merge order (later overrides earlier):
-        1. inherits target  - Parent template (if specified, resolved recursively)
-        2. sites/           - Base site definitions (committed)
-        3. sites.local/     - Local/CI overrides (gitignored)
+        1. inherits target         - Parent template (resolved recursively)
+        2. sites/                  - Primary trusted site definitions (committed)
+        3. extra_trusted_sites_dirs - Additional trusted dirs, in list order
+        4. sites.local/            - Local/CI overrides (gitignored)
 
-        Note: Only the base file (sites/) can specify `inherits`. The sites.local/
-        overlay cannot change inheritance for security reasons.
+        `inherits` handling:
+        - The FIRST trusted directory to contain the site establishes the
+          inheritance chain (`inherits` is honored).
+        - Any later file (in another trusted dir OR in `sites.local/`) has
+          its `inherits` stripped. A site has exactly one inheritance
+          chain, determined by its base file.
+
+        This means `sites.local/` cannot inject inheritance at all: the
+        security invariant is preserved regardless of how many extra trusted
+        dirs are configured.
+
+        Identity (`name`, `metadata.name`) is set by the BASE file. Overlays
+        in other trusted dirs and in `sites.local/` cannot rename the site.
+        Lifting that rule would let an overlay produce a site whose name is
+        not findable through any of the workspace indexes (built from the
+        base file). Use `inherits:` or rename the base file instead.
 
         Args:
-            name: Site name (filename without extension)
+            name: Site name (filename without extension).
+            prov: Optional provenance dict. When supplied, every leaf key
+                in the merged data gets attributed to the file whose
+                value won. The outer merge of inherited data uses plain
+                `_deep_merge` so attributions from the chain walk
+                survive (the inherited dict was already attributed
+                inside `_load_inherited_data`).
 
         Returns:
-            Merged site data dictionary
+            Merged site data dictionary.
 
         Raises:
-            FileNotFoundError: If site file doesn't exist in any directory
-            ValueError: If inheritance creates a cycle or references invalid kind
+            FileNotFoundError: If no trusted dir or sites.local/ has the file.
+            ValueError: If inheritance creates a cycle, references invalid
+                kind, or an overlay tries to set `name`/`metadata.name`.
         """
         site_dirs = [
-            self.workspace / "sites",  # Base (committed)
-            self.workspace / "sites.local",  # Local/CI overrides
+            *self._trusted_sites_dirs,
+            self.workspace / "sites.local",
         ]
 
         merged_data: dict[str, Any] = {}
         found = False
-        is_base_file = True  # Track if we're processing the base file
+        is_base_file = True  # First file found establishes the inheritance chain
 
         for sites_dir in site_dirs:
             for ext in (".yaml", ".yml"):
@@ -247,60 +748,240 @@ class Orchestrator:
                     with open(path, "r", encoding="utf-8") as f:
                         data = yaml.safe_load(f) or {}
 
-                    # Process inheritance only on base file (not local overlay)
+                    # Process inheritance only on the first file found (the base)
                     if is_base_file and "inherits" in data:
-                        inherits_path = (path.parent / data["inherits"]).resolve()
+                        inherits_path = self._resolve_inherits(path, data["inherits"])
                         # Initialize seen list with current file to detect self-reference
-                        inherited_data = self._load_inherited_data(inherits_path, seen=[path.resolve()])
+                        inherited_data = self._load_inherited_data(
+                            inherits_path, seen=[path.resolve()], prov=prov
+                        )
+                        # Merge inherited into the working dict WITHOUT
+                        # re-attribution. The per-leaf provenance for
+                        # inherited keys was already set during the chain
+                        # walk; the outer merge would otherwise clobber it
+                        # with the parent file's label.
                         merged_data = self._deep_merge(merged_data, inherited_data)
                         # Remove inherits from data before merging
                         data = {k: v for k, v in data.items() if k != "inherits"}
                     elif not is_base_file and "inherits" in data:
-                        # Strip inherits from local overlay (security: can't inject inheritance)
+                        # Strip inherits from any non-base file. For sites.local/
+                        # this prevents runtime injection of inheritance (security).
+                        # For additional trusted dirs it reflects the rule that a
+                        # site has exactly one inheritance chain, established by
+                        # the base file.
                         data = {k: v for k, v in data.items() if k != "inherits"}
 
-                    merged_data = self._deep_merge(merged_data, data)
+                    # Reject overlay-renames-site. Identity is set by the
+                    # base file; the workspace name indexes are built
+                    # from base files, so an overlay rename produces a
+                    # site unfindable through any index. Allow overlays
+                    # to RESTATE the same name (the common case where
+                    # extras-dir overlays mirror the base shape) and
+                    # reject only when the overlay tries to CHANGE it.
+                    # When the base omits an explicit `name:`, identity
+                    # defaults to the basename of the canonical id, so
+                    # an overlay introducing a different name is also
+                    # a rename.
+                    if not is_base_file:
+                        overlay_name = self._read_internal_name(data)
+                        if overlay_name is not None:
+                            existing_name = (
+                                self._read_internal_name(merged_data)
+                                or name.rsplit("/", 1)[-1]
+                            )
+                            if overlay_name != existing_name:
+                                raise ValueError(
+                                    f"Overlay {path} cannot rename the site "
+                                    f"({existing_name!r} -> {overlay_name!r}). "
+                                    f"Site identity is established by the base "
+                                    f"file. Use `inherits:` or rename the base "
+                                    f"file."
+                                )
+
+                    if prov is not None:
+                        merged_data = self._deep_merge_provenance(
+                            merged_data, data, self._origin_label(path), prov
+                        )
+                    else:
+                        merged_data = self._deep_merge(merged_data, data)
                     found = True
+                    if is_base_file:
+                        logger.debug(f"Loaded site data from: {path}")
+                    else:
+                        # DEBUG: avoids per-overlay noise across large fleets.
+                        logger.debug(f"Site '{name}': applied overlay {path}")
                     is_base_file = False  # Subsequent files are overlays
-                    logger.debug(f"Loaded site data from: {path}")
                     break  # Only load one file per directory (prefer .yaml)
 
         if not found:
-            raise FileNotFoundError(f"Site '{name}' not found in sites/ or sites.local/")
+            where = "sites/"
+            if self._extra_trusted_sites_dirs:
+                where += ", extra trusted sites dirs,"
+            where += " or sites.local/"
+            raise FileNotFoundError(f"Site '{name}' not found in {where}")
 
         return merged_data
+
+    def _origin_label(self, path: Path) -> str:
+        """Return a stable workspace-relative label for a source file.
+
+        Used by the provenance walk so per-key attribution renders
+        identically across machines. Falls back to the absolute path
+        when the file lives outside the workspace (e.g., an extra
+        trusted dir under a different parent).
+        """
+        try:
+            return path.resolve().relative_to(self.workspace.resolve()).as_posix()
+        except ValueError:
+            return path.as_posix()
+
+    def load_site_with_provenance(self, name: str) -> tuple[Site, dict[str, str]]:
+        """Load a site and return per-key provenance for its merged data.
+
+        The provenance dict maps every dotted leaf key in the merged
+        site to the workspace-relative path of the file whose value
+        won. Used by `siteops sites <name> -v` to show where each
+        value came from after inherit + overlay merge.
+
+        For sites authored with the K8s envelope shape (`spec:`,
+        `metadata:`), prov keys are normalized to the flat-shape view
+        (`subscription`, `labels.X`, `properties.X`) so callers do not
+        need to know about the on-disk envelope.
+
+        Args:
+            name: Basename, relative path, or internal `name:` value.
+
+        Returns:
+            `(site, provenance)` where `site` is the fully resolved
+            Site (matching `load_site(name)`) and `provenance` is the
+            per-leaf origin map.
+        """
+        if "/" in name or "\\" in name:
+            try:
+                lookup_key = _normalize_site_identifier(name)
+            except ValueError:
+                lookup_key = name
+        else:
+            lookup_key = name
+        site_path = self._find_trusted_site_file(lookup_key)
+        if site_path is None:
+            where = "sites/"
+            if self._extra_trusted_sites_dirs:
+                where += " or extra trusted sites dirs"
+            raise FileNotFoundError(f"Site file not found: {name} (searched {where})")
+        if self._is_site_template(site_path):
+            raise ValueError(
+                f"Cannot load '{name}' as a site: it is a SiteTemplate "
+                f"(inheritance-only). SiteTemplates cannot be deployed directly."
+            )
+        canonical_id = self._canonical_site_id(site_path)
+        default_name = site_path.stem
+        prov: dict[str, str] = {}
+        merged_data = self._load_site_data(canonical_id, prov=prov)
+        _validate_resource(merged_data, "Site", site_path)
+        site = self._parse_site_dict(merged_data, site_path, default_name, source_name=name)
+        # Normalize prov to the flat-shape view that matches `Site` so
+        # display-time lookups like `prov["subscription"]` succeed
+        # regardless of whether the on-disk file used the K8s envelope.
+        prov = self._normalize_provenance_to_flat_shape(merged_data, prov)
+        return site, prov
+
+    @staticmethod
+    def _normalize_provenance_to_flat_shape(
+        merged_data: dict[str, Any], prov: dict[str, str]
+    ) -> dict[str, str]:
+        """Rewrite K8s-envelope prov keys to the flat-shape view.
+
+        When the merged data uses `spec:`/`metadata:`, the walker
+        attributed keys like `spec.subscription` and `metadata.name`.
+        The flat-shape view used by the CLI display is `subscription`
+        and `name`. Translate so the consumer sees one shape.
+
+        The trigger is conservative: only rewrite when the merged data
+        actually has the K8s-envelope shape (a `spec:` or `metadata:`
+        top-level dict), and only for `Site` (or unspecified-kind)
+        resources. Anything else is passed through to avoid silently
+        mis-normalizing a flat-shape dict that happens to have a
+        top-level field named `spec`.
+        """
+        kind = merged_data.get("kind")
+        if kind not in (None, "Site"):
+            return prov
+        has_envelope = (
+            isinstance(merged_data.get("spec"), dict)
+            or isinstance(merged_data.get("metadata"), dict)
+        )
+        if not has_envelope:
+            return prov
+        new_prov: dict[str, str] = {}
+        for key, origin in prov.items():
+            if key == "spec" or key == "metadata" or key == "metadata.labels":
+                continue
+            if key.startswith("spec."):
+                new_prov[key[len("spec."):]] = origin
+            elif key == "metadata.name":
+                new_prov["name"] = origin
+            elif key.startswith("metadata.labels."):
+                new_prov[key.replace("metadata.labels.", "labels.", 1)] = origin
+            else:
+                new_prov[key] = origin
+        return new_prov
 
     def load_site(self, name: str) -> Site:
         """Load a site by name, applying inheritance and local overlays.
 
+        `name` may be the site file's basename, its relative path under
+        a trusted `sites/` directory, OR its internal `name:` field. All
+        three forms are symmetric (see `_find_trusted_site_file`).
+
         Resolution order (later sources override earlier):
-        1. Inherited site/template (if 'inherits' specified)
-        2. Base site file from sites/{name}.yaml
-        3. Local overlay from sites.local/{name}.yaml (if exists)
+        1. Inherited site/template (if 'inherits' specified on the base file).
+        2. Base site file from `sites/` or any extra trusted dir (first
+           trusted dir containing the file wins).
+        3. Overlays from any remaining trusted dirs (`inherits` stripped).
+        4. Local overlay from `sites.local/<relative-path>.yaml` if present
+           (`inherits` stripped). Keyed by the relative path of the base
+           file under its trusted dir, so nested sites have nested overlays.
 
         Args:
-            name: Site name (corresponds to sites/{name}.yaml)
+            name: Basename, relative path, OR internal `name:` value.
 
         Returns:
-            Fully resolved Site instance
+            Fully resolved Site instance.
 
         Raises:
-            ValueError: If site file is invalid, missing required fields,
-                       or references non-existent inherited files
-            FileNotFoundError: If sites/{name}.yaml doesn't exist
+            ValueError: If the site file is invalid, missing required
+                fields, references a non-existent inherited file, or two
+                files in the workspace would resolve to the same name.
+            FileNotFoundError: If no form matches.
         """
-        # Check cache first
+        # Normalize path-form identifiers (forward-slash separators) so
+        # the cache lookup is consistent across `regions/eu/munich` and
+        # `regions\\eu\\munich` and similar variants.
+        if "/" in name or "\\" in name:
+            try:
+                lookup_key = _normalize_site_identifier(name)
+            except ValueError:
+                lookup_key = name
+        else:
+            lookup_key = name
         with self._cache_lock:
-            if name in self._site_cache:
-                return self._site_cache[name]
+            if lookup_key in self._site_cache:
+                return self._site_cache[lookup_key]
 
-        # Check if site file exists
-        site_path = self.workspace / "sites" / f"{name}.yaml"
-        if not site_path.exists():
-            # Also check .yml extension
-            site_path = self.workspace / "sites" / f"{name}.yml"
-            if not site_path.exists():
-                raise FileNotFoundError(f"Site file not found: sites/{name}.yaml")
+        site_path = self._find_trusted_site_file(lookup_key)
+        if site_path is None:
+            where = "sites/"
+            if self._extra_trusted_sites_dirs:
+                where += " or extra trusted sites dirs"
+            raise FileNotFoundError(f"Site file not found: {name} (searched {where})")
+
+        # Canonical id keys the overlay merge in `_load_site_data`.
+        # Equal to the basename for flat layouts, or to the relative
+        # path under the owning trusted dir for nested layouts.
+        canonical_id = self._canonical_site_id(site_path)
+        # Default `Site.name` is the basename. Unique by invariant.
+        default_name = site_path.stem
 
         # Check if this is a SiteTemplate (cannot be loaded directly)
         if self._is_site_template(site_path):
@@ -310,28 +991,72 @@ class Orchestrator:
             )
 
         # Load and merge site data (handles inheritance + local overlay)
-        merged_data = self._load_site_data(name)
+        merged_data = self._load_site_data(canonical_id)
 
         # Validate merged data
         _validate_resource(merged_data, "Site", site_path)
 
-        # Parse merged data (similar to Site.from_file but from dict)
+        site = self._parse_site_dict(merged_data, site_path, default_name, source_name=name)
+
+        # Cache under every form the caller might use later. Always
+        # under the canonical id (basename or relative path) and the
+        # internal name. Also under whatever the caller actually passed
+        # (and its normalized form, if a path-form identifier).
+        with self._cache_lock:
+            self._site_cache[canonical_id] = site
+            if default_name != canonical_id:
+                self._site_cache[default_name] = site
+            if site.name and site.name not in self._site_cache:
+                self._site_cache[site.name] = site
+            self._site_cache[lookup_key] = site
+            if name != lookup_key:
+                self._site_cache[name] = site
+
+        return site
+
+    def _parse_site_dict(
+        self,
+        merged_data: dict[str, Any],
+        site_path: Path,
+        default_name: str,
+        source_name: str,
+    ) -> Site:
+        """Build a `Site` from merged data and the resolved file path.
+
+        Single source of truth for the parsing rules `load_site` and
+        `load_site_with_provenance` both depend on. Supports the flat
+        shape (`name:` at top level, fields at top level) and the K8s
+        envelope (`metadata:` + `spec:`). Defaults the site's `name`
+        to the basename when neither shape supplies one.
+
+        Args:
+            merged_data: Output of `_load_site_data` (any shape).
+            site_path: Resolved path of the base site file (used for
+                error messages only).
+            default_name: Default for `Site.name` when neither
+                `metadata.name` nor top-level `name` is set.
+            source_name: The identifier the caller passed; used in the
+                "missing required field" error message.
+
+        Raises:
+            ValueError: When required fields (`subscription`,
+                `location`) are missing.
+        """
         if "spec" in merged_data:
             spec = merged_data["spec"]
             metadata = merged_data.get("metadata", {})
-            site_name = metadata.get("name", name)
+            site_name = metadata.get("name", default_name)
             labels = metadata.get("labels", {})
         else:
             spec = merged_data
-            site_name = merged_data.get("name", name)
+            site_name = merged_data.get("name", default_name)
             labels = merged_data.get("labels", {})
 
-        required = ["subscription", "location"]
-        for req in required:
+        for req in ("subscription", "location"):
             if req not in spec:
-                raise ValueError(f"Missing required field '{req}' in site: {name}")
+                raise ValueError(f"Missing required field '{req}' in site: {source_name}")
 
-        site = Site(
+        return Site(
             name=site_name,
             subscription=spec["subscription"],
             resource_group=spec.get("resourceGroup", ""),
@@ -341,42 +1066,37 @@ class Orchestrator:
             parameters=spec.get("parameters", {}),
         )
 
-        # Cache the resolved site
-        with self._cache_lock:
-            self._site_cache[name] = site
-
-        return site
-
     def _get_all_site_names(self) -> list[str]:
-        """Get all deployable site names from the sites directory.
+        """Get all deployable site names from trusted site directories.
 
-        Scans the workspace's sites/ directory for YAML files and returns
-        the names of files that represent deployable sites (kind: Site).
-        Files with kind: SiteTemplate are excluded as they are only used
-        for inheritance.
+        Recursively scans every trusted site directory for YAML files
+        and returns the basenames of files that represent deployable
+        sites (`kind: Site`). Files with `kind: SiteTemplate` are
+        excluded (inheritance-only). Files in `sites.local/` are NOT
+        discoverable. That directory is the overlay for committed and
+        trusted sites, not a source of new site identities.
+
+        The basename-uniqueness invariant (enforced by
+        `_build_site_indexes`) guarantees each returned basename maps to
+        exactly one file, even when nested under subdirectories.
 
         Returns:
-            List of site names (filename stems without .yaml extension)
+            Sorted list of site basenames (filenames without extension).
 
         Note:
-            - Files that cannot be parsed are included and will error during load_site()
-            - This allows proper error reporting with full context
+            Files that cannot be parsed are included and will error
+            during `load_site()`. Allows proper error reporting with
+            full context rather than silent omission.
         """
-        sites_dir = self.workspace / "sites"
-        if not sites_dir.exists():
-            return []
-
-        site_names = set()  # Use set to avoid duplicates if both .yaml and .yml exist
-        for ext in ("*.yaml", "*.yml"):
-            for path in sites_dir.glob(ext):
-                if self._is_site_template(path):
-                    continue
-                site_names.add(path.stem)
-
+        site_names: set[str] = set()
+        for _sites_dir, path in self._iter_trusted_site_files():
+            site_names.add(path.stem)
         return sorted(site_names)  # Sort for deterministic order
 
     def _is_site_template(self, path: Path) -> bool:
         """Check if a YAML file is a SiteTemplate (inheritance-only).
+
+        Memoized on resolved path for the orchestrator's lifetime.
 
         Args:
             path: Path to the YAML file
@@ -388,24 +1108,39 @@ class Orchestrator:
             Returns False if the file cannot be parsed, allowing load_site()
             to handle the error with proper context.
         """
+        resolved = path.resolve()
+        cached = self._template_check_cache.get(resolved)
+        if cached is not None:
+            return cached
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f)
-            return bool(data and data.get("kind") == "SiteTemplate")
+            result = bool(data and data.get("kind") == "SiteTemplate")
         except (yaml.YAMLError, OSError):
             # Let load_site() handle parsing errors with full context
-            return False
+            result = False
+        self._template_check_cache[resolved] = result
+        return result
 
     def load_all_sites(self) -> list[Site]:
-        """Load all sites from sites/ and sites.local/ directories.
+        """Load all deployable sites from trusted site directories.
 
-        Sites are merged across directories with the following precedence:
-        sites.local/ > sites/
+        Discovers sites from `sites/` and any extra trusted directories,
+        then loads each (applying `sites.local/` overlays where present).
+        Precedence within a single site: `sites.local/` > extra trusted
+        dirs (last wins) > `sites/`.
+
+        Memoized for the orchestrator's lifetime. The result is a stable
+        snapshot of every site once the workspace finishes loading;
+        subsequent commands like `explain_no_match` reuse it.
 
         Returns:
-            List of all Site instances found (with merged configuration)
+            List of all Site instances found (with merged configuration).
         """
-        sites = []
+        if self._all_sites_cache is not None:
+            return self._all_sites_cache
+
+        sites: list[Site] = []
         skipped = []
 
         for name in self._get_all_site_names():
@@ -424,6 +1159,7 @@ class Orchestrator:
                 print(f"  \u2022 {name}: {error}", file=sys.stderr)
             print(file=sys.stderr)
 
+        self._all_sites_cache = sites
         return sites
 
     def load_parameters(self, path: Path) -> dict[str, Any]:
@@ -800,34 +1536,73 @@ class Orchestrator:
                 site.subscription,
             )
 
-        # 6. Warn about any unresolved templates
-        self._check_unresolved_templates(params, site.name)
-
-        # 7. Filter to only parameters accepted by the template
+        # 6. Filter to template-accepted parameters before the unresolved-check
+        # so that defaults injected for steps that don't consume them (e.g.
+        # `siteAddress.{country,city}` from common.yaml) don't trip the check.
         template_path = (self.workspace / step.template).resolve()
+        filter_succeeded = False
         if template_path.exists():
             try:
                 params = filter_parameters(params, str(template_path), step.name)
+                filter_succeeded = True
             except (ValueError, FileNotFoundError) as e:
-                logger.warning(f"Could not filter parameters for step '{step.name}': {e}")
-                # Continue with unfiltered params - let ARM validate
+                logger.warning(
+                    f"Could not filter parameters for step '{step.name}': {e}; "
+                    f"skipping unresolved-template precheck so the original error "
+                    f"is not masked by a follow-on 'unresolved templates' failure"
+                )
+
+        # 7. Fail fast on any unresolved {{ ... }} templates. In dry-run mode
+        # downgrade to warning since `{{ steps.X.outputs.Y }}` cannot be
+        # resolved without real deployment outputs. Skipped when filtering
+        # failed: an unfiltered param set may carry tokens for params the
+        # template doesn't accept (which filtering would have stripped), and
+        # raising here would hide the upstream filter failure.
+        if filter_succeeded:
+            self._check_unresolved_templates(params, site.name, step.name)
 
         return params
 
-    def _check_unresolved_templates(self, params: dict[str, Any], site_name: str) -> None:
-        """Warn if any {{ ... }} templates weren't resolved."""
+    def _check_unresolved_templates(
+        self, params: dict[str, Any], site_name: str, step_name: str
+    ) -> None:
+        """Fail (or warn in dry-run) if any {{ ... }} templates remain.
 
-        def check_value(v: Any, path: str = "") -> None:
+        Unresolved templates at this stage mean a parameter source did not
+        produce the expected output, a step reference points at a non-existent
+        step/output, or a `{{ site.X }}` path is wrong. Letting the deployment
+        proceed would silently send literal `{{ ... }}` strings to ARM.
+
+        In `--dry-run` mode `{{ steps.X.outputs.Y }}` references cannot be
+        resolved (no real outputs exist), so we log a warning instead of
+        failing.
+        """
+        unresolved: list[tuple[str, str]] = []
+
+        def collect(v: Any, path: str = "") -> None:
             if isinstance(v, str) and "{{" in v and "}}" in v:
-                logger.warning(f"Unresolved template in {path}: {v} (site: {site_name})")
+                unresolved.append((path, v))
             elif isinstance(v, dict):
                 for k, val in v.items():
-                    check_value(val, f"{path}.{k}" if path else k)
+                    collect(val, f"{path}.{k}" if path else k)
             elif isinstance(v, list):
                 for i, item in enumerate(v):
-                    check_value(item, f"{path}[{i}]")
+                    collect(item, f"{path}[{i}]")
 
-        check_value(params)
+        collect(params)
+
+        if not unresolved:
+            return
+
+        details = "; ".join(f"{path}={value}" for path, value in unresolved)
+        message = (
+            f"Unresolved template(s) for step '{step_name}' (site: {site_name}): "
+            f"{details}"
+        )
+        if self.dry_run:
+            logger.warning(message)
+            return
+        raise ValueError(message)
 
     def _evaluate_condition(self, condition: str | None, site: Site) -> bool:
         """Evaluate a step condition against a site.
@@ -865,7 +1640,7 @@ class Orchestrator:
             logger.warning(f"Invalid condition syntax: {condition}")
             return True
 
-        field_path = match.group(1)  # e.g., "labels.environment" or "properties.deployOptions.includeSolution"
+        field_path = match.group(1)  # e.g., "labels.environment" or "properties.deployOptions.enableSecretSync"
         operator = match.group(2)  # "==" or "!=" or None (for truthy check)
         # Group 3 is quoted string value, group 4 is unquoted boolean
         expected_value = match.group(3) if match.group(3) is not None else match.group(4)
@@ -926,6 +1701,12 @@ class Orchestrator:
         if isinstance(step, KubectlStep):
             return None
 
+        # Wait steps gate on an external condition, not a deployment scope.
+        # They run on any site (the condition's resourceId carries the full
+        # ARM path).
+        if isinstance(step, WaitStep):
+            return None
+
         # Check scope/site level compatibility
         is_sub_level = site.is_subscription_level
         if step.scope == "subscription" and not is_sub_level:
@@ -947,6 +1728,8 @@ class Orchestrator:
         """
         if isinstance(step, KubectlStep):
             return f"kubectl:{step.operation}"
+        if isinstance(step, WaitStep):
+            return "wait"
         return step.scope
 
     @staticmethod
@@ -1185,6 +1968,94 @@ class Orchestrator:
                 error=f"Unsupported kubectl operation: {step.operation}",
             )
 
+    def _execute_wait_step(
+        self,
+        site: Site,
+        step: WaitStep,
+        step_outputs: dict[str, dict[str, Any]],
+        subscription_outputs: SubscriptionOutputs | None = None,
+    ) -> WaitResult:
+        """Execute a wait step: resolve the condition, then poll until satisfied.
+
+        Resolves template variables and step-output references in the
+        condition's string fields (mirroring `_execute_kubectl_step`), guards
+        against an unresolved or empty resourceId/expectedValue, then hands the
+        resolved condition to the executor's poll loop.
+
+        Args:
+            site: Target site
+            step: The wait step
+            step_outputs: Outputs from previous steps (per-site)
+            subscription_outputs: Outputs from subscription-scoped steps
+
+        Returns:
+            WaitResult with success status and, on failure, a diagnostic.
+        """
+
+        def _resolve(value: str) -> str:
+            resolved = self._resolve_template_strings(value, site)
+            if step_outputs or subscription_outputs:
+                resolved = self._resolve_step_outputs(
+                    resolved, step_outputs, subscription_outputs, site.subscription
+                )
+            return str(resolved)
+
+        condition = step.condition
+
+        if condition.type == "arm-tag":
+            resolved_resource_id = _resolve(condition.resource_id)
+            resolved_expected = _resolve(condition.expected_value)
+
+            # Runtime guard: an unresolved template ({{ ... }} left intact) or an
+            # empty value would silently poll a bogus resource for the full
+            # timeout. Fail fast with a clear message instead.
+            for label, val in (
+                ("resourceId", resolved_resource_id),
+                ("expectedValue", resolved_expected),
+            ):
+                if not val.strip() or "{{" in val:
+                    return WaitResult(
+                        success=False,
+                        step_name=step.name,
+                        site_name=site.name,
+                        error=(
+                            f"Wait step '{step.name}' has an unresolved or empty {label} after "
+                            f"template resolution: {val!r}. Check the site provides the referenced "
+                            f"variables."
+                        ),
+                    )
+
+            try:
+                resolved_condition = replace(
+                    condition,
+                    resource_id=resolved_resource_id,
+                    expected_value=resolved_expected,
+                )
+            except ValueError as e:
+                return WaitResult(
+                    success=False,
+                    step_name=step.name,
+                    site_name=site.name,
+                    error=f"Wait step '{step.name}' condition invalid after resolution: {e}",
+                )
+        else:
+            # Defensive: unknown condition types are rejected at parse/validate.
+            return WaitResult(
+                success=False,
+                step_name=step.name,
+                site_name=site.name,
+                error=f"Unsupported wait condition type: {condition.type}",
+            )
+
+        return self.executor.wait_for_condition(
+            condition=resolved_condition,
+            timeout_minutes=step.timeout_minutes,
+            poll_interval_seconds=step.poll_interval_seconds,
+            subscription=site.subscription,
+            step_name=step.name,
+            site_name=site.name,
+        )
+
     def _execute_step(
         self,
         site: Site,
@@ -1209,6 +2080,8 @@ class Orchestrator:
         """
         if isinstance(step, KubectlStep):
             return self._execute_kubectl_step(site, step, step_outputs, subscription_outputs)
+        elif isinstance(step, WaitStep):
+            return self._execute_wait_step(site, step, step_outputs, subscription_outputs)
         else:
             return self._deploy_bicep_step(site, step, manifest, timestamp, step_outputs, subscription_outputs)
 
@@ -1625,13 +2498,86 @@ class Orchestrator:
                 print(f"    [{result['site']}] {error}")
             print()
 
+    def filter_sites(self, selector: dict[str, list[str]]) -> list[Site]:
+        """Apply a parsed selector to the workspace's sites.
+
+        Resolves `name=` keys via the trusted-file fast path (path-form,
+        basename, or internal name) and falls back to a full-sweep
+        attribute match for the remaining selector keys. Used by both
+        `resolve_sites` (manifest deploy) and `cmd_sites` (CLI listing)
+        so the two commands accept identical selector grammar.
+
+        Args:
+            selector: Parsed selector dict (from `parse_selector`).
+
+        Returns:
+            Matching Site instances. When the selector has a `name` key,
+            results are sorted by `Site.name` and deduplicated so a name
+            appearing in both the trusted-file and fallback sweeps is
+            returned once. Other selectors return the underlying
+            `load_all_sites()` order without an additional sort.
+        """
+        # When the operator explicitly names sites via `name=X` (or
+        # repeated `name=X,name=Y`), route every name whose filename
+        # exists in a trusted sites/ directory through load_site() so
+        # load errors (broken inherits chain, invalid YAML) propagate
+        # instead of being silently swallowed by load_all_sites() and
+        # reported as "no sites matched". Names that have no trusted
+        # filename match fall through to load_all_sites() so the
+        # operator may also select by the site's internal `name:`
+        # field, which is permitted to differ from the filename.
+        if "name" in selector:
+            requested_names = selector["name"]
+            # The fast-path treats `_find_trusted_site_file` as the
+            # name-key matcher. Re-checking via matches_selector
+            # would fail when `name=` is a path-form or internal
+            # name and `Site.name` defaults to the basename. Other
+            # selector keys still apply.
+            other_selector = {k: v for k, v in selector.items() if k != "name"}
+            trusted_results: list[Site] = []
+            untrusted_names: list[str] = []
+            for n in requested_names:
+                if self._find_trusted_site_file(n) is not None:
+                    site = self.load_site(n)
+                    if not other_selector or site.matches_selector(other_selector):
+                        trusted_results.append(site)
+                else:
+                    untrusted_names.append(n)
+            # Resolve untrusted names (and any other selector keys)
+            # via the full sweep, scoped to the untrusted name set so
+            # we do not double-count trusted sites.
+            if untrusted_names:
+                sweep_selector = {**selector, "name": untrusted_names}
+                fallback = [
+                    s for s in self.load_all_sites()
+                    if s.matches_selector(sweep_selector)
+                ]
+                seen = {s.name for s in trusted_results}
+                for s in fallback:
+                    if s.name not in seen:
+                        trusted_results.append(s)
+                        seen.add(s.name)
+            trusted_results.sort(key=lambda s: s.name)
+            return trusted_results
+        all_sites = self.load_all_sites()
+        return [s for s in all_sites if s.matches_selector(selector)]
+
     def resolve_sites(self, manifest: Manifest, cli_selector: str | None = None) -> list[Site]:
         """Resolve sites from manifest, applying selectors.
 
         Priority:
         1. CLI --selector overrides everything
         2. Explicit sites list in manifest
-        3. Manifest siteSelector
+        3. Manifest selector (`selector:`, or legacy `siteSelector:`)
+
+        Raises:
+            ValueError: When neither the manifest nor the CLI provides any
+                site targeting. The manifest is "generic" (no `sites:` and
+                no `selector:`) AND no `-l/--selector` was passed. The
+                operator must add targeting to the manifest or supply it
+                on the CLI.
+            FileNotFoundError: When the manifest lists explicit site names
+                that do not resolve to any file in the workspace.
 
         Args:
             manifest: The manifest
@@ -1640,11 +2586,21 @@ class Orchestrator:
         Returns:
             List of matching sites
         """
+        # Hard error when the manifest declares no targeting AND the operator
+        # passed no -l/--selector. Today this would silently resolve to the
+        # empty set and cause a confusing "nothing to deploy" exit; surface
+        # the missing-targeting case loudly so the operator can either add
+        # targeting to the manifest or pass it on the CLI.
+        if not cli_selector and not manifest.sites and not manifest.site_selector:
+            raise NoTargetingError(
+                f"Manifest '{manifest.name}' has no targeting. "
+                f"Add `sites:` or `selector:` to the manifest, or pass `-l <key>=<value>` on the CLI."
+            )
+
         # CLI selector requires loading all sites for filtering
         if cli_selector:
-            all_sites = self.load_all_sites()
             selector = parse_selector(cli_selector)
-            return [s for s in all_sites if s.matches_selector(selector)]
+            return self.filter_sites(selector)
 
         # Explicit sites list - load only the named sites (most common case)
         if manifest.sites:
@@ -1659,7 +2615,7 @@ class Orchestrator:
                 names = ", ".join(missing)
                 raise FileNotFoundError(
                     f"Site files not found for manifest '{manifest.name}': {names}. "
-                    f"Check that matching YAML files exist in the sites/ directory."
+                    f"Create those site YAML files under `sites/`, or fix the site names listed in the manifest."
                 )
             return sites
 
@@ -1670,6 +2626,71 @@ class Orchestrator:
             return [s for s in all_sites if s.matches_selector(selector)]
 
         return []
+
+    def explain_no_match(self, cli_selector: str | None) -> str:
+        """Diagnose why a CLI selector matched no workspace sites.
+
+        For each selector key, report what values the operator
+        requested and what values are actually present in the
+        workspace. Distinguishes a typo (`-l env=prdo`) from an
+        empty workspace or a missing label.
+
+        Returns a single-paragraph diagnostic suitable for the
+        `cmd_deploy` error path, or a generic message when
+        `cli_selector` is None.
+        """
+        if not cli_selector:
+            return "No sites matched the manifest's targeting."
+        try:
+            sel = parse_selector(cli_selector)
+        except SelectorParseError as e:
+            return f"CLI selector `-l {cli_selector}` is invalid: {e}"
+        all_sites = self.load_all_sites()
+        if not all_sites:
+            return (
+                f"No sites in workspace; CLI selector `-l {cli_selector}` "
+                f"cannot match. Add a site file under `sites/` or pass "
+                f"`--extra-sites-dir` to point at one."
+            )
+        parts: list[str] = []
+        for key, requested in sel.items():
+            if key == "name":
+                names_in_ws = sorted({s.name for s in all_sites})
+                missing = [v for v in requested if v not in names_in_ws]
+                if missing:
+                    parts.append(
+                        f"`name={','.join(missing)}` not found. Workspace "
+                        f"site names: {', '.join(names_in_ws)}."
+                    )
+                else:
+                    # Names matched; another selector key must have
+                    # filtered them out. Surface the matched names so
+                    # the operator does not get a generic "no match".
+                    matched = ",".join(requested)
+                    parts.append(
+                        f"`name={matched}` matched a workspace site but "
+                        f"another selector key filtered it out."
+                    )
+            else:
+                values_in_ws = sorted(
+                    {str(s.labels[key]) for s in all_sites if key in s.labels}
+                )
+                requested_str = ",".join(requested)
+                if not values_in_ws:
+                    parts.append(
+                        f"`{key}={requested_str}` requested but no site "
+                        f"declares the `{key}` label."
+                    )
+                else:
+                    parts.append(
+                        f"`{key}={requested_str}` requested. Workspace "
+                        f"`{key}` values: {', '.join(values_in_ws)}."
+                    )
+        if not parts:
+            return f"CLI selector `-l {cli_selector}` matched no sites."
+        return (
+            f"CLI selector `-l {cli_selector}` matched no sites. " + " ".join(parts)
+        )
 
     def validate(self, manifest_path: Path, selector: str | None = None) -> list[str]:
         """Validate manifest and return list of errors.
@@ -1694,25 +2715,73 @@ class Orchestrator:
         errors: list[str] = []
 
         try:
-            manifest = Manifest.from_file(manifest_path)
+            manifest = Manifest.from_file(manifest_path, workspace_root=self.workspace)
         except Exception as e:
             return [f"Failed to parse manifest: {e}"]
 
-        sites = self.resolve_sites(manifest, selector)
-        if not sites:
-            if manifest.sites or manifest.site_selector or selector:
+        try:
+            sites = self.resolve_sites(manifest, selector)
+            selector_parse_failed = False
+        except NoTargetingError:
+            # Generic library or partial manifest. Skip site-dependent
+            # checks since they require a concrete site. `cmd_deploy`
+            # surfaces the same condition as a hard error.
+            sites = []
+            selector_parse_failed = False
+        except SelectorParseError as e:
+            # CLI selector failed to parse. Append the parse error
+            # (operator sees it alongside other manifest issues in one
+            # diagnostic pass) but suppress the no-match diagnostic
+            # below since the parse error is the higher-signal cause.
+            errors.append(str(e))
+            sites = []
+            selector_parse_failed = True
+        except ValueError as e:
+            # Site-resolution failure (cycle, overlay-rename, missing
+            # field, etc.). Append and continue so other manifest
+            # issues still surface in this pass.
+            errors.append(str(e))
+            sites = []
+            selector_parse_failed = False
+        except FileNotFoundError as e:
+            # Manifest `sites:` entry without a workspace file.
+            errors.append(str(e))
+            sites = []
+            selector_parse_failed = False
+        if not sites and (manifest.sites or manifest.site_selector or selector):
+            if selector and not selector_parse_failed:
+                # Rich diagnostic when CLI selector knocked everything
+                # out and the selector itself parsed cleanly.
+                errors.append(self.explain_no_match(selector))
+            elif not selector:
                 errors.append("No sites matched the specified criteria")
 
         # Validate manifest-level parameter files
         for param_path in manifest.parameters:
-            full_path = (self.workspace / param_path).resolve()
-            if not full_path.exists():
-                errors.append(f"Manifest parameter file not found: {param_path}")
+            if "{{" in param_path:
+                # Dynamic path: validate resolved path for each site
+                for site in sites:
+                    resolved = manifest.resolve_parameter_path(param_path, site)
+                    full_path = (self.workspace / resolved).resolve()
+                    if not full_path.exists():
+                        errors.append(
+                            f"Manifest parameter file not found: {resolved} "
+                            f"(resolved from '{param_path}' for site '{site.name}')"
+                        )
+                    else:
+                        try:
+                            self.load_parameters(full_path)
+                        except Exception as e:
+                            errors.append(f"Invalid manifest parameter file {resolved}: {e}")
             else:
-                try:
-                    self.load_parameters(full_path)
-                except Exception as e:
-                    errors.append(f"Invalid manifest parameter file {param_path}: {e}")
+                full_path = (self.workspace / param_path).resolve()
+                if not full_path.exists():
+                    errors.append(f"Manifest parameter file not found: {param_path}")
+                else:
+                    try:
+                        self.load_parameters(full_path)
+                    except Exception as e:
+                        errors.append(f"Invalid manifest parameter file {param_path}: {e}")
 
         # Build step name lookup for output reference validation
         all_step_names = {step.name for step in manifest.steps}
@@ -1739,6 +2808,30 @@ class Orchestrator:
                     full_path = (self.workspace / file_path).resolve()
                     if not full_path.exists():
                         errors.append(f"Kubectl file not found: {file_path} (step: {step.name})")
+            elif isinstance(step, WaitStep):
+                # Validate that step-output references in the condition point
+                # only to prior steps. A wait produces no outputs, so a self or
+                # later reference can never resolve.
+                condition = step.condition
+                condition_strings: list[str] = []
+                if condition.type == "arm-tag":
+                    condition_strings = [
+                        condition.resource_id,
+                        condition.tag_key,
+                        condition.expected_value,
+                    ]
+                for condition_string in condition_strings:
+                    for match in STEP_OUTPUT_PATTERN.finditer(condition_string):
+                        ref_step = match.group(1)
+                        if ref_step not in all_step_names:
+                            errors.append(
+                                f"Step '{step.name}' wait condition references unknown step '{ref_step}'"
+                            )
+                        elif ref_step not in prior_step_names:
+                            errors.append(
+                                f"Step '{step.name}' wait condition references step '{ref_step}' "
+                                f"which does not execute before it"
+                            )
             else:
                 template_path = (self.workspace / step.template).resolve()
 
@@ -1747,6 +2840,33 @@ class Orchestrator:
                     continue
 
                 for param_path in step.parameters:
+                    if "{{" in param_path:
+                        # Dynamic path: validate resolved path for each site
+                        for site in sites:
+                            resolved = manifest.resolve_parameter_path(param_path, site)
+                            full_path = (self.workspace / resolved).resolve()
+                            if not full_path.exists():
+                                errors.append(
+                                    f"Parameter file not found: {resolved} "
+                                    f"(step: {step.name}, resolved from '{param_path}' for site '{site.name}')"
+                                )
+                            else:
+                                try:
+                                    params = self.load_parameters(full_path)
+                                    errors.extend(
+                                        self._validate_output_references(
+                                            params,
+                                            step.name,
+                                            prior_step_names,
+                                            all_step_names,
+                                            resolved,
+                                            None,
+                                        )
+                                    )
+                                except Exception as e:
+                                    errors.append(f"Invalid parameter file {resolved}: {e}")
+                        continue
+
                     full_path = (self.workspace / param_path).resolve()
                     if not full_path.exists():
                         errors.append(f"Parameter file not found: {param_path} (step: {step.name})")
@@ -1963,7 +3083,7 @@ class Orchestrator:
             manifest_path: Path to manifest file
             selector: Optional site selector
         """
-        manifest = Manifest.from_file(manifest_path)
+        manifest = Manifest.from_file(manifest_path, workspace_root=self.workspace)
         sites = self.resolve_sites(manifest, selector)
 
         if not sites:
@@ -1971,7 +3091,7 @@ class Orchestrator:
             if selector:
                 print(f"  Selector: {selector}")
             elif manifest.site_selector:
-                print(f"  Manifest siteSelector: {manifest.site_selector}")
+                print(f"  Manifest selector: {manifest.site_selector}")
             print()
             return
 
@@ -2000,12 +3120,29 @@ class Orchestrator:
                 for j, f in enumerate(step.files):
                     prefix = "└─" if j == len(step.files) - 1 else "├─"
                     print(f"       {prefix} {f}")
+            elif isinstance(step, WaitStep):
+                condition = step.condition
+                print(f"    {i}. {step.name} (wait){condition_info}")
+                if condition.type == "arm-tag":
+                    print(f"       ├─ resource: {condition.resource_id}")
+                    print(f"       ├─ tag: {condition.tag_key} == {condition.expected_value}")
+                    if condition.failure_pattern:
+                        print(f"       ├─ failurePattern: {condition.failure_pattern}")
+                print(
+                    f"       └─ timeout {step.timeout_minutes}m, poll {step.poll_interval_seconds}s"
+                )
             else:
                 print(f"    {i}. {step.name} ({step.scope}){condition_info}")
                 print(f"       └─ {step.template}")
 
         print(f"\n{'═'*60}")
-        total = sum(1 for site in sites for step in manifest.steps if self._evaluate_condition(step.when, site))
+        total = sum(
+            1
+            for site in sites
+            for step in manifest.steps
+            if self._check_step_site_compatibility(step, site) is None
+            and self._evaluate_condition(step.when, site)
+        )
         print(f"  Total: {total} operation(s)")
 
         if len(sites) > 1:
@@ -2039,7 +3176,7 @@ class Orchestrator:
             Dict with deployment results keyed by site name and summary
         """
         if manifest is None:
-            manifest = Manifest.from_file(manifest_path)
+            manifest = Manifest.from_file(manifest_path, workspace_root=self.workspace)
         if sites is None:
             sites = self.resolve_sites(manifest, selector)
 

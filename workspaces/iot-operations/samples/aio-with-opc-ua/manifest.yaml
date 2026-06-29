@@ -1,0 +1,30 @@
+apiVersion: siteops/v1
+kind: Manifest
+name: aio-with-opc-ua
+description: |
+  End-to-end example: composes the AIO platform install with the OPC UA
+  sample on top, demonstrating an asset producing telemetry that flows from
+  the broker through a dataflow to an Event Hub destination.
+
+  Post-flatten step sequence (preview with `siteops sites --render`):
+    1. global-edge-site         (gated by enableGlobalSite)
+    2. edge-site                (gated by enableEdgeSite)
+    3. schema-registry
+    4. adr-ns
+    5. aio-enablement
+    6. aio-instance
+    7. schema-registry-role
+    8. resolve-aio
+    9. opc-ua-solution
+   10. opc-plc-simulator
+
+# Default selector. Override at the CLI with `-l <key>=<value>`.
+selector: "environment=dev"
+
+# Max concurrent sites. Mirrors the sample manifest. 0 = unlimited, 1 = serial.
+parallel: 3
+
+steps:
+  - include: ../../manifests/_aio-fundamentals.yaml
+  - include: ../../manifests/_resolve-aio.yaml
+  - include: ../opc-ua-solution/_partial.yaml

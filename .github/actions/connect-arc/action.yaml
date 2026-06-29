@@ -1,0 +1,238 @@
+# Used by e2e-test.yaml. Assumes a runner-local k3s installed by
+# create-k3s-cluster. Not a general-purpose Arc onboarding action.
+#
+# Connect a local Kubernetes cluster to Azure Arc and (optionally) configure
+# workload identity by reconfiguring the kube-apiserver's service-account-issuer.
+#
+# Reference (not a verbatim port): Azure/azure-iot-ops-cli-extension
+#   .github/actions/connect-arc/action.yml
+#
+# Improvements over the reference:
+#   - systemd drop-in for the issuer-URL change (deterministic restart) instead
+#     of `kill -9 + sleep 60s`.
+#   - Re-waits Connected status AFTER the k3s restart (the restart can flap
+#     Arc to Offline; downstream secret-sync deploys then fail confusingly).
+#   - Verifies the OIDC issuer is actually being served (`/.well-known/
+#     openid-configuration`) before declaring success.
+#   - `enable-features` is wrapped in the same retry as `connect` (it can race
+#     with cluster registration completion).
+#   - `set -euo pipefail` everywhere; no `config:` input (kubeconfig comes from
+#     create-k3s-cluster's default location, no secret-leak surface).
+#   - `--only-show-errors` trims non-error Azure CLI chatter from logs.
+#
+# Assumes: caller has already run `azure/login` (OIDC) and that
+# `~/.kube/config` points at the k3s cluster.
+
+name: Connect cluster to Azure Arc
+description: Used by e2e-test.yaml. az connectedk8s connect + optional workload-identity flow.
+
+inputs:
+  cluster-name:
+    required: true
+    description: Arc-enabled cluster resource name.
+  resource-group:
+    required: true
+    description: Resource group (must already exist).
+  location:
+    required: false
+    description: Azure region.
+    default: eastus2
+  enable-workload-identity:
+    required: false
+    description: Enable OIDC issuer + workload identity (required for secret sync).
+    default: "true"
+  custom-locations-oid:
+    required: false
+    description: |
+      Object ID of the Custom Locations RP in your tenant.
+      Find with: az ad sp show --id bc313c14-388c-4e7d-a58e-70017303ee3b --query id -o tsv
+      Provide if your azure login lacks Directory.Read permissions.
+    default: ""
+
+outputs:
+  cluster-name:
+    description: Arc-enabled cluster resource name (echoed for downstream steps).
+    value: ${{ inputs.cluster-name }}
+  resource-group:
+    description: Resource group (echoed for downstream steps).
+    value: ${{ inputs.resource-group }}
+  oidc-issuer-url:
+    description: OIDC issuer URL (empty if workload identity is not enabled).
+    value: ${{ steps.issuer.outputs.url }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install connectedk8s extension
+      shell: bash
+      run: |
+        set -euo pipefail
+        az extension add --name connectedk8s --upgrade --yes --only-show-errors
+
+    - name: Connect cluster to Arc + enable features
+      shell: bash
+      env:
+        CLUSTER_NAME: ${{ inputs.cluster-name }}
+        RESOURCE_GROUP: ${{ inputs.resource-group }}
+        LOCATION: ${{ inputs.location }}
+        CUSTOM_LOCATIONS_OID: ${{ inputs.custom-locations-oid }}
+      run: |
+        set -euo pipefail
+
+        MAX_RETRIES=3
+        RETRY_DELAY=60
+
+        # Build optional --custom-locations-oid arg
+        CL_ARG=()
+        if [ -n "${CUSTOM_LOCATIONS_OID}" ]; then
+          CL_ARG=(--custom-locations-oid "${CUSTOM_LOCATIONS_OID}")
+        fi
+
+        retry() {
+          local what="$1"; shift
+          local attempt
+          for attempt in $(seq 1 $MAX_RETRIES); do
+            if "$@"; then
+              echo "${what} succeeded (attempt ${attempt})."
+              return 0
+            fi
+            if [ "${attempt}" -eq "${MAX_RETRIES}" ]; then
+              echo "::error::${what} failed after ${MAX_RETRIES} attempts"
+              return 1
+            fi
+            echo "${what} attempt ${attempt} failed; retrying in ${RETRY_DELAY}s..."
+            sleep "${RETRY_DELAY}"
+          done
+        }
+
+        retry "az connectedk8s connect" \
+          az connectedk8s connect \
+            --name "${CLUSTER_NAME}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --location "${LOCATION}" \
+            --only-show-errors \
+            "${CL_ARG[@]}"
+
+        retry "az connectedk8s enable-features" \
+          az connectedk8s enable-features \
+            --name "${CLUSTER_NAME}" \
+            --resource-group "${RESOURCE_GROUP}" \
+            --features custom-locations cluster-connect \
+            --only-show-errors \
+            "${CL_ARG[@]}"
+
+    - name: Wait for Arc Connected status (initial)
+      shell: bash
+      env:
+        CLUSTER_NAME: ${{ inputs.cluster-name }}
+        RESOURCE_GROUP: ${{ inputs.resource-group }}
+      run: |
+        set -euo pipefail
+        bash "${GITHUB_ACTION_PATH}/wait-connected.sh" "${CLUSTER_NAME}" "${RESOURCE_GROUP}"
+
+    - name: Enable OIDC issuer + workload identity
+      if: inputs.enable-workload-identity == 'true'
+      shell: bash
+      env:
+        CLUSTER_NAME: ${{ inputs.cluster-name }}
+        RESOURCE_GROUP: ${{ inputs.resource-group }}
+      run: |
+        set -euo pipefail
+        az connectedk8s update \
+          --name "${CLUSTER_NAME}" \
+          --resource-group "${RESOURCE_GROUP}" \
+          --enable-oidc-issuer \
+          --enable-workload-identity \
+          --only-show-errors
+
+    - name: Capture OIDC issuer URL
+      id: issuer
+      if: inputs.enable-workload-identity == 'true'
+      shell: bash
+      env:
+        CLUSTER_NAME: ${{ inputs.cluster-name }}
+        RESOURCE_GROUP: ${{ inputs.resource-group }}
+      run: |
+        set -euo pipefail
+        URL=$(az connectedk8s show \
+          --name "${CLUSTER_NAME}" \
+          --resource-group "${RESOURCE_GROUP}" \
+          --query oidcIssuerProfile.issuerUrl \
+          --output tsv)
+        if [ -z "${URL}" ] || [ "${URL}" = "null" ]; then
+          echo "::error::Arc returned an empty OIDC issuer URL after enable-oidc-issuer"
+          exit 1
+        fi
+        echo "OIDC issuer URL: ${URL}"
+        echo "url=${URL}" >> "${GITHUB_OUTPUT}"
+
+    - name: Restart k3s with service-account-issuer (systemd drop-in)
+      if: inputs.enable-workload-identity == 'true'
+      shell: bash
+      env:
+        ISSUER_URL: ${{ steps.issuer.outputs.url }}
+      run: |
+        set -euo pipefail
+
+        # systemd drop-in is deterministic: override ExecStart, daemon-reload, restart.
+        # Beats the upstream `kill -9 + sleep 60s` pattern: no race, full logs.
+        # The empty ExecStart= line clears the inherited value before we set ours;
+        # without it systemd would append (invalid) and fail to start the unit.
+        sudo mkdir -p /etc/systemd/system/k3s.service.d
+        sudo tee /etc/systemd/system/k3s.service.d/oidc-issuer.conf >/dev/null <<EOF
+        [Service]
+        ExecStart=
+        ExecStart=/usr/local/bin/k3s server --cluster-init --write-kubeconfig-mode=644 --kube-apiserver-arg=service-account-issuer=${ISSUER_URL}
+        EOF
+
+        sudo systemctl daemon-reload
+        sudo systemctl restart k3s
+
+        # Wait for API + node Ready again (restart resets state).
+        export KUBECONFIG="${HOME}/.kube/config"
+        MAX_ATTEMPTS=30
+        SLEEP_SECONDS=10
+        for attempt in $(seq 1 $MAX_ATTEMPTS); do
+          if kubectl get --raw=/readyz >/dev/null 2>&1; then
+            echo "k3s API ready post-restart (attempt ${attempt})."
+            break
+          fi
+          if [ "${attempt}" -eq "${MAX_ATTEMPTS}" ]; then
+            echo "::error::k3s API did not recover after issuer-URL restart"
+            sudo journalctl -u k3s --no-pager --lines=200 || true
+            exit 1
+          fi
+          sleep "${SLEEP_SECONDS}"
+        done
+        kubectl wait --for=condition=Ready node --all --timeout=300s
+
+    - name: Wait for Arc Connected status (post-restart)
+      if: inputs.enable-workload-identity == 'true'
+      shell: bash
+      env:
+        CLUSTER_NAME: ${{ inputs.cluster-name }}
+        RESOURCE_GROUP: ${{ inputs.resource-group }}
+      run: |
+        set -euo pipefail
+        # Arc heartbeat can flap Offline during the API-server restart. Without
+        # this re-wait, the next deploy step fails with a confusing "cluster
+        # not connected" error 5+ minutes into the run.
+        bash "${GITHUB_ACTION_PATH}/wait-connected.sh" "${CLUSTER_NAME}" "${RESOURCE_GROUP}"
+
+    - name: Verify OIDC discovery endpoint
+      if: inputs.enable-workload-identity == 'true'
+      shell: bash
+      env:
+        EXPECTED_ISSUER: ${{ steps.issuer.outputs.url }}
+      run: |
+        set -euo pipefail
+        export KUBECONFIG="${HOME}/.kube/config"
+        # Fail fast here if the issuer-URL restart silently didn't take;
+        # better to surface it now than let the secret-sync deploy fail
+        # 20 minutes later with a cryptic Workload Identity error.
+        ACTUAL=$(kubectl get --raw /.well-known/openid-configuration | jq -r .issuer)
+        if [ "${ACTUAL}" != "${EXPECTED_ISSUER}" ]; then
+          echo "::error::OIDC issuer mismatch: expected '${EXPECTED_ISSUER}', got '${ACTUAL}'"
+          exit 1
+        fi
+        echo "OIDC discovery verified: issuer=${ACTUAL}"
