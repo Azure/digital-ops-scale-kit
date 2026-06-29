@@ -258,7 +258,7 @@ jobs:
 
       - uses: ./.github/actions/create-k3s-cluster
 
-      - uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2
+      - uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -497,7 +497,7 @@ jobs:
           pytest $PYTEST_PATHS -v -m integration --tb=long \
             --junitxml="e2e-results-${AIO_RELEASE}.xml"
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         if: always()
         with:
           name: e2e-results-${{ matrix.aio-release }}
@@ -548,7 +548,7 @@ jobs:
           pytest $PYTEST_PATHS -v -m integration --tb=long \
             --junitxml="e2e-results-${AIO_RELEASE_FROM}-to-${AIO_RELEASE_TO}.xml"
 
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         if: always() && needs.prep.outputs.upgrade-to != '' && needs.prep.outputs.upgrade-to != matrix.aio-release
         with:
           name: e2e-results-${{ matrix.aio-release }}-to-${{ needs.prep.outputs.upgrade-to }}
