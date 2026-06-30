@@ -3,12 +3,12 @@
 #
 # The `aksee` fields machineName and customLocationsOid are required.
 # `clusterName` comes from the shared top-level `site.parameters.clusterName`
-# (the same name the AIO steps target), so the bootstrap registration and the
-# AIO lookup cannot diverge. aksEdgeMsiUrl is optional and defaults to the
-# latest K3s build via base-site. `targetLocation` is mapped to `site.location`
-# so the cluster co-locates with the AIO resources, which also derive their
-# region from `site.location`. The template otherwise defaults it to the
-# resource group's location.
+# (the name the AIO steps also target), so the two cannot diverge.
+# aksEdgeMsiUrl is optional and defaults to the latest K3s build via
+# base-site. `targetLocation` is mapped to `site.location` so the cluster
+# co-locates with the AIO resources, which also derive their region from
+# `site.location`. The template otherwise defaults it to the resource
+# group's location.
 #
 # Override per-site in `sites/<site>.yaml`. See
 # `templates/host-bootstrap/aksee/README.md`.

@@ -132,16 +132,16 @@ template only if the template declares a matching object parameter (such as
 `param brokerConfig`). Otherwise each nested field must be mapped to a
 top-level `param` in a `parameters/inputs/*.yaml` file.
 
-Within that rule, a couple of habits keep config predictable:
+Two habits keep this predictable:
 
-- A value read by more than one layer should be a single top-level key, so the
-  layers cannot disagree. `clusterName` is shared: the AKS Edge Essentials host
-  registers the cluster under that name, and Azure IoT Operations deploys onto
-  the same cluster. One top-level value feeds both.
-- Group a feature's own settings under a namespace for clarity. The `aksee`
-  block gathers the host bootstrap and upgrade settings. Namespacing is for
-  grouping, not a requirement: single-purpose values such as `brokerConfig` sit
-  at the top level too.
+- A value used by more than one layer belongs at the top level, as one key the
+  layers cannot disagree on. `clusterName` is shared: the AKS Edge Essentials
+  host registers the cluster and Azure IoT Operations deploys onto it. Split it
+  (host sets one key, AIO reads another) and the bootstrap passes, then AIO
+  fails looking up a cluster name that was never registered.
+- Group a feature's settings under a namespace for clarity, like the `aksee`
+  block. Namespacing is optional: single-purpose values such as `brokerConfig`
+  sit at the top level too.
 
 ```yaml
 parameters:
@@ -150,10 +150,6 @@ parameters:
     machineName: arc-seattle-prod-vm   # the Arc machine resource and VM hostname
     customLocationsOid: <object-id>    # custom-locations resource provider object id
 ```
-
-Splitting a shared value across two keys invites a silent mismatch. A cluster
-name set for the host but not for AIO passes the bootstrap, then fails when AIO
-looks up a cluster registered under a different name.
 
 ### Properties
 
@@ -170,13 +166,11 @@ properties:
   # `site.properties` and `site.labels`, never `site.parameters`.
   aioRelease: "2605"
 
-  # Capability toggles. On/off switches for features, kept together so an
-  # operator has one place to look. Some gate a whole step via `when:`
-  # (enableSecretSync, enableGlobalSite, enableEdgeSite); others pass their
-  # value through to a Bicep `param` from the step's `parameters/inputs`
-  # file (enableCertManager, enableWorkloadIdentity,
-  # allowKubernetesMinorUpgrade). Naming: `enable*` turns a component on,
-  # `allow*` permits a behavior.
+  # Capability toggles, kept in one place. Some gate a whole step via
+  # `when:` (enableSecretSync, enableGlobalSite, enableEdgeSite). Others
+  # pass through to a Bicep `param` (enableCertManager,
+  # enableWorkloadIdentity, allowKubernetesMinorUpgrade). `enable*` turns a
+  # component on, `allow*` permits a behavior.
   deployOptions:
     enableGlobalSite: false
     enableEdgeSite: false
