@@ -16,8 +16,5 @@
   "enableWorkloadIdentity": false,
 
   "_scheduledTaskNameNote": "Optional. Defaults to SiteOpsAksEeBootstrap when omitted. Set explicitly if you run multiple bootstraps in parallel on the same host (unusual).",
-  "scheduledTaskName": "SiteOpsAksEeBootstrap",
-
-  "_localAdminUserNote": "Only used in dedicated-admin mode. By default the worker task runs as NT AUTHORITY\\SYSTEM and no account is created. With RunAsDedicatedAdmin the launcher creates this user (default siteops-bootstrap) with an on-box generated password, runs the task as it, and removes it in Phase 99.",
-  "localAdminUser": "siteops-bootstrap"
+  "scheduledTaskName": "SiteOpsAksEeBootstrap"
 }

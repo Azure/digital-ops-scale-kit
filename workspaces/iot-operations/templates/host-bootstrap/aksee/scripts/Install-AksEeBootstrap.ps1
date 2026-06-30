@@ -22,12 +22,10 @@ as a single `Microsoft.HybridCompute/machines/runCommands` script body.
 Steps:
   1. Verify admin privileges and tighten ACLs on the config directory.
   2. Write the embedded worker and template to the config directory.
-  3. Under -RunAsDedicatedAdmin, create (or refresh) a local admin user with
-     an on-box generated password. The default (SYSTEM) needs no account.
-  4. Write `config.json` and the initial `state.json` (phase=0).
-  5. Register a Scheduled Task with at-startup + immediate triggers that runs
-     `worker.ps1` as SYSTEM (or the local admin under -RunAsDedicatedAdmin).
-  6. Start the task and return `REGISTERED` so the caller sees success.
+  3. Write `config.json` and the initial `state.json` (phase=0).
+  4. Register a Scheduled Task with at-startup + immediate triggers that runs
+     `worker.ps1` as NT AUTHORITY\SYSTEM.
+  5. Start the task and return `REGISTERED` so the caller sees success.
 
 The Scheduled Task survives reboots (at-startup trigger) so Phase 1's
 Hyper-V enablement does not lose state.
@@ -60,11 +58,6 @@ Directory holding all worker artifacts. Defaults to
 Name of the Scheduled Task. Defaults to `SiteOpsAksEeBootstrap`. Set
 explicitly only if multiple bootstraps run on the same host.
 
-.PARAMETER LocalAdminUser
-Local user the Scheduled Task runs as. Defaults to `siteops-bootstrap`.
-The launcher creates the user (or resets its password) and adds it to
-the local Administrators group.
-
 .EXAMPLE
     # The worker deploys the cluster (AioDeploy, no SP) and Arc-connects it
     # with the Arc machine's managed identity. Grant that identity Contributor
@@ -93,7 +86,6 @@ param(
     [Parameter(Mandatory)] [string]$AksEdgeMsiUrl,
     [string]$ConfigDir         = 'C:\ProgramData\siteops\aksee-bootstrap',
     [string]$ScheduledTaskName = 'SiteOpsAksEeBootstrap',
-    [string]$LocalAdminUser    = 'siteops-bootstrap',
     # Off by default to match the validated AIO baseline. Set 'true' when
     # downstream AIO needs workload-identity-backed secret sync. A string,
     # not a switch: the Arc Run Command delivers parameters as strings, and
@@ -102,13 +94,7 @@ param(
     # Refuse to re-init when state.json shows an in-flight bootstrap.
     # Pass -Force to reset state to phase=0 and re-register the task
     # (destroys progress of any concurrent run).
-    [switch]$Force,
-    # The worker Scheduled Task runs as NT AUTHORITY\SYSTEM by default, so no
-    # local account or password is created. Set 'true' to instead create the
-    # $LocalAdminUser account with an on-box generated password and run the task
-    # as it (a hardened-environment fallback). A string, not a switch, so the
-    # Arc Run Command can deliver it (matching EnableWorkloadIdentity).
-    [string]$RunAsDedicatedAdmin = 'false'
+    [switch]$Force
 )
 
 Set-StrictMode -Version Latest
@@ -139,38 +125,6 @@ function Test-IsAdmin {
     return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
-function New-RandomPassword {
-    # Strong 24-char password (upper, lower, digit, symbol) for the local
-    # admin user, drawn from a cryptographic RNG (GetBytes, for PS 5.1
-    # compatibility) with rejection sampling to avoid modulo bias. The
-    # credential grants local admin and can outlive the bootstrap on an
-    # early failure, so it must be unpredictable.
-    $upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ'
-    $lower = 'abcdefghijkmnpqrstuvwxyz'
-    $digit = '23456789'
-    $symbol = '!@#$%^&*()-_=+'
-    $all = $upper + $lower + $digit + $symbol
-    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-    try {
-        # Uniform 0..max-1 for any alphabet under 256. Single-byte rejection
-        # sampling: reject the top partial block so the result is unbiased.
-        $idx = {
-            param([int]$max)
-            $b = New-Object 'byte[]' 1; $cap = 256 - (256 % $max)
-            do { $rng.GetBytes($b) } while ($b[0] -ge $cap)
-            $b[0] % $max
-        }
-        $chars = @($upper[(& $idx $upper.Length)], $lower[(& $idx $lower.Length)], $digit[(& $idx $digit.Length)], $symbol[(& $idx $symbol.Length)])
-        for ($i = 0; $i -lt 20; $i++) { $chars += $all[(& $idx $all.Length)] }
-        # Cryptographic Fisher-Yates shuffle so the required classes are not
-        # pinned to the first positions.
-        for ($i = $chars.Count - 1; $i -gt 0; $i--) { $j = & $idx ($i + 1); $t = $chars[$i]; $chars[$i] = $chars[$j]; $chars[$j] = $t }
-        return -join $chars
-    } finally {
-        $rng.Dispose()
-    }
-}
-
 function Invoke-IcaclsOrThrow {
     # icacls is native: a non-zero exit does not raise under $ErrorActionPreference=
     # 'Stop', so check $LASTEXITCODE explicitly.
@@ -185,8 +139,8 @@ function Set-StrictAcl {
     # so this never recurses and no junction is ever followed. Strip the inherited
     # Users-read grant, which would expose the kubeconfig bearer token and az token
     # cache, grant Administrators + SYSTEM, then set ownership to the Administrators
-    # group so a dedicated local-admin runAs works as well as the SYSTEM default. Verify
-    # the owner by SID.
+    # group. The worker Scheduled Task runs as SYSTEM, which retains full access
+    # through the explicit SYSTEM grant. Verify the owner by SID.
     param([string]$Path)
     Invoke-IcaclsOrThrow @($Path, '/setowner', 'Administrators')
     Invoke-IcaclsOrThrow @($Path, '/inheritance:r')
@@ -197,26 +151,6 @@ function Set-StrictAcl {
         throw "Refusing to use ${Path}: owner SID '$ownerSid' is not Administrators or SYSTEM after hardening."
     }
     Write-Log "Locked ACLs and reclaimed ownership on $Path"
-}
-
-function Set-LocalAdminUser {
-    # Create or refresh the local admin user the Scheduled Task runs as.
-    # Returns the plaintext password (needed for Register-ScheduledTask).
-    param([string]$Username, [string]$Password)
-    $secure = ConvertTo-SecureString $Password -AsPlainText -Force
-    $user = Get-LocalUser -Name $Username -ErrorAction SilentlyContinue
-    if ($null -eq $user) {
-        Write-Log "Creating local user $Username"
-        New-LocalUser -Name $Username -Password $secure -AccountNeverExpires -PasswordNeverExpires -UserMayNotChangePassword | Out-Null
-    } else {
-        Write-Log "Resetting password on existing local user $Username"
-        Set-LocalUser -Name $Username -Password $secure
-    }
-    $group = Get-LocalGroupMember -Group 'Administrators' -Member $Username -ErrorAction SilentlyContinue
-    if ($null -eq $group) {
-        Write-Log "Adding $Username to local Administrators group"
-        Add-LocalGroupMember -Group 'Administrators' -Member $Username
-    }
 }
 
 # ---------------------------------------------------------------------------
@@ -815,9 +749,11 @@ function Invoke-Phase2 {
         }
 
         # New-AksEdgeDeployment writes the kubeconfig to the invoking user's
-        # profile: the dedicated-admin profile, or either WoW64 systemprofile
-        # tree when the task runs as SYSTEM. Copy the first hit to the ACL-locked
-        # shared path so downstream phases and the operator use one location.
+        # profile. The task runs as SYSTEM, so that is the systemprofile tree.
+        # Check $env:USERPROFILE (the systemprofile path under SYSTEM) plus both
+        # WoW64 systemprofile variants explicitly, since a 32-bit child lands in
+        # the SysWOW64 tree. Copy the first hit to the ACL-locked shared path so
+        # downstream phases and the operator use one location.
         $kubeCandidates = @(
             (Join-Path $env:USERPROFILE '.kube\config'),
             (Join-Path $env:SystemRoot 'System32\config\systemprofile\.kube\config'),
@@ -1004,9 +940,8 @@ function Invoke-Phase99 {
     Write-Log 'Phase 99: cleanup'
 
     # Write the bootstrap-state tag first, while the Phase 3 az login is still
-    # valid. The cleanup below removes the az token cache (and the bootstrap
-    # user's profile under dedicated-admin), which would strip the managed-
-    # identity auth context this tag write depends on.
+    # valid. The cleanup below removes the az token cache, which would strip the
+    # managed-identity auth context this tag write depends on.
     try {
         Write-BootstrapStateTag -config $config -Value 'succeeded'
     } catch {
@@ -1022,33 +957,8 @@ function Invoke-Phase99 {
         Write-Log "Scheduled task $taskName not found, nothing to unregister"
     }
 
-    # Remove the bootstrap local admin AND the profile directory it
-    # leaves behind. `Remove-LocalUser` only deletes the SAM entry. The
-    # profile dir holds the kubeconfig with a long-lived cluster bearer
-    # token. Capture the SID first so the profile-by-SID lookup works
-    # after the account is gone. Also defensively remove the rendered
-    # AKS EE config in case Phase 2's finally block was skipped.
-    $bootstrapUser = Get-Prop $config 'localAdminUser' 'siteops-bootstrap'
-    $user = Get-LocalUser -Name $bootstrapUser -ErrorAction SilentlyContinue
-    $bootstrapSid = $null
-    if ($null -ne $user) {
-        $bootstrapSid = $user.SID.Value
-        Write-Log "Removing local user $bootstrapUser (SID $bootstrapSid)"
-        Remove-LocalUser -Name $bootstrapUser
-    } else {
-        Write-Log "Local user $bootstrapUser not found, nothing to remove"
-    }
-    if ($bootstrapSid) {
-        $profile = Get-CimInstance -ClassName Win32_UserProfile -Filter "SID='$bootstrapSid'" -ErrorAction SilentlyContinue
-        if ($null -ne $profile) {
-            try {
-                Remove-CimInstance -InputObject $profile -ErrorAction Stop
-                Write-Log "Removed user profile $($profile.LocalPath)"
-            } catch {
-                Write-Log "WARNING: failed to remove user profile $($profile.LocalPath): $_. The kubeconfig under .kube\config persists on disk. Remove manually if needed."
-            }
-        }
-    }
+    # Defensively remove the rendered AKS EE config in case Phase 2's finally
+    # block was skipped.
     $renderedPath = Join-Path $ConfigDir 'aksedge-config.json'
     if (Test-Path $renderedPath) {
         Remove-Item -Path $renderedPath -Force -ErrorAction SilentlyContinue
@@ -1058,7 +968,7 @@ function Invoke-Phase99 {
     # SYSTEM has no user profile to remove, but New-AksEdgeDeployment still
     # wrote a kubeconfig with a bearer token into the systemprofile tree. Purge
     # both WoW64 variants. The retained ConfigDir\kubeconfig is the canonical
-    # copy. No-op in dedicated-admin mode.
+    # copy.
     foreach ($sysKube in @(
             (Join-Path $env:SystemRoot 'System32\config\systemprofile\.kube'),
             (Join-Path $env:SystemRoot 'SysWOW64\config\systemprofile\.kube'))) {
@@ -1313,15 +1223,7 @@ Set-Content -Path $workerPath   -Value $EmbeddedWorker   -Encoding UTF8
 Set-Content -Path $templatePath -Value $EmbeddedTemplate -Encoding UTF8
 Write-Log "Wrote $workerPath and $templatePath"
 
-$runAsSystem = ($RunAsDedicatedAdmin -ine 'true')
-$adminPassword = $null
-if (-not $runAsSystem) {
-    $adminPassword = New-RandomPassword
-    Set-LocalAdminUser -Username $LocalAdminUser -Password $adminPassword
-    Write-Log "Worker task will run as local admin $LocalAdminUser"
-} else {
-    Write-Log 'Worker task will run as NT AUTHORITY\SYSTEM (no local account created)'
-}
+Write-Log 'Worker task will run as NT AUTHORITY\SYSTEM (no local account created)'
 
 $config = [pscustomobject]@{
     clusterName            = $ClusterName
@@ -1331,8 +1233,6 @@ $config = [pscustomobject]@{
     customLocationsOid     = $CustomLocationsOid
     aksEdgeMsiUrl          = $AksEdgeMsiUrl
     scheduledTaskName      = $ScheduledTaskName
-    localAdminUser         = $LocalAdminUser
-    runAsSystem            = $runAsSystem
     enableWorkloadIdentity = ($EnableWorkloadIdentity -ieq 'true')
 }
 $config | ConvertTo-Json | Set-Content -Path $configPath -Encoding UTF8
@@ -1358,19 +1258,12 @@ $action = New-ScheduledTaskAction `
 $startupTrigger = New-ScheduledTaskTrigger -AtStartup
 $onceTrigger    = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddSeconds(30))
 
-# Default: run as the built-in SYSTEM service account (no credential to store).
-# -RunAsDedicatedAdmin instead runs as the created local admin (password logon).
-if ($runAsSystem) {
-    $principal = New-ScheduledTaskPrincipal `
-        -UserId 'NT AUTHORITY\SYSTEM' `
-        -LogonType ServiceAccount `
-        -RunLevel Highest
-} else {
-    $principal = New-ScheduledTaskPrincipal `
-        -UserId "$env:COMPUTERNAME\$LocalAdminUser" `
-        -LogonType Password `
-        -RunLevel Highest
-}
+# Run as the built-in SYSTEM service account, so there is no credential to
+# store for the reboot-surviving task.
+$principal = New-ScheduledTaskPrincipal `
+    -UserId 'NT AUTHORITY\SYSTEM' `
+    -LogonType ServiceAccount `
+    -RunLevel Highest
 
 $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries `
@@ -1392,19 +1285,10 @@ $task = New-ScheduledTask `
     -Principal $principal `
     -Settings $settings
 
-if ($runAsSystem) {
-    Register-ScheduledTask `
-        -TaskName $ScheduledTaskName `
-        -InputObject $task `
-        -Force | Out-Null
-} else {
-    Register-ScheduledTask `
-        -TaskName $ScheduledTaskName `
-        -InputObject $task `
-        -User "$env:COMPUTERNAME\$LocalAdminUser" `
-        -Password $adminPassword `
-        -Force | Out-Null
-}
+Register-ScheduledTask `
+    -TaskName $ScheduledTaskName `
+    -InputObject $task `
+    -Force | Out-Null
 Write-Log "Registered Scheduled Task $ScheduledTaskName"
 
 Start-ScheduledTask -TaskName $ScheduledTaskName
