@@ -6,7 +6,7 @@ description: |
   delivered remotely via Arc Run Command. Mirrors the host bootstrap's
   runCommand-worker pattern because AKS EE has no cloud-driven upgrade channel.
 
-  Supports two modes via `site.properties.deployOptions.allowAkseeMinorUpgrade`:
+  Supports two modes via `site.properties.deployOptions.allowKubernetesMinorUpgrade`:
   - Patch mode (default, false): one hop within the current Kubernetes minor
     version. The worker no-ops when no newer patch is available.
   - Minor mode (true): sequential multi-hop loop, each hop advancing one
