@@ -48,7 +48,7 @@ az provider register --namespace Microsoft.IoTOperations
 
 ## Site configuration
 
-Add an `aksee` section under your site's `parameters`. The bootstrap uses no secret, so the whole config lives in the committable `sites/` tree:
+Set the cluster name and an `aksee` section under your site's `parameters`. The bootstrap uses no secret, so the whole config lives in the committable `sites/` tree:
 
 ```yaml
 # sites/<site>.yaml (committable)
@@ -59,9 +59,9 @@ location: westus2
 labels:
   environment: dev
 parameters:
+  clusterName: my-aksee-cluster
   aksee:
     machineName: my-arc-windows-vm
-    clusterName: my-aksee-cluster
     customLocationsOid: <custom-locations RP object id>
 ```
 
@@ -69,9 +69,9 @@ Required fields:
 
 | Field | Source |
 |---|---|
-| `machineName` | The Arc-onboarded VM's machine resource name. |
-| `clusterName` | Name to register the new K3s cluster as in Arc. New per site. |
-| `customLocationsOid` | `az ad sp show --id bc313c14-388c-4e7d-a58e-70017303ee3b --query id -o tsv`. Tenant-wide. |
+| `clusterName` (top-level) | Name to register the new K3s cluster as in Arc. The AIO steps target the same name, so set it once. New per site. |
+| `aksee.machineName` | The Arc-onboarded VM's machine resource name. |
+| `aksee.customLocationsOid` | `az ad sp show --id bc313c14-388c-4e7d-a58e-70017303ee3b --query id -o tsv`. Tenant-wide. |
 
 Optional fields:
 
