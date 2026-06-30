@@ -198,14 +198,11 @@ Use properties for:
 - Path-selection keys the engine reads (`aioRelease` picks a `parameters/aio-releases/<release>.yaml` file)
 - Free-form data structures consumed via `{{ site.properties.X }}`
 
-> **A template value goes in `parameters:`, with one exception: capability
-> toggles.** A name, size, count, or other configuration value the engine
-> hands to a Bicep `param` belongs in `parameters:` (auto-filtered per
-> template). On/off feature toggles are kept together under
-> `properties.deployOptions` so every switch sits in one place. When a
-> template needs a toggle's value, a one-line entry in the step's
-> `parameters/inputs` file passes `{{ site.properties.deployOptions.X }}`
-> through to the `param`.
+> **Template values go in `parameters:`. Capability toggles are the one
+> exception.** A name, size, or count the engine hands to a Bicep `param`
+> belongs in `parameters:`. On/off toggles stay together under
+> `properties.deployOptions`, and when a template needs one, a line in the
+> step's `parameters/inputs` file passes it through to the `param`.
 
 ### What siteops enforces vs what the workspace conventions are
 
