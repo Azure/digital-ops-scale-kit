@@ -124,6 +124,33 @@ Use parameters for:
 - Values that vary per-site based on capacity
 - Complex objects consumed by Bicep templates
 
+#### Top-level vs namespaced parameters
+
+Siteops hands a `site.parameters` entry to a template only when its top-level
+key matches one of the template's `param` names. A nested block reaches a
+template only if the template declares a matching object parameter (such as
+`param brokerConfig`). Otherwise each nested field must be mapped to a
+top-level `param` in a `parameters/inputs/*.yaml` file.
+
+Two habits keep this predictable:
+
+- A value used by more than one layer belongs at the top level, as one key the
+  layers cannot disagree on. `clusterName` is shared: the AKS Edge Essentials
+  host registers the cluster and Azure IoT Operations deploys onto it. Split it
+  (host sets one key, AIO reads another) and the bootstrap passes, then AIO
+  fails looking up a cluster name that was never registered.
+- Group a feature's settings under a namespace for clarity, like the `aksee`
+  block. Namespacing is optional: single-purpose values such as `brokerConfig`
+  sit at the top level too.
+
+```yaml
+parameters:
+  clusterName: arc-seattle-prod        # shared: the host registers it, AIO runs on it
+  aksee:                               # host bootstrap and upgrade settings
+    machineName: arc-seattle-prod-vm   # the Arc machine resource and VM hostname
+    customLocationsOid: <object-id>    # custom-locations resource provider object id
+```
+
 ### Properties
 
 Free-form site state read by manifests and templates via
@@ -134,16 +161,22 @@ workspace defines its own conventions.
 ```yaml
 properties:
   # Pinned AIO release (workspace convention). Selects which
-  # `parameters/aio-releases/<release>.yaml` gets loaded.
+  # `parameters/aio-releases/<release>.yaml` gets loaded. This must be a
+  # property, not a parameter: parameter-file path interpolation reads
+  # `site.properties` and `site.labels`, never `site.parameters`.
   aioRelease: "2605"
 
-  # Capability gates evaluated by manifest `when:` conditions
-  # (workspace convention). The `enable*` prefix is a workspace style.
+  # Capability toggles, kept in one place. Some gate a whole step via
+  # `when:` (enableSecretSync, enableGlobalSite, enableEdgeSite). Others
+  # pass through to a Bicep `param` (enableCertManager,
+  # enableWorkloadIdentity, allowKubernetesMinorUpgrade). `enable*` turns a
+  # component on, `allow*` permits a behavior.
   deployOptions:
     enableGlobalSite: false
     enableEdgeSite: false
     enableSecretSync: false
     enableCertManager: true
+    allowKubernetesMinorUpgrade: false
 
   # Free-form custom fields. Anything you reference via
   # `{{ site.properties.X }}` in a manifest, parameters file,
@@ -155,15 +188,15 @@ properties:
 
 Use properties for:
 
-- Capability gates evaluated via `when:` (`deployOptions.*`)
-- Workspace-specific orchestration state (release pins, feature toggles)
+- Capability toggles, gated via `when:` or passed through to a template (`deployOptions.*`)
+- Path-selection keys the engine reads (`aioRelease` picks a `parameters/aio-releases/<release>.yaml` file)
 - Free-form data structures consumed via `{{ site.properties.X }}`
 
-> **Bicep inputs go in `parameters:`, not `properties:`.** Resource tags,
-> cluster names, and any other value the engine should hand to a Bicep
-> `param` declaration belong in `parameters:` (auto-filtered per template).
-> `properties:` is read by the orchestrator and template substitution
-> only.
+> **Template values go in `parameters:`. Capability toggles are the one
+> exception.** A name, size, or count the engine hands to a Bicep `param`
+> belongs in `parameters:`. On/off toggles stay together under
+> `properties.deployOptions`, and when a template needs one, a line in the
+> step's `parameters/inputs` file passes it through to the `param`.
 
 ### What siteops enforces vs what the workspace conventions are
 
@@ -174,7 +207,7 @@ when forking the workspace:
 | Layer | Owned by | What it cares about |
 |---|---|---|
 | YAML mechanics | siteops engine | Top-level fields (`name`, `subscription`, `resourceGroup`, `location`, `labels`, `inherits`, `parameters`, `properties`); the `parameters:` filter against Bicep template params; the `{{ site.X }}` and `{{ site.properties.<path> }}` substitution surface; selector parsing on `labels`. |
-| Field semantics | The workspace | The names of fields under `properties:` (`aioRelease`, `deployOptions`, `enable*` prefix, etc.) and the names of label keys used in selectors (`environment`, `country`, `scope`, etc.). |
+| Field semantics | The workspace | The names of fields under `properties:` (`aioRelease`, `deployOptions`, the `enable*`/`allow*` toggle prefixes, etc.) and the names of label keys used in selectors (`environment`, `country`, `scope`, etc.). |
 
 Anything in the second row is a convention you can rename for your own
 workspace. The iot-operations workspace happens to use

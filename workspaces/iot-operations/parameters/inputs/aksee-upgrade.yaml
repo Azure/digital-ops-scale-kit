@@ -9,5 +9,5 @@
 # `templates/host-ops/aksee-upgrade/README.md`.
 
 machineName: "{{ site.parameters.aksee.machineName }}"
-allowKubernetesMinorUpgrade: "{{ site.properties.deployOptions.allowAkseeMinorUpgrade }}"
+allowKubernetesMinorUpgrade: "{{ site.properties.deployOptions.allowKubernetesMinorUpgrade }}"
 targetKubernetesVersion: "{{ site.parameters.aksee.targetKubernetesVersion }}"

@@ -20,7 +20,7 @@ properties:
     enableSecretSync: false
     enableWorkloadIdentity: false # OIDC issuer + WLIF on the AKS EE host bootstrap (paired with enableSecretSync)
     enableCertManager: true      # cert-manager Arc extension on the cluster
-    allowAkseeMinorUpgrade: false # Minor Kubernetes version hops in the aksee-upgrade worker
+    allowKubernetesMinorUpgrade: false # Minor Kubernetes version hops in the aksee-upgrade worker
 
 parameters:
   # AIO broker configuration defaults

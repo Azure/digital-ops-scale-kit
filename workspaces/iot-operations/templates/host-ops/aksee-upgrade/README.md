@@ -13,8 +13,10 @@ at [`../../host-bootstrap/aksee/README.md`](../../host-bootstrap/aksee/README.md
 
 ## Scope
 
-Two upgrade modes are supported, selected by `allowAkseeMinorUpgrade` under
-`deployOptions` in the site config:
+Two upgrade modes are supported, selected by `allowKubernetesMinorUpgrade` under
+`deployOptions` in the site config. The mode toggle is a property, while the
+optional `targetKubernetesVersion` that bounds a minor-mode run is a value under
+`parameters.aksee`:
 
 **Patch mode** (default, `false`): applies AKS EE patch updates within the
 current Kubernetes minor version on a single-node cluster. `AcceptUpgrade`
@@ -117,7 +119,7 @@ parameters:
 properties:
   deployOptions:
     # Set true to enable sequential minor-version hops. Default is false (patch only).
-    allowAkseeMinorUpgrade: true
+    allowKubernetesMinorUpgrade: true
 ```
 
 ## Run
