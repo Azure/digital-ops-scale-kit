@@ -141,6 +141,20 @@ jobs:
         shell: pwsh
         run: ./scripts/validate-bicep.ps1
 
+      - name: Verify generated host launchers
+        shell: pwsh
+        run: |
+          ./workspaces/iot-operations/templates/host-bootstrap/aksee/scripts/Build-Launcher.ps1
+          ./workspaces/iot-operations/templates/host-ops/aksee-upgrade/scripts/Build-Launcher.ps1
+          git diff --exit-code -- `
+            workspaces/iot-operations/templates/host-bootstrap/aksee/scripts/Install-AksEeBootstrap.ps1 `
+            workspaces/iot-operations/templates/host-bootstrap/aksee/scripts/Install-AksEeBootstrap.min.ps1 `
+            workspaces/iot-operations/templates/host-ops/aksee-upgrade/scripts/Install-AksEeUpgrade.ps1 `
+            workspaces/iot-operations/templates/host-ops/aksee-upgrade/scripts/Install-AksEeUpgrade.min.ps1
+          if ($LASTEXITCODE -ne 0) {
+            throw "Generated host launchers are stale. Run each Build-Launcher.ps1 and commit the outputs."
+          }
+
       - name: Find manifests
         id: find
         shell: bash

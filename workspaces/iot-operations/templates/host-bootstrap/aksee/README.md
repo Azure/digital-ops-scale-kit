@@ -77,7 +77,7 @@ Optional fields:
 
 | Field | Default | Source |
 |---|---|---|
-| `aksEdgeMsiUrl` | latest K3s build (`base-site`) | A versioned AKS EE MSI URL (Microsoft Download Center) to pin a specific release. Microsoft publishes no per-version `aka.ms` link, so use the direct download URL. |
+| `aksEdgeMsiUrl` | latest K3s build (`base-site`) | A Microsoft-published versioned AKS EE MSI URL to pin a specific release. |
 
 ## Run
 
@@ -185,9 +185,12 @@ Get-WinEvent -LogName 'Microsoft-Windows-TaskScheduler/Operational' -MaxEvents 5
 
 ### Re-apply against an already-bootstrapped host
 
-Re-running the bootstrap against a host that already finished is a safe no-op. The launcher sees `state.json` at `status=succeeded`, leaves the cluster and scheduled task untouched, and returns `ALREADY-BOOTSTRAPPED`. In a composition the wait step then passes immediately on the existing `succeeded` tag. Pass `-Force` to the launcher (or use the clean-restart block below) to re-bootstrap from scratch.
+Re-running the bootstrap against a completed host revalidates Phase 3 only. The launcher changes the
+state tag to `running`, records a new run ID, and starts the worker at Phase 3. The worker verifies the
+Arc-connected cluster and reapplies the requested Arc features. It does not reinstall AKS EE, enable
+host features, recreate K3s, or reboot Windows.
 
-### Re-run a failed phase (keeps existing task and user)
+### Re-run a failed phase
 
 Use when a transient failure hit a single phase (network blip, az CLI download timeout) and you want to retry the same phase without re-running the launcher.
 
@@ -200,7 +203,7 @@ Start-ScheduledTask -TaskName SiteOpsAksEeBootstrap
 
 ### Full clean restart (Phase 0 or 1 failed, no cluster yet)
 
-Use when something fundamental needs to change (different SP, different cluster name) and you want to re-deploy from scratch. Skips the cluster cleanup because no cluster exists yet at Phase 0 or 1.
+Use when a host or cluster setting needs to change and you want to deploy from scratch. Skip cluster cleanup because no cluster exists yet at Phase 0 or 1.
 
 ```powershell
 Stop-ScheduledTask       -TaskName SiteOpsAksEeBootstrap -ErrorAction SilentlyContinue
@@ -218,7 +221,7 @@ Import-Module AksEdge -ErrorAction SilentlyContinue
 Stop-AksEdgeDeployment   -Confirm:$false -ErrorAction SilentlyContinue
 Remove-AksEdgeDeployment -Confirm:$false -ErrorAction SilentlyContinue
 
-# Then run the Full clean restart block above to wipe task + working dir + user.
+# Then run the Full clean restart block above to remove the task and working directory.
 ```
 
 ## Phases reference
@@ -229,7 +232,7 @@ Remove-AksEdgeDeployment -Confirm:$false -ErrorAction SilentlyContinue
 | 1  | MSI install + `Install-AksEdgeHostFeatures` | Yes (Hyper-V enable) |
 | 2  | Render the cluster config (AioDeploy cluster-only, no service principal) and create the single-node K3s cluster | No |
 | 3  | Install Azure CLI if missing, authenticate with the Arc machine managed identity, Arc-connect the cluster, enable `cluster-connect` and `custom-locations`, and (when `enableWorkloadIdentity` is requested) wire the OIDC issuer through the K3s apiserver | No |
-| 99 | Cleanup (unregister scheduled task, purge the task account's kubeconfig and az token cache, remove the rendered config, and remove the bootstrap user if one was created). Write `siteops.bootstrap.state` tag on the Arc machine. | No |
+| 99 | Cleanup (unregister the scheduled task, purge the system-profile kubeconfig and az token cache, and remove the rendered config). Write the terminal bootstrap tags on the Arc machine. | No |
 
 Each phase is idempotent so a worker re-run from any state is safe. Phase 1 writes the next phase to `state.json` BEFORE calling `Install-AksEdgeHostFeatures` so the at-startup scheduled-task trigger resumes at Phase 2 after the reboot.
 
@@ -237,14 +240,19 @@ Phase 3 layers AIO-specific features on top of the basic Arc-connected cluster. 
 
 ## Bootstrap state tag
 
-The worker writes a tag on the Arc machine resource that signals terminal bootstrap state:
+The launcher and worker write tags on the configured Arc machine resource:
 
+- `siteops.bootstrap.state=running` before a new worker run starts when Azure CLI is available.
 - `siteops.bootstrap.state=succeeded` on Phase 99 success.
 - `siteops.bootstrap.state=failed-phase-N` on any phase failure. N is the failing phase number.
+- `siteops.bootstrap.runId=<value>` identifies the manifest deployment that wrote the state.
 
 Downstream automation reads this tag to gate on actual bootstrap completion. A siteops `type: wait` step is the intended primary consumer. A CI script polling via `az tag list` works the same way.
 
 The worker writes the tag using the Arc machine managed identity (the same identity it uses for all Phase 3 Azure operations). The required permission is `Microsoft.Resources/tags/write` on the Arc machine resource.
+
+Failures before Azure CLI is installed cannot write a terminal tag. In that case the wait reaches its
+timeout and `state.json` plus the worker log contain the failure details.
 
 - If you granted the identity `Contributor` in [prereq #2](#2-grant-the-arc-machine-identity-access-to-the-resource-group), no extra grant is needed.
 - If you scoped it to the narrow `Kubernetes Cluster - Azure Arc Onboarding` role instead, add a `Tag Contributor` assignment on the Arc machine resource:

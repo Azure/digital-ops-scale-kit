@@ -14,6 +14,8 @@ Auto-computed when unset (local developer convenience; CI sets these explicitly)
     E2E_SITE_NAME        Defaults to `e2e-local-<unix_epoch>`
     E2E_SUBSCRIPTION     Defaults to `az account show --query id -o tsv`
     E2E_LOCATION         Defaults to `az group show -n $E2E_RESOURCE_GROUP --query location -o tsv`
+    E2E_ENABLE_SECRET_SYNC
+                         Defaults to `true`
 
 Usage:
     python scripts/render-e2e-site.py \
@@ -36,7 +38,12 @@ import time
 from pathlib import Path
 
 REQUIRED_VARS = ("E2E_RESOURCE_GROUP", "E2E_CLUSTER_NAME", "E2E_AIO_RELEASE")
-OPTIONAL_VARS = ("E2E_SITE_NAME", "E2E_SUBSCRIPTION", "E2E_LOCATION")
+OPTIONAL_VARS = (
+    "E2E_SITE_NAME",
+    "E2E_SUBSCRIPTION",
+    "E2E_LOCATION",
+    "E2E_ENABLE_SECRET_SYNC",
+)
 ALL_VARS = REQUIRED_VARS + OPTIONAL_VARS
 
 UNRESOLVED_PATTERN = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
@@ -80,6 +87,11 @@ def compute_defaults(values: dict[str, str]) -> dict[str, str]:
         out["E2E_LOCATION"] = _run_az(
             ["group", "show", "--name", rg, "--query", "location", "-o", "tsv"]
         )
+
+    if not out.get("E2E_ENABLE_SECRET_SYNC"):
+        out["E2E_ENABLE_SECRET_SYNC"] = "true"
+    if out["E2E_ENABLE_SECRET_SYNC"] not in {"true", "false"}:
+        raise RuntimeError("E2E_ENABLE_SECRET_SYNC must be `true` or `false`.")
 
     return out
 

@@ -32,10 +32,9 @@ steps:
   - include: ../../templates/host-bootstrap/aksee/_partial.yaml
 
   # Gate AIO fundamentals on the bootstrap reaching its terminal state. The
-  # worker writes siteops.bootstrap.state=succeeded on the Arc machine resource
-  # at the end of Phase 99 (or failed-phase-N on failure). The machine resource
-  # name must equal the site's aksee.machineName, which the bootstrap also
-  # targets, so the same value identifies the resource here.
+  # The launcher replaces stale terminal state before this step polls. A
+  # completed bootstrap resumes at Phase 3 to revalidate Arc connectivity.
+  # The worker writes `succeeded` at Phase 99 or `failed-phase-N` on failure.
   - name: wait-for-bootstrap
     type: wait
     condition:

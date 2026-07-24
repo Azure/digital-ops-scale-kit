@@ -1,6 +1,6 @@
 // resolve-extensions.bicep
 // -------------------------------------------------------------------------------------
-// Resolves the AIO, azure-secret-store, and (conditionally) cert-manager Arc
+// Resolves the AIO, azure-secret-store, and conditionally cert-manager Arc
 // extensions on the cluster hosting the AIO instance, returning uniform
 // snapshots that update-extensions consumes.
 //
@@ -9,12 +9,11 @@
 // uses to STAMP these names. Drift between install and upgrade is structurally
 // impossible because both sides import the same authoritative deriver/constants.
 //
-// cert-manager ownership: the conditional `existing` is gated on the deploy-time
-// `enableCertManager` parameter (sourced from `site.properties.deployOptions.
-// enableCertManager`). This is the same flag that gates the install in
-// `enablement.bicep`, so the upgrade's view of cert-manager ownership matches
-// the install's. Sites that delegate cert-manager to a customer-managed install
-// pass `enableCertManager: false` and the snapshot is returned zero-valued.
+// cert-manager ownership: the conditional `existing` lookup is gated by the
+// deploy-time `enableCertManager` parameter. This is the same flag that gates
+// the install path, so the upgrade view of cert-manager ownership matches it.
+// Sites that delegate cert-manager to a customer-managed install pass false
+// and receive a zero-valued snapshot.
 //
 // Why not iterate `customLocation.clusterExtensionIds` and filter by extensionType?
 //   BCP138 forces duplicating the filter predicate per extension, `filter(...)[0]`

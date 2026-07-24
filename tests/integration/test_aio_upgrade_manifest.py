@@ -52,6 +52,38 @@ class TestAioUpgradeDeployment:
                 assert_step_succeeded(aio_upgrade_result, name, step_name)
 
 
+class TestAioUpgradeOidcOptionality:
+    """resolve-aio supports connected clusters with and without OIDC."""
+
+    def test_missing_oidc_profile_returns_empty_issuer(self, aio_upgrade_result):
+        sites_without_oidc = 0
+        for name in aio_upgrade_result["sites"]:
+            step = assert_step_succeeded(aio_upgrade_result, name, "resolve-aio")
+            issuer = assert_output_exists(step, "oidcIssuerUrl")
+            if issuer:
+                continue
+            sites_without_oidc += 1
+            assert issuer == ""
+
+        if sites_without_oidc == 0:
+            pytest.skip("No selected site lacks an OIDC issuer profile")
+
+    def test_existing_oidc_profile_preserves_issuer(self, aio_upgrade_result):
+        sites_with_oidc = 0
+        for name in aio_upgrade_result["sites"]:
+            step = assert_step_succeeded(aio_upgrade_result, name, "resolve-aio")
+            issuer = assert_output_exists(step, "oidcIssuerUrl")
+            if not issuer:
+                continue
+            sites_with_oidc += 1
+            assert issuer.startswith("https://"), (
+                f"Site '{name}': unexpected OIDC issuer URL {issuer!r}"
+            )
+
+        if sites_with_oidc == 0:
+            pytest.skip("No selected site has an OIDC issuer profile")
+
+
 class TestAioUpgradeResolveExtensions:
     """Validate the snapshot outputs from resolve-extensions."""
 
@@ -66,7 +98,7 @@ class TestAioUpgradeResolveExtensions:
             # configurationSettings must be non-empty: union(empty, overrides)
             # would silently wipe operator-applied config on the upgrade PUT.
             assert aio["configurationSettings"], (
-                f"Site '{name}': aio.configurationSettings is empty; "
+                f"Site '{name}': aio.configurationSettings is empty. "
                 f"upgrade would wipe operator config"
             )
 
@@ -90,7 +122,7 @@ class TestAioUpgradeResolveExtensions:
                     f"Site '{name}': secretStore snapshot missing '{key}'"
                 )
             assert secret_store["configurationSettings"], (
-                f"Site '{name}': secretStore.configurationSettings is empty; "
+                f"Site '{name}': secretStore.configurationSettings is empty. "
                 f"upgrade would wipe operator config"
             )
 
@@ -123,7 +155,7 @@ class TestAioUpgradePreservation:
 
             assert install_id == upgrade_id, (
                 f"Site '{name}': AIO extension id changed across upgrade "
-                f"({install_id!r} -> {upgrade_id!r}); upgrade is replacing not patching"
+                f"({install_id!r} -> {upgrade_id!r}). Upgrade is replacing not patching"
             )
 
     def test_secret_store_extension_id_preserved(self, aio_install_result, aio_upgrade_result):
@@ -186,7 +218,7 @@ class TestAioUpgradeSelfConsistency:
 
             assert resolved_id == applied_id, (
                 f"Site '{name}': update-extensions patched {applied_id!r} but "
-                f"resolve-extensions discovered {resolved_id!r}; upgrade is "
+                f"resolve-extensions discovered {resolved_id!r}. Upgrade is "
                 f"writing to the wrong extension"
             )
 
@@ -215,7 +247,8 @@ class TestAioUpgradeSelfConsistency:
                 f"Site '{name}': aio.configurationSettings empty in upgrade snapshot"
             )
             assert secret_store["configurationSettings"], (
-                f"Site '{name}': secretStore.configurationSettings empty in upgrade snapshot"
+                f"Site '{name}': secretStore.configurationSettings empty "
+                f"in upgrade snapshot"
             )
 
 
@@ -278,7 +311,7 @@ class TestAioExtensionInvariants:
             post = assert_output_exists(update, "aioPostUpdate")
             assert post["id"] == pre["id"], (
                 f"Site '{name}': AIO extension id changed across PUT "
-                f"({pre['id']!r} -> {post['id']!r}); full-replace, not in-place"
+                f"({pre['id']!r} -> {post['id']!r}). Full-replace, not in-place"
             )
 
     def test_aio_extension_name_and_type_preserved(self, aio_upgrade_result):
@@ -305,7 +338,7 @@ class TestAioExtensionInvariants:
             post = assert_output_exists(update, "aioPostUpdate")
             assert post["releaseNamespace"] == pre["releaseNamespace"], (
                 f"Site '{name}': releaseNamespace changed "
-                f"({pre['releaseNamespace']!r} -> {post['releaseNamespace']!r}); "
+                f"({pre['releaseNamespace']!r} -> {post['releaseNamespace']!r}). "
                 f"upgrade would relocate the AIO workload"
             )
 
@@ -323,7 +356,7 @@ class TestAioExtensionInvariants:
 
     def test_aio_configuration_settings_preserved(self, aio_upgrade_result):
         """configurationSettings carries operator-applied AIO config. Update
-        uses `union(existing, overrides)` which is additive-only by contract;
+        uses `union(existing, overrides)` which is additive-only by contract.
         any mutation across PUT is data loss.
         """
         for name in aio_upgrade_result["sites"]:
@@ -354,14 +387,12 @@ class TestAioExtensionInvariants:
             )
 
 
-# Placeholder marker for new test classes - replaced by edit below
 class TestSecretStoreExtensionInvariants:
-    """Secret-store Arc extension PUT changes only `version` (and `releaseTrain`
-    when the release config specifies a different train). All other fields
-    equal the pre-PUT snapshot.
+    """Secret-store Arc extension PUT changes only `version` or `releaseTrain`.
 
-    Mirrors TestAioExtensionInvariants. Same caveats: `configurationProtectedSettings`
-    is outside the assertable surface.
+    All other fields equal the pre-PUT snapshot. This mirrors
+    TestAioExtensionInvariants. `configurationProtectedSettings` is outside the
+    assertable surface.
     """
 
     def test_secret_store_extension_id_preserved(self, aio_upgrade_result):
@@ -372,7 +403,7 @@ class TestSecretStoreExtensionInvariants:
             post = assert_output_exists(update, "secretStorePostUpdate")
             assert post["id"] == pre["id"], (
                 f"Site '{name}': secret store extension id changed across PUT "
-                f"({pre['id']!r} -> {post['id']!r}); full-replace, not in-place"
+                f"({pre['id']!r} -> {post['id']!r}). Full-replace, not in-place"
             )
 
     def test_secret_store_name_and_type_preserved(self, aio_upgrade_result):
@@ -446,7 +477,7 @@ class TestCertManagerExtensionInvariants:
             post = assert_output_exists(update, "certManagerPostUpdate")
             assert post["id"] == pre["id"], (
                 f"Site '{name}': cert-manager extension id changed across PUT "
-                f"({pre['id']!r} -> {post['id']!r}); full-replace, not in-place"
+                f"({pre['id']!r} -> {post['id']!r}). Full-replace, not in-place"
             )
 
     def test_cert_manager_name_and_type_preserved(self, aio_upgrade_result):

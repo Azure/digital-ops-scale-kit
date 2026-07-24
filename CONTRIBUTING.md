@@ -60,6 +60,8 @@ stays in sync with the version in `siteops/__init__.py` (read dynamically by pyp
 
 - The scale kit version cannot be more stable than siteops. If siteops is beta, the scale kit
   is beta.
+- Keep `siteops.__version__` at `1.0.0b1` throughout the `v1.0.0b*` Scale Kit content beta series.
+  Do not create another `siteops/v*` beta tag unless the release policy changes.
 - When a content release requires a new siteops version, tag both on the same commit.
 - Content-only changes (new templates, manifest updates, doc fixes) bump only the `v*` tag.
 - Tool-only changes (CLI features, orchestrator fixes) bump only the `siteops/v*` tag.

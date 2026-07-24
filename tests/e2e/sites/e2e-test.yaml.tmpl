@@ -28,6 +28,8 @@
 #   E2E_LOCATION         Azure region (ephemeral: workflow input; persistent: from `az group show`)
 #   E2E_CLUSTER_NAME     Arc-connected cluster name created earlier in the run
 #   E2E_AIO_RELEASE      AIO release selector (drives versioned-templates path)
+#   E2E_ENABLE_SECRET_SYNC
+#                        Whether the site enables Secret Sync (`true` or `false`)
 
 apiVersion: siteops/v1
 kind: Site
@@ -49,7 +51,7 @@ properties:
   deployOptions:
     enableGlobalSite: false
     enableEdgeSite: false
-    enableSecretSync: true
+    enableSecretSync: ${E2E_ENABLE_SECRET_SYNC}
     enableCertManager: true
 
 parameters:
