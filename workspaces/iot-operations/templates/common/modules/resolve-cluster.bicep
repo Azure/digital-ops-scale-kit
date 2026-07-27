@@ -4,7 +4,9 @@
 //
 // Accepts the full resource ID (e.g., from customLocation.properties.hostResourceId),
 // parses the name, declares the cluster as an existing resource, and outputs
-// its OIDC issuer URLs for workload identity federation.
+// its OIDC issuer URLs for workload identity federation. Clusters without
+// workload identity do not expose oidcIssuerProfile, so those outputs are
+// empty strings rather than failed output evaluations.
 //
 // The module boundary converts the runtime resource ID into a compile-time
 // parameter, allowing the existing resource lookup that Bicep otherwise
@@ -26,8 +28,8 @@ output name string = connectedCluster.name
 @description('Full ARM resource ID of the connected cluster. Used by upgrade flow to compute the AIO Arc extension name via aioExtensionName(clusterResourceId), mirroring the install-time derivation.')
 output id string = connectedCluster.id
 
-@description('Public OIDC issuer URL for workload identity federation.')
-output oidcIssuerUrl string = connectedCluster.properties.oidcIssuerProfile.issuerUrl
+@description('Public OIDC issuer URL for workload identity federation. Empty when the cluster has no OIDC issuer profile.')
+output oidcIssuerUrl string = connectedCluster.properties.?oidcIssuerProfile.?issuerUrl ?? ''
 
 @description('Self-hosted OIDC issuer URL (empty string if not configured).')
-output selfHostedIssuerUrl string = connectedCluster.properties.oidcIssuerProfile.?selfHostedIssuerUrl ?? ''
+output selfHostedIssuerUrl string = connectedCluster.properties.?oidcIssuerProfile.?selfHostedIssuerUrl ?? ''

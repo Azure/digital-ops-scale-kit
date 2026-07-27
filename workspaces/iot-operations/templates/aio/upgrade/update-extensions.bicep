@@ -1,6 +1,6 @@
 // update-extensions.bicep
 // -------------------------------------------------------------------------------------
-// Bumps Arc extension versions for AIO, secret-store, and (conditionally) cert-manager
+// Bumps Arc extension versions for AIO, secret-store, and conditionally cert-manager
 // while preserving each extension's existing configurationSettings, releaseTrain, and
 // identity. Inputs are typically chained from `resolve-extensions.bicep` outputs.
 //
@@ -11,9 +11,8 @@
 // configurationOverrides are unioned over the existing configurationSettings so
 // the PUT cannot wipe operator state.
 //
-// cert-manager is gated by `enableCertManager`: when false, no cert-manager PUT
-// is emitted. (Conditional resource declaration. The existing extension is left
-// untouched.)
+// cert-manager is gated by `enableCertManager`. When false, no cert-manager PUT
+// is emitted and the existing extension is left untouched.
 //
 // API version: `Microsoft.KubernetesConfiguration/extensions@2023-05-01` is fixed
 // across AIO releases and is not driven by the AIO API version dispatcher. If a
@@ -197,7 +196,7 @@ resource certManagerExtensionUpdate 'Microsoft.KubernetesConfiguration/extension
 @description('Resource ID of the (updated) AIO Arc extension.')
 output aioExtensionId string = aioExtensionUpdate.id
 
-@description('Resource ID of the (updated) secret store Arc extension.')
+@description('Resource ID of the updated secret store Arc extension.')
 output secretStoreExtensionId string = secretStoreExtensionUpdate.id
 
 @description('Resource ID of the (updated) cert-manager Arc extension. Empty when enableCertManager is false.')

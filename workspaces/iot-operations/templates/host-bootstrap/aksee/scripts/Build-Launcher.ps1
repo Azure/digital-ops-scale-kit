@@ -159,6 +159,10 @@ if ($minErrors.Count -gt 0) {
 $minBytes = (Get-Item $minPath).Length
 $minLines = (Get-Content $minPath).Count
 Write-Host ("Generated {0} ({1} lines, {2:N0} bytes, parse OK)" -f $minPath, $minLines, $minBytes)
+$maxInlineBytes = 38000
+if ($minBytes -gt $maxInlineBytes) {
+    throw ("Minified launcher is {0:N0} bytes and exceeds the configured {1:N0}-byte inline delivery limit. Move the runCommand to scriptUri delivery." -f $minBytes, $maxInlineBytes)
+}
 if ($minBytes -gt 36000) {
     Write-Warning ("Minified launcher is {0:N0} bytes and is approaching the runCommands inline-script size limit. Slim the source or move to scriptUri delivery before it grows further." -f $minBytes)
 }

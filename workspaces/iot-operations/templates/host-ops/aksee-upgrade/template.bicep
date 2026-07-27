@@ -14,7 +14,8 @@
 // Two upgrade modes are supported via `allowKubernetesMinorUpgrade`:
 //   false (default): patch updates within the current Kubernetes minor version.
 //   true: sequential minor-version hops. `AcceptUpgrade` is set true only for
-//   the run and re-pinned false on completion or failure. Use
+//   the run and re-pinned false after successful completion. A failed run
+//   preserves the staged update cache. Use
 //   `targetKubernetesVersion` to stop at a specific minor version. The wait
 //   step timeout should be raised for multi-hop runs.
 //
@@ -55,7 +56,7 @@ param targetSubscription string = subscription().subscriptionId
 @description('Opaque per-deploy identifier recorded in the completion tag (siteops.aksee.upgrade.runId). Defaults to the deploy time so each deploy is correlatable. Re-deploys with a fresh value re-run the worker, which no-ops when no newer patch is available.')
 param runId string = utcNow()
 
-@description('When false (default), the worker applies patch updates within the current Kubernetes minor version. When true, the worker performs sequential minor-version hops. `AcceptUpgrade` is scoped to the run and re-pinned false on completion or failure.')
+@description('When false (default), the worker applies patch updates within the current Kubernetes minor version. When true, the worker performs sequential minor-version hops. `AcceptUpgrade` is scoped to the run and re-pinned false after successful completion. A failed run preserves the staged update cache.')
 param allowKubernetesMinorUpgrade bool = false
 
 @description('Optional target Kubernetes minor version for minor-mode upgrades, e.g. `1.33` or `v1.33.5+k3s1`. The worker normalizes to major.minor and stops hopping once the deployed minor reaches this value. Empty string means no explicit target.')

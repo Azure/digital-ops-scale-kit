@@ -4,10 +4,12 @@
   "clusterName": "aksee-cluster1",
   "resourceGroup": "aksee-rg",
   "subscription": "00000000-0000-0000-0000-000000000000",
+  "machineName": "arc-server1",
+  "runId": "manual-20260723T210000Z",
   "location": "westus2",
   "customLocationsOid": "00000000-0000-0000-0000-000000000000",
 
-  "_aksEdgeMsiUrlNote": "Official aka.ms shortcut to the latest stable AKS Edge Essentials K3s MSI. Microsoft does not publish per-version aka.ms links, so to pin a specific version, host the MSI yourself and point this at it.",
+  "_aksEdgeMsiUrlNote": "Official aka.ms shortcut to the latest stable AKS Edge Essentials K3s MSI. Use a Microsoft-published versioned MSI URL to pin a specific release.",
   "aksEdgeMsiUrl": "https://aka.ms/aks-edge/k3s-msi",
 
   "_authNote": "Phase 3 authenticates with the Arc machine's system-assigned managed identity (az login --identity). Grant it Contributor on the resource group, or Kubernetes Cluster - Azure Arc Onboarding plus Tag Contributor for least privilege. No service principal is used.",

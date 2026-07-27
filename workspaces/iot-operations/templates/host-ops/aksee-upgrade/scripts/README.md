@@ -8,7 +8,7 @@ remediation) is in [`../README.md`](../README.md).
 |---|---|---|
 | `worker.ps1` | The phase state machine that runs on the VM. Source. | Yes |
 | `launcher-template.ps1` | Launcher source with the `__EMBEDDED_WORKER_PS1__` sentinel. Writes the worker, registers the SYSTEM task, sets the in-progress tag. | Yes |
-| `Build-Launcher.ps1` | Generator. Embeds the worker into the launcher, emits the full and minified variants, parse-checks both, warns near the size boundary. | No (run after editing sources) |
+| `Build-Launcher.ps1` | Generator. Embeds the worker into the launcher, emits the full and minified variants, and enforces parse and inline-size checks. | No (run after editing sources) |
 | `Install-AksEeUpgrade.ps1` | Generated full launcher. Operator-direct invocation form. | No (regenerated) |
 | `Install-AksEeUpgrade.min.ps1` | Generated minified launcher. The Bicep `loadTextContent` references this. | No (regenerated) |
 | `config.example.json` | Example config for direct worker invocation (debugging only). | Reference |
@@ -23,12 +23,9 @@ and the parse check falsely errors):
 powershell -File "<abs>\Build-Launcher.ps1" -ScriptDir "<abs>"
 ```
 
-The generator parse-checks both variants and exits non-zero on failure. The
-minified launcher is what the Bicep inlines, so keep it within the runCommands
-inline-script size limit. The minifier already strips comments and blank lines,
-so only code reductions shrink the delivered launcher. If it approaches the
-limit, switch to `scriptUri` (a SAS blob URL) delivery, which removes the
-inline-size limit at the cost of a storage dependency.
+The generator parse-checks both variants and exits non-zero on parse or inline-size failure. The
+minified launcher is what the Bicep inlines. Move to `scriptUri` delivery when the launcher needs
+more capacity.
 
 ## Direct worker invocation (local testing)
 

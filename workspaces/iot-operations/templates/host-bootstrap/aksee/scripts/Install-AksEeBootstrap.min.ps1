@@ -4,6 +4,8 @@ param(
 [Parameter(Mandatory)] [string]$ClusterName,
 [Parameter(Mandatory)] [string]$ResourceGroup,
 [Parameter(Mandatory)] [string]$Subscription,
+[Parameter(Mandatory)] [string]$MachineName,
+[Parameter(Mandatory)] [string]$RunId,
 [Parameter(Mandatory)] [string]$Location,
 [Parameter(Mandatory)] [string]$CustomLocationsOid,
 [Parameter(Mandatory)] [string]$AksEdgeMsiUrl,
@@ -44,6 +46,39 @@ if ($ownerSid -notin @('S-1-5-32-544', 'S-1-5-18')) {
 throw "Refusing to use ${Path}: owner SID '$ownerSid' is not Administrators or SYSTEM after hardening."
 }
 Write-Log "Locked ACLs and reclaimed ownership on $Path"
+}
+function Set-RunningTag {
+param([switch]$Required)
+if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
+if ($Required) {
+throw 'Azure CLI is required to refresh completed bootstrap state, but it is not installed.'
+}
+Write-Log 'Skipping in-progress tag write because Azure CLI is not installed.'
+return
+}
+try {
+$env:AZURE_CONFIG_DIR = Join-Path $ConfigDir '.azure'
+foreach ($name in @('IDENTITY_ENDPOINT', 'IMDS_ENDPOINT')) {
+if (-not [Environment]::GetEnvironmentVariable($name)) {
+$machineValue = [Environment]::GetEnvironmentVariable($name, 'Machine')
+if ($machineValue) { Set-Item -Path "Env:$name" -Value $machineValue }
+}
+}
+& az login --identity --only-show-errors 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'az login --identity returned non-zero.' }
+$accountOut = & az account set --subscription $Subscription 2>&1
+if ($LASTEXITCODE -ne 0) { throw "az account set failed: $accountOut" }
+$arcId = "/subscriptions/$Subscription/resourceGroups/$ResourceGroup/providers/Microsoft.HybridCompute/machines/$MachineName"
+$tagOut = & az tag update --resource-id $arcId --operation merge --tags `
+'siteops.bootstrap.state=running' `
+"siteops.bootstrap.runId=$RunId" `
+--only-show-errors 2>&1
+if ($LASTEXITCODE -ne 0) { throw "az tag update failed: $tagOut" }
+Write-Log "Set siteops.bootstrap.state=running on $arcId (runId=$RunId)"
+} catch {
+if ($Required) { throw "Failed to refresh bootstrap state before revalidation: $_" }
+Write-Log "Skipping in-progress tag write. The worker will retry when Azure CLI is available. $_"
+}
 }
 $EmbeddedWorker = @'
 [CmdletBinding()]
@@ -167,20 +202,45 @@ if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
 Write-Log "Skipping bootstrap-state tag write: az CLI not installed."
 return
 }
+$account = & az account show --output none --only-show-errors 2>&1
+if ($LASTEXITCODE -ne 0) {
+foreach ($envName in @('IDENTITY_ENDPOINT', 'IMDS_ENDPOINT')) {
+if (-not [Environment]::GetEnvironmentVariable($envName)) {
+$machineValue = [Environment]::GetEnvironmentVariable($envName, 'Machine')
+if ($machineValue) { Set-Item -Path "Env:$envName" -Value $machineValue }
+}
+}
+$loginOut = & az login --identity --only-show-errors 2>&1
+if ($LASTEXITCODE -ne 0) {
+Write-Log "Skipping bootstrap-state tag write because managed-identity login failed: $loginOut"
+return
+}
+$accountOut = & az account set --subscription $config.subscription 2>&1
+if ($LASTEXITCODE -ne 0) {
+Write-Log "Skipping bootstrap-state tag write because subscription selection failed: $accountOut"
+return
+}
+}
 $sub  = $config.subscription
 $rg   = $config.resourceGroup
-$name = $env:COMPUTERNAME
+$name = [string](Get-Prop $config 'machineName' '')
 if (-not $sub -or -not $rg -or -not $name) {
-Write-Log "Skipping bootstrap-state tag write: missing subscription / resourceGroup / COMPUTERNAME."
+Write-Log 'Skipping bootstrap-state tag write because subscription, resource group, or machine name is missing.'
 return
 }
 $arcId = "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.HybridCompute/machines/$name"
-$tagOut = & az tag update --resource-id $arcId --operation merge --tags "siteops.bootstrap.state=$Value" --only-show-errors 2>&1
-if ($LASTEXITCODE -ne 0) {
-Write-Log "WARNING: tag write failed on $arcId (exit $LASTEXITCODE): $tagOut. See README Prerequisites for the required Microsoft.Resources/tags/write grant."
+$runId = [string](Get-Prop $config 'runId' '')
+$tags = @("siteops.bootstrap.state=$Value", "siteops.bootstrap.runId=$runId")
+for ($attempt = 1; $attempt -le 3; $attempt++) {
+$tagOut = & az tag update --resource-id $arcId --operation merge --tags @tags --only-show-errors 2>&1
+if ($LASTEXITCODE -eq 0) {
+Write-Log "Wrote tag siteops.bootstrap.state=$Value on $arcId (runId=$runId)"
 return
 }
-Write-Log "Wrote tag siteops.bootstrap.state=$Value on $arcId"
+Write-Log "WARNING: tag write attempt $attempt/3 failed on $arcId (exit $LASTEXITCODE): $tagOut"
+if ($attempt -lt 3) { Start-Sleep -Seconds 5 }
+}
+Write-Log "WARNING: bootstrap-state tag write did not succeed after 3 attempts on $arcId."
 }
 function Test-ClusterArcConnected {
 param([string]$ClusterName, [string]$ResourceGroup)
@@ -655,9 +715,9 @@ $workerPath   = Join-Path $ConfigDir 'worker.ps1'
 $templatePath = Join-Path $ConfigDir 'aksedge-config.template.json'
 $configPath   = Join-Path $ConfigDir 'config.json'
 $statePath    = Join-Path $ConfigDir 'state.json'
+$initialPhase = 0
 if ((Test-Path $statePath) -and -not $Force) {
 $inFlight = $false
-$alreadyDone = $false
 $existingPhase = $null
 $existingStatus = $null
 try {
@@ -667,7 +727,7 @@ $existingStatus = $existing.status
 if ($existing.status -in @('running', 'pending-reboot')) {
 $inFlight = $true
 } elseif ($existing.status -eq 'succeeded') {
-$alreadyDone = $true
+$initialPhase = 3
 }
 if ($existing.PSObject.Properties.Name -contains 'phase') {
 $existingPhase = $existing.phase
@@ -679,11 +739,6 @@ Write-Log "WARNING: existing state.json could not be parsed. Re-initializing. ($
 if ($inFlight) {
 throw "Bootstrap already in flight (state.json shows phase=$existingPhase status=$existingStatus). Pass -Force to reset state and re-register the task, or wait for the existing run to complete."
 }
-if ($alreadyDone) {
-Write-Log "Bootstrap already completed (state.json shows phase=$existingPhase status=succeeded). Nothing to do. Pass -Force to re-bootstrap from scratch."
-Write-Output 'ALREADY-BOOTSTRAPPED'
-return
-}
 }
 Set-Content -Path $workerPath   -Value $EmbeddedWorker   -Encoding UTF8
 Set-Content -Path $templatePath -Value $EmbeddedTemplate -Encoding UTF8
@@ -693,6 +748,8 @@ $config = [pscustomobject]@{
 clusterName            = $ClusterName
 resourceGroup          = $ResourceGroup
 subscription           = $Subscription
+machineName            = $MachineName
+runId                  = $RunId
 location               = $Location
 customLocationsOid     = $CustomLocationsOid
 aksEdgeMsiUrl          = $AksEdgeMsiUrl
@@ -702,7 +759,7 @@ enableWorkloadIdentity = ($EnableWorkloadIdentity -ieq 'true')
 $config | ConvertTo-Json | Set-Content -Path $configPath -Encoding UTF8
 Write-Log "Wrote $configPath (auth=managed identity, WI=$($EnableWorkloadIdentity -ieq 'true'))"
 $initialState = [pscustomobject]@{
-phase       = 0
+phase       = $initialPhase
 status      = 'running'
 lastUpdated = (Get-Date).ToString('o')
 error       = $null
@@ -710,7 +767,8 @@ error       = $null
 $initialStateTmp = "$statePath.tmp"
 $initialState | ConvertTo-Json | Set-Content -Path $initialStateTmp -Encoding UTF8
 Move-Item -Path $initialStateTmp -Destination $statePath -Force
-Write-Log "Wrote $statePath (phase=0)"
+Write-Log "Wrote $statePath (phase=$initialPhase)"
+Set-RunningTag -Required:($initialPhase -eq 3)
 $action = New-ScheduledTaskAction `
 -Execute 'powershell.exe' `
 -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$workerPath`" -ConfigDir `"$ConfigDir`""

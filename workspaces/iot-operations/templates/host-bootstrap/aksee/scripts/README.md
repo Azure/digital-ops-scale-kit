@@ -32,14 +32,13 @@ Generated Install-AksEeBootstrap.ps1 (<N> lines, parse OK)
 Generated Install-AksEeBootstrap.min.ps1 (<N> lines, <N> bytes, parse OK)
 ```
 
-The generator parse-checks both variants and exits non-zero on failure. The minified variant is what the Bicep delivers via Arc Run Command. The full variant is for operator-direct use on the VM. Do not hand-edit the generated files. They are overwritten on every build.
+The generator parse-checks both variants and exits non-zero on parse or inline-size failure. The minified variant is what the Bicep delivers via Arc Run Command. The full variant is for operator-direct use on the VM. Do not hand-edit the generated files. They are overwritten on every build.
 
 ### Size constraints
 
-The Bicep template inlines the minified launcher, so it must stay within the size limit for an Arc `runCommands` script body. The generator warns when the minified launcher grows large. If it approaches the limit, options are:
-
-1. Reduce code. The minifier already strips comments and blank lines, so only code reductions (removing dead code, consolidating logic) shrink the delivered launcher.
-2. Switch to `scriptUri` delivery (a SAS URL to a blob), which the Arc run-command docs recommend for larger scripts and removes the inline-size limit. Adds a storage dependency.
+The Bicep template inlines the minified launcher, so it must stay within the configured Arc
+`runCommands` script-body limit. The generator warns before the limit and fails after it. Move to
+`scriptUri` delivery when the launcher needs more capacity.
 
 ## Direct worker invocation (local testing)
 

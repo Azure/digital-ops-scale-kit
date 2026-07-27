@@ -8,7 +8,7 @@
   "_runIdNote": "Opaque per-deploy identifier recorded in the completion tag (siteops.aksee.upgrade.runId) so a tag can be correlated with a specific deploy. The Bicep defaults it to the deploy time.",
   "runId": "2026-06-15T180000Z",
 
-  "_allowKubernetesMinorUpgradeNote": "When false (default), the worker applies patch updates only. When true, the worker performs sequential minor-version hops. AcceptUpgrade is scoped to the run and re-pinned false on completion or failure.",
+  "_allowKubernetesMinorUpgradeNote": "When false (default), the worker applies patch updates only. When true, the worker performs sequential minor-version hops. AcceptUpgrade is re-pinned false after successful completion. A failed run preserves the staged update cache.",
   "allowKubernetesMinorUpgrade": false,
 
   "_targetKubernetesVersionNote": "Optional. When allowKubernetesMinorUpgrade is true, the worker stops hopping once the deployed Kubernetes minor version matches this value. Accepts formats like '1.33' or 'v1.33.5+k3s1'. Empty string means upgrade to the latest available.",

@@ -44,7 +44,7 @@ on:
         type: string
         default: ""
       custom-locations-oid:
-        description: Custom Locations RP object ID in the tenant (see docs/e2e-testing.md).
+        description: Custom Locations RP object ID in the tenant. Empty uses the CUSTOM_LOCATIONS_OID environment secret.
         type: string
         default: ""
       skip-teardown:
@@ -59,6 +59,10 @@ on:
         description: Optional AIO release to upgrade to after the install-phase tests pass. Empty = skip the upgrade phase. Each matrix cell whose `aio-releases` value differs from this re-renders the site at the upgrade-to release and runs aio-upgrade.yaml + the upgrade-only integration tests.
         type: string
         default: ""
+      secret-sync-modes:
+        description: "Comma-separated modes: enabled,disabled. Disabled mode omits Secret Sync, OIDC issuer, and workload identity. Use both modes with tests=aio-upgrade to qualify optionality."
+        type: string
+        default: "enabled"
       tests:
         description: "Subset of integration test files to run, comma-separated. Each value maps to one tests/integration/test_<value>_manifest.py file and narrows which manifest gets deployed onto the cluster. Empty = run all. Valid values: aio-install, secretsync, secretsync-sample, opc-ua-solution, aio-upgrade. Useful for demos and focused debugging when paired with keep-cluster-alive-minutes."
         type: string
@@ -79,6 +83,8 @@ jobs:
       cluster-in: ${{ steps.v.outputs.cluster_in }}
       upgrade-to: ${{ steps.v.outputs.upgrade_to }}
       pytest-paths: ${{ steps.v.outputs.pytest_paths }}
+      secret-sync-modes: ${{ steps.v.outputs.secret_sync_modes }}
+      max-parallel: ${{ steps.v.outputs.max_parallel }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -92,6 +98,7 @@ jobs:
           INPUT_RG: "${{ inputs.resource-group }}"
           INPUT_CLUSTER: "${{ inputs.cluster-name }}"
           INPUT_UPGRADE_TO: "${{ inputs.upgrade-to }}"
+          INPUT_SECRET_SYNC_MODES: "${{ inputs.secret-sync-modes }}"
           INPUT_TESTS: "${{ inputs.tests }}"
           RUN_ID: "${{ github.run_id }}"
         run: |
@@ -117,11 +124,29 @@ jobs:
           rg_in = os.environ["INPUT_RG"].strip()
           cl_in = os.environ["INPUT_CLUSTER"].strip()
           upgrade_to = os.environ["INPUT_UPGRADE_TO"].strip()
-          persistent = bool(rg_in)
-          if cl_in and len(rs) > 1:
+          secret_sync_modes = [
+              mode.strip()
+              for mode in os.environ["INPUT_SECRET_SYNC_MODES"].split(",")
+              if mode.strip()
+          ]
+          if not secret_sync_modes:
+              sys.exit("secret-sync-modes must be non-empty")
+          secret_sync_modes = list(dict.fromkeys(secret_sync_modes))
+          invalid_secret_sync_modes = [
+              mode for mode in secret_sync_modes
+              if mode not in {"enabled", "disabled"}
+          ]
+          if invalid_secret_sync_modes:
               sys.exit(
-                  "cluster-name cannot be combined with a multi-release "
-                  "aio-releases matrix (each matrix cell registers its own cluster)."
+                  "secret-sync-modes entries not recognized: "
+                  f"{invalid_secret_sync_modes}. Valid: ['disabled', 'enabled']."
+              )
+          persistent = bool(rg_in)
+          if cl_in and (len(rs) > 1 or len(secret_sync_modes) > 1):
+              sys.exit(
+                  "cluster-name cannot be combined with a matrix that has "
+                  "multiple AIO releases or Secret Sync modes. Each matrix "
+                  "cell registers its own cluster."
               )
           # Validate upgrade-to against shipped versions. Same-version cells
           # are NOT a hard error here: a matrix like `aio-releases=2604,2605`
@@ -185,7 +210,17 @@ jobs:
               pytest_paths = " ".join(test_map[s] for s in ordered)
           else:
               pytest_paths = "tests/integration/"
+          if "disabled" in secret_sync_modes:
+              secret_sync_tests = {"secretsync", "secretsync-sample"}
+              if not tests_in or secret_sync_tests.intersection(tests_in):
+                  sys.exit(
+                      "secret-sync-modes includes 'disabled', but the selected "
+                      "tests include Secret Sync coverage. Set tests=aio-upgrade "
+                      "or choose only phases that do not deploy Secret Sync."
+                  )
           print(f"versions={json.dumps(rs)}")
+          print(f"secret_sync_modes={json.dumps(secret_sync_modes)}")
+          print(f"max_parallel={1 if persistent else 20}")
           print(f"upgrade_to={upgrade_to}")
           print(f"persistent={'true' if persistent else 'false'}")
           # Emit trimmed operator inputs so downstream steps use the exact
@@ -215,12 +250,14 @@ jobs:
       # they serialize (same RG can only host one AIO deploy at a time).
       # Ephemeral: rg_key is per-run and the release suffix distinguishes
       # cells, so matrix fan-out runs in parallel.
-      group: e2e-${{ needs.prep.outputs.rg-key }}${{ needs.prep.outputs.persistent == 'true' && '-persistent' || format('-{0}', matrix.aio-release) }}
+      group: e2e-${{ needs.prep.outputs.rg-key }}${{ needs.prep.outputs.persistent == 'true' && '-persistent' || format('-{0}-secretsync-{1}', matrix.aio-release, matrix.secret-sync-mode) }}
       cancel-in-progress: false
     strategy:
       fail-fast: false
+      max-parallel: ${{ fromJSON(needs.prep.outputs.max-parallel) }}
       matrix:
         aio-release: ${{ fromJSON(needs.prep.outputs.versions) }}
+        secret-sync-mode: ${{ fromJSON(needs.prep.outputs.secret-sync-modes) }}
     env:
       PERSISTENT_RG: ${{ needs.prep.outputs.persistent }}
       DEBUG_USER_OID: ${{ secrets.DEBUG_USER_OID }}
@@ -236,7 +273,9 @@ jobs:
           RG_IN: "${{ needs.prep.outputs.rg-in }}"
           CL_IN: "${{ needs.prep.outputs.cluster-in }}"
           RELEASE: "${{ matrix.aio-release }}"
-          RUN_SUFFIX: "${{ github.run_id }}-${{ github.run_attempt }}"
+          SECRET_SYNC_MODE: "${{ matrix.secret-sync-mode }}"
+          RUN_ID: "${{ github.run_id }}"
+          RUN_ATTEMPT: "${{ github.run_attempt }}"
         # Some AIO release strings may contain dots. Arc clusters
         # and several AIO-derived resource names reject dots, so we derive a
         # name-safe form (non-alphanumerics → `-`, trailing `-` trimmed) when
@@ -248,10 +287,17 @@ jobs:
         run: |
           set -euo pipefail
           SAFE_VER=$(printf '%s' "$RELEASE" | tr -c 'a-zA-Z0-9' '-' | sed 's/-*$//')
-          SUFFIX="${RUN_SUFFIX}-${SAFE_VER}"
-          RG="${RG_IN:-rg-e2e-$SUFFIX}"
-          CL="${CL_IN:-e2e-$SUFFIX}"
-          SN="e2e-$SUFFIX"
+          case "$SECRET_SYNC_MODE" in
+            enabled) SYNC_SUFFIX="sync-on" ;;
+            disabled) SYNC_SUFFIX="sync-off" ;;
+            *) echo "::error::Unexpected Secret Sync mode '$SECRET_SYNC_MODE'"; exit 1 ;;
+          esac
+          LONG_SUFFIX="${RUN_ID}-${RUN_ATTEMPT}-${SAFE_VER}-secretsync-${SECRET_SYNC_MODE}"
+          SHORT_RUN="${RUN_ID: -8}-${RUN_ATTEMPT}"
+          RESOURCE_SUFFIX="${SHORT_RUN}-${SAFE_VER}-${SYNC_SUFFIX}"
+          RG="${RG_IN:-rg-e2e-$LONG_SUFFIX}"
+          CL="${CL_IN:-e2e-$RESOURCE_SUFFIX}"
+          SN="e2e-$RESOURCE_SUFFIX"
           echo "rg=$RG" >> "$GITHUB_OUTPUT"
           echo "cluster=$CL" >> "$GITHUB_OUTPUT"
           echo "site_name=$SN" >> "$GITHUB_OUTPUT"
@@ -295,6 +341,16 @@ jobs:
             done
           ) &
           echo "OIDC token refresh service started (PID: $!)"
+
+      - name: Validate Custom Locations RP object ID
+        shell: bash
+        env:
+          CUSTOM_LOCATIONS_OID: ${{ inputs.custom-locations-oid != '' && inputs.custom-locations-oid || secrets.CUSTOM_LOCATIONS_OID }}
+        run: |
+          if [[ -z "$CUSTOM_LOCATIONS_OID" ]]; then
+            echo "::error::Set the CUSTOM_LOCATIONS_OID environment secret or pass the custom-locations-oid workflow input."
+            exit 1
+          fi
 
       - name: Snapshot RG resources (persistent mode)
         if: env.PERSISTENT_RG == 'true'
@@ -386,8 +442,10 @@ jobs:
           cluster-name: ${{ steps.names.outputs.cluster }}
           resource-group: ${{ steps.names.outputs.rg }}
           location: ${{ steps.loc.outputs.location }}
-          custom-locations-oid: ${{ inputs.custom-locations-oid }}
-          enable-workload-identity: "true"
+          custom-locations-oid: ${{ inputs.custom-locations-oid != '' && inputs.custom-locations-oid || secrets.CUSTOM_LOCATIONS_OID }}
+          # Secret Sync requires OIDC issuer and workload identity, so one
+          # matrix axis intentionally controls all three settings.
+          enable-workload-identity: ${{ matrix.secret-sync-mode == 'enabled' && 'true' || 'false' }}
 
       - name: Check for kubectl manifest steps
         id: rbac-check
@@ -463,6 +521,7 @@ jobs:
           E2E_LOCATION: ${{ steps.loc.outputs.location }}
           E2E_CLUSTER_NAME: ${{ steps.names.outputs.cluster }}
           E2E_AIO_RELEASE: ${{ matrix.aio-release }}
+          E2E_ENABLE_SECRET_SYNC: ${{ matrix.secret-sync-mode == 'enabled' && 'true' || 'false' }}
         run: |
           set -euo pipefail
           python scripts/render-e2e-site.py \
@@ -478,6 +537,7 @@ jobs:
           SITEOPS_EXTRA_SITES_DIRS: ${{ runner.temp }}/e2e-sites
           INTEGRATION_SELECTOR: name=${{ steps.names.outputs.site_name }}
           AIO_RELEASE: ${{ matrix.aio-release }}
+          SECRET_SYNC_MODE: ${{ matrix.secret-sync-mode }}
           PYTEST_PATHS: ${{ needs.prep.outputs.pytest-paths }}
           # Test helpers (tests/integration/helpers/kube.py) read this env
           # var and pass --kubeconfig=<path> to every kubectl invocation.
@@ -495,13 +555,13 @@ jobs:
         run: |
           set -euo pipefail
           pytest $PYTEST_PATHS -v -m integration --tb=long \
-            --junitxml="e2e-results-${AIO_RELEASE}.xml"
+            --junitxml="e2e-results-${AIO_RELEASE}-secretsync-${SECRET_SYNC_MODE}.xml"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: e2e-results-${{ matrix.aio-release }}
-          path: e2e-results-${{ matrix.aio-release }}.xml
+          name: e2e-results-${{ matrix.aio-release }}-secretsync-${{ matrix.secret-sync-mode }}
+          path: e2e-results-${{ matrix.aio-release }}-secretsync-${{ matrix.secret-sync-mode }}.xml
 
       - name: Re-render E2E site at upgrade-to
         id: upgrade_render
@@ -514,6 +574,7 @@ jobs:
           E2E_LOCATION: ${{ steps.loc.outputs.location }}
           E2E_CLUSTER_NAME: ${{ steps.names.outputs.cluster }}
           E2E_AIO_RELEASE: ${{ needs.prep.outputs.upgrade-to }}
+          E2E_ENABLE_SECRET_SYNC: ${{ matrix.secret-sync-mode == 'enabled' && 'true' || 'false' }}
         # Overwrites the rendered site at the same path (E2E_SITE_NAME is
         # unchanged) so SITEOPS_EXTRA_SITES_DIRS still resolves the same
         # site key but with the upgrade-to release pinned.
@@ -535,6 +596,7 @@ jobs:
           SITEOPS_E2E_UPGRADE_PHASE: "1"
           AIO_RELEASE_FROM: ${{ matrix.aio-release }}
           AIO_RELEASE_TO: ${{ needs.prep.outputs.upgrade-to }}
+          SECRET_SYNC_MODE: ${{ matrix.secret-sync-mode }}
           PYTEST_PATHS: ${{ needs.prep.outputs.pytest-paths }}
           # See the comment on the prior "Run E2E integration tests" step.
           SITEOPS_TEST_KUBECONFIG: /etc/rancher/k3s/k3s.yaml
@@ -546,13 +608,13 @@ jobs:
         run: |
           set -euo pipefail
           pytest $PYTEST_PATHS -v -m integration --tb=long \
-            --junitxml="e2e-results-${AIO_RELEASE_FROM}-to-${AIO_RELEASE_TO}.xml"
+            --junitxml="e2e-results-${AIO_RELEASE_FROM}-to-${AIO_RELEASE_TO}-secretsync-${SECRET_SYNC_MODE}.xml"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always() && needs.prep.outputs.upgrade-to != '' && needs.prep.outputs.upgrade-to != matrix.aio-release
         with:
-          name: e2e-results-${{ matrix.aio-release }}-to-${{ needs.prep.outputs.upgrade-to }}
-          path: e2e-results-${{ matrix.aio-release }}-to-${{ needs.prep.outputs.upgrade-to }}.xml
+          name: e2e-results-${{ matrix.aio-release }}-to-${{ needs.prep.outputs.upgrade-to }}-secretsync-${{ matrix.secret-sync-mode }}
+          path: e2e-results-${{ matrix.aio-release }}-to-${{ needs.prep.outputs.upgrade-to }}-secretsync-${{ matrix.secret-sync-mode }}.xml
 
       - name: Keep cluster alive (pre-teardown hold)
         if: always() && inputs.keep-cluster-alive-minutes > 0
@@ -765,4 +827,3 @@ jobs:
             echo "- Persistent-mode teardown incomplete in RG \`$RG\` ($residual residual resource(s))" >> "$GITHUB_STEP_SUMMARY"
             printf '%s\n' "$FINAL_DELTA"
           fi
-

@@ -4,14 +4,13 @@
 // script body locally with the supplied parameters, and reports back into
 // the resource's instanceView.
 //
-// The launcher writes the worker + AKS EE config template to disk, registers a
-// Scheduled Task that drives the worker (running as NT AUTHORITY\SYSTEM), starts
-// the task, and returns `REGISTERED`. ARM sees the runCommand succeed at
-// that point. The actual bootstrap (Hyper-V enable, reboot, cluster deploy,
-// Arc-connect) happens inside the Scheduled Task asynchronously. The worker
-// writes a `siteops.bootstrap.state` tag on the Arc machine when it finishes,
-// and a siteops `type: wait` step gates downstream steps on that tag (see the
-// `aio-with-aksee-bootstrap` sample).
+// The launcher writes the worker + AKS EE config template to disk, validates or
+// refreshes the bootstrap state tag, registers a Scheduled Task that drives the
+// worker as NT AUTHORITY\SYSTEM, starts the task, and returns `REGISTERED`. ARM
+// sees the runCommand succeed at that point. The actual bootstrap happens inside
+// the Scheduled Task asynchronously. The worker writes a
+// `siteops.bootstrap.state` tag on the Arc machine when it finishes, and a
+// siteops `type: wait` step gates downstream steps on that tag.
 //
 // Prerequisites on the target VM (one-time per VM, outside this Bicep):
 //   1. Server is Arc-connected (e.g., via `OnboardingScript.ps1`).
@@ -46,6 +45,9 @@ param targetResourceGroup string = resourceGroup().name
 
 @description('Subscription ID where the cluster will be Arc-registered.')
 param targetSubscription string = subscription().subscriptionId
+
+@description('Opaque per-deploy identifier recorded in the bootstrap tags. Defaults to the deploy time so each manifest reapply reevaluates bootstrap state and records a distinct operation.')
+param runId string = utcNow()
 
 @description('Azure region for the connectedClusters and custom-location resources the worker creates inside the VM.')
 param targetLocation string = resourceGroup().location
@@ -89,6 +91,8 @@ resource bootstrapCommand 'Microsoft.HybridCompute/machines/runCommands@2024-11-
       { name: 'ClusterName',        value: clusterName }
       { name: 'ResourceGroup',      value: targetResourceGroup }
       { name: 'Subscription',       value: targetSubscription }
+      { name: 'MachineName',        value: machineName }
+      { name: 'RunId',              value: runId }
       { name: 'Location',           value: targetLocation }
       { name: 'CustomLocationsOid', value: customLocationsOid }
       { name: 'AksEdgeMsiUrl',      value: aksEdgeMsiUrl }
@@ -117,3 +121,6 @@ output machineId string = machine.id
 
 @description('Name of the runCommand resource. Re-deploys with the same name overwrite this resource. Use a different name (for example timestamped) to keep history.')
 output runCommandName string = bootstrapCommand.name
+
+@description('The per-deploy identifier recorded in the bootstrap tags.')
+output runId string = runId

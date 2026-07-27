@@ -208,9 +208,7 @@ function Write-BootstrapStateTag {
     # bootstrap completion. Safe to call before az CLI is installed or
     # authenticated: it logs and returns without throwing, and a failed tag
     # write does not fail the bootstrap. Requires `Microsoft.Resources/tags/write`
-    # on the Arc machine resource (see README "Bootstrap state tag"). Assumes
-    # the resource name equals `$env:COMPUTERNAME`. The constructed ID is
-    # logged for manual tagging.
+    # on the configured Arc machine resource.
     param(
         [Parameter(Mandatory)] $config,
         [Parameter(Mandatory)] [string]$Value
@@ -221,21 +219,47 @@ function Write-BootstrapStateTag {
         return
     }
 
+    $account = & az account show --output none --only-show-errors 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        foreach ($envName in @('IDENTITY_ENDPOINT', 'IMDS_ENDPOINT')) {
+            if (-not [Environment]::GetEnvironmentVariable($envName)) {
+                $machineValue = [Environment]::GetEnvironmentVariable($envName, 'Machine')
+                if ($machineValue) { Set-Item -Path "Env:$envName" -Value $machineValue }
+            }
+        }
+        $loginOut = & az login --identity --only-show-errors 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Log "Skipping bootstrap-state tag write because managed-identity login failed: $loginOut"
+            return
+        }
+        $accountOut = & az account set --subscription $config.subscription 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Log "Skipping bootstrap-state tag write because subscription selection failed: $accountOut"
+            return
+        }
+    }
+
     $sub  = $config.subscription
     $rg   = $config.resourceGroup
-    $name = $env:COMPUTERNAME
+    $name = [string](Get-Prop $config 'machineName' '')
     if (-not $sub -or -not $rg -or -not $name) {
-        Write-Log "Skipping bootstrap-state tag write: missing subscription / resourceGroup / COMPUTERNAME."
+        Write-Log 'Skipping bootstrap-state tag write because subscription, resource group, or machine name is missing.'
         return
     }
 
     $arcId = "/subscriptions/$sub/resourceGroups/$rg/providers/Microsoft.HybridCompute/machines/$name"
-    $tagOut = & az tag update --resource-id $arcId --operation merge --tags "siteops.bootstrap.state=$Value" --only-show-errors 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Log "WARNING: tag write failed on $arcId (exit $LASTEXITCODE): $tagOut. See README Prerequisites for the required Microsoft.Resources/tags/write grant."
-        return
+    $runId = [string](Get-Prop $config 'runId' '')
+    $tags = @("siteops.bootstrap.state=$Value", "siteops.bootstrap.runId=$runId")
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $tagOut = & az tag update --resource-id $arcId --operation merge --tags @tags --only-show-errors 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Log "Wrote tag siteops.bootstrap.state=$Value on $arcId (runId=$runId)"
+            return
+        }
+        Write-Log "WARNING: tag write attempt $attempt/3 failed on $arcId (exit $LASTEXITCODE): $tagOut"
+        if ($attempt -lt 3) { Start-Sleep -Seconds 5 }
     }
-    Write-Log "Wrote tag siteops.bootstrap.state=$Value on $arcId"
+    Write-Log "WARNING: bootstrap-state tag write did not succeed after 3 attempts on $arcId."
 }
 
 function Test-ClusterArcConnected {

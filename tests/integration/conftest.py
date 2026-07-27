@@ -61,6 +61,7 @@ _UPGRADE_PHASE_INSTALL_SENTINEL = {"_upgrade_phase_sentinel": True}
 # is fine. Reading from it is not.
 _UPGRADE_PHASE_ALLOWED_CLASSES = frozenset({
     "TestAioUpgradeDeployment",
+    "TestAioUpgradeOidcOptionality",
     "TestAioUpgradeResolveExtensions",
     "TestAioUpgradeSelfConsistency",
     "TestAioUpgradeIdempotency",
@@ -103,6 +104,7 @@ def _generate_overlays_from_site_overrides() -> bool:
         input=raw,
         capture_output=True,
         text=True,
+        check=False,
     )
     if result.returncode != 0:
         print(f"generate-site-overrides.py failed: {result.stderr}", file=sys.stderr)
@@ -354,7 +356,7 @@ def aio_upgrade_with_overrides_result(
         raise RuntimeError(
             "aio_upgrade_with_overrides_result: aio-upgrade.yaml has no "
             "step named 'update-extensions' to inject overrides into. "
-            "Manifest structure changed; update the fixture."
+            "Manifest structure changed. Update the fixture."
         )
 
     result = orchestrator.deploy(
@@ -439,4 +441,3 @@ def aio_namespace(aio_install_result: dict) -> str:
     if isinstance(ns, dict):
         ns = ns.get("value")
     return ns or DEFAULT
-

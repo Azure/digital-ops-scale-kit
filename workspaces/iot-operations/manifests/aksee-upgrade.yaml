@@ -12,7 +12,8 @@ description: |
   - Minor mode (true): sequential multi-hop loop, each hop advancing one
     Kubernetes minor version. An optional `site.parameters.aksee.targetKubernetesVersion`
     stops the loop at a specific minor version. `AcceptUpgrade` is set true only
-    for the run and re-pinned false on completion or failure.
+    for the run and re-pinned false after successful completion. A failed run
+    preserves the staged update cache for retry.
 
   The upgrade step returns shortly after the Connected Machine Agent picks up
   the launcher (~90 seconds), then the worker stages, applies, and verifies the

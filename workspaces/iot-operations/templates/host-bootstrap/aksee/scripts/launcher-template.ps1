@@ -15,9 +15,11 @@ Steps:
   1. Verify admin privileges and tighten ACLs on the config directory.
   2. Write the embedded worker and template to the config directory.
   3. Write `config.json` and the initial `state.json` (phase=0).
-  4. Register a Scheduled Task with at-startup + immediate triggers that runs
+  4. Replace stale terminal state with `running`. A completed bootstrap resumes
+     at Phase 3 so the worker revalidates Arc connectivity.
+  5. Register a Scheduled Task with at-startup + immediate triggers that runs
      `worker.ps1` as NT AUTHORITY\SYSTEM.
-  5. Start the task and return `REGISTERED` so the caller sees success.
+  6. Start the task and return `REGISTERED` so the caller sees success.
 
 The Scheduled Task survives reboots (at-startup trigger) so Phase 1's
 Hyper-V enablement does not lose state.
@@ -32,6 +34,12 @@ receive the new connectedClusters resource.
 
 .PARAMETER Subscription
 Subscription ID.
+
+.PARAMETER MachineName
+Name of the Arc-enabled Windows machine resource that receives bootstrap tags.
+
+.PARAMETER RunId
+Opaque per-deploy identifier written with bootstrap state tags.
 
 .PARAMETER Location
 Azure region for the connectedClusters and custom-location resources.
@@ -58,6 +66,8 @@ explicitly only if multiple bootstraps run on the same host.
         -ClusterName        aksee-cluster1 `
         -ResourceGroup      aksee-rg `
         -Subscription       00000000-0000-0000-0000-000000000000 `
+        -MachineName        arc-server1 `
+        -RunId              2026-07-23T210000Z `
         -Location           westus3 `
         -CustomLocationsOid 00000000-0000-0000-0000-000000000000 `
         -AksEdgeMsiUrl      https://aka.ms/aks-edge/k3s-msi
@@ -73,6 +83,8 @@ param(
     [Parameter(Mandatory)] [string]$ClusterName,
     [Parameter(Mandatory)] [string]$ResourceGroup,
     [Parameter(Mandatory)] [string]$Subscription,
+    [Parameter(Mandatory)] [string]$MachineName,
+    [Parameter(Mandatory)] [string]$RunId,
     [Parameter(Mandatory)] [string]$Location,
     [Parameter(Mandatory)] [string]$CustomLocationsOid,
     [Parameter(Mandatory)] [string]$AksEdgeMsiUrl,
@@ -143,6 +155,48 @@ function Set-StrictAcl {
         throw "Refusing to use ${Path}: owner SID '$ownerSid' is not Administrators or SYSTEM after hardening."
     }
     Write-Log "Locked ACLs and reclaimed ownership on $Path"
+}
+
+function Set-RunningTag {
+    # Mark this deploy in progress before the runCommand returns. The worker
+    # writes the terminal value.
+    param([switch]$Required)
+
+    if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
+        if ($Required) {
+            throw 'Azure CLI is required to refresh completed bootstrap state, but it is not installed.'
+        }
+        Write-Log 'Skipping in-progress tag write because Azure CLI is not installed.'
+        return
+    }
+
+    try {
+        $env:AZURE_CONFIG_DIR = Join-Path $ConfigDir '.azure'
+        foreach ($name in @('IDENTITY_ENDPOINT', 'IMDS_ENDPOINT')) {
+            if (-not [Environment]::GetEnvironmentVariable($name)) {
+                $machineValue = [Environment]::GetEnvironmentVariable($name, 'Machine')
+                if ($machineValue) { Set-Item -Path "Env:$name" -Value $machineValue }
+            }
+        }
+
+        & az login --identity --only-show-errors 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'az login --identity returned non-zero.' }
+
+        $accountOut = & az account set --subscription $Subscription 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "az account set failed: $accountOut" }
+
+        $arcId = "/subscriptions/$Subscription/resourceGroups/$ResourceGroup/providers/Microsoft.HybridCompute/machines/$MachineName"
+        $tagOut = & az tag update --resource-id $arcId --operation merge --tags `
+            'siteops.bootstrap.state=running' `
+            "siteops.bootstrap.runId=$RunId" `
+            --only-show-errors 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "az tag update failed: $tagOut" }
+
+        Write-Log "Set siteops.bootstrap.state=running on $arcId (runId=$RunId)"
+    } catch {
+        if ($Required) { throw "Failed to refresh bootstrap state before revalidation: $_" }
+        Write-Log "Skipping in-progress tag write. The worker will retry when Azure CLI is available. $_"
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -224,13 +278,12 @@ $templatePath = Join-Path $ConfigDir 'aksedge-config.template.json'
 $configPath   = Join-Path $ConfigDir 'config.json'
 $statePath    = Join-Path $ConfigDir 'state.json'
 
-# Re-init guard. Inspect any existing state.json before resetting state and
-# re-registering the task. A bootstrap that is in flight must not be clobbered,
-# and one that already succeeded must not be re-run blindly. -Force overrides
-# both, destroying any prior state for a deliberate re-bootstrap.
+# Re-init guard. Refuse to clobber an in-flight bootstrap without -Force.
+# Revalidate a completed bootstrap from Phase 3 so host features and cluster
+# creation do not run again.
+$initialPhase = 0
 if ((Test-Path $statePath) -and -not $Force) {
     $inFlight = $false
-    $alreadyDone = $false
     $existingPhase = $null
     $existingStatus = $null
     try {
@@ -240,7 +293,7 @@ if ((Test-Path $statePath) -and -not $Force) {
             if ($existing.status -in @('running', 'pending-reboot')) {
                 $inFlight = $true
             } elseif ($existing.status -eq 'succeeded') {
-                $alreadyDone = $true
+                $initialPhase = 3
             }
             if ($existing.PSObject.Properties.Name -contains 'phase') {
                 $existingPhase = $existing.phase
@@ -252,15 +305,6 @@ if ((Test-Path $statePath) -and -not $Force) {
     }
     if ($inFlight) {
         throw "Bootstrap already in flight (state.json shows phase=$existingPhase status=$existingStatus). Pass -Force to reset state and re-register the task, or wait for the existing run to complete."
-    }
-    if ($alreadyDone) {
-        # Idempotent re-apply. The cluster is already bootstrapped and the
-        # state tag already reads succeeded, so the composition wait step
-        # passes without any work here. Leave state, the task, and the user
-        # untouched. -Force re-bootstraps from scratch.
-        Write-Log "Bootstrap already completed (state.json shows phase=$existingPhase status=succeeded). Nothing to do. Pass -Force to re-bootstrap from scratch."
-        Write-Output 'ALREADY-BOOTSTRAPPED'
-        return
     }
 }
 
@@ -274,6 +318,8 @@ $config = [pscustomobject]@{
     clusterName            = $ClusterName
     resourceGroup          = $ResourceGroup
     subscription           = $Subscription
+    machineName            = $MachineName
+    runId                  = $RunId
     location               = $Location
     customLocationsOid     = $CustomLocationsOid
     aksEdgeMsiUrl          = $AksEdgeMsiUrl
@@ -284,7 +330,7 @@ $config | ConvertTo-Json | Set-Content -Path $configPath -Encoding UTF8
 Write-Log "Wrote $configPath (auth=managed identity, WI=$($EnableWorkloadIdentity -ieq 'true'))"
 
 $initialState = [pscustomobject]@{
-    phase       = 0
+    phase       = $initialPhase
     status      = 'running'
     lastUpdated = (Get-Date).ToString('o')
     error       = $null
@@ -292,7 +338,9 @@ $initialState = [pscustomobject]@{
 $initialStateTmp = "$statePath.tmp"
 $initialState | ConvertTo-Json | Set-Content -Path $initialStateTmp -Encoding UTF8
 Move-Item -Path $initialStateTmp -Destination $statePath -Force
-Write-Log "Wrote $statePath (phase=0)"
+Write-Log "Wrote $statePath (phase=$initialPhase)"
+
+Set-RunningTag -Required:($initialPhase -eq 3)
 
 $action = New-ScheduledTaskAction `
     -Execute 'powershell.exe' `

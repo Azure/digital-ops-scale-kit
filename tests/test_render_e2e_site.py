@@ -42,6 +42,7 @@ FULL_ENV = {
     "E2E_SITE_NAME": "e2e-unit-test",
     "E2E_SUBSCRIPTION": "00000000-0000-0000-0000-000000000000",
     "E2E_LOCATION": "eastus2",
+    "E2E_ENABLE_SECRET_SYNC": "true",
 }
 
 
@@ -113,6 +114,7 @@ class TestComputeDefaults:
         values["E2E_LOCATION"] = "westus"
         out = render_e2e_site.compute_defaults(values)
         assert out["E2E_SITE_NAME"] == "e2e-local-1700000000"
+        assert out["E2E_ENABLE_SECRET_SYNC"] == "true"
 
     def test_subscription_default_uses_az(self, monkeypatch):
         calls = []
@@ -133,6 +135,15 @@ class TestComputeDefaults:
         assert out["E2E_LOCATION"] == "westus"
         assert any(a[0] == "account" for a in calls)
         assert any(a[0] == "group" for a in calls)
+
+    def test_secret_sync_mode_rejects_invalid_value(self):
+        values = {name: "" for name in render_e2e_site.ALL_VARS}
+        values["E2E_RESOURCE_GROUP"] = "rg-x"
+        values["E2E_SUBSCRIPTION"] = "sub"
+        values["E2E_LOCATION"] = "westus"
+        values["E2E_ENABLE_SECRET_SYNC"] = "sometimes"
+        with pytest.raises(RuntimeError, match="must be `true` or `false`"):
+            render_e2e_site.compute_defaults(values)
 
 
 class TestRender:
@@ -207,3 +218,42 @@ class TestRealTemplate:
         assert doc["resourceGroup"] == FULL_ENV["E2E_RESOURCE_GROUP"]
         assert doc["subscription"] == FULL_ENV["E2E_SUBSCRIPTION"]
         assert doc["properties"]["aioRelease"] == FULL_ENV["E2E_AIO_RELEASE"]
+        assert doc["properties"]["deployOptions"]["enableSecretSync"] is True
+
+    def test_secret_sync_disabled_renders_boolean_false(self):
+        import yaml
+
+        template = Path(__file__).parent.parent / "tests" / "e2e" / "sites" / "e2e-test.yaml.tmpl"
+        values = {**FULL_ENV, "E2E_ENABLE_SECRET_SYNC": "false"}
+        out = render_e2e_site.render(template, values)
+        doc = yaml.safe_load(out)
+        assert doc["properties"]["deployOptions"]["enableSecretSync"] is False
+
+
+class TestWorkflowSecretSyncModes:
+    """The E2E workflow wires each mode through Arc and site rendering."""
+
+    def test_workflow_matrix_controls_workload_identity_and_site(self):
+        workflow = (
+            Path(__file__).parent.parent / ".github" / "workflows" / "e2e-test.yaml"
+        ).read_text(encoding="utf-8")
+
+        assert "secret-sync-modes:" in workflow
+        assert "secret-sync-mode: ${{ fromJSON(" in workflow
+        assert "enable-workload-identity: ${{ matrix.secret-sync-mode" in workflow
+        assert "E2E_ENABLE_SECRET_SYNC: ${{ matrix.secret-sync-mode" in workflow
+        assert "Validate Custom Locations RP object ID" in workflow
+        assert "secrets.CUSTOM_LOCATIONS_OID" in workflow
+        assert (
+            "inputs.custom-locations-oid != '' && inputs.custom-locations-oid "
+            "|| secrets.CUSTOM_LOCATIONS_OID"
+        ) in workflow
+        assert "multiple AIO releases or Secret Sync modes" in workflow
+        assert "Secret Sync requires OIDC issuer and workload identity" in workflow
+        assert "matrix axis intentionally controls all three settings" in workflow
+        assert "max_parallel={1 if persistent else 20}" in workflow
+        assert "max-parallel: ${{ fromJSON(needs.prep.outputs.max-parallel) }}" in workflow
+        assert 'enabled) SYNC_SUFFIX="sync-on"' in workflow
+        assert 'disabled) SYNC_SUFFIX="sync-off"' in workflow
+        assert 'RESOURCE_SUFFIX="${SHORT_RUN}-${SAFE_VER}-${SYNC_SUFFIX}"' in workflow
+        assert "-ss-" not in workflow
