@@ -372,7 +372,7 @@ class TestAioExtensionInvariants:
 
     def test_aio_release_train_preserved(self, aio_upgrade_result):
         """releaseTrain change is allowed only when the release config bumps
-        the train. Shipped release configs (2603, 2604, 2605) all use `stable`,
+        the train. Shipped release configs (2603, 2604, 2605, 2606) all use `stable`,
         so a mismatch here means the RP defaulted the train unexpectedly OR
         the release config was bumped (intentional, update the test).
         """

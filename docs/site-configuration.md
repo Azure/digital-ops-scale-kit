@@ -164,7 +164,7 @@ properties:
   # `parameters/aio-releases/<release>.yaml` gets loaded. This must be a
   # property, not a parameter: parameter-file path interpolation reads
   # `site.properties` and `site.labels`, never `site.parameters`.
-  aioRelease: "2605"
+  aioRelease: "2606"
 
   # Capability toggles, kept in one place. Some gate a whole step via
   # `when:` (enableSecretSync, enableGlobalSite, enableEdgeSite). Others

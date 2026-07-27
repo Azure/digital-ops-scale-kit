@@ -448,10 +448,74 @@ VERSION_CONFIG_REQUIRED_FIELDS = {
     "aioVersion",
     "aioTrain",
     "aioApiVersion",
+    "adrApiVersion",
     "certManagerVersion",
     "certManagerTrain",
     "secretStoreVersion",
     "secretStoreTrain",
+}
+
+EXPECTED_SUPPORTED_RELEASES = {
+    "2512": {
+        "aioVersion": "1.2.154",
+        "aioTrain": "stable",
+        "aioApiVersion": "2025-10-01",
+        "adrApiVersion": "2025-10-01",
+        "certManagerVersion": "0.7.0",
+        "certManagerTrain": "stable",
+        "secretStoreVersion": "1.1.5",
+        "secretStoreTrain": "stable",
+    },
+    "2602": {
+        "aioVersion": "1.2.189",
+        "aioTrain": "stable",
+        "aioApiVersion": "2025-10-01",
+        "adrApiVersion": "2025-10-01",
+        "certManagerVersion": "0.9.0",
+        "certManagerTrain": "stable",
+        "secretStoreVersion": "1.1.6",
+        "secretStoreTrain": "stable",
+    },
+    "2603": {
+        "aioVersion": "1.3.38",
+        "aioTrain": "stable",
+        "aioApiVersion": "2026-03-01",
+        "adrApiVersion": "2026-04-01",
+        "certManagerVersion": "0.10.2",
+        "certManagerTrain": "stable",
+        "secretStoreVersion": "1.3.0",
+        "secretStoreTrain": "stable",
+    },
+    "2604": {
+        "aioVersion": "1.3.70",
+        "aioTrain": "stable",
+        "aioApiVersion": "2026-03-01",
+        "adrApiVersion": "2026-04-01",
+        "certManagerVersion": "0.11.0",
+        "certManagerTrain": "stable",
+        "secretStoreVersion": "1.4.0",
+        "secretStoreTrain": "stable",
+    },
+    "2605": {
+        "aioVersion": "1.3.105",
+        "aioTrain": "stable",
+        "aioApiVersion": "2026-03-01",
+        "adrApiVersion": "2026-04-01",
+        "certManagerVersion": "0.12.0",
+        "certManagerTrain": "stable",
+        "secretStoreVersion": "1.4.1",
+        "secretStoreTrain": "stable",
+    },
+    "2606": {
+        "aioVersion": "1.3.137",
+        "aioTrain": "stable",
+        "aioApiVersion": "2026-03-01",
+        "adrApiVersion": "2026-04-01",
+        "certManagerVersion": "0.13.3",
+        "certManagerTrain": "stable",
+        "secretStoreVersion": "1.5.0",
+        "secretStoreTrain": "stable",
+    },
 }
 
 
@@ -490,6 +554,25 @@ class TestReleaseConfigs:
                 assert value is not None and str(value).strip() != "", (
                     f"{release_file.name}: '{key}' is empty or missing"
                 )
+
+    def test_release_configs_match_expected_supported_metadata(self, workspace):
+        """Every supported release must match the expected version and API metadata."""
+        actual = {}
+        for release_file in self._get_release_files(workspace):
+            with open(release_file, "r", encoding="utf-8") as f:
+                actual[release_file.stem] = yaml.safe_load(f)
+
+        assert actual == EXPECTED_SUPPORTED_RELEASES
+
+    def test_base_site_defaults_to_latest_supported_release(self, workspace):
+        """The base site should select the highest supported release moniker."""
+        base_path = workspace / "sites" / "base-site.yaml"
+        with open(base_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+
+        default_release = data["properties"]["aioRelease"]
+        latest_release = max(EXPECTED_SUPPORTED_RELEASES, key=int)
+        assert default_release == latest_release
 
     def test_base_site_aio_release_has_config_file(self, workspace):
         """The aioRelease in base-site.yaml must have a matching config file."""

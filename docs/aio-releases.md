@@ -5,10 +5,10 @@ Azure IoT Operations (AIO) ships on a release cadence. Each release pins specifi
 ## How release selection works
 
 ```
-site.properties.aioRelease: "2605"
+site.properties.aioRelease: "2606"
             │
             ▼
-workspaces/iot-operations/parameters/aio-releases/2605.yaml
+workspaces/iot-operations/parameters/aio-releases/2606.yaml
             │
             ▼  (siteops auto-forwards matching params to Bicep)
 templates/aio/enablement.bicep       ──► cert-manager, secret store extensions
@@ -20,14 +20,14 @@ templates/deps/adr-ns.bicep          ──► ADR namespace (dispatches on adrA
 Each release YAML is a flat schema:
 
 ```yaml
-# parameters/aio-releases/2605.yaml
-aioVersion: "1.3.105"           # AIO extension version pinned in Arc
+# parameters/aio-releases/2606.yaml
+aioVersion: "1.3.137"           # AIO extension version pinned in Arc
 aioTrain: stable                # Extension release train
 aioApiVersion: "2026-03-01"     # Microsoft.IoTOperations/instances API version
 adrApiVersion: "2026-04-01"     # Microsoft.DeviceRegistry/namespaces API version
-certManagerVersion: "0.12.0"
+certManagerVersion: "0.13.3"
 certManagerTrain: stable
-secretStoreVersion: "1.4.1"
+secretStoreVersion: "1.5.0"
 secretStoreTrain: stable
 ```
 
@@ -45,10 +45,10 @@ name: munich-prod
 inherits: base-site.yaml
 
 properties:
-  aioRelease: "2605"    # must match parameters/aio-releases/2605.yaml
+  aioRelease: "2606"    # must match parameters/aio-releases/2606.yaml
 ```
 
-If not specified, the site inherits whatever `base-site.yaml` declares (`"2605"` today).
+If not specified, the site inherits whatever `base-site.yaml` declares (`"2606"` today).
 
 ## Available releases
 
@@ -60,7 +60,8 @@ Every file in `workspaces/iot-operations/parameters/aio-releases/` is a shipped 
 | `2602` | `2025-10-01` | `2025-10-01` | |
 | `2603` | `2026-03-01` | `2026-04-01` | |
 | `2604` | `2026-03-01` | `2026-04-01` | |
-| `2605` | `2026-03-01` | `2026-04-01` | base-site default |
+| `2605` | `2026-03-01` | `2026-04-01` | |
+| `2606` | `2026-03-01` | `2026-04-01` | base-site default |
 
 Source of truth for every pinned version number is the YAML itself. Cross-reference against the [IoT Operations release matrix](https://github.com/Azure/azure-iot-ops-cli-extension/wiki/IoT-Operations-versions) before shipping a new one.
 
@@ -82,7 +83,7 @@ siteops -w workspaces/iot-operations deploy manifests/aio-upgrade.yaml -l "name=
 
 Azure IoT Operations supports upgrade to any patch of the same minor version, or to the next minor version. Other transitions (downgrades, multi-minor jumps, preview/GA crossings) require uninstall and reinstall. See [Upgrade Azure IoT Operations](https://learn.microsoft.com/en-us/azure/iot-operations/deploy-iot-ops/howto-upgrade) for the authoritative rules.
 
-The scalekit exercises adjacent-release upgrades (e.g. `2604` -> `2605`) in CI per E2E dispatch.
+The scalekit exercises adjacent-release upgrades (e.g. `2605` -> `2606`) in CI per E2E dispatch.
 
 ### Sample template API-version policy
 
