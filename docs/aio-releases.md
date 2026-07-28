@@ -5,10 +5,10 @@ Azure IoT Operations (AIO) ships on a release cadence. Each release pins specifi
 ## How release selection works
 
 ```
-site.properties.aioRelease: "2605"
+site.properties.aioRelease: "2607"
             │
             ▼
-workspaces/iot-operations/parameters/aio-releases/2605.yaml
+workspaces/iot-operations/parameters/aio-releases/2607.yaml
             │
             ▼  (siteops auto-forwards matching params to Bicep)
 templates/aio/enablement.bicep       ──► cert-manager, secret store extensions
@@ -20,18 +20,21 @@ templates/deps/adr-ns.bicep          ──► ADR namespace (dispatches on adrA
 Each release YAML is a flat schema:
 
 ```yaml
-# parameters/aio-releases/2605.yaml
-aioVersion: "1.3.105"           # AIO extension version pinned in Arc
+# parameters/aio-releases/2607.yaml
+aioVersion: "1.4.41"            # AIO extension version pinned in Arc
 aioTrain: stable                # Extension release train
-aioApiVersion: "2026-03-01"     # Microsoft.IoTOperations/instances API version
+aioApiVersion: "2026-07-01"     # Microsoft.IoTOperations/instances API version
 adrApiVersion: "2026-04-01"     # Microsoft.DeviceRegistry/namespaces API version
-certManagerVersion: "0.12.0"
+certManagerVersion: "0.14.0"
 certManagerTrain: stable
-secretStoreVersion: "1.4.1"
+certManagerConfigurationOverrides:
+  trust-manager.secretTargets.enabled: "false"
+  trust-manager.secretTargets.authorizedSecretsAll: "false"
+secretStoreVersion: "1.5.1"
 secretStoreTrain: stable
 ```
 
-The `aioApiVersion` and `adrApiVersion` values route CREATE and UPDATE operations through their matching versioned modules (for example `templates/aio/modules/instance-2026-03-01.bicep` and `templates/deps/modules/adr-ns-2026-04-01.bicep`). Bicep cannot parameterize API version strings, so the dispatchers use `@allowed` + conditional modules. See [Adding a new AIO release](#adding-a-new-aio-release) below.
+The `aioApiVersion` and `adrApiVersion` values route CREATE and UPDATE operations through their matching versioned modules (for example `templates/aio/modules/instance-2026-07-01.bicep` and `templates/deps/modules/adr-ns-2026-04-01.bicep`). Release-specific configuration override objects are auto-forwarded to templates that declare them. Bicep cannot parameterize API version strings, so the dispatchers use `@allowed` + conditional modules. See [Adding a new AIO release](#adding-a-new-aio-release) below.
 
 ## Pinning a site to a release
 
@@ -45,10 +48,10 @@ name: munich-prod
 inherits: base-site.yaml
 
 properties:
-  aioRelease: "2605"    # must match parameters/aio-releases/2605.yaml
+  aioRelease: "2607"    # must match parameters/aio-releases/2607.yaml
 ```
 
-If not specified, the site inherits whatever `base-site.yaml` declares (`"2605"` today).
+If not specified, the site inherits whatever `base-site.yaml` declares (`"2607"` today).
 
 ## Available releases
 
@@ -60,7 +63,9 @@ Every file in `workspaces/iot-operations/parameters/aio-releases/` is a shipped 
 | `2602` | `2025-10-01` | `2025-10-01` | |
 | `2603` | `2026-03-01` | `2026-04-01` | |
 | `2604` | `2026-03-01` | `2026-04-01` | |
-| `2605` | `2026-03-01` | `2026-04-01` | base-site default |
+| `2605` | `2026-03-01` | `2026-04-01` | |
+| `2606` | `2026-03-01` | `2026-04-01` | |
+| `2607` | `2026-07-01` | `2026-04-01` | base-site default |
 
 Source of truth for every pinned version number is the YAML itself. Cross-reference against the [IoT Operations release matrix](https://github.com/Azure/azure-iot-ops-cli-extension/wiki/IoT-Operations-versions) before shipping a new one.
 
@@ -82,7 +87,7 @@ siteops -w workspaces/iot-operations deploy manifests/aio-upgrade.yaml -l "name=
 
 Azure IoT Operations supports upgrade to any patch of the same minor version, or to the next minor version. Other transitions (downgrades, multi-minor jumps, preview/GA crossings) require uninstall and reinstall. See [Upgrade Azure IoT Operations](https://learn.microsoft.com/en-us/azure/iot-operations/deploy-iot-ops/howto-upgrade) for the authoritative rules.
 
-The scalekit exercises adjacent-release upgrades (e.g. `2604` -> `2605`) in CI per E2E dispatch.
+The scalekit exercises adjacent-release upgrades (e.g. `2606` -> `2607`) in CI per E2E dispatch.
 
 ### Sample template API-version policy
 
@@ -92,17 +97,20 @@ This policy applies only to samples. Fundamentals (`templates/aio/`, `templates/
 
 ## Adding a new AIO release
 
-1. **Ship the release YAML.** Create `parameters/aio-releases/<release>.yaml` with all eight fields (`aioVersion`, `aioTrain`, `aioApiVersion`, `adrApiVersion`, `certManagerVersion`, `certManagerTrain`, `secretStoreVersion`, `secretStoreTrain`).
-2. **If `aioApiVersion` is new**, extend the dispatch in both Bicep dispatchers:
+1. **Ship the release YAML.** Create `parameters/aio-releases/<release>.yaml` with the required version, train, API, and configuration override fields used by the supported release matrix.
+2. **If `aioApiVersion` is new**, extend every AIO API-version consumer:
    - `templates/aio/instance.bicep`: add to `@allowed` on `param aioApiVersion`, add a new conditional `module instance_<YYYY>` block, push the previously-newest version from `else` into an explicit equality, make the new version the `else`.
    - `templates/aio/modules/update-instance.bicep`: same pattern. The file header has a checklist.
-   - Add `templates/aio/modules/instance-<YYYY-MM-DD>.bicep` and `update-instance-<YYYY-MM-DD>.bicep`. Start by copying the previous API version's modules verbatim and change only the API version strings. Diverge per-module only when the schema actually changes.
+   - `templates/aio/resolve-aio.bicep`: add the matching version-bound read module and active-output branch.
+   - `templates/secretsync/enable-secretsync.bicep`: extend the `aioApiVersion` allowlist used by the instance update.
+   - `templates/aio/upgrade/update-extensions.bicep`: extend the allowlist used by release-specific extension defaults.
+   - Add `templates/aio/modules/instance-<YYYY-MM-DD>.bicep`, `resolve-instance-<YYYY-MM-DD>.bicep`, and `update-instance-<YYYY-MM-DD>.bicep`. Seed them from the previous API version, then apply every verified schema change for the new API.
 3. **If `adrApiVersion` is new**, extend the ADR dispatch:
    - `templates/deps/adr-ns.bicep`: add to `@allowed` on `param adrApiVersion`, add a new conditional `module ns_<YYYY>` block, fold the previously-newest version into an explicit equality.
    - Add `templates/deps/modules/adr-ns-<YYYY-MM-DD>.bicep` by copying the previous version verbatim and changing the API version string.
 4. **If neither API version is new**, no Bicep changes are needed. Siteops forwards the new extension versions via parameter auto-filtering.
 5. **Run the workspace suite**: `pytest tests/workspace/ -q`. The relevant checks are:
-   - `test_version_config_api_versions_are_allowed_in_bicep`: every `aioApiVersion` must appear in both AIO dispatchers' `@allowed` lists.
+   - `test_version_config_api_versions_are_allowed_in_bicep`: every `aioApiVersion` must appear in every AIO API-version consumer listed in step 2.
    - `test_version_config_adr_api_versions_are_allowed_in_bicep`: every `adrApiVersion` must appear in the ADR dispatcher's `@allowed` list.
    - `test_all_sites_aio_releases_have_config_files`: no site references a missing YAML file.
    - `TestUpdateInstanceDispatch`: every param of the update-instance dispatcher is forwarded by every caller.
@@ -141,4 +149,4 @@ Release misconfigurations surface at four points:
 - [Site configuration](site-configuration.md): the `aioRelease` field lives in `properties:`. Inheritance and overlays apply normally.
 - [Parameter resolution](parameter-resolution.md): how release YAML values are auto-forwarded to Bicep.
 - [E2E testing](e2e-testing.md): how to dispatch a matrix over multiple releases.
-- `templates/aio/instance.bicep` and `templates/aio/modules/update-instance.bicep`: dispatcher checklists embedded at the top of each file.
+- `templates/aio/instance.bicep`, `templates/aio/resolve-aio.bicep`, `templates/aio/modules/update-instance.bicep`, and `templates/aio/upgrade/update-extensions.bicep`: dispatcher and release-default checklists.

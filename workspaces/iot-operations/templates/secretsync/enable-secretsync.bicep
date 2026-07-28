@@ -87,6 +87,7 @@ param instanceDescription string = ''
 @allowed([
   '2025-10-01'
   '2026-03-01'
+  '2026-07-01'
 ])
 param aioApiVersion string
 

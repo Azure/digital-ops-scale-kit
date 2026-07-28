@@ -93,6 +93,7 @@ param aioTrain string = 'stable'
 @allowed([
   '2025-10-01'
   '2026-03-01'
+  '2026-07-01'
 ])
 param aioApiVersion string
 
@@ -172,6 +173,31 @@ module resources_2026 './modules/instance-2026-03-01.bicep' = if (aioApiVersion 
   }
 }
 
+module resources_2026_07 './modules/instance-2026-07-01.bicep' = if (aioApiVersion == '2026-07-01') {
+  name: 'aio-resources-2026-07-01'
+  params: {
+    clusterName: clusterName
+    clusterNamespace: clusterNamespace
+    clusterLocation: clusterLocation
+    clusterResourceId: cluster.id
+    customLocationName: customLocationName ?? 'location-${HASH}'
+    clExtensionIds: clExtensionIds
+    instanceName: aioInstanceName ?? 'aio-${HASH}'
+    instanceIdentity: instanceIdentity
+    schemaRegistryId: schemaRegistryId
+    adrNamespaceId: adrNamespaceId
+    features: features
+    defaultDataflowInstanceCount: defaultDataflowInstanceCount
+    aioVersion: aioVersion
+    aioTrain: aioTrain
+    observabilityEnabled: observabilityEnabled
+    otelCollectorAddress: otelCollectorAddress
+    aioConfigurationOverrides: aioConfigurationOverrides
+    brokerConfig: brokerConfig
+    trustConfig: trustConfig
+  }
+}
+
 // Select outputs from the active module.
 // The @allowed constraint on aioApiVersion guarantees exactly one module deploys.
 //
@@ -207,7 +233,8 @@ var activeResources = aioApiVersion == '2025-10-01'
       customLocationId: resources_2025!.outputs.customLocationId
       customLocationName: resources_2025!.outputs.customLocationName
     }
-  : {
+  : aioApiVersion == '2026-03-01'
+    ? {
       instanceName: resources_2026!.outputs.instanceName
       brokerName: resources_2026!.outputs.brokerName
       brokerListenerName: resources_2026!.outputs.brokerListenerName
@@ -221,6 +248,20 @@ var activeResources = aioApiVersion == '2025-10-01'
       customLocationId: resources_2026!.outputs.customLocationId
       customLocationName: resources_2026!.outputs.customLocationName
     }
+    : {
+        instanceName: resources_2026_07!.outputs.instanceName
+        brokerName: resources_2026_07!.outputs.brokerName
+        brokerListenerName: resources_2026_07!.outputs.brokerListenerName
+        brokerAuthnName: resources_2026_07!.outputs.brokerAuthnName
+        brokerSettings: resources_2026_07!.outputs.brokerSettings
+        aioExtensionId: resources_2026_07!.outputs.aioExtensionId
+        aioExtensionName: resources_2026_07!.outputs.aioExtensionName
+        aioExtensionVersion: resources_2026_07!.outputs.aioExtensionVersion
+        aioExtensionReleaseTrain: resources_2026_07!.outputs.aioExtensionReleaseTrain
+        aioExtensionPrincipalId: resources_2026_07!.outputs.aioExtensionPrincipalId
+        customLocationId: resources_2026_07!.outputs.customLocationId
+        customLocationName: resources_2026_07!.outputs.customLocationName
+      }
 
 /*****************************************************************************/
 /*                          Deployment Outputs                               */

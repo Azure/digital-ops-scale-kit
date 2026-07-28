@@ -38,6 +38,7 @@ param aioInstanceName string
 @allowed([
   '2025-10-01'
   '2026-03-01'
+  '2026-07-01'
 ])
 param aioApiVersion string
 
@@ -70,6 +71,13 @@ module resolve_2026 './modules/resolve-instance-2026-03-01.bicep' = if (aioApiVe
   }
 }
 
+module resolve_2026_07 './modules/resolve-instance-2026-07-01.bicep' = if (aioApiVersion == '2026-07-01') {
+  name: 'resolve-instance-2026-07-${uniqueString(aioInstanceName)}'
+  params: {
+    aioInstanceName: aioInstanceName
+  }
+}
+
 // Select outputs from the active module. The @allowed constraint guarantees
 // exactly one module deploys. Convention: newest API version is the
 // else-branch; every older version is an explicit positive equality check.
@@ -85,7 +93,8 @@ var activeInstance = aioApiVersion == '2025-10-01'
       features: resolve_2025!.outputs.features
       instanceDescription: resolve_2025!.outputs.instanceDescription
     }
-  : {
+  : aioApiVersion == '2026-03-01'
+    ? {
       customLocationResourceId: resolve_2026!.outputs.customLocationResourceId
       instanceLocation: resolve_2026!.outputs.instanceLocation
       instanceTags: resolve_2026!.outputs.instanceTags
@@ -96,6 +105,17 @@ var activeInstance = aioApiVersion == '2025-10-01'
       features: resolve_2026!.outputs.features
       instanceDescription: resolve_2026!.outputs.instanceDescription
     }
+    : {
+        customLocationResourceId: resolve_2026_07!.outputs.customLocationResourceId
+        instanceLocation: resolve_2026_07!.outputs.instanceLocation
+        instanceTags: resolve_2026_07!.outputs.instanceTags
+        identityType: resolve_2026_07!.outputs.identityType
+        userAssignedIdentities: resolve_2026_07!.outputs.userAssignedIdentities
+        schemaRegistryResourceId: resolve_2026_07!.outputs.schemaRegistryResourceId
+        adrNamespaceResourceId: resolve_2026_07!.outputs.adrNamespaceResourceId
+        features: resolve_2026_07!.outputs.features
+        instanceDescription: resolve_2026_07!.outputs.instanceDescription
+      }
 
 // =====================================================================================
 // Chained Resolution: version-stable

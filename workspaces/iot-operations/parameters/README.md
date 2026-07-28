@@ -9,7 +9,7 @@ Parameter YAML files referenced by manifest steps. All paths in this dir are wor
 | `common/` | Workspace-wide defaults applied to every step (e.g. `parameters/common/common.yaml`). |
 | `inputs/` | Per-step **fan-in** files: `<step>.yaml` wires upstream step outputs into the named step's parameters. |
 | `outputs/` | Per-step **fan-out** files: `<step>.yaml` exposes a step's outputs for downstream consumers. |
-| `aio-releases/` | Release pinning. One YAML per AIO release (e.g. `2605.yaml`) with the API and extension versions for that release. The site's `properties.aioRelease` selects which file is loaded. |
+| `aio-releases/` | Release pinning. One YAML per AIO release (e.g. `2607.yaml`) with the API and extension versions for that release. The site's `properties.aioRelease` selects which file is loaded. |
 
 ## Conventions
 

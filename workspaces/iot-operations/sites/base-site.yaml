@@ -11,7 +11,7 @@ labels:
 properties:
   # AIO version (release moniker) - determines extension versions
   # See: parameters/aio-releases/ for available releases
-  aioRelease: "2605"
+  aioRelease: "2607"
 
   # Deployment options - control which components are deployed
   deployOptions:

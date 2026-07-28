@@ -26,6 +26,7 @@
 @allowed([
   '2025-10-01'
   '2026-03-01'
+  '2026-07-01'
 ])
 param aioApiVersion string
 
@@ -96,6 +97,25 @@ module update_2026 './update-instance-2026-03-01.bicep' = if (aioApiVersion == '
   }
 }
 
+module update_2026_07 './update-instance-2026-07-01.bicep' = if (aioApiVersion == '2026-07-01') {
+  name: 'update-instance-2026-07-${uniqueString(instanceName, spcResourceId)}'
+  params: {
+    instanceName: instanceName
+    instanceLocation: instanceLocation
+    extendedLocationName: extendedLocationName
+    instanceTags: instanceTags
+    identityType: identityType
+    userAssignedIdentities: userAssignedIdentities
+    schemaRegistryResourceId: schemaRegistryResourceId
+    adrNamespaceResourceId: adrNamespaceResourceId
+    features: features
+    instanceDescription: instanceDescription
+    spcResourceId: spcResourceId
+  }
+}
+
 output instanceResourceId string = aioApiVersion == '2025-10-01'
   ? update_2025!.outputs.instanceResourceId
-  : update_2026!.outputs.instanceResourceId
+  : aioApiVersion == '2026-03-01'
+    ? update_2026!.outputs.instanceResourceId
+    : update_2026_07!.outputs.instanceResourceId
