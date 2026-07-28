@@ -414,14 +414,14 @@ class TestAioUpgradeChaining:
             ext_names,
         ), "aioExtensionName(clusterResourceId) signature changed; install/upgrade parity at risk"
 
-        # Install side passes clusterResourceId.
-        for install_module in [
-            workspaces_path
-            for workspaces_path in [
-                workspace / "templates" / "aio" / "modules" / "instance-2025-10-01.bicep",
-                workspace / "templates" / "aio" / "modules" / "instance-2026-03-01.bicep",
-            ]
-        ]:
+        # Every install-side module passes the full cluster resource ID.
+        install_modules = sorted(
+            (workspace / "templates" / "aio" / "modules").glob(
+                "instance-*.bicep"
+            )
+        )
+        assert install_modules
+        for install_module in install_modules:
             text = install_module.read_text(encoding="utf-8")
             assert "deriveAioExtensionName(clusterResourceId)" in text, (
                 f"{install_module.name} must call deriveAioExtensionName(clusterResourceId) "
@@ -440,6 +440,7 @@ class TestAioUpgradeChaining:
             "chained connectedClusterResourceId; otherwise the resolved name "
             "will not match the name install stamped"
         )
+        assert "deriveAioExtensionSuffix(connectedClusterResourceId)" in resolve_ext
 
 
 
@@ -451,6 +452,7 @@ VERSION_CONFIG_REQUIRED_FIELDS = {
     "adrApiVersion",
     "certManagerVersion",
     "certManagerTrain",
+    "certManagerConfigurationOverrides",
     "secretStoreVersion",
     "secretStoreTrain",
 }
@@ -463,6 +465,7 @@ EXPECTED_SUPPORTED_RELEASES = {
         "adrApiVersion": "2025-10-01",
         "certManagerVersion": "0.7.0",
         "certManagerTrain": "stable",
+        "certManagerConfigurationOverrides": {},
         "secretStoreVersion": "1.1.5",
         "secretStoreTrain": "stable",
     },
@@ -473,6 +476,7 @@ EXPECTED_SUPPORTED_RELEASES = {
         "adrApiVersion": "2025-10-01",
         "certManagerVersion": "0.9.0",
         "certManagerTrain": "stable",
+        "certManagerConfigurationOverrides": {},
         "secretStoreVersion": "1.1.6",
         "secretStoreTrain": "stable",
     },
@@ -483,6 +487,7 @@ EXPECTED_SUPPORTED_RELEASES = {
         "adrApiVersion": "2026-04-01",
         "certManagerVersion": "0.10.2",
         "certManagerTrain": "stable",
+        "certManagerConfigurationOverrides": {},
         "secretStoreVersion": "1.3.0",
         "secretStoreTrain": "stable",
     },
@@ -493,6 +498,7 @@ EXPECTED_SUPPORTED_RELEASES = {
         "adrApiVersion": "2026-04-01",
         "certManagerVersion": "0.11.0",
         "certManagerTrain": "stable",
+        "certManagerConfigurationOverrides": {},
         "secretStoreVersion": "1.4.0",
         "secretStoreTrain": "stable",
     },
@@ -503,6 +509,7 @@ EXPECTED_SUPPORTED_RELEASES = {
         "adrApiVersion": "2026-04-01",
         "certManagerVersion": "0.12.0",
         "certManagerTrain": "stable",
+        "certManagerConfigurationOverrides": {},
         "secretStoreVersion": "1.4.1",
         "secretStoreTrain": "stable",
     },
@@ -513,7 +520,22 @@ EXPECTED_SUPPORTED_RELEASES = {
         "adrApiVersion": "2026-04-01",
         "certManagerVersion": "0.13.3",
         "certManagerTrain": "stable",
+        "certManagerConfigurationOverrides": {},
         "secretStoreVersion": "1.5.0",
+        "secretStoreTrain": "stable",
+    },
+    "2607": {
+        "aioVersion": "1.4.41",
+        "aioTrain": "stable",
+        "aioApiVersion": "2026-07-01",
+        "adrApiVersion": "2026-04-01",
+        "certManagerVersion": "0.14.0",
+        "certManagerTrain": "stable",
+        "certManagerConfigurationOverrides": {
+            "trust-manager.secretTargets.enabled": "false",
+            "trust-manager.secretTargets.authorizedSecretsAll": "false",
+        },
+        "secretStoreVersion": "1.5.1",
         "secretStoreTrain": "stable",
     },
 }
@@ -551,9 +573,14 @@ class TestReleaseConfigs:
 
             for key in VERSION_CONFIG_REQUIRED_FIELDS:
                 value = config.get(key)
-                assert value is not None and str(value).strip() != "", (
-                    f"{release_file.name}: '{key}' is empty or missing"
-                )
+                if key.endswith("ConfigurationOverrides"):
+                    assert isinstance(value, dict), (
+                        f"{release_file.name}: '{key}' must be an object"
+                    )
+                else:
+                    assert value is not None and str(value).strip() != "", (
+                        f"{release_file.name}: '{key}' is empty or missing"
+                    )
 
     def test_release_configs_match_expected_supported_metadata(self, workspace):
         """Every supported release must match the expected version and API metadata."""
@@ -651,6 +678,7 @@ class TestReleaseConfigs:
             workspace / "templates" / "aio" / "modules" / "update-instance.bicep",
             workspace / "templates" / "aio" / "resolve-aio.bicep",
             workspace / "templates" / "secretsync" / "enable-secretsync.bicep",
+            workspace / "templates" / "aio" / "upgrade" / "update-extensions.bicep",
         ]
 
         # Extract the @allowed([...]) block immediately preceding `param aioApiVersion`.

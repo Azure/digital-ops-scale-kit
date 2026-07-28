@@ -1,0 +1,14 @@
+# AIO Release 2607 - Version Configuration
+# Source: https://github.com/Azure/azure-iot-ops-cli-extension/wiki/IoT-Operations-versions#2607
+
+aioVersion: "1.4.41"
+aioTrain: stable
+aioApiVersion: "2026-07-01"
+adrApiVersion: "2026-04-01"
+certManagerVersion: "0.14.0"
+certManagerTrain: stable
+certManagerConfigurationOverrides:
+  trust-manager.secretTargets.enabled: "false"
+  trust-manager.secretTargets.authorizedSecretsAll: "false"
+secretStoreVersion: "1.5.1"
+secretStoreTrain: stable

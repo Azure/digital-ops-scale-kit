@@ -166,7 +166,7 @@ class TestSiteInvariants:
         site = orch.load_site("fallback-test-site")
         assert site.name == "fallback-test-site"
         # The base inherits should have been applied: aioRelease comes from base-site.yaml.
-        assert site.properties.get("aioRelease") == "2606"
+        assert site.properties.get("aioRelease") == "2607"
 
     def test_extras_dir_overlays_workspace_site_with_same_name(self, tmp_path, workspace):
         """When an extras dir contains a site file with the same name as one

@@ -7,5 +7,6 @@ aioApiVersion: "2025-10-01"
 adrApiVersion: "2025-10-01"
 certManagerVersion: "0.7.0"
 certManagerTrain: stable
+certManagerConfigurationOverrides: {}
 secretStoreVersion: "1.1.5"
 secretStoreTrain: stable

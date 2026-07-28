@@ -22,9 +22,13 @@ var certManagerExtensionName = 'cert-manager'
 @export()
 var secretStoreExtensionName = 'azure-secret-store'
 
-@description('Derives the per-cluster AIO Arc extension name from the connected cluster resource ID. Mirrors the install-time name computation.')
+@description('Derives the per-cluster suffix used by the AIO Arc extension and related configuration.')
 @export()
-func aioExtensionName(clusterResourceId string) string => 'azure-iot-operations-${take(uniqueString(clusterResourceId), 5)}'
+func aioExtensionSuffix(clusterResourceId string) string => take(uniqueString(clusterResourceId), 5)
+
+@description('Derives the per-cluster AIO Arc extension name from the connected cluster resource ID.')
+@export()
+func aioExtensionName(clusterResourceId string) string => 'azure-iot-operations-${aioExtensionSuffix(clusterResourceId)}'
 
 @description('Authoritative extensionType discriminator for the AIO Arc extension.')
 @export()

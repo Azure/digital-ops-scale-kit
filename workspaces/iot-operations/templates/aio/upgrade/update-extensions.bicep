@@ -78,6 +78,14 @@ param aioVersion string = ''
 @description('Target release train for the AIO Arc extension. Empty preserves the resolved current train.')
 param aioTrain string = ''
 
+@description('IoT Operations API version for release-specific extension configuration defaults.')
+@allowed([
+  '2025-10-01'
+  '2026-03-01'
+  '2026-07-01'
+])
+param aioApiVersion string
+
 @description('Configuration overrides to merge over the AIO extension\'s existing configurationSettings on PUT. Empty preserves config exactly.')
 param aioConfigurationOverrides object = {}
 
@@ -108,6 +116,24 @@ param certManagerConfigurationOverrides object = {}
 
 var effectiveAioVersion = !empty(aioVersion) ? aioVersion : aio.version
 var effectiveAioTrain = !empty(aioTrain) ? aioTrain : aio.releaseTrain
+
+// These values depend on the cluster-derived extension suffix, so they cannot
+// live as static release-YAML overrides. Add only missing keys to preserve
+// operator-customized values on later reapply.
+var aioApiConfigurationDefaults = aioApiVersion == '2025-10-01' || aioApiVersion == '2026-03-01'
+  ? {}
+  : union(
+      contains(aio.configurationSettings, 'connectors.values.securityPki.applicationUri')
+        ? {}
+        : {
+            'connectors.values.securityPki.applicationUri': 'urn:microsoft.com:aio:opc:ua:broker:${aio.extensionSuffix}'
+          },
+      contains(aio.configurationSettings, 'connectors.values.securityPki.subjectName')
+        ? {}
+        : {
+            'connectors.values.securityPki.subjectName': 'CN=aio-opc-opcuabroker-${aio.extensionSuffix}'
+          }
+    )
 
 var effectiveSecretStoreVersion = !empty(secretStoreVersion) ? secretStoreVersion : secretStore.version
 var effectiveSecretStoreTrain = !empty(secretStoreTrain) ? secretStoreTrain : secretStore.releaseTrain
@@ -141,7 +167,10 @@ resource aioExtensionUpdate 'Microsoft.KubernetesConfiguration/extensions@2023-0
         releaseNamespace: aio.releaseNamespace
       }
     }
-    configurationSettings: union(aio.configurationSettings, aioConfigurationOverrides)
+    configurationSettings: union(
+      union(aio.configurationSettings, aioApiConfigurationDefaults),
+      aioConfigurationOverrides
+    )
   }
 }
 
@@ -205,6 +234,9 @@ output certManagerExtensionId string = enableCertManager ? certManagerExtensionU
 @description('Effective version applied to the AIO Arc extension.')
 output aioVersionApplied string = effectiveAioVersion
 
+@description('IoT Operations API version whose release defaults were applied.')
+output aioApiVersionApplied string = aioApiVersion
+
 @description('Effective version applied to the secret store Arc extension.')
 output secretStoreVersionApplied string = effectiveSecretStoreVersion
 
@@ -221,6 +253,7 @@ output aioPostUpdate object = {
   configurationSettings: aioExtensionUpdate.properties.?configurationSettings ?? {}
   identity: aioExtensionUpdate.?identity ?? { type: 'None' }
   releaseNamespace: aioExtensionUpdate.properties.?scope.?cluster.?releaseNamespace ?? 'azure-iot-operations'
+  extensionSuffix: aio.extensionSuffix
 }
 
 @description('Post-PUT snapshot of the secret store Arc extension, mirroring `resolve-extensions.outputs.secretStore`. `releaseNamespace` is omitted because the install path does not set scope.cluster.releaseNamespace and the upgrade mirrors that. Excludes `configurationProtectedSettings` (write-only, returned masked).')

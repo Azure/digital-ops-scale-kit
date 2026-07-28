@@ -26,6 +26,7 @@
 
 import {
   aioExtensionName as deriveAioExtensionName
+  aioExtensionSuffix as deriveAioExtensionSuffix
   secretStoreExtensionName
   certManagerExtensionName
   certManagerExtensionType
@@ -81,6 +82,7 @@ output aio object = {
   configurationSettings: aioExtension.properties.?configurationSettings ?? {}
   identity: aioExtension.?identity ?? { type: 'None' }
   releaseNamespace: aioExtension.properties.?scope.?cluster.?releaseNamespace ?? 'azure-iot-operations'
+  extensionSuffix: deriveAioExtensionSuffix(connectedClusterResourceId)
 }
 
 @description('Secret store Arc extension snapshot.')

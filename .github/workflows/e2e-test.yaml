@@ -24,9 +24,9 @@ on:
   workflow_dispatch:
     inputs:
       aio-releases:
-        description: Comma-separated AIO releases to fan out over (e.g. "2605,2606").
+        description: Comma-separated AIO releases to fan out over (e.g. "2606,2607").
         type: string
-        default: "2606"
+        default: "2607"
       environment:
         description: GitHub Environment whose secrets/approvers apply.
         type: string
@@ -109,7 +109,7 @@ jobs:
           if not rs:
               sys.exit("aio-releases must be non-empty")
           # Fail fast if any requested release lacks a shipped config YAML.
-          # Without this, a typo (e.g. "2607" when only "2606" is shipped)
+          # Without this, a release without a matching config file
           # proceeds through k3s bring-up + Arc registration and only errors
           # out at siteops deploy time.
           releases_dir = Path("workspaces/iot-operations/parameters/aio-releases")
@@ -149,9 +149,9 @@ jobs:
                   "cell registers its own cluster."
               )
           # Validate upgrade-to against shipped versions. Same-version cells
-          # are NOT a hard error here: a matrix like `aio-releases=2605,2606`
-          # with `upgrade-to=2606` is a legitimate "test 2605->2606 plus
-          # exercise 2606 install" shape. Each cell decides per-cell whether
+          # are NOT a hard error here: a matrix like `aio-releases=2606,2607`
+          # with `upgrade-to=2607` is a legitimate "test 2606->2607 plus
+          # exercise 2607 install" shape. Each cell decides per-cell whether
           # to skip the upgrade phase based on `matrix.aio-release == upgrade-to`.
           if upgrade_to and not (releases_dir / f"{upgrade_to}.yaml").is_file():
               available = sorted(p.stem for p in releases_dir.glob("*.yaml"))

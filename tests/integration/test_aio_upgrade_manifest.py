@@ -31,6 +31,55 @@ pytestmark = [pytest.mark.integration]
 
 WORKSPACE_PATH = Path(__file__).parent.parent.parent / "workspaces" / "iot-operations"
 
+AIO_2607_ADDITIVE_SETTINGS = {
+    "connectors.values.securityPki.applicationUri",
+    "connectors.values.securityPki.subjectName",
+}
+CERT_MANAGER_2607_ADDITIVE_SETTINGS = {
+    "trust-manager.secretTargets.enabled",
+    "trust-manager.secretTargets.authorizedSecretsAll",
+}
+
+
+def _assert_config_preserved_with_additions(
+    *,
+    name: str,
+    component: str,
+    pre: dict,
+    post: dict,
+    allowed_additions: set[str],
+) -> None:
+    for key, value in pre.items():
+        assert key in post, (
+            f"Site '{name}': {component} configuration key {key!r} was removed"
+        )
+        assert post[key] == value, (
+            f"Site '{name}': {component} configuration key {key!r} changed "
+            f"({value!r} -> {post[key]!r})"
+        )
+
+    additions = set(post) - set(pre)
+    assert additions <= allowed_additions, (
+        f"Site '{name}': {component} added unexpected configuration keys "
+        f"{sorted(additions - allowed_additions)}"
+    )
+
+
+def _assert_config_preserved_with_overrides(
+    *,
+    name: str,
+    component: str,
+    pre: dict,
+    post: dict,
+    expected_overrides: dict,
+) -> None:
+    expected = {**pre, **expected_overrides}
+    assert post == expected, (
+        f"Site '{name}': {component} configuration does not match the "
+        f"preserved state plus release overrides. Expected: {expected!r}. "
+        f"Actual: {post!r}"
+    )
+
 
 class TestAioUpgradeDeployment:
     """Validate that aio-upgrade.yaml deploys successfully end-to-end."""
@@ -356,23 +405,31 @@ class TestAioExtensionInvariants:
 
     def test_aio_configuration_settings_preserved(self, aio_upgrade_result):
         """configurationSettings carries operator-applied AIO config. Update
-        uses `union(existing, overrides)` which is additive-only by contract.
-        any mutation across PUT is data loss.
+        preserves every existing key and may add only release-required defaults.
         """
         for name in aio_upgrade_result["sites"]:
             resolve = assert_step_succeeded(aio_upgrade_result, name, "resolve-extensions")
             pre = assert_output_exists(resolve, "aio")
             update = assert_step_succeeded(aio_upgrade_result, name, "update-extensions")
             post = assert_output_exists(update, "aioPostUpdate")
-            assert post["configurationSettings"] == pre["configurationSettings"], (
-                f"Site '{name}': configurationSettings mutated by upgrade. "
-                f"Pre: {pre['configurationSettings']!r}, "
-                f"Post: {post['configurationSettings']!r}"
+            aio_api_version = assert_output_exists(update, "aioApiVersionApplied")
+            _assert_config_preserved_with_additions(
+                name=name,
+                component="AIO",
+                pre=pre["configurationSettings"],
+                post=post["configurationSettings"],
+                allowed_additions=(
+                    AIO_2607_ADDITIVE_SETTINGS
+                    if aio_api_version == "2026-07-01"
+                    else set()
+                ),
             )
+            if aio_api_version == "2026-07-01":
+                assert AIO_2607_ADDITIVE_SETTINGS <= set(post["configurationSettings"])
 
     def test_aio_release_train_preserved(self, aio_upgrade_result):
         """releaseTrain change is allowed only when the release config bumps
-        the train. Shipped release configs (2603, 2604, 2605, 2606) all use `stable`,
+        the train. Shipped release configs (2603 through 2607) all use `stable`,
         so a mismatch here means the RP defaulted the train unexpectedly OR
         the release config was bumped (intentional, update the test).
         """
@@ -533,10 +590,21 @@ class TestCertManagerExtensionInvariants:
                 pytest.skip(f"Site '{name}': enableCertManager is false")
             update = assert_step_succeeded(aio_upgrade_result, name, "update-extensions")
             post = assert_output_exists(update, "certManagerPostUpdate")
-            assert post["configurationSettings"] == pre["configurationSettings"], (
-                f"Site '{name}': cert-manager configurationSettings mutated by upgrade. "
-                f"Pre: {pre['configurationSettings']!r}, "
-                f"Post: {post['configurationSettings']!r}"
+            aio_api_version = assert_output_exists(update, "aioApiVersionApplied")
+            expected_overrides = (
+                {
+                    key: "false"
+                    for key in CERT_MANAGER_2607_ADDITIVE_SETTINGS
+                }
+                if aio_api_version == "2026-07-01"
+                else {}
+            )
+            _assert_config_preserved_with_overrides(
+                name=name,
+                component="cert-manager",
+                pre=pre["configurationSettings"],
+                post=post["configurationSettings"],
+                expected_overrides=expected_overrides,
             )
 
     def test_cert_manager_release_train_preserved(self, aio_upgrade_result):
