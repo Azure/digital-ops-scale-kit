@@ -211,14 +211,15 @@ resource eventHubNamespace 'Microsoft.EventHub/namespaces@2024-01-01' = {
   }
 }
 
-// Role assignment for Event Hubs Data Sender role
+// Role assignment for Event Hubs Data Sender role. Set `createRoleAssignment: false`
+// when the AIO extension has no managed identity, since a condition cannot test a
+// runtime property and an empty principalId is rejected by ARM.
 resource roleAssignmentDataSender 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (createRoleAssignment) {
   name: guid(eventHubNamespace.id, aioExtension.id, '2b629674-e913-4c01-ae53-ef4638d8f975')
   scope: eventHubNamespace
   properties: {
     // ID for Event Hubs Data Sender role is 2b629674-e913-4c01-ae53-ef4638d8f975
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '2b629674-e913-4c01-ae53-ef4638d8f975')
-    // Safe-access in case identity was not provisioned on the AIO extension.
     principalId: aioExtension.?identity.?principalId ?? ''
     principalType: 'ServicePrincipal'
   }
@@ -232,6 +233,11 @@ resource eventHub 'Microsoft.EventHub/namespaces/eventhubs@2024-01-01' = {
     partitionCount: 1
   }
 }
+
+// The namespace reports its own endpoint as `https://<host>:443/`. Deriving the host
+// from it keeps the sample correct in clouds whose Service Bus suffix differs from
+// the public one. `environment()` exposes no Service Bus suffix to use instead.
+var eventHubHost = replace(replace(eventHubNamespace.properties.serviceBusEndpoint, 'https://', ''), ':443/', '')
 
 /*****************************************************************************/
 /*                                    Data flow                              */
@@ -247,7 +253,7 @@ resource dataflowEndpointEventHub 'Microsoft.IoTOperations/instances/dataflowEnd
   properties: {
     endpointType: 'Kafka'
     kafkaSettings: {
-      host: '${eventHubName}.servicebus.windows.net:9093'
+      host: '${eventHubHost}:9093'
       batching: {
         latencyMs: 0
         maxMessages: 100
@@ -258,14 +264,11 @@ resource dataflowEndpointEventHub 'Microsoft.IoTOperations/instances/dataflowEnd
       authentication: {
         method: 'SystemAssignedManagedIdentity'
         systemAssignedManagedIdentitySettings: {
-          audience: 'https://${eventHubName}.servicebus.windows.net'
+          audience: 'https://${eventHubHost}'
         }
       }
     }
   }
-  dependsOn: [
-    eventHubNamespace
-  ]
 }
 
 resource dataflowCToF 'Microsoft.IoTOperations/instances/dataflowProfiles/dataflows@2025-10-01' = {
@@ -345,6 +348,9 @@ resource dataflowCToF 'Microsoft.IoTOperations/instances/dataflowProfiles/datafl
   }
   dependsOn: [
     eventHub
+    // Data Sender grant must exist before the dataflow sends. Role propagation is
+    // eventually consistent, so this narrows the window rather than closing it.
+    roleAssignmentDataSender
   ]
 }
 

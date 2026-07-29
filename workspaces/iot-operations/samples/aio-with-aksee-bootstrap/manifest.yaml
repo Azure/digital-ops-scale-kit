@@ -11,7 +11,7 @@ description: |
   completion tag so the cluster-dependent steps run only once the cluster is
   ready. One `siteops deploy` runs the whole chain.
 
-  Post-flatten step sequence (preview with `siteops sites --render`):
+  Post-flatten step sequence (preview with `siteops validate -v`):
     1. aksee-bootstrap          (Windows VM through K3s + Arc + custom locations)
     2. wait-for-bootstrap       (gate on the siteops.bootstrap.state tag)
     3. global-edge-site         (gated by enableGlobalSite)

@@ -172,6 +172,10 @@ resource aioExtensionUpdate 'Microsoft.KubernetesConfiguration/extensions@2023-0
       aioConfigurationOverrides
     )
   }
+  // AIO reconciles against cert-manager CRDs and webhooks, so it must not upgrade
+  // while cert-manager is mid-upgrade. Install serializes the same pair.
+  // Must stay in sync with the `if (enableCertManager)` guard below.
+  dependsOn: enableCertManager ? [certManagerExtensionUpdate] : []
 }
 
 // =====================================================================================
