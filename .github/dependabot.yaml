@@ -11,7 +11,13 @@ updates:
       prefix-development: "chore(pip-dev-deps)"
 
   - package-ecosystem: "github-actions"
-    directory: "/"
+    directories:
+      # "/" covers .github/workflows. Composite actions are separate manifests that
+      # are only scanned when their directory is listed, which is why actions used
+      # solely by a composite action did not receive update pull requests. The glob
+      # keeps future composite actions covered without editing this file.
+      - "/"
+      - "/.github/actions/*"
     schedule:
       interval: "weekly"
     commit-message:

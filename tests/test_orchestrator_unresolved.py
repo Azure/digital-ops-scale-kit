@@ -17,6 +17,7 @@ literal token is sent to ARM. Three behaviors must hold:
 
 from __future__ import annotations
 
+import json
 import logging
 from unittest.mock import patch
 
@@ -27,9 +28,28 @@ from siteops.models import Manifest, Site
 from siteops.orchestrator import Orchestrator
 
 
-def _write_template(workspace, name: str, params: list[str]) -> str:
-    """Write a minimal Bicep template that declares the given params."""
-    body = "\n".join(f"param {p} string" for p in params)
+def _write_template(workspace, name: str, params: dict[str, str]) -> str:
+    """Write a minimal ARM JSON template that declares the given params.
+
+    ARM JSON is parsed in process by `get_template_parameters`, while Bicep
+    shells out to the compiler. These tests assert token detection in resolved
+    parameters, not compilation, so JSON keeps them fast. The Bicep path itself
+    is covered by `test_unresolved_check_with_bicep_template`.
+    """
+    template = {
+        "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+        "contentVersion": "1.0.0.0",
+        "parameters": {n: {"type": t} for n, t in params.items()},
+        "resources": [],
+    }
+    path = workspace / "templates" / f"{name}.json"
+    path.write_text(json.dumps(template), encoding="utf-8")
+    return f"templates/{name}.json"
+
+
+def _write_bicep_template(workspace, name: str, params: dict[str, str]) -> str:
+    """Write a minimal Bicep template. Compiles via `az bicep build`."""
+    body = "\n".join(f"param {n} {t}" for n, t in params.items())
     path = workspace / "templates" / f"{name}.bicep"
     path.write_text(body + "\n", encoding="utf-8")
     return f"templates/{name}.bicep"
@@ -69,7 +89,7 @@ class TestUnresolvedTemplateGuard:
 
     def test_unresolved_in_accepted_param_raises(self, tmp_workspace):
         """A surviving `{{ ... }}` in a template-accepted param must raise."""
-        template_rel = _write_template(tmp_workspace, "accepts-name", ["name"])
+        template_rel = _write_template(tmp_workspace, "accepts-name", {"name": "string"})
         manifest = _make_manifest(tmp_workspace, "deploy", template_rel)
         site = _make_site()
         # Inject a parameter file whose value references a non-existent step.
@@ -89,7 +109,7 @@ class TestUnresolvedTemplateGuard:
         defaults (e.g. `siteAddress.country`) targeting non-consuming steps
         must not break deployment.
         """
-        template_rel = _write_template(tmp_workspace, "accepts-name", ["name"])
+        template_rel = _write_template(tmp_workspace, "accepts-name", {"name": "string"})
         manifest = _make_manifest(tmp_workspace, "deploy", template_rel)
         site = _make_site()
         site.parameters = {
@@ -107,7 +127,7 @@ class TestUnresolvedTemplateGuard:
 
     def test_unresolved_warns_in_dry_run(self, tmp_workspace, caplog):
         """Dry-run mode downgrades the unresolved-check to a warning."""
-        template_rel = _write_template(tmp_workspace, "accepts-name", ["name"])
+        template_rel = _write_template(tmp_workspace, "accepts-name", {"name": "string"})
         manifest = _make_manifest(tmp_workspace, "deploy", template_rel)
         site = _make_site()
         site.parameters = {"name": "{{ steps.missing.outputs.id }}"}
@@ -129,7 +149,7 @@ class TestUnresolvedTemplateGuard:
         filter failure surfaces instead of being masked by a misleading
         'unresolved templates' error.
         """
-        template_rel = _write_template(tmp_workspace, "accepts-name", ["name"])
+        template_rel = _write_template(tmp_workspace, "accepts-name", {"name": "string"})
         manifest = _make_manifest(tmp_workspace, "deploy", template_rel)
         site = _make_site()
         # Param contains an unresolved token that *would* trip the check if
@@ -169,10 +189,8 @@ class TestUnresolvedTemplateGuard:
         unresolved template buried inside one would otherwise reach ARM as a
         literal string element.
         """
-        body = "param tags array\n"
-        path = tmp_workspace / "templates" / "accepts-tags.bicep"
-        path.write_text(body, encoding="utf-8")
-        manifest = _make_manifest(tmp_workspace, "deploy", "templates/accepts-tags.bicep")
+        template_rel = _write_template(tmp_workspace, "accepts-tags", {"tags": "array"})
+        manifest = _make_manifest(tmp_workspace, "deploy", template_rel)
         site = _make_site()
         site.parameters = {"tags": ["ok", "{{ steps.missing.outputs.id }}", "also-ok"]}
 
@@ -184,10 +202,8 @@ class TestUnresolvedTemplateGuard:
 
     def test_unresolved_in_nested_dict_raises(self, tmp_workspace):
         """Unresolved tokens inside an object value are detected (recursive walk)."""
-        body = "param config object\n"
-        path = tmp_workspace / "templates" / "accepts-config.bicep"
-        path.write_text(body, encoding="utf-8")
-        manifest = _make_manifest(tmp_workspace, "deploy", "templates/accepts-config.bicep")
+        template_rel = _write_template(tmp_workspace, "accepts-config", {"config": "object"})
+        manifest = _make_manifest(tmp_workspace, "deploy", template_rel)
         site = _make_site()
         site.parameters = {
             "config": {
@@ -200,4 +216,22 @@ class TestUnresolvedTemplateGuard:
         step = manifest.steps[0]
 
         with pytest.raises(ValueError, match=r"Unresolved template.*config\.nested\.inner"):
+            orchestrator.resolve_parameters(step, site, manifest, step_outputs={})
+
+    def test_unresolved_check_with_bicep_template(self, tmp_workspace):
+        """The guard behaves identically when the parameter surface comes from a
+        compiled Bicep template rather than ARM JSON.
+
+        The other tests in this class use ARM JSON so they do not pay a Bicep
+        compile each. This one keeps real `az bicep build` extraction covered.
+        """
+        template_rel = _write_bicep_template(tmp_workspace, "accepts-name", {"name": "string"})
+        manifest = _make_manifest(tmp_workspace, "deploy", template_rel)
+        site = _make_site()
+        site.parameters = {"name": "{{ steps.missing.outputs.id }}"}
+
+        orchestrator = Orchestrator(tmp_workspace)
+        step = manifest.steps[0]
+
+        with pytest.raises(ValueError, match="Unresolved template"):
             orchestrator.resolve_parameters(step, site, manifest, step_outputs={})

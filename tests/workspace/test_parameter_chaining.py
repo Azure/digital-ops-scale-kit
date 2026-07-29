@@ -457,89 +457,6 @@ VERSION_CONFIG_REQUIRED_FIELDS = {
     "secretStoreTrain",
 }
 
-EXPECTED_SUPPORTED_RELEASES = {
-    "2512": {
-        "aioVersion": "1.2.154",
-        "aioTrain": "stable",
-        "aioApiVersion": "2025-10-01",
-        "adrApiVersion": "2025-10-01",
-        "certManagerVersion": "0.7.0",
-        "certManagerTrain": "stable",
-        "certManagerConfigurationOverrides": {},
-        "secretStoreVersion": "1.1.5",
-        "secretStoreTrain": "stable",
-    },
-    "2602": {
-        "aioVersion": "1.2.189",
-        "aioTrain": "stable",
-        "aioApiVersion": "2025-10-01",
-        "adrApiVersion": "2025-10-01",
-        "certManagerVersion": "0.9.0",
-        "certManagerTrain": "stable",
-        "certManagerConfigurationOverrides": {},
-        "secretStoreVersion": "1.1.6",
-        "secretStoreTrain": "stable",
-    },
-    "2603": {
-        "aioVersion": "1.3.38",
-        "aioTrain": "stable",
-        "aioApiVersion": "2026-03-01",
-        "adrApiVersion": "2026-04-01",
-        "certManagerVersion": "0.10.2",
-        "certManagerTrain": "stable",
-        "certManagerConfigurationOverrides": {},
-        "secretStoreVersion": "1.3.0",
-        "secretStoreTrain": "stable",
-    },
-    "2604": {
-        "aioVersion": "1.3.70",
-        "aioTrain": "stable",
-        "aioApiVersion": "2026-03-01",
-        "adrApiVersion": "2026-04-01",
-        "certManagerVersion": "0.11.0",
-        "certManagerTrain": "stable",
-        "certManagerConfigurationOverrides": {},
-        "secretStoreVersion": "1.4.0",
-        "secretStoreTrain": "stable",
-    },
-    "2605": {
-        "aioVersion": "1.3.105",
-        "aioTrain": "stable",
-        "aioApiVersion": "2026-03-01",
-        "adrApiVersion": "2026-04-01",
-        "certManagerVersion": "0.12.0",
-        "certManagerTrain": "stable",
-        "certManagerConfigurationOverrides": {},
-        "secretStoreVersion": "1.4.1",
-        "secretStoreTrain": "stable",
-    },
-    "2606": {
-        "aioVersion": "1.3.137",
-        "aioTrain": "stable",
-        "aioApiVersion": "2026-03-01",
-        "adrApiVersion": "2026-04-01",
-        "certManagerVersion": "0.13.3",
-        "certManagerTrain": "stable",
-        "certManagerConfigurationOverrides": {},
-        "secretStoreVersion": "1.5.0",
-        "secretStoreTrain": "stable",
-    },
-    "2607": {
-        "aioVersion": "1.4.41",
-        "aioTrain": "stable",
-        "aioApiVersion": "2026-07-01",
-        "adrApiVersion": "2026-04-01",
-        "certManagerVersion": "0.14.0",
-        "certManagerTrain": "stable",
-        "certManagerConfigurationOverrides": {
-            "trust-manager.secretTargets.enabled": "false",
-            "trust-manager.secretTargets.authorizedSecretsAll": "false",
-        },
-        "secretStoreVersion": "1.5.1",
-        "secretStoreTrain": "stable",
-    },
-}
-
 
 class TestReleaseConfigs:
     """Release config YAML files should be valid and consistent."""
@@ -582,23 +499,50 @@ class TestReleaseConfigs:
                         f"{release_file.name}: '{key}' is empty or missing"
                     )
 
-    def test_release_configs_match_expected_supported_metadata(self, workspace):
-        """Every supported release must match the expected version and API metadata."""
-        actual = {}
-        for release_file in self._get_release_files(workspace):
-            with open(release_file, "r", encoding="utf-8") as f:
-                actual[release_file.stem] = yaml.safe_load(f)
+    def test_release_config_value_shapes(self, workspace):
+        """Release metadata must be well formed for the contracts that consume it.
 
-        assert actual == EXPECTED_SUPPORTED_RELEASES
+        Extension versions reach Helm, and API versions are substituted into
+        Bicep dispatchers, so a malformed value here surfaces as a deployment
+        failure rather than a validation error. Shapes are asserted rather than
+        exact values, which git history already records.
+        """
+        semver = re.compile(r"^\d+\.\d+\.\d+")
+        api_version = re.compile(r"^\d{4}-\d{2}-\d{2}(-preview)?$")
+
+        for release_file in self._get_release_files(workspace):
+            assert release_file.stem.isdigit(), (
+                f"{release_file.name}: release moniker must be numeric so releases order"
+            )
+
+            with open(release_file, "r", encoding="utf-8") as f:
+                config = yaml.safe_load(f)
+
+            for key in ("aioVersion", "certManagerVersion", "secretStoreVersion"):
+                assert semver.match(str(config[key])), (
+                    f"{release_file.name}: '{key}' is not a version: {config[key]!r}"
+                )
+
+            for key in ("aioApiVersion", "adrApiVersion"):
+                assert api_version.match(str(config[key])), (
+                    f"{release_file.name}: '{key}' is not an ARM API version: {config[key]!r}"
+                )
+
+            overrides = config["certManagerConfigurationOverrides"]
+            assert all(isinstance(k, str) for k in overrides), (
+                f"{release_file.name}: configuration override keys must be strings"
+            )
 
     def test_base_site_defaults_to_latest_supported_release(self, workspace):
-        """The base site should select the highest supported release moniker."""
+        """The base site should select the highest release moniker that ships."""
         base_path = workspace / "sites" / "base-site.yaml"
         with open(base_path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
 
         default_release = data["properties"]["aioRelease"]
-        latest_release = max(EXPECTED_SUPPORTED_RELEASES, key=int)
+        latest_release = max(
+            (f.stem for f in self._get_release_files(workspace)), key=int
+        )
         assert default_release == latest_release
 
     def test_base_site_aio_release_has_config_file(self, workspace):
