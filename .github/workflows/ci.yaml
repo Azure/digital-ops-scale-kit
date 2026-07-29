@@ -11,6 +11,8 @@ on:
       - "tests/**"
       - "scripts/**"
       - "pyproject.toml"
+      - ".github/workflows/**"
+      - ".github/actions/**"
   pull_request:
     branches: [main]
     paths:
@@ -19,6 +21,8 @@ on:
       - "tests/**"
       - "scripts/**"
       - "pyproject.toml"
+      - ".github/workflows/**"
+      - ".github/actions/**"
   workflow_dispatch:
 
 permissions:
