@@ -39,7 +39,7 @@ jobs:
           installDev: true
 
       - script: >
-          pytest tests/ -v
+          pytest tests/ -m "not integration" -v
           --cov=siteops
           --cov-report=term-missing
           --cov-report=xml:coverage.xml

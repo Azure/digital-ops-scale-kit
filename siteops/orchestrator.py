@@ -2391,8 +2391,8 @@ class Orchestrator:
                     site = future_to_site[future]
                     try:
                         result = future.result()
-                        results.append(result)
                         self._extract_subscription_outputs(result, site.subscription, subscription_outputs)
+                        results.append(result)
                     except Exception as e:
                         logger.error(f"Error deploying subscription-level site {site.name}: {e}")
                         results.append(

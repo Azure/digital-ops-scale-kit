@@ -9,8 +9,10 @@ description: |
   (managed identity, Key Vault, role assignments, federated identity
   credential, default Secret Provider Class wired into the AIO instance),
   writes the configured Key Vault secrets, and creates one SecretSync ARM
-  resource per entry. The cluster-side SecretSync controller then
-  materializes each value as a Kubernetes Secret in the AIO namespace.
+  resource per distinct `kubernetesSecretName`. Entries that share a
+  `kubernetesSecretName` are grouped into one multi-key Kubernetes Secret.
+  The cluster-side SecretSync controller then materializes each group as a
+  Kubernetes Secret in the AIO namespace.
 
   The defaults in `parameters/inputs/sync-secrets.yaml` are obvious sample
   values. For real use, override `secrets` and `secretValues`. Supply

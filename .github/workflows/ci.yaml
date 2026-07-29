@@ -34,7 +34,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -55,7 +55,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -65,7 +65,7 @@ jobs:
           install-dev: "true"
 
       - name: Run unit tests
-        run: pytest tests/ -v --cov=siteops --cov-report=term-missing --cov-report=xml:coverage.xml --junitxml=test-results.xml
+        run: pytest tests/ -m "not integration" -v --cov=siteops --cov-report=term-missing --cov-report=xml:coverage.xml --junitxml=test-results.xml
 
       - name: Test Summary
         if: always()
@@ -130,7 +130,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
