@@ -92,6 +92,7 @@ var activeInstance = aioApiVersion == '2025-10-01'
       adrNamespaceResourceId: resolve_2025!.outputs.adrNamespaceResourceId
       features: resolve_2025!.outputs.features
       instanceDescription: resolve_2025!.outputs.instanceDescription
+      defaultSecretProviderClassResourceId: resolve_2025!.outputs.defaultSecretProviderClassResourceId
     }
   : aioApiVersion == '2026-03-01'
     ? {
@@ -104,6 +105,7 @@ var activeInstance = aioApiVersion == '2025-10-01'
       adrNamespaceResourceId: resolve_2026!.outputs.adrNamespaceResourceId
       features: resolve_2026!.outputs.features
       instanceDescription: resolve_2026!.outputs.instanceDescription
+      defaultSecretProviderClassResourceId: resolve_2026!.outputs.defaultSecretProviderClassResourceId
     }
     : {
         customLocationResourceId: resolve_2026_07!.outputs.customLocationResourceId
@@ -115,6 +117,7 @@ var activeInstance = aioApiVersion == '2025-10-01'
         adrNamespaceResourceId: resolve_2026_07!.outputs.adrNamespaceResourceId
         features: resolve_2026_07!.outputs.features
         instanceDescription: resolve_2026_07!.outputs.instanceDescription
+        defaultSecretProviderClassResourceId: resolve_2026_07!.outputs.defaultSecretProviderClassResourceId
       }
 
 // =====================================================================================
@@ -192,3 +195,6 @@ output features object = activeInstance.features
 
 @description('Instance description.')
 output instanceDescription string = activeInstance.instanceDescription
+
+@description('Default Secret Provider Class resource ID, empty when Secret Sync is not enabled. Forward this into an instance update so a caller that does not manage Secret Sync leaves the binding intact.')
+output defaultSecretProviderClassResourceId string = activeInstance.defaultSecretProviderClassResourceId
