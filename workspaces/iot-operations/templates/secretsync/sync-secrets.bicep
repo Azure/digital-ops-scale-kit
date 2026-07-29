@@ -35,6 +35,7 @@
 // -------------------------------------------------------------------------------------
 
 import { aioSecretSyncServiceAccountName } from '../common/extension-names.bicep'
+import { spcObjectsYaml as renderSpcObjects } from './spc-objects.bicep'
 
 // =====================================================================================
 // Parameters chained from upstream steps
@@ -91,7 +92,7 @@ resource customLocation 'Microsoft.ExtendedLocation/customLocations@2021-08-31-p
 // objectType. The SecretSync controller parses this string to know which Key Vault
 // objects to fetch. secretName uniqueness (enforced by the input contract above)
 // keeps this list duplicate-free.
-var spcObjectsYaml = 'array:\n${join(map(secrets, s => '  - |\n    objectName: ${s.secretName}\n    objectType: secret'), '\n')}\n'
+var spcObjectsYaml = renderSpcObjects(secrets)
 
 // Distinct Kubernetes Secret names referenced by the array. `union(..., [])`
 // is the Bicep idiom for deduplicating a list. One SecretSync ARM resource
