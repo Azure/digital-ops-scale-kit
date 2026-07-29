@@ -11,6 +11,7 @@ trigger:
       - tests/**
       - scripts/**
       - pyproject.toml
+      - .pipelines/**
 
 pr:
   branches:
@@ -22,6 +23,7 @@ pr:
       - tests/**
       - scripts/**
       - pyproject.toml
+      - .pipelines/**
 
 pool:
   vmImage: ubuntu-latest
