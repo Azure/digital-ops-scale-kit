@@ -17,7 +17,7 @@ Bicep templates referenced by manifest steps via the `template:` field.
 - **Versioned dispatchers** are introduced only when an API version actually diverges. Default to a single template. On the first breaking API change, split the area into a top-level dispatcher (e.g. `aio/instance.bicep`) plus per-API-version inner modules under `<area>/modules/<api-version>.bicep`.
 - **`existing` resource lookups** must use the shared deriver from `common/extension-names.bicep` so install and upgrade resolve to the same names.
 - **API version pins** for samples follow the policy in `docs/aio-releases.md` ("Sample template API-version policy"): pin to the oldest supported API version. The `test_samples_pin_to_oldest_api_version` workspace test enforces this for `samples/<name>/template.bicep`.
-- **Outputs** declared in a Bicep template must match the `outputs:` section of the matching `parameters/outputs/<step>.yaml` (when the step's outputs flow downstream). The `test_step_output_shape` workspace test enforces this.
+- **Outputs** declared in a Bicep template must match the `outputs:` section of the matching `parameters/outputs/<step>.yaml` (when the step's outputs flow downstream). The chaining tests in `tests/workspace/test_parameter_chaining.py` check that each consumer reference resolves to an output a producing step actually emits.
 
 ## Authoring a new template
 
