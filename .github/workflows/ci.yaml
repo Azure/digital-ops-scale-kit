@@ -65,7 +65,7 @@ jobs:
           install-dev: "true"
 
       - name: Run unit tests
-        run: pytest tests/ -v --cov=siteops --cov-report=term-missing --cov-report=xml:coverage.xml --junitxml=test-results.xml
+        run: pytest tests/ -m "not integration" -v --cov=siteops --cov-report=term-missing --cov-report=xml:coverage.xml --junitxml=test-results.xml
 
       - name: Test Summary
         if: always()
