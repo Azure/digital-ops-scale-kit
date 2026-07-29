@@ -38,9 +38,7 @@ parameters:
   - "parameters/aio-releases/{{ site.properties.aioRelease }}.yaml"
 
 steps:
-  - name: resolve-aio
-    template: templates/aio/resolve-aio.bicep
-    scope: resourceGroup
+  - include: _resolve-aio.yaml
 
   - name: resolve-extensions
     template: templates/aio/upgrade/resolve-extensions.bicep

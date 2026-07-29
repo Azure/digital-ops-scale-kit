@@ -33,6 +33,12 @@ def _all_manifest_files(workspace: Path) -> list[Path]:
                     found.append(manifest)
                 # Partials in the sample dir (filename prefixed `_`).
                 found.extend(sorted(sample_dir.glob(f"_*.{ext}")))
+    # Partials that live beside the implementation they wrap, such as the host
+    # lifecycle steps under `templates/<area>/<impl>/`.
+    templates = workspace / "templates"
+    if templates.is_dir():
+        for ext in ("yaml", "yml"):
+            found.extend(sorted(templates.rglob(f"_*.{ext}")))
     return found
 
 
@@ -44,42 +50,29 @@ class TestManifestValidation:
         manifests = _all_manifest_files(workspace)
         assert len(manifests) >= 1, "No manifests found in workspace"
 
-    def test_aio_fundamentals_validates(self, workspace, orchestrator):
-        """_aio-fundamentals.yaml (internal partial) should validate with no errors."""
-        errors = orchestrator.validate(workspace / "manifests" / "_aio-fundamentals.yaml")
-        assert errors == [], f"_aio-fundamentals.yaml validation errors: {errors}"
+    def test_every_manifest_validates(self, workspace, orchestrator):
+        """Every deployable manifest validates.
 
-    def test_aio_install_validates(self, workspace, orchestrator):
-        """aio-install.yaml should validate with no errors."""
-        errors = orchestrator.validate(workspace / "manifests" / "aio-install.yaml")
-        assert errors == [], f"aio-install.yaml validation errors: {errors}"
+        Sweeping discovery rather than naming files means a manifest added later is
+        covered on arrival instead of when someone remembers to add a test.
 
-    def test_secretsync_validates(self, workspace, orchestrator):
-        """secretsync.yaml should validate with no errors."""
-        errors = orchestrator.validate(workspace / "manifests" / "secretsync.yaml")
-        assert errors == [], f"secretsync.yaml validation errors: {errors}"
+        Partials are excluded because they are not independently deployable. One that
+        chains off an upstream step cannot resolve that reference until a composing
+        manifest supplies the producer, so validating it alone reports a failure that
+        is by design. Partials are still covered structurally by the underscore and
+        composition tests below, and through the entry points that include them.
+        """
+        failures: dict[str, list] = {}
+        for manifest in _all_manifest_files(workspace):
+            if manifest.name.startswith("_"):
+                continue
+            errors = orchestrator.validate(manifest)
+            if errors:
+                failures[str(manifest.relative_to(workspace))] = errors
 
-    def test_aio_upgrade_validates(self, workspace, orchestrator):
-        """aio-upgrade.yaml should validate with no errors."""
-        errors = orchestrator.validate(workspace / "manifests" / "aio-upgrade.yaml")
-        assert errors == [], f"aio-upgrade.yaml validation errors: {errors}"
-
-    def test_aksee_upgrade_validates(self, workspace, orchestrator):
-        """aksee-upgrade.yaml (host-ops patch update + wait gate) should validate."""
-        errors = orchestrator.validate(workspace / "manifests" / "aksee-upgrade.yaml")
-        assert errors == [], f"aksee-upgrade.yaml validation errors: {errors}"
-
-    def test_opc_ua_solution_validates(self, workspace, orchestrator):
-        """samples/opc-ua-solution/manifest.yaml should validate."""
-        errors = orchestrator.validate(workspace / "samples" / "opc-ua-solution" / "manifest.yaml")
-        assert errors == [], f"opc-ua-solution validation errors: {errors}"
-
-    def test_aio_with_opc_ua_validates(self, workspace, orchestrator):
-        """samples/aio-with-opc-ua/manifest.yaml should validate (composes via include)."""
-        errors = orchestrator.validate(
-            workspace / "samples" / "aio-with-opc-ua" / "manifest.yaml"
+        assert not failures, "manifest validation errors:\n" + "\n".join(
+            f"  {name}: {errs}" for name, errs in sorted(failures.items())
         )
-        assert errors == [], f"aio-with-opc-ua validation errors: {errors}"
 
     def test_no_duplicate_step_names_in_any_manifest(self, workspace, orchestrator):
         """No manifest (post-include flatten) should have duplicate step names."""

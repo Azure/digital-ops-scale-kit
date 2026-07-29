@@ -756,6 +756,51 @@ class TestSampleTemplateApiPolicy:
                     oldest[rp] = value
         return oldest
 
+    _VERSIONED_MODULE = re.compile(r"-\d{4}-\d{2}-\d{2}(?:-preview)?\.bicep$")
+
+    def _pin_violations(self, workspace: Path, bicep_files: list[Path]) -> list[str]:
+        oldest = self._oldest_versions(workspace)
+        assert oldest, "Could not derive oldest API versions from version YAMLs"
+
+        rp_pattern = re.compile(
+            r"(Microsoft\.(?:IoTOperations|DeviceRegistry))/[^@'\s]+@(\d{4}-\d{2}-\d{2}(?:-preview)?)"
+        )
+        violations: list[str] = []
+        for bicep in bicep_files:
+            text = bicep.read_text(encoding="utf-8")
+            for match in rp_pattern.finditer(text):
+                rp, api_version = match.group(1), match.group(2)
+                expected = oldest.get(rp)
+                if expected is not None and api_version != expected:
+                    violations.append(
+                        f"{bicep.relative_to(workspace)}: {rp} pinned to "
+                        f"'{api_version}' but oldest supported is '{expected}'"
+                    )
+        return violations
+
+    def test_templates_pin_to_oldest_api_version(self, workspace):
+        """Workspace templates that are not per-version modules follow the same pin.
+
+        A template naming a single API version literal serves every release, so it
+        must name the oldest one. Files whose name carries an API version are the
+        per-version modules a dispatcher routes to, and are exempt by definition.
+        Keying the exemption on the filename rather than on a directory keeps a
+        template from escaping the policy by living under `modules/`.
+        """
+        templates_dir = workspace / "templates"
+        bicep_files = [
+            f for f in sorted(templates_dir.rglob("*.bicep"))
+            if not self._VERSIONED_MODULE.search(f.name)
+        ]
+        assert bicep_files, f"No bicep files found under {templates_dir}"
+
+        violations = self._pin_violations(workspace, bicep_files)
+        assert not violations, (
+            "Templates that are not per-version modules must pin to the oldest "
+            "supported API version, or route through a dispatcher "
+            "(see docs/aio-releases.md):\n  " + "\n  ".join(violations)
+        )
+
     def test_samples_pin_to_oldest_api_version(self, workspace):
         """Every Microsoft.IoTOperations / Microsoft.DeviceRegistry reference under
         samples/ must equal the oldest API version in the release-YAML matrix.
