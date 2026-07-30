@@ -132,6 +132,60 @@ class TestParameterChaining:
             )
 
 
+class TestParameterAttachmentTier:
+    """A parameter file's attachment tier follows from what the file is.
+
+    Chaining files carry `{{ steps.X.outputs.Y }}` wiring and attach at step
+    level, the highest-precedence tier, scoped to the one consumer. Declaration
+    files carry operator intent and attach at manifest level, below site
+    parameters, so a site overlay overrides them and every step in the pipeline
+    reads the same values.
+    """
+
+    def _manifest_level_parameter_paths(self, manifest_path: Path) -> list[str]:
+        """Read the raw manifest-level `parameters:` list, path variables intact."""
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+        return [p for p in (raw.get("parameters") or []) if isinstance(p, str)]
+
+    def test_manifest_level_parameters_carry_no_step_output_refs(self, workspace):
+        """Manifest-level parameter files declare values rather than wire steps.
+
+        Manifest-level parameters apply to every step in the flattened pipeline,
+        including steps that run before a referenced producer, so a step output
+        reference there cannot be guaranteed to resolve. Structural validation
+        checks output references on step-level files only, which is why this
+        boundary is worth asserting directly.
+        """
+        from tests.workspace.test_manifest_validation import _all_manifest_files
+
+        manifests = _all_manifest_files(workspace)
+        assert manifests, "No manifests discovered"
+
+        violations: list[str] = []
+        checked = 0
+        for manifest_path in manifests:
+            for param_path in self._manifest_level_parameter_paths(manifest_path):
+                # A path variable such as {{ site.properties.aioRelease }} selects
+                # one of a set of files. Check every file it can resolve to.
+                pattern = re.sub(r"\{\{[^}]*\}\}", "*", param_path)
+                for param_file in sorted(workspace.glob(pattern)):
+                    checked += 1
+                    for _, _, raw in TestParameterChaining()._get_chaining_refs(param_file):
+                        violations.append(
+                            f"{manifest_path.relative_to(workspace)} attaches "
+                            f"{param_file.relative_to(workspace)} at manifest level, "
+                            f"but it chains a step output: {raw}"
+                        )
+
+        assert checked > 0, "No manifest-level parameter files resolved, so nothing was checked"
+        assert not violations, (
+            "Manifest-level parameter files must not chain step outputs. Move the "
+            "chaining keys into a step-level file and leave the declared values at "
+            "manifest level.\n" + "\n".join(violations)
+        )
+
+
 class TestConditionalStepCoverage:
     """Every when: condition should reference a property that exists in base-site.yaml."""
 
