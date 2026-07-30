@@ -1,7 +1,7 @@
 // subscription.bicep
 // -------------------------------------------------------------------------------------
 // Creates a Microsoft.Edge/sites resource at subscription scope. Use for
-// subscription-wide / global edge sites; use main.bicep for resource-group scope.
+// subscription-wide global edge sites, and main.bicep for resource-group scope.
 //
 // Inputs:  siteName, optional displayName/siteDescription/siteAddress/labels.
 // Outputs: site { id, name, displayName }.

@@ -25,6 +25,6 @@ Implementations of host-side bootstrap for Azure IoT Operations targets. Each im
 3. Add `_partial.yaml` that wires the template into a deployable step.
 4. If the implementation delivers host-runtime artifacts, add `<impl>/scripts/` with the artifacts and a `<impl>/scripts/README.md` that documents the dev workflow.
 5. Add `<impl>/README.md` describing the capability, prerequisites, configuration, run, monitor, verify, and troubleshoot.
-6. Add a standalone entry point at `manifests/<name>-bootstrap.yaml` that just includes `<impl>/_partial.yaml`, plus input wiring at `parameters/inputs/<name>-bootstrap.yaml`.
+6. Add a standalone entry point at `manifests/<name>-bootstrap.yaml` that includes `<impl>/_partial.yaml` and then a `type: wait` step gating on the completion tag the worker writes, plus input wiring at `parameters/inputs/<name>-bootstrap.yaml`. Run Command returns once the launcher registers the work, so without the wait step the following steps run against a cluster that does not exist yet.
 7. Optionally add a composition sample at `samples/aio-with-<name>-bootstrap/` that demonstrates bootstrap + AIO install in one deploy.
 8. Add this row to the implementations table above.

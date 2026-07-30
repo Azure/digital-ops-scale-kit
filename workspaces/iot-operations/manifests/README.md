@@ -8,6 +8,8 @@ Standalone manifests and their internal partials for the AIO platform.
 |------|------|------------|---------|
 | `aio-install.yaml` | Standalone | yes | Day-1 AIO platform install. Composes `_aio-fundamentals.yaml` and conditionally adds secret sync. |
 | `aio-upgrade.yaml` | Standalone | yes | In-place AIO upgrade to the site's current `aioRelease`. |
+| `aksee-bootstrap.yaml` | Standalone | yes | AKS Edge Essentials host bootstrap, gated on the completion tag the host worker writes. |
+| `aksee-upgrade.yaml` | Standalone | yes | Day-2 in-place AKS Edge Essentials cluster upgrade. |
 | `secretsync.yaml` | Standalone | yes | Day-2 enable secret sync on an existing AIO install. |
 | `_aio-fundamentals.yaml` | Partial | no | Arc extensions, custom location, instance, schema registry, ADR namespace, plus optional global/edge sites. |
 | `_resolve-aio.yaml` | Partial | no | Reads instance and custom-location names from the existing AIO instance for downstream chaining. |

@@ -19,7 +19,7 @@ This guide covers CI/CD configuration for automated testing and deployments. Sit
 
 | Workflow | Trigger | Purpose |
 |----------|---------|---------|
-| `ci.yaml` | Push, pull request, manual | Validate Bicep templates, run unit tests, and validate manifests |
+| `ci.yaml` | Push, pull request, manual | Lint Python, run unit tests, validate Bicep templates, and validate manifests |
 | `deploy.yaml` | Manual (`workflow_dispatch`) | Deploy infrastructure to Azure |
 | `_siteops-deploy.yaml` | Called by deploy.yaml | Reusable deployment logic |
 | `integration-test.yaml` | Manual (`workflow_dispatch`) | Run the integration pytest suite against an environment that was previously deployed via `deploy.yaml` |
@@ -227,6 +227,7 @@ CI runs automatically on pushes to main and PRs that modify:
 - `tests/**`
 - `scripts/**`
 - `pyproject.toml`
+- `.github/workflows/**` and `.github/actions/**` on GitHub Actions, or `.pipelines/**` on Azure Pipelines
 
 Can also be triggered manually from **Actions → CI → Run workflow** (GHA) or **Pipelines → CI → Run pipeline** (ADO).
 
@@ -433,9 +434,12 @@ manifest:
         - manifests/aio-install.yaml
         - manifests/aio-upgrade.yaml
         - manifests/secretsync.yaml
+        - manifests/aksee-bootstrap.yaml
+        - manifests/aksee-upgrade.yaml
         - samples/secretsync-sample/manifest.yaml
         - samples/opc-ua-solution/manifest.yaml
         - samples/aio-with-opc-ua/manifest.yaml
+        - samples/aio-with-aksee-bootstrap/manifest.yaml
         - manifests/my-new-manifest.yaml  # Add here (full path)
 ```
 
@@ -449,11 +453,16 @@ manifest:
     - manifests/aio-install.yaml
     - manifests/aio-upgrade.yaml
     - manifests/secretsync.yaml
+    - manifests/aksee-bootstrap.yaml
+    - manifests/aksee-upgrade.yaml
     - samples/secretsync-sample/manifest.yaml
     - samples/opc-ua-solution/manifest.yaml
     - samples/aio-with-opc-ua/manifest.yaml
+    - samples/aio-with-aksee-bootstrap/manifest.yaml
     - manifests/my-new-manifest.yaml  # Add here (full path)
 ```
+
+Keep the two lists in step. A manifest offered on one platform and not the other is deployable only from that platform.
 
 ### Adding new workspaces
 
@@ -564,8 +573,9 @@ stages:
 
 | Pipeline file | Purpose | Trigger |
 |---------------|---------|---------|
-| `.pipelines/ci.yaml` | Bicep validation, unit tests, manifest validation | Push to main, PRs |
+| `.pipelines/ci.yaml` | Lint, unit tests, Bicep validation, manifest validation | Push to main, PRs |
 | `.pipelines/deploy.yaml` | Manual deploy with environment selection | Manual only |
+| `.pipelines/integration-test.yaml` | Integration suite against an environment already deployed by `deploy.yaml` | Manual only |
 | `.pipelines/templates/siteops-deploy.yaml` | Stage template: deployment logic | Called by deploy.yaml |
 | `.pipelines/templates/setup-siteops.yaml` | Steps template: install Python + siteops | Called by all pipelines |
 

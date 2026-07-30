@@ -15,11 +15,11 @@
 //   2. Custom Location parsed from the instance's extendedLocation.name.
 //   3. Connected Cluster parsed from the CL's hostResourceId.
 //
-// Why route on aioApiVersion: Microsoft.IoTOperations is an Arc-mapped RP;
+// Why route on aioApiVersion: Microsoft.IoTOperations is an Arc-mapped RP, so
 // the ARM API version on `existing` issues a real GET against that version's
 // CRD generation. The site's selected release config (aio-releases/<release>.yaml)
 // is the source of truth for which API version to read with. During an
-// upgrade, this is the *target* API version; the GET against a source-version
+// upgrade, this is the *target* API version, and the GET against a source-version
 // instance relies on RP forward-compat for read shape.
 //
 // Usage (siteops manifest step):
@@ -80,7 +80,7 @@ module resolve_2026_07 './modules/resolve-instance-2026-07-01.bicep' = if (aioAp
 
 // Select outputs from the active module. The @allowed constraint guarantees
 // exactly one module deploys. Convention: newest API version is the
-// else-branch; every older version is an explicit positive equality check.
+// else-branch, and every older version is an explicit positive equality check.
 var activeInstance = aioApiVersion == '2025-10-01'
   ? {
       customLocationResourceId: resolve_2025!.outputs.customLocationResourceId

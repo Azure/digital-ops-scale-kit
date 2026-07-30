@@ -166,7 +166,8 @@ digital-ops-scale-kit/
 │   ├── cli.py                    # CLI entry point
 │   ├── models.py                 # Site, Manifest, Step dataclasses
 │   ├── orchestrator.py           # Core orchestration logic
-│   └── executor.py               # Azure CLI and kubectl execution
+│   ├── executor.py               # Azure CLI and kubectl execution
+│   └── __main__.py               # Enables `python -m siteops`
 ├── tests/                        # Test suite
 ├── scripts/                      # Utility scripts (Bicep validation, etc.)
 ├── workspaces/
@@ -296,7 +297,7 @@ auto-filtering, merge order, and cross-scope output chaining.
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `-w, --workspace` | Workspace directory | current dir, walking upward to the nearest `sites/` ancestor |
+| `-w, --workspace` | Workspace directory | auto-discovered: the current dir when it has `sites/` and `manifests/`, otherwise the single workspace under `./workspaces/`, otherwise the current dir |
 | `-l, --selector` | Filter sites by label. Repeatable. `name=` may carry multiple values (OR-combined). | none |
 | `-p, --parallel` | Max concurrent sites for `deploy`. Accepts a positive integer, or `max`/`auto`/`0` for unlimited | manifest setting |
 | `--extra-sites-dir` | Additional trusted `sites/` directory. Repeatable. Also accepts `SITEOPS_EXTRA_SITES_DIRS`. CLI wins on conflict | none |

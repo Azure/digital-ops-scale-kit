@@ -3,7 +3,7 @@
 // Creates an Azure Device Registry namespace. Devices and assets created later
 // (e.g. by samples/opc-ua-solution/template.bicep) live under this namespace.
 //
-// Routes to a per-API-version module under ./modules; ADR namespace API can
+// Routes to a per-API-version module under ./modules. The ADR namespace API can
 // move per AIO release.
 //
 // Inputs:  adrNamespaceName, adrApiVersion (sourced from aio-releases YAML),
@@ -38,8 +38,8 @@ param adrApiVersion string
 /*****************************************************************************/
 
 // --- Adding a new API version ----------------------------------------------
-// Convention: the newest API version is always the else-branch (falsy fallback);
-// every older version is an explicit positive equality check. Mirror this in
+// Convention: the newest API version is always the else-branch (falsy fallback),
+// and every older version is an explicit positive equality check. Mirror this in
 // any future ADR-versioned templates that join this dispatch.
 // ---------------------------------------------------------------------------
 

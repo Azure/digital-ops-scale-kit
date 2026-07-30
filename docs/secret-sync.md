@@ -234,8 +234,9 @@ instanceLocation: "{{ steps.resolve-aio.outputs.instanceLocation }}"
   scope: resourceGroup
   parameters:
     - samples/secretsync-sample/inputs.yaml
-  when: "{{ site.properties.deployOptions.enableSecretSync }}"
 ```
+
+Gate the step when the composition makes secret sync optional. `aio-install.yaml` puts the `when:` on the `_secretsync.yaml` include rather than on individual steps, so every spliced step inherits one condition.
 
 The declaration file holds `secrets` and `secretValues` and attaches at manifest level, which puts it below site parameters in the [merge order](parameter-resolution.md#merge-order) so a site or a `sites.local/` overlay overrides it:
 
@@ -257,8 +258,7 @@ templates/
 ├── aio/
 │   ├── resolve-aio.bicep                    # Read-only instance → CL → cluster resolution (dispatcher)
 │   └── modules/
-│       ├── resolve-instance-2025-10-01.bicep  # Per-API-version instance read
-│       ├── resolve-instance-2026-03-01.bicep  # Per-API-version instance read
+│       ├── resolve-instance-<api-version>.bicep  # Per-API-version instance read, one per supported version
 │       └── update-instance.bicep            # Shared safe instance PUT (dispatcher) used by the secretsync flow
 ├── common/
 │   └── modules/
@@ -267,9 +267,12 @@ templates/
 └── secretsync/
     ├── enable-secretsync.bicep              # Creates MI, KV, roles, FIC, SPC, instance update
     ├── sync-secrets.bicep                   # Syncs N KV secrets to K8s secrets in one deploy
+    ├── spc-objects.bicep                    # Shared SPC objects derivation, imported by both writers
     └── modules/
         └── keyvault-roles.bicep             # KV role assignments (cross-RG capable)
 ```
+
+The per-API-version modules track the supported releases, so read the directory rather than this tree for the current set.
 
 ### Resolve modules
 

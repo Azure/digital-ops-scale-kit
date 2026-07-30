@@ -65,6 +65,8 @@ selector: "environment=dev"
 steps:
   - include: ../../manifests/_aio-fundamentals.yaml
   - include: ../../manifests/_resolve-aio.yaml
+  - include: ../../manifests/_secretsync.yaml
+    when: "{{ site.properties.deployOptions.enableSecretSync }}"
   - include: ../opc-ua-solution/_partial.yaml
 ```
 
@@ -82,6 +84,7 @@ Omit `_resolve-aio.yaml` when the composition has no downstream consumer of the 
 |---|---|---|
 | `secretsync-sample/` | Bundle | inputs + declaration + partial, over `templates/secretsync/` |
 | `opc-ua-solution/` | Bundle | template + inputs + partial |
-| `aio-with-opc-ua/` | Composition | `_aio-fundamentals` + `_resolve-aio` + `opc-ua-solution/_partial` |
+| `aio-with-opc-ua/` | Composition | `_aio-fundamentals` + `_resolve-aio` + `_secretsync` (gated) + `opc-ua-solution/_partial` |
+| `aio-with-aksee-bootstrap/` | Composition | `host-bootstrap/aksee/_partial` + a wait on the bootstrap tag + `_aio-fundamentals` |
 
 See each sample's own `README.md` for what it deploys, prerequisites, and how to configure before deploying.

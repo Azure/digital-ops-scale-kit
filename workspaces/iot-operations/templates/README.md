@@ -10,7 +10,9 @@ Bicep templates referenced by manifest steps via the `template:` field.
 | `common/` | Shared bicep modules used across multiple top-level templates (e.g. `extension-names.bicep`, the single source of truth for AIO/cert-manager/secret-store extension naming). |
 | `deps/` | AIO dependencies: schema registry, ADR namespace, role assignments. |
 | `edge-site/` | Edge site resources (subscription-scoped global site, RG-scoped per-cluster site). |
-| `secretsync/` | Workload-identity-backed secret sync enablement. |
+| `host-bootstrap/` | Host provisioning delivered through Arc Run Command, one subdir per implementation (`aksee/`). |
+| `host-ops/` | Day-2 host operations, one subdir per operation (`aksee-upgrade/`). |
+| `secretsync/` | Workload-identity-backed secret sync enablement and the secret sync data path. |
 
 ## Conventions
 
