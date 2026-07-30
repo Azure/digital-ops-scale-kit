@@ -7,12 +7,15 @@ import yaml
 
 from siteops.orchestrator import Orchestrator
 
-# All deployOptions defined in base-site.yaml
+# Every deployOptions key base-site.yaml defines. Kept in step with the site by
+# test_base_site_defines_all_deploy_options, which compares both directions.
 EXPECTED_DEPLOY_OPTIONS = {
     "enableGlobalSite",
     "enableEdgeSite",
     "enableSecretSync",
     "enableCertManager",
+    "enableWorkloadIdentity",
+    "allowKubernetesMinorUpgrade",
 }
 
 
@@ -55,16 +58,23 @@ class TestSiteInheritanceResolution:
             )
 
     def test_base_site_defines_all_deploy_options(self, workspace):
-        """base-site.yaml should define every expected deployOptions key."""
+        """base-site.yaml and the expected set must match exactly.
+
+        Comparing both directions keeps the constant honest. A one-way check lets a
+        newly shipped toggle go unguarded, which is how `enableWorkloadIdentity` and
+        `allowKubernetesMinorUpgrade` shipped without inheritance coverage.
+        """
         base_path = workspace / "sites" / "base-site.yaml"
         with open(base_path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
 
         deploy_options = data.get("properties", {}).get("deployOptions", {})
         actual_keys = set(deploy_options.keys())
-        missing = EXPECTED_DEPLOY_OPTIONS - actual_keys
-        assert missing == set(), (
-            f"base-site.yaml missing deployOptions keys: {missing}"
+
+        assert actual_keys == EXPECTED_DEPLOY_OPTIONS, (
+            "base-site.yaml deployOptions and EXPECTED_DEPLOY_OPTIONS disagree. "
+            f"missing from base-site: {sorted(EXPECTED_DEPLOY_OPTIONS - actual_keys)}; "
+            f"unguarded in base-site: {sorted(actual_keys - EXPECTED_DEPLOY_OPTIONS)}"
         )
 
     def test_shared_templates_inherit_base(self, workspace):

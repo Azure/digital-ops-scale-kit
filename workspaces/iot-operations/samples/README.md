@@ -18,7 +18,8 @@ samples/<name>/
 ├── manifest.yaml     User entry point. Standalone deployable.
 ├── _partial.yaml     Internal partial. Composed by the manifest above and by other samples.
 ├── template.bicep    The sample's Bicep template.
-├── inputs.yaml       Step output to step input wiring (consumer fan-in).
+├── inputs.yaml       Step output to step input wiring (consumer fan-in). Attaches at step level.
+├── <declaration>.yaml Optional. Operator-authored values. Attaches at manifest level.
 └── outputs.yaml      Optional. Sample step outputs forwarded to downstream consumers.
 ```
 
@@ -27,7 +28,8 @@ samples/<name>/
 - **`manifest.yaml`** is the user-facing entry point. Composes `_partial.yaml` plus any prerequisite steps the standalone deployment needs (e.g., `_resolve-aio.yaml` reads names from an existing AIO instance).
 - **`_partial.yaml`** holds only the steps that ARE the sample. The leading `_` marks it as an internal partial not intended for direct deployment. Composed by `manifest.yaml` and by compositional samples.
 - **`template.bicep`** is the sample's deployment template. Pinned to the oldest supported AIO and ADR API versions per `docs/aio-releases.md` (Sample template API-version policy).
-- **`inputs.yaml`** wires upstream step outputs into the sample's step parameters. Co-located with the sample (not in the workspace-root `parameters/inputs/` dir).
+- **`inputs.yaml`** wires upstream step outputs into the sample's step parameters. Co-located with the sample (not in the workspace-root `parameters/inputs/` dir). Attaches at step level, since chaining belongs to one consumer.
+- **Declaration files** hold operator-authored values such as a `secrets` array. Attach them at manifest level so a site or a `sites.local/` overlay overrides them, and so several steps can read one source. Keep them separate from `inputs.yaml` even when the same step consumes both. See `docs/parameter-resolution.md` (Choosing an attachment tier).
 - **`outputs.yaml`** (optional) is the producer-side fan-out file when the sample's step outputs are consumed elsewhere. Same shape as `parameters/outputs/`.
 
 ## Adding a new self-contained sample
@@ -35,10 +37,11 @@ samples/<name>/
 1. Create `samples/<name>/`.
 2. Add `template.bicep` with your sample's resources. Pin Microsoft.IoTOperations and Microsoft.DeviceRegistry references to the oldest supported API version (the workspace test `test_samples_pin_to_oldest_api_version` enforces this).
 3. Add `inputs.yaml` with `{{ steps.X.outputs.Y }}` references for any values the template needs from upstream steps.
-4. Add `_partial.yaml` containing the sample steps (no `resolve-aio`, no other prerequisites).
-5. Add `manifest.yaml`. For a sample that needs `resolve-aio`, include `_resolve-aio.yaml` from `manifests/` and then include `_partial.yaml`.
-6. Optionally add an integration test under `tests/integration/test_<name>_manifest.py`.
-7. Optionally compose into `samples/<combo>/manifest.yaml` to demonstrate the sample alongside other deployments. See the next section.
+4. Add a declaration file for any operator-authored values the sample ships defaults for, and attach it at manifest level in step 6.
+5. Add `_partial.yaml` containing the sample steps (no `resolve-aio`, no other prerequisites).
+6. Add `manifest.yaml`. For a sample that needs `resolve-aio`, include `_resolve-aio.yaml` from `manifests/` and then include `_partial.yaml`.
+7. Optionally add an integration test under `tests/integration/test_<name>_manifest.py`.
+8. Optionally compose into `samples/<combo>/manifest.yaml` to demonstrate the sample alongside other deployments. See the next section.
 
 ### Scaling beyond a single file
 
@@ -62,6 +65,8 @@ selector: "environment=dev"
 steps:
   - include: ../../manifests/_aio-fundamentals.yaml
   - include: ../../manifests/_resolve-aio.yaml
+  - include: ../../manifests/_secretsync.yaml
+    when: "{{ site.properties.deployOptions.enableSecretSync }}"
   - include: ../opc-ua-solution/_partial.yaml
 ```
 
@@ -77,8 +82,9 @@ Omit `_resolve-aio.yaml` when the composition has no downstream consumer of the 
 
 | Sample | Shape | Composes |
 |---|---|---|
-| `secretsync-sample/` | Bundle | template + inputs + partial |
+| `secretsync-sample/` | Bundle | inputs + declaration + partial, over `templates/secretsync/` |
 | `opc-ua-solution/` | Bundle | template + inputs + partial |
-| `aio-with-opc-ua/` | Composition | `_aio-fundamentals` + `_resolve-aio` + `opc-ua-solution/_partial` |
+| `aio-with-opc-ua/` | Composition | `_aio-fundamentals` + `_resolve-aio` + `_secretsync` (gated) + `opc-ua-solution/_partial` |
+| `aio-with-aksee-bootstrap/` | Composition | `host-bootstrap/aksee/_partial` + a wait on the bootstrap tag + `_aio-fundamentals` |
 
 See each sample's own `README.md` for what it deploys, prerequisites, and how to configure before deploying.

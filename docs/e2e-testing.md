@@ -34,7 +34,7 @@ Unit tests (`pytest tests/ -m "not integration"`) cover every code path that doe
  │                  │    (overwrites same site file)          │
  │                  ├─ pytest tests/integration               │
  │                  │    (SITEOPS_E2E_UPGRADE_PHASE=1;        │
- │                  │     only TestAioUpgrade* classes run,   │
+ │                  │     only allowlisted classes run,       │
  │                  │     install fixture short-circuits)     │
  │                  ├─ upload e2e-results-<release>-to-       │
  │                  │           <upgrade-to>.xml              │
@@ -219,7 +219,7 @@ pytest tests/integration/ -v -m integration
 
 `SITEOPS_E2E_UPGRADE_PHASE=1` does two things:
 
-- **Narrows test collection** to `TestAioUpgradeDeployment`, `TestAioUpgradeResolveExtensions`, `TestAioUpgradeSelfConsistency`, and `TestAioUpgradeIdempotency`. Everything else is skipped. `TestAioUpgradePreservation` is excluded because its assertions consume install-phase outputs that are not available across separately rendered phases.
+- **Narrows test collection** to the upgrade allowlist in `tests/integration/conftest.py`: the `TestAioUpgrade*` classes covering deployment, OIDC optionality, extension resolution, self-consistency, and idempotency, plus the extension invariant classes for AIO, Secret Store, cert-manager, and additive overrides. Everything else is skipped. `TestAioUpgradePreservation` is excluded because its assertions consume install-phase outputs that are not available across separately rendered phases.
 - **Short-circuits the `aio_install_result` fixture** so `aio-install.yaml` is not re-deployed at the new release on top of the existing instance.
 
 ## Troubleshooting

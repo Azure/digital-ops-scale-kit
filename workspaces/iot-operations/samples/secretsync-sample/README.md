@@ -17,10 +17,10 @@ The cluster-side SecretSync controller resolves each SecretSync, exchanges its O
 
 ## Configure before deploying
 
-The sync-secrets template treats the `secrets` array as the desired state. Each deploy PUTs the SPC with the union of all entries and emits one SecretSync per distinct `kubernetesSecretName`. Edit `parameters/inputs/sync-secrets.yaml` (or override in a `sites.local/` overlay) to declare the secrets you want synced and supply their values.
+The sync-secrets template treats the `secrets` array as the desired state. Each deploy PUTs the SPC with the union of all entries and emits one SecretSync per distinct `kubernetesSecretName`. Edit `secrets.yaml` (or override in a `sites.local/` overlay) to declare the secrets you want synced and supply their values.
 
 ```yaml
-# parameters/inputs/sync-secrets.yaml (or sites.local/ overlay)
+# samples/secretsync-sample/secrets.yaml (or sites.local/ overlay)
 secrets:
   # Single-key Secret: one Key Vault secret -> one Kubernetes Secret with one key.
   - secretName: db-password
@@ -48,12 +48,14 @@ secrets:
     kubernetesSecretKey: password
 
 secretValues:
-  db-password: "{{ env.DB_PASSWORD }}"
-  api-key: "{{ env.API_KEY }}"
+  # Placeholders only. Real values come from an overlay or CI, see
+  # "Supplying real values" below.
+  db-password: "replace-me"
+  api-key: "replace-me"
   # license-token omitted because createInKv is false
-  my-db-host-kv: "{{ env.DB_HOST }}"
-  my-db-username-kv: "{{ env.DB_USERNAME }}"
-  my-db-password-kv: "{{ env.DB_PASSWORD }}"
+  my-db-host-kv: "replace-me"
+  my-db-username-kv: "replace-me"
+  my-db-password-kv: "replace-me"
 ```
 
 Per-entry fields:
@@ -65,13 +67,43 @@ Per-entry fields:
 
 Supply `secretValues` via a `sites.local/` overlay or a CI/CD secret store. Do not commit real values to source control.
 
+### Supplying real values
+
+`secrets.yaml` attaches at manifest level, which sits below site parameters in the merge order, so a site overrides it. Locally, drop a gitignored overlay next to the site you deploy to:
+
+```yaml
+# workspaces/iot-operations/sites.local/munich-dev.yaml
+parameters:
+  secretValues:
+    db-password: "the-real-password"
+    api-key: "the-real-api-key"
+```
+
+In CI, set the `SITE_OVERRIDES` secret. Dot-notation keys expand into the same overlay:
+
+```json
+{
+  "munich-dev": {
+    "parameters.secretValues.db-password": "the-real-password",
+    "parameters.secretValues.api-key": "the-real-api-key"
+  }
+}
+```
+
+Two behaviors are worth knowing when you override:
+
+- `secretValues` is a map, so an overlay merges key by key. Supply only the values you want to replace and the rest of the declared defaults stay in place.
+- `secrets` is a list, so an overlay replaces it wholesale. Restate the entries you want when you override it.
+
+`siteops sites <name> --render` redacts the whole `secretValues` map, so you can preview a fully resolved site without printing any of them.
+
 ## Deploy
 
 ```bash
 siteops -w workspaces/iot-operations deploy samples/secretsync-sample/manifest.yaml -l environment=dev
 ```
 
-The defaults shipped in `parameters/inputs/sync-secrets.yaml` are placeholder values intended for a first-run smoke test against a throwaway environment. Override them per the section above before deploying anywhere you care about.
+The defaults shipped in `secrets.yaml` are placeholder values intended for a first-run smoke test against a throwaway environment. Override them per the section above before deploying anywhere you care about.
 
 ## Verifying the result
 
@@ -91,12 +123,14 @@ Remove its entry from `secrets` and re-deploy. The SPC will be PUT without that 
 az resource delete --ids <secretSyncResourceId>
 ```
 
-## Authoritative writes to the SPC
+## Writes to the SPC
 
-`sync-secrets.bicep` is authoritative for the default SPC's `properties.objects` field. Each deploy PUTs the SPC with the union of every entry in `secrets`, replacing whatever was there before. Two implications worth knowing for day-2 operations:
+The default SPC is written by both `enable-secretsync.bicep` and `sync-secrets.bicep`, and an ARM PUT replaces the fields it omits. Both therefore derive `properties.objects` from the same `secrets` declaration, through the shared `templates/secretsync/spc-objects.bicep` library, so whichever runs last produces the same object list.
 
-- **Re-running enablement clears the SPC objects.** Redeploying `enable-secretsync` (or composing manifests like `secretsync.yaml` standalone, or `aio-install.yaml` with `enableSecretSync` true) PUTs the SPC without an `objects` field, so the controller stops materializing every Kubernetes Secret with the error `the secretproviderclass parameters does not have a valid objects field`. Re-run the sample after any enablement redeploy.
-- **CLI-managed entries are dropped on Bicep redeploy.** Entries added out of band via `az iot ops secretsync secret set` are removed the next time this sample runs. Pick one source of truth per cluster.
+Two implications worth knowing for day-2 operations:
+
+- **Declare `secrets` where every writer sees it.** Manifest level, or a site's `parameters`, puts the array in front of both templates. An array attached to a single step reaches only that step, which lets the other writer PUT the SPC with a different object list.
+- **The declaration is the source of truth.** Entries added out of band via `az iot ops secretsync secret set` are replaced the next time either template runs. Pick one source of truth per cluster.
 
 ## Writing your own sample
 

@@ -10,7 +10,22 @@ Parameters flow from multiple sources and are automatically filtered per templat
 | 2 | Site parameters | `site.parameters` section - site-specific overrides |
 | 3 (highest) | Step parameters | `step.parameters` list - step-specific overrides |
 
-Later values override earlier values. Nested objects merge recursively. This order follows the principle of specificity: manifest provides shared defaults, sites override with specific values.
+Later values override earlier values. Nested objects merge recursively. Lists are replaced rather than merged. This order follows the principle of specificity: manifest provides shared defaults, sites override with specific values.
+
+## Choosing an attachment tier
+
+A parameter file's tier follows from what the file holds, not from which step consumes it.
+
+| The file holds | Attach at | Why |
+|---|---|---|
+| **Chaining**: `{{ steps.X.outputs.Y }}` wiring | Step level | Wiring belongs to one consumer and must not be overridable. Step level is the highest-precedence tier. |
+| **Declaration**: operator-authored values | Manifest level | Sits below site parameters, so a site or a `sites.local/` overlay overrides it. Applies to every step, so several steps can read one source. |
+
+The quick test is whether the file contains `{{ steps.`. If it does, it is a chaining file.
+
+Attaching a declaration at step level makes it unoverridable, because step level outranks site level and lists are replaced wholesale. Keep the two kinds in separate files even when the same step consumes both. The workspace test `test_manifest_level_parameters_carry_no_step_output_refs` enforces the chaining half of the rule.
+
+Manifest-level attachment is safe to use broadly because parameters are filtered per template: a step receives only the keys its own template declares. A `@secure()` value therefore reaches only the template that declares it.
 
 When a manifest pulls in others via `include:` (see [manifest-includes.md](manifest-includes.md)), each included manifest's manifest-level `parameters:` are appended after the parent's. Duplicate paths (normalized POSIX strings) are dropped on a first-wins basis, so the parent always wins on conflict.
 
@@ -23,6 +38,7 @@ When a manifest pulls in others via `include:` (see [manifest-includes.md](manif
 | `{{ site.resourceGroup }}` | `rg-iot-munich-dev` |
 | `{{ site.subscription }}` | `00000000-...` |
 | `{{ site.labels.X }}` | Any label value |
+| `{{ site.parameters.X.Y }}` | Nested parameter value |
 | `{{ site.properties.X.Y }}` | Nested property |
 | `{{ site.properties.X[0] }}` | Array indexing |
 | `{{ steps.X.outputs.Y }}` | Output from step X |
@@ -47,7 +63,7 @@ The directory groups files by the role they play in the parameter merge:
 |---|---|---|
 | `parameters/common/` | Site-derived shared values applied to all steps | `common.yaml` |
 | `parameters/inputs/` | Consumer fan-in (a step pulls outputs from upstream producers) | `inputs/aio-instance.yaml` pulls from `schema-registry`, `adr-ns`, `aio-enablement` |
-| `parameters/outputs/` | Producer fan-out (a single step's outputs feed multiple downstream consumers) | `outputs/aio-instance.yaml` feeds `schema-registry-role` and the OPC UA sample |
+| `parameters/outputs/` | Producer fan-out (a single step's outputs feed multiple downstream consumers) | `outputs/aio-instance.yaml` feeds `schema-registry-role` |
 | `parameters/aio-releases/` | Per-release version pin files (selected via `site.properties.aioRelease`) | `aio-releases/2607.yaml` |
 
 A step that has both fan-in inputs and fan-out outputs gets two files: one under `inputs/`, one under `outputs/`, named after the step (e.g. `inputs/aio-instance.yaml` and `outputs/aio-instance.yaml`).

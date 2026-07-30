@@ -202,8 +202,8 @@ module resources_2026_07 './modules/instance-2026-07-01.bicep' = if (aioApiVersi
 // The @allowed constraint on aioApiVersion guarantees exactly one module deploys.
 //
 // --- Adding a new API version ----------------------------------------------
-// Convention: the newest API version is always the else-branch (falsy fallback);
-// every older version is an explicit positive equality check.
+// Convention: the newest API version is always the else-branch (falsy fallback),
+// and every older version is an explicit positive equality check.
 //
 // When 2027-01-01 lands:
 //   1. Extend @allowed on aioApiVersion above.

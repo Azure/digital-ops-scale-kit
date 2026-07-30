@@ -28,3 +28,15 @@ selector: "environment=dev"
 
 steps:
   - include: ../templates/host-bootstrap/aksee/_partial.yaml
+
+  # Run Command returns on acceptance, so gate on the worker's terminal tag.
+  - name: wait-for-bootstrap
+    type: wait
+    condition:
+      type: arm-tag
+      resourceId: "/subscriptions/{{ site.subscription }}/resourceGroups/{{ site.resourceGroup }}/providers/Microsoft.HybridCompute/machines/{{ site.parameters.aksee.machineName }}"
+      tagKey: "siteops.bootstrap.state"
+      expectedValue: "succeeded"
+      failurePattern: "failed-*"
+    timeoutMinutes: 60
+    pollIntervalSeconds: 30

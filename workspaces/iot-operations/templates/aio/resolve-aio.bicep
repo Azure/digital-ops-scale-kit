@@ -15,11 +15,11 @@
 //   2. Custom Location parsed from the instance's extendedLocation.name.
 //   3. Connected Cluster parsed from the CL's hostResourceId.
 //
-// Why route on aioApiVersion: Microsoft.IoTOperations is an Arc-mapped RP;
+// Why route on aioApiVersion: Microsoft.IoTOperations is an Arc-mapped RP, so
 // the ARM API version on `existing` issues a real GET against that version's
 // CRD generation. The site's selected release config (aio-releases/<release>.yaml)
 // is the source of truth for which API version to read with. During an
-// upgrade, this is the *target* API version; the GET against a source-version
+// upgrade, this is the *target* API version, and the GET against a source-version
 // instance relies on RP forward-compat for read shape.
 //
 // Usage (siteops manifest step):
@@ -80,7 +80,7 @@ module resolve_2026_07 './modules/resolve-instance-2026-07-01.bicep' = if (aioAp
 
 // Select outputs from the active module. The @allowed constraint guarantees
 // exactly one module deploys. Convention: newest API version is the
-// else-branch; every older version is an explicit positive equality check.
+// else-branch, and every older version is an explicit positive equality check.
 var activeInstance = aioApiVersion == '2025-10-01'
   ? {
       customLocationResourceId: resolve_2025!.outputs.customLocationResourceId
@@ -92,6 +92,7 @@ var activeInstance = aioApiVersion == '2025-10-01'
       adrNamespaceResourceId: resolve_2025!.outputs.adrNamespaceResourceId
       features: resolve_2025!.outputs.features
       instanceDescription: resolve_2025!.outputs.instanceDescription
+      defaultSecretProviderClassResourceId: resolve_2025!.outputs.defaultSecretProviderClassResourceId
     }
   : aioApiVersion == '2026-03-01'
     ? {
@@ -104,6 +105,7 @@ var activeInstance = aioApiVersion == '2025-10-01'
       adrNamespaceResourceId: resolve_2026!.outputs.adrNamespaceResourceId
       features: resolve_2026!.outputs.features
       instanceDescription: resolve_2026!.outputs.instanceDescription
+      defaultSecretProviderClassResourceId: resolve_2026!.outputs.defaultSecretProviderClassResourceId
     }
     : {
         customLocationResourceId: resolve_2026_07!.outputs.customLocationResourceId
@@ -115,6 +117,7 @@ var activeInstance = aioApiVersion == '2025-10-01'
         adrNamespaceResourceId: resolve_2026_07!.outputs.adrNamespaceResourceId
         features: resolve_2026_07!.outputs.features
         instanceDescription: resolve_2026_07!.outputs.instanceDescription
+        defaultSecretProviderClassResourceId: resolve_2026_07!.outputs.defaultSecretProviderClassResourceId
       }
 
 // =====================================================================================
@@ -192,3 +195,6 @@ output features object = activeInstance.features
 
 @description('Instance description.')
 output instanceDescription string = activeInstance.instanceDescription
+
+@description('Default Secret Provider Class resource ID, empty when Secret Sync is not enabled. Forward this into an instance update so a caller that does not manage Secret Sync leaves the binding intact.')
+output defaultSecretProviderClassResourceId string = activeInstance.defaultSecretProviderClassResourceId

@@ -35,6 +35,7 @@
 // -------------------------------------------------------------------------------------
 
 import { aioSecretSyncServiceAccountName } from '../common/extension-names.bicep'
+import { spcObjectsYaml as renderSpcObjects } from './spc-objects.bicep'
 
 // =====================================================================================
 // Parameters chained from upstream steps
@@ -59,7 +60,7 @@ param instanceLocation string
 // Per-deploy parameters
 // =====================================================================================
 
-@description('Per-secret metadata. Each entry: { secretName: string, kubernetesSecretName?: string (defaults to secretName), kubernetesSecretKey?: string (defaults to secretName), createInKv?: bool (default true) }. secretName values must be unique within the array. Entries that share a kubernetesSecretName are grouped into one multi-key Kubernetes Secret. Their (kubernetesSecretName, kubernetesSecretKey) pairs must be globally unique. The array must be non-empty.')
+@description('Per-secret metadata. Each entry: { secretName: string, kubernetesSecretName?: string (defaults to secretName), kubernetesSecretKey?: string (defaults to secretName), createInKv?: bool (default true) }. secretName values must be unique within the array. Entries that share a kubernetesSecretName are grouped into one multi-key Kubernetes Secret. Their (kubernetesSecretName, kubernetesSecretKey) pairs must be globally unique. An empty array leaves the Secret Provider Class without an objects field and creates nothing. The parameter stays required so a caller that omits it fails rather than silently syncing nothing.')
 param secrets array
 
 @secure()
@@ -91,7 +92,7 @@ resource customLocation 'Microsoft.ExtendedLocation/customLocations@2021-08-31-p
 // objectType. The SecretSync controller parses this string to know which Key Vault
 // objects to fetch. secretName uniqueness (enforced by the input contract above)
 // keeps this list duplicate-free.
-var spcObjectsYaml = 'array:\n${join(map(secrets, s => '  - |\n    objectName: ${s.secretName}\n    objectType: secret'), '\n')}\n'
+var spcObjectsYaml = renderSpcObjects(secrets)
 
 // Distinct Kubernetes Secret names referenced by the array. `union(..., [])`
 // is the Bicep idiom for deduplicating a list. One SecretSync ARM resource
@@ -123,12 +124,17 @@ resource spc 'Microsoft.SecretSyncController/azureKeyVaultSecretProviderClasses@
     type: 'CustomLocation'
   }
   tags: tags
-  properties: {
-    clientId: managedIdentityClientId
-    keyvaultName: keyVaultName
-    tenantId: tenant().tenantId
-    objects: spcObjectsYaml
-  }
+  // An empty array omits the property rather than emitting an `array:` document
+  // with no entries, matching the enablement writer so the two agree on every
+  // shape of the declaration.
+  properties: union(
+    {
+      clientId: managedIdentityClientId
+      keyvaultName: keyVaultName
+      tenantId: tenant().tenantId
+    },
+    empty(secrets) ? {} : { objects: spcObjectsYaml }
+  )
 }
 
 // =====================================================================================

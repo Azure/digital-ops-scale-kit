@@ -28,23 +28,34 @@ def _templates_root(workspace: Path) -> Path:
     return workspace / "templates"
 
 
-def _discover_dispatchers(workspace: Path) -> list[tuple[Path, str, list[str]]]:
-    """Find templates that route on an API-version parameter.
+def _discover_api_version_consumers(workspace: Path) -> list[tuple[Path, str, list[str]]]:
+    """Find every template that constrains an API-version parameter.
 
-    A dispatcher declares an `@allowed` API-version param and conditions at
-    least one module on it.
+    A consumer declares `@allowed` on a `*ApiVersion` parameter. Some route
+    modules on it, others forward it to a router or key a variable off it. All of
+    them must accept the same version set, because a release selects one value
+    that every consumer on the path receives.
     """
     found: list[tuple[Path, str, list[str]]] = []
     for path in sorted(_templates_root(workspace).rglob("*.bicep")):
         source = path.read_text(encoding="utf-8")
         for match in ALLOWED_BLOCK.finditer(source):
-            param = match.group("param")
             versions = QUOTED.findall(match.group("body"))
-            if not versions:
-                continue
-            if re.search(rf"=\s*if\s*\(\s*{param}\s*==", source):
-                found.append((path, param, versions))
+            if versions:
+                found.append((path, match.group("param"), versions))
     return found
+
+
+def _discover_dispatchers(workspace: Path) -> list[tuple[Path, str, list[str]]]:
+    """Consumers that additionally condition a module on the parameter.
+
+    Only these have a routing shape to assert.
+    """
+    return [
+        (path, param, versions)
+        for path, param, versions in _discover_api_version_consumers(workspace)
+        if re.search(rf"=\s*if\s*\(\s*{param}\s*==", path.read_text(encoding="utf-8"))
+    ]
 
 
 def _module_condition_versions(source: str, param: str) -> list[str]:
@@ -73,8 +84,19 @@ class TestDispatchShape:
 
     def test_dispatchers_are_discoverable(self, workspace):
         """Guards the discovery itself, so a rename cannot silently empty this suite."""
-        assert _discover_dispatchers(workspace), (
-            "no API-version dispatchers found; discovery regex is likely stale"
+        consumers = _discover_api_version_consumers(workspace)
+        dispatchers = _discover_dispatchers(workspace)
+
+        assert consumers, "no API-version consumers found; discovery regex is likely stale"
+        assert dispatchers, "no API-version dispatchers found; discovery regex is likely stale"
+
+        consumer_paths = {p for p, _, _ in consumers}
+        assert {p for p, _, _ in dispatchers} <= consumer_paths, (
+            "every dispatcher must also be discovered as a consumer"
+        )
+        assert len(consumers) > len(dispatchers), (
+            "expected consumers that forward the parameter without routing a module "
+            "themselves; if that is no longer true, this assertion can go"
         )
 
     def test_every_allowed_version_has_exactly_one_module(self, workspace):
@@ -123,23 +145,28 @@ class TestDispatchShape:
 
 
 class TestDispatcherAllowedSetsAgree:
-    """All dispatchers on the same parameter must allow the same versions."""
+    """Every consumer of the same parameter must allow the same versions.
 
-    def test_allowed_sets_match_across_dispatchers(self, workspace):
+    A release selects one API version and every consumer on the path receives it,
+    so a consumer that forwards the value without routing a module still rejects
+    the deployment when its allowed set lags.
+    """
+
+    def test_allowed_sets_match_across_consumers(self, workspace):
         by_param: dict[str, dict[str, list[str]]] = {}
-        for path, param, versions in _discover_dispatchers(workspace):
+        for path, param, versions in _discover_api_version_consumers(workspace):
             by_param.setdefault(param, {})[path.name] = sorted(versions)
 
         for param, per_file in by_param.items():
             distinct = {tuple(v) for v in per_file.values()}
             assert len(distinct) == 1, (
-                f"dispatchers disagree on allowed {param} values: {per_file}"
+                f"consumers disagree on allowed {param} values: {per_file}"
             )
 
 
 @pytest.mark.parametrize("param", ["aioApiVersion", "adrApiVersion"])
-def test_release_api_versions_are_dispatchable(workspace, param):
-    """Every API version selected by a release must be routable by a dispatcher."""
+def test_release_api_versions_are_accepted_by_every_consumer(workspace, param):
+    """Every API version a release selects must be accepted everywhere it flows."""
     import yaml
 
     releases_dir = workspace / "parameters" / "aio-releases"
@@ -148,11 +175,11 @@ def test_release_api_versions_are_dispatchable(workspace, param):
         with open(release_file, "r", encoding="utf-8") as f:
             selected.add(yaml.safe_load(f)[param])
 
-    dispatchers = [d for d in _discover_dispatchers(workspace) if d[1] == param]
-    assert dispatchers, f"no dispatcher routes {param}"
+    consumers = [c for c in _discover_api_version_consumers(workspace) if c[1] == param]
+    assert consumers, f"no consumer constrains {param}"
 
-    for path, _, versions in dispatchers:
+    for path, _, versions in consumers:
         missing = selected - set(versions)
         assert not missing, (
-            f"{path.name}: releases select {param} values it cannot route: {sorted(missing)}"
+            f"{path.name}: releases select {param} values it rejects: {sorted(missing)}"
         )

@@ -222,7 +222,7 @@ Two modes are supported, controlled by `allowKubernetesMinorUpgrade` in config:
            max hops exceeded -> throw, else loop back to Phase 1.
   Phase 99 Cleanup. Re-pin `AcceptUpgrade $false` (best-effort). Write the
            completion tag (`siteops.aksee.upgrade.state` plus `appliedVersion`,
-           `fromVersion`, `hopCount`, `runId`) and remove the az token cache.
+           `fromVersion`, `runId`) and remove the az token cache.
 
 The host does not reboot during an AKS EE upgrade (Hyper-V is already enabled
 and only the inner node VM restarts), so the worker normally runs straight

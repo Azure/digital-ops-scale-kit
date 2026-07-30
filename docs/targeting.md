@@ -141,7 +141,7 @@ Manifest selectors that match zero sites warn but still exit zero.
 
 `siteops validate <manifest>` exercises the same parse and resolve paths as `deploy` without executing any steps.
 
-- **Unknown manifest keys are rejected** with a `did you mean` hint sourced from the canonical list (`apiVersion`, `kind`, `name`, `description`, `sites`, `selector`, `parallel`, `parameters`, `steps`).
+- **Unknown manifest keys are rejected** with a `did you mean` hint sourced from the canonical list (`apiVersion`, `kind`, `name`, `description`, `sites`, `selector`, `siteSelector`, `parallel`, `parameters`, `steps`). `siteSelector` is the deprecated spelling of `selector` and is still accepted.
 - **Selector parse errors** (duplicate non-`name` keys, malformed pairs) are surfaced as validation errors. They no longer mask other manifest issues. The operator sees every problem in one pass.
 - **Library manifests pass validation** because no targeting is structurally OK. Add `-l` when running `validate` to exercise the resolve path against real sites.
 

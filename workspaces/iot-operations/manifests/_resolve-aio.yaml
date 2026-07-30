@@ -2,9 +2,13 @@ apiVersion: siteops/v1
 kind: Manifest
 name: resolve-aio
 description: |
-  Shared resolve-aio partial. Reads instance and custom-location names from
-  the existing AIO instance so downstream steps (secret sync, samples) can
-  chain off the resolved values regardless of naming convention.
+  Shared resolve-aio partial. Reads the custom location, connected cluster, ADR
+  namespace, OIDC issuer, and the instance state an update must forward, so
+  downstream steps chain off resolved values instead of restating them.
+
+  The instance name is an input rather than a discovery. It comes from
+  `parameters/common/common.yaml`, which derives it by convention. Set
+  `site.parameters.aioInstanceName` when an install used a different name.
 
   Internal partial (filename prefixed `_`). Not deployed directly. Composed
   by manifests and samples that add secret sync or capabilities on top of

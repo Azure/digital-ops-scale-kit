@@ -29,6 +29,20 @@ pool:
   vmImage: ubuntu-latest
 
 jobs:
+  - job: lint
+    displayName: Lint
+    steps:
+      - checkout: self
+        fetchDepth: 1
+        persistCredentials: false
+
+      - template: templates/setup-siteops.yaml
+        parameters:
+          installDev: true
+
+      - script: ruff check siteops tests scripts
+        displayName: Run ruff
+
   - job: test
     displayName: Unit Tests
     steps:
@@ -73,6 +87,19 @@ jobs:
 
       - pwsh: ./scripts/validate-bicep.ps1
         displayName: Validate Bicep templates
+
+      - pwsh: |
+          ./workspaces/iot-operations/templates/host-bootstrap/aksee/scripts/Build-Launcher.ps1
+          ./workspaces/iot-operations/templates/host-ops/aksee-upgrade/scripts/Build-Launcher.ps1
+          git diff --exit-code -- `
+            workspaces/iot-operations/templates/host-bootstrap/aksee/scripts/Install-AksEeBootstrap.ps1 `
+            workspaces/iot-operations/templates/host-bootstrap/aksee/scripts/Install-AksEeBootstrap.min.ps1 `
+            workspaces/iot-operations/templates/host-ops/aksee-upgrade/scripts/Install-AksEeUpgrade.ps1 `
+            workspaces/iot-operations/templates/host-ops/aksee-upgrade/scripts/Install-AksEeUpgrade.min.ps1
+          if ($LASTEXITCODE -ne 0) {
+            throw "Generated host launchers are stale. Run each Build-Launcher.ps1 and commit the outputs."
+          }
+        displayName: Verify generated host launchers
 
       - script: |
           # set -o pipefail so `siteops ... | tee` returns siteops's exit

@@ -206,7 +206,7 @@ when forking the workspace:
 
 | Layer | Owned by | What it cares about |
 |---|---|---|
-| YAML mechanics | siteops engine | Top-level fields (`name`, `subscription`, `resourceGroup`, `location`, `labels`, `inherits`, `parameters`, `properties`); the `parameters:` filter against Bicep template params; the `{{ site.X }}` and `{{ site.properties.<path> }}` substitution surface; selector parsing on `labels`. |
+| YAML mechanics | siteops engine | Top-level fields (`name`, `subscription`, `resourceGroup`, `location`, `labels`, `inherits`, `parameters`, `properties`), the `parameters:` filter against Bicep template params, the `{{ site.X }}` and `{{ site.properties.<path> }}` substitution surface, and selector parsing on `labels`. |
 | Field semantics | The workspace | The names of fields under `properties:` (`aioRelease`, `deployOptions`, the `enable*`/`allow*` toggle prefixes, etc.) and the names of label keys used in selectors (`environment`, `country`, `scope`, etc.). |
 
 Anything in the second row is a convention you can rename for your own
@@ -412,7 +412,7 @@ siteops deploy manifests/aio-install.yaml -l name=a,name=b          # multi-site
 
 ## Scaling to a fleet
 
-Once you cross a handful of sites, two-axis composition (region × environment) duplicates env config across `<region>-dev.yaml` and `<region>-prod.yaml`. The recommended pattern: introduce intermediate `SiteTemplate` files so each concrete site inherits one chain.
+Once you cross a handful of sites, two-axis composition (region by environment) duplicates env config across `<region>-dev.yaml` and `<region>-prod.yaml`. The recommended pattern: introduce intermediate `SiteTemplate` files so each concrete site inherits one chain.
 
 ```
 sites/

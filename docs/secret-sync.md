@@ -14,7 +14,7 @@ The enablement template (`enable-secretsync.bicep`) creates:
 | Key Vault (optional) | Stores secrets, skipped if you bring your own |
 | Key Vault role assignments | Grants the MI `Key Vault Secrets User` + `Key Vault Reader` |
 | Federated Identity Credential | Binds the MI to the cluster's secret sync service account via OIDC |
-| SecretProviderClass (SPC) | Cluster-side resource linking the MI, Key Vault, and tenant |
+| SecretProviderClass (SPC) | Cluster-side resource linking the MI, Key Vault, and tenant, carrying the secrets the site declares |
 | Instance update | Sets the SPC as the instance's default secret provider |
 
 ## Prerequisites
@@ -58,6 +58,28 @@ instanceLocation: "{{ steps.resolve-aio.outputs.instanceLocation }}"
 schemaRegistryResourceId: "{{ steps.resolve-aio.outputs.schemaRegistryResourceId }}"
 # ... additional properties forwarded for safe instance update
 ```
+
+### Declaring the secrets to sync
+
+The set of Key Vault secrets a site synchronizes is declared once, as a `secrets` array, and read by both templates that write the SPC.
+
+`enable-secretsync.bicep` and `sync-secrets.bicep` both PUT the default Secret Provider Class, and a full PUT replaces `properties.objects`. Both therefore derive that field from the same declaration through the shared `templates/secretsync/spc-objects.bicep` library, so the two writers always agree on what the cluster-side controller materializes.
+
+Declare the array at **manifest level**, or in a site's `parameters` section:
+
+```yaml
+# sites/my-site.yaml, or a sites.local/ overlay
+parameters:
+  secrets:
+    - secretName: db-password
+    - secretName: api-key
+      kubernetesSecretName: my-app-credentials
+      kubernetesSecretKey: key
+```
+
+Manifest-level attachment sits below site parameters in the [merge order](parameter-resolution.md#merge-order), so a site overrides the declared default. It also applies to every step in the pipeline, and each step receives only the parameters its own template declares. `secretValues` is `@secure()` and declared only by `sync-secrets.bicep`, so values reach the template that writes them to Key Vault and no other deployment.
+
+A site that declares no secrets gets an SPC with no `objects` field, which is the correct shape for an instance whose secrets are managed elsewhere.
 
 ## Enabling secret sync
 
@@ -193,17 +215,37 @@ The `secretValues` parameter is decorated with `@secure()` so ARM never logs val
 
 ### Adding as a manifest step
 
-To sync secrets as part of a manifest, add a step after enablement:
+Syncing secrets from a manifest takes two parameter files, split by what each one holds.
+
+The chaining file wires upstream step outputs into the sync step, so it attaches at step level:
+
+```yaml
+# samples/secretsync-sample/inputs.yaml
+keyVaultName: "{{ steps.secretsync.outputs.keyVaultName }}"
+spcName: "{{ steps.secretsync.outputs.spcResourceName }}"
+managedIdentityClientId: "{{ steps.secretsync.outputs.managedIdentityClientId }}"
+customLocationName: "{{ steps.resolve-aio.outputs.customLocationName }}"
+instanceLocation: "{{ steps.resolve-aio.outputs.instanceLocation }}"
+```
 
 ```yaml
 - name: sync-secrets
   template: templates/secretsync/sync-secrets.bicep
   scope: resourceGroup
   parameters:
-    - parameters/inputs/sync-secrets.yaml
-    # secretValues come from sites.local/ or CI secrets
-  when: "{{ site.properties.deployOptions.enableSecretSync }}"
+    - samples/secretsync-sample/inputs.yaml
 ```
+
+Gate the step when the composition makes secret sync optional. `aio-install.yaml` puts the `when:` on the `_secretsync.yaml` include rather than on individual steps, so every spliced step inherits one condition.
+
+The declaration file holds `secrets` and `secretValues` and attaches at manifest level, which puts it below site parameters in the [merge order](parameter-resolution.md#merge-order) so a site or a `sites.local/` overlay overrides it:
+
+```yaml
+parameters:
+  - samples/secretsync-sample/secrets.yaml
+```
+
+Manifest-level attachment also reaches every step, so the enablement step and the sync step PUT the SPC from the same array. See [Declaring the secrets to sync](#declaring-the-secrets-to-sync).
 
 ### Removing a secret
 
@@ -216,8 +258,7 @@ templates/
 ├── aio/
 │   ├── resolve-aio.bicep                    # Read-only instance → CL → cluster resolution (dispatcher)
 │   └── modules/
-│       ├── resolve-instance-2025-10-01.bicep  # Per-API-version instance read
-│       ├── resolve-instance-2026-03-01.bicep  # Per-API-version instance read
+│       ├── resolve-instance-<api-version>.bicep  # Per-API-version instance read, one per supported version
 │       └── update-instance.bicep            # Shared safe instance PUT (dispatcher) used by the secretsync flow
 ├── common/
 │   └── modules/
@@ -226,9 +267,12 @@ templates/
 └── secretsync/
     ├── enable-secretsync.bicep              # Creates MI, KV, roles, FIC, SPC, instance update
     ├── sync-secrets.bicep                   # Syncs N KV secrets to K8s secrets in one deploy
+    ├── spc-objects.bicep                    # Shared SPC objects derivation, imported by both writers
     └── modules/
         └── keyvault-roles.bicep             # KV role assignments (cross-RG capable)
 ```
+
+The per-API-version modules track the supported releases, so read the directory rather than this tree for the current set.
 
 ### Resolve modules
 

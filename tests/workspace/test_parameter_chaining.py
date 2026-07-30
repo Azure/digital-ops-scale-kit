@@ -132,6 +132,60 @@ class TestParameterChaining:
             )
 
 
+class TestParameterAttachmentTier:
+    """A parameter file's attachment tier follows from what the file is.
+
+    Chaining files carry `{{ steps.X.outputs.Y }}` wiring and attach at step
+    level, the highest-precedence tier, scoped to the one consumer. Declaration
+    files carry operator intent and attach at manifest level, below site
+    parameters, so a site overlay overrides them and every step in the pipeline
+    reads the same values.
+    """
+
+    def _manifest_level_parameter_paths(self, manifest_path: Path) -> list[str]:
+        """Read the raw manifest-level `parameters:` list, path variables intact."""
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+        return [p for p in (raw.get("parameters") or []) if isinstance(p, str)]
+
+    def test_manifest_level_parameters_carry_no_step_output_refs(self, workspace):
+        """Manifest-level parameter files declare values rather than wire steps.
+
+        Manifest-level parameters apply to every step in the flattened pipeline,
+        including steps that run before a referenced producer, so a step output
+        reference there cannot be guaranteed to resolve. Structural validation
+        checks output references on step-level files only, which is why this
+        boundary is worth asserting directly.
+        """
+        from tests.workspace.test_manifest_validation import _all_manifest_files
+
+        manifests = _all_manifest_files(workspace)
+        assert manifests, "No manifests discovered"
+
+        violations: list[str] = []
+        checked = 0
+        for manifest_path in manifests:
+            for param_path in self._manifest_level_parameter_paths(manifest_path):
+                # A path variable such as {{ site.properties.aioRelease }} selects
+                # one of a set of files. Check every file it can resolve to.
+                pattern = re.sub(r"\{\{[^}]*\}\}", "*", param_path)
+                for param_file in sorted(workspace.glob(pattern)):
+                    checked += 1
+                    for _, _, raw in TestParameterChaining()._get_chaining_refs(param_file):
+                        violations.append(
+                            f"{manifest_path.relative_to(workspace)} attaches "
+                            f"{param_file.relative_to(workspace)} at manifest level, "
+                            f"but it chains a step output: {raw}"
+                        )
+
+        assert checked > 0, "No manifest-level parameter files resolved, so nothing was checked"
+        assert not violations, (
+            "Manifest-level parameter files must not chain step outputs. Move the "
+            "chaining keys into a step-level file and leave the declared values at "
+            "manifest level.\n" + "\n".join(violations)
+        )
+
+
 class TestConditionalStepCoverage:
     """Every when: condition should reference a property that exists in base-site.yaml."""
 
@@ -184,6 +238,45 @@ class TestConditionalStepCoverage:
                     f"'site.properties.{prop_path}' in when condition.\n"
                     f"Known property paths: {sorted(known_paths)}"
                 )
+
+    def test_output_consumers_share_their_producer_guard(self, workspace):
+        """A step that chains an output runs under the same guard as its producer.
+
+        A gated producer that is skipped emits no outputs, so an ungated consumer
+        resolves `{{ steps.X.outputs.Y }}` to nothing and sends the literal
+        template to ARM. Include-level `when:` propagates to every spliced step,
+        so this compares the post-flatten guards rather than the authored ones.
+        """
+        from siteops.models import Manifest
+        from tests.workspace.test_manifest_validation import _all_manifest_files
+
+        violations: list[str] = []
+        for manifest_path in _all_manifest_files(workspace):
+            manifest = Manifest.from_file(manifest_path, workspace_root=workspace)
+            guards = {s.name: (s.when or "") for s in manifest.steps}
+
+            for step in manifest.steps:
+                for param_path in getattr(step, "parameters", []) or []:
+                    pattern = re.sub(r"\{\{[^}]*\}\}", "*", param_path)
+                    for param_file in sorted(workspace.glob(pattern)):
+                        for producer, _, raw in TestParameterChaining()._get_chaining_refs(param_file):
+                            # A producer outside this manifest is spliced in by
+                            # whatever composes it, and is checked there.
+                            if producer not in guards:
+                                continue
+                            if guards[producer] and guards[producer] != guards[step.name]:
+                                violations.append(
+                                    f"{manifest_path.relative_to(workspace)}: step "
+                                    f"'{step.name}' chains {raw} from '{producer}', "
+                                    f"which is gated by \"{guards[producer]}\" while the "
+                                    f"consumer is gated by \"{guards[step.name] or 'nothing'}\""
+                                )
+
+        assert not violations, (
+            "A step that consumes an output must run under its producer's guard. "
+            "Give the consumer the same `when:`, or gate the include that contributes "
+            "it.\n" + "\n".join(sorted(set(violations)))
+        )
 
 
 class TestUpdateInstanceDispatch:
@@ -755,6 +848,51 @@ class TestSampleTemplateApiPolicy:
                 if rp not in oldest or value < oldest[rp]:
                     oldest[rp] = value
         return oldest
+
+    _VERSIONED_MODULE = re.compile(r"-\d{4}-\d{2}-\d{2}(?:-preview)?\.bicep$")
+
+    def _pin_violations(self, workspace: Path, bicep_files: list[Path]) -> list[str]:
+        oldest = self._oldest_versions(workspace)
+        assert oldest, "Could not derive oldest API versions from version YAMLs"
+
+        rp_pattern = re.compile(
+            r"(Microsoft\.(?:IoTOperations|DeviceRegistry))/[^@'\s]+@(\d{4}-\d{2}-\d{2}(?:-preview)?)"
+        )
+        violations: list[str] = []
+        for bicep in bicep_files:
+            text = bicep.read_text(encoding="utf-8")
+            for match in rp_pattern.finditer(text):
+                rp, api_version = match.group(1), match.group(2)
+                expected = oldest.get(rp)
+                if expected is not None and api_version != expected:
+                    violations.append(
+                        f"{bicep.relative_to(workspace)}: {rp} pinned to "
+                        f"'{api_version}' but oldest supported is '{expected}'"
+                    )
+        return violations
+
+    def test_templates_pin_to_oldest_api_version(self, workspace):
+        """Workspace templates that are not per-version modules follow the same pin.
+
+        A template naming a single API version literal serves every release, so it
+        must name the oldest one. Files whose name carries an API version are the
+        per-version modules a dispatcher routes to, and are exempt by definition.
+        Keying the exemption on the filename rather than on a directory keeps a
+        template from escaping the policy by living under `modules/`.
+        """
+        templates_dir = workspace / "templates"
+        bicep_files = [
+            f for f in sorted(templates_dir.rglob("*.bicep"))
+            if not self._VERSIONED_MODULE.search(f.name)
+        ]
+        assert bicep_files, f"No bicep files found under {templates_dir}"
+
+        violations = self._pin_violations(workspace, bicep_files)
+        assert not violations, (
+            "Templates that are not per-version modules must pin to the oldest "
+            "supported API version, or route through a dispatcher "
+            "(see docs/aio-releases.md):\n  " + "\n  ".join(violations)
+        )
 
     def test_samples_pin_to_oldest_api_version(self, workspace):
         """Every Microsoft.IoTOperations / Microsoft.DeviceRegistry reference under

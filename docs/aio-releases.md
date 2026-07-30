@@ -119,7 +119,7 @@ This policy applies only to samples. Fundamentals (`templates/aio/`, `templates/
    ```
    gh workflow run e2e-test.yaml -f aio-releases=<existing>,<new>
    ```
-   The matrix runs each release in its own fresh RG + Arc cluster, and `test_aio_extension_version_matches_version_config` cross-checks the deployed `aioExtension.version` against the YAML.
+   The matrix runs each release in its own fresh RG + Arc cluster, and the integration suite cross-checks the deployed `aioExtension.version` against the YAML.
 
 ## Removing an EOL release
 

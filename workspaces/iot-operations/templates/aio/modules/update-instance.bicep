@@ -13,8 +13,8 @@
 // available to any capability, not only secretsync.
 //
 // --- Adding a new API version -------------------------------------------------------
-// Convention: the newest API version is always the else-branch (falsy fallback);
-// every older version is an explicit positive equality check. See
+// Convention: the newest API version is always the else-branch (falsy fallback),
+// and every older version is an explicit positive equality check. See
 // templates/aio/instance.bicep for the detailed restructuring example.
 //   1. Extend @allowed on aioApiVersion below.
 //   2. Add a new `module update_<YYYY>` conditional block.

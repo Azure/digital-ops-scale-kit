@@ -32,6 +32,7 @@
 // =====================================================================================
 
 import { aioSecretSyncServiceAccountName } from '../common/extension-names.bicep'
+import { spcObjectsYaml as renderSpcObjects } from './spc-objects.bicep'
 
 @description('Name of the existing IoT Operations instance.')
 param aioInstanceName string
@@ -109,6 +110,9 @@ param spcName string = ''
 
 @description('Skip Key Vault role assignments (use when roles are already configured).')
 param skipRoleAssignments bool = false
+
+@description('Key Vault secrets this site synchronizes, the same array the sync step consumes. Enablement PUTs the Secret Provider Class, and a full PUT replaces `objects`, so both writers derive that field from this one declaration. Leave empty only when no secrets are declared for the site.')
+param secrets array = []
 
 @description('Tags to apply to created resources.')
 param tags object = {}
@@ -225,11 +229,16 @@ resource spc 'Microsoft.SecretSyncController/azureKeyVaultSecretProviderClasses@
     type: 'CustomLocation'
   }
   tags: tags
-  properties: {
-    clientId: managedIdentity.properties.clientId
-    keyvaultName: resolvedKvName
-    tenantId: tenant().tenantId
-  }
+  // The property is omitted rather than nulled when no secrets are declared, which
+  // matches the shape this template PUT before it derived the field.
+  properties: union(
+    {
+      clientId: managedIdentity.properties.clientId
+      keyvaultName: resolvedKvName
+      tenantId: tenant().tenantId
+    },
+    empty(secrets) ? {} : { objects: renderSpcObjects(secrets) }
+  )
   dependsOn: [
     federatedCredential
     newKeyVault

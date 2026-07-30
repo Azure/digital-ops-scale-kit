@@ -14,10 +14,10 @@ description: |
   The cluster-side SecretSync controller then materializes each group as a
   Kubernetes Secret in the AIO namespace.
 
-  The defaults in `parameters/inputs/sync-secrets.yaml` are obvious sample
-  values. For real use, override `secrets` and `secretValues`. Supply
-  `secretValues` via a CI secret or sites.local/ overlay. Do not commit real
-  values.
+  The defaults in `secrets.yaml` are obvious sample values. It attaches at
+  manifest level, so a site or a `sites.local/` overlay overrides `secrets`
+  and `secretValues`. Supply `secretValues` via a CI secret or an overlay.
+  Do not commit real values.
 
   Prerequisites:
     - AIO instance must be deployed and running (run aio-install first)
@@ -31,6 +31,7 @@ selector: "environment=dev"
 parameters:
   - parameters/common/common.yaml
   - "parameters/aio-releases/{{ site.properties.aioRelease }}.yaml"
+  - samples/secretsync-sample/secrets.yaml
 
 steps:
   - include: ../../manifests/_resolve-aio.yaml

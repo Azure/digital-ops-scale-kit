@@ -59,7 +59,7 @@ worker runs asynchronously:
 | 1 | Stage one hop: check whether the target minor is already met, then stage the next AKS EE update from Microsoft Update (a Windows Update scan, download, and install that self-extracts into the update-cache) and install the cached MSI with `Start-AksEdgeUpdate -Force`. Goes to Phase 2 when staged, Phase 3 to verify and finalize when Microsoft Update offers nothing | No |
 | 2 | Apply: `Import-Module AksEdge -Force` then `Start-AksEdgeControlPlaneUpdate -firstControlPlane $true -Force` | Yes (node VM) |
 | 3 | Verify hop + decide: deployed Kubernetes version, `/readyz`, nodes Ready, `Test-AksEdgeArcConnection`. Decide: target reached -> Phase 99, patch mode -> Phase 99, max hops exceeded -> fail, else loop back to Phase 1 | No |
-| 99 | Finalize: re-pin `AcceptUpgrade $false` (best-effort), write `siteops.aksee.upgrade.state=succeeded` (with `appliedVersion`, `fromVersion`, `hopCount`, `runId`), remove the az token cache | No |
+| 99 | Finalize: re-pin `AcceptUpgrade $false` (best-effort), write `siteops.aksee.upgrade.state=succeeded` (with `appliedVersion`, `fromVersion`, `runId`), remove the az token cache | No |
 
 The host does not reboot during the upgrade (only the inner node VM does), so
 the worker normally runs straight through. The at-startup Scheduled Task trigger

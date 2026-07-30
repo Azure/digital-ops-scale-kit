@@ -40,3 +40,6 @@ output features object = instance.properties.?features ?? {}
 
 @description('Instance description.')
 output instanceDescription string = instance.properties.?description ?? ''
+
+@description('Default Secret Provider Class resource ID. Empty when Secret Sync is not enabled. Forward this on an update so an unrelated caller does not unbind it.')
+output defaultSecretProviderClassResourceId string = instance.properties.?defaultSecretProviderClassRef.?resourceId ?? ''
