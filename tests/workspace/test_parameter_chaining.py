@@ -239,6 +239,45 @@ class TestConditionalStepCoverage:
                     f"Known property paths: {sorted(known_paths)}"
                 )
 
+    def test_output_consumers_share_their_producer_guard(self, workspace):
+        """A step that chains an output runs under the same guard as its producer.
+
+        A gated producer that is skipped emits no outputs, so an ungated consumer
+        resolves `{{ steps.X.outputs.Y }}` to nothing and sends the literal
+        template to ARM. Include-level `when:` propagates to every spliced step,
+        so this compares the post-flatten guards rather than the authored ones.
+        """
+        from siteops.models import Manifest
+        from tests.workspace.test_manifest_validation import _all_manifest_files
+
+        violations: list[str] = []
+        for manifest_path in _all_manifest_files(workspace):
+            manifest = Manifest.from_file(manifest_path, workspace_root=workspace)
+            guards = {s.name: (s.when or "") for s in manifest.steps}
+
+            for step in manifest.steps:
+                for param_path in getattr(step, "parameters", []) or []:
+                    pattern = re.sub(r"\{\{[^}]*\}\}", "*", param_path)
+                    for param_file in sorted(workspace.glob(pattern)):
+                        for producer, _, raw in TestParameterChaining()._get_chaining_refs(param_file):
+                            # A producer outside this manifest is spliced in by
+                            # whatever composes it, and is checked there.
+                            if producer not in guards:
+                                continue
+                            if guards[producer] and guards[producer] != guards[step.name]:
+                                violations.append(
+                                    f"{manifest_path.relative_to(workspace)}: step "
+                                    f"'{step.name}' chains {raw} from '{producer}', "
+                                    f"which is gated by \"{guards[producer]}\" while the "
+                                    f"consumer is gated by \"{guards[step.name] or 'nothing'}\""
+                                )
+
+        assert not violations, (
+            "A step that consumes an output must run under its producer's guard. "
+            "Give the consumer the same `when:`, or gate the include that contributes "
+            "it.\n" + "\n".join(sorted(set(violations)))
+        )
+
 
 class TestUpdateInstanceDispatch:
     """Ensure callers of update-instance.bicep pass every param the router declares.
