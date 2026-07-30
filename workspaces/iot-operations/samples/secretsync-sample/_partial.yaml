@@ -12,4 +12,4 @@ steps:
     template: templates/secretsync/sync-secrets.bicep
     scope: resourceGroup
     parameters:
-      - parameters/inputs/sync-secrets.yaml
+      - samples/secretsync-sample/inputs.yaml

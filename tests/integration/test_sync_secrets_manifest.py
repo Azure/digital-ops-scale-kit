@@ -39,9 +39,9 @@ from tests.integration.helpers.secretsync import dump_secretsync_status
 pytestmark = [pytest.mark.integration]
 
 # Fixed sample values from
-# `workspaces/iot-operations/parameters/inputs/sync-secrets.yaml`. Every
+# `workspaces/iot-operations/samples/secretsync-sample/secrets.yaml`. Every
 # materialized Kubernetes Secret is asserted to carry the matching value.
-# Order matches the chaining file's `secrets` array.
+# Order matches the declaration file's `secrets` array.
 SAMPLE_SECRETS = [
     {
         "secretName": "secretsync-sample-secret-a",
