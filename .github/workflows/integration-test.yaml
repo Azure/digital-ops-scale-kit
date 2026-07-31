@@ -84,7 +84,12 @@ jobs:
       - name: Mask secret values
         env:
           SITE_OVERRIDES: ${{ secrets.SITE_OVERRIDES }}
+        # `set -o pipefail` so a jq failure on malformed input fails the step.
+        # Without it the exit status comes from the `while` loop, which reports
+        # success having masked nothing, and the next step runs with values that
+        # any diagnostic could write to the log.
         run: |
+          set -euo pipefail
           if [[ -n "$SITE_OVERRIDES" ]]; then
             echo "$SITE_OVERRIDES" | jq -r '.. | strings' | while IFS= read -r val; do
               [[ -n "$val" ]] && echo "::add-mask::${val}"

@@ -447,6 +447,106 @@ class TestSyncSecretsIdempotency:
                 )
 
 
+class TestEnablementPreservesSyncedObjects:
+    """Re-running enablement leaves the synced object list on the class.
+
+    Both `enable-secretsync.bicep` and `sync-secrets.bicep` PUT the default
+    Secret Provider Class, and a PUT replaces the fields it omits. Neither
+    product manifest declares a `secrets` array, so day-2 enablement reaches
+    the template with none and has to keep what the cluster already carries.
+
+    This is the one sequence no other test covers. Every redeploy test re-runs
+    the manifest it started with, whereas the failure here needs the sync step
+    to establish the list and a different manifest to write the class next.
+    Losing it stops the controller materializing every Kubernetes Secret, so
+    the assertions below check the object list and then the Secrets themselves.
+    """
+
+    def test_day_two_enablement_keeps_object_list(
+        self,
+        orchestrator,
+        selector,
+        sync_secret_result,
+        aio_namespace,
+        kubectl_available,
+    ):
+        expected_names = {s["secretName"] for s in SAMPLE_SECRETS}
+
+        spc_ids: dict[str, str] = {}
+        for site_name in sync_secret_result["sites"]:
+            step = assert_step_succeeded(sync_secret_result, site_name, "secretsync")
+            spc_ids[site_name] = assert_output_exists(step, "spcResourceId")
+
+        # Baseline, so a failure below distinguishes "enablement dropped it"
+        # from "the sync step never wrote it".
+        for site_name, spc_id in spc_ids.items():
+            objects = _read_spc_objects(spc_id)
+            missing = expected_names - _object_names(objects)
+            assert not missing, (
+                f"Site '{site_name}': the sync step did not leave every sample "
+                f"secret on the class. Missing: {sorted(missing)}."
+            )
+
+        # Day-2 enablement, the standalone path that declares no secrets.
+        manifest_path = WORKSPACE_PATH / "manifests" / "secretsync.yaml"
+        result = orchestrator.deploy(manifest_path=manifest_path, selector=selector)
+        assert result["summary"]["failed"] == 0, (
+            f"Day-2 enablement failed: {result['summary']}"
+        )
+
+        for site_name, spc_id in spc_ids.items():
+            assert_step_succeeded(result, site_name, "secretsync")
+            objects = _read_spc_objects(spc_id)
+            missing = expected_names - _object_names(objects)
+            assert not missing, (
+                f"Site '{site_name}': re-running enablement dropped "
+                f"{sorted(missing)} from the class object list. The controller "
+                f"stops materializing every Kubernetes Secret once the list is "
+                f"replaced, so the secrets the sync step established are gone."
+            )
+
+        # The object list is the mechanism. These are the Secrets an operator
+        # would notice, so assert them too rather than trusting the projection.
+        for site_name in sync_secret_result["sites"]:
+            step = assert_step_succeeded(sync_secret_result, site_name, "sync-secrets")
+            for entry in assert_output_exists(step, "materializedSecrets"):
+                k8s_name = entry["kubernetesSecretName"]
+                secret = wait_for_secret(k8s_name, aio_namespace)
+                assert secret is not None, (
+                    f"Site '{site_name}': Secret '{k8s_name}' is gone from "
+                    f"'{aio_namespace}' after re-running enablement."
+                )
+                assert entry["kubernetesSecretKey"] in secret.get("data", {}), (
+                    f"Site '{site_name}': Secret '{k8s_name}' lost key "
+                    f"'{entry['kubernetesSecretKey']}' after re-running enablement."
+                )
+
+
+def _read_spc_objects(spc_resource_id: str) -> str:
+    """Return `properties.objects` off the Secret Provider Class, or empty."""
+    proc = _run_az(
+        ["az", "resource", "show", "--ids", spc_resource_id, "-o", "json"],
+        timeout=180,
+    )
+    payload = json.loads(proc.stdout)
+    return (payload.get("properties") or {}).get("objects") or ""
+
+
+def _object_names(objects_yaml: str) -> set[str]:
+    """Extract the `objectName` values from the class's objects document.
+
+    The document is a YAML string of literal blocks rather than structured
+    data, so the names are read by line prefix. An unparseable or empty
+    document yields an empty set, which the callers report as missing names.
+    """
+    names: set[str] = set()
+    for line in objects_yaml.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("objectName:"):
+            names.add(stripped.split(":", 1)[1].strip())
+    return names
+
+
 def _run_az(
     args: list[str], *, timeout: int = 120, redact: tuple[str, ...] = ()
 ) -> subprocess.CompletedProcess:

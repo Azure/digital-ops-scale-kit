@@ -52,7 +52,7 @@ on:
         type: boolean
         default: false
       keep-cluster-alive-minutes:
-        description: Minutes to keep the runner (and k3s cluster) alive after tests, before teardown. 0 = skip. Capped at 300.
+        description: Minutes to keep the runner (and k3s cluster) alive after tests, before teardown. 0 = skip. Clamped to what is left of the job budget so teardown still runs.
         type: number
         default: 0
       upgrade-to:
@@ -301,6 +301,7 @@ jobs:
           echo "rg=$RG" >> "$GITHUB_OUTPUT"
           echo "cluster=$CL" >> "$GITHUB_OUTPUT"
           echo "site_name=$SN" >> "$GITHUB_OUTPUT"
+          echo "job_start_epoch=$(date +%s)" >> "$GITHUB_OUTPUT"
 
       - uses: ./.github/actions/create-k3s-cluster
 
@@ -374,6 +375,7 @@ jobs:
           echo "Snapshot: $count pre-existing resource(s) in RG $RG will be preserved."
 
       - name: Create resource group (ephemeral mode)
+        id: create-rg
         if: env.PERSISTENT_RG != 'true'
         shell: bash
         env:
@@ -433,7 +435,7 @@ jobs:
           az extension add --name connectedk8s --upgrade --yes --only-show-errors
           COUNT=$(az connectedk8s list -g "$RG" --query "length([?name=='$CLUSTER'])" -o tsv)
           if [[ "$COUNT" != "0" ]]; then
-            echo "::error::Arc cluster '$CLUSTER' already exists in RG '$RG'. This workflow registers a fresh k3s under this name; re-using an existing registration is not supported. Delete the Arc resource (\`az connectedk8s delete -n $CLUSTER -g $RG\`) or pick an unused cluster-name."
+            echo "::error::Arc cluster '$CLUSTER' already exists in RG '$RG'. This workflow registers a fresh k3s under this name. Re-using an existing registration is not supported. Delete the Arc resource (\`az connectedk8s delete -n $CLUSTER -g $RG\`) or pick an unused cluster-name."
             exit 1
           fi
 
@@ -479,7 +481,7 @@ jobs:
           if [[ -n "$AZURE_CLIENT_OID" ]]; then
             SP_OID="$AZURE_CLIENT_OID"
           else
-            echo "AZURE_CLIENT_OID not set; falling back to Graph lookup."
+            echo "AZURE_CLIENT_OID not set, falling back to Graph lookup."
             SP_OID=$(az ad sp show --id "$AZURE_CLIENT_ID" --query id -o tsv 2>/dev/null || true)
             if [[ -z "$SP_OID" ]]; then
               echo "::error::Could not resolve SP object ID. Set AZURE_CLIENT_OID secret to the SP's object ID, or grant the SP Directory.Read.All on Microsoft Graph."
@@ -623,15 +625,28 @@ jobs:
           HOLD_MIN: "${{ inputs.keep-cluster-alive-minutes }}"
           RG: "${{ steps.names.outputs.rg }}"
           CLUSTER: "${{ steps.names.outputs.cluster }}"
+          JOB_START_EPOCH: "${{ steps.names.outputs.job_start_epoch }}"
+          JOB_BUDGET_MIN: "${{ (inputs.keep-cluster-alive-minutes > 0 || inputs.upgrade-to != '') && 360 || 120 }}"
         # Sleep so the runner (and its k3s cluster + Arc connection) remain
-        # reachable for interactive debugging before teardown. Cap at 300min
-        # to leave headroom under the 360min job timeout. Cancel the run to
-        # exit early; teardown still runs via `if: always()`.
+        # reachable for interactive debugging before teardown. The hold is
+        # capped by what is left of the job budget, not by a fixed ceiling: a
+        # hold that outlasts the budget is cancelled mid-sleep, which skips
+        # teardown and leaks the resource group. Cancel the run to exit early,
+        # since teardown still runs via `if: always()`.
         run: |
           set -euo pipefail
-          MAX=300
+          RESERVE_MIN=20
+          ELAPSED_MIN=$(( ( $(date +%s) - JOB_START_EPOCH ) / 60 ))
+          REMAINING_MIN=$(( JOB_BUDGET_MIN - ELAPSED_MIN - RESERVE_MIN ))
           MINS=$HOLD_MIN
-          if (( MINS > MAX )); then MINS=$MAX; fi
+          if (( MINS > REMAINING_MIN )); then
+            echo "::warning::Requested ${MINS}m hold exceeds the ${REMAINING_MIN}m left in the job budget after ${ELAPSED_MIN}m elapsed. Holding ${REMAINING_MIN}m so teardown still runs."
+            MINS=$REMAINING_MIN
+          fi
+          if (( MINS <= 0 )); then
+            echo "::warning::No budget left to hold after ${ELAPSED_MIN}m elapsed. Proceeding to teardown."
+            exit 0
+          fi
           echo "Holding for $MINS minute(s) before teardown. Arc cluster: $CLUSTER in RG: $RG."
           echo "- Keep-alive: holding cluster \`$CLUSTER\` for ${MINS}m before teardown" >> "$GITHUB_STEP_SUMMARY"
           for ((i=1; i<=MINS; i++)); do
@@ -646,6 +661,7 @@ jobs:
           RG: "${{ steps.names.outputs.rg }}"
           EXPECTED_RUN_ID: "${{ github.run_id }}"
           EXPECTED_RUN_ATTEMPT: "${{ github.run_attempt }}"
+          RG_CREATED: "${{ steps.create-rg.outcome }}"
         # Layered defense against ever deleting a non-ephemeral RG:
         #   1. Name must match `rg-e2e-<run_id>-<attempt>-*`, the exact
         #      shape `Compute names` emits in ephemeral mode.
@@ -664,9 +680,23 @@ jobs:
             echo "::error::Refusing to delete RG '$RG': name does not match this run's ephemeral pattern '${EXPECTED_PREFIX}*'."
             exit 1
           fi
-          EXISTS=$(az group exists --name "$RG")
+          # `az group exists` can fail rather than answer, for example when the
+          # identity lacks subscription-scope read. That is distinct from the
+          # RG being absent, so handle the query failure on its own terms
+          # instead of letting `set -e` end the step.
+          EXISTS=""
+          if ! EXISTS=$(az group exists --name "$RG" 2>&1); then
+            if [[ "$RG_CREATED" != "success" ]]; then
+              echo "Could not query RG '$RG' and creation did not succeed, so there is nothing this run made to remove."
+              echo "- Ephemeral RG never created: \`$RG\`" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "::error::RG '$RG' was created but cannot be queried, so it may survive this run. Delete it by hand."
+            echo "- Ephemeral RG may have leaked, delete by hand: \`$RG\`" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
           if [[ "$EXISTS" != "true" ]]; then
-            echo "RG '$RG' does not exist; teardown is a no-op."
+            echo "RG '$RG' does not exist, so teardown is a no-op."
             echo "- Ephemeral RG already absent: \`$RG\`" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -684,9 +714,9 @@ jobs:
             echo "  actual:   managedBy=$MANAGED ephemeral=$EPHEMERAL run_id=$TAG_RUN_ID run_attempt=$TAG_RUN_ATTEMPT"
             exit 1
           fi
-          echo "Guards passed; deleting ephemeral RG '$RG'."
+          echo "Guards passed, deleting ephemeral RG '$RG'."
           if ! az group delete --name "$RG" --yes --no-wait; then
-            echo "::warning::Ephemeral RG delete failed; RG $RG may linger."
+            echo "::warning::Ephemeral RG delete failed, so RG $RG may linger."
             echo "- Ephemeral RG delete failed: \`$RG\`" >> "$GITHUB_STEP_SUMMARY"
           fi
 
@@ -741,7 +771,7 @@ jobs:
               echo "[connectedk8s delete] $cluster (ARM DELETE accepted)"
               return 0
             fi
-            echo "::warning::[connectedk8s delete] $cluster ARM DELETE failed; will retry via parallel delete pass"
+            echo "::warning::[connectedk8s delete] $cluster ARM DELETE failed, will retry via parallel delete pass"
             printf '%s\n' "$out" | sed "s/^/[connectedk8s delete $cluster] /"
             return 1
           }
@@ -759,7 +789,7 @@ jobs:
             LIST_ERR="$RUNNER_TEMP/e2e-teardown/list-err-$i.log"
             POST_IDS=$(az resource list -g "$RG" --query "[].id" -o tsv 2>"$LIST_ERR")
             if [[ $? -ne 0 ]]; then
-              echo "::warning::Teardown pass $i: az resource list failed; retrying."
+              echo "::warning::Teardown pass $i: az resource list failed, retrying."
               echo "::group::az resource list stderr (pass $i)"
               redact "$LIST_ERR"
               echo "::endgroup::"
@@ -806,14 +836,14 @@ jobs:
             sleep 30
           done
           if [[ $LIST_OK -eq 0 ]]; then
-            echo "::error::Persistent-mode teardown could not enumerate RG $RG; delta cleanup did not run. Inspect the RG manually."
+            echo "::warning::Persistent-mode teardown could not enumerate RG $RG. Delta cleanup did not run, so inspect the RG manually."
             echo "- Persistent-mode teardown unable to enumerate RG \`$RG\` (az resource list failed)" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           FINAL_ERR="$RUNNER_TEMP/e2e-teardown/list-err-final.log"
           POST_IDS=$(az resource list -g "$RG" --query "[].id" -o tsv 2>"$FINAL_ERR")
           if [[ $? -ne 0 ]]; then
-            echo "::warning::Final residual check: az resource list failed; residual state unknown."
+            echo "::warning::Final residual check: az resource list failed, so residual state is unknown."
             echo "::group::az resource list stderr (final)"
             redact "$FINAL_ERR"
             echo "::endgroup::"

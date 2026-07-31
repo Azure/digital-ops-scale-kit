@@ -68,6 +68,130 @@ class TestParameterChaining:
                 f"Available outputs: {sorted(output_names)}"
             )
 
+    def test_resolve_aio_outputs_all_have_consumers(self, workspace):
+        """Every output resolve-aio emits is chained by a parameter file a manifest attaches.
+
+        The resolve step exists to feed downstream steps, so an output nothing
+        reads is either dead weight or a half-wired mechanism whose consumer was
+        never added. Only files a manifest actually attaches count, since a
+        reference sitting in an unreferenced file consumes nothing at deploy time.
+        """
+        from tests.workspace.test_manifest_validation import _all_manifest_files
+
+        resolve_aio = workspace / "templates" / "aio" / "resolve-aio.bicep"
+        outputs = set(
+            re.findall(r"^output\s+(\w+)\s+", resolve_aio.read_text(encoding="utf-8"), re.MULTILINE)
+        )
+        assert outputs, "No outputs found in resolve-aio.bicep"
+
+        attached: set[Path] = set()
+        for manifest_path in _all_manifest_files(workspace):
+            raw = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+            declared = list(raw.get("parameters") or [])
+            for step in raw.get("steps") or []:
+                if isinstance(step, dict):
+                    declared.extend(step.get("parameters") or [])
+            for param_path in declared:
+                if not isinstance(param_path, str):
+                    continue
+                # A path variable selects one of a set, so check every candidate.
+                pattern = re.sub(r"\{\{[^}]*\}\}", "*", param_path)
+                attached.update(workspace.glob(pattern))
+
+        assert attached, "No manifest-attached parameter files resolved"
+
+        consumed: set[str] = set()
+        for param_file in sorted(attached):
+            for step_name, output_path, _ in self._get_chaining_refs(param_file):
+                if step_name == "resolve-aio":
+                    consumed.add(output_path.split(".")[0])
+
+        orphaned = outputs - consumed
+        assert not orphaned, (
+            f"resolve-aio.bicep emits outputs no attached parameter file consumes: "
+            f"{sorted(orphaned)}. Either chain each into the step that needs it, or drop it."
+        )
+
+    def test_secret_provider_class_preservation_is_wired(self, workspace):
+        """Enablement still preserves an existing object list rather than dropping it.
+
+        Both templates PUT the Secret Provider Class. When a site declares no
+        secrets, enablement keeps the cluster's current `objects` by reading them
+        back. That spans the resolve output, the chaining file, the parameter, and
+        the module whose result reaches the write, so this asserts the behavior
+        rather than the declarations that support it.
+        """
+        resolve_output = "defaultSecretProviderClassResourceId"
+        enable_param = "existingSpcResourceId"
+
+        resolve_aio = (workspace / "templates" / "aio" / "resolve-aio.bicep").read_text(encoding="utf-8")
+        assert re.search(rf"^output\s+{resolve_output}\s+", resolve_aio, re.MULTILINE), (
+            f"resolve-aio.bicep no longer emits '{resolve_output}', which enablement "
+            f"needs to read the existing Secret Provider Class."
+        )
+
+        # Parse the mapping rather than pattern-matching raw text, so requoting or
+        # reformatting the YAML does not fail the test.
+        chaining_file = workspace / "parameters" / "inputs" / "secretsync.yaml"
+        mapping = yaml.safe_load(chaining_file.read_text(encoding="utf-8")) or {}
+        expected = "{{ steps.resolve-aio.outputs." + resolve_output + " }}"
+        assert mapping.get(enable_param) == expected, (
+            f"inputs/secretsync.yaml no longer maps '{resolve_output}' to "
+            f"'{enable_param}'. Without it enablement receives an empty id and "
+            f"writes the Secret Provider Class without preserving its object list. "
+            f"Found: {mapping.get(enable_param)!r}"
+        )
+
+        enable = (workspace / "templates" / "secretsync" / "enable-secretsync.bicep").read_text(encoding="utf-8")
+        assert re.search(rf"^param\s+{enable_param}\s+string", enable, re.MULTILINE), (
+            f"enable-secretsync.bicep no longer declares '{enable_param}', so the "
+            f"chained value would be filtered out before it reaches the template."
+        )
+
+        # Declaring the parameter is not enough. The value the class is written with
+        # has to actually come from the module that reads the current one, otherwise
+        # every link above can stay intact while the preservation itself is gone.
+        module_match = re.search(
+            r"module\s+(\w+)\s+'\./modules/read-spc-objects\.bicep'\s*=\s*if\s*\(([^)]+)\)",
+            enable,
+        )
+        assert module_match, (
+            "enable-secretsync.bicep no longer instantiates modules/read-spc-objects.bicep "
+            "behind a condition, so it cannot preserve an existing object list."
+        )
+        module_symbol, module_condition = module_match.group(1), module_match.group(2)
+        # The condition is usually a variable, so resolve one level of indirection
+        # before checking that the guard ultimately depends on the chained id.
+        condition_source = module_condition
+        var_match = re.search(
+            rf"^var\s+{re.escape(module_condition.strip())}\s*=\s*(.+)$", enable, re.MULTILINE
+        )
+        if var_match:
+            condition_source = var_match.group(1)
+        assert enable_param in condition_source, (
+            f"the read module's guard does not depend on '{enable_param}', so it would "
+            f"run on a first install where there is nothing to read. "
+            f"Found: {condition_source!r}"
+        )
+
+        objects_var = re.search(r"^var\s+spcObjects\s*=\s*(.+)$", enable, re.MULTILINE)
+        assert objects_var, "enable-secretsync.bicep no longer defines `spcObjects`."
+        assert f"{module_symbol}!.outputs" in objects_var.group(1), (
+            f"`spcObjects` does not read from the '{module_symbol}' module, so the class "
+            f"is written without the object list it currently carries. "
+            f"Found: {objects_var.group(1)!r}"
+        )
+
+        spc_write = re.search(
+            r"resource\s+spc\s+'Microsoft\.SecretSyncController[^']*'\s*=\s*\{(.+?)\n\}",
+            enable,
+            re.DOTALL,
+        )
+        assert spc_write and "spcObjects" in spc_write.group(1), (
+            "the Secret Provider Class resource no longer writes `spcObjects`, so the "
+            "resolved object list never reaches the PUT."
+        )
+
     def test_aio_instance_inputs_refs_in_aio_install(self, workspace):
         """parameters/inputs/aio-instance.yaml should only reference steps that exist in aio-install.yaml."""
         chaining_file = workspace / "parameters" / "inputs" / "aio-instance.yaml"
@@ -132,7 +256,34 @@ class TestParameterChaining:
             )
 
 
-class TestParameterAttachmentTier:
+class TestArmResourceShape:
+    """Resource bodies keep the shape ARM can validate before deployment."""
+
+    def test_properties_are_object_literals(self, workspace):
+        """No resource builds its whole `properties` from a function call.
+
+        A function such as `union()` compiles the entire object into one
+        expression. ARM cannot evaluate that before preflight when any part of
+        it reads a resource or a module output, so the provider receives the
+        unevaluated string and rejects the deployment. Per-property expressions
+        inside an object literal are fine, which is what every provider expects.
+        Templates compile either way, so this is the only place it is caught
+        before a live deploy.
+        """
+        pattern = re.compile(r"^\s*properties:\s*([A-Za-z_]\w*)\s*\(", re.MULTILINE)
+        violations: list[str] = []
+        for bicep in sorted(workspace.rglob("*.bicep")):
+            for match in pattern.finditer(bicep.read_text(encoding="utf-8")):
+                line = bicep.read_text(encoding="utf-8")[: match.start()].count("\n") + 1
+                violations.append(
+                    f"{bicep.relative_to(workspace)}:{line}: properties built by "
+                    f"{match.group(1)}()"
+                )
+
+        assert not violations, (
+            "Build `properties` as an object literal and put any condition on the "
+            "individual property value instead.\n" + "\n".join(violations)
+        )
     """A parameter file's attachment tier follows from what the file is.
 
     Chaining files carry `{{ steps.X.outputs.Y }}` wiring and attach at step

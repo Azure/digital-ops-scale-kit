@@ -125,12 +125,12 @@ az resource delete --ids <secretSyncResourceId>
 
 ## Writes to the SPC
 
-The default SPC is written by both `enable-secretsync.bicep` and `sync-secrets.bicep`, and an ARM PUT replaces the fields it omits. Both therefore derive `properties.objects` from the same `secrets` declaration, through the shared `templates/secretsync/spc-objects.bicep` library, so whichever runs last produces the same object list.
+The default SPC is written by both `enable-secretsync.bicep` and `sync-secrets.bicep`, and an ARM PUT replaces the fields it omits. Enablement does not own `properties.objects`. It writes the shared derivation when the site declares secrets, and otherwise reads the current value off the class and writes it back, so a platform install never drops an object list it did not set.
 
 Two implications worth knowing for day-2 operations:
 
-- **Declare `secrets` where every writer sees it.** Manifest level, or a site's `parameters`, puts the array in front of both templates. An array attached to a single step reaches only that step, which lets the other writer PUT the SPC with a different object list.
-- **The declaration is the source of truth.** Entries added out of band via `az iot ops secretsync secret set` are replaced the next time either template runs. Pick one source of truth per cluster.
+- **Declaring `secrets` where both writers see it keeps them in agreement.** Manifest level, or a site's `parameters`, puts the array in front of both templates, and both derive the object list from `templates/secretsync/spc-objects.bicep` so the documents are identical. An array attached to a single step reaches only that step.
+- **The declaration is the source of truth.** Entries added out of band via `az iot ops secretsync secret set` are replaced the next time a template runs with declared secrets. Pick one source of truth per cluster.
 
 ## Writing your own sample
 
