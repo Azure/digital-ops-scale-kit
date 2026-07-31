@@ -261,14 +261,16 @@ resource spc 'Microsoft.SecretSyncController/azureKeyVaultSecretProviderClasses@
     type: 'CustomLocation'
   }
   tags: tags
-  properties: union(
-    {
-      clientId: managedIdentity.properties.clientId
-      keyvaultName: resolvedKvName
-      tenantId: tenant().tenantId
-    },
-    empty(spcObjects) ? {} : { objects: spcObjects }
-  )
+  // `properties` stays an object literal with per-property expressions. Building
+  // it with `union()` makes the whole object one expression, and ARM cannot
+  // evaluate that before preflight when it reads a resource or a module output,
+  // so the resource provider receives the unevaluated string and rejects it.
+  properties: {
+    clientId: managedIdentity.properties.clientId
+    keyvaultName: resolvedKvName
+    tenantId: tenant().tenantId
+    objects: spcObjects
+  }
   dependsOn: [
     federatedCredential
     newKeyVault

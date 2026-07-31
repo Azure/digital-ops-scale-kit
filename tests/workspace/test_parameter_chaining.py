@@ -256,7 +256,34 @@ class TestParameterChaining:
             )
 
 
-class TestParameterAttachmentTier:
+class TestArmResourceShape:
+    """Resource bodies keep the shape ARM can validate before deployment."""
+
+    def test_properties_are_object_literals(self, workspace):
+        """No resource builds its whole `properties` from a function call.
+
+        A function such as `union()` compiles the entire object into one
+        expression. ARM cannot evaluate that before preflight when any part of
+        it reads a resource or a module output, so the provider receives the
+        unevaluated string and rejects the deployment. Per-property expressions
+        inside an object literal are fine, which is what every provider expects.
+        Templates compile either way, so this is the only place it is caught
+        before a live deploy.
+        """
+        pattern = re.compile(r"^\s*properties:\s*([A-Za-z_]\w*)\s*\(", re.MULTILINE)
+        violations: list[str] = []
+        for bicep in sorted(workspace.rglob("*.bicep")):
+            for match in pattern.finditer(bicep.read_text(encoding="utf-8")):
+                line = bicep.read_text(encoding="utf-8")[: match.start()].count("\n") + 1
+                violations.append(
+                    f"{bicep.relative_to(workspace)}:{line}: properties built by "
+                    f"{match.group(1)}()"
+                )
+
+        assert not violations, (
+            "Build `properties` as an object literal and put any condition on the "
+            "individual property value instead.\n" + "\n".join(violations)
+        )
     """A parameter file's attachment tier follows from what the file is.
 
     Chaining files carry `{{ steps.X.outputs.Y }}` wiring and attach at step

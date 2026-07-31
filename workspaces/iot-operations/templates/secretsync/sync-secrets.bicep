@@ -124,14 +124,15 @@ resource spc 'Microsoft.SecretSyncController/azureKeyVaultSecretProviderClasses@
     type: 'CustomLocation'
   }
   tags: tags
-  properties: union(
-    {
-      clientId: managedIdentityClientId
-      keyvaultName: keyVaultName
-      tenantId: tenant().tenantId
-    },
-    empty(spcObjectsYaml) ? {} : { objects: spcObjectsYaml }
-  )
+  // Object literal rather than `union()`, matching enable-secretsync.bicep. A
+  // whole-object expression is handed to the resource provider unevaluated when
+  // any part of it is not known at preflight.
+  properties: {
+    clientId: managedIdentityClientId
+    keyvaultName: keyVaultName
+    tenantId: tenant().tenantId
+    objects: spcObjectsYaml
+  }
 }
 
 // =====================================================================================
