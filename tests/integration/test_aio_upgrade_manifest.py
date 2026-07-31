@@ -7,6 +7,7 @@ round-trip test: it must preserve extension identity, configurationSettings,
 and releaseNamespace rather than trigger a full-replace.
 """
 
+import os
 from pathlib import Path
 
 import pytest
@@ -332,6 +333,82 @@ class TestAioUpgradeIdempotency:
                     f"Site '{name}': {output_name} changed on re-upgrade "
                     f"({v1!r} -> {v2!r})"
                 )
+
+
+class TestAioUpgradeTargetVersion:
+    """The upgrade lands on its target release.
+
+    Allowlisted for upgrade-phase E2E. A no-op re-PUT satisfies every other
+    upgrade assertion, since ids, namespaces, and config all stay stable.
+    Binding the applied version to the target release is what distinguishes a
+    cross-release upgrade from a redeploy of the release already installed.
+    """
+
+    def _target_release_version(self, orchestrator, site_name: str) -> tuple[str, str]:
+        """Return the (release key, aioVersion) the upgrade should have applied.
+
+        Prefers `AIO_RELEASE_TO`, which the workflow exports independently of
+        the site file. Reading the site instead would compare the deployment
+        against the same input that produced it, so a re-render that emitted
+        the wrong release would agree with itself and pass.
+        """
+        import yaml
+
+        release_key = os.environ.get("AIO_RELEASE_TO", "").strip()
+        source = "AIO_RELEASE_TO"
+        if not release_key:
+            site = orchestrator.load_site(site_name)
+            release_key = site.properties.get("aioRelease", "")
+            source = f"site '{site_name}' properties.aioRelease"
+        assert release_key, (
+            f"No target release available from {source}, so the applied version "
+            f"cannot be checked against anything."
+        )
+
+        version_config = WORKSPACE_PATH / "parameters" / "aio-releases" / f"{release_key}.yaml"
+        assert version_config.is_file(), (
+            f"Target release '{release_key}' (from {source}) has no config at "
+            f"{version_config}."
+        )
+        expected = yaml.safe_load(version_config.read_text(encoding="utf-8"))["aioVersion"]
+        return release_key, expected
+
+    def test_applied_version_matches_target_release(self, orchestrator, aio_upgrade_result):
+        for name in aio_upgrade_result["sites"]:
+            step = assert_step_succeeded(aio_upgrade_result, name, "update-extensions")
+            applied = assert_output_exists(step, "aioVersionApplied")
+            release_key, expected = self._target_release_version(orchestrator, name)
+            assert applied == expected, (
+                f"Site '{name}': applied AIO version {applied!r} does not match "
+                f"{expected!r} declared by release '{release_key}'. The upgrade "
+                f"reported success without landing on the target release, which "
+                f"a re-render of the wrong release or a dispatch that dropped the "
+                f"bump would both produce."
+            )
+
+    def test_version_moved_when_releases_differ(self, aio_upgrade_result):
+        """A cross-release upgrade changes the version it started from.
+
+        Skipped when the run is not crossing releases, since the resolved and
+        applied versions are then equal by design.
+        """
+        release_from = os.environ.get("AIO_RELEASE_FROM", "").strip()
+        release_to = os.environ.get("AIO_RELEASE_TO", "").strip()
+        if not release_from or not release_to or release_from == release_to:
+            pytest.skip("Not a cross-release upgrade, so the version is expected to hold")
+
+        for name in aio_upgrade_result["sites"]:
+            resolve_step = assert_step_succeeded(aio_upgrade_result, name, "resolve-extensions")
+            resolved = assert_output_exists(resolve_step, "aio")["version"]
+
+            update_step = assert_step_succeeded(aio_upgrade_result, name, "update-extensions")
+            applied = assert_output_exists(update_step, "aioVersionApplied")
+
+            assert applied != resolved, (
+                f"Site '{name}': upgrading {release_from} to {release_to} left the "
+                f"AIO version at {resolved!r}. The instance was re-PUT at the "
+                f"version it already carried."
+            )
 
 
 class TestAioExtensionInvariants:

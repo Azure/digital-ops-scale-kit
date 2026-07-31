@@ -65,6 +65,7 @@ _UPGRADE_PHASE_ALLOWED_CLASSES = frozenset({
     "TestAioUpgradeResolveExtensions",
     "TestAioUpgradeSelfConsistency",
     "TestAioUpgradeIdempotency",
+    "TestAioUpgradeTargetVersion",
     "TestAioExtensionInvariants",
     "TestSecretStoreExtensionInvariants",
     "TestCertManagerExtensionInvariants",
@@ -74,6 +75,16 @@ _UPGRADE_PHASE_ALLOWED_CLASSES = frozenset({
 
 def _is_upgrade_phase() -> bool:
     return os.environ.get(_UPGRADE_PHASE_ENV, "").strip() in ("1", "true", "yes")
+
+
+def _in_ci() -> bool:
+    """True when running on a GitHub Actions runner.
+
+    Used to turn a skip into a failure: locally a missing prerequisite is a
+    clean skip, while in CI it means a misconfigured workflow that would
+    otherwise report success after provisioning real resources.
+    """
+    return os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
 
 
 def _extra_sites_dirs() -> list[Path]:
@@ -136,6 +147,19 @@ def pytest_collection_modifyitems(config, items):
     )
 
     if not has_config:
+        # In CI a missing site config means the workflow is misconfigured, not
+        # that there is nothing to run. Skipping would exit 0 after the run has
+        # already provisioned a cluster and an AIO instance, reporting success
+        # while asserting nothing. Fail where that is unambiguous, and keep the
+        # clean skip for local runs.
+        if _in_ci():
+            pytest.exit(
+                "Integration tests require sites.local/ overlays, SITE_OVERRIDES, "
+                "or SITEOPS_EXTRA_SITES_DIRS with site files, and none were found. "
+                "Skipping the whole suite in CI is not allowed, since it would "
+                "report success without asserting anything.",
+                returncode=1,
+            )
         skip = pytest.mark.skip(
             reason="Integration tests require sites.local/ overlays, "
             "SITE_OVERRIDES, or SITEOPS_EXTRA_SITES_DIRS with site files"
@@ -149,13 +173,38 @@ def pytest_collection_modifyitems(config, items):
             reason=f"{_UPGRADE_PHASE_ENV} active: only upgrade-step tests run "
             f"in this phase (install fixtures are stubbed)"
         )
+        seen_classes: set[str] = set()
+        kept = 0
         for item in items:
             if "integration" not in item.keywords:
                 continue
             cls = getattr(item, "cls", None)
             cls_name = cls.__name__ if cls is not None else None
+            if cls_name is not None:
+                seen_classes.add(cls_name)
             if cls_name not in _UPGRADE_PHASE_ALLOWED_CLASSES:
                 item.add_marker(skip_upgrade)
+            else:
+                kept += 1
+
+        # The allowlist is matched by name, so a rename or a moved test drops
+        # coverage with no other signal. Both checks below turn that into a
+        # fast failure rather than an expensive green run.
+        missing = _UPGRADE_PHASE_ALLOWED_CLASSES - seen_classes
+        if missing:
+            pytest.exit(
+                f"{_UPGRADE_PHASE_ENV} allowlist names classes that were not "
+                f"collected: {sorted(missing)}. Update "
+                f"_UPGRADE_PHASE_ALLOWED_CLASSES to match the tests, since an "
+                f"unmatched name runs nothing.",
+                returncode=1,
+            )
+        if kept == 0:
+            pytest.exit(
+                f"{_UPGRADE_PHASE_ENV} is set but no test matched the allowlist, "
+                f"so the upgrade phase would assert nothing.",
+                returncode=1,
+            )
 
 
 def pytest_sessionfinish(session, exitstatus):

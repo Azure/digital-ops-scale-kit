@@ -301,6 +301,7 @@ jobs:
           echo "rg=$RG" >> "$GITHUB_OUTPUT"
           echo "cluster=$CL" >> "$GITHUB_OUTPUT"
           echo "site_name=$SN" >> "$GITHUB_OUTPUT"
+          echo "job_start_epoch=$(date +%s)" >> "$GITHUB_OUTPUT"
 
       - uses: ./.github/actions/create-k3s-cluster
 
@@ -623,15 +624,28 @@ jobs:
           HOLD_MIN: "${{ inputs.keep-cluster-alive-minutes }}"
           RG: "${{ steps.names.outputs.rg }}"
           CLUSTER: "${{ steps.names.outputs.cluster }}"
+          JOB_START_EPOCH: "${{ steps.names.outputs.job_start_epoch }}"
+          JOB_BUDGET_MIN: "${{ (inputs.keep-cluster-alive-minutes > 0 || inputs.upgrade-to != '') && 360 || 120 }}"
         # Sleep so the runner (and its k3s cluster + Arc connection) remain
-        # reachable for interactive debugging before teardown. Cap at 300min
-        # to leave headroom under the 360min job timeout. Cancel the run to
-        # exit early; teardown still runs via `if: always()`.
+        # reachable for interactive debugging before teardown. The hold is
+        # capped by what is left of the job budget, not by a fixed ceiling: a
+        # hold that outlasts the budget is cancelled mid-sleep, which skips
+        # teardown and leaks the resource group. Cancel the run to exit early,
+        # since teardown still runs via `if: always()`.
         run: |
           set -euo pipefail
-          MAX=300
+          RESERVE_MIN=20
+          ELAPSED_MIN=$(( ( $(date +%s) - JOB_START_EPOCH ) / 60 ))
+          REMAINING_MIN=$(( JOB_BUDGET_MIN - ELAPSED_MIN - RESERVE_MIN ))
           MINS=$HOLD_MIN
-          if (( MINS > MAX )); then MINS=$MAX; fi
+          if (( MINS > REMAINING_MIN )); then
+            echo "::warning::Requested ${MINS}m hold exceeds the ${REMAINING_MIN}m left in the job budget after ${ELAPSED_MIN}m elapsed. Holding ${REMAINING_MIN}m so teardown still runs."
+            MINS=$REMAINING_MIN
+          fi
+          if (( MINS <= 0 )); then
+            echo "::warning::No budget left to hold after ${ELAPSED_MIN}m elapsed. Proceeding to teardown."
+            exit 0
+          fi
           echo "Holding for $MINS minute(s) before teardown. Arc cluster: $CLUSTER in RG: $RG."
           echo "- Keep-alive: holding cluster \`$CLUSTER\` for ${MINS}m before teardown" >> "$GITHUB_STEP_SUMMARY"
           for ((i=1; i<=MINS; i++)); do
