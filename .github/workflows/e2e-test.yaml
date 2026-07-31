@@ -52,7 +52,7 @@ on:
         type: boolean
         default: false
       keep-cluster-alive-minutes:
-        description: Minutes to keep the runner (and k3s cluster) alive after tests, before teardown. 0 = skip. Capped at 300.
+        description: Minutes to keep the runner (and k3s cluster) alive after tests, before teardown. 0 = skip. Clamped to what is left of the job budget so teardown still runs.
         type: number
         default: 0
       upgrade-to:
