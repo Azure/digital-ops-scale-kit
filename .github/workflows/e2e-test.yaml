@@ -375,6 +375,7 @@ jobs:
           echo "Snapshot: $count pre-existing resource(s) in RG $RG will be preserved."
 
       - name: Create resource group (ephemeral mode)
+        id: create-rg
         if: env.PERSISTENT_RG != 'true'
         shell: bash
         env:
@@ -660,6 +661,7 @@ jobs:
           RG: "${{ steps.names.outputs.rg }}"
           EXPECTED_RUN_ID: "${{ github.run_id }}"
           EXPECTED_RUN_ATTEMPT: "${{ github.run_attempt }}"
+          RG_CREATED: "${{ steps.create-rg.outcome }}"
         # Layered defense against ever deleting a non-ephemeral RG:
         #   1. Name must match `rg-e2e-<run_id>-<attempt>-*`, the exact
         #      shape `Compute names` emits in ephemeral mode.
@@ -678,7 +680,21 @@ jobs:
             echo "::error::Refusing to delete RG '$RG': name does not match this run's ephemeral pattern '${EXPECTED_PREFIX}*'."
             exit 1
           fi
-          EXISTS=$(az group exists --name "$RG")
+          # `az group exists` can fail rather than answer, for example when the
+          # identity lacks subscription-scope read. That is distinct from the
+          # RG being absent, so handle the query failure on its own terms
+          # instead of letting `set -e` end the step.
+          EXISTS=""
+          if ! EXISTS=$(az group exists --name "$RG" 2>&1); then
+            if [[ "$RG_CREATED" != "success" ]]; then
+              echo "Could not query RG '$RG' and creation did not succeed, so there is nothing this run made to remove."
+              echo "- Ephemeral RG never created: \`$RG\`" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "::error::RG '$RG' was created but cannot be queried, so it may survive this run. Delete it by hand."
+            echo "- Ephemeral RG may have leaked, delete by hand: \`$RG\`" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
           if [[ "$EXISTS" != "true" ]]; then
             echo "RG '$RG' does not exist; teardown is a no-op."
             echo "- Ephemeral RG already absent: \`$RG\`" >> "$GITHUB_STEP_SUMMARY"
