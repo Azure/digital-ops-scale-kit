@@ -79,7 +79,9 @@ parameters:
 
 Manifest-level attachment sits below site parameters in the [merge order](parameter-resolution.md#merge-order), so a site overrides the declared default. It also applies to every step in the pipeline, and each step receives only the parameters its own template declares. `secretValues` is `@secure()` and declared only by `sync-secrets.bicep`, so values reach the template that writes them to Key Vault and no other deployment.
 
-A site that declares no secrets gets an SPC with no `objects` field, which is the correct shape for an instance whose secrets are managed elsewhere.
+A site that declares no secrets keeps whatever object list the cluster already carries. Enablement reads the current value from the class the instance is bound to and writes it back, so running the platform install on a cluster whose secrets came from elsewhere leaves them in place. On a first install there is nothing to read, and the class is written without an `objects` field.
+
+The read requires the bound class to exist. When an instance points at a class that was deleted out of band, the read fails and the deployment stops rather than writing over the reference. Set `preserveExistingSpcObjects: false` in the site's `parameters` to skip the read and let enablement create the class fresh. It belongs on the site rather than in a parameter file, because the chaining file that supplies the class reference attaches at step level and outranks a site value.
 
 ## Enabling secret sync
 

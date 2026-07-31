@@ -124,16 +124,13 @@ resource spc 'Microsoft.SecretSyncController/azureKeyVaultSecretProviderClasses@
     type: 'CustomLocation'
   }
   tags: tags
-  // An empty array omits the property rather than emitting an `array:` document
-  // with no entries, matching the enablement writer so the two agree on every
-  // shape of the declaration.
   properties: union(
     {
       clientId: managedIdentityClientId
       keyvaultName: keyVaultName
       tenantId: tenant().tenantId
     },
-    empty(secrets) ? {} : { objects: spcObjectsYaml }
+    empty(spcObjectsYaml) ? {} : { objects: spcObjectsYaml }
   )
 }
 

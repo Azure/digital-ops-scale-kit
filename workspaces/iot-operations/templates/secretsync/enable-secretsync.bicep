@@ -111,8 +111,14 @@ param spcName string = ''
 @description('Skip Key Vault role assignments (use when roles are already configured).')
 param skipRoleAssignments bool = false
 
-@description('Key Vault secrets this site synchronizes, the same array the sync step consumes. Enablement PUTs the Secret Provider Class, and a full PUT replaces `objects`, so both writers derive that field from this one declaration. Leave empty only when no secrets are declared for the site.')
+@description('Key Vault secrets this site synchronizes, the same array the sync step consumes. Both writers derive the Secret Provider Class object list from this one declaration. Leave empty to keep whatever the cluster already has.')
 param secrets array = []
+
+@description('Resource ID of the Secret Provider Class the instance is already bound to, chained from the resolve step. Empty on a first install.')
+param existingSpcResourceId string = ''
+
+@description('Read the existing Secret Provider Class before writing it. Set false on a site whose instance points at a class that no longer exists, which makes the read fail. Belongs in the site\'s `parameters`, since the chaining file that supplies `existingSpcResourceId` outranks a site value.')
+param preserveExistingSpcObjects bool = true
 
 @description('Tags to apply to created resources.')
 param tags object = {}
@@ -219,7 +225,33 @@ resource federatedCredential 'Microsoft.ManagedIdentity/userAssignedIdentities/f
 
 // =====================================================================================
 // Secret Provider Class (SPC)
+//
+// `objects` has two writers, this template and sync-secrets.bicep, and an ARM PUT
+// replaces whatever it omits. Enablement does not own the field, it avoids destroying
+// it: declared secrets win, otherwise keep what the cluster has, otherwise omit.
+//
+// The read is a module because a module carrying `condition: false` is never deployed,
+// while an ARM `if()` around a `reference()` evaluates both branches.
 // =====================================================================================
+
+var declaredObjects = renderSpcObjects(secrets)
+var preserveExistingObjects = preserveExistingSpcObjects && empty(declaredObjects) && !empty(existingSpcResourceId)
+
+// Segment 2 is the subscription and segment 4 the resource group, so the class is read
+// from where it lives. Guarded like kvRgName above, so the splits skip an empty id.
+var existingSpcSubscriptionId = preserveExistingObjects ? split(existingSpcResourceId, '/')[2] : subscription().subscriptionId
+var existingSpcRgName = preserveExistingObjects ? split(existingSpcResourceId, '/')[4] : resourceGroup().name
+var existingSpcName = preserveExistingObjects ? last(split(existingSpcResourceId, '/')) : ''
+
+module readExistingObjects './modules/read-spc-objects.bicep' = if (preserveExistingObjects) {
+  name: 'read-spc-objects-${uniqueString(aioInstanceName)}'
+  scope: resourceGroup(existingSpcSubscriptionId, existingSpcRgName)
+  params: {
+    spcName: existingSpcName
+  }
+}
+
+var spcObjects = preserveExistingObjects ? readExistingObjects!.outputs.objects : declaredObjects
 
 resource spc 'Microsoft.SecretSyncController/azureKeyVaultSecretProviderClasses@2024-08-21-preview' = {
   name: resolvedSpcName
@@ -229,15 +261,13 @@ resource spc 'Microsoft.SecretSyncController/azureKeyVaultSecretProviderClasses@
     type: 'CustomLocation'
   }
   tags: tags
-  // The property is omitted rather than nulled when no secrets are declared, which
-  // matches the shape this template PUT before it derived the field.
   properties: union(
     {
       clientId: managedIdentity.properties.clientId
       keyvaultName: resolvedKvName
       tenantId: tenant().tenantId
     },
-    empty(secrets) ? {} : { objects: renderSpcObjects(secrets) }
+    empty(spcObjects) ? {} : { objects: spcObjects }
   )
   dependsOn: [
     federatedCredential

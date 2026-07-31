@@ -8,7 +8,9 @@
 // would take turns clearing each other's value.
 // =====================================================================================
 
-@description('Renders the Secret Provider Class `objects` YAML for a set of Key Vault secrets. Each entry contributes one `objectName` of type `secret`.')
+@description('Renders the Secret Provider Class `objects` YAML for a set of Key Vault secrets. Each entry contributes one `objectName` of type `secret`. An empty set renders an empty string, so a caller can treat the result as nothing to write.')
 @export()
 func spcObjectsYaml(secrets array) string =>
-  'array:\n${join(map(secrets, s => '  - |\n    objectName: ${s.secretName}\n    objectType: secret'), '\n')}\n'
+  empty(secrets)
+    ? ''
+    : 'array:\n${join(map(secrets, s => '  - |\n    objectName: ${s.secretName}\n    objectType: secret'), '\n')}\n'
