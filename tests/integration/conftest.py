@@ -128,11 +128,21 @@ _pre_existing_overlays: set[str] = set()
 _generated_overlays = False
 
 
-def pytest_collection_modifyitems(config, items):
-    """Generate overlays from SITE_OVERRIDES and skip if no config available."""
+def pytest_collection_finish(session):
+    """Prepare site config and gate the integration suite.
+
+    Runs after marker deselection, so `session.items` holds exactly what this
+    session will execute. The unit lane collects this file and then deselects
+    every integration item, and a session that reaches Azure has to be told
+    apart from one that never will. Doing this in `pytest_collection_modifyitems`
+    would judge the unit lane, since deselection has not happened yet.
+    """
     global _generated_overlays, _pre_existing_overlays
 
-    # Snapshot existing overlay files before generation
+    items = [item for item in session.items if "integration" in item.keywords]
+    if not items:
+        return
+
     sites_local = WORKSPACE_PATH / "sites.local"
     if sites_local.is_dir():
         _pre_existing_overlays = {f.name for f in sites_local.glob("*.yaml")}
@@ -165,8 +175,7 @@ def pytest_collection_modifyitems(config, items):
             "SITE_OVERRIDES, or SITEOPS_EXTRA_SITES_DIRS with site files"
         )
         for item in items:
-            if "integration" in item.keywords:
-                item.add_marker(skip)
+            item.add_marker(skip)
 
     if _is_upgrade_phase():
         skip_upgrade = pytest.mark.skip(
@@ -176,8 +185,6 @@ def pytest_collection_modifyitems(config, items):
         seen_classes: set[str] = set()
         kept = 0
         for item in items:
-            if "integration" not in item.keywords:
-                continue
             cls = getattr(item, "cls", None)
             cls_name = cls.__name__ if cls is not None else None
             if cls_name is not None:
