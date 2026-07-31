@@ -435,7 +435,7 @@ jobs:
           az extension add --name connectedk8s --upgrade --yes --only-show-errors
           COUNT=$(az connectedk8s list -g "$RG" --query "length([?name=='$CLUSTER'])" -o tsv)
           if [[ "$COUNT" != "0" ]]; then
-            echo "::error::Arc cluster '$CLUSTER' already exists in RG '$RG'. This workflow registers a fresh k3s under this name; re-using an existing registration is not supported. Delete the Arc resource (\`az connectedk8s delete -n $CLUSTER -g $RG\`) or pick an unused cluster-name."
+            echo "::error::Arc cluster '$CLUSTER' already exists in RG '$RG'. This workflow registers a fresh k3s under this name. Re-using an existing registration is not supported. Delete the Arc resource (\`az connectedk8s delete -n $CLUSTER -g $RG\`) or pick an unused cluster-name."
             exit 1
           fi
 
@@ -481,7 +481,7 @@ jobs:
           if [[ -n "$AZURE_CLIENT_OID" ]]; then
             SP_OID="$AZURE_CLIENT_OID"
           else
-            echo "AZURE_CLIENT_OID not set; falling back to Graph lookup."
+            echo "AZURE_CLIENT_OID not set, falling back to Graph lookup."
             SP_OID=$(az ad sp show --id "$AZURE_CLIENT_ID" --query id -o tsv 2>/dev/null || true)
             if [[ -z "$SP_OID" ]]; then
               echo "::error::Could not resolve SP object ID. Set AZURE_CLIENT_OID secret to the SP's object ID, or grant the SP Directory.Read.All on Microsoft Graph."
@@ -696,7 +696,7 @@ jobs:
             exit 1
           fi
           if [[ "$EXISTS" != "true" ]]; then
-            echo "RG '$RG' does not exist; teardown is a no-op."
+            echo "RG '$RG' does not exist, so teardown is a no-op."
             echo "- Ephemeral RG already absent: \`$RG\`" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -714,9 +714,9 @@ jobs:
             echo "  actual:   managedBy=$MANAGED ephemeral=$EPHEMERAL run_id=$TAG_RUN_ID run_attempt=$TAG_RUN_ATTEMPT"
             exit 1
           fi
-          echo "Guards passed; deleting ephemeral RG '$RG'."
+          echo "Guards passed, deleting ephemeral RG '$RG'."
           if ! az group delete --name "$RG" --yes --no-wait; then
-            echo "::warning::Ephemeral RG delete failed; RG $RG may linger."
+            echo "::warning::Ephemeral RG delete failed, so RG $RG may linger."
             echo "- Ephemeral RG delete failed: \`$RG\`" >> "$GITHUB_STEP_SUMMARY"
           fi
 
@@ -771,7 +771,7 @@ jobs:
               echo "[connectedk8s delete] $cluster (ARM DELETE accepted)"
               return 0
             fi
-            echo "::warning::[connectedk8s delete] $cluster ARM DELETE failed; will retry via parallel delete pass"
+            echo "::warning::[connectedk8s delete] $cluster ARM DELETE failed, will retry via parallel delete pass"
             printf '%s\n' "$out" | sed "s/^/[connectedk8s delete $cluster] /"
             return 1
           }
@@ -789,7 +789,7 @@ jobs:
             LIST_ERR="$RUNNER_TEMP/e2e-teardown/list-err-$i.log"
             POST_IDS=$(az resource list -g "$RG" --query "[].id" -o tsv 2>"$LIST_ERR")
             if [[ $? -ne 0 ]]; then
-              echo "::warning::Teardown pass $i: az resource list failed; retrying."
+              echo "::warning::Teardown pass $i: az resource list failed, retrying."
               echo "::group::az resource list stderr (pass $i)"
               redact "$LIST_ERR"
               echo "::endgroup::"
@@ -836,14 +836,14 @@ jobs:
             sleep 30
           done
           if [[ $LIST_OK -eq 0 ]]; then
-            echo "::error::Persistent-mode teardown could not enumerate RG $RG; delta cleanup did not run. Inspect the RG manually."
+            echo "::warning::Persistent-mode teardown could not enumerate RG $RG. Delta cleanup did not run, so inspect the RG manually."
             echo "- Persistent-mode teardown unable to enumerate RG \`$RG\` (az resource list failed)" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           FINAL_ERR="$RUNNER_TEMP/e2e-teardown/list-err-final.log"
           POST_IDS=$(az resource list -g "$RG" --query "[].id" -o tsv 2>"$FINAL_ERR")
           if [[ $? -ne 0 ]]; then
-            echo "::warning::Final residual check: az resource list failed; residual state unknown."
+            echo "::warning::Final residual check: az resource list failed, so residual state is unknown."
             echo "::group::az resource list stderr (final)"
             redact "$FINAL_ERR"
             echo "::endgroup::"
