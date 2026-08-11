@@ -54,6 +54,15 @@ foreach ($file in $bicepFiles) {
     Remove-Item $outFile -Force -ErrorAction SilentlyContinue
 
     $diagnostics = @($output | Where-Object { "$_".Trim() })
+
+    # The CLI emits an upgrade notice on stderr when a newer Bicep exists. It is
+    # not a compile diagnostic, and it carries the word "warning", so leaving it
+    # in fails every file the moment a new Bicep ships. Compile diagnostics carry
+    # a source location, which the notice does not.
+    $diagnostics = @($diagnostics | Where-Object {
+        "$_" -notmatch 'A new Bicep release is available'
+    })
+
     $warnings = @($diagnostics | Where-Object { $_ -match '\bWarning\b' })
 
     if ($LASTEXITCODE -ne 0) {

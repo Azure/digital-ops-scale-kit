@@ -166,6 +166,13 @@ properties:
   # `site.properties` and `site.labels`, never `site.parameters`.
   aioRelease: "2607"
 
+  # Config-driven resource sets. Each key names a file in the matching
+  # `parameters/` subdirectory, so `dataflows: opc-to-fabric` loads
+  # `parameters/dataflows/opc-to-fabric.yaml`. `none` deploys nothing.
+  # See docs/resource-catalog.md.
+  resourceSets:
+    dataflows: "none"
+
   # Capability toggles, kept in one place. Some gate a whole step via
   # `when:` (enableSecretSync, enableGlobalSite, enableEdgeSite). Others
   # pass through to a Bicep `param` (enableCertManager,
@@ -189,7 +196,7 @@ properties:
 Use properties for:
 
 - Capability toggles, gated via `when:` or passed through to a template (`deployOptions.*`)
-- Path-selection keys the engine reads (`aioRelease` picks a `parameters/aio-releases/<release>.yaml` file)
+- Path-selection keys the engine reads (`aioRelease` picks a `parameters/aio-releases/<release>.yaml` file, and each key under `resourceSets` picks a file in the matching `parameters/` subdirectory)
 - Free-form data structures consumed via `{{ site.properties.X }}`
 
 > **Template values go in `parameters:`. Capability toggles are the one

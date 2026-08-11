@@ -13,6 +13,7 @@ Per-deployment-target YAML files (`kind: Site` and `kind: SiteTemplate`).
 - **Inheritance**: a site declares `inherits: base-site.yaml` (or any `SiteTemplate`). Single parent. Child wins on conflict. Nested objects merge recursively. See `docs/site-configuration.md`.
 - **Overlays**: a same-name file under `sites.local/` (or any extras dir passed via `--extra-sites-dir`) merges into the base site at load time. Overlays cannot introduce `inherits:`.
 - **Scope**: sites with no `resourceGroup:` are subscription-scoped and must carry `labels.scope: subscription` so manifests can target them with `selector: scope=subscription`. The `test_subscription_scoped_sites_carry_scope_label` workspace test enforces this.
+- **Resource sets**: `properties.resourceSets.<family>` names which declared AIO resources a site deploys, resolving to `parameters/<family>/<set>.yaml`. Every site inherits `none`, which deploys nothing. See `docs/resource-catalog.md`.
 
 ## Authoring tips
 

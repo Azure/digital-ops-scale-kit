@@ -329,6 +329,28 @@ class TestResolveSites:
         assert len(sites) == 2
         assert {s.name for s in sites} == {"dev-eastus", "dev-westus"}
 
+    def test_repeated_site_name_resolves_once(self, multi_site_workspace):
+        """A site named twice is deployed once.
+
+        `load_site` caches and returns the same object per site, so a repeated
+        entry would otherwise deploy concurrently against one ARM deployment
+        name, and the result map keyed by site name would keep only the last.
+        """
+        orchestrator = Orchestrator(multi_site_workspace)
+        manifest = Manifest(
+            name="test",
+            description="",
+            sites=["dev-eastus", "dev-westus", "dev-eastus"],
+            steps=[],
+        )
+
+        sites = orchestrator.resolve_sites(manifest)
+
+        assert len(sites) == 2, (
+            f"Expected the duplicate to be dropped, got {[s.name for s in sites]}"
+        )
+        assert {s.name for s in sites} == {"dev-eastus", "dev-westus"}
+
     def test_site_selector(self, multi_site_workspace):
         orchestrator = Orchestrator(multi_site_workspace)
         manifest = Manifest(

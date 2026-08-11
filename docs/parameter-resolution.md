@@ -27,7 +27,7 @@ Attaching a declaration at step level makes it unoverridable, because step level
 
 Manifest-level attachment is safe to use broadly because parameters are filtered per template: a step receives only the keys its own template declares. A `@secure()` value therefore reaches only the template that declares it.
 
-When a manifest pulls in others via `include:` (see [manifest-includes.md](manifest-includes.md)), each included manifest's manifest-level `parameters:` are appended after the parent's. Duplicate paths (normalized POSIX strings) are dropped on a first-wins basis, so the parent always wins on conflict.
+When a manifest pulls in others via `include:` (see [manifest-includes.md](manifest-includes.md)), each included manifest's manifest-level `parameters:` are appended after the parent's. Duplicate paths (normalized POSIX strings) are dropped on a first-wins basis, so the same file declared by both is loaded once, in the parent's position. That is not the same as the parent winning on a *key*: when the parent and an included manifest attach different files that both set one key, the files load in list order and the included manifest's value survives. A parent that needs to override an included default sets it on the site instead.
 
 ## Template variables
 
@@ -65,8 +65,11 @@ The directory groups files by the role they play in the parameter merge:
 | `parameters/inputs/` | Consumer fan-in (a step pulls outputs from upstream producers) | `inputs/aio-instance.yaml` pulls from `schema-registry`, `adr-ns`, `aio-enablement` |
 | `parameters/outputs/` | Producer fan-out (a single step's outputs feed multiple downstream consumers) | `outputs/aio-instance.yaml` feeds `schema-registry-role` |
 | `parameters/aio-releases/` | Per-release version pin files (selected via `site.properties.aioRelease`) | `aio-releases/2607.yaml` |
+| `parameters/dataflows/` | Dataflow declaration sets (selected via `site.properties.resourceSets.dataflows`) | `dataflows/none.yaml` |
 
 A step that has both fan-in inputs and fan-out outputs gets two files: one under `inputs/`, one under `outputs/`, named after the step (e.g. `inputs/aio-instance.yaml` and `outputs/aio-instance.yaml`).
+
+A file may instead be named for a class of steps when they all read the same upstream values. `inputs/catalog.yaml` is the fan-in every resource catalog family step reads, so one file serves each family a workspace adds. See [resource-catalog.md](resource-catalog.md).
 
 When one chaining file would be shared by multiple consumer steps **within the same manifest**, prefer one file per consumer step named `<manifest>-<step>.yaml` (e.g. `inputs/aio-upgrade-resolve-extensions.yaml`, `inputs/aio-upgrade-update-extensions.yaml`). A single shared file ends up with `{{ steps.X.outputs.Y }}` references that look forward from the perspective of the earliest consumer, which structural validation correctly rejects.
 

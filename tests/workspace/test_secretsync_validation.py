@@ -90,11 +90,13 @@ class TestSyncSecretsInputContract:
         inputs = _collect_sync_secrets_inputs(workspace)
         failures: list[str] = []
         sync_secrets_files: list[Path] = []
+        entry_count = 0
         for path in inputs:
             entries = _load_secrets_array(path)
             if entries is None:
                 continue
             sync_secrets_files.append(path)
+            entry_count += len(entries)
             failures.extend(self._check_no_empty_overrides(path, entries))
             failures.extend(self._check_unique_secret_names(path, entries))
             failures.extend(self._check_unique_pairs(path, entries))
@@ -104,6 +106,15 @@ class TestSyncSecretsInputContract:
             "Expected at least one workspace YAML with a `secrets:` array "
             "carrying sync-secrets entries. Found none. If the sync-secrets "
             "sample moved or was removed, update the discovery filter."
+        )
+        # Guard on entries, not files. Every check above iterates entries, so a
+        # file declaring an empty array satisfies a file-level guard while
+        # leaving all four checks examining nothing.
+        assert entry_count > 0, (
+            f"Discovered {len(sync_secrets_files)} sync-secrets file(s) but "
+            f"zero entries across them, so every check in this test would pass "
+            f"without examining anything. "
+            f"Files: {[p.name for p in sync_secrets_files]}"
         )
         assert not failures, "\n\n".join(failures)
 

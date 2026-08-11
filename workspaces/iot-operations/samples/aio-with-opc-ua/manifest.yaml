@@ -25,6 +25,10 @@ selector: "environment=dev"
 # Max concurrent sites. Mirrors the sample manifest. 0 = unlimited, 1 = serial.
 parallel: 3
 
+parameters:
+  - parameters/common/common.yaml
+  - "parameters/aio-releases/{{ site.properties.aioRelease }}.yaml"
+
 steps:
   - include: ../../manifests/_aio-fundamentals.yaml
   - include: ../../manifests/_resolve-aio.yaml

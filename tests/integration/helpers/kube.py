@@ -246,6 +246,199 @@ def get_custom_resource(
         raise
 
 
+def wait_for_cr(
+    resource_type: str,
+    name: str,
+    namespace: str,
+    *,
+    timeout: int = 300,
+    interval: int = 5,
+) -> dict[str, Any]:
+    """Poll for a custom resource to appear and return it.
+
+    ARM accepting a PUT and the custom location projecting the resource to the
+    cluster are separate events, so a read issued right after a deploy races
+    the projection. Every cluster read of a just-deployed resource goes through
+    here, otherwise the test is flaky in the failing direction.
+
+    Args:
+        resource_type: kubectl resource shorthand, for example
+            `dataflows.connectivity.iotoperations.azure.com`.
+        name: resource name.
+        namespace: resource namespace.
+        timeout: total seconds to wait for the projection, sized for the first
+            projection on a cold cluster where the operator may still be
+            starting rather than for a warm reread.
+        interval: seconds between attempts.
+
+    Returns:
+        The parsed resource.
+
+    Raises:
+        KubectlError: The resource did not appear within the budget. The message
+            names what was awaited and for how long, and carries the last
+            kubectl diagnostic, since a bare timeout does not say whether the
+            resource is late or the read is failing for another reason.
+    """
+    deadline = time.monotonic() + timeout
+    last: KubectlError | None = None
+    while True:
+        try:
+            return kubectl_json(["get", resource_type, name, "-n", namespace])
+        except KubectlError as e:
+            last = e
+            if time.monotonic() >= deadline:
+                raise KubectlError(
+                    f"'{name}' ({resource_type}) did not appear in namespace "
+                    f"'{namespace}' within {timeout}s. ARM accepted the write, so "
+                    f"either the custom location has not projected it or the "
+                    f"resource was never created. Last kubectl error: {last}",
+                    last.returncode,
+                    last.stderr,
+                ) from last
+            time.sleep(interval)
+
+
+def cr_identity(resource_type: str, name: str, namespace: str) -> tuple[str, str]:
+    """Return the `(uid, creationTimestamp)` identifying one projected resource.
+
+    Kubernetes assigns both when an object is created and keeps them for its
+    lifetime, so an unchanged pair across a redeploy is what separates a
+    reconcile from a delete and recreate. A resource id cannot show this,
+    because it is derived from the name and is identical either way.
+
+    Args:
+        resource_type: kubectl resource shorthand, for example
+            `dataflows.connectivity.iotoperations.azure.com`.
+        name: resource name.
+        namespace: resource namespace.
+
+    Returns:
+        The object's `uid` and `creationTimestamp`.
+
+    Raises:
+        AssertionError: If either field is absent, since a comparison of two
+            empty values would pass while proving nothing.
+    """
+    metadata = wait_for_cr(resource_type, name, namespace).get("metadata", {})
+    uid = metadata.get("uid")
+    created = metadata.get("creationTimestamp")
+    assert uid and created, (
+        f"'{name}' has no metadata.uid or metadata.creationTimestamp, so a "
+        f"recreate could not be distinguished from a reconcile."
+    )
+    return uid, created
+
+
+# The only value that means every instance of a resource is working. The AIO
+# controller aggregates per-instance reports into `Unavailable`, `Degraded`,
+# `Unknown`, or `Available`, in that severity order.
+CR_HEALTH_AVAILABLE = "Available"
+
+# Health is written after a resource is created, not with it. The data plane
+# flushes reports to a ConfigMap on roughly a 60 second cycle and the controller
+# polls that ConfigMap on roughly another, so a resource takes about two minutes
+# from its own creation to report. Each deployment creates its own resources, so
+# every wait budgets for that from scratch. The budget only costs wall clock
+# when a resource is genuinely unhealthy, since a healthy one returns as soon as
+# it reports.
+_HEALTH_TIMEOUT = 300
+
+# One read inside the poll loop. Short enough that several attempts fit in the
+# budget above, and clamped further as the deadline approaches.
+_HEALTH_READ_TIMEOUT = 30
+
+
+def cr_health(
+    resource_type: str, name: str, namespace: str, *, timeout: int = _HEALTH_READ_TIMEOUT
+) -> dict[str, Any]:
+    """Return the health block AIO reports for one projected resource.
+
+    Empty until the controller has written it at least once, which is normal
+    for the first minutes after a deploy rather than a failure.
+
+    The read is short because the caller owns the waiting. A long read inside a
+    poll loop would spend the loop's whole budget on one attempt.
+    """
+    cr = wait_for_cr(resource_type, name, namespace, timeout=timeout)
+    return (cr.get("status") or {}).get("healthState") or {}
+
+
+def wait_for_cr_health(
+    resource_type: str,
+    name: str,
+    namespace: str,
+    *,
+    expected: str = CR_HEALTH_AVAILABLE,
+    timeout: int = _HEALTH_TIMEOUT,
+    interval: int = 15,
+) -> dict[str, Any]:
+    """Wait until AIO reports a resource healthy, and return the health block.
+
+    This is what separates a resource ARM accepted from one that runs. A
+    projected `spec` matches the declaration whether or not the dataflow can
+    reach its endpoints, so health is the only signal that proves function.
+
+    Health lags a successful deploy. The data plane flushes reports to a
+    ConfigMap on roughly a 60 second cycle and the controller polls that
+    ConfigMap on roughly another, so the value can take about two minutes to
+    appear. An absent block means "not reported yet" and is polled through
+    rather than failed on.
+
+    Args:
+        resource_type: kubectl resource shorthand, for example
+            `dataflows.connectivity.iotoperations.azure.com`.
+        name: resource name.
+        namespace: resource namespace.
+        expected: the status to wait for.
+        timeout: total seconds to wait, sized for a resource reporting for the
+            first time after its own creation.
+        interval: seconds between polls.
+
+    Returns:
+        The `status.healthState` block once it reports `expected`.
+
+    Raises:
+        AssertionError: The status did not reach `expected` within the budget.
+            The message carries the last status with the reason and message AIO
+            supplied, which is what names the underlying fault.
+    """
+    deadline = time.monotonic() + timeout
+    observed: str | None = None
+    health: dict[str, Any] = {}
+    while True:
+        # Both the read and the sleep are clamped to what is left, so the
+        # budget is a wall-clock bound. Without that, a read starting just
+        # before the deadline runs to its own timeout past it.
+        remaining = deadline - time.monotonic()
+        health = cr_health(
+            resource_type,
+            name,
+            namespace,
+            timeout=max(1, int(min(_HEALTH_READ_TIMEOUT, max(remaining, 1)))),
+        )
+        observed = health.get("status")
+        if isinstance(observed, str) and observed.casefold() == expected.casefold():
+            return health
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(interval, remaining))
+
+    if observed is None:
+        raise AssertionError(
+            f"'{name}' never reported a health status within {timeout}s. AIO "
+            f"writes `status.healthState.status` once the data plane has "
+            f"reported, so the resource was projected but no instance of it "
+            f"ever reported running."
+        )
+    raise AssertionError(
+        f"'{name}' reports health '{observed}' after {timeout}s, expected "
+        f"'{expected}'. Reason: {health.get('reasonCode') or 'none given'}. "
+        f"Message: {health.get('message') or 'none given'}."
+    )
+
+
 def wait_for_cr_status(
     api_version: str,
     kind: str,

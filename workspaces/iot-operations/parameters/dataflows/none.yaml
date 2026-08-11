@@ -1,0 +1,19 @@
+# The empty dataflow set. Every site inherits `resourceSets.dataflows: none` from
+# base-site.yaml, so deploying manifests/aio-resources.yaml against an unconfigured site
+# creates nothing rather than failing to resolve its declaration file.
+#
+# Point a site at a different set to deploy dataflows:
+#
+#   # sites/<site>.yaml
+#   properties:
+#     resourceSets:
+#       dataflows: my-set
+#
+# and add parameters/dataflows/my-set.yaml declaring the resources. The key name
+# matches this directory name, so `resourceSets.dataflows` always names a file here.
+# See docs/dataflows.md for the declaration keys, and docs/resource-catalog.md for the
+# selection mechanism.
+
+dataflowEndpoints: []
+dataflowProfiles: []
+dataflows: []

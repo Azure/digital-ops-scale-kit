@@ -10,8 +10,17 @@ Covers:
 
 import json
 import logging
+from unittest.mock import patch
 
-from siteops.models import Manifest, Site
+import pytest
+
+from siteops.models import (
+    DeploymentStep,
+    Manifest,
+    MultipleSubscriptionSitesError,
+    ParameterSelectionError,
+    Site,
+)
 from siteops.orchestrator import Orchestrator
 
 
@@ -155,6 +164,98 @@ class TestStepOutputChaining:
 
         # Missing path should leave the template unresolved
         assert result == value
+
+
+class TestConditionEvaluationOnAMissingProperty:
+    """How a gate behaves when the site does not carry the property at all.
+
+    These pin current behavior rather than assert what it ought to be. The
+    operators are asymmetric: `==` and the truthy form fail closed (the step is
+    skipped), while `!=` fails open (the step runs). A gate written as
+    `!= 'none'` therefore runs on a site that declares nothing, which is the
+    opposite of what the author usually means.
+
+    Changing this would silently alter the meaning of every existing `!=` gate,
+    including any in customer manifests, so it is documented here instead. The
+    concrete harm in this workspace is closed elsewhere: a catalog family whose
+    gate opens for a site with no selection then fails on the unresolved
+    declaration path rather than deploying an empty set.
+    """
+
+    def _site(self, **properties):
+        return Site(
+            name="test",
+            subscription="sub",
+            resource_group="rg",
+            location="eastus",
+            properties=properties,
+        )
+
+    def test_equals_fails_closed(self, complete_workspace):
+        orchestrator = Orchestrator(complete_workspace)
+        site = self._site(unrelated="value")
+
+        assert (
+            orchestrator._evaluate_condition(
+                "{{ site.properties.missing == 'yes' }}", site
+            )
+            is False
+        )
+
+    def test_truthy_fails_closed(self, complete_workspace):
+        orchestrator = Orchestrator(complete_workspace)
+        site = self._site(unrelated="value")
+
+        assert (
+            orchestrator._evaluate_condition("{{ site.properties.missing }}", site)
+            is False
+        )
+
+    def test_not_equals_fails_open(self, complete_workspace):
+        """A missing property compares as empty string, which differs from any
+        literal, so the step runs."""
+        orchestrator = Orchestrator(complete_workspace)
+        site = self._site(unrelated="value")
+
+        assert (
+            orchestrator._evaluate_condition(
+                "{{ site.properties.missing != 'none' }}", site
+            )
+            is True
+        )
+
+    def test_not_equals_on_a_nested_missing_path_fails_open(self, complete_workspace):
+        """The catalog's gate shape: a nested selection key the site omits."""
+        orchestrator = Orchestrator(complete_workspace)
+        site = self._site(resourceSets={})
+
+        assert (
+            orchestrator._evaluate_condition(
+                "{{ site.properties.resourceSets.dataflows != 'none' }}", site
+            )
+            is True
+        )
+
+    def test_malformed_condition_fails_open(self, complete_workspace):
+        """An expression the evaluator cannot parse runs the step.
+
+        Manifest loading rejects a malformed `when:` on both a step and an
+        include, so this is the residual behavior for anything that reaches the
+        evaluator another way.
+        """
+        orchestrator = Orchestrator(complete_workspace)
+        site = self._site(gate="on")
+
+        assert orchestrator._evaluate_condition("{{ nonsense }}", site) is True
+
+    def test_unknown_field_root_fails_open(self, complete_workspace):
+        orchestrator = Orchestrator(complete_workspace)
+        site = self._site(gate="on")
+
+        assert (
+            orchestrator._evaluate_condition("{{ site.unknown.thing == 'x' }}", site)
+            is True
+        )
 
 
 class TestConditionEvaluation:
@@ -795,6 +896,132 @@ class TestPropertiesResolution:
 
         result = orchestrator._resolve_template_strings("{{ site.properties.nonexistent }}", site)
         assert result == "{{ site.properties.nonexistent }}"
+
+
+class TestUnresolvedParameterPath:
+    """A site-selected parameter file that names nothing fails the step.
+
+    `parameters/<family>/{{ site.properties.X }}.yaml` lets a site choose which
+    file to load. Two ways that goes wrong, and both would otherwise deploy the
+    step with those parameters absent and report success: the site does not
+    carry the property, or it carries a value naming a file that does not exist.
+    At fleet scale either is a silent partial deployment.
+    """
+
+    def _workspace_with_selected_path(self, tmp_path, site_properties: str):
+        workspace = tmp_path / "workspace"
+        for sub in ("parameters", "templates", "sites", "manifests"):
+            (workspace / sub).mkdir(parents=True)
+
+        (workspace / "sites" / "test-site.yaml").write_text(
+            "apiVersion: siteops/v1\nkind: Site\nname: test-site\n"
+            'subscription: "00000000-0000-0000-0000-000000000000"\n'
+            "resourceGroup: rg-test\nlocation: eastus\n" + site_properties
+        )
+        (workspace / "parameters" / "chosen.yaml").write_text('selected: "yes"\n')
+        (workspace / "templates" / "test.json").write_text(
+            json.dumps({"parameters": {"selected": {"type": "string"}}})
+        )
+        (workspace / "manifests" / "test.yaml").write_text(
+            "apiVersion: siteops/v1\nkind: Manifest\nname: test\n"
+            "sites: [test-site]\n"
+            'parameters: ["parameters/{{ site.properties.setName }}.yaml"]\n'
+            "steps:\n  - name: test-step\n    template: templates/test.json\n"
+        )
+
+        from siteops.executor import get_template_parameters
+
+        get_template_parameters.cache_clear()
+
+        orchestrator = Orchestrator(workspace)
+        manifest = Manifest.from_file(
+            workspace / "manifests" / "test.yaml", workspace_root=workspace
+        )
+        return orchestrator, manifest, orchestrator.load_site("test-site")
+
+    def test_resolved_path_loads_normally(self, tmp_path):
+        orchestrator, manifest, site = self._workspace_with_selected_path(
+            tmp_path, "properties:\n  setName: chosen\n"
+        )
+        result = orchestrator.resolve_parameters(manifest.steps[0], site, manifest, {})
+        assert result["selected"] == "yes"
+
+    def test_missing_property_raises_rather_than_skipping(self, tmp_path):
+        """The site has no `setName`, so the path cannot resolve."""
+        orchestrator, manifest, site = self._workspace_with_selected_path(
+            tmp_path, "properties:\n  unrelated: value\n"
+        )
+        with pytest.raises(ParameterSelectionError, match="does not carry the property"):
+            orchestrator.resolve_parameters(manifest.steps[0], site, manifest, {})
+
+    def test_a_selected_file_that_does_not_exist_raises(self, tmp_path):
+        """The site names a set that is not there, which a typo produces.
+
+        This resolves cleanly, so nothing is left unsubstituted to notice. The
+        file simply is not there, and skipping it deploys empty.
+        """
+        orchestrator, manifest, site = self._workspace_with_selected_path(
+            tmp_path, "properties:\n  setName: chosn\n"
+        )
+        with pytest.raises(ParameterSelectionError, match="does not exist"):
+            orchestrator.resolve_parameters(manifest.steps[0], site, manifest, {})
+
+    def test_the_typo_error_names_the_resolved_file(self, tmp_path):
+        orchestrator, manifest, site = self._workspace_with_selected_path(
+            tmp_path, "properties:\n  setName: chosn\n"
+        )
+        with pytest.raises(ParameterSelectionError) as excinfo:
+            orchestrator.resolve_parameters(manifest.steps[0], site, manifest, {})
+        assert "chosn" in str(excinfo.value)
+
+    def test_a_fixed_path_that_is_missing_still_only_warns(self, tmp_path, caplog):
+        """A path with no variable is the manifest author's own input.
+
+        Only site-selected paths fail closed, so an optional fixed file keeps
+        the behavior it had.
+        """
+        workspace = tmp_path / "workspace"
+        for sub in ("parameters", "templates", "sites", "manifests"):
+            (workspace / sub).mkdir(parents=True)
+
+        (workspace / "sites" / "test-site.yaml").write_text(
+            "apiVersion: siteops/v1\nkind: Site\nname: test-site\n"
+            'subscription: "00000000-0000-0000-0000-000000000000"\n'
+            "resourceGroup: rg-test\nlocation: eastus\n"
+        )
+        (workspace / "templates" / "test.json").write_text(
+            json.dumps({"parameters": {"selected": {"type": "string"}}})
+        )
+        (workspace / "manifests" / "test.yaml").write_text(
+            "apiVersion: siteops/v1\nkind: Manifest\nname: test\n"
+            "sites: [test-site]\n"
+            "parameters: [parameters/absent.yaml]\n"
+            "steps:\n  - name: test-step\n    template: templates/test.json\n"
+        )
+
+        from siteops.executor import get_template_parameters
+
+        get_template_parameters.cache_clear()
+
+        orchestrator = Orchestrator(workspace)
+        manifest = Manifest.from_file(
+            workspace / "manifests" / "test.yaml", workspace_root=workspace
+        )
+        site = orchestrator.load_site("test-site")
+
+        with caplog.at_level(logging.WARNING):
+            orchestrator.resolve_parameters(manifest.steps[0], site, manifest, {})
+        assert any("not found" in r.message for r in caplog.records)
+
+    def test_error_names_the_site_and_the_path(self, tmp_path):
+        orchestrator, manifest, site = self._workspace_with_selected_path(
+            tmp_path, "properties:\n  unrelated: value\n"
+        )
+        with pytest.raises(ParameterSelectionError) as excinfo:
+            orchestrator.resolve_parameters(manifest.steps[0], site, manifest, {})
+        message = str(excinfo.value)
+        assert "test-site" in message
+        assert "setName" in message
 
 
 class TestResolveParametersManifestLevel:
@@ -1834,6 +2061,89 @@ class TestCrossScopeOutputResolution:
 
         # Should remain unresolved
         assert result == value
+
+
+class TestMultipleSubscriptionLevelSites:
+    """Deploy rejects an ambiguous subscription-level site rather than picking one.
+
+    Subscription-scoped steps run once per subscription and their outputs feed
+    every resource-group site under it, so two candidates have no correct
+    resolution. `validate` reports this, but `deploy` does not run `validate`,
+    so silently taking the first would deploy the rest of the fleet against
+    outputs from a site the operator never named.
+    """
+
+    def _manifest_with_a_subscription_step(self):
+        return Manifest(
+            name="test",
+            description="",
+            sites=[],
+            steps=[
+                DeploymentStep(
+                    name="global",
+                    template="templates/global.bicep",
+                    scope="subscription",
+                ),
+                DeploymentStep(name="local", template="templates/local.bicep"),
+            ],
+        )
+
+    def _sites(self, count: int):
+        subscription_level = [
+            Site(name=f"global-{i}", subscription="sub-123", resource_group="", location="eastus")
+            for i in range(count)
+        ]
+        return subscription_level + [
+            Site(name="rg-site", subscription="sub-123", resource_group="rg-1", location="eastus")
+        ]
+
+    def test_two_candidates_raise(self, complete_workspace):
+        orchestrator = Orchestrator(complete_workspace)
+        manifest = self._manifest_with_a_subscription_step()
+
+        with pytest.raises(MultipleSubscriptionSitesError, match="multiple"):
+            orchestrator.deploy(
+                manifest_path=complete_workspace / "manifests" / "test.yaml",
+                manifest=manifest,
+                sites=self._sites(2),
+            )
+
+    def test_the_error_names_every_candidate(self, complete_workspace):
+        orchestrator = Orchestrator(complete_workspace)
+        manifest = self._manifest_with_a_subscription_step()
+
+        with pytest.raises(MultipleSubscriptionSitesError) as excinfo:
+            orchestrator.deploy(
+                manifest_path=complete_workspace / "manifests" / "test.yaml",
+                manifest=manifest,
+                sites=self._sites(2),
+            )
+        message = str(excinfo.value)
+        assert "global-0" in message
+        assert "global-1" in message
+
+    def test_one_candidate_is_accepted(self, complete_workspace):
+        """The guard rejects ambiguity, not subscription-scoped steps."""
+        orchestrator = Orchestrator(complete_workspace)
+        manifest = self._manifest_with_a_subscription_step()
+
+        with patch.object(orchestrator, "_deploy_site", return_value={
+            "site": "x",
+            "status": "success",
+            "error": None,
+            "steps_completed": 2,
+            "steps_skipped": 0,
+            "steps_total": 2,
+            "elapsed": 0.0,
+            "steps": [],
+        }):
+            result = orchestrator.deploy(
+                manifest_path=complete_workspace / "manifests" / "test.yaml",
+                manifest=manifest,
+                sites=self._sites(1),
+            )
+
+        assert result["summary"]["failed"] == 0
 
 
 class TestGroupSitesBySubscription:

@@ -157,6 +157,57 @@ class TestDeployParallel:
         assert failed["steps_total"] == len(manifest.steps)
         assert failed["steps"] == []
 
+    def test_sequential_mode_isolates_a_failing_site(self, tmp_workspace):
+        """Sequential mode gives the same blast-radius guarantee as parallel.
+
+        Sequential is the default. An unexpected error escaping here would abort
+        the whole run, so sites already deployed get no result row and the
+        operator cannot tell which part of the fleet succeeded.
+        """
+        manifest = _make_manifest()
+        sites = _make_sites(3)
+        orchestrator = Orchestrator(tmp_workspace)
+
+        def _fake(m, s, *args, **kwargs):
+            if s.name == "site-1":
+                raise RuntimeError("boom")
+            return _ok_result(s, m)
+
+        with patch.object(orchestrator, "_deploy_site", side_effect=_fake):
+            results = orchestrator._deploy_sequential(manifest, sites, TIMESTAMP)
+
+        assert len(results) == len(sites), (
+            "A failing site truncated the run, so later sites have no result."
+        )
+        by_site = {r["site"]: r for r in results}
+        assert by_site["site-0"]["status"] == "success"
+        assert by_site["site-2"]["status"] == "success", (
+            "The site after the failure never ran."
+        )
+        assert by_site["site-1"]["status"] == "failed"
+        assert "boom" in by_site["site-1"]["error"]
+
+    def test_sequential_failure_row_matches_the_parallel_shape(self, tmp_workspace):
+        """Both modes report an unexpected failure identically.
+
+        A caller reading the summary should not be able to tell which execution
+        mode produced a row.
+        """
+        manifest = _make_manifest()
+        sites = _make_sites(1)
+        orchestrator = Orchestrator(tmp_workspace)
+
+        def _fake(m, s, *args, **kwargs):
+            raise RuntimeError("boom")
+
+        with patch.object(orchestrator, "_deploy_site", side_effect=_fake):
+            sequential = orchestrator._deploy_sequential(manifest, sites, TIMESTAMP)
+            parallel = orchestrator._deploy_parallel(
+                manifest, sites, TIMESTAMP, ParallelConfig(sites=1)
+            )
+
+        assert sequential[0] == parallel[0]
+
     def test_results_are_not_lost_under_contention(self, tmp_workspace):
         """All results survive concurrent accumulation.
 

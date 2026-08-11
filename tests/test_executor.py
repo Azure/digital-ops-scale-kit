@@ -12,6 +12,7 @@ import json
 import os
 import re
 import subprocess
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -24,7 +25,9 @@ from siteops.executor import (
     ARC_PROXY_PORT_BASE,
     ARC_PROXY_PORT_SPACING,
     DEFAULT_AZ_TIMEOUT_SECONDS,
+    DEFAULT_DEPLOYMENT_SUBMIT_TIMEOUT_SECONDS,
     DEFAULT_KUBECTL_TIMEOUT_SECONDS,
+    ENGINE_TIMEOUT_SENTINEL,
     HTTPS_URL_PATTERN,
     AzCliExecutor,
     DeploymentResult,
@@ -429,6 +432,113 @@ _SUBMIT_OK = (True, "", "")
 class TestDeployResourceGroup:
     """Tests for resource group deployments."""
 
+    def test_arm_error_naming_a_timeout_parameter_fails_fast(
+        self, tmp_workspace, sample_bicep_template, monkeypatch
+    ):
+        """A deterministic ARM error is not mistaken for the engine's own timeout.
+
+        Azure parameter names containing `Timeout` are common, so matching the
+        stderr text for the word would discard a real validation error and send
+        the poller looking for a deployment that was never created.
+        """
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        monkeypatch.setattr(executor, "_az_path", "/usr/bin/az")
+
+        arm_error = (
+            "ERROR: Deployment template validation failed: The value for "
+            "'idleTimeoutInMinutes' is not valid."
+        )
+        with patch.object(executor, "_run_az", side_effect=[(False, "", arm_error)]) as mock_az:
+            result = executor.deploy_resource_group(
+                subscription="sub-123",
+                resource_group="rg-test",
+                template_path=sample_bicep_template,
+                parameters={},
+                deployment_name="test-deploy",
+                step_name="step-1",
+                site_name="site-1",
+            )
+
+        assert result.success is False
+        assert "idleTimeoutInMinutes" in result.error, (
+            f"The ARM error was discarded rather than reported: {result.error}"
+        )
+        assert mock_az.call_count == 1, (
+            "A deterministic submit failure should not be polled."
+        )
+
+    def test_engine_timeout_still_polls(
+        self, tmp_workspace, sample_bicep_template, monkeypatch
+    ):
+        """The engine's own timeout is ambiguous, so the deployment is polled.
+
+        The PUT may have reached ARM, so the not-found grace decides rather than
+        failing fast.
+        """
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        monkeypatch.setattr(executor, "_az_path", "/usr/bin/az")
+
+        sentinel = ENGINE_TIMEOUT_SENTINEL.format(
+            timeout=DEFAULT_DEPLOYMENT_SUBMIT_TIMEOUT_SECONDS
+        )
+        responses = [
+            (False, "", sentinel),
+            _show_result("Succeeded", outputs={}),
+        ]
+        with patch.object(executor, "_run_az", side_effect=responses):
+            result = executor.deploy_resource_group(
+                subscription="sub-123",
+                resource_group="rg-test",
+                template_path=sample_bicep_template,
+                parameters={},
+                deployment_name="test-deploy",
+                step_name="step-1",
+                site_name="site-1",
+            )
+
+        assert result.success is True
+
+    def test_run_az_decodes_utf8_output(self, tmp_workspace, monkeypatch):
+        """`az` output is decoded as UTF-8 rather than the locale encoding.
+
+        On a host whose locale encoding cannot represent a byte `az` emits,
+        decoding raises inside subprocess's reader thread and `subprocess.run`
+        returns `stdout=None` instead of an error. The deployment poller reads
+        that as an unobservable deployment and reports a wrong diagnosis once
+        the observation grace expires.
+        """
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        monkeypatch.setattr(executor, "_az_path", "/usr/bin/az")
+
+        captured: dict[str, object] = {}
+
+        def _fake_run(cmd, **kwargs):
+            captured.update(kwargs)
+            return MagicMock(returncode=0, stdout='{"tag": "OK"}', stderr="")
+
+        with patch("siteops.executor.subprocess.run", side_effect=_fake_run):
+            ok, stdout, stderr = executor._run_az(["group", "show"])
+
+        assert ok is True
+        assert captured.get("encoding") == "utf-8", (
+            "az output must be decoded as UTF-8, not the locale encoding."
+        )
+        assert captured.get("errors") == "replace"
+
+    def test_run_az_never_returns_none_stdout(self, tmp_workspace, monkeypatch):
+        """A None stream is normalized, since callers index into it directly."""
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        monkeypatch.setattr(executor, "_az_path", "/usr/bin/az")
+
+        with patch(
+            "siteops.executor.subprocess.run",
+            return_value=MagicMock(returncode=0, stdout=None, stderr=None),
+        ):
+            ok, stdout, stderr = executor._run_az(["group", "show"])
+
+        assert stdout == ""
+        assert stderr == ""
+
     def test_deploy_resource_group_success(self, tmp_workspace, sample_bicep_template, monkeypatch):
         executor = AzCliExecutor(workspace=tmp_workspace)
         monkeypatch.setattr(executor, "_az_path", "/usr/bin/az")
@@ -662,6 +772,96 @@ class TestDeployResourceGroup:
         assert result.success is False
         assert "QuotaExceeded" in result.error
         assert "Storage quota exceeded" in result.error
+
+    def test_failed_nested_deployment_names_the_module(
+        self, tmp_workspace, sample_bicep_template, monkeypatch
+    ):
+        """A failed module is reported by name, not by the shared nested type.
+
+        A Bicep module compiles to a nested deployment, so every module in a
+        template shares one resource type. Reporting only that type leaves a
+        multi-module template's failure unattributable.
+        """
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        monkeypatch.setattr(executor, "_az_path", "/usr/bin/az")
+
+        ops = [
+            {
+                "properties": {
+                    "provisioningState": "Failed",
+                    "targetResource": {
+                        "resourceType": "Microsoft.Resources/deployments",
+                        "id": (
+                            "/subscriptions/sub-123/resourceGroups/rg-test/providers/"
+                            "Microsoft.Resources/deployments/dataflow-endpoints-abc123"
+                        ),
+                    },
+                    "statusMessage": {
+                        "error": {"code": "InvalidTemplate", "message": "Bad endpointType"}
+                    },
+                }
+            },
+        ]
+        responses = [
+            _SUBMIT_OK,
+            _show_result(
+                "Failed",
+                error={
+                    "code": "DeploymentFailed",
+                    "message": "At least one resource deployment operation failed.",
+                },
+            ),
+            (True, json.dumps(ops), ""),
+        ]
+        with patch.object(executor, "_run_az", side_effect=responses):
+            result = executor.deploy_resource_group(
+                subscription="sub-123",
+                resource_group="rg-test",
+                template_path=sample_bicep_template,
+                parameters={},
+                deployment_name="test-deploy",
+                step_name="step-1",
+                site_name="site-1",
+            )
+
+        assert result.success is False
+        assert "dataflow-endpoints-abc123" in result.error, (
+            f"The failed module is not named in the error: {result.error}"
+        )
+        assert "Microsoft.Resources/deployments/dataflow-endpoints-abc123" in result.error, (
+            f"The module is named by type and name rather than by a dump of the "
+            f"whole target: {result.error}"
+        )
+        assert "/subscriptions/" not in result.error, (
+            f"The error carries the target's full resource id, which names the "
+            f"subscription and resource group: {result.error}"
+        )
+        assert "Bad endpointType" in result.error
+
+    @pytest.mark.parametrize(
+        "target,expected",
+        [
+            ({"resourceType": "Microsoft.Resources/deployments", "resourceName": "m"},
+             "Microsoft.Resources/deployments/m"),
+            ({"resourceType": "Microsoft.IoTOperations/instances"},
+             "Microsoft.IoTOperations/instances"),
+            ({}, ""),
+            ("not a dict", ""),
+            (None, ""),
+            # A tool that reports an unexpected shape must not raise from the
+            # path that is already reporting a failure.
+            ({"resourceType": 12345}, "12345"),
+            ({"resourceType": "Microsoft.Resources/deployments", "id": ["a"]},
+             "Microsoft.Resources/deployments/['a']"),
+        ],
+    )
+    def test_target_label_handles_unexpected_shapes(self, target, expected):
+        """The label is built while reporting a failure, so it always returns a string."""
+        from siteops.executor import _operation_target_label
+
+        result = _operation_target_label(target)
+        assert isinstance(result, str)
+        assert result == expected
 
     def test_failed_state_falls_back_to_properties_error(self, tmp_workspace, sample_bicep_template, monkeypatch):
         executor = AzCliExecutor(workspace=tmp_workspace)
@@ -1507,11 +1707,15 @@ class TestGetTemplateParameters:
             patch("siteops.executor.subprocess.run") as mock_run,
             patch("siteops.executor.shutil.which", return_value="/usr/bin/az"),
         ):
-            mock_run.return_value = MagicMock(
-                returncode=0,
-                stdout=json.dumps(arm_json),
-                stderr="",
-            )
+            # `az bicep build` writes the compiled template to `--outfile`, so
+            # the fake writes it too. Returning it on stdout would pass while
+            # the real command wrote a file nothing read.
+            def _fake_build(argv, *args, **kwargs):
+                out_path = Path(argv[argv.index("--outfile") + 1])
+                out_path.write_text(json.dumps(arm_json), encoding="utf-8")
+                return MagicMock(returncode=0, stdout="", stderr="")
+
+            mock_run.side_effect = _fake_build
 
             # Clear cache for this test
             get_template_parameters.cache_clear()

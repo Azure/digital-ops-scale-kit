@@ -371,6 +371,19 @@ See [ADO architecture](#ado-architecture) for the Azure DevOps equivalent.
 | **Token Refresh** | Background OIDC refresh every 4 min | Not needed (`AzureCLI@2` manages lifecycle) |
 | **Credential Isolation** | `persist-credentials: false` on checkout | `persistCredentials: false` on checkout |
 | **Audit Trail** | All runs logged with triggering user | Same |
+| **Output Redaction** | `SITEOPS_REDACT_OUTPUT=1`, and on by default from `GITHUB_ACTIONS` | Same, and on by default from `TF_BUILD` |
+
+### Output redaction
+
+Workflow logs and artifacts are a public surface, so deployment failure text is scrubbed before it reaches them. A resource id is reduced to the resource type that failed, and subscription, tenant, and principal identifiers, bearer tokens, and Azure service hostnames are replaced with placeholders. The error code and message survive, so a failure stays diagnosable:
+
+```text
+[munich-prod] x dataflow-resources: BadRequest: <Microsoft.IoTOperations/instances/dataflowEndpoints> is invalid
+```
+
+Redaction follows the destination rather than the text. A local `siteops deploy` prints the full detail, which is what an operator needs to diagnose their own environment. It turns on automatically under `GITHUB_ACTIONS` and `TF_BUILD`, so a workflow added later is covered, and the shipped workflows set `SITEOPS_REDACT_OUTPUT=1` explicitly as well.
+
+Set `SITEOPS_REDACT_OUTPUT=0` to keep full detail while debugging a self-hosted runner, and treat the resulting log as operator-local.
 
 ### Security model
 
@@ -424,45 +437,29 @@ To add a new manifest to the deployment workflows:
    - Workload bundles or composed manifests under `workspaces/<workspace>/samples/<name>/`
 2. Update the workflow/pipeline to add the path to the dropdown:
 
-**GitHub Actions** (`.github/workflows/deploy.yaml`):
+**GitHub Actions** (`.github/workflows/deploy.yaml`): add the path to the `manifest` input's `options:` list.
 ```yaml
 manifest:
     description: "Manifest to deploy (path relative to the workspace root)"
     required: true
     type: choice
     options:
-        - manifests/aio-install.yaml
-        - manifests/aio-upgrade.yaml
-        - manifests/secretsync.yaml
-        - manifests/aksee-bootstrap.yaml
-        - manifests/aksee-upgrade.yaml
-        - samples/secretsync-sample/manifest.yaml
-        - samples/opc-ua-solution/manifest.yaml
-        - samples/aio-with-opc-ua/manifest.yaml
-        - samples/aio-with-aksee-bootstrap/manifest.yaml
+        # ... existing entries ...
         - manifests/my-new-manifest.yaml  # Add here (full path)
 ```
 
-**Azure DevOps** (`.pipelines/deploy.yaml`):
+**Azure DevOps** (`.pipelines/deploy.yaml`): add the same path to the `manifest` parameter's `values:` list.
 ```yaml
 - name: manifest
   displayName: Manifest (path relative to the workspace root)
   type: string
   default: manifests/aio-install.yaml
   values:
-    - manifests/aio-install.yaml
-    - manifests/aio-upgrade.yaml
-    - manifests/secretsync.yaml
-    - manifests/aksee-bootstrap.yaml
-    - manifests/aksee-upgrade.yaml
-    - samples/secretsync-sample/manifest.yaml
-    - samples/opc-ua-solution/manifest.yaml
-    - samples/aio-with-opc-ua/manifest.yaml
-    - samples/aio-with-aksee-bootstrap/manifest.yaml
+    # ... existing entries ...
     - manifests/my-new-manifest.yaml  # Add here (full path)
 ```
 
-Keep the two lists in step. A manifest offered on one platform and not the other is deployable only from that platform.
+Keep the two lists in step. A manifest offered on one platform and not the other is deployable only from that platform. `tests/workspace/test_deploy_registration.py` derives the expected set from the workspace and fails when either list drifts, so the current entries are whatever those files hold rather than what this page lists.
 
 ### Adding new workspaces
 

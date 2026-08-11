@@ -20,7 +20,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
-import yaml
+from siteops import yamlio
 
 VALID_SCOPES = {"subscription", "resourceGroup"}
 DEFAULT_API_VERSION = "siteops/v1"
@@ -113,6 +113,29 @@ CONDITION_PATTERN = re.compile(
 # Supported kubectl operations (extensible for future operations like 'wait', 'delete')
 KUBECTL_OPERATIONS = {"apply"}
 
+
+def validate_condition_syntax(when: str | None, context: str) -> None:
+    """Reject a `when:` expression the condition evaluator cannot parse.
+
+    Condition evaluation fails OPEN, returning True for an expression it cannot
+    parse, so an unvalidated typo turns a gate that should exclude into one that
+    includes everywhere. Every path that assigns `when:` has to come through
+    here, including an include's `when:` propagated onto a spliced step.
+
+    Args:
+        when: The expression, or None to skip.
+        context: What carries the expression, for the error message.
+
+    Raises:
+        ValueError: If the expression does not match the supported grammar.
+    """
+    if when and not CONDITION_PATTERN.fullmatch(when.strip()):
+        raise ConditionSyntaxError(
+            f"Invalid 'when' condition syntax on {context}: {when}. "
+            "Expected: {{ site.labels.X == 'value' }}, {{ site.properties.path == true }}, "
+            "or {{ site.properties.path }} (truthy check)"
+        )
+
 # Supported wait-step condition types. The first is `arm-tag` (poll an Azure
 # tag on an ARM resource). The dispatch shape accommodates future condition
 # types (e.g. arm-resource-property, kubectl-resource-ready) without a manifest
@@ -136,6 +159,39 @@ class SelectorParseError(ValueError):
     Distinct from generic `ValueError` so `validate()` can attribute
     the failure to selector input (and skip the redundant no-match
     diagnostic) without substring-matching the error message.
+    """
+
+
+class MultipleSubscriptionSitesError(ValueError):
+    """Raised when one subscription resolves more than one subscription-level site.
+
+    Subscription-scoped steps run once per subscription and their outputs feed
+    every resource-group site under it, so two candidates have no correct
+    resolution. `validate()` reports this among its errors. `deploy` raises it,
+    since `deploy` does not run `validate` and choosing one candidate would
+    deploy the rest of the fleet against outputs from a site the operator did
+    not name.
+    """
+
+
+class ParameterSelectionError(ValueError):
+    """Raised when a site-selected parameter file does not resolve to a real file.
+
+    A parameter path carrying a variable lets a site choose which file to load.
+    When the site lacks the property, or names a file that does not exist, the
+    step would otherwise deploy with those parameters absent and report success.
+    Distinct from generic `ValueError` so a caller can tell an engine guard from
+    an incidental failure while reading a file.
+    """
+
+
+class ConditionSyntaxError(ValueError):
+    """Raised when a `when:` expression does not match the supported grammar.
+
+    Condition evaluation fails open, returning True for anything it cannot
+    parse, so an unvalidated expression turns a gate meant to exclude into one
+    that runs everywhere. Distinct from generic `ValueError` so a caller can
+    tell this from an unrelated model validation failure.
     """
 
 
@@ -164,7 +220,8 @@ def parse_selector(selector: str | None) -> dict[str, list[str]]:
         or empty.
 
     Raises:
-        SelectorParseError: If a non-name key appears more than once.
+        SelectorParseError: If a term is not in `key=value` form, or a
+            non-name key appears more than once.
 
     Example:
         >>> parse_selector('environment=prod,region=eastus')
@@ -180,8 +237,13 @@ def parse_selector(selector: str | None) -> dict[str, list[str]]:
     labels: dict[str, list[str]] = {}
     for part in selector.split(","):
         part = part.strip()
-        if "=" not in part:
+        if not part:
             continue
+        if "=" not in part:
+            raise SelectorParseError(
+                f"Selector term `{part}` is not in `key=value` form. "
+                f"Did you mean `name={part}`?"
+            )
         key, value = part.split("=", 1)
         key = key.strip()
         value = value.strip()
@@ -511,7 +573,7 @@ class Site:
             `Orchestrator.load_site(name)` for fully-resolved sites.
         """
         with open(path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+            data = yamlio.load(f)
 
         if not data:
             raise ValueError(f"Empty or invalid YAML file: {path}")
@@ -591,12 +653,7 @@ class DeploymentStep:
         if self.scope not in VALID_SCOPES:
             raise ValueError(f"Invalid scope '{self.scope}'. Must be one of: {VALID_SCOPES}")
 
-        if self.when and not CONDITION_PATTERN.fullmatch(self.when.strip()):
-            raise ValueError(
-                f"Invalid 'when' condition syntax: {self.when}. "
-                "Expected: {{ site.labels.X == 'value' }}, {{ site.properties.path == true }}, "
-                "or {{ site.properties.path }} (truthy check)"
-            )
+        validate_condition_syntax(self.when, f"step '{self.name}'")
 
 
 @dataclass
@@ -656,12 +713,7 @@ class KubectlStep:
         if not self.files:
             raise ValueError(f"KubectlStep '{self.name}' must specify at least one file")
 
-        if self.when and not CONDITION_PATTERN.fullmatch(self.when.strip()):
-            raise ValueError(
-                f"Invalid 'when' condition syntax: {self.when}. "
-                "Expected: {{ site.labels.X == 'value' }}, {{ site.properties.path == true }}, "
-                "or {{ site.properties.path }} (truthy check)"
-            )
+        validate_condition_syntax(self.when, f"step '{self.name}'")
 
 
 @dataclass(frozen=True)
@@ -769,12 +821,7 @@ class WaitStep:
                 f"would be checked only once."
             )
 
-        if self.when and not CONDITION_PATTERN.fullmatch(self.when.strip()):
-            raise ValueError(
-                f"Invalid 'when' condition syntax: {self.when}. "
-                "Expected: {{ site.labels.X == 'value' }}, {{ site.properties.path == true }}, "
-                "or {{ site.properties.path }} (truthy check)"
-            )
+        validate_condition_syntax(self.when, f"step '{self.name}'")
 
 
 # Union type for manifest steps - allows type checking to distinguish step types
@@ -989,7 +1036,7 @@ def _read_manifest_spec(path: Path) -> tuple[dict[str, Any], str, str]:
     top-level keys.
     """
     with open(path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
+        data = yamlio.load(f)
 
     if not data:
         raise ValueError(f"Empty or invalid YAML file: {path}")
@@ -1077,6 +1124,9 @@ def _propagate_when(step: "ManifestStep", include_when: str | None, source: Path
             f"and the parent include also sets one. Consolidate into a "
             f"single condition on either the include or the step."
         )
+    # Assignment here bypasses the step's own __post_init__ validation, so
+    # validate explicitly. An include's gate is the same contract as a step's.
+    validate_condition_syntax(include_when, f"include of '{source.name}'")
     step.when = include_when
 
 
@@ -1202,8 +1252,12 @@ def _parse_arm_tag_condition(step_name: str, condition_data: dict[str, Any], sou
 def _merge_parameters(parent: list[str], fragment: list[str]) -> list[str]:
     """Append fragment parameters after parent's, deduplicating by raw path.
 
-    Parent wins on duplicate paths. Comparison is on the normalized POSIX
-    string of the raw path, not on the resolved-with-Mustache path.
+    Deduplication is by raw path string, so the same file declared by both is
+    listed once, in the parent's position. It does not make the parent win on a
+    parameter *key*: two different files that both set one key are both loaded,
+    and `resolve_parameters` applies them in list order, so the fragment's value
+    is the one that survives. A parent that needs to override a fragment's
+    default sets it on the site rather than in its own parameter file.
     """
     seen = {Path(p).as_posix() for p in parent}
     merged = list(parent)

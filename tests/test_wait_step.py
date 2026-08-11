@@ -202,13 +202,33 @@ class TestClassifyAzError:
             ("AuthorizationFailed: does not have authorization", "permanent"),
             ("ERROR: status code: 403 Forbidden", "permanent"),
             ("Please run 'az login' to setup account", "permanent"),
-            ("SubscriptionNotFound: subscription was not recognized", "resource_not_found"),
+            # A missing subscription is a configuration error rather than a
+            # resource that might yet appear, and the permanent set names it.
+            ("SubscriptionNotFound: subscription was not recognized", "permanent"),
             ("ERROR: status code: 429 TooManyRequests", "transient"),
             ("ERROR: status code: 503 ServiceUnavailable", "transient"),
             ("Command timed out after 60s", "transient"),
             ("connection reset by peer", "transient"),
             ("some unrecognized failure", "unknown"),
             ("", "unknown"),
+            # The not-found phrase appears in messages of every class, so an
+            # unambiguous code has to win over it.
+            (
+                "ERROR: AuthorizationFailed: the client could not be found in tenant",
+                "permanent",
+            ),
+            (
+                "AADSTS700016: Application with identifier 'x' was not found in "
+                "the directory 'y'",
+                "permanent",
+            ),
+            (
+                "ERROR: status code: 503 ServiceUnavailable; resource was not found",
+                "transient",
+            ),
+            ("ERROR: InvalidTemplate - parameter 'timeouts' is not valid", "permanent"),
+            # The phrase alone still classifies, so a plain ARM 404 message works.
+            ("The Resource 'x' under resource group 'y' was not found.", "resource_not_found"),
         ],
     )
     def test_classification(self, stderr, expected):

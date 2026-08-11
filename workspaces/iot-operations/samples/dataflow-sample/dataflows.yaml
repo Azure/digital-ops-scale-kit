@@ -1,0 +1,144 @@
+# The dataflow resources this sample declares.
+#
+# Attached at manifest level, which puts it below site parameters in the merge order,
+# so a `sites.local/` overlay or a site definition overrides it. The same three keys
+# are what a committed set under `parameters/dataflows/` supplies, so a declaration
+# moves between the two routes unchanged.
+# See docs/dataflows.md for the authoring contract.
+# Consumed by: dataflow-resources
+#
+# Each key is a list, so one declaration creates as many resources as it names and
+# the whole set deploys in a single round trip. This sample declares two of each to
+# show that, and because a dataflow selecting one endpoint and one pool out of
+# several is the shape a real solution has.
+#
+# Where the values come from
+# --------------------------
+# Every `{{ ... }}` resolves per site, so this one file deploys across a fleet and each
+# site receives its own values. Tiers in this workspace:
+#
+#   sites/base-site.yaml       fleet-wide defaults, inherited by every site
+#   sites/shared/germany.yaml  one region, shared by every German site under it
+#   sites/munich-dev.yaml      one site, carrying only what differs
+#
+# Comments below name the tier each value comes from. A declaration names a value, not
+# a tier, so moving a value up a tier changes only where it is maintained. Interpolate
+# into string-valued properties, and state numbers directly. Preview a site's resolved
+# values with:
+#   siteops -w workspaces/iot-operations sites munich-dev --render
+
+# Endpoints a dataflow can read from or write to. AIO creates a `default` MQTT
+# endpoint alongside the instance, so declare an endpoint here only when a solution
+# needs one the instance did not supply.
+#
+# The host and trust bundle below name the in-cluster broker service for an install
+# in the default `azure-iot-operations` namespace. Adjust both when the install uses
+# a different namespace.
+dataflowEndpoints:
+  - name: dataflow-sample-mqtt-out
+    properties:
+      endpointType: Mqtt
+      mqttSettings:
+        host: "aio-broker.azure-iot-operations:18883"
+        # Site tier. Each site connects under its own prefix, so a broker-side view can
+        # tell them apart. A site value resolves at any depth.
+        clientIdPrefix: "dataflow-sample-{{ site.name }}"
+        authentication:
+          method: ServiceAccountToken
+          serviceAccountTokenSettings:
+            audience: aio-internal
+        tls:
+          mode: Enabled
+          trustedCaCertificateConfigMapRef: azure-iot-operations-aio-ca-trust-bundle
+
+  - name: dataflow-sample-alerts-out
+    properties:
+      endpointType: Mqtt
+      mqttSettings:
+        host: "aio-broker.azure-iot-operations:18883"
+        clientIdPrefix: "dataflow-sample-alerts-{{ site.name }}"
+        authentication:
+          method: ServiceAccountToken
+          serviceAccountTokenSettings:
+            audience: aio-internal
+        tls:
+          mode: Enabled
+          trustedCaCertificateConfigMapRef: azure-iot-operations-aio-ca-trust-bundle
+
+# Execution pools. AIO creates a `default` profile sized by the instance template's
+# defaultDataflowInstanceCount, so declare a profile here to give a workload its own
+# pool. Do not name a profile or an endpoint `default`, since the instance template
+# owns both names.
+#
+# Two pools here keep a low-volume alert path off the pool carrying bulk telemetry,
+# which is the usual reason to declare one at all.
+dataflowProfiles:
+  - name: dataflow-sample-profile
+    properties:
+      instanceCount: 1
+
+  - name: dataflow-sample-alerts-pool
+    properties:
+      instanceCount: 1
+
+# The pipelines themselves. Operations run in order: a Source reads from an endpoint,
+# BuiltInTransformation reshapes each message, and a Destination writes the result.
+# `endpointRef` names an endpoint above or one the instance already created, and
+# `profileRef` names which pool the dataflow runs in.
+#
+# The first subscribes to every asset topic under the AIO data prefix, so one
+# declaration moves telemetry from whatever assets a site has without naming them.
+# Deploy `samples/opc-ua-solution/manifest.yaml` first to have it carry real oven
+# telemetry, or publish to the prefix yourself to exercise it standalone.
+#
+# The second reads a narrower topic and writes to its own endpoint through its own
+# pool, so the two share nothing but the source broker.
+dataflows:
+  - name: dataflow-sample-passthrough
+    profileRef: dataflow-sample-profile
+    properties:
+      mode: Enabled
+      operations:
+        - operationType: Source
+          sourceSettings:
+            endpointRef: default
+            dataSources:
+              - "azure-iot-operations/data/#"
+        - operationType: BuiltInTransformation
+          builtInTransformationSettings:
+            serializationFormat: Json
+            map:
+              - type: PassThrough
+                inputs:
+                  - "*"
+                output: "*"
+        - operationType: Destination
+          destinationSettings:
+            endpointRef: dataflow-sample-mqtt-out
+            # Region tier for `country`, site tier for `name`. One template, a distinct
+            # topic per site.
+            dataDestination: "dataflow-sample/{{ site.labels.country }}/{{ site.name }}/output"
+
+  - name: dataflow-sample-alerts
+    profileRef: dataflow-sample-alerts-pool
+    properties:
+      mode: Enabled
+      operations:
+        - operationType: Source
+          sourceSettings:
+            endpointRef: default
+            dataSources:
+              - "azure-iot-operations/data/alerts/#"
+        - operationType: BuiltInTransformation
+          builtInTransformationSettings:
+            serializationFormat: Json
+            map:
+              - type: PassThrough
+                inputs:
+                  - "*"
+                output: "*"
+        - operationType: Destination
+          destinationSettings:
+            endpointRef: dataflow-sample-alerts-out
+            # Site tier for `city`, one tier below `country` above.
+            dataDestination: "dataflow-sample/alerts/{{ site.labels.city }}/{{ site.name }}"

@@ -33,6 +33,7 @@ the cluster the AIO instance was deployed onto:
     every kubectl invocation.
 """
 
+import copy
 import os
 import subprocess
 import sys
@@ -49,6 +50,12 @@ SCRIPT_PATH = Path(__file__).parent.parent.parent / "scripts" / "generate-site-o
 
 _EXTRA_SITES_DIRS_ENV = "SITEOPS_EXTRA_SITES_DIRS"
 _UPGRADE_PHASE_ENV = "SITEOPS_E2E_UPGRADE_PHASE"
+
+# The catalog family and committed set the `aio-resources` phase deploys. The
+# set ships at parameters/dataflows/site-telemetry.yaml, so a rename there has
+# to reach this constant or the deploy resolves nothing.
+CATALOG_FAMILY = "dataflows"
+CATALOG_SET = "site-telemetry"
 
 # Sentinel returned by `aio_install_result` in upgrade phase. Shape is
 # deliberately not a real deploy result so any leaked consumer fails loudly.
@@ -275,6 +282,28 @@ def _resolve_or_fail(
     return manifest, sites
 
 
+def _assert_deployed(result: dict, label: str) -> dict:
+    """Fail with the scrubbed diagnostic fields rather than the whole result.
+
+    A result carries fully-qualified resource ids on every site row, and a
+    failing assertion in CI writes its message to a published job log and to the
+    JUnit artifact. The engine already scrubs each site's `error` when the
+    destination is published, so reporting those fields keeps the failure
+    actionable without republishing what the scrub removed.
+    """
+    summary = result.get("summary", {})
+    if summary.get("failed"):
+        errors = [
+            f"  {name}: {site.get('error', 'no error reported')}"
+            for name, site in (result.get("sites") or {}).items()
+            if site.get("error")
+        ]
+        raise AssertionError(
+            f"{label} deployment failed. Summary: {summary}\n" + "\n".join(errors)
+        )
+    return result
+
+
 @pytest.fixture(scope="session")
 def aio_install_result(orchestrator: Orchestrator, selector: str | None) -> dict:
     """Deploy aio-install.yaml once, shared by all dependent tests.
@@ -293,11 +322,7 @@ def aio_install_result(orchestrator: Orchestrator, selector: str | None) -> dict
         manifest=manifest,
         sites=sites,
     )
-    assert result["summary"]["failed"] == 0, (
-        f"aio-install deployment failed: {result}"
-    )
-    return result
-
+    return _assert_deployed(result, "aio-install")
 
 @pytest.fixture(scope="session")
 def secretsync_result(
@@ -328,6 +353,65 @@ def opc_ua_solution_result(
 
 
 @pytest.fixture(scope="session")
+def dataflow_sample_result(
+    orchestrator: Orchestrator, selector: str | None, aio_install_result: dict
+) -> dict:
+    """Deploy samples/dataflow-sample/manifest.yaml after AIO is installed.
+
+    The sample attaches its own declaration at manifest level, so this covers
+    the catalog templates without depending on a site carrying a
+    `resourceSets` selection.
+    """
+    manifest_path = WORKSPACE_PATH / "samples" / "dataflow-sample" / "manifest.yaml"
+    manifest, sites = _resolve_or_fail(orchestrator, manifest_path, selector)
+    result = orchestrator.deploy(
+        manifest_path=manifest_path,
+        manifest=manifest,
+        sites=sites,
+    )
+    return _assert_deployed(result, "dataflow-sample")
+
+
+@pytest.fixture(scope="session")
+def aio_resources_result(
+    orchestrator: Orchestrator, selector: str | None, aio_install_result: dict
+) -> dict:
+    """Deploy manifests/aio-resources.yaml with a site selecting a dataflow set.
+
+    This is the fleet route: a site names a committed set through
+    `properties.resourceSets.<family>`, the catalog resolves that to a
+    declaration file, and the family gate opens. `dataflow_sample_result`
+    covers the same templates through a manifest-attached declaration, so this
+    fixture exists for the selection mechanism rather than for the templates.
+
+    The set is applied to the resolved sites here rather than in the site
+    template, so a default run keeps every family at `none` and pays nothing
+    for a phase it did not select. `Orchestrator` caches and returns the same
+    `Site` objects to every fixture in the session, so the original properties
+    are restored afterwards. Without that, a later fixture would resolve a site
+    that permanently selects this set.
+    """
+    manifest_path = WORKSPACE_PATH / "manifests" / "aio-resources.yaml"
+    manifest, sites = _resolve_or_fail(orchestrator, manifest_path, selector)
+
+    original = {id(site): copy.deepcopy(site.properties) for site in sites}
+    for site in sites:
+        site.properties.setdefault("resourceSets", {})[CATALOG_FAMILY] = CATALOG_SET
+
+    try:
+        result = orchestrator.deploy(
+            manifest_path=manifest_path,
+            manifest=manifest,
+            sites=sites,
+        )
+        return _assert_deployed(result, "aio-resources")
+    finally:
+        for site in sites:
+            site.properties.clear()
+            site.properties.update(original[id(site)])
+
+
+@pytest.fixture(scope="session")
 def aio_upgrade_result(
     orchestrator: Orchestrator, selector: str | None, aio_install_result: dict
 ) -> dict:
@@ -340,11 +424,12 @@ def aio_upgrade_result(
     """
     manifest_path = WORKSPACE_PATH / "manifests" / "aio-upgrade.yaml"
     manifest, sites = _resolve_or_fail(orchestrator, manifest_path, selector)
-    return orchestrator.deploy(
+    result = orchestrator.deploy(
         manifest_path=manifest_path,
         manifest=manifest,
         sites=sites,
     )
+    return _assert_deployed(result, "aio-upgrade")
 
 
 # Test override keys injected by aio_upgrade_with_overrides_result. Exposed at
@@ -420,9 +505,7 @@ def aio_upgrade_with_overrides_result(
         manifest=manifest,
         sites=sites,
     )
-    assert result["summary"]["failed"] == 0, (
-        f"aio-upgrade-with-overrides deployment failed: {result}"
-    )
+    _assert_deployed(result, "aio-upgrade-with-overrides")
     return result
 
 

@@ -1,0 +1,38 @@
+apiVersion: siteops/v1
+kind: Manifest
+name: dataflow-sample
+
+description: |
+  Reference sample that declares dataflows in YAML and deploys them onto an
+  existing AIO instance, carrying no Bicep of its own. `dataflows.yaml` declares
+  two MQTT endpoints, two execution pools, and two dataflows, each reading a
+  topic under the AIO data prefix and republishing it through its own endpoint
+  and pool. Destination topics carry the site's country, city, and name, so
+  every site publishes under its own.
+
+  Needs no cloud infrastructure and no credentials beyond the deployment
+  identity. Subscribe to `dataflow-sample/<country>/<site>/output` on the broker
+  to watch it work.
+
+  `dataflows.yaml` attaches at manifest level, so a site or a `sites.local/`
+  overlay overrides it. A site can instead select a committed set through
+  `properties.resourceSets.dataflows` and deploy `manifests/aio-resources.yaml`.
+  Both routes run the same templates.
+
+  Prerequisites:
+    - AIO instance must be deployed and running (run aio-install first)
+    - The site's aioRelease must point to a parameters/aio-releases/<release>.yaml file
+
+parallel: 3
+
+# Default selector. Override at the CLI with `-l <key>=<value>`.
+selector: "environment=dev"
+
+parameters:
+  - parameters/common/common.yaml
+  - "parameters/aio-releases/{{ site.properties.aioRelease }}.yaml"
+  - samples/dataflow-sample/dataflows.yaml
+
+steps:
+  - include: ../../manifests/_resolve-aio.yaml
+  - include: ../../manifests/_dataflows.yaml

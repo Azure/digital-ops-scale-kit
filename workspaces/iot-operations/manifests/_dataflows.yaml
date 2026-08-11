@@ -1,0 +1,26 @@
+apiVersion: siteops/v1
+kind: Manifest
+name: dataflow-steps
+description: |
+  Dataflow endpoints, profiles, and dataflows for an existing AIO instance,
+  created from a declaration file. Expects an upstream `resolve-aio` step and a
+  manifest-level declaration supplying `dataflowEndpoints`, `dataflowProfiles`,
+  and `dataflows`. An omitted key creates nothing.
+
+  The family deploys as one step. `main.bicep` routes on `aioApiVersion` to one
+  module per AIO API generation, and that module orders endpoints and profiles
+  before the dataflows that name them.
+
+  Internal partial (filename prefixed `_`). Not deployed directly. Composed by
+  `aio-resources.yaml` (the config-driven catalog entry point) and by samples
+  that layer dataflows onto an install.
+
+  See docs/dataflows.md for the declaration keys, and docs/resource-catalog.md
+  for how a site selects a set.
+
+steps:
+  - name: dataflow-resources
+    template: templates/aio/dataflows/main.bicep
+    scope: resourceGroup
+    parameters:
+      - parameters/inputs/catalog.yaml

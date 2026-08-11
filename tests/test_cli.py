@@ -760,6 +760,36 @@ class TestCmdDeploy:
         # The diagnostic should list at least one real workspace site.
         assert "test-site" in captured.err
 
+    def test_deploy_fails_when_a_site_in_scope_will_not_load(
+        self, multi_site_workspace, capsys
+    ):
+        """A selector resolves against every site, so one that fails to load
+        leaves the target set smaller than the selector names. Deploying the
+        remainder would report success for a fleet the operator did not get."""
+        from siteops.orchestrator import Orchestrator
+
+        # A tab inside indentation breaks the YAML parser.
+        broken = multi_site_workspace / "sites" / "broken-site.yaml"
+        broken.write_text("name: broken-site\n\tlabels:\n", encoding="utf-8")
+
+        orchestrator = Orchestrator(multi_site_workspace)
+        manifest_path = multi_site_workspace / "manifests" / "multi-site.yaml"
+
+        args = MagicMock()
+        args.manifest = manifest_path
+        args.workspace = multi_site_workspace
+        args.selector = None
+        args.parallel = None
+
+        with patch.object(orchestrator, "deploy") as mock_deploy:
+            exit_code = cmd_deploy(args, orchestrator)
+
+        assert exit_code == 1
+        mock_deploy.assert_not_called()
+        captured = capsys.readouterr()
+        assert "broken-site" in captured.err
+        assert "target set is incomplete" in captured.err
+
     def test_deploy_no_steps(self, complete_workspace, capsys):
         """Test deploy with no steps returns exit code 0."""
         from siteops.orchestrator import Orchestrator

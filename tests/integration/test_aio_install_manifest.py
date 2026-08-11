@@ -135,9 +135,13 @@ class TestAioInstallIdempotency:
     def test_redeploy_preserves_resource_ids(
         self, orchestrator, selector, aio_install_result
     ):
-        """Re-deploying must not recreate core AIO resources. Recreation would
-        break every downstream step (secretsync, opc-ua) that captured the
-        original IDs. Mirrors the stability guard in the secretsync suite."""
+        """Re-deploying resolves the same resources.
+
+        A resource id is derived from its name, so this catches a resource that
+        moved or was renamed. It cannot show that a resource survived, since a
+        delete and recreate under the same name produces the same id. The
+        extension identity below is what covers that.
+        """
         result2 = orchestrator.deploy(
             manifest_path=WORKSPACE_PATH / "manifests" / "aio-install.yaml",
             selector=selector,
@@ -156,6 +160,43 @@ class TestAioInstallIdempotency:
                     f"Site '{name}': {output_name} resource ID changed on redeploy "
                     f"({id1!r} -> {id2!r})"
                 )
+
+    def test_redeploy_does_not_recreate_the_aio_extension(
+        self, orchestrator, selector, aio_install_result
+    ):
+        """The extension's managed identity survives a second deploy.
+
+        Azure assigns a principal id when it creates the identity, and a new one
+        whenever the extension is recreated. It is therefore the field that
+        separates a reconcile from a delete and recreate, which the resource id
+        cannot do. A recreated extension drops every role assignment granted to
+        the old principal, and both deploys still report success.
+        """
+        result2 = orchestrator.deploy(
+            manifest_path=WORKSPACE_PATH / "manifests" / "aio-install.yaml",
+            selector=selector,
+        )
+        assert result2["summary"]["failed"] == 0
+
+        for name in aio_install_result["sites"]:
+            before = assert_output_exists(
+                find_step(aio_install_result, name, "aio-instance"), "aioExtension"
+            ).get("identityPrincipalId")
+            after = assert_output_exists(
+                find_step(result2, name, "aio-instance"), "aioExtension"
+            ).get("identityPrincipalId")
+
+            assert before, (
+                f"Site '{name}': the aio extension reported no "
+                f"identityPrincipalId, so a recreate could not be told from a "
+                f"reconcile."
+            )
+            assert after == before, (
+                f"Site '{name}': the aio extension's managed identity changed on "
+                f"redeploy, so the extension was recreated rather than "
+                f"reconciled. Every role assignment made to the previous "
+                f"principal no longer applies."
+            )
 
 
 class TestAioInstallClusterHealth:
