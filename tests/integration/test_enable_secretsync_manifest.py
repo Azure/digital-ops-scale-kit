@@ -91,9 +91,16 @@ class TestSecretSyncIdempotency:
     """Validate that re-deploying produces consistent results."""
 
     def test_redeploy_succeeds_with_same_outputs(self, orchestrator, selector, secretsync_result):
-        """Every resource secretsync creates is expected to be idempotent. A
-        regression where the MI, KV, or SPC silently gets recreated would
-        break workload-identity federation and any dependent site."""
+        """Every resource secretsync creates is expected to be idempotent.
+
+        The resource ids catch a resource that moved or was renamed. The managed
+        identity's principal and client ids are what catch a recreate, since
+        Azure assigns both at creation and issues new ones for a replacement
+        identity, while the resource id is derived from the name and is
+        identical either way. A recreated identity keeps the same id and no
+        longer holds the federated credential or the vault role, so workload
+        identity silently stops working.
+        """
         result2 = orchestrator.deploy(
             manifest_path=WORKSPACE_PATH / "manifests" / "secretsync.yaml",
             selector=selector,
@@ -105,6 +112,11 @@ class TestSecretSyncIdempotency:
             "managedIdentityResourceId",
             "keyVaultResourceId",
         )
+        # Assigned by Azure at creation rather than derived from the name.
+        identity_outputs = (
+            "managedIdentityPrincipalId",
+            "managedIdentityClientId",
+        )
         for name in secretsync_result["sites"]:
             step1 = find_step(secretsync_result, name, "secretsync")
             step2 = find_step(result2, name, "secretsync")
@@ -114,6 +126,19 @@ class TestSecretSyncIdempotency:
                 assert v1 == v2, (
                     f"Site '{name}': {output_name} changed on redeploy "
                     f"({v1!r} -> {v2!r})"
+                )
+            for output_name in identity_outputs:
+                v1 = assert_output_exists(step1, output_name)
+                v2 = assert_output_exists(step2, output_name)
+                assert v1, (
+                    f"Site '{name}': {output_name} is empty, so a recreated "
+                    f"managed identity could not be told from a reconciled one."
+                )
+                assert v1 == v2, (
+                    f"Site '{name}': {output_name} changed on redeploy "
+                    f"({v1!r} -> {v2!r}), so the managed identity was recreated "
+                    f"rather than reconciled. Its federated credential and vault "
+                    f"role no longer apply."
                 )
 
 

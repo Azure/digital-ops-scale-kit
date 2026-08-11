@@ -30,44 +30,6 @@ class TestParameterChaining:
         manifest = Manifest.from_file(manifest_path, workspace_root=workspace_root)
         return {s.name for s in manifest.steps}
 
-    def test_secretsync_inputs_refs_valid_steps(self, workspace):
-        """parameters/inputs/secretsync.yaml should only reference steps that exist in manifests."""
-        chaining_file = workspace / "parameters" / "inputs" / "secretsync.yaml"
-        refs = self._get_chaining_refs(chaining_file)
-        assert len(refs) > 0, "No step output references found in inputs/secretsync.yaml"
-
-        # Get step names from both manifests that use this inputs file
-        aio_steps = self._get_manifest_step_names(workspace / "manifests" / "aio-install.yaml", workspace_root=workspace)
-        secretsync_steps = self._get_manifest_step_names(workspace / "manifests" / "secretsync.yaml", workspace_root=workspace)
-        all_valid_steps = aio_steps | secretsync_steps
-
-        for step_name, output_path, raw in refs:
-            assert step_name in all_valid_steps, (
-                f"inputs/secretsync.yaml references unknown step '{step_name}': {raw}"
-            )
-
-    def test_secretsync_inputs_refs_valid_outputs(self, workspace):
-        """Every output referenced in inputs/secretsync.yaml should exist in resolve-aio.bicep."""
-        chaining_file = workspace / "parameters" / "inputs" / "secretsync.yaml"
-        refs = self._get_chaining_refs(chaining_file)
-
-        # Parse output names from resolve-aio.bicep
-        resolve_aio = workspace / "templates" / "aio" / "resolve-aio.bicep"
-        bicep_content = resolve_aio.read_text(encoding="utf-8")
-        output_names = set(re.findall(r"^output\s+(\w+)\s+", bicep_content, re.MULTILINE))
-        assert len(output_names) > 0, "No outputs found in resolve-aio.bicep"
-
-        for step_name, output_path, raw in refs:
-            if step_name != "resolve-aio":
-                continue
-            # The top-level output name is the first segment of the path
-            top_level_output = output_path.split(".")[0]
-            assert top_level_output in output_names, (
-                f"inputs/secretsync.yaml references unknown output "
-                f"'{top_level_output}' from resolve-aio: {raw}\n"
-                f"Available outputs: {sorted(output_names)}"
-            )
-
     def test_resolve_aio_outputs_all_have_consumers(self, workspace):
         """Every output resolve-aio emits is chained by a parameter file a manifest attaches.
 
@@ -111,6 +73,80 @@ class TestParameterChaining:
             f"resolve-aio.bicep emits outputs no attached parameter file consumes: "
             f"{sorted(orphaned)}. Either chain each into the step that needs it, or drop it."
         )
+
+    def test_every_chained_output_is_declared_by_its_producer(self, workspace):
+        """Every `{{ steps.X.outputs.Y }}` names an output step X's template declares.
+
+        The engine validates that step X exists and runs earlier, but not that
+        Y is real. A reference to a misspelled output resolves to nothing, and
+        the step deploys with that parameter missing. Per-file tests covered
+        some chaining files and not others, so this discovers them instead.
+
+        Only the first path segment is checked. A nested path such as
+        `customLocation.id` indexes into an output object whose shape lives in
+        the template's own expression rather than in its output declarations.
+        """
+        from tests.workspace.test_manifest_validation import _all_manifest_files
+
+        output_decl = re.compile(r"^output\s+(\w+)\s+", re.MULTILINE)
+        checked = 0
+        failures: list[str] = []
+
+        for manifest_path in _all_manifest_files(workspace):
+            from siteops.models import Manifest
+
+            manifest = Manifest.from_file(manifest_path, workspace_root=workspace)
+            template_for_step = {
+                s.name: getattr(s, "template", None) for s in manifest.steps
+            }
+
+            # Read the flattened manifest rather than the raw YAML. A step
+            # contributed by an `include:` carries its own parameter files, and
+            # those are invisible in the raw steps list, which holds the include
+            # entry instead.
+            declared = list(manifest.parameters or [])
+            for step in manifest.steps:
+                declared.extend(getattr(step, "parameters", []) or [])
+
+            param_files: set[Path] = set()
+            for param_path in declared:
+                if not isinstance(param_path, str):
+                    continue
+                pattern = re.sub(r"\{\{[^}]*\}\}", "*", param_path)
+                param_files.update(workspace.glob(pattern))
+
+            for param_file in sorted(param_files):
+                for step_name, output_path, raw_ref in self._get_chaining_refs(param_file):
+                    template = template_for_step.get(step_name)
+                    if not template:
+                        # The producer is spliced in by whatever composes this
+                        # manifest, and is checked there.
+                        continue
+                    template_file = workspace / template
+                    if not template_file.exists() or template_file.suffix != ".bicep":
+                        continue
+                    declared_outputs = set(
+                        output_decl.findall(template_file.read_text(encoding="utf-8"))
+                    )
+                    if not declared_outputs:
+                        continue
+
+                    checked += 1
+                    root = output_path.split(".")[0]
+                    if root not in declared_outputs:
+                        failures.append(
+                            f"{param_file.relative_to(workspace)} references "
+                            f"'{root}' from step '{step_name}', which "
+                            f"{template} does not declare: {raw_ref}\n"
+                            f"    Available: {sorted(declared_outputs)}"
+                        )
+
+        assert checked > 0, (
+            "No chained output references were checked, so this test would pass "
+            "without examining anything. If the chaining convention moved, "
+            "update the discovery rather than deleting the test."
+        )
+        assert not failures, "\n\n".join(failures)
 
     def test_secret_provider_class_preservation_is_wired(self, workspace):
         """Enablement still preserves an existing object list rather than dropping it.
@@ -284,6 +320,9 @@ class TestArmResourceShape:
             "Build `properties` as an object literal and put any condition on the "
             "individual property value instead.\n" + "\n".join(violations)
         )
+
+
+class TestParameterAttachmentTier:
     """A parameter file's attachment tier follows from what the file is.
 
     Chaining files carry `{{ steps.X.outputs.Y }}` wiring and attach at step
@@ -789,43 +828,45 @@ class TestReleaseConfigs:
         )
         assert default_release == latest_release
 
-    def test_base_site_aio_release_has_config_file(self, workspace):
-        """The aioRelease in base-site.yaml must have a matching config file."""
-        base_path = workspace / "sites" / "base-site.yaml"
-        with open(base_path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
-
-        aio_release = data.get("properties", {}).get("aioRelease")
-        assert aio_release, "base-site.yaml missing properties.aioRelease"
-
-        release_file = workspace / "parameters" / "aio-releases" / f"{aio_release}.yaml"
-        assert release_file.exists(), (
-            f"base-site.yaml references aioRelease '{aio_release}' "
-            f"but parameters/aio-releases/{aio_release}.yaml does not exist"
-        )
-
     def test_all_sites_aio_releases_have_config_files(self, workspace):
-        """Every committed site that pins an aioRelease must reference an existing config file.
+        """Every committed site resolves an aioRelease to an existing config file.
 
-        Catches drift where a site is added or updated to use a release whose YAML
-        was never created (e.g., typo, or deleted release without migrating sites).
+        Sites are read through the orchestrator so inheritance applies. Reading
+        the raw YAML would have to skip a site that declares no `aioRelease` of
+        its own, which cannot tell a site that inherits one from a site whose
+        whole chain lacks it. The second case resolves the release path to a
+        literal `{{ ... }}`, which names no file, and six manifests select a
+        release that way.
         """
+        from siteops.orchestrator import Orchestrator
+
         releases_dir = workspace / "parameters" / "aio-releases"
         sites_dir = workspace / "sites"
         if not sites_dir.exists():
             return
 
+        orchestrator = Orchestrator(workspace)
+        checked = 0
         for site_file in sorted(sites_dir.glob("*.yaml")):
-            with open(site_file, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
-            aio_release = (data.get("properties") or {}).get("aioRelease")
-            if not aio_release:
+            if site_file.name == "base-site.yaml":
+                # A template rather than a deployable site.
                 continue
+            site = orchestrator.load_site(site_file.stem)
+            aio_release = (site.properties or {}).get("aioRelease")
+            assert aio_release, (
+                f"{site_file.name} resolves no `properties.aioRelease`, and "
+                f"neither does anything it inherits. Every manifest that pins a "
+                f"release resolves its path from that key, so the path would "
+                f"keep its template literal and name no file."
+            )
             release_file = releases_dir / f"{aio_release}.yaml"
             assert release_file.exists(), (
                 f"{site_file.name} references aioRelease '{aio_release}' "
                 f"but parameters/aio-releases/{aio_release}.yaml does not exist"
             )
+            checked += 1
+
+        assert checked > 0, "No committed sites were checked."
 
     def test_release_yaml_keys_consistent_across_files(self, workspace):
         """All aio-releases YAML files should declare the same key set.
@@ -853,97 +894,14 @@ class TestReleaseConfigs:
                 f"All release files must declare the same key set."
             )
 
-    def test_version_config_api_versions_are_allowed_in_bicep(self, workspace):
-        """Every aioApiVersion must appear in the @allowed list of the dispatching bicep templates.
-
-        Single source of truth: the @allowed([...]) block in templates/aio/instance.bicep
-        and templates/aio/modules/update-instance.bicep. Prevents shipping a version YAML
-        whose aioApiVersion the templates cannot route to (which would only surface at
-        deploy time as an opaque Bicep parameter error).
-        """
-        dispatchers = [
-            workspace / "templates" / "aio" / "instance.bicep",
-            workspace / "templates" / "aio" / "modules" / "update-instance.bicep",
-            workspace / "templates" / "aio" / "resolve-aio.bicep",
-            workspace / "templates" / "secretsync" / "enable-secretsync.bicep",
-            workspace / "templates" / "aio" / "upgrade" / "update-extensions.bicep",
-        ]
-
-        # Extract the @allowed([...]) block immediately preceding `param aioApiVersion`.
-        # Matches:  @allowed([\n  '2025-10-01'\n  '2026-03-01'\n])\nparam aioApiVersion
-        allowed_block_re = re.compile(
-            r"@allowed\(\s*\[([^\]]*)\]\s*\)\s*param\s+aioApiVersion\b",
-            re.MULTILINE,
-        )
-        literal_re = re.compile(r"'([^']+)'")
-
-        def extract_allowed(bicep_path: Path) -> set[str]:
-            text = bicep_path.read_text(encoding="utf-8")
-            match = allowed_block_re.search(text)
-            assert match, f"{bicep_path.name}: could not find @allowed block before `param aioApiVersion`"
-            return set(literal_re.findall(match.group(1)))
-
-        allowed_sets = {p.name: extract_allowed(p) for p in dispatchers}
-        # Sanity: both dispatchers must agree on the allowed set.
-        values = list(allowed_sets.values())
-        assert all(s == values[0] for s in values), (
-            f"@allowed lists for aioApiVersion diverge between dispatchers: {allowed_sets}"
-        )
-        allowed = values[0]
-        assert allowed, "No @allowed values parsed (regex or template changed)"
-
-        for release_file in self._get_release_files(workspace):
-            with open(release_file, "r", encoding="utf-8") as f:
-                config = yaml.safe_load(f)
-            api_version = config.get("aioApiVersion")
-            assert api_version in allowed, (
-                f"{release_file.name}: aioApiVersion '{api_version}' is not in the "
-                f"@allowed set {sorted(allowed)} declared by "
-                f"{', '.join(sorted(allowed_sets.keys()))}. "
-                f"Add the new API version to both dispatchers' @allowed blocks and "
-                f"their ternary dispatch before shipping this version YAML."
-            )
-
-    def test_version_config_adr_api_versions_are_allowed_in_bicep(self, workspace):
-        """Every adrApiVersion must appear in the @allowed list of templates/deps/adr-ns.bicep.
-
-        Same shape as test_version_config_api_versions_are_allowed_in_bicep but
-        for the ADR (Microsoft.DeviceRegistry) dispatch. The ADR namespace API
-        version moves with AIO releases (devices/assets project to cluster).
-        """
-        dispatcher = workspace / "templates" / "deps" / "adr-ns.bicep"
-        text = dispatcher.read_text(encoding="utf-8")
-        match = re.search(
-            r"@allowed\(\s*\[([^\]]*)\]\s*\)\s*param\s+adrApiVersion\b",
-            text,
-            re.MULTILINE,
-        )
-        assert match, (
-            f"{dispatcher.name}: could not find @allowed block before "
-            f"`param adrApiVersion`"
-        )
-        allowed = set(re.findall(r"'([^']+)'", match.group(1)))
-        assert allowed, "No @allowed values parsed for adrApiVersion"
-
-        for release_file in self._get_release_files(workspace):
-            with open(release_file, "r", encoding="utf-8") as f:
-                config = yaml.safe_load(f)
-            api_version = config.get("adrApiVersion")
-            assert api_version in allowed, (
-                f"{release_file.name}: adrApiVersion '{api_version}' is not in "
-                f"the @allowed set {sorted(allowed)} declared by "
-                f"{dispatcher.name}. Add the new API version to the @allowed "
-                f"block and dispatch in {dispatcher.name} (and create a matching "
-                f"per-version module under templates/deps/modules/) before "
-                f"shipping this version YAML."
-            )
-
     def test_version_config_adr_api_versions_have_module(self, workspace):
         """Every adrApiVersion must have a matching templates/deps/modules/adr-ns-<ver>.bicep.
 
-        Parallel to test_version_config_api_versions_are_allowed_in_bicep but for
-        the per-version module file the ADR dispatcher routes to. Catches the
-        case where the @allowed list is updated but the module file is missing.
+        The dispatcher's `@allowed` list and the module files it routes to are
+        separate facts. `test_aio_dispatch_shape.py` reads the dispatcher source
+        for its routing conditions and never checks the file exists, so an
+        allowed version whose module was deleted or never created is caught
+        only here.
         """
         modules_dir = workspace / "templates" / "deps" / "modules"
         for release_file in self._get_release_files(workspace):

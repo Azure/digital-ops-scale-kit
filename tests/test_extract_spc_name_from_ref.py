@@ -9,7 +9,7 @@ require a live E2E to surface.
 
 from __future__ import annotations
 
-from tests.integration.test_secretsync_manifest import _extract_spc_name_from_ref
+from tests.integration.test_enable_secretsync_manifest import _extract_spc_name_from_ref
 
 
 def test_returns_none_for_non_dict():

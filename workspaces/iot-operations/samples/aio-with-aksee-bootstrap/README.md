@@ -18,7 +18,7 @@ The deploy blocks at `wait-for-bootstrap` for the 25 to 40 minutes the cluster t
 
 1. **aksee-bootstrap**: delivers and runs the bootstrap launcher on the target Windows VM via Arc Run Command. The launcher registers a Scheduled Task that drives a state machine through preflight, MSI install + Hyper-V enable (may reboot), single-node K3s cluster create, Arc-connect with custom locations, and cleanup. Survives the Hyper-V reboot via the at-startup task trigger and `state.json`. Phase 99 writes `siteops.bootstrap.state=succeeded` on the Arc machine resource.
 2. **wait-for-bootstrap**: polls that tag until it reads `succeeded`, gating the cluster-dependent steps below on the cluster actually being ready.
-3. **aio-fundamentals**: Arc extensions, custom location, AIO instance, schema registry, ADR namespace. Runs on the cluster the bootstrap produced.
+3. **the AIO platform steps**, composed from `_aio-fundamentals.yaml`: `global-edge-site`, `edge-site`, `schema-registry`, `adr-ns`, `aio-enablement`, `aio-instance`, and `schema-registry-role`. Arc extensions, custom location, AIO instance, schema registry, and ADR namespace, on the cluster the bootstrap produced.
 
 After the deploy completes, the cluster is registered with Arc, has custom locations enabled, and is running AIO. Add secret sync, OPC UA, or other workload samples on top via additional `include:` directives or by composing into a larger manifest.
 

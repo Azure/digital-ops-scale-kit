@@ -93,7 +93,7 @@ The scalekit exercises adjacent-release upgrades (e.g. `2606` -> `2607`) in CI p
 
 Sample templates under `samples/<name>/template.bicep` (e.g. `samples/opc-ua-solution/template.bicep`) pin every `Microsoft.IoTOperations/*` and `Microsoft.DeviceRegistry/*` reference to the **oldest supported** API version in the matrix above. They rely on RP backward-compatibility so a single file works against every shipped release. Bump these pins only when the oldest supported API version is removed from the matrix, not on every release. The workspace test `test_samples_pin_to_oldest_api_version` enforces this.
 
-This policy applies only to samples. Fundamentals (`templates/aio/`, `templates/deps/`) use the per-version dispatch described under "Adding a new AIO release".
+This policy applies to samples. The platform fundamentals (`templates/aio/` top level, `templates/deps/`) and the config-driven catalog templates under `templates/aio/dataflows/` both use the per-version dispatch described under "Adding a new AIO release", so a site's resources are written at the API generation its release ships. Adding a release that introduces a generation therefore means adding a catalog module too, which `tests/workspace/test_aio_dispatch_shape.py` checks. See [resource-catalog.md](resource-catalog.md).
 
 ## Adding a new AIO release
 
@@ -110,8 +110,9 @@ This policy applies only to samples. Fundamentals (`templates/aio/`, `templates/
    - Add `templates/deps/modules/adr-ns-<YYYY-MM-DD>.bicep` by copying the previous version verbatim and changing the API version string.
 4. **If neither API version is new**, no Bicep changes are needed. Siteops forwards the new extension versions via parameter auto-filtering.
 5. **Run the workspace suite**: `pytest tests/workspace/ -q`. The relevant checks are:
-   - `test_version_config_api_versions_are_allowed_in_bicep`: every `aioApiVersion` must appear in every AIO API-version consumer listed in step 2.
-   - `test_version_config_adr_api_versions_are_allowed_in_bicep`: every `adrApiVersion` must appear in the ADR dispatcher's `@allowed` list.
+   - `test_release_api_versions_are_accepted_by_every_consumer`: every API version a release selects appears in the `@allowed` list of every consumer that dispatches on it, discovered rather than listed.
+   - `test_allowed_sets_match_across_consumers`: the consumers agree on which versions they accept.
+   - `test_version_config_aio_api_versions_have_modules`: every selectable version has a per-version module file.
    - `test_all_sites_aio_releases_have_config_files`: no site references a missing YAML file.
    - `TestUpdateInstanceDispatch`: every param of the update-instance dispatcher is forwarded by every caller.
 6. **Decide the default for new sites.** If the new release should be the workspace default, update `aioRelease:` in `sites/base-site.yaml`. Sites that don't override `properties.aioRelease` will then pick it up on the next deploy. If the new release is opt-in only, leave the base alone and pin specific sites individually.

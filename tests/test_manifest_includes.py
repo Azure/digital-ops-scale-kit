@@ -446,6 +446,69 @@ class TestWhenPropagation:
         with pytest.raises(IncludeError, match="already has a `when:`"):
             Manifest.from_file(parent, workspace_root=workspace)
 
+    def test_malformed_include_when_raises(self, workspace: Path):
+        """An include's gate is validated like a step's own.
+
+        Condition evaluation fails open, so an unvalidated typo turns a gate
+        meant to exclude into one that includes on every site. A single `=`
+        instead of `==` is the realistic case.
+        """
+        _write_manifest(
+            workspace / "manifests" / "f.yaml",
+            {"name": "f", "steps": [_step("f-1")]},
+        )
+        parent = _write_manifest(
+            workspace / "manifests" / "p.yaml",
+            {
+                "name": "p",
+                "steps": [
+                    {
+                        "include": "f.yaml",
+                        "when": "{{ site.properties.gate = 'on' }}",
+                    }
+                ],
+            },
+        )
+
+        with pytest.raises(ValueError, match="Invalid 'when' condition syntax"):
+            Manifest.from_file(parent, workspace_root=workspace)
+
+    def test_malformed_include_when_names_the_include(self, workspace: Path):
+        _write_manifest(
+            workspace / "manifests" / "f.yaml",
+            {"name": "f", "steps": [_step("f-1")]},
+        )
+        parent = _write_manifest(
+            workspace / "manifests" / "p.yaml",
+            {
+                "name": "p",
+                "steps": [{"include": "f.yaml", "when": "{{ nonsense }}"}],
+            },
+        )
+
+        with pytest.raises(ValueError, match="f.yaml"):
+            Manifest.from_file(parent, workspace_root=workspace)
+
+    def test_valid_include_when_is_accepted(self, workspace: Path):
+        """The supported forms still pass, so the guard is not over-tight."""
+        _write_manifest(
+            workspace / "manifests" / "f.yaml",
+            {"name": "f", "steps": [_step("f-1")]},
+        )
+        for expression in (
+            "{{ site.properties.gate == 'on' }}",
+            "{{ site.properties.nested.path != 'none' }}",
+            "{{ site.labels.tier == 'edge' }}",
+            "{{ site.properties.flag }}",
+            "{{ site.properties.flag == true }}",
+        ):
+            parent = _write_manifest(
+                workspace / "manifests" / "p.yaml",
+                {"name": "p", "steps": [{"include": "f.yaml", "when": expression}]},
+            )
+            m = Manifest.from_file(parent, workspace_root=workspace)
+            assert m.steps[0].when == expression
+
     def test_when_with_fragment_manifest_params_raises(self, workspace: Path):
         _write_manifest(
             workspace / "manifests" / "f.yaml",

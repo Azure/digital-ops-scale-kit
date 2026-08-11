@@ -64,13 +64,21 @@ on:
         type: string
         default: "enabled"
       tests:
-        description: "Subset of integration test files to run, comma-separated. Each value maps to one tests/integration/test_<value>_manifest.py file and narrows which manifest gets deployed onto the cluster. Empty = run all. Valid values: aio-install, secretsync, secretsync-sample, opc-ua-solution, aio-upgrade. Useful for demos and focused debugging when paired with keep-cluster-alive-minutes."
+        description: "Subset of integration test files to run, comma-separated. Each value maps to one tests/integration/test_<value>_manifest.py file and narrows which manifest gets deployed onto the cluster. Empty = run all. Valid values: aio-install, enable-secretsync, sync-secrets, opc-ua-solution, dataflow-sample, aio-resources, aio-upgrade. Useful for demos and focused debugging when paired with keep-cluster-alive-minutes."
         type: string
         default: ""
 
 permissions:
   id-token: write
   contents: read
+
+# Engine output reaches this workflow's logs and artifacts, which are public.
+# `GITHUB_ACTIONS` already turns redaction on, so this is here to make the
+# intent visible and to cover a step that does not inherit that variable.
+env:
+  SITEOPS_REDACT_OUTPUT: "1"
+  # Suppress az result payloads. A command needing output passes an explicit `-o`.
+  AZURE_CORE_OUTPUT: none
 
 jobs:
   prep:
@@ -89,6 +97,13 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+
+      # A template that does not compile fails every deploy that reaches it, so
+      # this runs before the matrix provisions a cluster. Warnings are fatal
+      # here, which is what catches an unknown resource type or API version.
+      - name: Validate Bicep templates
+        shell: pwsh
+        run: ./scripts/validate-bicep.ps1
 
       - name: Parse inputs
         id: v
@@ -179,9 +194,11 @@ jobs:
           # sync if a new test phase file is added.
           test_map = {
               "aio-install": "tests/integration/test_aio_install_manifest.py",
-              "secretsync": "tests/integration/test_secretsync_manifest.py",
-              "secretsync-sample": "tests/integration/test_sync_secrets_manifest.py",
+              "enable-secretsync": "tests/integration/test_enable_secretsync_manifest.py",
+              "sync-secrets": "tests/integration/test_sync_secrets_manifest.py",
               "opc-ua-solution": "tests/integration/test_opc_ua_solution_manifest.py",
+              "dataflow-sample": "tests/integration/test_dataflow_sample_manifest.py",
+              "aio-resources": "tests/integration/test_aio_resources_manifest.py",
               "aio-upgrade": "tests/integration/test_aio_upgrade_manifest.py",
           }
           if tests_in:
@@ -211,7 +228,7 @@ jobs:
           else:
               pytest_paths = "tests/integration/"
           if "disabled" in secret_sync_modes:
-              secret_sync_tests = {"secretsync", "secretsync-sample"}
+              secret_sync_tests = {"enable-secretsync", "sync-secrets"}
               if not tests_in or secret_sync_tests.intersection(tests_in):
                   sys.exit(
                       "secret-sync-modes includes 'disabled', but the selected "
@@ -244,7 +261,11 @@ jobs:
     needs: prep
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
-    timeout-minutes: ${{ (inputs.keep-cluster-alive-minutes > 0 || inputs.upgrade-to != '') && 360 || 120 }}
+    # A standard run installs AIO, deploys the catalog through both routes, and
+    # tears the resource group down. Sized above the observed run so the
+    # `always()` teardown still gets scheduled, since a cancelled job can skip
+    # it and leave the resource group behind.
+    timeout-minutes: ${{ (inputs.keep-cluster-alive-minutes > 0 || inputs.upgrade-to != '') && 360 || 180 }}
     concurrency:
       # Persistent: matrix cells share rg_key and omit the release suffix, so
       # they serialize (same RG can only host one AIO deploy at a time).
@@ -395,6 +416,7 @@ jobs:
           az group create \
             --name "$RG" \
             --location "$LOCATION" \
+            -o none \
             --tags \
               managedBy=siteops-e2e \
               ephemeral=true \
@@ -488,6 +510,8 @@ jobs:
               exit 1
             fi
           fi
+          # Mask the SP object id so every later step prints it as ***.
+          echo "::add-mask::$SP_OID"
           kubectl create namespace azure-iot-operations \
             --dry-run=client -o yaml | kubectl apply -f -
           kubectl create rolebinding e2e-sp-admin \
@@ -529,8 +553,13 @@ jobs:
           python scripts/render-e2e-site.py \
             --template tests/e2e/sites/e2e-test.yaml.tmpl \
             --output-dir "$RUNNER_TEMP/e2e-sites"
-          echo "::group::Rendered site"
-          cat "$RUNNER_TEMP/e2e-sites/${E2E_SITE_NAME}.yaml"
+          # Job logs are public. The structure is what makes a render debuggable
+          # (inherits resolution, deployOptions, resourceSets), so the four
+          # fields the template fills from the environment are masked and the
+          # rest is printed as-is.
+          echo "::group::Rendered site (identifying values masked)"
+          sed -E 's/^([[:space:]]*(subscription|resourceGroup|location|clusterName)):.*/\1: <masked>/' \
+            "$RUNNER_TEMP/e2e-sites/${E2E_SITE_NAME}.yaml"
           echo "::endgroup::"
 
       - name: Run E2E integration tests
@@ -585,8 +614,9 @@ jobs:
           python scripts/render-e2e-site.py \
             --template tests/e2e/sites/e2e-test.yaml.tmpl \
             --output-dir "$RUNNER_TEMP/e2e-sites"
-          echo "::group::Rendered site (upgrade-to ${E2E_AIO_RELEASE})"
-          cat "$RUNNER_TEMP/e2e-sites/${E2E_SITE_NAME}.yaml"
+          echo "::group::Rendered site (upgrade-to ${E2E_AIO_RELEASE}, identifying values masked)"
+          sed -E 's/^([[:space:]]*(subscription|resourceGroup|location|clusterName)):.*/\1: <masked>/' \
+            "$RUNNER_TEMP/e2e-sites/${E2E_SITE_NAME}.yaml"
           echo "::endgroup::"
 
       - name: Run upgrade-phase integration tests
@@ -626,7 +656,7 @@ jobs:
           RG: "${{ steps.names.outputs.rg }}"
           CLUSTER: "${{ steps.names.outputs.cluster }}"
           JOB_START_EPOCH: "${{ steps.names.outputs.job_start_epoch }}"
-          JOB_BUDGET_MIN: "${{ (inputs.keep-cluster-alive-minutes > 0 || inputs.upgrade-to != '') && 360 || 120 }}"
+          JOB_BUDGET_MIN: "${{ (inputs.keep-cluster-alive-minutes > 0 || inputs.upgrade-to != '') && 360 || 180 }}"
         # Sleep so the runner (and its k3s cluster + Arc connection) remain
         # reachable for interactive debugging before teardown. The hold is
         # capped by what is left of the job budget, not by a fixed ceiling: a
@@ -684,8 +714,12 @@ jobs:
           # identity lacks subscription-scope read. That is distinct from the
           # RG being absent, so handle the query failure on its own terms
           # instead of letting `set -e` end the step.
+          #
+          # Route stderr away rather than merging it. A warning on a successful
+          # call would join the value and compare unequal to `true`, so a live
+          # resource group would read as absent. Nothing reads the merged stream.
           EXISTS=""
-          if ! EXISTS=$(az group exists --name "$RG" 2>&1); then
+          if ! EXISTS=$(az group exists --name "$RG" -o tsv --only-show-errors 2>/dev/null); then
             if [[ "$RG_CREATED" != "success" ]]; then
               echo "Could not query RG '$RG' and creation did not succeed, so there is nothing this run made to remove."
               echo "- Ephemeral RG never created: \`$RG\`" >> "$GITHUB_STEP_SUMMARY"
@@ -695,10 +729,18 @@ jobs:
             echo "- Ephemeral RG may have leaked, delete by hand: \`$RG\`" >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
-          if [[ "$EXISTS" != "true" ]]; then
+          if [[ "$EXISTS" == "false" ]]; then
             echo "RG '$RG' does not exist, so teardown is a no-op."
             echo "- Ephemeral RG already absent: \`$RG\`" >> "$GITHUB_STEP_SUMMARY"
             exit 0
+          fi
+          # `true` and `false` are the only answers. Anything else means the
+          # value did not come from the query, so stop rather than treat the
+          # group as absent.
+          if [[ "$EXISTS" != "true" ]]; then
+            echo "::error::RG '$RG' existence check returned '$EXISTS' rather than true or false, so teardown cannot run safely. Delete it by hand."
+            echo "- Ephemeral RG state unknown, delete by hand: \`$RG\`" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
           fi
           TAGS_JSON=$(az group show --name "$RG" --query tags -o json)
           MANAGED=$(echo "$TAGS_JSON" | python3 -c "import json,sys;print((json.load(sys.stdin) or {}).get('managedBy',''))")

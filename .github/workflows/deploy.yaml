@@ -33,8 +33,10 @@ on:
                     - manifests/secretsync.yaml
                     - manifests/aksee-bootstrap.yaml
                     - manifests/aksee-upgrade.yaml
+                    - manifests/aio-resources.yaml
                     - samples/secretsync-sample/manifest.yaml
                     - samples/opc-ua-solution/manifest.yaml
+                    - samples/dataflow-sample/manifest.yaml
                     - samples/aio-with-opc-ua/manifest.yaml
                     - samples/aio-with-aksee-bootstrap/manifest.yaml
                 default: "manifests/aio-install.yaml"
@@ -64,6 +66,10 @@ on:
 
 env:
     PYTHONUNBUFFERED: "1"
+    # Engine output reaches this workflow's logs and artifacts, which are public.
+    SITEOPS_REDACT_OUTPUT: "1"
+    # Suppress az result payloads. A command needing output passes an explicit `-o`.
+    AZURE_CORE_OUTPUT: none
 
 # Serialize per-environment work across deploy and integration-test
 concurrency:

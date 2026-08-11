@@ -61,6 +61,45 @@ def assert_output_exists(step_result: dict[str, Any], output_name: str) -> Any:
     return output
 
 
+# AIO reports unified workload health from the generation below onward. A site
+# on an older release deploys the same resources, and the catalog assertions
+# above still hold, but nothing writes `status.healthState`, so waiting for it
+# would spend the budget and then fail for the platform's age rather than for
+# anything the declaration did.
+CR_HEALTH_MIN_API_VERSION = "2026-03-01"
+
+
+def skip_unless_health_is_reported(step_result: dict[str, Any]) -> str:
+    """Skip the calling test when the deployed generation predates health reporting.
+
+    Reads the generation the family entry point reports, so the decision
+    follows what was actually deployed rather than what a release file names.
+
+    Args:
+        step_result: The result of the catalog family step.
+
+    Returns:
+        The API version that deployed, when it reports health.
+    """
+    import pytest
+
+    # Read through the unwrapping helper. ARM returns an output as
+    # `{"value": ..., "type": ...}`, so reading the mapping directly yields a
+    # dict and every caller skips on a release that does report health.
+    api_version = assert_output_exists(step_result, "apiVersion")
+    if not isinstance(api_version, str) or not api_version:
+        pytest.skip(
+            f"The family step reported apiVersion as {api_version!r}, so whether "
+            f"this release reports workload health cannot be determined."
+        )
+    if api_version < CR_HEALTH_MIN_API_VERSION:
+        pytest.skip(
+            f"AIO reports workload health from {CR_HEALTH_MIN_API_VERSION}, and "
+            f"this deploy wrote at {api_version}."
+        )
+    return api_version
+
+
 def assert_output_starts_with(
     step_result: dict[str, Any], output_name: str, prefix: str
 ) -> str:

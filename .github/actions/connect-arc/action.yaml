@@ -111,6 +111,7 @@ runs:
             --resource-group "${RESOURCE_GROUP}" \
             --location "${LOCATION}" \
             --only-show-errors \
+            -o none \
             "${CL_ARG[@]}"
 
         retry "az connectedk8s enable-features" \
@@ -119,6 +120,7 @@ runs:
             --resource-group "${RESOURCE_GROUP}" \
             --features custom-locations cluster-connect \
             --only-show-errors \
+            -o none \
             "${CL_ARG[@]}"
 
     - name: Wait for Arc Connected status (initial)
@@ -143,7 +145,8 @@ runs:
           --resource-group "${RESOURCE_GROUP}" \
           --enable-oidc-issuer \
           --enable-workload-identity \
-          --only-show-errors
+          --only-show-errors \
+          -o none
 
     - name: Capture OIDC issuer URL
       id: issuer
@@ -163,7 +166,10 @@ runs:
           echo "::error::Arc returned an empty OIDC issuer URL after enable-oidc-issuer"
           exit 1
         fi
-        echo "OIDC issuer URL: ${URL}"
+        # The issuer URL carries a tenant-scoped id. Mask it so every later step
+        # prints it as ***.
+        echo "::add-mask::${URL}"
+        echo "Captured OIDC issuer URL"
         echo "url=${URL}" >> "${GITHUB_OUTPUT}"
 
     - name: Restart k3s with service-account-issuer (systemd drop-in)

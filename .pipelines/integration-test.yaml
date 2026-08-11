@@ -8,14 +8,17 @@ pr: none
 
 parameters:
   - name: manifest
-    displayName: "Manifest to test"
+    displayName: "Test phase"
     type: string
     default: all
     values:
       - all
       - aio-install
-      - secretsync
+      - enable-secretsync
+      - sync-secrets
       - opc-ua-solution
+      - dataflow-sample
+      - aio-resources
 
   - name: skipCleanup
     displayName: "Skip resource cleanup (for debugging)"
@@ -51,6 +54,9 @@ parameters:
 variables:
   - group: ${{ parameters.secretGroups[parameters.environment] }}
   - name: PYTHONUNBUFFERED
+    value: '1'
+  # Engine output reaches this pipeline's logs and artifacts, which are public.
+  - name: SITEOPS_REDACT_OUTPUT
     value: '1'
 
 pool:

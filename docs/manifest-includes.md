@@ -66,7 +66,8 @@ Manifest-level `parameters:` lists merge across includes:
 
 - The parent's `parameters:` come first.
 - Each include's manifest-level `parameters:` are appended after, in include order.
-- Duplicate paths (compared as normalized POSIX strings) are dropped on the first wins basis. The parent therefore wins on conflict.
+- Duplicate paths (compared as normalized POSIX strings) are dropped on the first wins basis, so the same file declared by both is loaded once, in the parent's position.
+- That is path deduplication, not key precedence. When the parent and an include attach *different* files that both set one key, the files load in list order and the include's value survives.
 
 Step-level `parameters:` (on individual steps) are not affected by include resolution. They follow the existing per-step rules.
 

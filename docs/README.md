@@ -14,6 +14,8 @@ Extended documentation for the Digital Operations Scale Kit.
 | [manifest-includes.md](manifest-includes.md) | Splicing one manifest into another via `include:` |
 | [parameter-resolution.md](parameter-resolution.md) | Template variables, output chaining, auto-filtering |
 | [aio-releases.md](aio-releases.md) | Pinning an AIO release per site, in-place upgrades, adding a new release |
+| [resource-catalog.md](resource-catalog.md) | Declaring AIO workload resources in YAML, attachment routes, when to use Bicep |
+| [dataflows.md](dataflows.md) | Dataflow endpoints, profiles, and dataflows |
 | [secret-sync.md](secret-sync.md) | Secret sync enablement and usage |
 | [ci-cd-setup.md](ci-cd-setup.md) | GitHub Actions, OIDC, secrets configuration |
 | [e2e-testing.md](e2e-testing.md) | End-to-end live-subscription test workflow |
@@ -33,8 +35,12 @@ Extended documentation for the Digital Operations Scale Kit.
 | **Include** | A step shape that splices another manifest's steps into the parent's step list at the include's position. Optionally gated by `when:`. |
 | **Standalone manifest** | A manifest meant to be deployed directly. The default. |
 | **Partial** | A manifest authored to be `include:`-d, not deployed standalone. Filename prefixed `_` by convention. |
-| **Sample** | A deployable example in `samples/<name>/`. Two shapes are supported: bundles (manifest + partial + template + inputs) and compositions (a manifest that `include:`s leaf partials from `manifests/` and other samples). |
-| **Composition** | A sample whose `manifest.yaml` is built entirely from `include:` steps that pull in `_partial.yaml`s from `manifests/` and other samples. Has no template of its own. |
+| **Sample** | A deployable example in `samples/<name>/`. Two shapes are supported, split by whether other samples can compose it: bundles (carry a `_partial.yaml`, so other samples can compose them) and compositions (`include:` other partials instead). |
+| **Composition** | A sample that carries no `_partial.yaml`, so it is an endpoint rather than a building block. Its `manifest.yaml` is built from `include:` steps pulling in `_partial.yaml`s from `manifests/` and other samples, plus any glue step they need and any declaration files it attaches. |
+| **Declaration** | An operator-authored parameter file describing resources to create, such as a `secrets` array or the dataflow catalog's `dataflowEndpoints`. Attaches at manifest level so a site can override it. |
+| **Resource catalog** | The mechanism for declaring AIO workload resources in YAML instead of Bicep. `manifests/aio-resources.yaml` is its entry point, and each family deploys only when a site selects a set for it. See [resource-catalog.md](resource-catalog.md). |
+| **Family** | One group of related resource kinds the catalog deploys together as a single step, such as dataflows (endpoints, profiles, and dataflows). One name identifies it throughout: `templates/aio/<family>/`, `manifests/_<family>.yaml`, `parameters/<family>/`, and the `resourceSets.<family>` key. |
+| **Resource set** | A named declaration file selected per site through `properties.resourceSets.<family>`, which picks a file from the matching `parameters/` subdirectory. Every family ships a `none.yaml`, which every site inherits and which deploys nothing. |
 | **Step** | A unit of work in a manifest's `steps:` list. Shapes: Bicep deploy (`template:`), kubectl op (`type: kubectl`), wait gate (`type: wait`), include (`include:`). |
 | **Scope** | A step's deployment scope: `resourceGroup` or `subscription`. |
 | **AIO release** | A versioned bundle of pinned extension versions and API versions, defined by a YAML in `parameters/aio-releases/` and selected per site via `properties.aioRelease`. |

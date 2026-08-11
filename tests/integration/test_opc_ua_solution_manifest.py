@@ -14,6 +14,7 @@ from tests.integration.helpers.assertions import (
 from tests.integration.helpers.kube import (
     KubectlError,
     apply_manifest,
+    cr_identity,
     delete_resource,
     get_pod_logs,
     kubectl_json,
@@ -100,9 +101,12 @@ class TestOpcUaSolutionIdempotency:
     def test_redeploy_preserves_outputs(
         self, orchestrator, selector, opc_ua_solution_result
     ):
-        """Event Hub name/namespace must be stable across redeploys. A change
-        indicates resources were recreated, which breaks any consumer that
-        cached the endpoint."""
+        """Event Hub name and namespace stay stable across redeploys.
+
+        Both are derived from configuration, so this catches a rename or a
+        relocation rather than a recreate. The projected dataflow below is what
+        shows the AIO resources survived.
+        """
         result2 = orchestrator.deploy(
             manifest_path=OPC_UA_SOLUTION_MANIFEST,
             selector=selector,
@@ -118,6 +122,43 @@ class TestOpcUaSolutionIdempotency:
                 f"Site '{name}': eventHub output changed on redeploy "
                 f"({eh1!r} -> {eh2!r})"
             )
+
+    def test_redeploy_does_not_recreate_the_projected_dataflow(
+        self, orchestrator, selector, opc_ua_solution_result, aio_namespace, kubectl_available
+    ):
+        """The dataflow survives a second deploy as the same cluster object.
+
+        The deploy's own outputs echo configuration both runs read, so they
+        cannot show this. `metadata.uid` is assigned when Kubernetes creates the
+        object and kept for its lifetime, so an unchanged uid is what separates
+        a reconcile from a delete and recreate. A recreate drops data in flight
+        and still reports a successful deploy.
+
+        Scoped to the dataflow because its namespace is the one the projection
+        assertions in this module already read. The asset and device are looked
+        up across namespaces elsewhere, so they are not asserted here.
+        """
+        before = cr_identity(
+            "dataflows.connectivity.iotoperations.azure.com",
+            OVEN_DATAFLOW_NAME,
+            aio_namespace,
+        )
+
+        result2 = orchestrator.deploy(
+            manifest_path=OPC_UA_SOLUTION_MANIFEST,
+            selector=selector,
+        )
+        assert result2["summary"]["failed"] == 0
+
+        after = cr_identity(
+            "dataflows.connectivity.iotoperations.azure.com",
+            OVEN_DATAFLOW_NAME,
+            aio_namespace,
+        )
+        assert after == before, (
+            f"Dataflow '{OVEN_DATAFLOW_NAME}' was recreated by the redeploy "
+            f"rather than reconciled. Before: {before}. After: {after}."
+        )
 
 
 class TestOpcUaSolutionCrossManifestJoin:

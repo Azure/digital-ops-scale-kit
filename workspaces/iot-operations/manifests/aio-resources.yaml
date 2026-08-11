@@ -1,0 +1,37 @@
+apiVersion: siteops/v1
+kind: Manifest
+name: aio-resources
+description: |
+  Config-driven AIO workload resources for an existing instance. Each family
+  deploys only when the site selects a set for it, so one entry point serves
+  every combination.
+
+  A site selects sets through `properties.resourceSets.<family>`, which resolves
+  to `parameters/<family>/<set>.yaml`. Every site inherits `none` for each
+  family, which deploys nothing. Families are ordered here to satisfy
+  cross-family references, since a reference to a resource that does not exist
+  yet deploys clean and never runs.
+
+  Prerequisites:
+    - AIO instance must be deployed and running
+    - The site's aioRelease must point to a parameters/aio-releases/<release>.yaml file
+
+# Max concurrent sites. 0 = unlimited, 1 = serial.
+parallel: 3
+
+# Default selector. Override at the CLI with `-l <key>=<value>`.
+selector: "environment=dev"
+
+# Declaration files load for every site regardless of the gates below, so every
+# family needs a `resourceSets` key on the site and a matching `none.yaml`.
+# `siteops validate` reports a missing one rather than deploying nothing.
+parameters:
+  - parameters/common/common.yaml
+  - "parameters/aio-releases/{{ site.properties.aioRelease }}.yaml"
+  - "parameters/dataflows/{{ site.properties.resourceSets.dataflows }}.yaml"
+
+steps:
+  - include: _resolve-aio.yaml
+
+  - include: _dataflows.yaml
+    when: "{{ site.properties.resourceSets.dataflows != 'none' }}"

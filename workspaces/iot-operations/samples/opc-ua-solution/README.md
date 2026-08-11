@@ -2,6 +2,8 @@
 
 Reference sample that adds a simulated OPC UA asset, an Event Hub destination, and a dataflow that routes oven telemetry from the AIO broker to the Event Hub. Demonstrates the full asset-to-cloud data path against an existing AIO instance.
 
+This sample expresses its dataflow as ARM resources in `template.bicep`, alongside the Event Hub and role assignment it also needs. For dataflows whose values are known ahead of the deployment, `../dataflow-sample/` declares the same kind of resource in YAML. [docs/resource-catalog.md](../../../../docs/resource-catalog.md) covers when each route fits.
+
 ## What this sample deploys
 
 1. **resolve-aio**: reads custom location and ADR namespace names from the existing AIO instance.

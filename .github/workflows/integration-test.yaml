@@ -7,13 +7,16 @@ on:
   workflow_dispatch:
     inputs:
       manifest:
-        description: "Manifest to test"
+        description: "Test phase"
         type: choice
         options:
           - all
           - aio-install
-          - secretsync
+          - enable-secretsync
+          - sync-secrets
           - opc-ua-solution
+          - dataflow-sample
+          - aio-resources
         default: all
       skip-cleanup:
         description: "Skip resource cleanup (for debugging)"
@@ -30,6 +33,10 @@ on:
 
 env:
   PYTHONUNBUFFERED: "1"
+  # Engine output reaches this workflow's logs and artifacts, which are public.
+  SITEOPS_REDACT_OUTPUT: "1"
+  # Suppress az result payloads. A command needing output passes an explicit `-o`.
+  AZURE_CORE_OUTPUT: none
 
 concurrency:
   # Shared `azure-${env}` lock so a deploy and an integration test

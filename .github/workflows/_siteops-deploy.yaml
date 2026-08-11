@@ -56,6 +56,12 @@ on:
 
 env:
   PYTHONUNBUFFERED: "1"
+  # Engine output reaches this workflow's logs and artifacts, which are public.
+  # Set here rather than inherited, since a reusable workflow does not receive
+  # the caller's env.
+  SITEOPS_REDACT_OUTPUT: "1"
+  # Suppress az result payloads. A command needing output passes an explicit `-o`.
+  AZURE_CORE_OUTPUT: none
 
 jobs:
   deploy:

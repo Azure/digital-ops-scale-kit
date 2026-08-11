@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from siteops import __version__
+from siteops.sanitize import scrub_for_output
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +130,10 @@ _ARC_PROXY_PORT_IN_USE_PATTERN = re.compile(
 # Azure deployments can take significant time for complex resources
 DEFAULT_AZ_TIMEOUT_SECONDS = 3600
 
+# Compiling one template is local work. Bounded anyway, so a wedged `az` fails
+# the step with a diagnostic rather than holding a site's thread for the run.
+DEFAULT_BICEP_BUILD_TIMEOUT_SECONDS = 300
+
 # Default timeout for kubectl operations (10 minutes)
 DEFAULT_KUBECTL_TIMEOUT_SECONDS = 600
 
@@ -171,24 +176,35 @@ DEPLOYMENT_OBSERVATION_GRACE_SECONDS = 600
 _DEPLOYMENT_TERMINAL_SUCCESS = frozenset({"Succeeded"})
 _DEPLOYMENT_TERMINAL_FAILURE = frozenset({"Failed", "Canceled"})
 
-# Classification patterns for `az` failures during a wait poll. Order matters:
-# resource-not-found is checked before the permanent set because a 404 message
-# can contain generic phrases. Permanent errors will never self-resolve, so they
-# fail the wait fast instead of polling for the full timeout. Transient errors
-# (throttling, 5xx, network) keep polling.
-_WAIT_RESOURCE_NOT_FOUND_PATTERN = re.compile(
-    r"ResourceNotFound|was not found|could not be found|"
-    r"status code:\s*404|\(?NotFound\)?",
+# Classification patterns for `az` failures during a wait poll. Order matters.
+# Codes are matched before prose, because "was not found" appears in messages of
+# every class: an authorization failure reports a principal that could not be
+# found, and a 5xx can carry it as incidental detail. A permanent error fails the
+# wait immediately, a transient one keeps polling.
+_WAIT_NOT_FOUND_CODE_PATTERN = re.compile(
+    # `NotFound` is bounded so it does not match the tail of a more specific
+    # code. `SubscriptionNotFound` is a permanent configuration error, not a
+    # missing resource, and an unbounded match classified it as the latter.
+    r"ResourceNotFound|status code:\s*404|\(?\bNotFound\b\)?",
+    re.IGNORECASE,
+)
+_WAIT_NOT_FOUND_PHRASE_PATTERN = re.compile(
+    r"was not found|could not be found",
     re.IGNORECASE,
 )
 _WAIT_PERMANENT_ERROR_PATTERN = re.compile(
     r"AuthorizationFailed|does not have authorization|\bForbidden\b|status code:\s*403|"
     r"az login|not logged in|AADSTS|SubscriptionNotFound|InvalidResourceId|"
-    r"is not a valid resource id|InvalidAuthenticationToken|ExpiredAuthenticationToken",
+    r"is not a valid resource id|InvalidAuthenticationToken|ExpiredAuthenticationToken|"
+    r"InvalidTemplate",
     re.IGNORECASE,
 )
 _WAIT_TRANSIENT_ERROR_PATTERN = re.compile(
-    r"timed out|timeout|TooManyRequests|status code:\s*429|status code:\s*5\d\d|"
+    # `timeout` is bounded as a whole word. Azure parameter names embed it
+    # freely (`idleTimeoutInMinutes`, `sessionTimeoutSeconds`), and an unbounded
+    # match would read a deterministic validation error naming one as transient
+    # and retry a submit that can never succeed.
+    r"timed out|\btimeouts?\b|TooManyRequests|status code:\s*429|status code:\s*5\d\d|"
     r"ServerTimeout|ServiceUnavailable|connection (?:reset|aborted|refused)|"
     r"temporarily unavailable|Gateway Time-?out",
     re.IGNORECASE,
@@ -207,14 +223,18 @@ def _classify_az_error(stderr: str) -> str:
     """Classify an `az` failure stderr for wait-step polling.
 
     Returns one of `resource_not_found`, `permanent`, `transient`, or `unknown`.
+    Codes are tested before the not-found prose, which appears in messages of
+    every class.
     """
     text = stderr or ""
-    if _WAIT_RESOURCE_NOT_FOUND_PATTERN.search(text):
+    if _WAIT_NOT_FOUND_CODE_PATTERN.search(text):
         return "resource_not_found"
     if _WAIT_PERMANENT_ERROR_PATTERN.search(text):
         return "permanent"
     if _WAIT_TRANSIENT_ERROR_PATTERN.search(text):
         return "transient"
+    if _WAIT_NOT_FOUND_PHRASE_PATTERN.search(text):
+        return "resource_not_found"
     return "unknown"
 
 
@@ -226,18 +246,47 @@ def _format_arm_error(error_node: Any) -> str:
     """
     if not isinstance(error_node, dict):
         return str(error_node)
-    code = error_node.get("code", "")
-    message = error_node.get("message", "")
+    # Coerced, since this runs while reporting a failure. A provider returning
+    # an unexpected shape must not raise from the reporting path and mask the
+    # failure being reported.
+    code = str(error_node.get("code", "") or "")
+    message = str(error_node.get("message", "") or "")
     parts = [part for part in (code, message) if part]
-    text = ": ".join(parts) if parts else json.dumps(error_node)
+    text = ": ".join(parts) if parts else json.dumps(error_node, default=str)
     details = error_node.get("details")
     if isinstance(details, list) and details and isinstance(details[0], dict):
-        detail_code = details[0].get("code", "")
-        detail_message = details[0].get("message", "")
+        detail_code = str(details[0].get("code", "") or "")
+        detail_message = str(details[0].get("message", "") or "")
         detail_text = ": ".join(part for part in (detail_code, detail_message) if part)
         if detail_text:
             text = f"{text} ({detail_text})"
     return text
+
+
+# A Bicep module compiles to a nested deployment, so every module shares this resource
+# type. Reporting the type alone would name the mechanism rather than the module.
+_NESTED_DEPLOYMENT_TYPE = "microsoft.resources/deployments"
+
+
+def _operation_target_label(target: Any) -> str:
+    """Name the resource a failed deployment operation targeted.
+
+    Falls back to the resource id, then to an empty string when the operation
+    carries no target at all. Both fields are coerced, since this runs while
+    reporting a failure and a tool that returned something unexpected must not
+    raise from the reporting path itself.
+    """
+    if not isinstance(target, dict):
+        return ""
+    resource_type = str(target.get("resourceType") or "")
+    resource_id = str(target.get("id") or "")
+
+    if resource_type.lower() == _NESTED_DEPLOYMENT_TYPE:
+        name = str(target.get("resourceName") or "") or resource_id.rsplit("/", 1)[-1]
+        if name:
+            return f"{resource_type}/{name}"
+
+    return resource_type or resource_id
 
 
 def _describe_condition(condition: Any) -> str:
@@ -280,25 +329,36 @@ ARC_PROXY_PORT_BASE = 47021  # First slot uses 47021/47020, avoiding default 470
 ARC_PROXY_PORT_SPACING = 10  # Space between slots
 ARC_PROXY_MAX_SLOTS = 10  # Maximum concurrent proxies
 
+# The engine's own subprocess timeout, distinct from anything a tool prints. A
+# caller that needs to know the engine gave up compares against this exactly,
+# since searching stderr for "timeout" also matches an ARM error naming a
+# parameter such as `idleTimeoutInMinutes`.
+ENGINE_TIMEOUT_SENTINEL = "Command timed out after {timeout}s"
+
 
 @lru_cache(maxsize=128)
-def get_template_parameters(template_path: str) -> frozenset[str]:
-    """Extract parameter names from a Bicep or ARM template.
+def _load_template_arm_json(template_path: str) -> dict[str, Any]:
+    """Compile (or read) a template and return its ARM JSON.
 
-    For Bicep files, uses 'az bicep build --stdout' to convert to ARM JSON.
-    For ARM JSON files, parses directly.
+    Bicep is compiled to a temporary file rather than to the console, since
+    `az` decodes console output in the locale encoding and raises on content
+    that encoding cannot represent.
 
-    Results are cached per template path for performance.
+    Results are cached per template path, so a template is compiled once no
+    matter how many callers inspect it.
+
+    The cached value is shared, and sites deploy on a thread pool, so treat
+    the return as read-only. A caller that needs to mutate takes its own copy.
 
     Args:
-        template_path: Absolute path to the template file
+        template_path: Absolute path to a `.bicep` or `.json` template.
 
     Returns:
-        Frozenset of parameter names the template accepts
+        The parsed ARM template.
 
     Raises:
-        ValueError: If template cannot be parsed
-        FileNotFoundError: If template file doesn't exist
+        ValueError: If the template cannot be compiled or parsed.
+        FileNotFoundError: If the template does not exist.
     """
     path = Path(template_path)
 
@@ -313,31 +373,69 @@ def get_template_parameters(template_path: str) -> frozenset[str]:
                 "`az` is available, then retry."
             )
 
-        result = subprocess.run(
-            [az_path, "bicep", "build", "--file", str(path), "--stdout"],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            raise ValueError(f"Failed to compile Bicep template {template_path}: {result.stderr}")
-        try:
-            arm_json = json.loads(result.stdout)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Failed to parse compiled Bicep template {template_path}: {e}") from e
-    elif path.suffix == ".json":
+        with tempfile.TemporaryDirectory() as tmp:
+            out_file = Path(tmp) / "template.json"
+            try:
+                result = subprocess.run(
+                    [az_path, "bicep", "build", "--file", str(path), "--outfile", str(out_file)],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=DEFAULT_BICEP_BUILD_TIMEOUT_SECONDS,
+                )
+            except subprocess.TimeoutExpired as e:
+                # Raised as ValueError so callers handling a bad template handle
+                # this too. `TimeoutExpired` is a `SubprocessError`, so letting it
+                # escape would bypass them and fail the whole site rather than the
+                # step.
+                raise ValueError(
+                    f"Timed out compiling Bicep template {template_path} after "
+                    f"{DEFAULT_BICEP_BUILD_TIMEOUT_SECONDS}s"
+                ) from e
+            if result.returncode != 0:
+                raise ValueError(
+                    f"Failed to compile Bicep template {template_path}: {result.stderr}"
+                )
+            try:
+                return json.loads(out_file.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError) as e:
+                raise ValueError(
+                    f"Failed to parse compiled Bicep template {template_path}: {e}"
+                ) from e
+
+    if path.suffix == ".json":
         try:
             with open(path, "r", encoding="utf-8") as f:
-                arm_json = json.load(f)
+                return json.load(f)
         except json.JSONDecodeError as e:
             raise ValueError(f"Failed to parse ARM template {template_path}: {e}") from e
-    else:
-        raise ValueError(f"Unsupported template format: {path.suffix}. Expected .bicep or .json")
 
-    parameters = arm_json.get("parameters", {})
-    param_names = frozenset(parameters.keys())
+    raise ValueError(f"Unsupported template format: {path.suffix}. Expected .bicep or .json")
 
-    logger.debug(f"Template {path.name} accepts parameters: {sorted(param_names)}")
+
+def get_template_parameters(template_path: str) -> frozenset[str]:
+    """Extract parameter names from a Bicep or ARM template.
+
+    Args:
+        template_path: Absolute path to the template file
+
+    Returns:
+        Frozenset of parameter names the template accepts
+
+    Raises:
+        ValueError: If template cannot be parsed
+        FileNotFoundError: If template file doesn't exist
+    """
+    arm_json = _load_template_arm_json(template_path)
+    param_names = frozenset(arm_json.get("parameters", {}).keys())
+    logger.debug(f"Template {Path(template_path).name} accepts parameters: {sorted(param_names)}")
     return param_names
+
+
+# The compile cache lives on the loader, so expose clearing through the public
+# reader. A caller that rewrites a template in place relies on this.
+get_template_parameters.cache_clear = _load_template_arm_json.cache_clear
 
 
 def filter_parameters(
@@ -666,10 +764,22 @@ class AzCliExecutor:
         logger.debug(f"Executing: {cmd_str}")
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=timeout)
-            return result.returncode == 0, result.stdout, result.stderr
+            # Decode as UTF-8 rather than the locale encoding. `az` emits UTF-8,
+            # and a byte the locale cannot represent otherwise raises inside
+            # subprocess's reader thread, which surfaces as `stdout=None` rather
+            # than as an error.
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+                timeout=timeout,
+            )
+            return result.returncode == 0, result.stdout or "", result.stderr or ""
         except subprocess.TimeoutExpired:
-            return False, "", f"Command timed out after {timeout}s"
+            return False, "", ENGINE_TIMEOUT_SENTINEL.format(timeout=timeout)
         except Exception as e:
             return False, "", f"Failed to execute az command: {e}"
 
@@ -708,10 +818,18 @@ class AzCliExecutor:
         logger.debug(f"Executing: {cmd_str}")
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=timeout)
-            return result.returncode == 0, result.stdout, result.stderr
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+                timeout=timeout,
+            )
+            return result.returncode == 0, result.stdout or "", result.stderr or ""
         except subprocess.TimeoutExpired:
-            return False, "", f"Command timed out after {timeout}s"
+            return False, "", ENGINE_TIMEOUT_SENTINEL.format(timeout=timeout)
         except Exception as e:
             return False, "", f"Failed to execute kubectl command: {e}"
 
@@ -868,7 +986,7 @@ class AzCliExecutor:
                     continue
 
                 # Not retryable: surface stderr and bail.
-                logger.error(f"Arc proxy exited unexpectedly: {stderr}")
+                logger.error(f"Arc proxy exited unexpectedly: {scrub_for_output(stderr)}")
                 yield None
                 return
 
@@ -876,7 +994,7 @@ class AzCliExecutor:
             yield kubeconfig_path
 
         except Exception as e:
-            logger.error(f"Failed to start Arc proxy: {e}")
+            logger.error(f"Failed to start Arc proxy: {scrub_for_output(str(e))}")
             yield None
 
         finally:
@@ -1082,10 +1200,11 @@ class AzCliExecutor:
                 return True, None
 
             last_error = stderr
-            lowered = (stderr or "").lower()
-            if "timed out" in lowered or "timeout" in lowered:
-                # Ambiguous: the PUT may have reached ARM. Poll and let the not-found
-                # grace decide.
+            if stderr == ENGINE_TIMEOUT_SENTINEL.format(
+                timeout=DEFAULT_DEPLOYMENT_SUBMIT_TIMEOUT_SECONDS
+            ):
+                # The engine's own timeout, not an ARM error. The PUT may have
+                # reached ARM, so poll and let the not-found grace decide.
                 logger.warning(
                     f"Submit of '{deployment_name}' timed out. Polling in case ARM "
                     f"accepted the request."
@@ -1301,9 +1420,7 @@ class AzCliExecutor:
             if isinstance(status_message, dict):
                 error_node = status_message.get("error", status_message)
             target = props.get("targetResource") or {}
-            target_label = ""
-            if isinstance(target, dict):
-                target_label = target.get("resourceType") or target.get("id") or ""
+            target_label = _operation_target_label(target)
             formatted = (
                 _format_arm_error(error_node)
                 if error_node

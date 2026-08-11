@@ -20,6 +20,7 @@ from siteops.models import (
     KubectlStep,
     Manifest,
     ParallelConfig,
+    SelectorParseError,
     Site,
     _validate_resource,
     parse_selector,
@@ -57,10 +58,22 @@ class TestParseSelector:
         result = parse_selector("tag=key=value")
         assert result == {"tag": ["key=value"]}
 
-    def test_key_without_value(self):
-        # Edge case: key without = should be ignored
-        result = parse_selector("valid=yes,invalid")
-        assert result == {"valid": ["yes"]}
+    def test_key_without_value_raises(self):
+        """A term with no `=` is rejected rather than dropped.
+
+        Dropping it silently widens the selection. A lone bare term parses to
+        an empty dict, which matches every site, so `-l seattle-dev` would
+        deploy fleet-wide instead of to one site.
+        """
+        with pytest.raises(SelectorParseError, match="not in `key=value` form"):
+            parse_selector("valid=yes,invalid")
+
+    def test_bare_term_suggests_the_name_key(self):
+        with pytest.raises(SelectorParseError, match=r"name=seattle-dev"):
+            parse_selector("seattle-dev")
+
+    def test_trailing_comma_is_not_a_bare_term(self):
+        assert parse_selector("environment=prod,") == {"environment": ["prod"]}
 
     def test_name_or_combines_duplicate_values(self):
         result = parse_selector("name=a,name=b")

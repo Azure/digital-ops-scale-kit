@@ -46,9 +46,26 @@ class TestManifestValidation:
     """Every manifest in the workspace should validate without errors."""
 
     def test_all_manifests_discovered(self, workspace):
-        """Sanity check: workspace has manifests to validate."""
-        manifests = _all_manifest_files(workspace)
-        assert len(manifests) >= 1, "No manifests found in workspace"
+        """Discovery reaches every manifest location, so the sweeps are not partial.
+
+        Several tests in this suite iterate `_all_manifest_files`. A glob that
+        stopped matching one location would leave all of them green while
+        checking a fraction of the workspace, so this asserts each location is
+        covered rather than that the result is non-empty.
+        """
+        root = workspace.resolve()
+        discovered = {p.resolve() for p in _all_manifest_files(workspace)}
+
+        expected = {p.resolve() for p in (workspace / "manifests").glob("*.yaml")}
+        expected |= {p.resolve() for p in (workspace / "samples").glob("*/manifest.yaml")}
+        assert expected, "No manifests on disk, so this check covers nothing."
+
+        missing = sorted(str(p.relative_to(root)) for p in expected - discovered)
+        assert not missing, (
+            "Manifest discovery missed files that are on disk, so every sweep "
+            "keyed on it is checking less than it appears to:\n  "
+            + "\n  ".join(missing)
+        )
 
     def test_every_manifest_validates(self, workspace, orchestrator):
         """Every deployable manifest validates.

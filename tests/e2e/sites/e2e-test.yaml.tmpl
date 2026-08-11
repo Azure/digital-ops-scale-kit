@@ -48,6 +48,12 @@ labels:
 
 properties:
   aioRelease: "${E2E_AIO_RELEASE}"
+  # Catalog sets stay at `none`, so a run exercises the gate rather than the
+  # resources. The dataflow templates are qualified through
+  # samples/dataflow-sample/, which carries its own declaration, and a site that
+  # selects no set is the default every operator starts from.
+  resourceSets:
+    dataflows: "none"
   deployOptions:
     enableGlobalSite: false
     enableEdgeSite: false

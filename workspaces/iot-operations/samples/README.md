@@ -1,9 +1,11 @@
 # Samples
 
-Deployable examples for Azure IoT Operations. Two shapes are supported.
+Deployable examples for Azure IoT Operations. Each sample teaches one thing, so start with the one closest to what you are building: `aio-with-opc-ua` for a full solution on a fresh install, `dataflow-sample` for declaring workload resources in YAML, `secretsync-sample` for Key Vault secrets on the cluster, and `aio-with-aksee-bootstrap` when the host does not exist yet.
 
-- **Self-contained workload bundle.** A sample directory carries its own Bicep template, input wiring, and a manifest that composes them on top of an existing AIO install. Example: `secretsync-sample`.
-- **Composition.** A sample directory carries just a manifest (and a small README) that `include:`s leaf partials from `manifests/` and other samples into one end-to-end deploy. Example: `aio-with-opc-ua`.
+Two shapes are supported, and the line between them is whether other samples can compose the directory.
+
+- **Self-contained workload bundle.** The directory carries a `_partial.yaml` defining its own steps, so other samples can compose it. It may also carry a Bicep template, chaining inputs, and declaration files. Examples: `opc-ua-solution` (with its own template), `secretsync-sample`.
+- **Composition.** The directory carries no `_partial.yaml`, so it is an endpoint rather than a building block. Its manifest `include:`s leaf partials from `manifests/` and other samples into one deploy, adds any glue step those partials need such as a `wait` gate, and may attach declaration files supplying what they deploy. Examples: `aio-with-opc-ua`, `aio-with-aksee-bootstrap`, `dataflow-sample` (a declaration over the shared `templates/aio/dataflows/`).
 
 Both shapes are deployable from the same path convention:
 
@@ -16,11 +18,23 @@ siteops -w workspaces/iot-operations deploy samples/<name>/manifest.yaml -l envi
 ```
 samples/<name>/
 ├── manifest.yaml     User entry point. Standalone deployable.
+├── README.md         What it deploys, prerequisites, and how to configure it.
 ├── _partial.yaml     Internal partial. Composed by the manifest above and by other samples.
-├── template.bicep    The sample's Bicep template.
-├── inputs.yaml       Step output to step input wiring (consumer fan-in). Attaches at step level.
+├── template.bicep    Optional. The sample's own Bicep. Omit it when the steps run shared templates.
+├── inputs.yaml       Optional. Step output to step input wiring (consumer fan-in). Attaches at step level.
 ├── <declaration>.yaml Optional. Operator-authored values. Attaches at manifest level.
 └── outputs.yaml      Optional. Sample step outputs forwarded to downstream consumers.
+```
+
+Only `manifest.yaml`, `README.md`, and `_partial.yaml` are always present. `secretsync-sample` has no template of its own, since its steps deploy `templates/secretsync/`.
+
+## Composition layout
+
+```
+samples/<name>/
+├── manifest.yaml     User entry point. include: steps, any glue step they need, plus any declaration it attaches.
+├── README.md         What the composition deploys and in what order.
+└── <declaration>.yaml Optional. Operator-authored values. Attaches at manifest level.
 ```
 
 ## File conventions
@@ -80,11 +94,14 @@ Omit `_resolve-aio.yaml` when the composition has no downstream consumer of the 
 
 ## Samples in this workspace
 
-| Sample | Shape | Composes |
-|---|---|---|
-| `secretsync-sample/` | Bundle | inputs + declaration + partial, over `templates/secretsync/` |
-| `opc-ua-solution/` | Bundle | template + inputs + partial |
-| `aio-with-opc-ua/` | Composition | `_aio-fundamentals` + `_resolve-aio` + `_secretsync` (gated) + `opc-ua-solution/_partial` |
-| `aio-with-aksee-bootstrap/` | Composition | `host-bootstrap/aksee/_partial` + a wait on the bootstrap tag + `_aio-fundamentals` |
+| Sample | Shape | What it teaches | Composes |
+|---|---|---|---|
+| `secretsync-sample/` | Bundle | Synchronizing Key Vault secrets to the cluster | inputs + declaration + partial, over `templates/secretsync/` |
+| `opc-ua-solution/` | Bundle | A full solution in Bicep: device, asset, dataflow, and cloud egress | template + inputs + partial |
+| `dataflow-sample/` | Composition | Declaring dataflows in YAML | declaration + `_resolve-aio` + `manifests/_dataflows`, over `templates/aio/dataflows/` |
+| `aio-with-opc-ua/` | Composition | Installing the platform and a full solution in one deploy | `_aio-fundamentals` + `_resolve-aio` + `_secretsync` (gated) + `opc-ua-solution/_partial` |
+| `aio-with-aksee-bootstrap/` | Composition | Bringing up a host before installing AIO | `host-bootstrap/aksee/_partial` + a wait on the bootstrap tag + `_aio-fundamentals` |
 
 See each sample's own `README.md` for what it deploys, prerequisites, and how to configure before deploying.
+
+`dataflow-sample` and `parameters/dataflows/` reach the same templates by different routes. The sample attaches its declaration on its own manifest, which suits a one-off or a demo. `parameters/dataflows/<set>.yaml` is a committed set a site selects through `properties.resourceSets.dataflows`, which is the fleet route. See [resource-catalog.md](../../../docs/resource-catalog.md).

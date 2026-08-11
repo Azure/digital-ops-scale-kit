@@ -25,6 +25,7 @@ from typing import Any, Iterator
 
 import yaml
 
+from siteops import yamlio
 from siteops.executor import (
     AzCliExecutor,
     DeploymentResult,
@@ -38,8 +39,10 @@ from siteops.models import (
     KubectlStep,
     Manifest,
     ManifestStep,
+    MultipleSubscriptionSitesError,
     NoTargetingError,
     ParallelConfig,
+    ParameterSelectionError,
     SelectorParseError,
     Site,
     WaitStep,
@@ -47,6 +50,7 @@ from siteops.models import (
     _validate_resource,
     parse_selector,
 )
+from siteops.sanitize import scrub_for_output
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +71,16 @@ StepResult = DeploymentResult | KubectlResult | WaitResult
 
 # Type alias for subscription-scoped outputs: subscription_id -> step_name -> outputs
 SubscriptionOutputs = dict[str, dict[str, dict[str, Any]]]
+
+
+def _reportable_subscription(sub_id: str) -> str:
+    """Return a subscription id short enough to name without identifying a tenant.
+
+    Truncated before scrubbing, so the prefix survives redaction. That keeps two
+    subscriptions distinguishable in a message that names both, which a full
+    placeholder would not.
+    """
+    return scrub_for_output(f"{sub_id[:8]}...") or ""
 
 
 def _resolve_output_path(obj: Any, path: str) -> Any:
@@ -110,6 +124,28 @@ def _thread_safe_print(*args: Any, **kwargs: Any) -> None:
     """Print with lock to avoid interleaved output from multiple threads."""
     with _print_lock:
         print(*args, **kwargs)
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Build a dict from JSON pairs, refusing a key written twice.
+
+    JSON keeps the last of a repeated key, exactly as YAML does, so a parameter
+    file that sets one twice deploys only the second value and discards the
+    first in silence. The YAML loader rejects that, and a parameter file should
+    not behave differently for being written in JSON.
+
+    Raises:
+        ValueError: A key appeared more than once.
+    """
+    seen: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in seen:
+            raise ValueError(
+                f"Duplicate key '{key}' in a JSON parameter file. JSON keeps the "
+                f"last one, so the first is discarded. Merge them or rename one."
+            )
+        seen[key] = value
+    return seen
 
 
 class Orchestrator:
@@ -159,6 +195,9 @@ class Orchestrator:
         self._template_check_cache: dict[Path, bool] = {}
         # Memo of the deduped site list returned by `load_all_sites`.
         self._all_sites_cache: list[Site] | None = None
+        # Sites that failed to load on the last `load_all_sites`, as
+        # `(name, reportable_error)`. Empty until that runs.
+        self.skipped_sites: list[tuple[str, str]] = []
         # Memo of `_load_inherited_data(path)` keyed by resolved path,
         # used only when no provenance dict is being recorded. With N
         # sites sharing one template, the template would otherwise be
@@ -411,7 +450,7 @@ class Orchestrator:
         for path in basename_to_path.values():
             try:
                 with open(path, "r", encoding="utf-8") as f:
-                    data = yaml.safe_load(f) or {}
+                    data = yamlio.load(f) or {}
             except (yaml.YAMLError, OSError):
                 # Defer parse errors to load_site() for context-rich reporting.
                 continue
@@ -643,7 +682,7 @@ class Orchestrator:
             raise FileNotFoundError(f"Inherited file not found: {path}")
 
         with open(path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
+            data = yamlio.load(f) or {}
 
         # Inherits parents must be SiteTemplates. A `kind: Site` parent
         # would chain deployable sites together, where editing one would
@@ -746,7 +785,7 @@ class Orchestrator:
                 path = sites_dir / f"{name}{ext}"
                 if path.exists():
                     with open(path, "r", encoding="utf-8") as f:
-                        data = yaml.safe_load(f) or {}
+                        data = yamlio.load(f) or {}
 
                     # Process inheritance only on the first file found (the base)
                     if is_base_file and "inherits" in data:
@@ -1114,7 +1153,7 @@ class Orchestrator:
             return cached
         try:
             with open(path, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f)
+                data = yamlio.load(f)
             result = bool(data and data.get("kind") == "SiteTemplate")
         except (yaml.YAMLError, OSError):
             # Let load_site() handle parsing errors with full context
@@ -1148,8 +1187,11 @@ class Orchestrator:
                 site = self.load_site(name)
                 sites.append(site)
             except (ValueError, yaml.YAMLError, OSError) as e:
-                logger.warning(f"Failed to load site '{name}': {e}")
-                skipped.append((name, str(e)))
+                # Scrubbed once, here, so the log line and the notice below
+                # carry the same text on a published surface.
+                reportable = scrub_for_output(str(e))
+                logger.warning(f"Failed to load site '{name}': {reportable}")
+                skipped.append((name, reportable))
 
         if skipped:
             import sys
@@ -1159,6 +1201,10 @@ class Orchestrator:
                 print(f"  \u2022 {name}: {error}", file=sys.stderr)
             print(file=sys.stderr)
 
+        # Recorded so a caller can fail on it. A site that does not load is one
+        # the operator expected to deploy to, so a run that silently continues
+        # against a smaller fleet is reporting success for work it did not do.
+        self.skipped_sites = list(skipped)
         self._all_sites_cache = sites
         return sites
 
@@ -1186,9 +1232,9 @@ class Orchestrator:
 
         with open(path, "r", encoding="utf-8") as f:
             if path.suffix == ".json":
-                result = json.load(f)
+                result = json.load(f, object_pairs_hook=_reject_duplicate_json_keys)
             else:
-                result = yaml.safe_load(f) or {}
+                result = yamlio.load(f) or {}
 
         with self._params_cache_lock:
             self._params_cache[path] = result
@@ -1470,6 +1516,47 @@ class Orchestrator:
 
         return None
 
+    @staticmethod
+    def _require_selected_parameter_file(
+        declared: str, resolved: str, site: Site, workspace: Path, tier: str
+    ) -> None:
+        """Fail when a site-selected parameter file does not resolve to a real file.
+
+        A path carrying a variable, such as
+        `parameters/<family>/{{ site.properties.X }}.yaml`, means the site picks
+        which file to load. Two cases are rejected:
+
+        - The site does not carry the property, so the variable survives and the
+          path names no file.
+        - The site carries a value naming a file that does not exist.
+
+        Either is a site or manifest defect rather than an intentional skip.
+        Without this check the deploy reports success with those parameters
+        missing, so neither is visible. A path with no variable in it is a fixed input the
+        manifest author controls, and a missing one stays a warning so an
+        optional file keeps working.
+
+        Raises:
+            ParameterSelectionError: If the path is site-selected and names no file.
+        """
+        if "{{" not in declared:
+            return
+
+        if "{{" in resolved:
+            raise ParameterSelectionError(
+                f"{tier} parameter path '{declared}' did not resolve for site "
+                f"'{site.name}' (resolved to '{resolved}'). The site does not "
+                f"carry the property the path selects on. Add it to the site or "
+                f"to the site it inherits from."
+            )
+
+        if not (workspace / resolved).resolve().is_file():
+            raise ParameterSelectionError(
+                f"{tier} parameter path '{declared}' resolved to "
+                f"'{resolved}' for site '{site.name}', which does not exist. "
+                f"Check the value the site selects for a typo, or add the file."
+            )
+
     def resolve_parameters(
         self,
         step: DeploymentStep,
@@ -1503,6 +1590,7 @@ class Orchestrator:
         params: dict[str, Any] = {}
         for param_path in manifest.parameters:
             resolved_path = manifest.resolve_parameter_path(param_path, site)
+            self._require_selected_parameter_file(param_path, resolved_path, site, self.workspace, "Manifest")
             full_path = (self.workspace / resolved_path).resolve()
             if full_path.exists():
                 file_params = self.load_parameters(full_path)
@@ -1516,6 +1604,7 @@ class Orchestrator:
         # 3. Merge step-level parameter files (step-specific overrides)
         for param_path in step.parameters:
             resolved_path = manifest.resolve_parameter_path(param_path, site)
+            self._require_selected_parameter_file(param_path, resolved_path, site, self.workspace, "Step")
             full_path = (self.workspace / resolved_path).resolve()
             if full_path.exists():
                 file_params = self.load_parameters(full_path)
@@ -2170,14 +2259,18 @@ class Orchestrator:
                     }
                 )
             else:
-                log(f"[{site.name}] x {step.name}: {result.error}")
+                # Scrubbed once here, so the log line, the site result, and the
+                # step result all carry the same text, and none of them can publish a
+                # resource identity from a CI run.
+                reportable_error = scrub_for_output(result.error)
+                log(f"[{site.name}] x {step.name}: {reportable_error}")
                 status = "failed"
-                error_message = result.error
+                error_message = reportable_error
                 step_results.append(
                     {
                         "step": step.name,
                         "status": "failed",
-                        "error": result.error,
+                        "error": reportable_error,
                     }
                 )
                 break
@@ -2191,6 +2284,17 @@ class Orchestrator:
             f"[{site.name}] {status_symbol} completed in {elapsed:.1f}s "
             f"({steps_completed}/{total_steps - steps_skipped} steps{skip_info})"
         )
+
+        # A closed gate and a mistyped one produce the same silent success, so
+        # name the reasons rather than blaming gates. A scope mismatch skips
+        # steps too, and a site with no gates would otherwise be told to check
+        # conditions it does not have.
+        if steps_completed == 0 and steps_skipped == total_steps and total_steps > 0:
+            reasons = sorted(
+                {r["reason"] for r in step_results if r.get("status") == "skipped" and r.get("reason")}
+            )
+            detail = f" ({'; '.join(reasons)})" if reasons else ""
+            log(f"[{site.name}] ! nothing deployed: every step was skipped{detail}.")
 
         return {
             "site": site.name,
@@ -2223,15 +2327,47 @@ class Orchestrator:
         """
         results: list[dict[str, Any]] = []
         for site in sites:
-            result = self._deploy_site(
-                manifest,
-                site,
-                timestamp,
-                parallel_mode=False,
-                subscription_outputs=subscription_outputs,
-            )
+            try:
+                result = self._deploy_site(
+                    manifest,
+                    site,
+                    timestamp,
+                    parallel_mode=False,
+                    subscription_outputs=subscription_outputs,
+                )
+            except Exception as e:
+                # Match the parallel path. An unexpected error (a malformed
+                # parameter file, an unresolved template) fails one site and
+                # leaves the rest of the run reportable, so the operator can
+                # still read the fleet state from the summary.
+                logger.error(
+                    f"Unexpected error deploying to {site.name}: {scrub_for_output(str(e))}"
+                )
+                result = self._site_failure_result(site, manifest, f"Unexpected error: {e}")
             results.append(result)
         return results
+
+    @staticmethod
+    def _site_failure_result(
+        site: Site, manifest: Manifest, error: str
+    ) -> dict[str, Any]:
+        """Build the result row for a site that failed before reporting its own.
+
+        Keeps the shape identical to a normal `_deploy_site` return so a caller
+        reading the summary cannot tell which path produced it. The message
+        comes from an exception rather than from a step, so it is scrubbed here
+        for the same reason a step's error is.
+        """
+        return {
+            "site": site.name,
+            "status": "failed",
+            "error": scrub_for_output(error),
+            "steps_completed": 0,
+            "steps_skipped": 0,
+            "steps_total": len(manifest.steps),
+            "elapsed": 0.0,
+            "steps": [],
+        }
 
     def _deploy_parallel(
         self,
@@ -2275,19 +2411,12 @@ class Orchestrator:
                     with results_lock:
                         results.append(result)
                 except Exception as e:
-                    logger.error(f"Unexpected error deploying to {site.name}: {e}")
+                    logger.error(
+                        f"Unexpected error deploying to {site.name}: {scrub_for_output(str(e))}"
+                    )
                     with results_lock:
                         results.append(
-                            {
-                                "site": site.name,
-                                "status": "failed",
-                                "error": f"Unexpected error: {e}",
-                                "steps_completed": 0,
-                                "steps_skipped": 0,
-                                "steps_total": len(manifest.steps),
-                                "elapsed": 0.0,
-                                "steps": [],
-                            }
+                            self._site_failure_result(site, manifest, f"Unexpected error: {e}")
                         )
 
         return results
@@ -2394,19 +2523,11 @@ class Orchestrator:
                         self._extract_subscription_outputs(result, site.subscription, subscription_outputs)
                         results.append(result)
                     except Exception as e:
-                        logger.error(f"Error deploying subscription-level site {site.name}: {e}")
-                        results.append(
-                            {
-                                "site": site.name,
-                                "status": "failed",
-                                "error": str(e),
-                                "steps_completed": 0,
-                                "steps_skipped": 0,
-                                "steps_total": len(manifest.steps),
-                                "elapsed": 0.0,
-                                "steps": [],
-                            }
+                        logger.error(
+                            f"Error deploying subscription-level site {site.name}: "
+                            f"{scrub_for_output(str(e))}"
                         )
+                        results.append(self._site_failure_result(site, manifest, str(e)))
 
         return subscription_outputs, results
 
@@ -2486,7 +2607,7 @@ class Orchestrator:
             print("  Failed Sites:")
             for result in failed_results:
                 error = result.get("error", "Unknown error")
-                print(f"    [{result['site']}] {error}")
+                print(f"    [{result['site']}] {scrub_for_output(error)}")
             print()
 
         # Show blocked sites
@@ -2495,7 +2616,7 @@ class Orchestrator:
             print("  Blocked Sites:")
             for result in blocked_results:
                 error = result.get("error", "Blocked due to subscription failure")
-                print(f"    [{result['site']}] {error}")
+                print(f"    [{result['site']}] {scrub_for_output(error)}")
             print()
 
     def filter_sites(self, selector: dict[str, list[str]]) -> list[Site]:
@@ -2606,16 +2727,34 @@ class Orchestrator:
         if manifest.sites:
             missing = []
             sites = []
+            # A site is cached under several keys (basename, canonical path,
+            # internal name), so two manifest entries naming the same site yield
+            # the same object. Deploying it twice would race two deployments
+            # onto one ARM deployment name and collapse both into one result
+            # row, so keep the first occurrence and drop the rest.
+            seen: set[int] = set()
+            duplicates: list[str] = []
             for name in manifest.sites:
                 try:
-                    sites.append(self.load_site(name))
+                    site = self.load_site(name)
                 except FileNotFoundError:
                     missing.append(name)
+                    continue
+                if id(site) in seen:
+                    duplicates.append(name)
+                    continue
+                seen.add(id(site))
+                sites.append(site)
             if missing:
                 names = ", ".join(missing)
                 raise FileNotFoundError(
                     f"Site files not found for manifest '{manifest.name}': {names}. "
                     f"Create those site YAML files under `sites/`, or fix the site names listed in the manifest."
+                )
+            if duplicates:
+                logger.warning(
+                    f"Manifest '{manifest.name}' names the same site more than once "
+                    f"({', '.join(duplicates)}). Deploying it once."
                 )
             return sites
 
@@ -2762,17 +2901,19 @@ class Orchestrator:
                 # Dynamic path: validate resolved path for each site
                 for site in sites:
                     resolved = manifest.resolve_parameter_path(param_path, site)
-                    full_path = (self.workspace / resolved).resolve()
-                    if not full_path.exists():
-                        errors.append(
-                            f"Manifest parameter file not found: {resolved} "
-                            f"(resolved from '{param_path}' for site '{site.name}')"
+                    try:
+                        # One implementation, so `validate` and `deploy` agree
+                        # on both the predicate and the wording.
+                        self._require_selected_parameter_file(
+                            param_path, resolved, site, self.workspace, "Manifest"
                         )
-                    else:
-                        try:
-                            self.load_parameters(full_path)
-                        except Exception as e:
-                            errors.append(f"Invalid manifest parameter file {resolved}: {e}")
+                    except ParameterSelectionError as e:
+                        errors.append(str(e))
+                        continue
+                    try:
+                        self.load_parameters((self.workspace / resolved).resolve())
+                    except Exception as e:
+                        errors.append(f"Invalid manifest parameter file {resolved}: {e}")
             else:
                 full_path = (self.workspace / param_path).resolve()
                 if not full_path.exists():
@@ -2844,27 +2985,29 @@ class Orchestrator:
                         # Dynamic path: validate resolved path for each site
                         for site in sites:
                             resolved = manifest.resolve_parameter_path(param_path, site)
-                            full_path = (self.workspace / resolved).resolve()
-                            if not full_path.exists():
-                                errors.append(
-                                    f"Parameter file not found: {resolved} "
-                                    f"(step: {step.name}, resolved from '{param_path}' for site '{site.name}')"
+                            try:
+                                self._require_selected_parameter_file(
+                                    param_path, resolved, site, self.workspace, "Step"
                                 )
-                            else:
-                                try:
-                                    params = self.load_parameters(full_path)
-                                    errors.extend(
-                                        self._validate_output_references(
-                                            params,
-                                            step.name,
-                                            prior_step_names,
-                                            all_step_names,
-                                            resolved,
-                                            None,
-                                        )
+                            except ParameterSelectionError as e:
+                                errors.append(f"{e} (step: {step.name})")
+                                continue
+                            try:
+                                params = self.load_parameters(
+                                    (self.workspace / resolved).resolve()
+                                )
+                                errors.extend(
+                                    self._validate_output_references(
+                                        params,
+                                        step.name,
+                                        prior_step_names,
+                                        all_step_names,
+                                        resolved,
+                                        None,
                                     )
-                                except Exception as e:
-                                    errors.append(f"Invalid parameter file {resolved}: {e}")
+                                )
+                            except Exception as e:
+                                errors.append(f"Invalid parameter file {resolved}: {e}")
                         continue
 
                     full_path = (self.workspace / param_path).resolve()
@@ -2943,14 +3086,14 @@ class Orchestrator:
                         if len(rg_level_sites) > 3:
                             site_names += f"... and {len(rg_level_sites) - 3} more"
                         errors.append(
-                            f"Subscription '{sub_id[:8]}...' has RG-level sites ({site_names}) "
+                            f"Subscription '{_reportable_subscription(sub_id)}' has RG-level sites ({site_names}) "
                             f"but no subscription-level site for subscription-scoped steps"
                         )
                 elif len(sub_level_sites) > 1:
                     # Multiple subscription-level sites for same subscription
                     site_names = ", ".join(s.name for s in sub_level_sites)
                     errors.append(
-                        f"Subscription '{sub_id[:8]}...' has multiple subscription-level sites: {site_names}. "
+                        f"Subscription '{_reportable_subscription(sub_id)}' has multiple subscription-level sites: {site_names}. "
                         f"Only one subscription-level site per subscription is allowed."
                     )
 
@@ -3218,7 +3361,20 @@ class Orchestrator:
             rg_sites: list[Site] = []
             for sub_id, (sub_level, rg_level) in site_groups.items():
                 if sub_level:
-                    # Use first subscription-level site (validation ensures only one)
+                    if len(sub_level) > 1:
+                        # Subscription-scoped steps run once per subscription
+                        # and their outputs feed every resource-group site under
+                        # it, so there is no correct choice between two
+                        # candidates. `deploy` does not run `validate`, so the
+                        # check is repeated here rather than picking one and
+                        # deploying the fleet against outputs from a site the
+                        # operator did not intend.
+                        names = ", ".join(s.name for s in sub_level)
+                        raise MultipleSubscriptionSitesError(
+                            f"Subscription '{_reportable_subscription(sub_id)}' has multiple "
+                            f"subscription-level sites: {names}. Only one "
+                            f"subscription-level site per subscription is allowed."
+                        )
                     subscription_sites[sub_id] = sub_level[0]
                 rg_sites.extend(rg_level)
 

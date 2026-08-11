@@ -115,7 +115,7 @@ From the **Actions** tab, dispatch **E2E Tests** with the defaults to run a sing
 | `custom-locations-oid` | tenant value | See prerequisite 2. |
 | `skip-teardown` | false | Preserve the deployment for inspection. Scope depends on mode (see below). |
 | `keep-cluster-alive-minutes` | `0` | Hold the runner for N min before teardown for debugging. Max 300. Nothing should be added to the persistent RG during the hold (it'll be deleted by teardown). |
-| `tests` | empty (run all) or `aio-install,secretsync` | Comma-separated allowlist of test phases to deploy and run. Valid values: `aio-install`, `secretsync`, `secretsync-sample`, `opc-ua-solution`, `aio-upgrade`. Useful for demos and focused debugging when paired with `keep-cluster-alive-minutes`. |
+| `tests` | empty (run all) or `aio-install,enable-secretsync` | Comma-separated allowlist of test phases to deploy and run. Valid values: `aio-install`, `enable-secretsync`, `sync-secrets`, `opc-ua-solution`, `dataflow-sample`, `aio-resources`, `aio-upgrade`. Useful for demos and focused debugging when paired with `keep-cluster-alive-minutes`. |
 | `upgrade-to` | empty or `2607` | Optional AIO release to upgrade to after install-phase tests pass. Empty skips the upgrade phase. Per-cell skip when equal to the cell's `aio-releases` value. Requires `aio-upgrade` to be in the `tests` allowlist (or `tests` empty). |
 | `secret-sync-modes` | `enabled` or `enabled,disabled` | Matrix modes for Secret Sync and workload identity. Use `enabled,disabled` with `tests=aio-upgrade` to qualify upgrade behavior with and without the OIDC profile. |
 

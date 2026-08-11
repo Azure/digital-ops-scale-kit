@@ -56,6 +56,7 @@ Site Ops runs anywhere Python runs. No agents, no servers, no state to manage.
 - **Parallel execution**: deploy to multiple sites simultaneously with configurable concurrency
 - **Failure isolation**: one site's failure doesn't block others. Subscription failures block only dependent sites.
 - **Dry-run validation**: preview the full deployment plan without making Azure calls
+- **Declarative workload resources**: declare Azure IoT Operations resources such as dataflows in YAML, and deploy one reviewable definition across the fleet with each site's own values substituted in
 - **Flexible step orchestration**: conditional execution, parameter auto-filtering, and mixed step types (Bicep and kubectl via Arc proxy) in a single manifest
 
 ### Cloud-first deployment
@@ -180,10 +181,12 @@ digital-ops-scale-kit/
 ├── docs/                         # Extended documentation
 │   ├── aio-releases.md           # AIO release pinning, upgrades, adding a new release
 │   ├── ci-cd-setup.md            # GitHub Actions, Azure DevOps, OIDC, secrets
+│   ├── dataflows.md              # Dataflow endpoints, profiles, and dataflows
 │   ├── e2e-testing.md            # End-to-end live-subscription test workflow
 │   ├── manifest-includes.md      # Splicing one manifest into another via `include:`
 │   ├── manifest-reference.md     # Manifest syntax, step types
 │   ├── parameter-resolution.md   # Variables, output chaining
+│   ├── resource-catalog.md       # Declaring AIO workload resources in YAML
 │   ├── secret-sync.md            # Secret sync enablement and usage
 │   ├── site-configuration.md     # Sites, inheritance, overlays
 │   ├── targeting.md              # Selector grammar, site identity, no-match diagnostic
@@ -202,6 +205,7 @@ Each workspace follows a consistent structure:
 | `manifests/` | **What** to deploy | Ordered steps with site selection and conditions |
 | `parameters/` | **With what values** | Template variables, output chaining |
 | `templates/` | **How** to deploy | Bicep/ARM templates |
+| `samples/` | **Worked examples** | Deployable examples, each teaching one thing |
 | `sites.local/` | **Overrides** | Local/CI overrides (gitignored) |
 
 ---

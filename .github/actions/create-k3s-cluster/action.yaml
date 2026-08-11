@@ -12,6 +12,11 @@
 #   - `kubectl wait --for=condition=Ready` instead of hand-rolled polling.
 #
 # Constraint: assumes a runner with systemd (GHA-hosted ubuntu-latest does).
+#
+# The default version tracks the minimum Kubernetes version Azure IoT Operations
+# validates against, rather than the newest k3s release. Qualifying at the floor
+# is what proves the workspace deploys on the oldest cluster a customer can run.
+# Raise it when the AIO minimum rises.
 
 name: Create k3s cluster
 description: Used by e2e-test.yaml. Install and start a single-node k3s cluster, write kubeconfig.
@@ -20,7 +25,11 @@ inputs:
   version:
     required: false
     description: k3s version (must be a supported AIO minimum or higher).
-    default: "v1.31.1+k3s1"
+    default: "v1.33.6+k3s1"
+  free-disk-space:
+    required: false
+    description: Reclaim runner disk before installing. Set false to keep the Android SDK.
+    default: "true"
 
 outputs:
   kubeconfig:
@@ -30,6 +39,30 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Reclaim runner disk
+      if: inputs.free-disk-space == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        # A hosted runner guarantees 14 GB free. AIO's reference single-node
+        # cluster is specified at 30 GB, but that covers a cluster accumulating
+        # images and logs over its life, where this one is installed, tested,
+        # and torn down. Removing the Android SDK is free headroom against that
+        # difference. Nothing else preinstalled is touched, since a toolchain
+        # that looks unused can still back an action or a transitive dependency.
+        df -h /
+        sudo rm -rf /usr/local/lib/android
+        df -h /
+
+        # Advisory. Running out of disk fails the AIO install loudly, so there
+        # is nothing silent to guard against, and no run here has been observed
+        # to need more. Reported so a run that does can be recognized from its
+        # log rather than diagnosed from unrelated pod failures.
+        free=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
+        if [ "$free" -lt 20 ]; then
+          echo "::warning::${free} GB free after reclaiming. If the AIO install fails on image pulls, disk is the first thing to check."
+        fi
+
     - name: Install k3s
       shell: bash
       env:

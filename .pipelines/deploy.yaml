@@ -23,8 +23,10 @@ parameters:
       - manifests/secretsync.yaml
       - manifests/aksee-bootstrap.yaml
       - manifests/aksee-upgrade.yaml
+      - manifests/aio-resources.yaml
       - samples/secretsync-sample/manifest.yaml
       - samples/opc-ua-solution/manifest.yaml
+      - samples/dataflow-sample/manifest.yaml
       - samples/aio-with-opc-ua/manifest.yaml
       - samples/aio-with-aksee-bootstrap/manifest.yaml
 
@@ -70,6 +72,9 @@ parameters:
 variables:
   - group: ${{ parameters.secretGroups[parameters.environment] }}
   - name: PYTHONUNBUFFERED
+    value: '1'
+  # Engine output reaches this pipeline's logs and artifacts, which are public.
+  - name: SITEOPS_REDACT_OUTPUT
     value: '1'
 
 pool:

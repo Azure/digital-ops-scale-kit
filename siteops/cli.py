@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from siteops import __version__
-from siteops.models import _merge_selector_strings
+from siteops.models import MultipleSubscriptionSitesError, _merge_selector_strings
 from siteops.orchestrator import Orchestrator
 
 
@@ -64,6 +64,20 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         print(f"\nError: {e}\n", file=sys.stderr)
         return 1
 
+    if orchestrator.skipped_sites:
+        # A selector resolves against every site in the workspace, so a site
+        # that fails to load drops out of the target set. Deploying the rest
+        # reports success for a smaller fleet than the selector names. The
+        # failing sites were already reported by name.
+        names = ", ".join(name for name, _ in orchestrator.skipped_sites)
+        print(
+            f"\nError: {len(orchestrator.skipped_sites)} site(s) could not be loaded "
+            f"({names}), so the target set is incomplete. Fix those files, or narrow "
+            f"the selector so they are out of scope.\n",
+            file=sys.stderr,
+        )
+        return 1
+
     if not sites:
         if cli_selector:
             # Operator explicitly asked for a target set and got
@@ -82,13 +96,20 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         return 0
 
     # Execute deployment
-    result = orchestrator.deploy(
-        manifest_path,
-        selector=getattr(args, "selector", None),
-        parallel_override=parallel_override,
-        manifest=manifest,
-        sites=sites,
-    )
+    try:
+        result = orchestrator.deploy(
+            manifest_path,
+            selector=getattr(args, "selector", None),
+            parallel_override=parallel_override,
+            manifest=manifest,
+            sites=sites,
+        )
+    except MultipleSubscriptionSitesError as e:
+        # Raised late, after site resolution, so it lands outside the guard
+        # around loading. Printed rather than raised so the operator sees which
+        # sites collide instead of a traceback.
+        print(f"\nError: {e}\n", file=sys.stderr)
+        return 1
 
     # Return exit code based on results
     if result["summary"]["failed"] > 0:
@@ -320,6 +341,17 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
             return 1
         print("\nNo sites found in workspace\n")
         return 0
+
+    if orchestrator.skipped_sites:
+        # A site that does not load is one the operator expected to be here.
+        # The names are already reported above; this makes the shortfall
+        # visible to a wrapper script and to CI rather than only to a reader.
+        print(
+            f"Error: {len(orchestrator.skipped_sites)} site(s) could not be "
+            f"loaded, so this listing is incomplete. Fix the files named above.",
+            file=sys.stderr,
+        )
+        return 1
 
     if getattr(args, "render", False) is True:
         import yaml
