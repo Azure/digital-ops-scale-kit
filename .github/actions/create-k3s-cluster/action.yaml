@@ -44,23 +44,24 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        # A hosted runner guarantees 14 GB free. AIO's reference single-node
-        # cluster is specified at 30 GB, but that covers a cluster accumulating
-        # images and logs over its life, where this one is installed, tested,
-        # and torn down. Removing the Android SDK is free headroom against that
-        # difference. Nothing else preinstalled is touched, since a toolchain
-        # that looks unused can still back an action or a transitive dependency.
+        # AIO's reference single-node cluster is specified at 30 GB. That figure
+        # covers a cluster accumulating images and logs over its life, where this
+        # one is installed, tested, and torn down. The runner image carries well
+        # above that before anything is removed, so this step is headroom rather
+        # than a prerequisite. Removing the Android SDK is the cheapest of it.
+        # Nothing else preinstalled is touched, since a toolchain that looks
+        # unused can still back an action or a transitive dependency.
         df -h /
         sudo rm -rf /usr/local/lib/android
         df -h /
 
-        # Advisory. Running out of disk fails the AIO install loudly, so there
-        # is nothing silent to guard against, and no run here has been observed
-        # to need more. Reported so a run that does can be recognized from its
-        # log rather than diagnosed from unrelated pod failures.
+        # Advisory, and set at the reference minimum. Running out of disk fails
+        # the AIO install loudly, so there is nothing silent to guard against.
+        # Reported so a run that does hit it can be recognized from its log
+        # rather than diagnosed from unrelated pod failures.
         free=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
-        if [ "$free" -lt 20 ]; then
-          echo "::warning::${free} GB free after reclaiming. If the AIO install fails on image pulls, disk is the first thing to check."
+        if [ "$free" -lt 30 ]; then
+          echo "::warning::${free} GB free after reclaiming, below the 30 GB reference minimum. If the AIO install fails on image pulls, disk is the first thing to check."
         fi
 
     - name: Install k3s

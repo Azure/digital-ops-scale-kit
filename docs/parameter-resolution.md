@@ -77,18 +77,16 @@ Samples co-locate their input and output files inside `samples/<name>/` rather t
 
 ## Cross-scope output chaining
 
-RG-level sites can reference outputs from subscription-scoped steps. Subscription outputs are keyed by subscription ID and resolved automatically:
+RG-level sites can reference outputs from subscription-scoped steps. Subscription outputs are keyed by subscription ID and resolved automatically. A consumer names the producing step the same way it would name an RG-scoped one:
 
 ```yaml
-# parameters/inputs/aio-instance.yaml
+# An input file for a step that consumes the subscription-scoped producer
 edgeSiteId: "{{ steps.global-edge-site.outputs.site.id }}"
 ```
 
-For `munich-line-1` (subscription: sub-123):
-→ Resolves from subscription outputs for sub-123
+`global-edge-site` is a subscription-scoped step in `manifests/_aio-fundamentals.yaml`, deployed once per subscription. `munich-dev` and `munich-prod` are RG-level sites in that same subscription, so both resolve this reference from the one set of outputs that step produced.
 
-For `munich-line-2` (subscription: sub-123):
-→ Resolves from the same subscription outputs
+The consuming template has to declare the parameter. Auto-filtering drops anything a template does not accept, so a chained value whose name is not a declared parameter is removed before the deployment.
 
 **Resolution priority:**
 
@@ -113,7 +111,7 @@ tags:
 When deploying:
 
 - **schema-registry template**: Receives `location`, `tags`, `schemaRegistryName`
-- **aio-instance template**: Receives `location`, `tags`, `customLocationName`, `aioInstanceName`
+- **aio-instance template**: Receives `customLocationName`, `aioInstanceName`
 - Extra parameters are silently filtered out
 
 ## Best practices

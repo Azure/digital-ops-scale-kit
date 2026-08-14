@@ -1738,3 +1738,1087 @@ class TestSiteSelector:
         )
 
         assert site.matches_selector({"environment": ["dev"]}) is False
+
+
+class TestKeyWrittenWithNoValue:
+    """A key present with nothing after the colon parses as `None`.
+
+    `dict.get(key, default)` returns that `None`, because the default applies
+    only when the key is absent. Every field below declares a default factory,
+    which asserts the field is never `None`, so the declaration is what these
+    hold the models to.
+    """
+
+    def _site_file(self, tmp_path, body: str) -> Path:
+        path = tmp_path / "empty-keys.yaml"
+        path.write_text(
+            "apiVersion: siteops/v1\n"
+            "kind: Site\n"
+            "name: empty-keys\n"
+            "subscription: sub-123\n"
+            "location: eastus\n"
+            "resourceGroup: rg-test\n" + body,
+            encoding="utf-8",
+        )
+        return path
+
+    def test_site_empty_mappings_load_as_empty(self, tmp_path):
+        """`labels:`, `properties:` and `parameters:` with no value."""
+        site = Site.from_file(self._site_file(tmp_path, "labels:\nproperties:\nparameters:\n"))
+
+        assert site.labels == {}
+        assert site.properties == {}
+        assert site.parameters == {}
+
+    def test_site_with_empty_labels_still_selects(self, tmp_path):
+        """Without the fix this raises `AttributeError` inside the selector.
+
+        A single site written this way took down selection for the whole
+        fleet, since `matches_selector` runs against every candidate.
+        """
+        site = Site.from_file(self._site_file(tmp_path, "labels:\n"))
+
+        assert site.matches_selector({"environment": ["dev"]}) is False
+
+    def test_site_empty_resource_group_is_subscription_level(self, tmp_path):
+        """`resourceGroup:` with no value means the site is subscription-level.
+
+        The declared type is `str`, so a `None` here reaches every reader that
+        formats or compares it as one.
+        """
+        path = tmp_path / "sub-level.yaml"
+        path.write_text(
+            "apiVersion: siteops/v1\nkind: Site\nname: sub-level\n"
+            "subscription: sub-123\nlocation: eastus\nresourceGroup:\n",
+            encoding="utf-8",
+        )
+
+        site = Site.from_file(path)
+
+        assert site.resource_group == ""
+        assert site.is_subscription_level is True
+
+    def test_direct_construction_is_held_to_the_declaration(self):
+        """The guarantee cannot depend on having come through a loader."""
+        site = Site(
+            name="direct",
+            subscription="sub-123",
+            resource_group="rg-test",
+            location="eastus",
+            labels=None,
+            properties=None,
+            parameters=None,
+        )
+
+        assert site.labels == {}
+        assert site.properties == {}
+        assert site.parameters == {}
+        assert site.matches_selector({"environment": ["dev"]}) is False
+
+    def test_manifest_empty_sites_list(self, tmp_path):
+        """Without the fix this raises `TypeError` while iterating `None`."""
+        path = tmp_path / "m.yaml"
+        path.write_text(
+            "apiVersion: siteops/v1\nkind: Manifest\nname: m\nsites:\n"
+            "steps:\n  - name: s1\n    template: t.bicep\n",
+            encoding="utf-8",
+        )
+
+        manifest = Manifest.from_file(path, workspace_root=tmp_path)
+
+        assert manifest.sites == []
+
+    def test_manifest_empty_parameters_list(self, tmp_path):
+        path = tmp_path / "m.yaml"
+        path.write_text(
+            "apiVersion: siteops/v1\nkind: Manifest\nname: m\nparameters:\n"
+            "steps:\n  - name: s1\n    template: t.bicep\n",
+            encoding="utf-8",
+        )
+
+        manifest = Manifest.from_file(path, workspace_root=tmp_path)
+
+        assert manifest.parameters == []
+
+    def test_step_empty_parameters_list(self, tmp_path):
+        path = tmp_path / "m.yaml"
+        path.write_text(
+            "apiVersion: siteops/v1\nkind: Manifest\nname: m\n"
+            "steps:\n  - name: s1\n    template: t.bicep\n    parameters:\n",
+            encoding="utf-8",
+        )
+
+        manifest = Manifest.from_file(path, workspace_root=tmp_path)
+
+        assert manifest.steps[0].parameters == []
+
+    def test_wrong_type_names_the_file_and_the_key(self, tmp_path):
+        """A wrong type is still rejected, and says where to look.
+
+        Normalizing a null must not soften this into acceptance.
+        """
+        path = tmp_path / "m.yaml"
+        path.write_text(
+            "apiVersion: siteops/v1\nkind: Manifest\nname: m\nsites: not-a-list\n"
+            "steps:\n  - name: s1\n    template: t.bicep\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError, match=r"'sites' in .* must be a list, got str"):
+            Manifest.from_file(path, workspace_root=tmp_path)
+
+    @pytest.mark.parametrize(
+        ("body", "expected"),
+        [
+            (
+                "metadata: just-a-string\nspec:\n  subscription: s\n  location: eastus\n",
+                r"'metadata' in site .* must be a mapping, got str",
+            ),
+            (
+                "metadata:\n  name: n\nspec: just-a-string\n",
+                r"'spec' in site .* must be a mapping, got str",
+            ),
+        ],
+        ids=["metadata", "spec"],
+    )
+    def test_site_envelope_must_be_a_mapping(self, tmp_path, body, expected):
+        """A wrong-typed envelope reached `'str' object has no attribute 'get'`."""
+        path = tmp_path / "s.yaml"
+        path.write_text(f"apiVersion: siteops/v1\nkind: Site\n{body}", encoding="utf-8")
+
+        with pytest.raises(ValueError, match=expected):
+            Site.from_file(path)
+
+    def test_manifest_envelope_must_be_a_mapping(self, tmp_path):
+        path = tmp_path / "m.yaml"
+        path.write_text(
+            "apiVersion: siteops/v1\nkind: Manifest\nmetadata:\n  name: m\nspec: just-a-string\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError, match=r"'spec' in manifest .* must be a mapping, got str"):
+            Manifest.from_file(path, workspace_root=tmp_path)
+
+    def test_site_empty_spec_reports_the_missing_field(self, tmp_path):
+        """`spec:` with no value must not become an unindexable `None`."""
+        path = tmp_path / "s.yaml"
+        path.write_text(
+            "apiVersion: siteops/v1\nkind: Site\nmetadata:\n  name: n\nspec:\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError, match=r"Missing required field 'subscription'"):
+            Site.from_file(path)
+
+
+class TestSiteParseIsShared:
+    """`from_file` and the orchestrator's resolved path are one parse.
+
+    Two copies of the shape handling drifted apart in exactly one way that
+    mattered: a rule added to one held for only one. These pin the equivalence
+    so a change to either has to keep it.
+    """
+
+    def test_from_file_and_from_data_agree(self, tmp_path):
+        body = (
+            "apiVersion: siteops/v1\nkind: Site\nname: agree\n"
+            "subscription: sub-123\nlocation: eastus\nresourceGroup: rg-test\n"
+            "labels:\n  environment: dev\nproperties:\n  resourceSets:\n    dataflows: set-a\n"
+        )
+        path = tmp_path / "agree.yaml"
+        path.write_text(body, encoding="utf-8")
+
+        from_file = Site.from_file(path)
+        from_data = Site.from_data(yaml.safe_load(body), source=path, default_name=path.stem)
+
+        assert from_file == from_data
+
+    def test_nested_envelope_agrees_too(self, tmp_path):
+        body = (
+            "apiVersion: siteops/v1\nkind: Site\n"
+            "metadata:\n  name: nested\n  labels:\n    environment: prod\n"
+            "spec:\n  subscription: sub-123\n  location: eastus\n  resourceGroup: rg-test\n"
+        )
+        path = tmp_path / "nested.yaml"
+        path.write_text(body, encoding="utf-8")
+
+        from_file = Site.from_file(path)
+        from_data = Site.from_data(yaml.safe_load(body), source=path, default_name=path.stem)
+
+        assert from_file == from_data
+        assert from_file.labels == {"environment": "prod"}
+
+
+class TestSiteEnvelopeIsClosed:
+    """The site envelope rejects a key no parser reads.
+
+    A misspelled envelope key used to load clean and contribute nothing, so a
+    site deployed with defaults and reported success. Resource sets made
+    `properties` decide what a site deploys, which is what raised the cost.
+
+    These pin the rules directly. Disabling all three checks previously left
+    the site suite green, because nothing asserted them.
+    """
+
+    FLAT = (
+        "apiVersion: siteops/v1\nkind: Site\nname: munich-dev\n"
+        "subscription: sub-123\nlocation: eastus\n"
+    )
+    NESTED = (
+        "apiVersion: siteops/v1\nkind: Site\n"
+        "metadata:\n  name: munich-dev\n"
+        "spec:\n  subscription: sub-123\n  location: eastus\n"
+    )
+
+    def _write(self, tmp_path, body: str) -> Path:
+        path = tmp_path / "munich-dev.yaml"
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    def test_unknown_flat_key_is_rejected_with_a_suggestion(self, tmp_path):
+        path = self._write(tmp_path, self.FLAT + "paramaters:\n  a: b\n")
+
+        with pytest.raises(ValueError) as exc:
+            Site.from_file(path)
+
+        message = str(exc.value)
+        assert "unknown top-level key" in message
+        assert "`paramaters`" in message
+        assert "did you mean `parameters`?" in message
+
+    def test_unknown_key_names_the_site_not_the_manifest(self, tmp_path):
+        """A site reporting itself as a manifest sends the reader to the wrong
+        file and the wrong allowed-key list."""
+        path = self._write(tmp_path, self.FLAT + "widgets: 3\n")
+
+        with pytest.raises(ValueError, match=r"^Site '"):
+            Site.from_file(path)
+
+    def test_unknown_key_is_rejected_in_the_nested_shape(self, tmp_path):
+        """The envelope is closed in both shapes, at both levels."""
+        path = self._write(tmp_path, self.NESTED + "  paramaters:\n    a: b\n")
+
+        with pytest.raises(ValueError, match=r"unknown spec key"):
+            Site.from_file(path)
+
+    def test_unknown_metadata_key_is_rejected(self, tmp_path):
+        path = self._write(
+            tmp_path,
+            "apiVersion: siteops/v1\nkind: Site\n"
+            "metadata:\n  name: munich-dev\n  lables:\n    a: b\n"
+            "spec:\n  subscription: sub-123\n  location: eastus\n",
+        )
+
+        with pytest.raises(ValueError, match=r"unknown metadata key"):
+            Site.from_file(path)
+
+    @pytest.mark.parametrize("field", ["subscription", "location"])
+    def test_required_field_absent_is_rejected(self, tmp_path, field):
+        lines = [ln for ln in self.FLAT.splitlines() if not ln.startswith(f"{field}:")]
+        path = self._write(tmp_path, "\n".join(lines) + "\n")
+
+        with pytest.raises(ValueError, match=rf"Missing required field '{field}'"):
+            Site.from_file(path)
+
+    @pytest.mark.parametrize("field", ["subscription", "location"])
+    @pytest.mark.parametrize("empty", ["", "   ", "\n"], ids=["null", "blank", "newline"])
+    def test_required_field_present_without_a_value_is_rejected(
+        self, tmp_path, field, empty
+    ):
+        """Presence is not enough. A key with nothing after the colon parses as
+        null and reached a command line as the string `None`."""
+        body = self.FLAT.replace(f"{field}: sub-123", f"{field}:{empty}")
+        body = body.replace(f"{field}: eastus", f"{field}:{empty}")
+        path = self._write(tmp_path, body)
+
+        with pytest.raises(ValueError, match=rf"'{field}'.*(no value|Missing required)"):
+            Site.from_file(path)
+
+    @pytest.mark.parametrize("key", ["labels", "properties", "parameters"])
+    @pytest.mark.parametrize(
+        ("value", "kind"),
+        [("not-a-map", "str"), ("- a\n  - b", "list"), ("7", "int")],
+        ids=["str", "list", "int"],
+    )
+    def test_open_container_must_be_a_mapping_flat(self, tmp_path, key, value, kind):
+        """Open as to which keys it carries, closed as to being a mapping,
+        since every reader indexes into it."""
+        if kind == "list":
+            body = self.FLAT + f"{key}:\n  - a\n  - b\n"
+        else:
+            body = self.FLAT + f"{key}: {value}\n"
+        path = self._write(tmp_path, body)
+
+        with pytest.raises(ValueError, match=rf"'{key}' in site .* must be a mapping"):
+            Site.from_file(path)
+
+    @pytest.mark.parametrize("key", ["properties", "parameters"])
+    def test_open_container_must_be_a_mapping_nested(self, tmp_path, key):
+        path = self._write(tmp_path, self.NESTED + f"  {key}: not-a-map\n")
+
+        with pytest.raises(ValueError, match=rf"'{key}' in site .* must be a mapping"):
+            Site.from_file(path)
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("name", "\n  - one\n  - two"),
+            ("name", " 2607"),
+            ("subscription", " 12345"),
+            ("location", "\n  - eastus"),
+            ("resourceGroup", " 7"),
+            ("inherits", "\n  - base.yaml"),
+        ],
+        ids=["name-list", "name-int", "subscription-int", "location-list", "rg-int", "inherits-list"],
+    )
+    def test_a_text_field_must_be_text(self, tmp_path, key, value):
+        """A name becomes a dictionary key while the workspace index is built,
+        and a list is not hashable, so it failed before any message could name
+        the file. The others reach a command line or a path join. The error
+        says to quote the value, since an unquoted release number such as 2607
+        is the way this is usually reached."""
+        body = self.FLAT
+        if f"{key}:" in body:
+            line = [ln for ln in body.splitlines() if ln.startswith(f"{key}:")][0]
+            body = body.replace(line + "\n", f"{key}:{value}\n")
+        else:
+            body = body + f"{key}:{value}\n"
+        path = self._write(tmp_path, body)
+
+        with pytest.raises(ValueError, match=rf"'{key}' in site .* must be text"):
+            Site.from_file(path)
+
+    def test_a_quoted_numeric_name_is_accepted(self, tmp_path):
+        """The rule is about the type, not the characters. A site named for a
+        release is legitimate as long as it is quoted."""
+        body = self.FLAT.replace("name: munich-dev\n", "name: '2607'\n")
+        path = self._write(tmp_path, body)
+
+        assert Site.from_file(path).name == "2607"
+
+    @pytest.mark.parametrize(
+        ("value", "kind"),
+        [("2607", "int"), ("true", "bool"), ("1.5", "float")],
+        ids=["int", "bool", "float"],
+    )
+    def test_a_label_value_must_be_text(self, tmp_path, value, kind):
+        """A selector compares text, so a label of any other type matches
+        nothing. It is rejected rather than coerced, since coercing would make
+        a site start matching a selector it never matched and change what a
+        deployment targets."""
+        path = self._write(tmp_path, self.FLAT + f"labels:\n  release: {value}\n")
+
+        with pytest.raises(ValueError, match=rf"Label 'release'.*must be text, got {kind}"):
+            Site.from_file(path)
+
+    def test_a_quoted_label_value_is_accepted(self, tmp_path):
+        path = self._write(tmp_path, self.FLAT + "labels:\n  release: '2607'\n")
+
+        assert Site.from_file(path).labels == {"release": "2607"}
+
+    def test_a_label_value_must_be_text_nested(self, tmp_path):
+        path = self._write(
+            tmp_path, self.NESTED.replace("  name: munich-dev\n", "  name: munich-dev\n  labels:\n    release: 2607\n")
+        )
+
+        with pytest.raises(ValueError, match=r"Label 'release'.*must be text"):
+            Site.from_file(path)
+
+    def test_a_text_field_must_be_text_nested(self, tmp_path):
+        path = self._write(
+            tmp_path, self.NESTED.replace("  name: munich-dev\n", "  name:\n  - one\n  - two\n")
+        )
+
+        with pytest.raises(ValueError, match=r"'name' in site .* must be text"):
+            Site.from_file(path)
+
+    def test_description_is_accepted_and_not_read(self, tmp_path):
+        """Manifests carry one, so a site that already has it must keep
+        loading now that unknown keys are rejected."""
+        path = self._write(tmp_path, self.FLAT + "description: the munich plant\n")
+
+        site = Site.from_file(path)
+
+        assert site.name == "munich-dev"
+        assert not hasattr(site, "description")
+
+    def test_a_bare_name_falls_back_to_the_filename(self, tmp_path):
+        """`name:` with no value parsed as null and reached `Site` as `None`,
+        which broke sorting and interpolation far from this file."""
+        path = self._write(tmp_path, self.FLAT.replace("name: munich-dev", "name:"))
+
+        site = Site.from_file(path)
+
+        assert site.name == "munich-dev"
+        assert sorted([site], key=lambda s: s.name)
+
+
+class TestSiteValidationCoversResolvedData:
+    """Validation runs on merged data, so inheritance and overlays are covered.
+
+    The engine merges a base file, its inherit chain, and any overlay before
+    constructing the model, so a rule added at construction needs no separate
+    overlay handling. That is only true while validation stays on the merged
+    path, which is what these pin.
+    """
+
+    @staticmethod
+    def _orchestrator(workspace: Path):
+        from siteops.orchestrator import Orchestrator
+
+        return Orchestrator(workspace)
+
+    def _workspace(self, tmp_path) -> Path:
+        workspace = tmp_path / "workspace"
+        (workspace / "sites" / "shared").mkdir(parents=True)
+        (workspace / "sites" / "shared" / "base.yaml").write_text(
+            "apiVersion: siteops/v1\nkind: SiteTemplate\nname: base\n"
+            "subscription: sub-123\nlocation: eastus\n",
+            encoding="utf-8",
+        )
+        return workspace
+
+    def test_unknown_key_contributed_by_a_parent_is_rejected(self, tmp_path):
+        workspace = self._workspace(tmp_path)
+        (workspace / "sites" / "shared" / "base.yaml").write_text(
+            "apiVersion: siteops/v1\nkind: SiteTemplate\nname: base\n"
+            "subscription: sub-123\nlocation: eastus\nparamaters:\n  a: b\n",
+            encoding="utf-8",
+        )
+        (workspace / "sites" / "munich.yaml").write_text(
+            "apiVersion: siteops/v1\nkind: Site\nname: munich\n"
+            "inherits: shared/base.yaml\nresourceGroup: rg-munich\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError, match=r"unknown top-level key"):
+            self._orchestrator(workspace).load_site("munich")
+
+    def test_unknown_key_contributed_by_an_overlay_is_rejected(self, tmp_path):
+        """`sites.local/` is gitignored, so a typo there reaches no test that
+        reads committed content only."""
+        workspace = self._workspace(tmp_path)
+        (workspace / "sites" / "munich.yaml").write_text(
+            "apiVersion: siteops/v1\nkind: Site\nname: munich\n"
+            "subscription: sub-123\nlocation: eastus\nresourceGroup: rg-munich\n",
+            encoding="utf-8",
+        )
+        (workspace / "sites.local").mkdir()
+        (workspace / "sites.local" / "munich.yaml").write_text(
+            "apiVersion: siteops/v1\nkind: Site\nname: munich\nparamaters:\n  a: b\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError, match=r"unknown top-level key"):
+            self._orchestrator(workspace).load_site("munich")
+
+    def test_a_required_value_may_come_from_a_parent(self, tmp_path):
+        """The check runs after the merge, so a child may leave one to its
+        template. Rejecting here would break inheritance."""
+        workspace = self._workspace(tmp_path)
+        (workspace / "sites" / "munich.yaml").write_text(
+            "apiVersion: siteops/v1\nkind: Site\nname: munich\n"
+            "inherits: shared/base.yaml\nresourceGroup: rg-munich\n",
+            encoding="utf-8",
+        )
+
+        site = self._orchestrator(workspace).load_site("munich")
+
+        assert site.subscription == "sub-123"
+        assert site.location == "eastus"
+
+    def test_an_overlay_that_blanks_a_required_value_is_rejected(self, tmp_path):
+        workspace = self._workspace(tmp_path)
+        (workspace / "sites" / "munich.yaml").write_text(
+            "apiVersion: siteops/v1\nkind: Site\nname: munich\n"
+            "subscription: sub-123\nlocation: eastus\nresourceGroup: rg-munich\n",
+            encoding="utf-8",
+        )
+        (workspace / "sites.local").mkdir()
+        (workspace / "sites.local" / "munich.yaml").write_text(
+            "apiVersion: siteops/v1\nkind: Site\nname: munich\nsubscription:\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError, match=r"'subscription'.*no value"):
+            self._orchestrator(workspace).load_site("munich")
+
+
+class TestStepCollectionsAreTypeChecked:
+    """A step collection written as a single string is rejected.
+
+    YAML accepts `parameters: parameters/common.yaml` where a list is meant,
+    and the engine then iterates the string one character at a time, looking
+    for parameter files named `p`, `a`, `r`. The error has to name the file and
+    the key instead.
+    """
+
+    def _manifest(self, tmp_path, body: str) -> Path:
+        (tmp_path / "manifests").mkdir(exist_ok=True)
+        path = tmp_path / "manifests" / "m.yaml"
+        path.write_text(
+            "apiVersion: siteops/v1\nkind: Manifest\nname: m\n" + body, encoding="utf-8"
+        )
+        return path
+
+    def test_a_string_step_parameters_is_rejected(self, tmp_path):
+        path = self._manifest(
+            tmp_path,
+            "steps:\n  - name: s\n    template: t.bicep\n    parameters: parameters/common.yaml\n",
+        )
+
+        with pytest.raises(ValueError, match=r"'parameters' in .* must be a list, got str"):
+            Manifest.from_file(path, workspace_root=tmp_path)
+
+    def test_a_string_kubectl_files_is_rejected(self, tmp_path):
+        path = self._manifest(
+            tmp_path,
+            "steps:\n  - name: s\n    type: kubectl\n    operation: apply\n"
+            "    arc:\n      name: c\n      resourceGroup: rg\n    files: configs/app.yaml\n",
+        )
+
+        with pytest.raises(ValueError, match=r"'files' in .* must be a list, got str"):
+            Manifest.from_file(path, workspace_root=tmp_path)
+
+    def test_a_string_steps_is_rejected(self, tmp_path):
+        path = self._manifest(tmp_path, "steps: not-a-list\n")
+
+        with pytest.raises(ValueError, match=r"'steps' in .* must be a list, got str"):
+            Manifest.from_file(path, workspace_root=tmp_path)
+
+    def test_a_list_still_loads(self, tmp_path):
+        path = self._manifest(
+            tmp_path,
+            "steps:\n  - name: s\n    template: t.bicep\n"
+            "    parameters:\n      - parameters/common.yaml\n",
+        )
+
+        manifest = Manifest.from_file(path, workspace_root=tmp_path)
+
+        assert manifest.steps[0].parameters == ["parameters/common.yaml"]
+
+    def test_an_omitted_collection_is_empty(self, tmp_path):
+        path = self._manifest(tmp_path, "steps:\n  - name: s\n    template: t.bicep\n")
+
+        manifest = Manifest.from_file(path, workspace_root=tmp_path)
+
+        assert manifest.steps[0].parameters == []
+
+    def test_a_manifest_metadata_that_is_not_a_mapping_is_rejected(self, tmp_path):
+        path = self._manifest(tmp_path, "")
+        path.write_text(
+            "apiVersion: siteops/v1\nkind: Manifest\nmetadata: not-a-map\n"
+            "spec:\n  steps:\n    - name: s\n      template: t.bicep\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError, match=r"'metadata' in manifest .* must be a mapping"):
+            Manifest.from_file(path, workspace_root=tmp_path)
+
+
+class TestInheritsInsideSpecIsRejected:
+    """`spec.inherits` is rejected rather than silently ignored.
+
+    `inherits` is read at the top level, so a site that declared it inside
+    `spec` loaded clean and quietly dropped everything its parent supplied.
+    Both shapes inherit from the top level, so the placement is what is wrong.
+    """
+
+    def test_inherits_inside_spec_is_rejected_by_name(self, tmp_path):
+        path = tmp_path / "child.yaml"
+        path.write_text(
+            "apiVersion: siteops/v1\nkind: Site\nmetadata:\n  name: child\n"
+            "spec:\n  inherits: shared/base.yaml\n  subscription: sub\n  location: eastus\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError, match=r"`inherits` inside `spec`"):
+            Site.from_file(path)
+
+    def test_the_message_points_at_the_placement_that_works(self, tmp_path):
+        path = tmp_path / "child.yaml"
+        path.write_text(
+            "apiVersion: siteops/v1\nkind: Site\nmetadata:\n  name: child\n"
+            "spec:\n  inherits: shared/base.yaml\n  subscription: sub\n  location: eastus\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError, match=r"top level"):
+            Site.from_file(path)
+
+    def test_the_flat_shape_still_inherits(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        (workspace / "sites" / "shared").mkdir(parents=True)
+        (workspace / "sites" / "shared" / "base.yaml").write_text(
+            "apiVersion: siteops/v1\nkind: SiteTemplate\nname: base\n"
+            "subscription: sub-123\nlocation: eastus\n",
+            encoding="utf-8",
+        )
+        (workspace / "sites" / "child.yaml").write_text(
+            "apiVersion: siteops/v1\nkind: Site\nname: child\n"
+            "inherits: shared/base.yaml\nresourceGroup: rg-child\n",
+            encoding="utf-8",
+        )
+
+        from siteops.orchestrator import Orchestrator
+
+        site = Orchestrator(workspace).load_site("child")
+
+        assert site.subscription == "sub-123"
+
+
+class TestTheIndexPathDefersToValidation:
+    """Building the workspace index must not crash on a malformed file.
+
+    The index reads `metadata.name` before any site is validated, so a
+    malformed envelope surfaced there as an attribute error naming neither the
+    file nor the key.
+    """
+
+    def test_a_malformed_metadata_reports_the_file_and_key(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        (workspace / "sites").mkdir(parents=True)
+        (workspace / "sites" / "n.yaml").write_text(
+            "apiVersion: siteops/v1\nkind: Site\nmetadata: not-a-map\n"
+            "spec:\n  subscription: sub\n  location: eastus\n",
+            encoding="utf-8",
+        )
+
+        from siteops.orchestrator import Orchestrator
+
+        with pytest.raises(ValueError, match=r"'metadata' in site .* must be a mapping"):
+            Orchestrator(workspace).load_site("n")
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "apiVersion: siteops/v1\nkind: Site\nname:\n  - one\n  - two\n"
+            "subscription: sub\nlocation: eastus\n",
+            "apiVersion: siteops/v1\nkind: Site\nmetadata:\n  name:\n    - one\n"
+            "spec:\n  subscription: sub\n  location: eastus\n",
+        ],
+        ids=["flat", "nested"],
+    )
+    def test_a_name_that_is_not_text_reports_the_file_and_key(self, tmp_path, body):
+        """The index keys a dictionary by whatever `name` holds, so a list
+        failed as an unhashable key before the file could be named."""
+        workspace = tmp_path / "workspace"
+        (workspace / "sites").mkdir(parents=True)
+        (workspace / "sites" / "n.yaml").write_text(body, encoding="utf-8")
+
+        from siteops.orchestrator import Orchestrator
+
+        with pytest.raises(ValueError, match=r"'name' in site .* must be text"):
+            Orchestrator(workspace).load_site("n")
+
+
+class TestTheSiteKeySetsStayInStep:
+    """The two shapes describe one contract, so their key sets must agree.
+
+    Only the flat set is pinned elsewhere, by the test comparing it against the
+    documented list. A field added to a nested set alone would be accepted in
+    one shape and rejected in the other, and nothing would say so.
+    """
+
+    def test_the_nested_sets_partition_the_flat_set(self):
+        from siteops.models import (
+            _SITE_FLAT_KNOWN_KEYS,
+            _SITE_NESTED_METADATA_KEYS,
+            _SITE_NESTED_SPEC_KEYS,
+        )
+
+        # `apiVersion` and `kind` stay at the top in both shapes. Everything
+        # else the flat shape reads has to appear in exactly one nested
+        # container, or the two shapes accept different files.
+        envelope = {"apiVersion", "kind"}
+        nested_total = _SITE_NESTED_METADATA_KEYS | _SITE_NESTED_SPEC_KEYS | envelope
+
+        # `inherits` is deliberately flat-only, since no loader reads it from a
+        # spec. It is the one field the nested shape does not carry.
+        assert _SITE_FLAT_KNOWN_KEYS - nested_total == {"inherits"}
+        assert nested_total - _SITE_FLAT_KNOWN_KEYS == set()
+
+    def test_the_containers_do_not_overlap(self):
+        from siteops.models import _SITE_NESTED_METADATA_KEYS, _SITE_NESTED_SPEC_KEYS
+
+        assert not (_SITE_NESTED_METADATA_KEYS & _SITE_NESTED_SPEC_KEYS), (
+            "a key in both containers would be accepted in either place, and "
+            "only one of them is read"
+        )
+
+    def test_the_nested_top_level_carries_only_the_envelope(self):
+        from siteops.models import _SITE_NESTED_TOP_KEYS
+
+        assert _SITE_NESTED_TOP_KEYS == {"apiVersion", "kind", "metadata", "spec"}
+
+
+class TestASiteErrorNamesTheFilesBehindIt:
+    """A site is checked after its inherit chain and overlays are merged.
+
+    The name in the error is the site, so on its own it points at none of the
+    files that could hold the offending key. One shared parent produces the
+    same error for every site that inherits it, and an overlay directory is
+    not part of what CI checks out.
+    """
+
+    BASE = (
+        "apiVersion: siteops/v1\nkind: SiteTemplate\n"
+        "subscription: sub\nlocation: eastus\n"
+    )
+
+    def _workspace(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        (workspace / "sites").mkdir(parents=True)
+        (workspace / "sites.local").mkdir()
+        return workspace
+
+    def test_a_key_from_a_parent_template_names_the_parent(self, tmp_path):
+        from siteops.orchestrator import Orchestrator
+
+        workspace = self._workspace(tmp_path)
+        (workspace / "sites" / "base-site.yaml").write_text(
+            self.BASE + "paramaters:\n  a: b\n", encoding="utf-8"
+        )
+        (workspace / "sites" / "munich-dev.yaml").write_text(
+            "apiVersion: siteops/v1\nkind: Site\nname: munich-dev\n"
+            "inherits: base-site.yaml\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError) as exc:
+            Orchestrator(workspace).load_site("munich-dev")
+
+        assert "sites/base-site.yaml" in str(exc.value)
+
+    def test_a_key_from_an_overlay_names_the_overlay(self, tmp_path):
+        """`sites.local/` is gitignored, so the file CI never sees is exactly
+        the one an operator needs named."""
+        from siteops.orchestrator import Orchestrator
+
+        workspace = self._workspace(tmp_path)
+        (workspace / "sites" / "munich-dev.yaml").write_text(
+            "apiVersion: siteops/v1\nkind: Site\nname: munich-dev\n"
+            "subscription: sub\nlocation: eastus\n",
+            encoding="utf-8",
+        )
+        (workspace / "sites.local" / "munich-dev.yaml").write_text(
+            "paramaters:\n  a: b\n", encoding="utf-8"
+        )
+
+        with pytest.raises(ValueError) as exc:
+            Orchestrator(workspace).load_site("munich-dev")
+
+        assert "sites.local/munich-dev.yaml" in str(exc.value)
+
+    def test_a_valid_site_still_reuses_the_inherit_chain_memo(self, tmp_path):
+        """Collecting the file list runs on the failure path only. Doing it
+        during every load would read a shared parent once per site."""
+        from siteops.orchestrator import Orchestrator
+
+        workspace = self._workspace(tmp_path)
+        (workspace / "sites" / "base-site.yaml").write_text(self.BASE, encoding="utf-8")
+        for name in ("munich-dev", "seattle-dev"):
+            (workspace / "sites" / f"{name}.yaml").write_text(
+                f"apiVersion: siteops/v1\nkind: Site\nname: {name}\n"
+                f"inherits: base-site.yaml\n",
+                encoding="utf-8",
+            )
+
+        orchestrator = Orchestrator(workspace)
+        orchestrator.load_site("munich-dev")
+        orchestrator.load_site("seattle-dev")
+
+        assert orchestrator._inherited_data_cache, (
+            "the inherit chain was not memoized, so a shared parent is reparsed "
+            "for every site that inherits it"
+        )
+
+
+class TestARejectedKeyIsExplainedNotJustNamed:
+    """A rejection is only useful if it says what to do next.
+
+    A key can be rejected for three different reasons, and the closest-spelling
+    suggestion is the right answer for only one of them. Offering it for the
+    others points at a field that is real, different, and also wrong.
+    """
+
+    def _write(self, tmp_path, body):
+        path = tmp_path / "munich-dev.yaml"
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    @pytest.mark.parametrize(
+        ("body", "expected"),
+        [
+            (
+                "apiVersion: siteops/v1\nkind: Site\nmetadata:\n  name: n\n"
+                "spec:\n  description: x\n  subscription: s\n  location: eastus\n",
+                "belongs under `metadata`",
+            ),
+            (
+                "apiVersion: siteops/v1\nkind: Site\nmetadata:\n  name: n\n"
+                "  subscription: s\nspec:\n  subscription: s\n  location: eastus\n",
+                "belongs under `spec`",
+            ),
+        ],
+        ids=["description-in-spec", "subscription-in-metadata"],
+    )
+    def test_a_real_field_in_the_wrong_container_is_told_where_it_goes(
+        self, tmp_path, body, expected
+    ):
+        with pytest.raises(ValueError) as exc:
+            Site.from_file(self._write(tmp_path, body))
+
+        assert expected in str(exc.value)
+        assert "did you mean" not in str(exc.value)
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "apiVersion: siteops/v1\nkind: Site\nname: n\nsubscription: s\n"
+            "location: eastus\nannotations:\n  owner: platform\n",
+            "apiVersion: siteops/v1\nkind: Site\nmetadata:\n  name: n\n"
+            "  annotations:\n    owner: platform\n"
+            "spec:\n  subscription: s\n  location: eastus\n",
+        ],
+        ids=["flat", "nested"],
+    )
+    def test_a_kubernetes_key_this_engine_does_not_read_is_named_as_such(
+        self, tmp_path, body
+    ):
+        """`annotations` is recognizable to anyone who writes Kubernetes and is
+        read by nothing here. The answer is where operator metadata goes, which
+        no spelling suggestion can express."""
+        with pytest.raises(ValueError) as exc:
+            Site.from_file(self._write(tmp_path, body))
+
+        message = str(exc.value)
+        assert "not read by siteops" in message
+        assert "`labels`" in message and "`properties`" in message
+
+    def test_a_file_carrying_both_shapes_is_told_it_carries_both(self, tmp_path):
+        """Reporting three real field names as unknown keys says they are not
+        real, which is the opposite of the problem."""
+        body = (
+            "apiVersion: siteops/v1\nkind: Site\nname: n\nsubscription: s\n"
+            "location: eastus\nspec:\n  resourceGroup: rg\n"
+        )
+
+        with pytest.raises(ValueError) as exc:
+            Site.from_file(self._write(tmp_path, body))
+
+        message = str(exc.value)
+        assert "mixes the two site shapes" in message
+        for field in ("`name`", "`subscription`", "`location`"):
+            assert field in message
+        assert "unknown" not in message
+
+    def test_a_blank_required_key_is_told_that_removing_it_is_an_option(self, tmp_path):
+        """The operator who hits this was usually inheriting the value already,
+        and the blank key is what defeated it."""
+        body = (
+            "apiVersion: siteops/v1\nkind: Site\nname: n\nsubscription:\n"
+            "location: eastus\n"
+        )
+
+        with pytest.raises(ValueError) as exc:
+            Site.from_file(self._write(tmp_path, body))
+
+        assert "remove the key entirely" in str(exc.value)
+
+    def test_a_plain_typo_still_gets_the_spelling_suggestion(self, tmp_path):
+        """The suggestion is right for the case it was written for, so the
+        other paths must not have replaced it."""
+        body = (
+            "apiVersion: siteops/v1\nkind: Site\nname: n\nsubscription: s\n"
+            "location: eastus\nparamaters:\n  a: b\n"
+        )
+
+        with pytest.raises(ValueError) as exc:
+            Site.from_file(self._write(tmp_path, body))
+
+        assert "did you mean `parameters`?" in str(exc.value)
+
+
+class TestInheritsIsReadAtTheTopLevelOfEitherShape:
+    """Inheritance is about where `inherits` sits, not which shape the file uses.
+
+    The envelope shape inherits exactly as the flat shape does, provided
+    `inherits:` sits beside `apiVersion` and `kind`. Telling a reader that the
+    envelope cannot inherit sends them to rewrite a file when moving one line
+    is the fix.
+    """
+
+    def _workspace(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        (workspace / "sites").mkdir(parents=True)
+        return workspace
+
+    def test_an_envelope_site_inherits_from_an_envelope_template(self, tmp_path):
+        from siteops.orchestrator import Orchestrator
+
+        workspace = self._workspace(tmp_path)
+        (workspace / "sites" / "base-site.yaml").write_text(
+            "apiVersion: siteops/v1\nkind: SiteTemplate\n"
+            "spec:\n  subscription: sub-parent\n  location: eastus\n"
+            "  properties:\n    fromParent: true\n",
+            encoding="utf-8",
+        )
+        (workspace / "sites" / "munich.yaml").write_text(
+            "apiVersion: siteops/v1\nkind: Site\ninherits: base-site.yaml\n"
+            "metadata:\n  name: munich\nspec:\n  resourceGroup: rg-munich\n",
+            encoding="utf-8",
+        )
+
+        site = Orchestrator(workspace).load_site("munich")
+
+        assert site.subscription == "sub-parent"
+        assert site.location == "eastus"
+        assert site.properties == {"fromParent": True}
+        assert site.resource_group == "rg-munich"
+
+    def test_inherits_inside_spec_says_to_move_it_up(self, tmp_path):
+        """The placement is wrong, not the shape."""
+        path = tmp_path / "munich.yaml"
+        path.write_text(
+            "apiVersion: siteops/v1\nkind: Site\nmetadata:\n  name: munich\n"
+            "spec:\n  inherits: base-site.yaml\n  subscription: s\n  location: eastus\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError) as exc:
+            Site.from_file(path)
+
+        message = str(exc.value)
+        assert "top level" in message
+        assert "flat" not in message, (
+            "the envelope shape inherits too, so the error must not name a shape"
+        )
+
+    def test_inherits_that_is_not_a_path_names_the_file_and_the_key(self, tmp_path):
+        """`inherits` is read while the merge is assembled, before any model
+        exists, so a list reached a path join and raised a bare TypeError that
+        named neither the file nor the key and took the whole listing down."""
+        from siteops.orchestrator import Orchestrator
+
+        workspace = self._workspace(tmp_path)
+        (workspace / "sites" / "munich.yaml").write_text(
+            "apiVersion: siteops/v1\nkind: Site\nname: munich\n"
+            "inherits:\n  - a.yaml\n  - b.yaml\nsubscription: s\nlocation: eastus\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ValueError) as exc:
+            Orchestrator(workspace).load_site("munich")
+
+        message = str(exc.value)
+        assert "'inherits'" in message
+        assert "munich" in message
+        assert "list" in message
+
+
+class TestTheMergedFileListReadsInMergeOrder:
+    """The order is the precedence, so it has to be the real one.
+
+    A reader uses the list to decide which file wins. Recording each file as it
+    was opened put a child ahead of the parent it inherits from, which reverses
+    that.
+    """
+
+    def test_parents_come_first_then_the_base_then_the_overlay(self, tmp_path):
+        from siteops.orchestrator import Orchestrator
+
+        workspace = tmp_path / "workspace"
+        (workspace / "sites").mkdir(parents=True)
+        (workspace / "sites.local").mkdir()
+        (workspace / "sites" / "grandparent.yaml").write_text(
+            "apiVersion: siteops/v1\nkind: SiteTemplate\nsubscription: s\nlocation: eastus\n",
+            encoding="utf-8",
+        )
+        (workspace / "sites" / "parent.yaml").write_text(
+            "apiVersion: siteops/v1\nkind: SiteTemplate\ninherits: grandparent.yaml\n",
+            encoding="utf-8",
+        )
+        (workspace / "sites" / "munich.yaml").write_text(
+            "apiVersion: siteops/v1\nkind: Site\nname: munich\ninherits: parent.yaml\n",
+            encoding="utf-8",
+        )
+        (workspace / "sites.local" / "munich.yaml").write_text(
+            "paramaters:\n  a: b\n", encoding="utf-8"
+        )
+
+        with pytest.raises(ValueError) as exc:
+            Orchestrator(workspace).load_site("munich")
+
+        listed = str(exc.value).split("Merged from:")[1]
+        positions = [
+            listed.index(name)
+            for name in (
+                "sites/grandparent.yaml",
+                "sites/parent.yaml",
+                "sites/munich.yaml",
+                "sites.local/munich.yaml",
+            )
+        ]
+        assert positions == sorted(positions), (
+            f"files are not listed in merge order: {listed.strip()}"
+        )
+
+
+class TestAListEntryIsHeldToItsType:
+    """A list of paths or identifiers is unusable if one entry is not text.
+
+    YAML turns an unquoted release or version into a number, so this is reached
+    by writing `sites: [2607]` rather than `sites: ["2607"]`. A site named that
+    way was dropped without a word, and a parameter path that way raised from
+    whatever first joined it to a directory.
+    """
+
+    def _manifest(self, tmp_path, body: str) -> Path:
+        path = tmp_path / "m.yaml"
+        path.write_text(
+            "apiVersion: siteops/v1\nkind: Manifest\nname: m\n" + body, encoding="utf-8"
+        )
+        return path
+
+    def test_a_site_entry_that_is_not_text_is_reported(self, tmp_path):
+        """Dropping it silently means deploying to fewer sites than asked for,
+        which is the worst outcome for a fleet command."""
+        path = self._manifest(
+            tmp_path,
+            "sites: [2607, other]\nsteps:\n  - name: s\n    template: t.bicep\n",
+        )
+
+        with pytest.raises(ValueError, match=r"Entry 0 of 'sites'.*must be str, got int"):
+            Manifest.from_file(path, workspace_root=tmp_path)
+
+    def test_a_step_parameter_entry_that_is_not_text_is_reported(self, tmp_path):
+        path = self._manifest(
+            tmp_path,
+            "sites: [a]\nsteps:\n  - name: s\n    template: t.bicep\n    parameters: [123]\n",
+        )
+
+        with pytest.raises(
+            ValueError, match=r"Entry 0 of 'parameters'.*must be str, got int"
+        ):
+            Manifest.from_file(path, workspace_root=tmp_path)
+
+    def test_a_manifest_parameter_entry_that_is_not_text_is_reported(self, tmp_path):
+        path = self._manifest(
+            tmp_path,
+            "sites: [a]\nparameters: [7]\nsteps:\n  - name: s\n    template: t.bicep\n",
+        )
+
+        with pytest.raises(
+            ValueError, match=r"Entry 0 of 'parameters'.*must be str, got int"
+        ):
+            Manifest.from_file(path, workspace_root=tmp_path)
+
+    def test_a_quoted_numeric_entry_is_accepted(self, tmp_path):
+        """The rule is the type, not the characters."""
+        path = self._manifest(
+            tmp_path,
+            "sites: ['2607']\nsteps:\n  - name: s\n    template: t.bicep\n",
+        )
+
+        assert Manifest.from_file(path, workspace_root=tmp_path).sites == ["2607"]

@@ -103,9 +103,8 @@ siteops deploy manifests/diagnostics.yaml -l name=munich-prod
 # Works. CLI supplies the targeting the manifest deferred.
 
 siteops deploy manifests/diagnostics.yaml
-# Error: declares no `sites:` or `selector:`, and no `-l/--selector`
-# was provided. Either add targeting to the manifest, or pass
-# `-l <key>=<value>` at deploy time.
+# Error: Manifest 'diagnostics' has no targeting. Add `sites:` or `selector:`
+# to the manifest, or pass `-l <key>=<value>` on the CLI.
 ```
 
 Partials (filename prefixed `_`) compose into other manifests via `include:`. They almost always omit targeting on the assumption that the parent manifest sets it. See [manifest-includes.md](manifest-includes.md).
@@ -117,7 +116,7 @@ When a CLI selector matches zero sites, `deploy` exits non-zero with a diagnosti
 ```bash
 siteops deploy manifests/aio-install.yaml -l environment=prdo
 # Error: CLI selector `-l environment=prdo` matched no sites.
-# `environment=prdo` requested. Workspace `environment` values: dev, prod, staging.
+# `environment=prdo` requested. Workspace `environment` values: 'dev', 'prod', 'staging'.
 ```
 
 ```bash

@@ -14,6 +14,7 @@ process handle without also patching the kernel calls in its cleanup path.
 from __future__ import annotations
 
 import threading
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -504,3 +505,57 @@ class TestSubscriptionFailureBlastRadius:
 
         assert phase_two == ["edge-b"]
         assert summary["sites"]["edge-b"]["status"] == "success"
+
+
+class TestAnInterruptedFleetStops:
+    """An operator who interrupts a rollout has decided to stop it.
+
+    Leaving the thread pool waits for everything already queued, so a fleet
+    that had eight sites submitted still deployed to all eight after the
+    interrupt. The sequential path stopped where it was told to.
+    """
+
+    def _sites(self, count):
+        return [
+            Site(
+                name=f"plant-{index:02d}",
+                subscription="00000000-0000-0000-0000-000000000000",
+                resource_group=f"rg-plant-{index:02d}",
+                location="eastus",
+                labels={},
+            )
+            for index in range(count)
+        ]
+
+    def test_the_sites_not_yet_started_are_not_deployed(self, tmp_workspace):
+        started: list[str] = []
+        gate = threading.Event()
+
+        def deploy_site(self_, manifest_, site, *args, **kwargs):
+            started.append(site.name)
+            if len(started) == 2:
+                gate.set()
+            # Hold the two running workers so the rest stay queued, which is
+            # the state the interrupt has to stop.
+            gate.wait(timeout=5)
+            if len(started) <= 2:
+                raise KeyboardInterrupt("operator stopped the rollout")
+            return {
+                "site": site.name, "status": "success", "error": None,
+                "steps_completed": 1, "steps_skipped": 0, "steps_total": 1,
+                "elapsed": 0.0, "steps": [],
+            }
+
+        orchestrator = Orchestrator(tmp_workspace)
+        manifest = SimpleNamespace(name="m", steps=[], parameters=[])
+        sites = self._sites(8)
+
+        with patch.object(Orchestrator, "_deploy_site", deploy_site), \
+             pytest.raises(KeyboardInterrupt):
+            orchestrator._deploy_parallel(
+                manifest, sites, "ts", ParallelConfig(sites=2)
+            )
+
+        assert len(started) < len(sites), (
+            f"every site deployed despite the interrupt: {started}"
+        )

@@ -25,6 +25,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import deque
 from collections.abc import Generator
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
@@ -33,10 +34,10 @@ from enum import Enum
 from fnmatch import fnmatchcase
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from siteops import __version__
-from siteops.sanitize import scrub_for_output
+from siteops.sanitize import scrub_command_for_output, scrub_for_output
 
 logger = logging.getLogger(__name__)
 
@@ -465,7 +466,11 @@ def filter_parameters(
             unused.append(key)
 
     if unused:
-        logger.debug(f"Step '{step_name}': Filtered out parameters not in template: {unused}")
+        logger.debug(
+            scrub_for_output(
+                f"Step '{step_name}': Filtered out parameters not in template: {unused}"
+            )
+        )
 
     return filtered
 
@@ -486,7 +491,12 @@ def _allocate_arc_port_slot() -> int:
                 port = ARC_PROXY_PORT_BASE + (slot * ARC_PROXY_PORT_SPACING)
                 logger.debug(f"Allocated Arc proxy slot {slot} (port {port})")
                 return port
-        raise RuntimeError(f"No available Arc proxy slots (max {ARC_PROXY_MAX_SLOTS} concurrent proxies)")
+        raise RuntimeError(
+            f"No Arc proxy slot is free. At most {ARC_PROXY_MAX_SLOTS} proxies run "
+            f"at once, so a manifest with a kubectl or wait step cannot deploy to "
+            f"more than {ARC_PROXY_MAX_SLOTS} sites concurrently. Lower `parallel:` "
+            f"in the manifest, or pass `--parallel {ARC_PROXY_MAX_SLOTS}`."
+        )
 
 
 def _release_arc_port_slot(port: int) -> None:
@@ -511,6 +521,117 @@ def _compute_probe_phase_budget(total_budget: float) -> tuple[float, float]:
     """
     readiness_budget = min(total_budget / 2.0, _ARC_PROXY_PROBE_READINESS_MIN_BUDGET_S)
     return total_budget - readiness_budget, total_budget
+
+
+_ARC_PROXY_RETAINED_LINES = 200
+
+
+class _ProxyOutputDrainer:
+    """Continuously read a subprocess's pipes so it cannot block writing to them.
+
+    The Arc proxy runs for the whole life of the caller's `with` body. A proxy
+    that fills the operating system's pipe buffer blocks on its next write and
+    stops serving, which presents as a deploy that hangs rather than one that
+    fails.
+
+    `DEVNULL` would also stop the blocking, but the port-in-use retry matches on
+    stderr, so that output is retained rather than discarded.
+    """
+
+    def __init__(
+        self, process: subprocess.Popen, max_lines: int = _ARC_PROXY_RETAINED_LINES
+    ) -> None:
+        self._buffers: dict[str, "deque[str]"] = {}
+        self._threads: list[threading.Thread] = []
+        # Set as stderr is read, not derived from the retained tail. The tail
+        # is bounded, so a proxy that keeps talking after the port error
+        # evicts the line the retry depends on, and a retryable collision
+        # would become a hard failure.
+        self._port_in_use = False
+
+        for name in ("stdout", "stderr"):
+            stream = getattr(process, name, None)
+            if stream is None:
+                continue
+            # Both pipes are drained, since either one filling blocks the
+            # proxy. Only stderr is retained, because the diagnostic is its
+            # only reader, and an unbounded buffer would move the pipe's growth
+            # into memory. A zero-length buffer still drains.
+            buffer: "deque[str]" = deque(maxlen=max_lines if name == "stderr" else 0)
+            self._buffers[name] = buffer
+            thread = threading.Thread(
+                target=self._drain,
+                args=(stream, buffer, name == "stderr"),
+                name=f"arc-proxy-{name}",
+                daemon=True,
+            )
+            thread.start()
+            self._threads.append(thread)
+
+    def _drain(
+        self, stream: TextIO, buffer: "deque[str]", watch_for_port: bool = False
+    ) -> None:
+        """Read until end of stream, keeping whatever the buffer retains."""
+        try:
+            for line in stream:
+                buffer.append(line)
+                if watch_for_port and _ARC_PROXY_PORT_IN_USE_PATTERN.search(line):
+                    self._port_in_use = True
+        except UnicodeDecodeError:
+            # Ordered above `ValueError`, which it subclasses, so this handler
+            # is reachable at all. The Arc proxy's streams are opened with
+            # `errors="replace"`, so this is the guard for a stream that is
+            # not, rather than a case the current caller produces. Reported
+            # rather than ending the drain silently, since the pipe stops being
+            # read from here and the proxy can block on its next write.
+            logger.debug("Arc proxy output could not be decoded, stopping this reader")
+        except (OSError, ValueError):
+            # Raised if the stream is closed while this read is in flight.
+            # Treated as the end of the stream either way.
+            pass
+        finally:
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+
+    def join(self, timeout: float = 5.0) -> None:
+        """Wait for the readers to reach end of stream, within one total budget.
+
+        The budget is shared rather than one each, since per reader made a
+        `join(2)` take four seconds.
+
+        A reader can outlive the proxy, because `az connectedk8s proxy` runs a
+        separate binary that can inherit the write end and hold it open, so end
+        of stream is not guaranteed. Two ways of forcing this reader to stop
+        were measured and rejected: closing the stream deadlocks against the
+        lock the blocked read holds, and closing the descriptor hangs the
+        interpreter. Terminating every process that holds the write end does
+        work, which is what the caller's cleanup aims at. A reader that still
+        survives is a daemon bounded by `max_lines`, so it cannot block exit or
+        grow without limit.
+        """
+        deadline = time.monotonic() + timeout
+        for thread in self._threads:
+            thread.join(max(0.0, deadline - time.monotonic()))
+
+    @property
+    def port_in_use(self) -> bool:
+        """Whether the proxy reported its port was taken.
+
+        Two readings, because neither covers the other. The flag is set as each
+        line is read, so it survives a chatty proxy evicting the line from the
+        bounded tail. The tail is searched as well, since a message split
+        across two writes never appears whole on any single line.
+        """
+        return self._port_in_use or bool(
+            _ARC_PROXY_PORT_IN_USE_PATTERN.search(self.stderr)
+        )
+
+    @property
+    def stderr(self) -> str:
+        """The retained tail of stderr, as one string."""
+        return "".join(self._buffers.get("stderr", ()))
 
 
 def _probe_arc_proxy_ready(
@@ -611,6 +732,8 @@ def _probe_arc_proxy_ready(
                 cmd,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 check=False,
                 timeout=run_timeout,
             )
@@ -625,7 +748,8 @@ def _probe_arc_proxy_ready(
         detail = stderr_text or stdout_text or "(no output)"
         first_line = detail.splitlines()[0]
         last_observation = (
-            f"argv={cmd!r} exit={result.returncode} detail={first_line[:200]!r}"
+            f"argv={scrub_command_for_output(cmd)!r} exit={result.returncode} "
+            f"detail={scrub_for_output(first_line)[:200]!r}"
         )
         time.sleep(_ARC_PROXY_PROBE_READINESS_INTERVAL_S)
 
@@ -755,13 +879,17 @@ class AzCliExecutor:
             return False, "", "Azure CLI (az) not found in PATH. Install from https://aka.ms/installazurecli"
 
         cmd = [self.az_path] + args
-        cmd_str = " ".join(cmd)
+        # Rendered from the vector rather than scrubbed after joining, so a
+        # value containing a space is replaced whole. Display only. Both lines
+        # below carry the subscription and resource group the command targets,
+        # and a dry run is what an operator runs in CI to preview a change.
+        cmd_display = scrub_command_for_output(cmd)
 
         if self.dry_run:
-            logger.info(f"[DRY-RUN] {cmd_str}")
+            logger.info(f"[DRY-RUN] {cmd_display}")
             return True, "{}", ""
 
-        logger.debug(f"Executing: {cmd_str}")
+        logger.debug(f"Executing: {cmd_display}")
 
         try:
             # Decode as UTF-8 rather than the locale encoding. `az` emits UTF-8,
@@ -809,13 +937,13 @@ class AzCliExecutor:
         if kubeconfig is not None:
             cmd.append(f"--kubeconfig={kubeconfig}")
         cmd.extend(args)
-        cmd_str = " ".join(cmd)
+        cmd_display = scrub_command_for_output(cmd)
 
         if self.dry_run:
-            logger.info(f"[DRY-RUN] {cmd_str}")
+            logger.info(f"[DRY-RUN] {cmd_display}")
             return True, "", ""
 
-        logger.debug(f"Executing: {cmd_str}")
+        logger.debug(f"Executing: {cmd_display}")
 
         try:
             result = subprocess.run(
@@ -867,8 +995,10 @@ class AzCliExecutor:
         """
         if self.dry_run:
             logger.info(
-                f"[DRY-RUN] az connectedk8s proxy -n {cluster_name} "
-                f"-g {resource_group} --subscription {subscription}"
+                scrub_for_output(
+                    f"[DRY-RUN] az connectedk8s proxy -n {cluster_name} "
+                    f"-g {resource_group} --subscription {subscription}"
+                )
             )
             yield "dry-run-kubeconfig"
             return
@@ -879,7 +1009,12 @@ class AzCliExecutor:
             return
 
         proxy_process: subprocess.Popen | None = None
+        drainer: _ProxyOutputDrainer | None = None
         allocated_port: int | None = None
+        # A slot stays held until the attempt sequence ends, so a retry cannot
+        # be handed back the port that just failed.
+        held_ports: list[int] = []
+        started = False
         # Per-proxy kubeconfig so parallel proxies do not race the
         # ambient current-context in `~/.kube/config`. Created with
         # `mkstemp` for an atomic, unique file. The fd is closed
@@ -893,6 +1028,7 @@ class AzCliExecutor:
             for attempt in range(ARC_PROXY_MAX_PORT_RETRIES):
                 # Allocate a unique port slot for this proxy instance
                 allocated_port = _allocate_arc_port_slot()
+                held_ports.append(allocated_port)
 
                 cmd = [
                     self.az_path,
@@ -910,7 +1046,7 @@ class AzCliExecutor:
                     kubeconfig_path,
                 ]
 
-                logger.debug(f"Starting Arc proxy: {' '.join(cmd)}")
+                logger.debug(f"Starting Arc proxy: {scrub_command_for_output(cmd)}")
 
                 # Start process with its own process group for clean termination
                 if os.name == "nt":
@@ -920,6 +1056,8 @@ class AzCliExecutor:
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                         text=True,
+                        encoding="utf-8",
+                        errors="replace",
                         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
                     )
                 else:
@@ -929,8 +1067,14 @@ class AzCliExecutor:
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                         text=True,
+                        encoding="utf-8",
+                        errors="replace",
                         preexec_fn=os.setsid,
                     )
+
+                # Drain from the moment the process exists, so it can never
+                # block on a full pipe.
+                drainer = _ProxyOutputDrainer(proxy_process)
 
                 # Active readiness probe. Bails early if the proxy process dies.
                 logger.debug(
@@ -944,6 +1088,7 @@ class AzCliExecutor:
                     kubeconfig_path=kubeconfig_path,
                 )
                 if ready:
+                    started = True
                     break  # proxy responsive
 
                 # Probe did not become ready. Determine cause.
@@ -965,13 +1110,17 @@ class AzCliExecutor:
                     except (subprocess.TimeoutExpired, ProcessLookupError, OSError):
                         # Best-effort terminate. Finally block handles full cleanup.
                         pass
-                    yield None
-                    return
+                    break
 
-                _, stderr = proxy_process.communicate(timeout=5)
-                is_port_in_use = bool(
-                    _ARC_PROXY_PORT_IN_USE_PATTERN.search(stderr or "")
-                )
+                # The process has already exited here, so the readers are at end
+                # of stream or about to be. Read what the drainer collected
+                # rather than calling `communicate()`, which would contend with
+                # them. The retry decision comes from a flag set as the line was
+                # read, since the retained tail is bounded and a chatty proxy
+                # can push the port error out of it.
+                drainer.join(timeout=5)
+                stderr = drainer.stderr
+                is_port_in_use = drainer.port_in_use
                 is_last_attempt = attempt == ARC_PROXY_MAX_PORT_RETRIES - 1
 
                 if is_port_in_use and not is_last_attempt:
@@ -980,22 +1129,29 @@ class AzCliExecutor:
                         f"in use, retrying with next slot "
                         f"(attempt {attempt + 1}/{ARC_PROXY_MAX_PORT_RETRIES})"
                     )
-                    _release_arc_port_slot(allocated_port)
                     allocated_port = None
                     proxy_process = None
+                    drainer = None
                     continue
 
                 # Not retryable: surface stderr and bail.
                 logger.error(f"Arc proxy exited unexpectedly: {scrub_for_output(stderr)}")
-                yield None
-                return
-
-            logger.debug("Arc proxy established successfully")
-            yield kubeconfig_path
+                break
 
         except Exception as e:
             logger.error(f"Failed to start Arc proxy: {scrub_for_output(str(e))}")
             yield None
+
+        else:
+            # Every yield sits outside the handler above. Inside the `try` it
+            # caught whatever the caller's `with` body raised, reported it as a
+            # startup failure, and destroyed the original exception. `finally`
+            # still runs, so cleanup is unchanged.
+            if started:
+                logger.debug("Arc proxy established successfully")
+                yield kubeconfig_path
+            else:
+                yield None
 
         finally:
             if proxy_process is not None and proxy_process.poll() is None:
@@ -1024,9 +1180,18 @@ class AzCliExecutor:
                     except Exception as e:
                         logger.debug(f"Failed to kill proxy process: {e}")
 
-            # Release the allocated port slot
-            if allocated_port is not None:
-                _release_arc_port_slot(allocated_port)
+            # Join briefly to retire the readers. The proxy being down does not
+            # guarantee end of stream, since a descendant it started can still
+            # hold the write end, so this is best effort. They are daemons
+            # bounded by their buffers, so one that survives cannot block exit
+            # or grow without limit.
+            if drainer is not None:
+                drainer.join(timeout=2)
+
+            # Release every slot this call took, including those a retry left
+            # held.
+            for port in held_ports:
+                _release_arc_port_slot(port)
 
             # Best-effort remove the per-proxy kubeconfig. The file may
             # already be gone (test teardown, manual cleanup), so swallow
@@ -1645,7 +1810,11 @@ class AzCliExecutor:
 
         if self.dry_run:
             files_display = ", ".join(files)
-            logger.info(f"[DRY-RUN] kubectl apply via Arc proxy ({cluster_name}): {files_display}")
+            logger.info(
+                scrub_for_output(
+                    f"[DRY-RUN] kubectl apply via Arc proxy ({cluster_name}): {files_display}"
+                )
+            )
             return KubectlResult(success=True, step_name=step_name, site_name=site_name)
 
         if not self.kubectl_path:
@@ -1672,7 +1841,7 @@ class AzCliExecutor:
             success, stdout, stderr = self._run_kubectl(args, kubeconfig=arc_kubeconfig)
 
             if success and stdout:
-                logger.debug(f"kubectl output:\n{stdout}")
+                logger.debug(f"kubectl output:\n{scrub_for_output(stdout)}")
 
             return KubectlResult(
                 success=success,
@@ -1802,8 +1971,10 @@ class AzCliExecutor:
 
         if self.dry_run:
             logger.info(
-                f"[DRY-RUN] would wait for {description} "
-                f"(timeout {timeout_minutes}m, poll {poll_interval_seconds}s)"
+                scrub_for_output(
+                    f"[DRY-RUN] would wait for {description} "
+                    f"(timeout {timeout_minutes}m, poll {poll_interval_seconds}s)"
+                )
             )
             return WaitResult(success=True, step_name=step_name, site_name=site_name)
 
@@ -1824,7 +1995,9 @@ class AzCliExecutor:
                     last_error = error
 
                 if state == WaitState.SATISFIED:
-                    logger.debug(f"{description} satisfied after {poll_count} poll(s)")
+                    logger.debug(
+                        scrub_for_output(f"{description} satisfied after {poll_count} poll(s)")
+                    )
                     return WaitResult(success=True, step_name=step_name, site_name=site_name)
 
                 if state == WaitState.FAILED:

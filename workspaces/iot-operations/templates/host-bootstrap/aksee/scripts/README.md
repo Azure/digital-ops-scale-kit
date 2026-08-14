@@ -28,8 +28,8 @@ cd workspaces/iot-operations/templates/host-bootstrap/aksee/scripts
 Output:
 
 ```
-Generated Install-AksEeBootstrap.ps1 (<N> lines, parse OK)
-Generated Install-AksEeBootstrap.min.ps1 (<N> lines, <N> bytes, parse OK)
+Generated <scripts-dir>\Install-AksEeBootstrap.ps1 (<N> lines, parse OK)
+Generated <scripts-dir>\Install-AksEeBootstrap.min.ps1 (<N> lines, <N> bytes, parse OK)
 ```
 
 The generator parse-checks both variants and exits non-zero on parse or inline-size failure. The minified variant is what the Bicep delivers via Arc Run Command. The full variant is for operator-direct use on the VM. Do not hand-edit the generated files. They are overwritten on every build.

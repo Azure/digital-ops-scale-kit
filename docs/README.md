@@ -8,6 +8,7 @@ Extended documentation for the Digital Operations Scale Kit.
 
 | Document | Description |
 |----------|-------------|
+| [migrating.md](migrating.md) | What to change in a workspace when moving to a newer Scale Kit release |
 | [site-configuration.md](site-configuration.md) | Site definitions, inheritance, overlays |
 | [targeting.md](targeting.md) | Selector grammar, site identity, no-match diagnostic |
 | [manifest-reference.md](manifest-reference.md) | Manifest syntax, step types, conditions |

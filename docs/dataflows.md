@@ -14,7 +14,7 @@ A declaration file carries up to three arrays. All three are created by one modu
 | `dataflowProfiles` | Execution pools, sized by `instanceCount` | same module |
 | `dataflows` | The pipelines themselves | same module |
 
-`templates/aio/dataflows/main.bicep` is what a manifest step points at. It routes to the module for the AIO API generation the site's release ships, so a site's dataflow resources are written at the same generation as the instance serving them.
+`templates/aio/dataflows/main.bicep` is what a manifest step points at. It routes to the module for the AIO API version the site's release ships, so a site's dataflow resources are written at the same API version as the instance serving them.
 
 Every key is optional. An omitted or empty array creates nothing.
 
@@ -86,7 +86,7 @@ siteops -w workspaces/iot-operations sites munich-dev --render
 
 ## Step order
 
-The family deploys as one step, `dataflow-resources`. Inside it, endpoints and profiles are created before the dataflows that name them. A dataflow references an endpoint by name through `endpointRef`, and ARM does not model that relationship, so the ordering is what guarantees the target exists. Each per-generation module expresses it with `dependsOn`, so ARM enforces it.
+The family deploys as one step, `dataflow-resources`. Inside it, endpoints and profiles are created before the dataflows that name them. A dataflow references an endpoint by name through `endpointRef`, and ARM does not model that relationship, so the ordering is what guarantees the target exists. Each per-version module expresses it with `dependsOn`, so ARM enforces it.
 
 A reference to a name nothing declares deploys clean and never moves data. The workspace tests check every `endpointRef` and `profileRef` against the declarations in the same file.
 

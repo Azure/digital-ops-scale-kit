@@ -495,6 +495,93 @@ class TestExecuteWaitStep:
         assert result.success is False
         assert "unresolved or empty resourceId" in result.error
 
+    @pytest.mark.parametrize(
+        ("field", "resource_id", "expected_value"),
+        [
+            ("resourceId", "{ site.subscription }}", "succeeded"),
+            ("resourceId", "{ steps.resolve-aio.outputs.machineId }}", "succeeded"),
+            ("expectedValue", ARC_ID, "{ site.parameters.state }}"),
+            ("expectedValue", ARC_ID, "{{ site.parameters.missing }}"),
+        ],
+        ids=["id-site-path", "id-hyphenated-step", "value-malformed", "value-unresolved"],
+    )
+    def test_a_mistyped_delimiter_fails_fast(
+        self, tmp_workspace, field, resource_id, expected_value
+    ):
+        """A wait step polls for the full timeout, so a mistyped delimiter that
+        reaches the poller costs the whole budget and then reports a resource
+        that was never going to be found. Both halves of the condition are
+        checked, since an unresolved expected value never equals the real tag
+        and the step waits out its budget just the same."""
+        orch = Orchestrator(tmp_workspace)
+        step = WaitStep(
+            name="wait-bs",
+            condition=ArmTagCondition(
+                type="arm-tag",
+                resource_id=resource_id,
+                tag_key="k",
+                expected_value=expected_value,
+            ),
+        )
+        with patch.object(
+            orch.executor, "wait_for_condition", side_effect=AssertionError("must not poll")
+        ):
+            result = orch._execute_wait_step(_site(), step, {})
+
+        assert result.success is False
+        assert f"unresolved or empty {field}" in result.error
+
+    def test_a_resolved_value_that_ends_in_braces_still_polls(self, tmp_workspace):
+        """The guard must not read rendered data as a template. A tag value can
+        legitimately end in `}}`, and refusing it would block a real wait."""
+        orch = Orchestrator(tmp_workspace)
+        step = WaitStep(
+            name="wait-bs",
+            condition=ArmTagCondition(
+                type="arm-tag",
+                resource_id=ARC_ID,
+                tag_key="k",
+                expected_value="{'state': {'phase': 'succeeded'}}",
+            ),
+        )
+
+        with patch.object(
+            orch.executor,
+            "wait_for_condition",
+            side_effect=lambda condition, **kwargs: WaitResult(
+                success=True, step_name="wait-bs", site_name="munich-dev"
+            ),
+        ):
+            result = orch._execute_wait_step(_site(), step, {})
+
+        assert result.success is True
+
+    @pytest.mark.parametrize("blank", ["", "   "], ids=["empty", "whitespace"])
+    def test_an_empty_resolved_value_fails_fast(self, tmp_workspace, blank):
+        """A wait step polls for its whole timeout, so an empty resource id
+        costs the full budget and then reports a resource that was never going
+        to be found. Empty and unresolved are both worth refusing up front."""
+        orch = Orchestrator(tmp_workspace)
+        step = WaitStep(
+            name="wait-bs",
+            condition=ArmTagCondition(
+                type="arm-tag",
+                resource_id="{{ site.parameters.blank }}",
+                tag_key="k",
+                expected_value="succeeded",
+            ),
+        )
+        site = _site()
+        site.parameters = {"blank": blank}
+
+        with patch.object(
+            orch.executor, "wait_for_condition", side_effect=AssertionError("must not poll")
+        ):
+            result = orch._execute_wait_step(site, step, {})
+
+        assert result.success is False
+        assert "unresolved or empty resourceId" in result.error
+
 
 class TestWaitStepDispatch:
     def test_compatibility_runs_on_any_site(self, tmp_workspace):

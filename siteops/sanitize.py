@@ -64,10 +64,30 @@ _AZURE_HOST_PATTERN = re.compile(
 # instead of leaking it or consuming the rest of the message.
 _RESOURCE_GROUP_PATTERN = re.compile(r"(resource group ')([\w.()-]+)", re.IGNORECASE)
 
+# A user principal name or email address. Azure echoes one back in a
+# `lastModifiedBy` field and in several permission errors, and it identifies a
+# person rather than a resource. The local part is replaced and the domain is
+# kept, since the domain is what makes the message diagnostic.
+#
+# `#` is part of the local part because that is the Azure AD guest form,
+# `alice_fabrikam.com#EXT#@contoso.onmicrosoft.com`, which is exactly what a
+# `lastModifiedBy` carries for a guest.
+#
+# The lookbehind covers every character the local part can contain, plus `/`,
+# which keeps a URL authority out. Blocking `/` alone stops a match only at the
+# first character, so `abfss://my-ws@account.dfs.core.windows.net` would match
+# from `ws` and be rewritten into an address that no longer resolves. A host is
+# left to the host rule.
+_UPN_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9._%+\-/])[A-Za-z0-9._%+#-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)"
+)
+
 GUID_PLACEHOLDER = "<guid>"
 RESOURCE_ID_PLACEHOLDER = "<resource-id>"
 SUBSCRIPTION_PLACEHOLDER = "<subscription>"
 RESOURCE_GROUP_PLACEHOLDER = "<resource-group>"
+KUBECONFIG_PLACEHOLDER = "<kubeconfig>"
+UPN_PLACEHOLDER = "<user>"
 TOKEN_PLACEHOLDER = "<token>"
 
 
@@ -105,7 +125,9 @@ def scrub(text: str | None) -> str | None:
 
     Order matters. Resource ids are handled first, since one contains a
     subscription GUID that would otherwise be replaced inside a path that is
-    itself about to be replaced.
+    itself about to be replaced. A user principal name is handled before the
+    host rule, so an address at an Azure service domain has its local part
+    removed rather than only its host labels.
 
     Args:
         text: The text to scrub. `None` passes through, so a caller can apply
@@ -119,9 +141,82 @@ def scrub(text: str | None) -> str | None:
 
     scrubbed = _RESOURCE_ID_PATTERN.sub(_replace_resource_id, text)
     scrubbed = _JWT_PATTERN.sub(TOKEN_PLACEHOLDER, scrubbed)
+    scrubbed = _UPN_PATTERN.sub(rf"{UPN_PLACEHOLDER}@\1", scrubbed)
     scrubbed = _AZURE_HOST_PATTERN.sub(lambda m: f"<host>.{m.group(1)}", scrubbed)
     scrubbed = _RESOURCE_GROUP_PATTERN.sub(rf"\1{RESOURCE_GROUP_PLACEHOLDER}", scrubbed)
     return _GUID_PATTERN.sub(GUID_PLACEHOLDER, scrubbed)
+
+
+# Flags whose value names the environment rather than the operation. A
+# subscription is included because the CLI accepts a display name as well as a
+# GUID, and a display name is not covered by the GUID rule.
+_IDENTIFYING_FLAGS = {
+    "-g": RESOURCE_GROUP_PLACEHOLDER,
+    "--resource-group": RESOURCE_GROUP_PLACEHOLDER,
+    "--subscription": SUBSCRIPTION_PLACEHOLDER,
+    # A per-proxy kubeconfig lands in the OS temp directory, whose path carries
+    # the account name on Windows. The path names the machine, not the command.
+    "--kubeconfig": KUBECONFIG_PLACEHOLDER,
+}
+
+
+def _render_flag(token: str) -> tuple[str, str | None]:
+    """Render one argument, and say what a following value should become.
+
+    The single place a token is classified. Returning the pending placeholder
+    rather than setting it lets the caller apply the same rules to a token in
+    any position, which is what stops a flag that follows a valueless flag from
+    being treated as a bare word.
+
+    Returns:
+        The token as it should appear, and the placeholder that replaces the
+        next token when this one is a flag that takes its value separately.
+    """
+    placeholder = _IDENTIFYING_FLAGS.get(token)
+    if placeholder is not None:
+        return token, placeholder
+
+    flag, separator, _ = token.partition("=")
+    if separator and flag in _IDENTIFYING_FLAGS:
+        return f"{flag}={_IDENTIFYING_FLAGS[flag]}", None
+
+    return token, None
+
+
+def scrub_command(argv: list[str]) -> list[str]:
+    """Replace identifying flag values in an argument vector.
+
+    Works on the vector rather than on the rendered string, which is what makes
+    it exact. A value may contain a space, since a subscription display name
+    can, and once the vector is joined that space is indistinguishable from the
+    separator, so the tail of the value survives any pattern. Matching on whole
+    tokens also means a flag is a flag: a value ending in `-g` is not one, and
+    a flag left without a value cannot consume the flag that follows it.
+
+    Args:
+        argv: The argument vector, as passed to `subprocess`.
+
+    Returns:
+        A new vector with identifying values replaced. Values are replaced
+        whether written as two tokens or as `--flag=value`.
+    """
+    scrubbed: list[str] = []
+    replace_next: str | None = None
+
+    for token in argv:
+        # A flag expecting a value, followed by another flag, means the value
+        # is missing. The following token is classified from scratch rather
+        # than consumed, so it keeps whatever treatment it deserves in its own
+        # right.
+        if replace_next is not None and not token.startswith("-"):
+            scrubbed.append(replace_next)
+            replace_next = None
+            continue
+
+        rendered, replace_next = _render_flag(token)
+        scrubbed.append(rendered)
+
+    return scrubbed
 
 
 # Set by a workflow to redact engine output. Also honored when explicitly set
@@ -165,3 +260,15 @@ def scrub_for_output(text: str | None) -> str | None:
     skips this, not the primary boundary.
     """
     return scrub(text) if is_redaction_enabled() else text
+
+
+def scrub_command_for_output(argv: list[str]) -> str:
+    """Render an argument vector for a log, scrubbed when output is published.
+
+    Pairs `scrub_command` with `scrub`, so a value named by a flag is replaced
+    structurally while everything else in the line, such as a resource id
+    inside a path, still goes through the text rules.
+    """
+    if not is_redaction_enabled():
+        return " ".join(argv)
+    return scrub(" ".join(scrub_command(argv))) or ""

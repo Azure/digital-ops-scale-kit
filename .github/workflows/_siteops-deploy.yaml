@@ -132,12 +132,12 @@ jobs:
       - name: Validate and show target sites
         shell: bash
         run: |
-          # Use validate -v instead of sites. It shows only site names and
-          # locations, not subscription IDs, resource groups, or parameters
+          # Use `validate --plan` instead of `sites`. It shows only site names
+          # and locations, not subscription IDs, resource groups, or parameters
           # which may contain sensitive values from SITE_OVERRIDES.
           CMD_ARGS=(-w "$INPUT_WORKSPACE" validate "$INPUT_MANIFEST")
           [[ -n "$INPUT_SELECTOR" ]] && CMD_ARGS+=(-l "$INPUT_SELECTOR")
-          CMD_ARGS+=(-v)
+          CMD_ARGS+=(--plan)
 
           echo "### Deployment Plan" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY

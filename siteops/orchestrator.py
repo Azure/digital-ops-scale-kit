@@ -21,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 import yaml
 
@@ -58,6 +58,18 @@ logger = logging.getLogger(__name__)
 # Supports nested paths like: steps.X.outputs.Y.Z.A
 STEP_OUTPUT_PATTERN = re.compile(r"\{\{\s*steps\.([a-zA-Z0-9_-]+)\.outputs\.([a-zA-Z0-9_.-]+)\s*\}\}")
 
+# A template whose closing delimiter is intact but whose opening one is not,
+# such as `{ site.name }}`. Anchored on a template path so that data rendered
+# into a string, which ends in `}}` whenever it nests, is not mistaken for one.
+# The path is a run of anything that is not a brace, rather than a list of the
+# characters a path may contain, so a name using a character nobody enumerated
+# is still caught. A hyphenated step name is the common one.
+#
+# The lookbehind is what makes this mean "malformed". Without it the single
+# brace matches the second brace of a well-formed `{{ ... }}`, so every correct
+# template reads as a mistyped one.
+_MALFORMED_TEMPLATE_PATTERN = re.compile(r"(?<!\{)\{\s*(?:site|steps)\.[^{}]*\}\}")
+
 # Pattern for {{ site.properties.<path> }}
 # Supports nested paths and array indices like: site.properties.endpoints[0].host
 SITE_PROPERTIES_PATTERN = re.compile(r"\{\{\s*site\.properties\.([a-zA-Z0-9_.\[\]]+)\s*\}\}")
@@ -71,6 +83,107 @@ StepResult = DeploymentResult | KubectlResult | WaitResult
 
 # Type alias for subscription-scoped outputs: subscription_id -> step_name -> outputs
 SubscriptionOutputs = dict[str, dict[str, dict[str, Any]]]
+
+
+def _resolve_parameter_mapping(
+    original: dict[Any, Any],
+    resolve: Callable[[Any], Any],
+) -> dict[Any, Any]:
+    """Resolve a parameter mapping's names as well as its values.
+
+    Resolution mapped `{k: resolve(v)}`, so a name kept its braces and reached
+    ARM as literal text. The fail-closed guard walked values only, so it missed
+    the same class, leaving the one check meant to stop an unresolved template
+    unable to see it.
+
+    Two cases are rejected rather than resolved. A name that resolves to a
+    whole object or list cannot be a name, and two names that resolve to the
+    same string would silently drop a value the operator wrote.
+
+    Args:
+        original: The mapping to resolve.
+        resolve: Applied to each name and each value.
+
+    Returns:
+        A new mapping with both halves resolved.
+
+    Raises:
+        ValueError: A name resolved to a non-string, or two names collided.
+    """
+    resolved: dict[Any, Any] = {}
+    origins: dict[Any, Any] = {}
+
+    for key, value in original.items():
+        new_key = key
+        if isinstance(key, str) and "{{" in key:
+            new_key = resolve(key)
+            if not isinstance(new_key, str):
+                raise ValueError(
+                    f"Parameter name '{key}' resolved to "
+                    f"{type(new_key).__name__}, which cannot be a name. A name "
+                    f"template must resolve to a single value."
+                )
+
+        if new_key in resolved:
+            # The resolved name is a site value, so it can be an address, a
+            # resource group, or anything else the operator put in the site.
+            # The two templates that produced it say the same thing to the
+            # person fixing it, without publishing the value.
+            raise ValueError(
+                f"Parameter names '{origins[new_key]}' and '{key}' both "
+                f"resolve to the same name. Rename one, since keeping either "
+                f"would drop the other."
+            )
+
+        origins[new_key] = key
+        resolved[new_key] = resolve(value)
+
+    return resolved
+
+
+def _carries_template(text: str) -> bool:
+    """True when a string still carries a template delimiter.
+
+    An opening delimiter always counts, so `{{ site.name }` is caught even
+    though its closing brace is mistyped. A token like that resolves to
+    nothing, matches no declared parameter, and would otherwise be filtered out
+    and deploy defaults while reporting success.
+
+    A closing delimiter counts only alongside a template path, since data
+    rendered into a string ends in `}}` whenever it nests and reporting that
+    would block a deployment the operator wrote correctly.
+    """
+    if "{{" in text:
+        return True
+    return bool(_MALFORMED_TEMPLATE_PATTERN.search(text))
+
+
+def _only_a_dry_run_could_not_resolve_this(
+    text: str, available_steps: frozenset[str] | None = None
+) -> bool:
+    """True when a real deployment would resolve this and a dry run cannot.
+
+    Only a step output qualifies, and only one naming a step that runs before
+    the step being checked. No step has produced an output during a dry run, so
+    failing on those would make dry run useless on any manifest that chains.
+
+    A reference to a step that does not exist, or that runs later, resolves in
+    neither a dry run nor a real one, so it is not excused. `available_steps`
+    is the set of names that qualify. Passing None excuses any step output,
+    which suits a caller that has no step list to check against.
+
+    Nothing else qualifies. A `{{ site.X }}` path that did not resolve, and a
+    mistyped delimiter, fail exactly the same way on the real deployment, so
+    excusing them would let a dry run pass a gate that exists to predict it.
+    """
+    if _MALFORMED_TEMPLATE_PATTERN.search(text):
+        return False
+    if available_steps is not None:
+        for match in STEP_OUTPUT_PATTERN.finditer(text):
+            if match.group(1) not in available_steps:
+                return False
+    remaining = STEP_OUTPUT_PATTERN.sub("", text)
+    return "{{" not in remaining and "}}" not in remaining
 
 
 def _reportable_subscription(sub_id: str) -> str:
@@ -490,11 +603,22 @@ class Orchestrator:
 
         Supports the flat shape (`name:` at top level) and the K8s-style
         nested shape (`metadata.name:`). Returns None if neither is set.
+
+        Type-safe on purpose. This runs while the workspace index is built,
+        which is before any site is validated, so a malformed `metadata`, or a
+        `name` that is a list, would otherwise surface here as an attribute
+        error or as an unhashable-key error naming neither the file nor the
+        key. Returning None defers the real diagnostic to `Site.from_data`,
+        which names both.
         """
         if "spec" in data:
-            metadata = data.get("metadata") or {}
-            return metadata.get("name")
-        return data.get("name")
+            metadata = data.get("metadata")
+            if not isinstance(metadata, dict):
+                return None
+            name = metadata.get("name")
+        else:
+            name = data.get("name")
+        return name if isinstance(name, str) else None
 
     def _canonical_site_id(self, site_path: Path) -> str:
         """Return the canonical relative-path identifier for a site file.
@@ -608,7 +732,19 @@ class Orchestrator:
             FileNotFoundError: If the parent cannot be resolved by either
                 strategy. The error lists every path that was probed so
                 the operator can see why fallback did not help.
+            ValueError: If the value is not a path.
         """
+        # Checked here rather than with the other field types, since this is
+        # read while the merge is assembled and a non-string reaches a path
+        # join before any model exists to validate it.
+        if not isinstance(inherits_value, str):
+            raise ValueError(
+                f"'inherits' in site '{self._origin_label(child_path)}' must be "
+                f"text naming one parent file, got "
+                f"{type(inherits_value).__name__}. A site has a single "
+                f"inheritance chain, so chain the parents instead of listing them."
+            )
+
         tried: list[Path] = []
 
         relative = (child_path.parent / inherits_value).resolve()
@@ -638,6 +774,7 @@ class Orchestrator:
         path: Path,
         seen: list[Path] | None = None,
         prov: dict[str, str] | None = None,
+        sources: list[str] | None = None,
     ) -> dict[str, Any]:
         """Load inherited site template with support for chained inheritance.
 
@@ -654,6 +791,9 @@ class Orchestrator:
             prov: Optional provenance dict. When supplied, every leaf key
                 gets its origin attributed to the file that contributed
                 the final value. Mutated in place.
+            sources: Optional list collecting every file read, in merge order.
+                Supplied only when a message needs to name them, since it
+                bypasses the memo for the same reason `prov` does.
 
         Returns:
             Merged data from inheritance chain (with metadata fields stripped)
@@ -675,7 +815,7 @@ class Orchestrator:
         # Cache hit returns a deep copy so callers may mutate freely.
         # Skip cache when prov is supplied because each provenance call
         # mutates the caller's prov dict and is not idempotent.
-        if prov is None and normalized in self._inherited_data_cache:
+        if prov is None and sources is None and normalized in self._inherited_data_cache:
             return copy.deepcopy(self._inherited_data_cache[normalized])
 
         if not path.exists():
@@ -698,7 +838,12 @@ class Orchestrator:
         # Handle chained inheritance
         if "inherits" in data:
             parent_path = self._resolve_inherits(path, data["inherits"])
-            parent_data = self._load_inherited_data(parent_path, seen, prov=prov)
+            parent_data = self._load_inherited_data(
+                parent_path, seen, prov=prov, sources=sources
+            )
+            # Recorded after the parent, so the list reads in merge order.
+            if sources is not None:
+                sources.append(self._origin_label(path))
             # Remove metadata fields before merging
             child_data = {
                 k: v for k, v in data.items() if k not in ("inherits", "kind", "apiVersion")
@@ -712,6 +857,8 @@ class Orchestrator:
         else:
             # Remove metadata fields from leaf template
             leaf_data = {k: v for k, v in data.items() if k not in ("kind", "apiVersion")}
+            if sources is not None:
+                sources.append(self._origin_label(path))
             if prov is not None:
                 # Attribute every leaf in the leaf template to itself.
                 data = self._deep_merge_provenance(
@@ -720,14 +867,17 @@ class Orchestrator:
             else:
                 data = leaf_data
 
-        if prov is None:
+        if prov is None and sources is None:
             self._inherited_data_cache[normalized] = copy.deepcopy(data)
 
         logger.debug(f"Loaded inherited data from: {path}")
         return data
 
     def _load_site_data(
-        self, name: str, prov: dict[str, str] | None = None
+        self,
+        name: str,
+        prov: dict[str, str] | None = None,
+        sources: list[str] | None = None,
     ) -> dict[str, Any]:
         """Load and merge site data with inheritance and overlay support.
 
@@ -792,7 +942,7 @@ class Orchestrator:
                         inherits_path = self._resolve_inherits(path, data["inherits"])
                         # Initialize seen list with current file to detect self-reference
                         inherited_data = self._load_inherited_data(
-                            inherits_path, seen=[path.resolve()], prov=prov
+                            inherits_path, seen=[path.resolve()], prov=prov, sources=sources
                         )
                         # Merge inherited into the working dict WITHOUT
                         # re-attribution. The per-leaf provenance for
@@ -837,6 +987,11 @@ class Orchestrator:
                                     f"file."
                                 )
 
+                    # Recorded after the inherit chain, so the list reads in
+                    # merge order: parents first, then this file, then overlays.
+                    if sources is not None:
+                        sources.append(self._origin_label(path))
+
                     if prov is not None:
                         merged_data = self._deep_merge_provenance(
                             merged_data, data, self._origin_label(path), prov
@@ -874,12 +1029,34 @@ class Orchestrator:
         except ValueError:
             return path.as_posix()
 
+    def _name_the_files_behind(self, canonical_id: str, error: str) -> str:
+        """Add the files a site was merged from to a validation error.
+
+        A site is checked after its inherit chain and every overlay are merged,
+        so the key that failed can come from a parent template, an extra
+        trusted directory, or `sites.local/`. The site's own name points at
+        none of those, and one shared parent produces the same error for every
+        site that inherits it.
+
+        Collected here rather than during the load, since threading it through
+        the normal path would bypass the inherit-chain memo for every site
+        instead of only for the one that failed.
+        """
+        sources: list[str] = []
+        try:
+            self._load_site_data(canonical_id, sources=sources)
+        except (OSError, ValueError):
+            return error
+        if not sources:
+            return error
+        return f"{error} Merged from: {', '.join(sources)}."
+
     def load_site_with_provenance(self, name: str) -> tuple[Site, dict[str, str]]:
         """Load a site and return per-key provenance for its merged data.
 
         The provenance dict maps every dotted leaf key in the merged
         site to the workspace-relative path of the file whose value
-        won. Used by `siteops sites <name> -v` to show where each
+        won. Used by `siteops sites <name> --show-sources` to show where each
         value came from after inherit + overlay merge.
 
         For sites authored with the K8s envelope shape (`spec:`,
@@ -918,7 +1095,12 @@ class Orchestrator:
         prov: dict[str, str] = {}
         merged_data = self._load_site_data(canonical_id, prov=prov)
         _validate_resource(merged_data, "Site", site_path)
-        site = self._parse_site_dict(merged_data, site_path, default_name, source_name=name)
+        # Built from merged data, so validation covers a key an overlay
+        # contributed as well as one the base file carries.
+        try:
+            site = Site.from_data(merged_data, source=name, default_name=default_name)
+        except ValueError as e:
+            raise ValueError(self._name_the_files_behind(canonical_id, str(e))) from e
         # Normalize prov to the flat-shape view that matches `Site` so
         # display-time lookups like `prov["subscription"]` succeed
         # regardless of whether the on-disk file used the K8s envelope.
@@ -1035,7 +1217,12 @@ class Orchestrator:
         # Validate merged data
         _validate_resource(merged_data, "Site", site_path)
 
-        site = self._parse_site_dict(merged_data, site_path, default_name, source_name=name)
+        # Built from merged data, so validation covers a key an overlay
+        # contributed as well as one the base file carries.
+        try:
+            site = Site.from_data(merged_data, source=name, default_name=default_name)
+        except ValueError as e:
+            raise ValueError(self._name_the_files_behind(canonical_id, str(e))) from e
 
         # Cache under every form the caller might use later. Always
         # under the canonical id (basename or relative path) and the
@@ -1052,58 +1239,6 @@ class Orchestrator:
                 self._site_cache[name] = site
 
         return site
-
-    def _parse_site_dict(
-        self,
-        merged_data: dict[str, Any],
-        site_path: Path,
-        default_name: str,
-        source_name: str,
-    ) -> Site:
-        """Build a `Site` from merged data and the resolved file path.
-
-        Single source of truth for the parsing rules `load_site` and
-        `load_site_with_provenance` both depend on. Supports the flat
-        shape (`name:` at top level, fields at top level) and the K8s
-        envelope (`metadata:` + `spec:`). Defaults the site's `name`
-        to the basename when neither shape supplies one.
-
-        Args:
-            merged_data: Output of `_load_site_data` (any shape).
-            site_path: Resolved path of the base site file (used for
-                error messages only).
-            default_name: Default for `Site.name` when neither
-                `metadata.name` nor top-level `name` is set.
-            source_name: The identifier the caller passed; used in the
-                "missing required field" error message.
-
-        Raises:
-            ValueError: When required fields (`subscription`,
-                `location`) are missing.
-        """
-        if "spec" in merged_data:
-            spec = merged_data["spec"]
-            metadata = merged_data.get("metadata", {})
-            site_name = metadata.get("name", default_name)
-            labels = metadata.get("labels", {})
-        else:
-            spec = merged_data
-            site_name = merged_data.get("name", default_name)
-            labels = merged_data.get("labels", {})
-
-        for req in ("subscription", "location"):
-            if req not in spec:
-                raise ValueError(f"Missing required field '{req}' in site: {source_name}")
-
-        return Site(
-            name=site_name,
-            subscription=spec["subscription"],
-            resource_group=spec.get("resourceGroup", ""),
-            location=spec["location"],
-            labels=labels,
-            properties=spec.get("properties", {}),
-            parameters=spec.get("parameters", {}),
-        )
 
     def _get_all_site_names(self) -> list[str]:
         """Get all deployable site names from trusted site directories.
@@ -1286,7 +1421,9 @@ class Orchestrator:
             return result
 
         elif isinstance(value, dict):
-            return {k: self._resolve_template_strings(v, site, step_outputs) for k, v in value.items()}
+            return _resolve_parameter_mapping(
+                value, lambda v: self._resolve_template_strings(v, site, step_outputs)
+            )
         elif isinstance(value, list):
             return [self._resolve_template_strings(v, site, step_outputs) for v in value]
         return value
@@ -1471,10 +1608,12 @@ class Orchestrator:
             return STEP_OUTPUT_PATTERN.sub(replacer, value)
 
         elif isinstance(value, dict):
-            return {
-                k: self._resolve_step_outputs(v, step_outputs, subscription_outputs, subscription_id)
-                for k, v in value.items()
-            }
+            return _resolve_parameter_mapping(
+                value,
+                lambda v: self._resolve_step_outputs(
+                    v, step_outputs, subscription_outputs, subscription_id
+                ),
+            )
         elif isinstance(value, list):
             return [
                 self._resolve_step_outputs(item, step_outputs, subscription_outputs, subscription_id) for item in value
@@ -1628,6 +1767,20 @@ class Orchestrator:
         # 6. Filter to template-accepted parameters before the unresolved-check
         # so that defaults injected for steps that don't consume them (e.g.
         # `siteAddress.{country,city}` from common.yaml) don't trip the check.
+        #
+        # Check top-level KEYS first. Filtering drops any key the template does
+        # not declare, and a key still carrying `{{ }}` never matches one, so
+        # without this the guard at step 7 sees an empty mapping and reports
+        # nothing. That turns a typo in a parameter name into a step that
+        # deploys defaults and reports success.
+        # A step output can only resolve from a step that already ran, so a dry
+        # run excuses a reference to one of those and nothing else.
+        available_steps = frozenset(
+            s.name for s in manifest.steps[: manifest.steps.index(step)]
+        ) if step in manifest.steps else None
+
+        self._check_unresolved_keys(params, site.name, step.name, available_steps)
+
         template_path = (self.workspace / step.template).resolve()
         filter_succeeded = False
         if template_path.exists():
@@ -1641,19 +1794,58 @@ class Orchestrator:
                     f"is not masked by a follow-on 'unresolved templates' failure"
                 )
 
-        # 7. Fail fast on any unresolved {{ ... }} templates. In dry-run mode
-        # downgrade to warning since `{{ steps.X.outputs.Y }}` cannot be
-        # resolved without real deployment outputs. Skipped when filtering
-        # failed: an unfiltered param set may carry tokens for params the
-        # template doesn't accept (which filtering would have stripped), and
-        # raising here would hide the upstream filter failure.
+        # 7. Fail fast on any unresolved {{ ... }} templates. A dry run warns
+        # only for `{{ steps.X.outputs.Y }}`, which it genuinely cannot
+        # resolve. Skipped when filtering failed: an unfiltered param set may
+        # carry tokens for params the template doesn't accept (which filtering
+        # would have stripped), and raising here would hide the upstream filter
+        # failure.
         if filter_succeeded:
-            self._check_unresolved_templates(params, site.name, step.name)
+            self._check_unresolved_templates(params, site.name, step.name, available_steps)
 
         return params
 
+    def _check_unresolved_keys(
+        self,
+        params: dict[str, Any],
+        site_name: str,
+        step_name: str,
+        available_steps: frozenset[str] | None = None,
+    ) -> None:
+        """Fail on a top-level parameter name that still carries a template.
+
+        Runs before `filter_parameters`, which is what makes it necessary. A
+        name that did not resolve cannot match a declared template parameter,
+        so filtering silently discards it and the guard that runs afterwards
+        has nothing left to see.
+
+        Only the top level is checked here. A nested key survives filtering
+        when its parent is accepted, so `_check_unresolved_templates` catches
+        it afterwards with the full path in the message.
+        """
+        unresolved = [k for k in params if isinstance(k, str) and _carries_template(k)]
+        if not unresolved:
+            return
+
+        details = "; ".join(sorted(unresolved))
+        message = (
+            f"Unresolved template(s) in parameter name(s) for step "
+            f"'{step_name}' (site: {site_name}): {details}"
+        )
+        if self.dry_run and all(
+            _only_a_dry_run_could_not_resolve_this(name, available_steps)
+            for name in unresolved
+        ):
+            logger.warning(scrub_for_output(message))
+            return
+        raise ValueError(message)
+
     def _check_unresolved_templates(
-        self, params: dict[str, Any], site_name: str, step_name: str
+        self,
+        params: dict[str, Any],
+        site_name: str,
+        step_name: str,
+        available_steps: frozenset[str] | None = None,
     ) -> None:
         """Fail (or warn in dry-run) if any {{ ... }} templates remain.
 
@@ -1662,18 +1854,24 @@ class Orchestrator:
         step/output, or a `{{ site.X }}` path is wrong. Letting the deployment
         proceed would silently send literal `{{ ... }}` strings to ARM.
 
-        In `--dry-run` mode `{{ steps.X.outputs.Y }}` references cannot be
-        resolved (no real outputs exist), so we log a warning instead of
-        failing.
+        A dry run warns only when every remaining token is a step-output
+        reference, which is the one thing it cannot resolve. Anything else
+        fails, since it fails on the real deployment too and a dry run that
+        passes is what a gate reads as a prediction of it.
         """
         unresolved: list[tuple[str, str]] = []
 
         def collect(v: Any, path: str = "") -> None:
-            if isinstance(v, str) and "{{" in v and "}}" in v:
+            if isinstance(v, str) and _carries_template(v):
                 unresolved.append((path, v))
             elif isinstance(v, dict):
                 for k, val in v.items():
-                    collect(val, f"{path}.{k}" if path else k)
+                    here = f"{path}.{k}" if path else k
+                    # Keys are walked as well as values, since a key is a place
+                    # a template can survive resolution and reach ARM.
+                    if isinstance(k, str) and _carries_template(k):
+                        unresolved.append((f"{here} (key)", k))
+                    collect(val, here)
             elif isinstance(v, list):
                 for i, item in enumerate(v):
                     collect(item, f"{path}[{i}]")
@@ -1688,8 +1886,13 @@ class Orchestrator:
             f"Unresolved template(s) for step '{step_name}' (site: {site_name}): "
             f"{details}"
         )
-        if self.dry_run:
-            logger.warning(message)
+        if self.dry_run and all(
+            _only_a_dry_run_could_not_resolve_this(value, available_steps)
+            for _, value in unresolved
+        ):
+            # Scrubbed because a reported path can carry a resolved key, which
+            # is a site value, and a dry run is what an operator runs in CI.
+            logger.warning(scrub_for_output(message))
             return
         raise ValueError(message)
 
@@ -2102,7 +2305,7 @@ class Orchestrator:
                 ("resourceId", resolved_resource_id),
                 ("expectedValue", resolved_expected),
             ):
-                if not val.strip() or "{{" in val:
+                if not val.strip() or _carries_template(val):
                     return WaitResult(
                         success=False,
                         step_name=step.name,
@@ -2397,27 +2600,40 @@ class Orchestrator:
 
         results: list[dict[str, Any]] = []
         results_lock = threading.Lock()
+        future_to_site = {}
 
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
-            future_to_site = {
-                executor.submit(self._deploy_site, manifest, site, timestamp, True, subscription_outputs): site
-                for site in sites
-            }
-
-            for future in as_completed(future_to_site):
-                site = future_to_site[future]
-                try:
-                    result = future.result()
-                    with results_lock:
-                        results.append(result)
-                except Exception as e:
-                    logger.error(
-                        f"Unexpected error deploying to {site.name}: {scrub_for_output(str(e))}"
+            try:
+                for site in sites:
+                    future = executor.submit(
+                        self._deploy_site, manifest, site, timestamp, True, subscription_outputs
                     )
-                    with results_lock:
-                        results.append(
-                            self._site_failure_result(site, manifest, f"Unexpected error: {e}")
+                    future_to_site[future] = site
+
+                for future in as_completed(future_to_site):
+                    site = future_to_site[future]
+                    try:
+                        result = future.result()
+                        with results_lock:
+                            results.append(result)
+                    except Exception as e:
+                        logger.error(
+                            f"Unexpected error deploying to {site.name}: {scrub_for_output(str(e))}"
                         )
+                        with results_lock:
+                            results.append(
+                                self._site_failure_result(site, manifest, f"Unexpected error: {e}")
+                            )
+            except BaseException:
+                # Leaving the pool waits for everything already queued, so an
+                # interrupted deploy would still reach every remaining site.
+                # Cancelling first stops the fleet at what is already running.
+                cancelled = sum(1 for pending in future_to_site if pending.cancel())
+                logger.error(
+                    f"Deployment stopped. {len(results)} site(s) reported, "
+                    f"{cancelled} not started."
+                )
+                raise
 
         return results
 
@@ -2786,6 +3002,14 @@ class Orchestrator:
             return f"CLI selector `-l {cli_selector}` is invalid: {e}"
         all_sites = self.load_all_sites()
         if not all_sites:
+            if self.skipped_sites:
+                names = ", ".join(name for name, _ in self.skipped_sites)
+                return (
+                    f"No site could be loaded, so CLI selector "
+                    f"`-l {cli_selector}` has nothing to match. "
+                    f"{len(self.skipped_sites)} site file(s) were rejected "
+                    f"({names}). Fix those files rather than adding a new site."
+                )
             return (
                 f"No sites in workspace; CLI selector `-l {cli_selector}` "
                 f"cannot match. Add a site file under `sites/` or pass "
@@ -2821,9 +3045,13 @@ class Orchestrator:
                         f"declares the `{key}` label."
                     )
                 else:
+                    # Quoted, so a value that differs only by surrounding
+                    # whitespace does not read as identical to the one asked
+                    # for.
+                    shown = ", ".join(repr(value) for value in values_in_ws)
                     parts.append(
                         f"`{key}={requested_str}` requested. Workspace "
-                        f"`{key}` values: {', '.join(values_in_ws)}."
+                        f"`{key}` values: {shown}."
                     )
         if not parts:
             return f"CLI selector `-l {cli_selector}` matched no sites."
@@ -3220,7 +3448,7 @@ class Orchestrator:
         """Display deployment plan without executing.
 
         Shows which sites will be deployed to and what steps will run.
-        Called by 'validate -v' to show the plan after validation passes.
+        Called by `validate --plan` and by `deploy --dry-run`.
 
         Args:
             manifest_path: Path to manifest file
@@ -3267,6 +3495,10 @@ class Orchestrator:
                 condition = step.condition
                 print(f"    {i}. {step.name} (wait){condition_info}")
                 if condition.type == "arm-tag":
+                    # Printed as written in the manifest, not resolved. The
+                    # text is committed content, so scrubbing it protects
+                    # nothing and corrupts an unresolved `{{ }}` template,
+                    # which is what a plan usually shows here.
                     print(f"       ├─ resource: {condition.resource_id}")
                     print(f"       ├─ tag: {condition.tag_key} == {condition.expected_value}")
                     if condition.failure_pattern:
