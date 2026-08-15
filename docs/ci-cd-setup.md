@@ -375,7 +375,7 @@ See [ADO architecture](#ado-architecture) for the Azure DevOps equivalent.
 
 ### Output redaction
 
-Workflow logs and artifacts are a public surface, so deployment failure text is scrubbed before it reaches them. A resource id is reduced to the resource type that failed, and subscription, tenant, and principal identifiers, bearer tokens, and Azure service hostnames are replaced with placeholders. The error code and message survive, so a failure stays diagnosable:
+Workflow logs and artifacts are a public surface, so deployment failure text is scrubbed before it reaches them. A resource id is reduced to the resource type that failed. Subscription, tenant, and principal identifiers and bearer tokens are replaced with placeholders, as is the local part of a user principal name. On an Azure service host the tenant-specific label is replaced and the service domain is kept, so `contosostorage.blob.core.windows.net` becomes `<host>.blob.core.windows.net` and still says which service was involved. The error code and message survive, so a failure stays diagnosable:
 
 ```text
 [munich-prod] x dataflow-resources: BadRequest: <Microsoft.IoTOperations/instances/dataflowEndpoints> is invalid

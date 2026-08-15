@@ -15,7 +15,7 @@ Sites define **where** to deploy: the Azure subscription, resource group, locati
 | Pin the manifest to a labeled cohort | Set `selector:` in the manifest |
 | Hard-code the target list for a manifest | Set `sites:` in the manifest |
 | Preview a fully-resolved site (post inherit + overlay) | `siteops -w <workspace> sites <name> --render` |
-| See where every value in a resolved site came from | `siteops -w <workspace> sites <name> -v` |
+| See where every value in a resolved site came from | `siteops -w <workspace> sites <name> --show-sources` |
 
 The reference material below covers the model in depth. See [targeting.md](targeting.md) for the selector grammar and the no-match diagnostic.
 
@@ -224,6 +224,80 @@ workspace. The iot-operations workspace happens to use
 without the engine caring. Just keep manifest `when:` conditions and
 `{{ site.properties.X }}` references in sync with whatever the
 workspace decides.
+
+### What a site file is checked against
+
+The top-level field set above is **closed**. A key the engine does not read is
+rejected when the site loads, rather than being ignored, and the error suggests
+the field you probably meant:
+
+```
+Site 'munich-dev' has unknown top-level key(s): `paramaters`
+  (did you mean `parameters`?). Allowed: ['apiVersion', 'description',
+  'inherits', 'kind', 'labels', 'location', 'name', 'parameters',
+  'properties', 'resourceGroup', 'subscription'].
+  Merged from: sites/base-site.yaml, sites/munich-dev.yaml.
+```
+
+The check runs on the merged result of the inherit chain and every overlay, so
+the key may come from a file other than the one you named. `Merged from:` lists
+those files in merge order, which includes a parent template, an extra trusted
+directory, and `sites.local/`.
+
+Rejecting rather than ignoring is what makes a misspelled field visible. It
+matters most for `properties`, since resource sets read it to decide what a
+site deploys, and a typo there leaves the site on defaults.
+
+Five further rules apply:
+
+- **`subscription` and `location` must carry a value.** A key written with
+  nothing after the colon parses as null, which is not the same as a default.
+  Give it a value, inherit one from a parent template, or remove the key, since
+  a blank key overrides the inherited value.
+- **`labels`, `properties`, and `parameters` must be mappings** when present.
+  Writing one with no value is fine and means the same as leaving it out.
+- **A label value must be text.** Selectors compare text, so `release: 2607`
+  matches nothing. Quote it as `release: "2607"`.
+- **A field that holds text must hold text.** `name`, `subscription`,
+  `resourceGroup`, `location`, `description`, and `inherits` are rejected when
+  written as a list or a number. Quote a value YAML would otherwise read as a
+  number, such as a site named for a release.
+- **`description` is accepted and not read.** It is there so a shared
+  `SiteTemplate` can carry a note.
+- **`inherits` is read at the top level of the file.** Both shapes inherit that way. A site using
+  the `metadata`/`spec` envelope inherits by putting `inherits:` alongside `apiVersion` and `kind`.
+  Written inside `spec` it is rejected by name rather than reported as a misspelling, since the
+  placement is what is wrong.
+
+A file that declares `spec` and also carries flat-shape fields at the top level
+is reported as mixing the two shapes. Pick one: move the fields under
+`metadata` and `spec`, or remove `spec` and keep everything at the top level.
+
+What is inside `labels`, `properties`, and `parameters` stays **open**, because
+those hold workspace-defined content and the engine stays out of it. A key in
+there that nothing reads is a different problem, and the workspace's own test
+suite catches it rather than the engine.
+
+### Templates in a parameter name
+
+`{{ site.X }}` resolves in a parameter **name** as well as a value, so one
+declaration can key data by site:
+
+```yaml
+parameters:
+  siteRoles:
+    "{{ site.name }}":
+      role: primary
+```
+
+Keep the template on a **nested** name, as above. A top-level name is matched
+against the parameters the template declares, and a resolved site value will
+not be one of them, so it is dropped before it reaches the deployment.
+
+Three cases fail rather than resolve. A name that cannot be resolved, a
+template that resolves to a whole object or list, and two names that resolve to
+the same string. The last is rejected rather than letting one overwrite the
+other.
 
 ### Conditionals
 

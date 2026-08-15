@@ -83,6 +83,18 @@ siteops -w workspaces/iot-operations deploy manifests/aio-upgrade.yaml -l "name=
 
 `aio-install.yaml` remains the greenfield-install manifest. Running it against an already-deployed site is desired-state and can overwrite operator-applied changes on the AIO instance and its children. Use `aio-upgrade.yaml` for in-place version moves.
 
+### Catalog families and upgrade order
+
+Bumping `aioRelease` changes the API version a site writes at, and that takes effect as soon as the site file changes, before the upgrade manifest has moved the cluster. A catalog deploy in that window writes resources at the new API version while the cluster still runs the old one.
+
+Deploy catalog families outside that window, and reapply them once the upgrade finishes:
+
+```bash
+siteops -w workspaces/iot-operations deploy manifests/aio-resources.yaml -l "name=<site>"
+```
+
+This applies to every family a site selects through `properties.resourceSets`. See [resource-catalog.md](resource-catalog.md).
+
 ### Supported upgrade paths
 
 Azure IoT Operations supports upgrade to any patch of the same minor version, or to the next minor version. Other transitions (downgrades, multi-minor jumps, preview/GA crossings) require uninstall and reinstall. See [Upgrade Azure IoT Operations](https://learn.microsoft.com/en-us/azure/iot-operations/deploy-iot-ops/howto-upgrade) for the authoritative rules.
@@ -93,7 +105,7 @@ The scalekit exercises adjacent-release upgrades (e.g. `2606` -> `2607`) in CI p
 
 Sample templates under `samples/<name>/template.bicep` (e.g. `samples/opc-ua-solution/template.bicep`) pin every `Microsoft.IoTOperations/*` and `Microsoft.DeviceRegistry/*` reference to the **oldest supported** API version in the matrix above. They rely on RP backward-compatibility so a single file works against every shipped release. Bump these pins only when the oldest supported API version is removed from the matrix, not on every release. The workspace test `test_samples_pin_to_oldest_api_version` enforces this.
 
-This policy applies to samples. The platform fundamentals (`templates/aio/` top level, `templates/deps/`) and the config-driven catalog templates under `templates/aio/dataflows/` both use the per-version dispatch described under "Adding a new AIO release", so a site's resources are written at the API generation its release ships. Adding a release that introduces a generation therefore means adding a catalog module too, which `tests/workspace/test_aio_dispatch_shape.py` checks. See [resource-catalog.md](resource-catalog.md).
+This policy applies to samples. The platform fundamentals (`templates/aio/` top level, `templates/deps/`) and the config-driven catalog templates under `templates/aio/dataflows/` both use the per-version dispatch described under "Adding a new AIO release", so a site's resources are written at the API version its release ships. Adding a release that introduces an API version therefore means adding a catalog module too, which `tests/workspace/test_aio_dispatch_shape.py` checks. See [resource-catalog.md](resource-catalog.md).
 
 ## Adding a new AIO release
 

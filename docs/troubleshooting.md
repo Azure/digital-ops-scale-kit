@@ -7,7 +7,7 @@ Common issues and solutions.
 ### "Site not found"
 
 ```
-Error: Site 'munich-dev' not found
+Error: Site file not found: munich-dev (searched sites/)
 ```
 
 **Cause**: Site file doesn't exist or has wrong name.
@@ -18,7 +18,7 @@ Error: Site 'munich-dev' not found
 
 ```
 Error: CLI selector `-l environment=prdo` matched no sites.
-`environment=prdo` requested. Workspace `environment` values: dev, prod, staging.
+`environment=prdo` requested. Workspace `environment` values: 'dev', 'prod', 'staging'.
 ```
 
 **Cause**: A typo in `-l/--selector`, or the requested label value does not exist on any site.
@@ -38,7 +38,7 @@ Error: Template not found: templates/missing.bicep
 ### "Step references unknown step"
 
 ```
-Error: Step 'aio-instance' references unknown step 'schema-reg'
+Error: Step 'aio-instance' references unknown step 'schema-reg' in parameters/p.yaml
 ```
 
 **Cause**: Output chaining references a step that doesn't exist.
@@ -99,14 +99,17 @@ The output is the post-inherit + post-overlay site as a single YAML doc, with em
 ## Debug commands
 
 ```bash
-# Verbose output (shows deployment plan)
-siteops -w workspaces/iot-operations validate manifests/aio-install.yaml -v
+# Show the deployment plan
+siteops -w workspaces/iot-operations validate manifests/aio-install.yaml --plan
 
-# Dry run to see exact commands
+# Dry run: shows the plan, and the sites and steps it would act on
 siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml --dry-run
 
+# Dry run with the exact commands each step would run
+siteops -v -w workspaces/iot-operations deploy manifests/aio-install.yaml --dry-run
+
 # Show every value's source file (post inherit + overlay merge)
-siteops -w workspaces/iot-operations sites <name> -v
+siteops -w workspaces/iot-operations sites <name> --show-sources
 
 # Print the fully-resolved site as YAML
 siteops -w workspaces/iot-operations sites <name> --render

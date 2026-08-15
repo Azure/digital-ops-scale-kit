@@ -203,8 +203,8 @@ jobs:
             echo "### $(basename $manifest)" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
 
-            # validate -v validates and shows deployment plan
-            if siteops -w "$WORKSPACE_DIR" validate "$manifest_rel" -v 2>&1 | tee -a $GITHUB_STEP_SUMMARY; then
+            # `validate --plan` validates and shows the deployment plan
+            if siteops -w "$WORKSPACE_DIR" validate "$manifest_rel" --plan 2>&1 | tee -a $GITHUB_STEP_SUMMARY; then
               echo "✓ Valid"
             else
               EXIT_CODE=1

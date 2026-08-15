@@ -6,7 +6,7 @@ description: |
   sample on top, demonstrating an asset producing telemetry that flows from
   the broker through a dataflow to an Event Hub destination.
 
-  Post-flatten step sequence (preview with `siteops validate -v`):
+  Post-flatten step sequence (preview with `siteops validate --plan`):
     1. global-edge-site         (gated by enableGlobalSite)
     2. edge-site                (gated by enableEdgeSite)
     3. schema-registry

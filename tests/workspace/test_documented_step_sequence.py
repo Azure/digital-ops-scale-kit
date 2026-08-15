@@ -1,7 +1,7 @@
 """Tests that a manifest's documented step sequence matches what it deploys.
 
 Several manifests list their post-flatten step sequence in the `description:`
-field, so a reader can see the order without running `siteops validate -v`. That
+field, so a reader can see the order without running `siteops validate --plan`. That
 listing is hand-maintained and has no other guard, which makes it the first thing
 to go stale when includes are added or removed.
 

@@ -146,7 +146,7 @@ The local path above proves the tool works. To productionize as a CI/CD pipeline
 
 3. **Configure site overrides** (optional):
 
-   The included sites use placeholder subscription IDs. To deploy to real Azure resources, create a `SITE_OVERRIDES` secret with your actual values. See [docs/ci-cd-setup.md](docs/ci-cd-setup.md#site-overrides) for the JSON shape.
+   The included sites use placeholder subscription IDs. To deploy to real Azure resources, create a `SITE_OVERRIDES` secret with your actual values. See [docs/ci-cd-setup.md](docs/ci-cd-setup.md#site_overrides) for the JSON shape.
 
 4. **Configure environments** (optional):
    - Create `dev`, `staging`, `prod` environments in repository settings
@@ -185,6 +185,7 @@ digital-ops-scale-kit/
 │   ├── e2e-testing.md            # End-to-end live-subscription test workflow
 │   ├── manifest-includes.md      # Splicing one manifest into another via `include:`
 │   ├── manifest-reference.md     # Manifest syntax, step types
+│   ├── migrating.md              # What to change when moving to a newer Scale Kit release
 │   ├── parameter-resolution.md   # Variables, output chaining
 │   ├── resource-catalog.md       # Declaring AIO workload resources in YAML
 │   ├── secret-sync.md            # Secret sync enablement and usage
@@ -246,6 +247,8 @@ apiVersion: siteops/v1
 kind: Manifest
 name: aio-install
 selector: "environment=dev"
+parameters:
+  - parameters/common/common.yaml  # shared defaults, filtered per template
 steps:
   - name: schema-registry
     template: templates/deps/schema-registry.bicep
@@ -253,9 +256,12 @@ steps:
   - name: aio-instance
     template: templates/aio/instance.bicep
     scope: resourceGroup
-    parameters:
-      - parameters/inputs/aio-instance.yaml  # outputs from prior steps
 ```
+
+A later step reads an earlier step's outputs with
+`{{ steps.<name>.outputs.<key> }}`. See
+[docs/parameter-resolution.md](docs/parameter-resolution.md) for chaining and
+auto-filtering.
 
 A manifest can also `include:` other manifests (partials and standalone
 manifests) to compose larger pipelines. See
@@ -290,12 +296,13 @@ auto-filtering, merge order, and cross-scope output chaining.
 |---------|-------------|
 | `siteops sites` | List sites in the workspace |
 | `siteops sites <name>` | Inspect one site (basename, relative path, or internal `name:`) |
-| `siteops sites <name> -v` | Show every value with the source file it came from after inherits and overlays |
+| `siteops sites <name> --show-sources` | Show every value with the source file it came from after inherits and overlays |
 | `siteops sites <name> --render` | Show the resolved YAML after inheritance and overlays |
 | `siteops validate <manifest>` | Validate manifest and all references |
-| `siteops validate <manifest> -v` | Validation plus the deployment plan |
+| `siteops validate <manifest> --plan` | Validation plus the deployment plan |
 | `siteops deploy <manifest>` | Execute deployment |
-| `siteops deploy <manifest> --dry-run` | Show what would deploy without calling Azure |
+| `siteops deploy <manifest> --dry-run` | Show the plan without calling Azure |
+| `siteops -v deploy <manifest> --dry-run` | The plan plus the exact commands each step would run |
 
 ### Common options
 

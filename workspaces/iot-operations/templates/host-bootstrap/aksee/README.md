@@ -53,6 +53,7 @@ Set the cluster name and an `aksee` section under your site's `parameters`. The 
 ```yaml
 # sites/<site>.yaml (committable)
 name: my-site
+inherits: base-site.yaml
 subscription: <subscription-id>
 resourceGroup: <rg-name>
 location: westus2
@@ -64,6 +65,10 @@ parameters:
     machineName: my-arc-windows-vm
     customLocationsOid: <custom-locations RP object id>
 ```
+
+`inherits: base-site.yaml` supplies the AKS Edge Essentials installer URL and the
+`deployOptions` toggles the bootstrap reads. A site that omits it passes
+`validate` and fails at deploy on the values the parent would have provided.
 
 Required fields:
 

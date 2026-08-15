@@ -69,13 +69,13 @@ Reach for Bicep when a value is not knowable until the deployment is already run
 - **A value comes from a resource the same deployment creates.** `samples/opc-ua-solution/template.bicep` derives its dataflow endpoint host from the Event Hub namespace it creates in the same template. A manifest-level declaration cannot carry that, because manifest-level parameters apply to every step including ones that run before the producer. Wiring a step output in is possible through a step-level file, at the cost of a site no longer being able to override the declaration. See [parameter-resolution.md](parameter-resolution.md).
 - **The solution ships resources outside AIO.** The same sample creates an Event Hub namespace, an event hub, and a role assignment. Those never become catalog resources, so keeping the dataflow beside them in one template keeps the solution readable.
 - **A resource needs per-item conditional deployment, per-item outputs, or ordering the array loop does not express.**
-- **The declaration needs a property only some supported API generations have.** A declaration is shared fleet-wide and any site may select it, so it has to be valid at every generation a site could be running.
+- **The declaration needs a property only some supported API versions have.** A declaration is shared fleet-wide and any site may select it, so it has to be valid at every API version a site could be running.
 
 Both routes deploy through `siteops` and produce the same kind of resource on the same instance. `samples/opc-ua-solution/` writes its dataflow as ARM resources alongside the Event Hub it also needs, while `samples/dataflow-sample/` declares its dataflows in YAML. Deploying them in sequence against the same instance runs one of each.
 
 ## Step names
 
-A family deploys as one step, named for the family: `dataflow-resources`. Inside it, `templates/aio/<family>/main.bicep` routes to a module for the AIO API generation the site's release ships, and that module creates every resource kind in order, so a resource exists before anything that references it.
+A family deploys as one step, named for the family: `dataflow-resources`. Inside it, `templates/aio/<family>/main.bicep` routes to a module for the AIO API version the site's release ships, and that module creates every resource kind in order, so a resource exists before anything that references it.
 
 One step per family rather than one per resource kind keeps a fleet deploy to one round trip per family per site, and keeps the step namespace small. Step names are a flat global namespace after include flattening, and a collision is a parse error.
 
@@ -138,19 +138,21 @@ Writing only the names the declaration carries is what lets a declaration run be
 
 ## API versions
 
-Catalog templates route on the AIO API generation the site's release ships, the same way the platform templates do. `main.bicep` dispatches on `aioApiVersion` to one module per generation under the family's `modules/` directory, so a site's dataflow resources are written through the same generation as the instance serving them.
+Catalog templates route on the AIO API version the site's release ships, the same way the platform templates do. `main.bicep` dispatches on `aioApiVersion` to one module per API version under the family's `modules/` directory, so a site's dataflow resources are written through the same API version as the instance serving them.
 
-The writable surface of these resources happens to be identical across every supported generation today. That is not why they dispatch. Schema equality does not imply the resource provider handles a request the same way at every generation, and neither a compile check nor a schema comparison can see that difference, so a resource is written at its own release's version rather than through an older one.
+The writable surface of these resources happens to be identical across every supported API version today. That is not why they dispatch. Schema equality does not imply the resource provider handles a request the same way at every API version, and neither a compile check nor a schema comparison can see that difference, so a resource is written at its own release's version rather than through an older one.
 
 The API version is not something a declaration names. That is the point: the site's `aioRelease` governs the platform, and the catalog resources follow without the author choosing a version.
 
-Declarations are compiled against **every** supported generation by the workspace tests, so a property missing from any of them fails in CI with the property and the generation named, rather than at deploy. A declaration is shared fleet-wide and any site may select it, so validating only the newest would pass in CI and fail live on a site that has not upgraded.
+During an upgrade a site names the new API version before the cluster runs it, so reapply a family once the upgrade finishes. See [aio-releases.md](aio-releases.md).
+
+Declarations are compiled against **every** supported API version by the workspace tests, so a property missing from any of them fails in CI with the property and the API version named, rather than at deploy. A declaration is shared fleet-wide and any site may select it, so validating only the newest would pass in CI and fail live on a site that has not upgraded.
 
 ## Adding a family
 
 Each family adds one partial and one declaration directory, and registers in one place. One name identifies the family everywhere: the directory under `templates/aio/`, the partial under `manifests/`, the `parameters/` subdirectory, and the `resourceSets` key all use it.
 
-1. Add `templates/aio/<family>/main.bicep` routing on `aioApiVersion`, plus one module under `modules/` per supported AIO API generation, each creating every resource kind the family owns and ordering them with `dependsOn`.
+1. Add `templates/aio/<family>/main.bicep` routing on `aioApiVersion`, plus one module under `modules/` per supported AIO API version, each creating every resource kind the family owns and ordering them with `dependsOn`.
 2. Add `manifests/_<family>.yaml` with one step pointing at that `main.bicep`. Attach `parameters/inputs/catalog.yaml` at **step level**, which is what supplies the custom location the resolve step read back. Carry **no** manifest-level `parameters:`, otherwise the family cannot be gated.
 3. Add `parameters/<family>/none.yaml` declaring an empty array for every key the family's `main.bicep` accepts.
 4. Add a `resourceSets.<family>: "none"` default to `sites/base-site.yaml`.
@@ -164,8 +166,8 @@ The declaration path loads for every site regardless of the gate, so steps 3 and
 
 1. Create `parameters/<family>/<set>.yaml` with the keys the family accepts.
 2. Point one or more sites at it through `properties.resourceSets.<family>`.
-3. Preview the steps with `siteops validate manifests/aio-resources.yaml -l <selector> -v`.
-4. Run the workspace tests with `pytest tests/workspace/ -q`, which check name uniqueness, reference resolution, required fields, and validity at every supported API generation.
+3. Preview the steps with `siteops validate manifests/aio-resources.yaml -l <selector> --plan`.
+4. Run the workspace tests with `pytest tests/workspace/ -q`, which check name uniqueness, reference resolution, required fields, and validity at every supported API version.
 
 ## See also
 

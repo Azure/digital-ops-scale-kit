@@ -107,17 +107,20 @@ class TestSitesRedaction:
         ws = tmp_path / "workspace"
         ws.mkdir()
         _write_site_with_secret(ws)
-        cmd_sites(Namespace(selector=None, verbose=False), Orchestrator(ws))
+        cmd_sites(Namespace(selector=None, show_sources=False), Orchestrator(ws))
         out = capsys.readouterr().out
         assert SECRET not in out
         assert "spPassword: ***" in out
         assert "my-cluster" in out  # non-secret still shown
 
-    def test_verbose_listing_redacts_secret(self, tmp_path, capsys):
+    def test_show_sources_listing_redacts_secret(self, tmp_path, capsys):
+        """The provenance walk is a second render path, so it needs its own
+        assertion. Passing the old `verbose=` here would silently exercise the
+        bare listing instead."""
         ws = tmp_path / "workspace"
         ws.mkdir()
         _write_site_with_secret(ws)
-        cmd_sites(Namespace(selector=None, verbose=True), Orchestrator(ws))
+        cmd_sites(Namespace(selector=None, show_sources=True), Orchestrator(ws))
         out = capsys.readouterr().out
         assert SECRET not in out
         assert "spPassword: ***" in out
@@ -126,7 +129,10 @@ class TestSitesRedaction:
         ws = tmp_path / "workspace"
         ws.mkdir()
         _write_site_with_secret(ws)
-        cmd_sites(Namespace(selector=None, verbose=False, render=True, name=None), Orchestrator(ws))
+        cmd_sites(
+            Namespace(selector=None, show_sources=False, render=True, name=None),
+            Orchestrator(ws),
+        )
         out = capsys.readouterr().out
         assert SECRET not in out
         assert "***" in out

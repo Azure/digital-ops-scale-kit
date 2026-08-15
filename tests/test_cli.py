@@ -10,6 +10,7 @@ Tests cover:
 import os
 import re
 import sys
+from argparse import Namespace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -55,7 +56,26 @@ class TestResolveManifestPath:
 
 
 class TestSetupLogging:
-    """Tests for logging configuration."""
+    """Tests for logging configuration.
+
+    `setup_logging` reconfigures process-wide state, so each case restores what
+    it changed. Leaving the root logger at DEBUG with a stale handler, or the
+    executor logger pinned, changes what any later test sees through `caplog`.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _restore_logging(self):
+        import logging
+
+        root = logging.getLogger()
+        executor = logging.getLogger("siteops.executor")
+        saved = (root.level, root.handlers[:], executor.level)
+        try:
+            yield
+        finally:
+            root.setLevel(saved[0])
+            root.handlers[:] = saved[1]
+            executor.setLevel(saved[2])
 
     def test_setup_logging_default(self):
         import logging
@@ -95,11 +115,10 @@ class TestCmdValidate:
         orchestrator = Orchestrator(complete_workspace)
         manifest_path = complete_workspace / "manifests" / "test-manifest.yaml"
 
-        args = MagicMock()
+        args = Namespace()
         args.manifest = manifest_path
         args.workspace = complete_workspace
         args.selector = None
-        args.verbose = False
 
         exit_code = cmd_validate(args, orchestrator)
 
@@ -114,11 +133,10 @@ class TestCmdValidate:
 
         orchestrator = Orchestrator(complete_workspace)
 
-        args = MagicMock()
+        args = Namespace()
         args.manifest = Path("nonexistent.yaml")
         args.workspace = complete_workspace
         args.selector = None
-        args.verbose = False
 
         exit_code = cmd_validate(args, orchestrator)
 
@@ -142,11 +160,10 @@ class TestCmdValidate:
 
         orchestrator = Orchestrator(complete_workspace)
 
-        args = MagicMock()
+        args = Namespace()
         args.manifest = manifest_path
         args.workspace = complete_workspace
         args.selector = None
-        args.verbose = False
 
         exit_code = cmd_validate(args, orchestrator)
 
@@ -155,18 +172,23 @@ class TestCmdValidate:
         assert "✗" in captured.out
         assert "Template not found" in captured.out
 
-    def test_validate_verbose_shows_plan(self, complete_workspace, capsys):
-        """Test validate -v shows deployment plan after validation."""
+    def test_validate_plan_shows_the_deployment_plan(self, complete_workspace, capsys):
+        """`validate --plan` shows the deployment plan after validation.
+
+        This asked for `verbose` and got a plan, because a mock argument bag
+        returns a truthy child for an attribute the test never set. The flag
+        that renders a plan is `plan`.
+        """
         from siteops.orchestrator import Orchestrator
 
         orchestrator = Orchestrator(complete_workspace)
         manifest_path = complete_workspace / "manifests" / "test-manifest.yaml"
 
-        args = MagicMock()
+        args = Namespace()
         args.manifest = manifest_path
         args.workspace = complete_workspace
         args.selector = None
-        args.verbose = True
+        args.plan = True
 
         exit_code = cmd_validate(args, orchestrator)
 
@@ -196,11 +218,10 @@ class TestCmdValidate:
 
         orchestrator = Orchestrator(complete_workspace)
 
-        args = MagicMock()
+        args = Namespace()
         args.manifest = manifest_path
         args.workspace = complete_workspace
         args.selector = None
-        args.verbose = False
 
         exit_code = cmd_validate(args, orchestrator)
 
@@ -213,7 +234,7 @@ class TestCmdValidate:
     def test_validate_verbose_library_manifest_no_traceback(
         self, complete_workspace, capsys
     ):
-        """`validate -v` on a library manifest (no `sites:` and no
+        """`validate --plan` on a library manifest (no `sites:` and no
         `selector:`) prints ✓ + Note and exits 0. Previously
         `show_plan` re-resolved sites and re-raised NoTargetingError
         as a traceback after the success print."""
@@ -229,11 +250,11 @@ class TestCmdValidate:
 
         orchestrator = Orchestrator(complete_workspace)
 
-        args = MagicMock()
+        args = Namespace()
         args.manifest = manifest_path
         args.workspace = complete_workspace
         args.selector = None
-        args.verbose = True
+        args.plan = True
 
         exit_code = cmd_validate(args, orchestrator)
 
@@ -262,11 +283,11 @@ class TestCmdValidate:
 
         orchestrator = Orchestrator(complete_workspace)
 
-        args = MagicMock()
+        args = Namespace()
         args.manifest = manifest_path
         args.workspace = complete_workspace
         args.selector = None
-        args.verbose = True
+        args.plan = True
 
         exit_code = cmd_validate(args, orchestrator)
 
@@ -284,11 +305,10 @@ class TestCmdValidate:
         orchestrator = Orchestrator(complete_workspace)
         manifest_path = complete_workspace / "manifests" / "test-manifest.yaml"
 
-        args = MagicMock()
+        args = Namespace()
         args.manifest = manifest_path
         args.workspace = complete_workspace
         args.selector = "environment=test"
-        args.verbose = False
 
         with patch.object(orchestrator, "validate") as mock_validate:
             mock_validate.return_value = []  # No errors
@@ -308,11 +328,10 @@ class TestCmdSites:
 
         orchestrator = Orchestrator(complete_workspace)
 
-        args = MagicMock()
+        args = Namespace()
         args.name = None
         args.workspace = complete_workspace
         args.selector = None
-        args.verbose = False
 
         exit_code = cmd_sites(args, orchestrator)
 
@@ -327,11 +346,10 @@ class TestCmdSites:
 
         orchestrator = Orchestrator(multi_site_workspace)
 
-        args = MagicMock()
+        args = Namespace()
         args.name = None
         args.workspace = multi_site_workspace
         args.selector = "environment=dev"
-        args.verbose = False
 
         exit_code = cmd_sites(args, orchestrator)
 
@@ -349,11 +367,10 @@ class TestCmdSites:
 
         orchestrator = Orchestrator(complete_workspace)
 
-        args = MagicMock()
+        args = Namespace()
         args.name = None
         args.workspace = complete_workspace
         args.selector = "nonexistent=value"
-        args.verbose = False
 
         exit_code = cmd_sites(args, orchestrator)
 
@@ -384,11 +401,10 @@ class TestCmdSites:
 
         orchestrator = Orchestrator(tmp_path)
 
-        args = MagicMock()
+        args = Namespace()
         args.name = "regions/eu/munich-dev"
         args.workspace = tmp_path
         args.selector = None
-        args.verbose = False
         args.render = False
         args.show_sources = False
 
@@ -408,11 +424,10 @@ class TestCmdSites:
 
         orchestrator = Orchestrator(tmp_path)
 
-        args = MagicMock()
+        args = Namespace()
         args.name = None
         args.workspace = tmp_path
         args.selector = None
-        args.verbose = False
 
         exit_code = cmd_sites(args, orchestrator)
 
@@ -434,11 +449,10 @@ class TestCmdSites:
 
         orchestrator = Orchestrator(complete_workspace)
 
-        args = MagicMock()
+        args = Namespace()
         args.name = None
         args.workspace = complete_workspace
         args.selector = None
-        args.verbose = False
 
         exit_code = cmd_sites(args, orchestrator)
 
@@ -461,11 +475,10 @@ class TestCmdSites:
 
         orchestrator = Orchestrator(complete_workspace)
 
-        args = MagicMock()
+        args = Namespace()
         args.name = None
         args.workspace = complete_workspace
         args.selector = None
-        args.verbose = False
 
         exit_code = cmd_sites(args, orchestrator)
 
@@ -480,12 +493,11 @@ class TestCmdSites:
 
         orchestrator = Orchestrator(multi_site_workspace)
 
-        args = MagicMock()
+        args = Namespace()
         args.name = None
         args.workspace = multi_site_workspace
         args.name = "dev-eastus"
         args.selector = None
-        args.verbose = False
         args.render = False
 
         exit_code = cmd_sites(args, orchestrator)
@@ -502,12 +514,11 @@ class TestCmdSites:
 
         orchestrator = Orchestrator(multi_site_workspace)
 
-        args = MagicMock()
+        args = Namespace()
         args.name = None
         args.workspace = multi_site_workspace
         args.name = "dev-eastus"
         args.selector = "name=prod-eastus"
-        args.verbose = False
         args.render = False
 
         exit_code = cmd_sites(args, orchestrator)
@@ -526,7 +537,7 @@ class TestCmdDeploy:
         orchestrator = Orchestrator(complete_workspace)
         manifest_path = complete_workspace / "manifests" / "test-manifest.yaml"
 
-        args = MagicMock()
+        args = Namespace()
         args.manifest = manifest_path
         args.workspace = complete_workspace
         args.selector = None
@@ -548,7 +559,7 @@ class TestCmdDeploy:
 
         orchestrator = Orchestrator(complete_workspace)
 
-        args = MagicMock()
+        args = Namespace()
         args.manifest = Path("nonexistent.yaml")
         args.workspace = complete_workspace
         args.selector = None
@@ -575,7 +586,7 @@ class TestCmdDeploy:
 
         orchestrator = Orchestrator(complete_workspace)
 
-        args = MagicMock()
+        args = Namespace()
         args.manifest = manifest_path
         args.workspace = complete_workspace
         args.selector = None
@@ -601,7 +612,7 @@ class TestCmdDeploy:
 
         orchestrator = Orchestrator(complete_workspace)
 
-        args = MagicMock()
+        args = Namespace()
         args.manifest = manifest_path
         args.workspace = complete_workspace
         args.selector = None
@@ -628,7 +639,7 @@ class TestCmdDeploy:
 
         orchestrator = Orchestrator(complete_workspace)
 
-        args = MagicMock()
+        args = Namespace()
         args.manifest = manifest_path
         args.workspace = complete_workspace
         args.selector = "env=prod,env=dev"
@@ -657,7 +668,7 @@ class TestCmdDeploy:
 
         orchestrator = Orchestrator(complete_workspace)
 
-        args = MagicMock()
+        args = Namespace()
         args.manifest = manifest_path
         args.workspace = complete_workspace
         args.selector = None
@@ -684,7 +695,7 @@ class TestCmdDeploy:
 
         orchestrator = Orchestrator(complete_workspace)
 
-        args = MagicMock()
+        args = Namespace()
         args.manifest = manifest_path
         args.workspace = complete_workspace
         args.selector = None
@@ -714,7 +725,7 @@ class TestCmdDeploy:
 
         orchestrator = Orchestrator(complete_workspace)
 
-        args = MagicMock()
+        args = Namespace()
         args.manifest = manifest_path
         args.workspace = complete_workspace
         args.selector = "nonexistent=value"
@@ -746,7 +757,7 @@ class TestCmdDeploy:
 
         orchestrator = Orchestrator(complete_workspace)
 
-        args = MagicMock()
+        args = Namespace()
         args.manifest = manifest_path
         args.workspace = complete_workspace
         args.selector = "name=does-not-exist"
@@ -775,7 +786,7 @@ class TestCmdDeploy:
         orchestrator = Orchestrator(multi_site_workspace)
         manifest_path = multi_site_workspace / "manifests" / "multi-site.yaml"
 
-        args = MagicMock()
+        args = Namespace()
         args.manifest = manifest_path
         args.workspace = multi_site_workspace
         args.selector = None
@@ -805,7 +816,7 @@ class TestCmdDeploy:
 
         orchestrator = Orchestrator(complete_workspace)
 
-        args = MagicMock()
+        args = Namespace()
         args.manifest = manifest_path
         args.workspace = complete_workspace
         args.selector = None
@@ -824,7 +835,7 @@ class TestCmdDeploy:
         orchestrator = Orchestrator(complete_workspace)
         manifest_path = complete_workspace / "manifests" / "test-manifest.yaml"
 
-        args = MagicMock()
+        args = Namespace()
         args.manifest = manifest_path
         args.workspace = complete_workspace
         args.selector = None
@@ -847,7 +858,7 @@ class TestCmdDeploy:
         orchestrator = Orchestrator(complete_workspace)
         manifest_path = complete_workspace / "manifests" / "test-manifest.yaml"
 
-        args = MagicMock()
+        args = Namespace()
         args.manifest = manifest_path
         args.workspace = complete_workspace
         args.selector = None
@@ -933,7 +944,7 @@ class TestCmdDeploy:
         orchestrator = Orchestrator(complete_workspace)
         manifest_path = complete_workspace / "manifests" / "test-manifest.yaml"
 
-        args = MagicMock()
+        args = Namespace()
         args.manifest = manifest_path
         args.workspace = complete_workspace
         args.selector = "environment=dev"
@@ -1110,8 +1121,9 @@ class TestMainArgumentParsing:
                 # name-OR / non-name-error rules.
                 assert args.selector == "name=a,name=b,env=prod"
 
-    def test_validate_verbose_flag(self, complete_workspace):
-        """Test validate -v flag is parsed correctly."""
+    def test_validate_plan_flag(self, complete_workspace):
+        """`--plan` asks for the deployment plan. It used to be `-v`, which
+        also raised log verbosity, so one flag meant two unrelated things."""
         manifest_path = complete_workspace / "manifests" / "test-manifest.yaml"
 
         with patch.object(
@@ -1123,7 +1135,7 @@ class TestMainArgumentParsing:
                 str(complete_workspace),
                 "validate",
                 str(manifest_path),
-                "-v",
+                "--plan",
             ],
         ):
             with patch("siteops.cli.cmd_validate") as mock_cmd:
@@ -1132,10 +1144,39 @@ class TestMainArgumentParsing:
                     main()
 
                 args = mock_cmd.call_args[0][0]
-                assert args.verbose is True
+                assert args.plan is True
+                # Asking for the plan does not turn on debug logging.
+                assert args.verbose is False
 
-    def test_sites_verbose_flag(self, complete_workspace):
-        """Test sites -v flag is parsed correctly."""
+    def test_verbose_is_global_and_reaches_every_subcommand(self, complete_workspace):
+        """`-v` is global, so `deploy` can have it. Without that, a dry run
+        could not show the commands it would have run."""
+        manifest_path = complete_workspace / "manifests" / "test-manifest.yaml"
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "siteops",
+                "-v",
+                "-w",
+                str(complete_workspace),
+                "deploy",
+                str(manifest_path),
+                "--dry-run",
+            ],
+        ):
+            with patch("siteops.cli.cmd_deploy") as mock_cmd:
+                mock_cmd.return_value = 0
+                with pytest.raises(SystemExit):
+                    main()
+
+                args = mock_cmd.call_args[0][0]
+                assert args.verbose is True
+                assert args.dry_run is True
+
+    def test_sites_show_sources_flag(self, complete_workspace):
+        """`--show-sources` names what it does. It used to be spelled `-v`."""
         with patch.object(
             sys,
             "argv",
@@ -1144,7 +1185,7 @@ class TestMainArgumentParsing:
                 "-w",
                 str(complete_workspace),
                 "sites",
-                "-v",
+                "--show-sources",
             ],
         ):
             with patch("siteops.cli.cmd_sites") as mock_cmd:
@@ -1153,7 +1194,7 @@ class TestMainArgumentParsing:
                     main()
 
                 args = mock_cmd.call_args[0][0]
-                assert args.verbose is True
+                assert args.show_sources is True
 
     def test_sites_selector_flag(self, complete_workspace):
         """Test sites -l flag is parsed correctly."""
@@ -1477,7 +1518,7 @@ parameters:
         monkeypatch.setattr(sys, "argv", ["siteops", "-w", str(workspace), "sites"])
 
         orchestrator = Orchestrator(workspace)
-        args = Namespace(selector=None, verbose=False)
+        args = Namespace(selector=None, show_sources=False)
 
         cmd_sites(args, orchestrator)
 
@@ -1519,7 +1560,7 @@ parameters:
         from siteops.orchestrator import Orchestrator
 
         orchestrator = Orchestrator(workspace)
-        args = Namespace(selector=None, verbose=False)
+        args = Namespace(selector=None, show_sources=False)
 
         cmd_sites(args, orchestrator)
 
@@ -1569,7 +1610,7 @@ parameters:
         from siteops.orchestrator import Orchestrator
 
         orchestrator = Orchestrator(workspace)
-        args = Namespace(selector=None, verbose=False)
+        args = Namespace(selector=None, show_sources=False)
 
         cmd_sites(args, orchestrator)
 
@@ -1584,10 +1625,10 @@ parameters:
         assert "placeholder-cluster" not in captured.out
 
 
-class TestCmdSitesVerboseProvenance:
-    """`-v` annotates every leaf with its source file."""
+class TestCmdSitesShowSourcesProvenance:
+    """`--show-sources` annotates every leaf with its source file."""
 
-    def test_verbose_shows_provenance_per_leaf(self, tmp_path, capsys):
+    def test_show_sources_annotates_every_leaf(self, tmp_path, capsys):
         workspace = tmp_path / "workspace"
         (workspace / "sites" / "shared").mkdir(parents=True)
         (workspace / "sites" / "shared" / "base.yaml").write_text(
@@ -1623,7 +1664,7 @@ labels:
         from siteops.orchestrator import Orchestrator
 
         orchestrator = Orchestrator(workspace)
-        args = Namespace(name=None, selector="name=munich", verbose=True, render=False)
+        args = Namespace(name=None, selector="name=munich", show_sources=True, render=False)
 
         cmd_sites(args, orchestrator)
 
@@ -1660,10 +1701,266 @@ location: eastus
         from siteops.orchestrator import Orchestrator
 
         orchestrator = Orchestrator(workspace)
-        args = Namespace(name=None, selector=None, verbose=False, render=False)
+        args = Namespace(name=None, selector=None, show_sources=False, render=False)
 
         cmd_sites(args, orchestrator)
 
         captured = capsys.readouterr()
         # No origin annotation in non-verbose output.
         assert "# sites/" not in captured.out
+
+
+class TestPlanOutputIsSeparateFromLogVerbosity:
+    """Asking for a plan and asking for debug logs are different requests.
+
+    They used to be one flag, which meant a plan on a published surface also
+    raised log verbosity there, and `deploy` could ask for neither. These use a
+    real `Namespace` rather than a mock argument bag, because an unset
+    attribute on a mock is a truthy child mock, so a mock cannot tell the
+    difference between a flag that was passed and one that was not.
+    """
+
+    def _args(self, workspace, manifest, **overrides):
+        from argparse import Namespace
+
+        values = {
+            "manifest": manifest,
+            "workspace": workspace,
+            "selector": None,
+            "plan": False,
+            "verbose": False,
+        }
+        values.update(overrides)
+        return Namespace(**values)
+
+    @pytest.mark.parametrize(
+        ("plan", "verbose", "expect_plan"),
+        [(False, False, False), (True, False, True), (False, True, False), (True, True, True)],
+        ids=["neither", "plan-only", "verbose-only", "both"],
+    )
+    def test_validate_shows_a_plan_for_plan_not_for_verbose(
+        self, complete_workspace, plan, verbose, expect_plan
+    ):
+        from siteops.orchestrator import Orchestrator
+
+        orchestrator = Orchestrator(complete_workspace)
+        manifest = complete_workspace / "manifests" / "test-manifest.yaml"
+        args = self._args(complete_workspace, manifest, plan=plan, verbose=verbose)
+
+        with patch.object(orchestrator, "show_plan") as show_plan:
+            exit_code = cmd_validate(args, orchestrator)
+
+        assert exit_code == 0
+        assert show_plan.called is expect_plan
+
+    @pytest.mark.parametrize("dry_run", [True, False], ids=["dry-run", "real-run"])
+    def test_deploy_shows_a_plan_only_on_a_dry_run(self, complete_workspace, dry_run):
+        """A dry run reports what a real run would do, so it shows the plan
+        without being asked. A real run does the thing instead of describing
+        it, and its own output covers what happened."""
+        from siteops.orchestrator import Orchestrator
+
+        orchestrator = Orchestrator(complete_workspace)
+        manifest = complete_workspace / "manifests" / "test-manifest.yaml"
+        args = self._args(complete_workspace, manifest, dry_run=dry_run, parallel=None)
+
+        summary = {"summary": {"failed": 0, "succeeded": 1}, "sites": {}}
+        with patch.object(orchestrator, "show_plan") as show_plan, \
+             patch.object(orchestrator, "deploy", return_value=summary):
+            exit_code = cmd_deploy(args, orchestrator)
+
+        assert exit_code == 0
+        assert show_plan.called is dry_run
+
+
+class TestVerboseSaysWhereTheOutputMoved:
+    """`-v` sets log verbosity and nothing else.
+
+    It used to select the deployment plan on `validate` and the source
+    annotations on `sites`. The obvious retry after the old spelling is
+    rejected is to move `-v` earlier, which succeeds and prints nothing, so a
+    job that existed to print a plan passes while emitting none. The note goes
+    to stderr so a pipeline reading stdout is unaffected.
+    """
+
+    def _validate_args(self, workspace, manifest, *, verbose, plan):
+        args = Namespace()
+        args.manifest = manifest
+        args.workspace = workspace
+        args.selector = None
+        args.verbose = verbose
+        args.plan = plan
+        return args
+
+    @pytest.mark.parametrize(
+        ("verbose", "plan", "expected"),
+        [(True, False, True), (True, True, False), (False, False, False)],
+        ids=["verbose-without-plan", "verbose-with-plan", "neither"],
+    )
+    def test_validate_names_the_flag_that_prints_a_plan(
+        self, complete_workspace, capsys, verbose, plan, expected
+    ):
+        from siteops.orchestrator import Orchestrator
+
+        orchestrator = Orchestrator(complete_workspace)
+        manifest = complete_workspace / "manifests" / "test-manifest.yaml"
+        args = self._validate_args(complete_workspace, manifest, verbose=verbose, plan=plan)
+
+        with patch.object(orchestrator, "show_plan"):
+            cmd_validate(args, orchestrator)
+
+        assert ("--plan" in capsys.readouterr().err) is expected
+
+    @pytest.mark.parametrize(
+        ("verbose", "show_sources", "expected"),
+        [(True, False, True), (True, True, False), (False, False, False)],
+        ids=["verbose-without-flag", "verbose-with-flag", "neither"],
+    )
+    def test_sites_names_the_flag_that_shows_sources(
+        self, complete_workspace, capsys, verbose, show_sources, expected
+    ):
+        from siteops.orchestrator import Orchestrator
+
+        args = Namespace()
+        args.workspace = complete_workspace
+        args.site = None
+        args.selector = None
+        args.resolve = False
+        args.verbose = verbose
+        args.show_sources = show_sources
+
+        cmd_sites(args, Orchestrator(complete_workspace))
+
+        assert ("--show-sources" in capsys.readouterr().err) is expected
+
+
+class TestAWorkspaceWhoseSitesAllFailIsDiagnosedAsSuch:
+    """An empty result has two causes and they need different answers.
+
+    A workspace with no site files needs one adding. A workspace whose site
+    files were all rejected needs those files fixing, and telling the operator
+    to add a site sends them to write a file they already have.
+    """
+
+    @pytest.fixture
+    def broken_workspace(self, tmp_workspace):
+        """A workspace whose only site carries a key the engine does not read."""
+        (tmp_workspace / "sites" / "plant-east.yaml").write_text(
+            "apiVersion: siteops/v1\nkind: Site\nname: plant-east\n"
+            "subscription: sub\nlocation: eastus\nparamaters:\n  a: b\n",
+            encoding="utf-8",
+        )
+        return tmp_workspace
+
+    def _args(self, workspace, **overrides):
+        args = Namespace()
+        args.workspace = workspace
+        args.site = None
+        args.selector = None
+        args.resolve = False
+        args.verbose = False
+        args.show_sources = False
+        for key, value in overrides.items():
+            setattr(args, key, value)
+        return args
+
+    def test_sites_reports_the_rejected_files_and_exits_nonzero(
+        self, broken_workspace, capsys
+    ):
+        from siteops.orchestrator import Orchestrator
+
+        exit_code = cmd_sites(self._args(broken_workspace), Orchestrator(broken_workspace))
+
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert "plant-east" in captured.err
+        assert "No sites found in workspace" not in captured.out
+
+    def test_an_empty_workspace_still_reports_an_empty_workspace(
+        self, tmp_workspace, capsys
+    ):
+        """The other cause. Reporting rejected files here would be as wrong as
+        the reverse."""
+        from siteops.orchestrator import Orchestrator
+
+        exit_code = cmd_sites(self._args(tmp_workspace), Orchestrator(tmp_workspace))
+
+        captured = capsys.readouterr()
+        assert exit_code == 0
+        assert "No sites found in workspace" in captured.out
+
+    def test_the_selector_explanation_names_the_rejected_files(self, broken_workspace):
+        from siteops.orchestrator import Orchestrator
+
+        orchestrator = Orchestrator(broken_workspace)
+        explanation = orchestrator.explain_no_match("environment=dev")
+
+        assert "plant-east" in explanation
+        assert "Add a site file" not in explanation
+
+    def test_naming_a_rejected_site_reports_it_rather_than_raising(
+        self, broken_workspace, capsys
+    ):
+        """`siteops sites <name>` is the direct way to ask why one site was
+        rejected, so it has to answer rather than raise through as a
+        traceback."""
+        from siteops.orchestrator import Orchestrator
+
+        args = self._args(broken_workspace)
+        args.name = "plant-east"
+
+        exit_code = cmd_sites(args, Orchestrator(broken_workspace))
+
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert "paramaters" in captured.err
+        assert "Traceback" not in captured.err
+
+    def test_a_missing_inherits_target_is_reported_rather_than_raising(
+        self, tmp_workspace, capsys
+    ):
+        """A missing parent raises `FileNotFoundError`, not `ValueError`, so a
+        handler covering only the latter still leaves a traceback."""
+        from siteops.orchestrator import Orchestrator
+
+        (tmp_workspace / "sites" / "plant-east.yaml").write_text(
+            "apiVersion: siteops/v1\nkind: Site\nname: plant-east\n"
+            "inherits: no-such-template.yaml\n",
+            encoding="utf-8",
+        )
+        args = self._args(tmp_workspace)
+        args.name = "plant-east"
+
+        exit_code = cmd_sites(args, Orchestrator(tmp_workspace))
+
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert "no-such-template.yaml" in captured.err
+        assert "Traceback" not in captured.err
+
+    def test_show_sources_names_the_file_each_value_came_from(
+        self, tmp_workspace, capsys
+    ):
+        """The provenance helper has its own tests. This is the command that
+        has to call it, which is where an operator reads the answer."""
+        from siteops.orchestrator import Orchestrator
+
+        (tmp_workspace / "sites" / "base-site.yaml").write_text(
+            "apiVersion: siteops/v1\nkind: SiteTemplate\n"
+            "subscription: sub-from-parent\nlocation: eastus\n",
+            encoding="utf-8",
+        )
+        (tmp_workspace / "sites" / "plant-east.yaml").write_text(
+            "apiVersion: siteops/v1\nkind: Site\nname: plant-east\n"
+            "inherits: base-site.yaml\nresourceGroup: rg-plant-east\n",
+            encoding="utf-8",
+        )
+        args = self._args(tmp_workspace, show_sources=True)
+
+        exit_code = cmd_sites(args, Orchestrator(tmp_workspace))
+
+        captured = capsys.readouterr()
+        assert exit_code == 0
+        assert "base-site.yaml" in captured.out, (
+            "the inherited value must name the file it came from"
+        )

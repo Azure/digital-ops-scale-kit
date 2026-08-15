@@ -107,7 +107,7 @@ stages:
                     set -o pipefail
                     CMD_ARGS=(-w "$WORKSPACE" validate "$MANIFEST")
                     [[ -n "$SELECTOR" ]] && CMD_ARGS+=(-l "$SELECTOR")
-                    CMD_ARGS+=(-v)
+                    CMD_ARGS+=(--plan)
 
                     SUMMARY_FILE="$(Build.ArtifactStagingDirectory)/deployment-plan.md"
                     echo "### Deployment Plan" > "$SUMMARY_FILE"

@@ -5,8 +5,12 @@
 
 Commands:
     deploy   - Deploy a manifest to target sites
-    validate - Validate manifest (use -v to show deployment plan)
+    validate - Validate manifest (use --plan to show the deployment plan)
     sites    - List available sites
+
+Global flags:
+    -v/--verbose controls log verbosity only. The deployment plan comes from
+    `validate --plan` or `deploy --dry-run`.
 """
 
 import argparse
@@ -95,6 +99,13 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         print("\n⚠ Manifest has no steps. Nothing to deploy.\n")
         return 0
 
+    # A dry run's whole job is answering what a real run would do, so it shows
+    # the plan without being asked. The executor's per-command lines stay
+    # behind `-v`, since they are a different question and a much longer
+    # answer.
+    if getattr(args, "dry_run", False):
+        orchestrator.show_plan(manifest_path, selector=cli_selector)
+
     # Execute deployment
     try:
         result = orchestrator.deploy(
@@ -117,6 +128,25 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     return 0
 
 
+def _note_superseded_verbose(
+    args: argparse.Namespace, requested: bool, command: str, flag: str, output: str
+) -> None:
+    """Say where the output moved when `-v` is used to ask for it.
+
+    `-v` used to select this output and now controls log verbosity only, so the
+    obvious retry after the old spelling fails is `-v`, which succeeds and
+    prints nothing. Written to stderr so a pipeline capturing stdout is
+    unaffected, and printed on the way in so it is visible before the run's own
+    output.
+    """
+    if getattr(args, "verbose", False) and not requested:
+        print(
+            f"Note: `-v` sets log verbosity. To print {output}, "
+            f"run `siteops {command} ... {flag}`.",
+            file=sys.stderr,
+        )
+
+
 def cmd_validate(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     """Validate manifest and optionally show deployment plan."""
     manifest_path = resolve_manifest_path(args.manifest, args.workspace)
@@ -126,7 +156,8 @@ def cmd_validate(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         return 1
 
     selector = getattr(args, "selector", None)
-    verbose = getattr(args, "verbose", False)
+    show_plan = getattr(args, "plan", False)
+    _note_superseded_verbose(args, show_plan, "validate", "--plan", "the deployment plan")
     errors = orchestrator.validate(manifest_path, selector=selector)
 
     if errors:
@@ -165,7 +196,7 @@ def cmd_validate(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
 
     # Skip the plan render for a library manifest with no selector.
     # show_plan re-resolves and would re-raise NoTargetingError.
-    if verbose and not is_library_no_selector:
+    if show_plan and not is_library_no_selector:
         orchestrator.show_plan(manifest_path, selector=selector)
 
     return 0
@@ -327,11 +358,35 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
             return 1
         # Use filter_sites for parity with deploy: trusted-file fast
         # path resolves path-form names like `regions/eu/munich-dev`.
-        sites = orchestrator.filter_sites(selector)
+        try:
+            sites = orchestrator.filter_sites(selector)
+        except (ValueError, FileNotFoundError) as e:
+            # `sites` is the command an operator reaches for to find out why a
+            # site was rejected, so it has to report that rather than raise
+            # through as a traceback.
+            print(f"\nError: {e}\n", file=sys.stderr)
+            return 1
     else:
-        sites = orchestrator.load_all_sites()
+        try:
+            sites = orchestrator.load_all_sites()
+        except (ValueError, FileNotFoundError) as e:
+            print(f"\nError: {e}\n", file=sys.stderr)
+            return 1
 
     if not sites:
+        if orchestrator.skipped_sites:
+            # Reported before the two cases below, since both of those describe
+            # a workspace that has nothing to offer. Here it has site files and
+            # every one of them was rejected, which is a different problem with
+            # a different fix.
+            names = ", ".join(name for name, _ in orchestrator.skipped_sites)
+            print(
+                f"\nError: no site could be loaded. "
+                f"{len(orchestrator.skipped_sites)} site file(s) were rejected "
+                f"({names}). Fix those files rather than adding a new site.\n",
+                file=sys.stderr,
+            )
+            return 1
         if selector_str:
             # Operator explicitly asked for a target set (positional
             # `name` or `-l`) and got nothing. Exit non-zero so wrapper
@@ -379,7 +434,10 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
             print(yaml.safe_dump(resolved, sort_keys=False, default_flow_style=False), end="")
         return 0
 
-    verbose = getattr(args, "verbose", False)
+    show_sources = getattr(args, "show_sources", False)
+    _note_superseded_verbose(
+        args, show_sources, "sites", "--show-sources", "the source file of each value"
+    )
 
     # Display header
     print()
@@ -391,12 +449,12 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     print()
 
     for site in sorted(sites, key=lambda s: s.name):
-        # In verbose mode, re-load with provenance so each leaf line
+        # With --show-sources, re-load with provenance so each leaf line
         # can be annotated with the source file the value came from
-        # (after inherits + overlay merge). Skipped in non-verbose
-        # mode to keep the bare listing fast.
+        # (after inherits + overlay merge). Skipped otherwise
+        # to keep the bare listing fast.
         prov: dict[str, str] | None = None
-        if verbose:
+        if show_sources:
             try:
                 _, prov = orchestrator.load_site_with_provenance(site.name)
             except (FileNotFoundError, ValueError) as e:
@@ -560,9 +618,9 @@ Examples:
         type=Path,
         default=None,
         help=(
-            "Workspace directory. When omitted, siteops auto-discovers a "
-            "single workspace under ./workspaces/ or uses the current "
-            "directory if it has the workspace shape."
+            "Workspace directory. When omitted, siteops uses the current "
+            "directory if it has the workspace shape, otherwise a single "
+            "workspace under ./workspaces/."
         ),
     )
     parser.add_argument(
@@ -576,6 +634,16 @@ Examples:
             "Additional trusted sites/ directory (repeatable). Also accepts "
             "the SITEOPS_EXTRA_SITES_DIRS env var. See "
             "docs/site-configuration.md for trust rules and precedence."
+        ),
+    )
+
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help=(
+            "Raise log verbosity to DEBUG. Controls logging only. To see a "
+            "deployment plan use `validate --plan` or `deploy --dry-run`."
         ),
     )
 
@@ -616,8 +684,11 @@ Examples:
     # validate command
     p_validate = subparsers.add_parser(
         "validate",
-        help="Validate manifest and show plan",
-        description="Validate manifest syntax, files, and references. Use -v to show deployment plan.",
+        help="Validate manifest and references",
+        description=(
+            "Validate manifest syntax, files, and references. "
+            "Use --plan to show the deployment plan."
+        ),
     )
     p_validate.add_argument("manifest", type=Path, help="Path to manifest file")
     p_validate.add_argument(
@@ -629,10 +700,9 @@ Examples:
         help=_SELECTOR_HELP,
     )
     p_validate.add_argument(
-        "-v",
-        "--verbose",
+        "--plan",
         action="store_true",
-        help="Show deployment plan after validation (default: false)",
+        help="Show the deployment plan after validation (default: false)",
     )
 
     # sites command
@@ -662,14 +732,11 @@ Examples:
         help=_SELECTOR_HELP,
     )
     p_sites.add_argument(
-        "-v",
-        "--verbose",
         "--show-sources",
         action="store_true",
         help=(
             "Annotate every leaf with the source file the value came from "
-            "after inherits + overlay merge. `--show-sources` is an alias "
-            "for `-v` on `sites` (default: false)."
+            "after inherits + overlay merge (default: false)."
         ),
     )
     p_sites.add_argument(

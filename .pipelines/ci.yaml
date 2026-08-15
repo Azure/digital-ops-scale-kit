@@ -134,7 +134,7 @@ jobs:
             echo "### $(basename $manifest)" >> "$SUMMARY_FILE"
             echo '```' >> "$SUMMARY_FILE"
 
-            if siteops -w "$WORKSPACE_DIR" validate "$manifest_rel" -v 2>&1 | tee -a "$SUMMARY_FILE"; then
+            if siteops -w "$WORKSPACE_DIR" validate "$manifest_rel" --plan 2>&1 | tee -a "$SUMMARY_FILE"; then
               echo "✓ Valid"
             else
               EXIT_CODE=1

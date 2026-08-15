@@ -9,6 +9,8 @@ itself runs under `GITHUB_ACTIONS` in CI, which turns redaction on, so a test
 asserting the local default would otherwise pass locally and fail in CI.
 """
 
+import logging
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -18,6 +20,8 @@ from siteops.sanitize import (
     REDACT_ENV,
     is_redaction_enabled,
     scrub,
+    scrub_command,
+    scrub_command_for_output,
     scrub_for_output,
 )
 
@@ -370,3 +374,197 @@ class TestOrchestratorAppliesRedaction:
         assert "contoso-munich-rg" not in step_error
         assert "BadRequest" in step_error
         assert SUBSCRIPTION not in capsys.readouterr().out
+
+
+class TestCommandScrubbing:
+    """A command line is redacted from its argument vector, not after joining.
+
+    The engine logs the commands it runs, and a dry run in CI is exactly where
+    an operator previews them. A value can contain a space, since a
+    subscription accepts a display name, and once the vector is joined that
+    space is indistinguishable from the separator.
+    """
+
+    @pytest.mark.parametrize(
+        ("argv", "expected"),
+        [
+            (["az", "--resource-group", "rg-plant-01"], ["az", "--resource-group", "<resource-group>"]),
+            (["az", "-g", "rg-plant-01"], ["az", "-g", "<resource-group>"]),
+            (["az", "--resource-group=rg-plant-01"], ["az", "--resource-group=<resource-group>"]),
+            (["az", "--subscription", "Contoso Prod"], ["az", "--subscription", "<subscription>"]),
+            (["az", "--subscription=Contoso Prod"], ["az", "--subscription=<subscription>"]),
+        ],
+        ids=["long", "short", "equals", "spaced-value", "equals-spaced"],
+    )
+    def test_an_identifying_flag_value_is_replaced(self, argv, expected):
+        assert scrub_command(argv) == expected
+
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            ["az", "--name", "prod-g", "eastus"],
+            ["az", "--diagnostic-g", "verbose"],
+            ["az", "deployment", "group", "create", "--name", "rg-like-name"],
+        ],
+        ids=["value-ends-in-dash-g", "flag-ends-in-dash-g", "unrelated-flag"],
+    )
+    def test_a_token_that_merely_ends_in_a_flag_is_untouched(self, argv):
+        """Matching on whole tokens is what makes this exact. A pattern without
+        a token boundary replaced the word after any token ending in `-g`,
+        which destroys a diagnostic without protecting anything."""
+        assert scrub_command(argv) == argv
+
+    def test_a_flag_without_a_value_does_not_consume_the_next_flag(self):
+        argv = ["az", "x", "--subscription", "--output", "json"]
+
+        assert scrub_command(argv) == argv
+
+    def test_a_flag_after_a_valueless_flag_is_still_scrubbed(self):
+        """The token following a valueless flag is classified in its own right.
+        Treating it as merely 'not the value' left the `=` form untouched."""
+        argv = ["az", "x", "-g", "--subscription=Contoso Prod"]
+
+        assert scrub_command(argv) == ["az", "x", "-g", "--subscription=<subscription>"]
+
+    def test_a_kubeconfig_path_is_replaced(self):
+        """A per-proxy kubeconfig lands in the OS temp directory, whose path
+        carries the account name on Windows."""
+        argv = ["kubectl", "--kubeconfig=/tmp/siteops-abc/kubeconfig", "get", "nodes"]
+
+        assert scrub_command(argv) == [
+            "kubectl", "--kubeconfig=<kubeconfig>", "get", "nodes",
+        ]
+
+    def test_repeated_flags_are_each_replaced(self):
+        argv = ["az", "-g", "rg-one", "--resource-group", "rg-two", "--subscription", "s"]
+
+        assert scrub_command(argv) == [
+            "az", "-g", "<resource-group>",
+            "--resource-group", "<resource-group>",
+            "--subscription", "<subscription>",
+        ]
+
+    def test_the_rendered_line_is_plain_when_redaction_is_off(self, monkeypatch):
+        """Local output stays copy-pasteable with real values, which is the
+        whole reason redaction is conditional."""
+        monkeypatch.setenv(REDACT_ENV, "false")
+
+        rendered = scrub_command_for_output(["az", "-g", "rg-plant-01"])
+
+        assert rendered == "az -g rg-plant-01"
+
+    def test_the_rendered_line_is_redacted_when_publishing(self, monkeypatch):
+        monkeypatch.setenv(REDACT_ENV, "true")
+
+        rendered = scrub_command_for_output(
+            ["az", "-g", "rg-plant-01", "--subscription", "Contoso Prod"]
+        )
+
+        assert rendered == "az -g <resource-group> --subscription <subscription>"
+
+    def test_text_rules_still_apply_to_the_rest_of_the_line(self, monkeypatch):
+        """Structural replacement covers flag values. Everything else, such as
+        a resource id inside a path, still goes through `scrub`."""
+        monkeypatch.setenv(REDACT_ENV, "true")
+
+        rendered = scrub_command_for_output(["az", "resource", "show", "--ids", RESOURCE_ID])
+
+        assert SUBSCRIPTION not in rendered
+        assert "rg-contoso-munich" not in rendered
+
+    def test_a_dry_run_command_line_is_scrubbed_where_it_is_logged(
+        self, clean_env, caplog
+    ):
+        """The engine's own call site, not the helper behind it.
+
+        A dry run in CI is where an operator previews the commands, so this is
+        the line that carries a subscription display name and a resource group
+        into a published log. Rendering the vector after joining it, or joining
+        it without rendering, both leave the value in place while every helper
+        test stays green.
+        """
+        from siteops.executor import AzCliExecutor
+
+        clean_env.setenv(REDACT_ENV, "1")
+        # `az_path` resolves from PATH, so it is pinned here rather than left to
+        # whether the Azure CLI happens to be installed on the runner.
+        clean_env.setattr(AzCliExecutor, "az_path", property(lambda self: "az"))
+        executor = AzCliExecutor(Path("."), dry_run=True)
+
+        with caplog.at_level(logging.INFO, logger="siteops.executor"):
+            executor._run_az(
+                [
+                    "deployment",
+                    "group",
+                    "create",
+                    "--subscription",
+                    "Contoso Prod",
+                    "-g",
+                    "rg-contoso-munich",
+                ]
+            )
+
+        assert "Contoso Prod" not in caplog.text
+        assert "rg-contoso-munich" not in caplog.text
+        assert "<subscription>" in caplog.text
+        assert "<resource-group>" in caplog.text
+
+
+class TestUserPrincipalNames:
+    """An address identifies a person, and Azure echoes one back.
+
+    `lastModifiedBy` was one of the values in a real disclosure, and the Arc
+    proxy failure tail this engine retains can carry the same shape.
+    """
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "lastModifiedBy jane.operator@contoso.com",
+            "principal admin_user@contoso.onmicrosoft.com was denied",
+            "AADSTS500011: user+tag@sub.contoso.co.uk not found",
+            "lastModifiedBy alice_fabrikam.com#EXT#@contoso.onmicrosoft.com",
+        ],
+        ids=["dotted", "underscore", "plus-and-subdomain", "guest"],
+    )
+    def test_the_local_part_is_removed(self, text):
+        scrubbed = scrub(text)
+
+        assert "@" in scrubbed, "the domain is kept, since it is what stays diagnostic"
+        assert "<user>@" in scrubbed
+        local_part = text.split("@")[0].split()[-1]
+        assert local_part not in scrubbed
+
+    def test_the_domain_survives_so_the_message_stays_useful(self):
+        assert scrub("owner jane@contoso.com") == "owner <user>@contoso.com"
+
+    def test_text_without_an_address_is_untouched(self):
+        text = "deployment failed at step aio-enablement"
+
+        assert scrub(text) == text
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "abfss://my-ws@account.dfs.core.windows.net/data",
+            "abfss://ws@account.dfs.core.windows.net",
+            "https://svc-account@host.example.com/path",
+            "mqtt://broker.contoso.io:8883",
+        ],
+        ids=["hyphenated-userinfo", "plain-userinfo", "https-userinfo", "no-userinfo"],
+    )
+    def test_a_url_authority_is_left_to_the_host_rule(self, text):
+        """The userinfo of a URL is not a person, and rewriting part of it
+        produced an address that no longer resolved. Everything before the
+        authority has to survive so the operator can still act on the message."""
+        scrubbed = scrub(text)
+
+        assert "<user>" not in scrubbed
+        assert scrubbed.startswith(text.split("://")[0] + "://")
+
+    def test_scrubbing_an_already_scrubbed_message_changes_nothing(self):
+        """Output can pass a boundary twice, and a second pass that rewrote the
+        placeholder would corrupt a message the first pass made safe."""
+        once = scrub("owner jane@contoso.com denied on host.contoso.blob.core.windows.net")
+
+        assert scrub(once) == once

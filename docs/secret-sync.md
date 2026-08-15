@@ -271,7 +271,8 @@ templates/
     ├── sync-secrets.bicep                   # Syncs N KV secrets to K8s secrets in one deploy
     ├── spc-objects.bicep                    # Shared SPC objects derivation, imported by both writers
     └── modules/
-        └── keyvault-roles.bicep             # KV role assignments (cross-RG capable)
+        ├── keyvault-roles.bicep             # KV role assignments (cross-RG capable)
+        └── read-spc-objects.bicep           # Reads `objects` off an existing SPC so enablement preserves it
 ```
 
 The per-API-version modules track the supported releases, so read the directory rather than this tree for the current set.

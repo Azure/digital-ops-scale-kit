@@ -15,12 +15,22 @@ Resources support K8s-style apiVersion/kind validation:
 """
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import MISSING, dataclass, field, fields
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar, Protocol, TypeVar
 
 from siteops import yamlio
+
+
+class DataclassInstance(Protocol):
+    """Any dataclass instance, which is what `fields()` accepts."""
+
+    __dataclass_fields__: ClassVar[dict[str, Any]]
+
+
+# A `list` or `dict`, tying `_require_collection`'s return to the type asked for.
+_CollectionT = TypeVar("_CollectionT", list, dict)
 
 VALID_SCOPES = {"subscription", "resourceGroup"}
 DEFAULT_API_VERSION = "siteops/v1"
@@ -57,6 +67,321 @@ _MANIFEST_NESTED_TOP_KEYS = {"apiVersion", "kind", "metadata", "spec"}
 _MANIFEST_NESTED_METADATA_KEYS = {"name", "description", "labels"}
 _MANIFEST_NESTED_SPEC_KEYS = _MANIFEST_FLAT_KNOWN_KEYS - {"apiVersion", "kind", "name", "description"}
 
+# Site files, both shapes. The set is what `Site.from_file` and the
+# orchestrator's merged-data path read, so it cannot drift from the parser.
+#
+# Only the envelope is closed. `labels`, `properties`, and `parameters` hold
+# operator-defined content and stay open, so a key inside them is checked
+# against workspace usage instead, which `siteops validate` reports.
+#
+# `description` is accepted and not read. Manifests carry one, so a site that
+# already has it should not start failing now that unknown keys are rejected.
+# Nothing else is added on that basis. A key the engine does not read is
+# rejected, which is the whole point of closing the envelope, and `annotations`
+# in particular is rejected on a manifest already.
+_SITE_FLAT_KNOWN_KEYS = {
+    "apiVersion",
+    "kind",
+    "name",
+    "description",
+    "inherits",
+    "subscription",
+    "resourceGroup",
+    "location",
+    "labels",
+    "properties",
+    "parameters",
+}
+_SITE_NESTED_TOP_KEYS = {"apiVersion", "kind", "metadata", "spec"}
+_SITE_NESTED_METADATA_KEYS = {"name", "description", "labels"}
+# `inherits` is absent here on purpose. Only the flat shape is read for it, so
+# admitting it in a spec would accept a key that silently does nothing.
+_SITE_NESTED_SPEC_KEYS = _SITE_FLAT_KNOWN_KEYS - {
+    "apiVersion",
+    "kind",
+    "name",
+    "description",
+    "labels",
+    "inherits",
+}
+
+# Required on a resolved site. Checked after any inherit and overlay merge, so
+# a child may leave one to its parent template.
+_SITE_REQUIRED_SPEC_KEYS = ("subscription", "location")
+
+# Keys that hold operator-defined content. Open as to which keys they carry,
+# closed as to being mappings, since every reader indexes into them.
+_SITE_MAPPING_KEYS = ("labels", "properties", "parameters")
+
+# Keys whose value is used as text: an identity, a path, or a command-line
+# argument. Checked as a set rather than one at a time, so a field added to the
+# envelope is covered by being listed rather than by remembering to guard it.
+# A name is the one that fails worst, since it becomes a dictionary key and a
+# list value that is not hashable raises before any message can name the file.
+_SITE_STRING_KEYS = (
+    "name",
+    "description",
+    "inherits",
+    "subscription",
+    "resourceGroup",
+    "location",
+)
+
+# Guidance for a key that is rejected for a reason the closest spelling cannot
+# express. A real field in the wrong container has a correct answer, and a
+# fuzzy match sends the reader to a different field that is also wrong:
+# `description` in a spec suggested `subscription`, which is neither where it
+# belongs nor what it means.
+_SITE_UNREAD_ADVICE = {
+    # Recognizable to anyone who writes Kubernetes manifests, and read by
+    # nothing here. Named so the answer is where operator metadata goes rather
+    # than the nearest spelling.
+    "annotations": (
+        "not read by siteops. Put operator metadata in `labels`, which "
+        "selectors match on, or in `properties`, which templates read"
+    ),
+    "namespace": (
+        "not read by siteops. A site targets a subscription and a resource "
+        "group, which `subscription` and `resourceGroup` name"
+    ),
+}
+_SITE_TOP_LEVEL_ADVICE = {
+    **_SITE_UNREAD_ADVICE,
+    **{key: "belongs under `metadata`" for key in _SITE_NESTED_METADATA_KEYS},
+    **{key: "belongs under `spec`" for key in _SITE_NESTED_SPEC_KEYS},
+}
+_SITE_METADATA_ADVICE = {
+    **_SITE_UNREAD_ADVICE,
+    **{key: "belongs under `spec`" for key in _SITE_NESTED_SPEC_KEYS},
+}
+_SITE_SPEC_ADVICE = {
+    **_SITE_UNREAD_ADVICE,
+    **{key: "belongs under `metadata`" for key in _SITE_NESTED_METADATA_KEYS},
+    "inherits": "is read at the top level of the file, in either shape",
+}
+
+
+def validate_site_required(spec: dict, source: Path | str) -> None:
+    """Reject a site whose required field is absent or carries no value.
+
+    Presence alone is not enough. A key written with nothing after the colon
+    parses as `None` and reaches a command line as the string `None` rather
+    than failing here.
+
+    Args:
+        spec: The site's spec mapping, after any inherit and overlay merge.
+        source: Path or label naming the file to report.
+
+    Raises:
+        ValueError: A required field is absent or empty.
+    """
+    for key in _SITE_REQUIRED_SPEC_KEYS:
+        if key not in spec:
+            raise ValueError(f"Missing required field '{key}' in site: {source}")
+        value = spec[key]
+        if value is None or (isinstance(value, str) and not value.strip()):
+            raise ValueError(
+                f"Required field '{key}' in site '{source}' has no value. "
+                f"Give it one, inherit it from a parent template, or remove "
+                f"the key entirely, since a key written with no value "
+                f"overrides the inherited one."
+            )
+
+
+def validate_site_keys(data: dict, source: Path | str) -> None:
+    """Reject a site key that no parser reads.
+
+    A misspelled envelope key is silent otherwise: `paramaters` contributes
+    nothing and the site deploys with defaults. Applied to merged data, so it
+    covers a key an overlay contributes as well as one the base file carries.
+
+    Args:
+        data: Site data, either shape, after any inherit and overlay merge.
+        source: Path or label naming the file to report.
+
+    Raises:
+        ValueError: A key is not one the site parser reads.
+    """
+    path = source if isinstance(source, Path) else Path(str(source))
+    if "spec" in data:
+        # A file carrying `spec` and also carrying flat-shape fields at the top
+        # level is two shapes at once. Reported as the shape problem it is,
+        # since listing the fields as unknown keys says three real field names
+        # are not real, which is the opposite of what the reader needs.
+        misplaced = sorted(
+            (set(data) - _SITE_NESTED_TOP_KEYS)
+            & (_SITE_NESTED_METADATA_KEYS | _SITE_NESTED_SPEC_KEYS)
+        )
+        if misplaced:
+            named = ", ".join(f"`{key}`" for key in misplaced)
+            raise ValueError(
+                f"Site '{source}' mixes the two site shapes. It declares `spec`, "
+                f"which is the envelope shape, and also carries {named} at the "
+                f"top level, where only the flat shape reads them. Move them "
+                f"under `metadata` or `spec`, or remove `spec` and put every "
+                f"field at the top level."
+            )
+        _validate_known_keys(
+            data, _SITE_NESTED_TOP_KEYS, path, "top-level", "Site", _SITE_TOP_LEVEL_ADVICE
+        )
+        metadata = _require_envelope_mapping(data, "metadata", source, "Site")
+        if metadata:
+            _validate_known_keys(
+                metadata,
+                _SITE_NESTED_METADATA_KEYS,
+                path,
+                "metadata",
+                "Site",
+                _SITE_METADATA_ADVICE,
+            )
+        spec = _require_envelope_mapping(data, "spec", source, "Site")
+        if "inherits" in spec:
+            # Named rather than reported as an unknown key, since `inherits` is
+            # a real field and the reader needs to know it is the placement
+            # that is wrong rather than the spelling.
+            raise ValueError(
+                f"Site '{source}' declares `inherits` inside `spec`, which is "
+                f"never read. Move it to the top level of the file, alongside "
+                f"`apiVersion` and `kind`. Both site shapes inherit that way."
+            )
+        _validate_known_keys(
+            spec, _SITE_NESTED_SPEC_KEYS, path, "spec", "Site", _SITE_SPEC_ADVICE
+        )
+        containers = [metadata, spec]
+    else:
+        _validate_known_keys(
+            data, _SITE_FLAT_KNOWN_KEYS, path, "top-level", "Site", _SITE_UNREAD_ADVICE
+        )
+        containers = [data]
+
+    # An open container still has to be a mapping. A scalar here fails much
+    # later, at the first read, with an error naming neither the file nor the
+    # key.
+    for container in containers:
+        for key in _SITE_MAPPING_KEYS:
+            if key in container and container[key] is not None:
+                if not isinstance(container[key], dict):
+                    raise ValueError(
+                        f"'{key}' in site '{source}' must be a mapping, got "
+                        f"{type(container[key]).__name__}."
+                    )
+        for key in _SITE_STRING_KEYS:
+            if key in container and container[key] is not None:
+                if not isinstance(container[key], str):
+                    raise ValueError(
+                        f"'{key}' in site '{source}' must be text, got "
+                        f"{type(container[key]).__name__}. Quote the value if "
+                        f"it is meant to be text."
+                    )
+
+        # A label value is compared against a selector, which is text, so a
+        # value of any other type matches nothing at all. Rejected rather than
+        # coerced: coercing would make a site start matching a selector it
+        # never matched, which changes what a deployment targets.
+        labels = container.get("labels")
+        if isinstance(labels, dict):
+            for label, value in labels.items():
+                if not isinstance(value, str):
+                    raise ValueError(
+                        f"Label '{label}' in site '{source}' must be text, got "
+                        f"{type(value).__name__}. Selectors compare text, so "
+                        f"this label matches nothing. Quote the value."
+                    )
+
+
+def _normalize_null_collections(instance: DataclassInstance) -> None:
+    """Replace a `None` collection field with its declared empty default.
+
+    A YAML key written with nothing after the colon parses as `None`, and
+    `dict.get(key, default)` returns that `None`, since the default applies
+    only when the key is absent. The `None` then reaches a reader promised a
+    collection and fails there, far from the file, naming neither.
+
+    Scope is deliberately narrow. A field declaring a default factory is
+    asserting it is never `None`, so that declaration is the rule, and a field
+    where `None` is meaningful declares no factory and is left alone. This does
+    not type-check scalars. `validate_site_required` covers the two that
+    matter, and rejecting rather than normalizing is right for those, since an
+    empty required scalar is not a request for a default.
+    """
+    for spec in fields(instance):
+        if spec.default_factory is MISSING:
+            continue
+        if getattr(instance, spec.name) is None:
+            setattr(instance, spec.name, spec.default_factory())
+
+
+def _require_collection(
+    data: dict[str, Any],
+    key: str,
+    source: Path | str,
+    kind: type[_CollectionT],
+    element_kind: type | None = None,
+) -> _CollectionT:
+    """Read an optional collection, treating a null value as absent.
+
+    Used where a value is consumed before any model is constructed, so
+    `_normalize_null_collections` has not run yet. Reports a wrong type against
+    the file and key rather than letting it surface later as a bare
+    `TypeError` from whatever first iterates it.
+
+    Args:
+        data: The mapping to read from.
+        key: The key to read.
+        source: Path or label naming the file to report.
+        kind: The collection type the caller requires, `list` or `dict`.
+        element_kind: When given, the type every element must be. A list of
+            paths or identifiers is unusable if one entry is a number, and
+            YAML produces one from an unquoted version or release.
+
+    Returns:
+        The value, or an empty collection of `kind` when absent or null.
+
+    Raises:
+        ValueError: The key holds a value of another type, or an element does.
+    """
+    value = data.get(key)
+    if value is None:
+        return kind()
+    if not isinstance(value, kind):
+        raise ValueError(
+            f"'{key}' in '{source}' must be a {kind.__name__}, got "
+            f"{type(value).__name__}."
+        )
+    if element_kind is not None:
+        for index, element in enumerate(value):
+            if not isinstance(element, element_kind):
+                raise ValueError(
+                    f"Entry {index} of '{key}' in '{source}' must be "
+                    f"{element_kind.__name__}, got {type(element).__name__}: "
+                    f"{element!r}. Quote the value if it is meant to be text."
+                )
+    return value
+
+
+def _require_envelope_mapping(
+    data: dict[str, Any], key: str, source: Path | str, kind: str
+) -> dict[str, Any]:
+    """Read a K8s envelope container, rejecting a wrong type by name.
+
+    `metadata` and `spec` are indexed immediately after they are read, so a
+    scalar here surfaces as `'str' object has no attribute 'get'`, naming
+    neither the file nor the key. Absent or null yields an empty mapping,
+    which the callers already treat as "nothing supplied".
+
+    Raises:
+        ValueError: The key holds something other than a mapping.
+    """
+    value = data.get(key)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(
+            f"'{key}' in {kind.lower()} '{source}' must be a mapping, got "
+            f"{type(value).__name__}."
+        )
+    return value
+
 
 def _suggest_known_key(unknown: str, known: set[str]) -> str | None:
     """Return a 'did you mean X?' suggestion for a typo if there is a close match."""
@@ -66,7 +391,12 @@ def _suggest_known_key(unknown: str, known: set[str]) -> str | None:
 
 
 def _validate_known_keys(
-    actual: dict, allowed: set[str], path: Path, context: str
+    actual: dict,
+    allowed: set[str],
+    path: Path,
+    context: str,
+    kind: str = "Manifest",
+    advice: dict[str, str] | None = None,
 ) -> None:
     """Reject any keys in `actual` that are not in `allowed`.
 
@@ -74,21 +404,31 @@ def _validate_known_keys(
         actual: The dict whose keys to validate.
         allowed: The closed set of permitted keys.
         path: Source file path, used in the error message.
-        context: Where in the manifest this dict lives (e.g. "top-level",
+        context: Where in the file this dict lives (e.g. "top-level",
             "spec", "metadata"), used to disambiguate the error.
+        kind: Resource kind named in the error, so a site does not report
+            itself as a manifest.
+        advice: Per-key guidance that replaces the closest-spelling
+            suggestion. A key that is real but sits in the wrong container
+            has a correct answer, and offering the nearest spelling instead
+            sends the reader to a different field that is also wrong.
     """
     unknown = sorted(set(actual.keys()) - allowed)
     if not unknown:
         return
     parts = []
     for key in unknown:
+        hint = (advice or {}).get(key)
+        if hint:
+            parts.append(f"`{key}` ({hint})")
+            continue
         suggestion = _suggest_known_key(key, allowed)
         if suggestion:
             parts.append(f"`{key}` (did you mean `{suggestion}`?)")
         else:
             parts.append(f"`{key}`")
     raise ValueError(
-        f"Manifest '{path}' has unknown {context} key(s): {', '.join(parts)}. "
+        f"{kind} '{path}' has unknown {context} key(s): {', '.join(parts)}. "
         f"Allowed: {sorted(allowed)}."
     )
 
@@ -491,6 +831,10 @@ class Site:
     properties: dict[str, Any] = field(default_factory=dict)
     parameters: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        """Hold the optional mappings to the types this class declares."""
+        _normalize_null_collections(self)
+
     def matches_selector(self, selector: dict[str, list[str]]) -> bool:
         """Check if site matches all selector criteria.
 
@@ -579,30 +923,67 @@ class Site:
             raise ValueError(f"Empty or invalid YAML file: {path}")
 
         _validate_resource(data, "Site", path)
+        return cls.from_data(data, source=path, default_name=path.stem)
+
+    @classmethod
+    def from_data(
+        cls,
+        data: dict[str, Any],
+        *,
+        source: Path | str,
+        default_name: str,
+    ) -> "Site":
+        """Build a site from already-parsed data in either shape.
+
+        The single parse for both entry points. `from_file` reads one file and
+        calls this. The orchestrator merges a file with its inherit chain and
+        any overlay, then calls this. One implementation is what stops the two
+        paths drifting, since a rule added to one of two copies holds for only
+        one of them.
+
+        Does not validate `apiVersion` and `kind`. Both callers do that before
+        calling, against the source they want named in that error.
+
+        Args:
+            data: Site data, either the flat shape or the K8s envelope, after
+                any inherit and overlay merge.
+            source: Path or label naming the file to report in an error.
+            default_name: Name to use when neither shape supplies one.
+
+        Returns:
+            Site instance.
+
+        Raises:
+            ValueError: A key is unknown, a required field is absent or empty,
+                or an open container is not a mapping.
+        """
+        validate_site_keys(data, source)
 
         if "spec" in data:
-            spec = data["spec"]
-            metadata = data.get("metadata", {})
-            name = metadata.get("name", path.stem)
-            labels = metadata.get("labels", {})
+            spec = data.get("spec") or {}
+            metadata = data.get("metadata") or {}
+            # `or default_name` rather than a `get` default, since a bare
+            # `name:` supplies the key with a null value. That reached `Site`
+            # as `None` and broke sorting and interpolation far from here.
+            name = metadata.get("name") or default_name
+            labels = metadata.get("labels")
         else:
             spec = data
-            name = data.get("name", path.stem)
-            labels = data.get("labels", {})
+            name = data.get("name") or default_name
+            labels = data.get("labels")
 
-        required = ["subscription", "location"]
-        for req in required:
-            if req not in spec:
-                raise ValueError(f"Missing required field '{req}' in site: {path}")
+        validate_site_required(spec, source)
 
+        # `None` reaching any of these is normalized by `__post_init__`, which
+        # holds them to the types this class declares.
         return cls(
             name=name,
             subscription=spec["subscription"],
-            resource_group=spec.get("resourceGroup", ""),
+            resource_group=spec.get("resourceGroup") or "",
             location=spec["location"],
             labels=labels,
-            properties=spec.get("properties", {}),
-            parameters=spec.get("parameters", {}),
+            properties=spec.get("properties"),
+            parameters=spec.get("parameters"),
         )
 
     @property
@@ -650,6 +1031,8 @@ class DeploymentStep:
     when: str | None = None
 
     def __post_init__(self) -> None:
+        _normalize_null_collections(self)
+
         if self.scope not in VALID_SCOPES:
             raise ValueError(f"Invalid scope '{self.scope}'. Must be one of: {VALID_SCOPES}")
 
@@ -705,6 +1088,8 @@ class KubectlStep:
     when: str | None = None
 
     def __post_init__(self) -> None:
+        _normalize_null_collections(self)
+
         if self.operation not in KUBECTL_OPERATIONS:
             raise ValueError(
                 f"Invalid kubectl operation '{self.operation}'. " f"Supported: {', '.join(sorted(KUBECTL_OPERATIONS))}"
@@ -866,6 +1251,10 @@ class Manifest:
     parallel: ParallelConfig = field(default_factory=ParallelConfig)
     parameters: list[str] = field(default_factory=list)
 
+    def __post_init__(self) -> None:
+        """Hold the optional fields to the types this class declares."""
+        _normalize_null_collections(self)
+
     @classmethod
     def from_file(cls, path: Path, *, workspace_root: Path) -> "Manifest":
         """Load a manifest from a YAML file.
@@ -927,14 +1316,13 @@ class Manifest:
         spec, name, description = _read_manifest_spec(path)
 
         sites = []
-        for item in spec.get("sites", []):
-            if isinstance(item, str):
-                try:
-                    sites.append(_normalize_site_identifier(item))
-                except ValueError as e:
-                    raise ValueError(
-                        f"Invalid site identifier in `{path}` `sites:` list: {e}"
-                    ) from e
+        for item in _require_collection(spec, "sites", path, list, str):
+            try:
+                sites.append(_normalize_site_identifier(item))
+            except ValueError as e:
+                raise ValueError(
+                    f"Invalid site identifier in `{path}` `sites:` list: {e}"
+                ) from e
 
         # `selector:` is the preferred manifest field. `siteSelector:` is
         # accepted for backward compatibility but logs a one-time deprecation
@@ -1045,12 +1433,11 @@ def _read_manifest_spec(path: Path) -> tuple[dict[str, Any], str, str]:
 
     if "spec" in data:
         _validate_known_keys(data, _MANIFEST_NESTED_TOP_KEYS, path, "top-level")
-        metadata = data.get("metadata", {}) or {}
+        metadata = _require_envelope_mapping(data, "metadata", path, "Manifest")
         if metadata:
             _validate_known_keys(metadata, _MANIFEST_NESTED_METADATA_KEYS, path, "metadata")
-        spec = data["spec"] or {}
-        if isinstance(spec, dict):
-            _validate_known_keys(spec, _MANIFEST_NESTED_SPEC_KEYS, path, "spec")
+        spec = _require_envelope_mapping(data, "spec", path, "Manifest")
+        _validate_known_keys(spec, _MANIFEST_NESTED_SPEC_KEYS, path, "spec")
         name = metadata.get("name", path.stem)
         description = metadata.get("description", "")
     else:
@@ -1162,7 +1549,7 @@ def _parse_inline_step(step_data: dict[str, Any], source_path: Path, index: int)
                 name=arc_data["name"],
                 resource_group=arc_data["resourceGroup"],
             ),
-            files=step_data["files"],
+            files=_require_collection(step_data, "files", source_path, list, str),
             when=step_data.get("when"),
         )
 
@@ -1174,7 +1561,7 @@ def _parse_inline_step(step_data: dict[str, Any], source_path: Path, index: int)
     return DeploymentStep(
         name=step_data["name"],
         template=step_data["template"],
-        parameters=step_data.get("parameters", []),
+        parameters=_require_collection(step_data, "parameters", source_path, list, str),
         scope=step_data.get("scope", "resourceGroup"),
         when=step_data.get("when"),
     )
@@ -1296,9 +1683,11 @@ def _resolve_steps_and_params(
         )
 
     steps: list[ManifestStep] = []
-    parameters: list[str] = list(spec.get("parameters", []))
+    parameters: list[str] = list(
+        _require_collection(spec, "parameters", manifest_path, list, str)
+    )
 
-    raw_steps = spec.get("steps") or []
+    raw_steps = _require_collection(spec, "steps", manifest_path, list)
     for index, step_data in enumerate(raw_steps):
         if not isinstance(step_data, dict):
             raise ValueError(
