@@ -34,11 +34,11 @@ was doing nothing, or something other than what it read as, and doing it silentl
 
 ### Every file siteops reads
 
-**A mapping key given twice is rejected.** YAML keeps the last of a repeated key and discards the
-rest, so a file carrying `location:` twice deployed the second value while the first read as though
-it applied. This applies to every YAML and JSON file siteops reads, including site files,
-manifests, and parameter files. The error names the key and the line it repeats on. Merge the two
-entries, or rename one.
+**A duplicate key is rejected.** YAML keeps the last of a repeated key and discards the rest, so a
+file carrying `location:` twice deployed the second value while the first read as though it
+applied. This applies to every YAML and JSON file siteops reads, including site files, manifests,
+and parameter files. The error names the key and the line it repeats on. Merge the two entries, or
+rename one.
 
 ### Site files
 
