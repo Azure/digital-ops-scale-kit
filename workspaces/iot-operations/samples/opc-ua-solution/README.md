@@ -12,11 +12,18 @@ This sample expresses its dataflow as ARM resources in `template.bicep`, alongsi
 
 Once running, the OPC UA connector polls the simulator over `opc.tcp://opcplc-000000:50000`, publishes oven telemetry to the broker on `azure-iot-operations/data/oven`, and the dataflow forwards each message to the Event Hub.
 
+## Releases this data path reaches
+
+The sample creates its device, asset, Event Hub, and dataflow on every release.
+
+Release `2607`, which sites inherit by default, and later releases run the OPC UA connector as a pod AIO creates on demand from a `ConnectorTemplate`. A future release adds that resource, and telemetry follows on those releases once it does.
+
 ## Prerequisites
 
 - AIO must be installed on the target cluster. Run `aio-install` first, or use the composed `samples/aio-with-opc-ua/manifest.yaml` for a single-command install + sample.
 - The site's `aioRelease` must point to a release config under `parameters/aio-releases/`.
 - Your principal needs role-assignment permissions (Owner, or `User Access Administrator` plus `Contributor`) on the deployment resource group so the Event Hubs Data Sender role can be granted to the AIO extension principal. Skip this requirement by setting `createRoleAssignment: false` if the role is already granted at a higher scope.
+- Your principal also needs Kubernetes RBAC inside the cluster, because the `opc-plc-simulator` step applies the simulator through Arc cluster-connect. Azure roles on the cluster resource authorize the connection rather than the operations that travel over it, so a principal without a binding sees `is forbidden` from the API server. The simulator manifest creates its own ServiceAccount, Role, and RoleBinding alongside the Deployment and Service, so the grant has to cover those. [docs/ci-cd-setup.md](../../../../docs/ci-cd-setup.md#kubernetes-rbac-for-arc-proxy-operations) covers both the Kubernetes-native and Azure RBAC routes, and [docs/troubleshooting.md](../../../../docs/troubleshooting.md) covers what to weigh when choosing the role.
 
 ## Configure before deploying
 
@@ -50,7 +57,7 @@ Check the dataflow CR is projected to the cluster:
 kubectl get dataflows.connectivity.iotoperations.azure.com -n azure-iot-operations
 ```
 
-Subscribe to the topic with an in-cluster MQTT client (see Microsoft's [`mqtt-client.yaml` reference](https://learn.microsoft.com/azure/iot-operations/manage-mqtt-broker/howto-test-connection)) and watch for messages on `azure-iot-operations/data/oven`. End-to-end telemetry flow lags the deploy: after Bicep returns, the OPC UA connector still needs to reconcile the asset, establish the OPC UA session, and warm up polling before the first MQTT publish lands.
+Subscribe to the topic with an in-cluster MQTT client (see Microsoft's [`mqtt-client.yaml` reference](https://learn.microsoft.com/azure/iot-operations/manage-mqtt-broker/howto-test-connection)) and watch for messages on `azure-iot-operations/data/oven`. End-to-end telemetry flow lags the deploy: after Bicep returns, the OPC UA connector still needs to reconcile the asset, establish the OPC UA session, and warm up polling before the first MQTT publish lands. On release `2607` and later, read [Releases this data path reaches](#releases-this-data-path-reaches) before waiting on this step.
 
 For Event Hub egress, inspect incoming messages in the Azure portal under the deployed Event Hub namespace, or query via the Event Hubs SDK.
 
