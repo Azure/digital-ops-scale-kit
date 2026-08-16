@@ -6,10 +6,6 @@ description: |
   sample on top, demonstrating an asset producing telemetry that flows from
   the broker through a dataflow to an Event Hub destination.
 
-  From AIO API version 2026-07-01, which includes the default 2607, AIO runs
-  the OPC UA connector as a pod it creates on demand from a ConnectorTemplate.
-  A future release adds that resource. See samples/opc-ua-solution/README.md.
-
   Post-flatten step sequence (preview with `siteops validate --plan`):
     1. global-edge-site         (gated by enableGlobalSite)
     2. edge-site                (gated by enableEdgeSite)

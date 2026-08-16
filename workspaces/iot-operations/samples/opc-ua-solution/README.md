@@ -16,7 +16,7 @@ Once running, the OPC UA connector polls the simulator over `opc.tcp://opcplc-00
 
 The sample creates its device, asset, Event Hub, and dataflow on every release.
 
-From AIO API version `2026-07-01`, which includes the default `2607`, AIO runs the OPC UA connector as a pod it creates on demand from a `ConnectorTemplate`. A future release adds that resource, and telemetry follows on those releases once it does.
+Release `2607`, which sites inherit by default, and later releases run the OPC UA connector as a pod AIO creates on demand from a `ConnectorTemplate`. A future release adds that resource, and telemetry follows on those releases once it does.
 
 ## Prerequisites
 
