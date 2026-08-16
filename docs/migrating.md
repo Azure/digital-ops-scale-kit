@@ -32,9 +32,17 @@ siteops -w <workspace> deploy <manifest> --dry-run -l <selector>
 Site files and manifests are checked more strictly. Every check exists because the shape it rejects
 was doing nothing, or something other than what it read as, and doing it silently.
 
+### Every file siteops reads
+
+**A duplicate key is rejected.** YAML keeps the last of a repeated key and discards the rest, so a
+file carrying `location:` twice deployed the second value while the first read as though it
+applied. This applies to every YAML and JSON file siteops reads, including site files, manifests,
+and parameter files. The error names the key and the line it repeats on. Merge the two entries, or
+rename one.
+
 ### Site files
 
-**A site key the engine does not read is rejected.** The allowed top-level fields are `apiVersion`,
+**A site key siteops does not read is rejected.** The allowed top-level fields are `apiVersion`,
 `kind`, `name`, `description`, `inherits`, `subscription`, `resourceGroup`, `location`, `labels`,
 `properties`, and `parameters`. In the `metadata`/`spec` envelope, `metadata` takes `name`,
 `description`, and `labels`, and `spec` takes `subscription`, `resourceGroup`, `location`,
@@ -127,6 +135,45 @@ in the same manifest, which depends on outputs no dry run produces. Those still 
 later all fail the dry run, so a pipeline that gates on `--dry-run` sees the same answer the
 deployment would give it.
 
+**A parameter path that selects a file by site value must resolve to a real file.** A path such as
+`parameters/aio-releases/{{ site.properties.aioRelease }}.yaml` lets the site choose which file to
+load. When the site does not carry the property, or carries a value naming a file that is not
+there, the step deployed without those parameters and reported success. Both cases now fail the
+step. A path with no template in it is unchanged and still warns, so an optional fixed file keeps
+working.
+
+### Deployment and targeting
+
+**A command line selector term must be written as `key=value`.** A term without `=` was dropped, so
+`-l munich-dev` left the command with no selector and it ran against whatever the manifest targets,
+usually a wider set than the term names. It now fails, and the error suggests what you probably
+meant:
+
+```
+Selector term `munich-dev` is not in `key=value` form. Did you mean `name=munich-dev`?
+```
+
+**A site that does not load stops the command.** `deploy` and `sites` name the sites they could not
+load and exit non-zero, where they previously logged each one and carried on with the rest. This
+matters most on this release, because the checks above reject files that earlier releases accepted,
+so a pipeline can go red against a workspace nobody changed. Run `siteops -w <workspace> sites`
+first and fix everything it names.
+
+**One subscription holds one subscription-level site.** `deploy` reports a second one rather than
+choosing between them. Subscription-scoped steps run once per subscription and their outputs feed
+every resource group site under it, so two candidates have no correct resolution. `validate`
+already reported this, and `deploy` does not run `validate`, so the check now covers both paths.
+
+### Secret Sync
+
+**The Key Vault secret declaration moved into the sample that owns it.**
+`parameters/inputs/sync-secrets.yaml` split in two:
+`samples/secretsync-sample/secrets.yaml` holds the secrets a site declares and attaches at manifest
+level, so a site or a `sites.local/` overlay can override it, and
+`samples/secretsync-sample/inputs.yaml` holds the step output wiring and attaches at step level. A
+manifest that referenced the old path reports `Parameter file not found` and does not deploy. Copy
+`secrets.yaml` into your own workspace, declare your secrets there, and reference your copy.
+
 ### Command line
 
 **`-v` is global and controls logging.** The output it used to select has its own flag:
@@ -138,10 +185,3 @@ deployment would give it.
 
 `siteops deploy --dry-run` prints the plan on its own. Running `-v` where one of these flags is
 meant prints a note naming the flag.
-
-### Importing siteops as a library
-
-`Site.from_file` and `Manifest.from_file` apply the checks above.
-`Site.from_data(data, *, source, default_name)` is new and builds a site from already-parsed data in
-either shape. `Site(labels=None)` and `Manifest(parameters=None)` normalize to empty collections.
-Nothing importable was renamed or removed.

@@ -12,11 +12,18 @@ This sample expresses its dataflow as ARM resources in `template.bicep`, alongsi
 
 Once running, the OPC UA connector polls the simulator over `opc.tcp://opcplc-000000:50000`, publishes oven telemetry to the broker on `azure-iot-operations/data/oven`, and the dataflow forwards each message to the Event Hub.
 
+## Releases this data path reaches
+
+The sample creates its device, asset, Event Hub, and dataflow on every release.
+
+From AIO API version `2026-07-01`, which includes the default `2607`, AIO runs the OPC UA connector as a pod it creates on demand from a `ConnectorTemplate`. A future release adds that resource, and telemetry follows on those releases once it does.
+
 ## Prerequisites
 
 - AIO must be installed on the target cluster. Run `aio-install` first, or use the composed `samples/aio-with-opc-ua/manifest.yaml` for a single-command install + sample.
 - The site's `aioRelease` must point to a release config under `parameters/aio-releases/`.
 - Your principal needs role-assignment permissions (Owner, or `User Access Administrator` plus `Contributor`) on the deployment resource group so the Event Hubs Data Sender role can be granted to the AIO extension principal. Skip this requirement by setting `createRoleAssignment: false` if the role is already granted at a higher scope.
+- Your principal also needs Kubernetes RBAC inside the cluster, because the `opc-plc-simulator` step applies the simulator through Arc cluster-connect. Azure roles on the cluster resource authorize the connection rather than the operations that travel over it, so a principal without a binding sees `is forbidden` from the API server. The simulator manifest creates its own ServiceAccount, Role, and RoleBinding alongside the Deployment and Service, so the grant has to cover those. [docs/ci-cd-setup.md](../../../../docs/ci-cd-setup.md#kubernetes-rbac-for-arc-proxy-operations) covers both the Kubernetes-native and Azure RBAC routes, and [docs/troubleshooting.md](../../../../docs/troubleshooting.md) covers what to weigh when choosing the role.
 
 ## Configure before deploying
 
