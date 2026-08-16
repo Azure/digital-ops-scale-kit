@@ -185,10 +185,3 @@ manifest that referenced the old path reports `Parameter file not found` and doe
 
 `siteops deploy --dry-run` prints the plan on its own. Running `-v` where one of these flags is
 meant prints a note naming the flag.
-
-### Importing siteops as a library
-
-`Site.from_file` and `Manifest.from_file` apply the checks above.
-`Site.from_data(data, *, source, default_name)` is new and builds a site from already-parsed data in
-either shape. `Site(labels=None)` and `Manifest(parameters=None)` normalize to empty collections.
-Nothing importable was renamed or removed.
