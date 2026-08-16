@@ -26,8 +26,7 @@ establishes its session, and warms up polling before the first message
 reaches the broker, after which the dataflow forwards it to Event Hub.
 
 Release `2607`, which sites inherit by default, and later releases run the
-connector as a pod AIO creates on demand from a `ConnectorTemplate`. A future
-release adds that resource. See
+connector as a pod AIO creates on demand from a `ConnectorTemplate`. See
 [samples/opc-ua-solution/README.md](../opc-ua-solution/README.md#releases-this-data-path-reaches).
 
 To add a declaratively authored dataflow over the same telemetry, deploy
