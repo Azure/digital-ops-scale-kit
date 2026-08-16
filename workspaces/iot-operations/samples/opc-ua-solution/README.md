@@ -57,7 +57,7 @@ Check the dataflow CR is projected to the cluster:
 kubectl get dataflows.connectivity.iotoperations.azure.com -n azure-iot-operations
 ```
 
-Subscribe to the topic with an in-cluster MQTT client (see Microsoft's [`mqtt-client.yaml` reference](https://learn.microsoft.com/azure/iot-operations/manage-mqtt-broker/howto-test-connection)) and watch for messages on `azure-iot-operations/data/oven`. End-to-end telemetry flow lags the deploy: after Bicep returns, the OPC UA connector still needs to reconcile the asset, establish the OPC UA session, and warm up polling before the first MQTT publish lands.
+Subscribe to the topic with an in-cluster MQTT client (see Microsoft's [`mqtt-client.yaml` reference](https://learn.microsoft.com/azure/iot-operations/manage-mqtt-broker/howto-test-connection)) and watch for messages on `azure-iot-operations/data/oven`. End-to-end telemetry flow lags the deploy: after Bicep returns, the OPC UA connector still needs to reconcile the asset, establish the OPC UA session, and warm up polling before the first MQTT publish lands. On release `2607` and later, read [Releases this data path reaches](#releases-this-data-path-reaches) before waiting on this step.
 
 For Event Hub egress, inspect incoming messages in the Azure portal under the deployed Event Hub namespace, or query via the Event Hubs SDK.
 

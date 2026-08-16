@@ -89,7 +89,9 @@ dataflowProfiles:
 # The first subscribes to every asset topic under the AIO data prefix, so one
 # declaration moves telemetry from whatever assets a site has without naming them.
 # Deploy `samples/opc-ua-solution/manifest.yaml` first to have it carry real oven
-# telemetry, or publish to the prefix yourself to exercise it standalone.
+# telemetry, or publish to the prefix yourself to exercise it standalone. On
+# release `2607` and later, publishing yourself is the quickest route, for the
+# reason that sample's README gives.
 #
 # The second reads a narrower topic and writes to its own endpoint through its own
 # pool, so the two share nothing but the source broker.
