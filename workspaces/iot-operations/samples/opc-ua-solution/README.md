@@ -16,7 +16,7 @@ Once running, the OPC UA connector polls the simulator over `opc.tcp://opcplc-00
 
 The sample creates its device, asset, Event Hub, and dataflow on every release.
 
-Release `2607`, which sites inherit by default, and later releases run the OPC UA connector as a pod AIO creates on demand from a `ConnectorTemplate`. A future release adds that resource, and telemetry follows on those releases once it does.
+Release `2607`, which sites inherit by default, and later releases run the OPC UA connector as a pod AIO creates on demand from a `ConnectorTemplate`. Creating that resource is currently outside this sample's scope, so telemetry on those releases waits on it.
 
 ## Prerequisites
 
