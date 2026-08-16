@@ -248,14 +248,17 @@ Rejecting rather than ignoring is what makes a misspelled field visible. It
 matters most for `properties`, since resource sets read it to decide what a
 site deploys, and a typo there leaves the site on defaults.
 
-Five further rules apply:
+Further rules apply:
 
 - **`subscription` and `location` must carry a value.** A key written with
   nothing after the colon parses as null, which is not the same as a default.
   Give it a value, inherit one from a parent template, or remove the key, since
   a blank key overrides the inherited value.
 - **`labels`, `properties`, and `parameters` must be mappings** when present.
-  Writing one with no value is fine and means the same as leaving it out.
+  Writing one with no value empties it. On a site with nothing to inherit that
+  reads the same as leaving the key out. On a site that inherits it replaces the
+  parent's block with nothing, which is the rule the first bullet states for
+  scalars. Leave the key out, or write `{}`, to keep what the parent supplies.
 - **A label value must be text.** Selectors compare text, so `release: 2607`
   matches nothing. Quote it as `release: "2607"`.
 - **A field that holds text must hold text.** `name`, `subscription`,

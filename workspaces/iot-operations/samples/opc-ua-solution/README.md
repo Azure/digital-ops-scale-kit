@@ -17,6 +17,7 @@ Once running, the OPC UA connector polls the simulator over `opc.tcp://opcplc-00
 - AIO must be installed on the target cluster. Run `aio-install` first, or use the composed `samples/aio-with-opc-ua/manifest.yaml` for a single-command install + sample.
 - The site's `aioRelease` must point to a release config under `parameters/aio-releases/`.
 - Your principal needs role-assignment permissions (Owner, or `User Access Administrator` plus `Contributor`) on the deployment resource group so the Event Hubs Data Sender role can be granted to the AIO extension principal. Skip this requirement by setting `createRoleAssignment: false` if the role is already granted at a higher scope.
+- Your principal also needs Kubernetes RBAC inside the cluster, because the `opc-plc-simulator` step applies the simulator through Arc cluster-connect. Azure roles on the cluster resource authorize the connection rather than the operations that travel over it, so a principal without a binding sees `is forbidden` from the API server. The simulator manifest creates its own ServiceAccount, Role, and RoleBinding alongside the Deployment and Service, so the grant has to cover those. [docs/ci-cd-setup.md](../../../../docs/ci-cd-setup.md#kubernetes-rbac-for-arc-proxy-operations) covers both the Kubernetes-native and Azure RBAC routes, and [docs/troubleshooting.md](../../../../docs/troubleshooting.md) covers what to weigh when choosing the role.
 
 ## Configure before deploying
 

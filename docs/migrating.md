@@ -32,6 +32,14 @@ siteops -w <workspace> deploy <manifest> --dry-run -l <selector>
 Site files and manifests are checked more strictly. Every check exists because the shape it rejects
 was doing nothing, or something other than what it read as, and doing it silently.
 
+### Every file the engine reads
+
+**A mapping key given twice is rejected.** YAML keeps the last of a repeated key and discards the
+rest, so a file carrying `location:` twice deployed the second value while the first read as though
+it applied. This applies to every YAML and JSON file the engine reads, including site files,
+manifests, and parameter files. The error names the key and the line it repeats on. Merge the two
+entries, or rename one.
+
 ### Site files
 
 **A site key the engine does not read is rejected.** The allowed top-level fields are `apiVersion`,
@@ -126,6 +134,16 @@ in the same manifest, which depends on outputs no dry run produces. Those still 
 `{{ site.X }}` path, a mistyped delimiter, and a reference to a step that does not exist or that runs
 later all fail the dry run, so a pipeline that gates on `--dry-run` sees the same answer the
 deployment would give it.
+
+### Secret Sync
+
+**The Key Vault secret declaration moved into the sample that owns it.**
+`parameters/inputs/sync-secrets.yaml` split in two:
+`samples/secretsync-sample/secrets.yaml` holds the secrets a site declares and attaches at manifest
+level, so a site or a `sites.local/` overlay can override it, and
+`samples/secretsync-sample/inputs.yaml` holds the step output wiring and attaches at step level. A
+manifest that referenced the old path reports `Parameter file not found` and does not deploy. Copy
+`secrets.yaml` into your own workspace, declare your secrets there, and reference your copy.
 
 ### Command line
 

@@ -69,6 +69,31 @@ The output is the post-inherit + post-overlay site as a single YAML doc, with em
 
 **Solution**: Verify role assignments on the subscription/resource group.
 
+### A `kubectl` step fails with "is forbidden"
+
+**Cause**: The identity has Azure permissions on the cluster resource but no Kubernetes RBAC inside
+the cluster. Arc cluster-connect authorizes the connection rather than the operations that travel
+over it, so ARM steps succeed while a `kubectl` step is refused by the API server.
+
+**Solution**: Grant the identity named in the error the Kubernetes permissions its step needs, in
+the namespace the step writes to, from a context that already holds cluster admin rather than
+through the Arc proxy being refused.
+
+For a development cluster, binding the built-in `admin` role to the target namespace is the quickest
+way to continue:
+
+```bash
+kubectl create rolebinding siteops-admin --clusterrole=admin --user=<object-id> --namespace=azure-iot-operations
+```
+
+Choose the role deliberately before using this beyond a development cluster. `admin` grants read on
+Secrets in that namespace, which is where Secret Sync materializes Key Vault values, and it grants
+creation of Roles and RoleBindings, which lets a holder widen its own access. Bind a `ClusterRole`
+that names the resources your manifests manage instead, and note that a manifest applying its own
+Role or RoleBinding, as the OPC UA sample's simulator does, needs those verbs to be part of what you
+grant. See [ci-cd-setup.md](ci-cd-setup.md#kubernetes-rbac-for-arc-proxy-operations) for the Azure
+RBAC alternative, which keeps the decision in Azure rather than on the cluster.
+
 ### Partial deployment failure
 
 **Cause**: One step failed, stopping the site deployment.
