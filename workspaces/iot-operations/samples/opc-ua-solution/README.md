@@ -16,7 +16,15 @@ Once running, the OPC UA connector polls the simulator over `opc.tcp://opcplc-00
 
 The sample creates its device, asset, Event Hub, and dataflow on every release.
 
-Release `2607`, which sites inherit by default, and later releases run the OPC UA connector as a pod AIO creates on demand from a `ConnectorTemplate`. Creating that resource is currently outside this sample's scope, so telemetry on those releases waits on it.
+Release `2608`, which sites inherit by default, and later release configurations
+deploy the connector template during both install and upgrade. The supervisor
+then creates the connector pod on demand, and the complete telemetry path
+described above is available.
+
+Releases before 2607 deploy the OPC UA connector statically. Release `2607` is
+affected by [Microsoft known issue 1330](https://learn.microsoft.com/azure/iot-operations/troubleshoot/known-issues#opc-connector-template-missing),
+where the OPC UA connector template is absent. The sample resources deploy, but
+that release does not create the connector pod that publishes their telemetry.
 
 ## Prerequisites
 
@@ -57,7 +65,7 @@ Check the dataflow CR is projected to the cluster:
 kubectl get dataflows.connectivity.iotoperations.azure.com -n azure-iot-operations
 ```
 
-Subscribe to the topic with an in-cluster MQTT client (see Microsoft's [`mqtt-client.yaml` reference](https://learn.microsoft.com/azure/iot-operations/manage-mqtt-broker/howto-test-connection)) and watch for messages on `azure-iot-operations/data/oven`. End-to-end telemetry flow lags the deploy: after Bicep returns, the OPC UA connector still needs to reconcile the asset, establish the OPC UA session, and warm up polling before the first MQTT publish lands. On release `2607` and later, read [Releases this data path reaches](#releases-this-data-path-reaches) before waiting on this step.
+Subscribe to the topic with an in-cluster MQTT client (see Microsoft's [`mqtt-client.yaml` reference](https://learn.microsoft.com/azure/iot-operations/manage-mqtt-broker/howto-test-connection)) and watch for messages on `azure-iot-operations/data/oven`. End-to-end telemetry flow lags the deploy: after Bicep returns, the OPC UA connector still needs to reconcile the asset, establish the OPC UA session, and warm up polling before the first MQTT publish lands. On release `2607`, read [Releases this data path reaches](#releases-this-data-path-reaches) before waiting on this step.
 
 For Event Hub egress, inspect incoming messages in the Azure portal under the deployed Event Hub namespace, or query via the Event Hubs SDK.
 

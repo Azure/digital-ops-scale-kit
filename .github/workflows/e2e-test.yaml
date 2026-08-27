@@ -24,9 +24,9 @@ on:
   workflow_dispatch:
     inputs:
       aio-releases:
-        description: Comma-separated AIO releases to fan out over (e.g. "2606,2607").
+        description: Comma-separated AIO releases to fan out over (e.g. "2607,2608").
         type: string
-        default: "2607"
+        default: "2608"
       environment:
         description: GitHub Environment whose secrets/approvers apply.
         type: string
@@ -164,9 +164,9 @@ jobs:
                   "cell registers its own cluster."
               )
           # Validate upgrade-to against shipped versions. Same-version cells
-          # are NOT a hard error here: a matrix like `aio-releases=2606,2607`
-          # with `upgrade-to=2607` is a legitimate "test 2606->2607 plus
-          # exercise 2607 install" shape. Each cell decides per-cell whether
+          # are NOT a hard error here: a matrix like `aio-releases=2607,2608`
+          # with `upgrade-to=2608` is a legitimate "test 2607->2608 plus
+          # exercise 2608 install" shape. Each cell decides per-cell whether
           # to skip the upgrade phase based on `matrix.aio-release == upgrade-to`.
           if upgrade_to and not (releases_dir / f"{upgrade_to}.yaml").is_file():
               available = sorted(p.stem for p in releases_dir.glob("*.yaml"))

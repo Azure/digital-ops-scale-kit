@@ -8,6 +8,7 @@ Covers:
 - Output path resolution
 """
 
+import hashlib
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -517,7 +518,7 @@ class TestDeploymentNameGeneration:
             assert deployment_name == "short-dev-step-20260102120000"
 
     def test_long_name_gets_hash_suffix(self, complete_workspace):
-        """Long deployment names should be truncated with hash suffix."""
+        """Long deployment names use a SHA-256 suffix when truncated."""
         orchestrator = Orchestrator(complete_workspace)
         site = Site(
             name="very-long-site-name-that-exceeds-limits",
@@ -535,17 +536,15 @@ class TestDeploymentNameGeneration:
             call_args = mock_deploy.call_args
             deployment_name = call_args.kwargs["deployment_name"]
 
-            # Name should be within Azure's limit
             assert len(deployment_name) <= 64
-            # Should end with timestamp
             assert deployment_name.endswith("20260102120000")
-            # Full name would be: very-long-manifest-name-very-long-site-name-that-exceeds-limits-very-long-step-name-20260102120000
-            # Since that exceeds 64 chars, it should be truncated with a hash
-            # The truncated name should be shorter than the full name would be
-            full_name = (
-                "very-long-manifest-name-very-long-site-name-that-exceeds-limits-very-long-step-name-20260102120000"
+            base_name = (
+                "very-long-manifest-name-very-long-site-name-that-exceeds-limits-"
+                "very-long-step-name"
             )
-            assert len(deployment_name) < len(full_name)
+            expected_hash = hashlib.sha256(base_name.encode()).hexdigest()[:10]
+            expected_base = f"{base_name[:38]}-{expected_hash}"
+            assert deployment_name == f"{expected_base}-20260102120000"
 
 
 class TestDeployParallelConfig:

@@ -2,14 +2,16 @@ apiVersion: siteops/v1
 kind: Manifest
 name: aio-upgrade
 description: |
-  Bump Arc extension versions for cert-manager, azure-secret-store, and AIO on
-  existing Azure IoT Operations instances, preserving each extension's existing
-  configurationSettings, releaseTrain, and identity.
+  Upgrade existing Azure IoT Operations installations to the release selected
+  by each site. Bumps the cert-manager, azure-secret-store, and AIO Arc
+  extensions while preserving each extension's existing configurationSettings,
+  releaseTrain, and identity.
 
   Reads target versions from parameters/aio-releases/<release>.yaml, the same
   source aio-install.yaml uses for the initial deployment. Operators select the
   target version per site via site.properties.aioRelease (re-pin the site to
-  the new release, then run this manifest). Drives only Arc extension bumps.
+  the new release, then run this manifest). A separate ordered step deploys
+  release-required resources after the Arc extension updates complete.
   The AIO instance ARM resource has no writable version property and is not
   mutated.
 
@@ -23,9 +25,9 @@ description: |
     - AIO instance must be deployed and running
     - The site's aioRelease must point to a parameters/aio-releases/<release>.yaml file
 
-  Out of scope (not yet supported):
-    - New child resource types introduced by future AIO releases (instance
-      properties, broker, dataflow profile, etc. are not mutated by this manifest)
+  Out of scope:
+    - AIO instance property migrations
+    - Child resource types without an API-versioned release-resources module
 
 # Max concurrent sites. 0 = unlimited, 1 = serial.
 parallel: 3
@@ -51,3 +53,9 @@ steps:
     scope: resourceGroup
     parameters:
       - parameters/inputs/aio-upgrade-update-extensions.yaml
+
+  - name: deploy-release-resources
+    template: templates/aio/upgrade/deploy-release-resources.bicep
+    scope: resourceGroup
+    parameters:
+      - parameters/inputs/aio-upgrade-deploy-release-resources.yaml

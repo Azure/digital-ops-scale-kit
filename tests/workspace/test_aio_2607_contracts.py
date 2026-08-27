@@ -29,27 +29,6 @@ def test_2607_resolve_and_update_modules_use_2026_07_api(workspace):
         assert "@2026-03-01" not in module
 
 
-def test_2607_security_pki_defaults_apply_to_install_and_upgrade(workspace):
-    create_module = _read(
-        workspace,
-        "templates/aio/modules/instance-2026-07-01.bicep",
-    )
-    update_extensions = _read(
-        workspace,
-        "templates/aio/upgrade/update-extensions.bicep",
-    )
-
-    for setting in (
-        "connectors.values.securityPki.applicationUri",
-        "connectors.values.securityPki.subjectName",
-    ):
-        assert setting in create_module
-        assert setting in update_extensions
-    assert "contains(aio.configurationSettings" in update_extensions
-    assert "aio.extensionSuffix" in update_extensions
-    assert "output aioApiVersionApplied string = aioApiVersion" in update_extensions
-
-
 def test_2607_cert_manager_defaults_flow_through_release_metadata(workspace):
     release = _read(workspace, "parameters/aio-releases/2607.yaml")
     enablement = _read(workspace, "templates/aio/enablement.bicep")

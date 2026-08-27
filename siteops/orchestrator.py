@@ -1689,7 +1689,33 @@ class Orchestrator:
                 f"to the site it inherits from."
             )
 
-        if not (workspace / resolved).resolve().is_file():
+        resolved_path = Path(resolved)
+        if resolved_path.is_absolute():
+            raise ParameterSelectionError(
+                f"{tier} parameter path '{declared}' resolved to "
+                f"'{resolved}' for site '{site.name}', but site-selected "
+                "parameter paths must be relative to the workspace."
+            )
+
+        if ".." in resolved_path.parts:
+            raise ParameterSelectionError(
+                f"{tier} parameter path '{declared}' resolved to "
+                f"'{resolved}' for site '{site.name}', but site-selected "
+                "parameter paths must not contain '..' path segments."
+            )
+
+        workspace_root = workspace.resolve()
+        full_path = (workspace_root / resolved_path).resolve()
+        try:
+            full_path.relative_to(workspace_root)
+        except ValueError as exc:
+            raise ParameterSelectionError(
+                f"{tier} parameter path '{declared}' resolved to "
+                f"'{resolved}' for site '{site.name}', which resolves outside "
+                "the workspace."
+            ) from exc
+
+        if not full_path.is_file():
             raise ParameterSelectionError(
                 f"{tier} parameter path '{declared}' resolved to "
                 f"'{resolved}' for site '{site.name}', which does not exist. "
@@ -2119,6 +2145,9 @@ class Orchestrator:
         # Check manifest-level parameters (apply to all steps)
         for param_path in manifest.parameters:
             resolved_path = manifest.resolve_parameter_path(param_path, site)
+            self._require_selected_parameter_file(
+                param_path, resolved_path, site, self.workspace, "Manifest"
+            )
             full_path = (self.workspace / resolved_path).resolve()
             if full_path.exists():
                 try:
@@ -2133,6 +2162,9 @@ class Orchestrator:
             if isinstance(step, DeploymentStep) and step.scope == "resourceGroup":
                 for param_path in step.parameters:
                     resolved_path = manifest.resolve_parameter_path(param_path, site)
+                    self._require_selected_parameter_file(
+                        param_path, resolved_path, site, self.workspace, "Step"
+                    )
                     full_path = (self.workspace / resolved_path).resolve()
                     if full_path.exists():
                         try:
@@ -2174,12 +2206,13 @@ class Orchestrator:
         base_name = f"{manifest.name}-{site.name}-{step.name}"
         MAX_LEN = 64
         TIMESTAMP_LEN = 14
+        HASH_LEN = 10
         max_base = MAX_LEN - TIMESTAMP_LEN - 1  # -1 for the separator
 
         if len(base_name) > max_base:
-            # Use hash suffix to ensure uniqueness when truncating
-            name_hash = hashlib.md5(base_name.encode()).hexdigest()[:6]
-            base_name = f"{base_name[:max_base - 7]}-{name_hash}"
+            # Keep a deterministic suffix when truncating similar long names.
+            name_hash = hashlib.sha256(base_name.encode()).hexdigest()[:HASH_LEN]
+            base_name = f"{base_name[:max_base - HASH_LEN - 1]}-{name_hash}"
 
         deployment_name = f"{base_name}-{timestamp}"
 

@@ -5,6 +5,7 @@ aioVersion: "1.2.189"
 aioTrain: stable
 aioApiVersion: "2025-10-01"
 adrApiVersion: "2025-10-01"
+aioReleaseConfiguration: {}
 certManagerVersion: "0.9.0"
 certManagerTrain: stable
 certManagerConfigurationOverrides: {}

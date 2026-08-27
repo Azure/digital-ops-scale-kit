@@ -27,19 +27,33 @@ from tests.integration.helpers.assertions import (
     assert_step_succeeded,
     find_step,
 )
+from tests.integration.helpers.kube import KubectlError, kubectl_json
+from tests.integration.helpers.releases import load_aio_release
 
 pytestmark = [pytest.mark.integration]
 
 WORKSPACE_PATH = Path(__file__).parent.parent.parent / "workspaces" / "iot-operations"
 
-AIO_2607_ADDITIVE_SETTINGS = {
+AIO_2026_03_API_ADDITIONS = {
     "connectors.values.securityPki.applicationUri",
+}
+AIO_SECURITY_PKI_SUBJECT_NAME_ADDITIONS = {
     "connectors.values.securityPki.subjectName",
 }
-CERT_MANAGER_2607_ADDITIVE_SETTINGS = {
+AIO_2608_RELEASE_ADDITIONS = {
+    "dataFlows.values.wasmGraphController.mqttBroker.caCertConfigMapRef",
+    "dataFlows.values.wasmGraphController.mqttBroker.caCertFileName",
+}
+CERT_MANAGER_TRUST_MANAGER_OVERRIDES = {
     "trust-manager.secretTargets.enabled",
     "trust-manager.secretTargets.authorizedSecretsAll",
 }
+OPC_UA_CONNECTOR_TEMPLATE_PREFIX = "azureiotoperationsconnectorforopcua-"
+
+
+def _release_configuration(orchestrator, site_name: str) -> dict:
+    _, data = load_aio_release(orchestrator, site_name, WORKSPACE_PATH)
+    return data.get("aioReleaseConfiguration") or {}
 
 
 def _assert_config_preserved_with_additions(
@@ -93,10 +107,15 @@ class TestAioUpgradeDeployment:
             assert site["status"] == "success", (
                 f"Site '{name}' failed: {site.get('error')}"
             )
-            assert site["steps_completed"] == 3
+            assert site["steps_completed"] == 4
 
     def test_all_phases_run(self, aio_upgrade_result):
-        expected = ("resolve-aio", "resolve-extensions", "update-extensions")
+        expected = (
+            "resolve-aio",
+            "resolve-extensions",
+            "update-extensions",
+            "deploy-release-resources",
+        )
         for name in aio_upgrade_result["sites"]:
             for step_name in expected:
                 assert_step_succeeded(aio_upgrade_result, name, step_name)
@@ -480,7 +499,9 @@ class TestAioExtensionInvariants:
                 f"({pre['identity']!r} -> {post['identity']!r})"
             )
 
-    def test_aio_configuration_settings_preserved(self, aio_upgrade_result):
+    def test_aio_configuration_settings_preserved(
+        self, aio_upgrade_result, orchestrator
+    ):
         """configurationSettings carries operator-applied AIO config. Update
         preserves every existing key and may add only release-required defaults.
         """
@@ -490,23 +511,44 @@ class TestAioExtensionInvariants:
             update = assert_step_succeeded(aio_upgrade_result, name, "update-extensions")
             post = assert_output_exists(update, "aioPostUpdate")
             aio_api_version = assert_output_exists(update, "aioApiVersionApplied")
+            release_configuration = _release_configuration(orchestrator, name)
+            allowed_additions: set[str] = set()
+            if aio_api_version in {"2026-03-01", "2026-07-01"}:
+                allowed_additions |= AIO_2026_03_API_ADDITIONS
+            extension_configuration = release_configuration.get("extension", {})
+            if (
+                aio_api_version == "2026-07-01"
+                or extension_configuration.get("securityPkiSubjectName")
+            ):
+                allowed_additions |= AIO_SECURITY_PKI_SUBJECT_NAME_ADDITIONS
+            if extension_configuration.get("wasmGraphControllerMqttTrust"):
+                allowed_additions |= AIO_2608_RELEASE_ADDITIONS
             _assert_config_preserved_with_additions(
                 name=name,
                 component="AIO",
                 pre=pre["configurationSettings"],
                 post=post["configurationSettings"],
-                allowed_additions=(
-                    AIO_2607_ADDITIVE_SETTINGS
-                    if aio_api_version == "2026-07-01"
-                    else set()
-                ),
+                allowed_additions=allowed_additions,
             )
-            if aio_api_version == "2026-07-01":
-                assert AIO_2607_ADDITIVE_SETTINGS <= set(post["configurationSettings"])
+            if aio_api_version in {"2026-03-01", "2026-07-01"}:
+                assert AIO_2026_03_API_ADDITIONS <= set(
+                    post["configurationSettings"]
+                )
+            if (
+                aio_api_version == "2026-07-01"
+                or extension_configuration.get("securityPkiSubjectName")
+            ):
+                assert AIO_SECURITY_PKI_SUBJECT_NAME_ADDITIONS <= set(
+                    post["configurationSettings"]
+                )
+            if extension_configuration.get("wasmGraphControllerMqttTrust"):
+                assert AIO_2608_RELEASE_ADDITIONS <= set(
+                    post["configurationSettings"]
+                )
 
     def test_aio_release_train_preserved(self, aio_upgrade_result):
         """releaseTrain change is allowed only when the release config bumps
-        the train. Shipped release configs (2603 through 2607) all use `stable`,
+        the train. Shipped release configs (2603 through 2608) all use `stable`,
         so a mismatch here means the RP defaulted the train unexpectedly OR
         the release config was bumped (intentional, update the test).
         """
@@ -518,6 +560,65 @@ class TestAioExtensionInvariants:
             assert post["releaseTrain"] == pre["releaseTrain"], (
                 f"Site '{name}': releaseTrain changed across PUT "
                 f"({pre['releaseTrain']!r} -> {post['releaseTrain']!r})"
+            )
+
+
+class TestOpcUaConnectorTemplateUpgrade:
+    """Release-required connector templates are added during upgrade."""
+
+    def test_connector_template_present_after_upgrade(
+        self,
+        aio_upgrade_result,
+        orchestrator,
+        aio_namespace,
+        kubectl_available,
+    ):
+        checked = 0
+        for name in aio_upgrade_result["sites"]:
+            release_configuration = _release_configuration(orchestrator, name)
+            connector_configuration = (
+                release_configuration.get("resources", {})
+                .get("opcUaConnector", {})
+            )
+            if not connector_configuration.get("version"):
+                continue
+            assert_step_succeeded(
+                aio_upgrade_result, name, "deploy-release-resources"
+            )
+            try:
+                templates = kubectl_json(
+                    [
+                        "get",
+                        "connectortemplates.akri.iotoperations.azure.com",
+                        "-n",
+                        aio_namespace,
+                    ]
+                )
+            except KubectlError as e:
+                pytest.fail(
+                    f"Site '{name}': connector templates not retrievable after "
+                    f"upgrade in `{aio_namespace}`: {e}"
+                )
+            names = [
+                item.get("metadata", {}).get("name", "")
+                for item in templates.get("items", [])
+            ]
+            matching = [
+                value
+                for value in names
+                if value.startswith(OPC_UA_CONNECTOR_TEMPLATE_PREFIX)
+            ]
+            assert matching, (
+                f"Site '{name}': no OPC UA connector template is present after "
+                f"upgrade. The cluster reports {len(names)} connector "
+                "template(s), none for OPC UA."
+            )
+            checked += 1
+
+        if checked == 0:
+            pytest.skip(
+                "No site under test upgrades to a release that declares an "
+                "OPC UA connector version."
             )
 
 
@@ -671,7 +772,7 @@ class TestCertManagerExtensionInvariants:
             expected_overrides = (
                 {
                     key: "false"
-                    for key in CERT_MANAGER_2607_ADDITIVE_SETTINGS
+                    for key in CERT_MANAGER_TRUST_MANAGER_OVERRIDES
                 }
                 if aio_api_version == "2026-07-01"
                 else {}

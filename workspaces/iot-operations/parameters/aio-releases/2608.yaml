@@ -1,0 +1,20 @@
+# AIO Release 2608 - Version Configuration
+# Source: https://github.com/Azure/azure-iot-ops-cli-extension/wiki/IoT-Operations-versions#2608
+
+aioVersion: "1.4.73"
+aioTrain: stable
+aioApiVersion: "2026-07-01"
+adrApiVersion: "2026-04-01"
+aioReleaseConfiguration:
+  extension:
+    wasmGraphControllerMqttTrust: true
+  resources:
+    opcUaConnector:
+      version: "1.4.10"
+certManagerVersion: "1.0.0"
+certManagerTrain: stable
+certManagerConfigurationOverrides:
+  trust-manager.secretTargets.enabled: "false"
+  trust-manager.secretTargets.authorizedSecretsAll: "false"
+secretStoreVersion: "1.5.2"
+secretStoreTrain: stable

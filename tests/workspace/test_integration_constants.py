@@ -174,6 +174,38 @@ class TestIntegrationStepNamesMatchTheManifests:
         assert not failures, "\n".join(failures)
 
 
+class TestIntegrationApiVersionsMatchTheWorkspace:
+    """API versions used by live reads match the templates they inspect."""
+
+    def test_extension_read_uses_the_deployed_resource_api(self, workspace):
+        constants = _module_constants(
+            INTEGRATION_DIR / "test_aio_install_manifest.py"
+        )
+        expected = constants.get("EXTENSION_API_VERSION")
+        assert expected, (
+            "test_aio_install_manifest.py no longer defines "
+            "EXTENSION_API_VERSION"
+        )
+
+        versions: set[str] = set()
+        for template in (workspace / "templates").rglob("*.bicep"):
+            source = template.read_text(encoding="utf-8")
+            versions.update(
+                re.findall(
+                    r"Microsoft\.KubernetesConfiguration/extensions@"
+                    r"(\d{4}-\d{2}-\d{2}(?:-preview)?)'",
+                    source,
+                )
+            )
+
+        assert versions, "No Arc extension API versions were found in templates."
+        assert versions == {expected}, (
+            "The live extension read API does not match the workspace "
+            f"templates. Integration: {expected!r}. Templates: "
+            f"{sorted(versions)}"
+        )
+
+
 class TestKubernetesResourceTypesAreConsistent:
     """The projected resource types are spelled the same in every module."""
 

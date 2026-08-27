@@ -9,7 +9,11 @@
 // -------------------------------------------------------------------------------------
 
 import * as types from './types.bicep'
-import { aioExtensionName as deriveAioExtensionName, aioExtensionType } from '../../common/extension-names.bicep'
+import {
+  aioExtensionName as deriveAioExtensionName
+  aioExtensionSuffix as deriveAioExtensionSuffix
+  aioExtensionType
+} from '../../common/extension-names.bicep'
 
 // =====================================================================================
 // Parameters (raw inputs from parent)
@@ -31,6 +35,7 @@ param defaultDataflowInstanceCount int
 // AIO extension
 param aioVersion string
 param aioTrain string
+param aioReleaseConfiguration object
 param observabilityEnabled bool
 param otelCollectorAddress string
 param aioConfigurationOverrides object
@@ -53,6 +58,7 @@ param clExtensionIds string[]
 // =====================================================================================
 
 var AIO_EXTENSION_NAME = deriveAioExtensionName(clusterResourceId)
+var AIO_EXTENSION_SUFFIX = deriveAioExtensionSuffix(clusterResourceId)
 
 var customerManagedTrust = trustConfig.source == 'CustomerManaged'
 var ISSUER_NAME = customerManagedTrust
@@ -81,10 +87,20 @@ var BROKER_CONFIG = {
   logsLevel: brokerConfig.?logsLevel ?? 'info'
 }
 
+var releaseExtensionConfiguration = aioReleaseConfiguration.?extension ?? {}
+var releaseAioConfigurationOverrides = releaseExtensionConfiguration.?configurationOverrides ?? {}
+var configureSecurityPkiSubjectName = bool(releaseExtensionConfiguration.?securityPkiSubjectName ?? false)
+var releaseSecurityPkiConfiguration = configureSecurityPkiSubjectName
+  ? {
+      'connectors.values.securityPki.subjectName': 'CN=aio-opc-opcuabroker-${AIO_EXTENSION_SUFFIX}'
+    }
+  : {}
+
 var defaultAioConfigurationSettings = {
   AgentOperationTimeoutInMinutes: '120'
   'connectors.values.mqttBroker.address': 'mqtts://${MQTT_SETTINGS.brokerListenerHost}:${MQTT_SETTINGS.brokerListenerPort}'
   'connectors.values.mqttBroker.serviceAccountTokenAudience': MQTT_SETTINGS.serviceAccountAudience
+  'connectors.values.securityPki.applicationUri': 'urn:microsoft.com:aio:opc:ua:broker:${AIO_EXTENSION_SUFFIX}'
   'dataFlows.values.tinyKube.mqttBroker.hostName': MQTT_SETTINGS.brokerListenerHost
   'dataFlows.values.tinyKube.mqttBroker.port': string(MQTT_SETTINGS.brokerListenerPort)
   'dataFlows.values.tinyKube.mqttBroker.authentication.serviceAccountTokenAudience': MQTT_SETTINGS.serviceAccountAudience
@@ -127,7 +143,12 @@ resource aioExtension 'Microsoft.KubernetesConfiguration/extensions@2023-05-01' 
         releaseNamespace: clusterNamespace
       }
     }
-    configurationSettings: union(defaultAioConfigurationSettings, aioConfigurationOverrides)
+    configurationSettings: union(
+      defaultAioConfigurationSettings,
+      releaseSecurityPkiConfiguration,
+      releaseAioConfigurationOverrides,
+      aioConfigurationOverrides
+    )
   }
 }
 

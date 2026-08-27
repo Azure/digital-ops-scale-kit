@@ -89,6 +89,9 @@ param aioApiVersion string
 @description('Configuration overrides to merge over the AIO extension\'s existing configurationSettings on PUT. Empty preserves config exactly.')
 param aioConfigurationOverrides object = {}
 
+@description('Release-owned AIO settings that distinguish releases sharing an ARM API generation.')
+param aioReleaseConfiguration object = {}
+
 @description('Target version for the secret store Arc extension. Empty preserves the resolved current version.')
 #disable-next-line secure-secrets-in-params
 param secretStoreVersion string = ''
@@ -116,22 +119,55 @@ param certManagerConfigurationOverrides object = {}
 
 var effectiveAioVersion = !empty(aioVersion) ? aioVersion : aio.version
 var effectiveAioTrain = !empty(aioTrain) ? aioTrain : aio.releaseTrain
+var releaseExtensionConfiguration = aioReleaseConfiguration.?extension ?? {}
+var releaseAioConfigurationOverrides = releaseExtensionConfiguration.?configurationOverrides ?? {}
+var configureSecurityPkiSubjectName = aioApiVersion == '2026-07-01' || bool(releaseExtensionConfiguration.?securityPkiSubjectName ?? false)
+var configureWasmGraphControllerMqttTrust = bool(releaseExtensionConfiguration.?wasmGraphControllerMqttTrust ?? false)
+
+var aioTrustSource = contains(aio.configurationSettings, 'trustSource')
+  ? string(aio.configurationSettings.trustSource)
+  : 'SelfSigned'
+var aioTrustConfigMap = aioTrustSource == 'CustomerManaged'
+  ? string(aio.configurationSettings['trustBundleSettings.configMap.name'])
+  : '${aio.releaseNamespace}-aio-ca-trust-bundle'
+var aioTrustConfigMapKey = aioTrustSource == 'CustomerManaged'
+  ? string(aio.configurationSettings['trustBundleSettings.configMap.key'])
+  : 'ca.crt'
 
 // These values depend on the cluster-derived extension suffix, so they cannot
 // live as static release-YAML overrides. Add only missing keys to preserve
 // operator-customized values on later reapply.
-var aioApiConfigurationDefaults = aioApiVersion == '2025-10-01' || aioApiVersion == '2026-03-01'
+var aioApplicationUriDefault = aioApiVersion == '2025-10-01'
+  ? {}
+  : contains(aio.configurationSettings, 'connectors.values.securityPki.applicationUri')
+    ? {}
+    : {
+        'connectors.values.securityPki.applicationUri': 'urn:microsoft.com:aio:opc:ua:broker:${aio.extensionSuffix}'
+      }
+var aioSubjectNameDefault = !configureSecurityPkiSubjectName
+  ? {}
+  : contains(aio.configurationSettings, 'connectors.values.securityPki.subjectName')
+    ? {}
+    : {
+        'connectors.values.securityPki.subjectName': 'CN=aio-opc-opcuabroker-${aio.extensionSuffix}'
+      }
+var aioApiConfigurationDefaults = union(
+  aioApplicationUriDefault,
+  aioSubjectNameDefault
+)
+
+var aioReleaseConfigurationDefaults = !configureWasmGraphControllerMqttTrust
   ? {}
   : union(
-      contains(aio.configurationSettings, 'connectors.values.securityPki.applicationUri')
+      contains(aio.configurationSettings, 'dataFlows.values.wasmGraphController.mqttBroker.caCertConfigMapRef')
         ? {}
         : {
-            'connectors.values.securityPki.applicationUri': 'urn:microsoft.com:aio:opc:ua:broker:${aio.extensionSuffix}'
+            'dataFlows.values.wasmGraphController.mqttBroker.caCertConfigMapRef': aioTrustConfigMap
           },
-      contains(aio.configurationSettings, 'connectors.values.securityPki.subjectName')
+      contains(aio.configurationSettings, 'dataFlows.values.wasmGraphController.mqttBroker.caCertFileName')
         ? {}
         : {
-            'connectors.values.securityPki.subjectName': 'CN=aio-opc-opcuabroker-${aio.extensionSuffix}'
+            'dataFlows.values.wasmGraphController.mqttBroker.caCertFileName': aioTrustConfigMapKey
           }
     )
 
@@ -168,7 +204,10 @@ resource aioExtensionUpdate 'Microsoft.KubernetesConfiguration/extensions@2023-0
       }
     }
     configurationSettings: union(
-      union(aio.configurationSettings, aioApiConfigurationDefaults),
+      aio.configurationSettings,
+      aioApiConfigurationDefaults,
+      releaseAioConfigurationOverrides,
+      aioReleaseConfigurationDefaults,
       aioConfigurationOverrides
     )
   }

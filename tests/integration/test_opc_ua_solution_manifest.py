@@ -24,6 +24,7 @@ from tests.integration.helpers.kube import (
 )
 from tests.integration.helpers.mqtt import mqtt_subscriber_pod_manifest
 from tests.integration.helpers.opcua import dump_opc_ua_connector_status
+from tests.integration.helpers.releases import load_aio_release
 
 pytestmark = [pytest.mark.integration]
 
@@ -35,11 +36,53 @@ OPC_UA_SOLUTION_MANIFEST = WORKSPACE_PATH / "samples" / "opc-ua-solution" / "man
 SIMULATOR_DEPLOYMENT_NAME = "opc-plc-000000"
 SIMULATOR_SERVICE_NAME = "opcplc-000000"
 
-# The oven asset / dataflow names are stamped by samples/opc-ua-solution/template.bicep.
+# The oven asset / device / dataflow names are stamped by
+# samples/opc-ua-solution/template.bicep.
 OVEN_ASSET_NAME = "oven"
+OVEN_DEVICE_NAME = "opc-ua-connector"
 OVEN_DATAFLOW_NAME = "opc-ua-solution-oven-dataflow"
 OVEN_MQTT_TOPIC = "azure-iot-operations/data/oven"
 EXPECTED_OVEN_DATA_KEYS = {"Temperature", "EnergyUse", "Weight"}
+
+# From this AIO API generation onward the OPC UA supervisor serves an asset only
+# after it adopts a `ConnectorTemplate`. A release deploys one when its
+# configuration declares a connector version. Earlier generations ship the
+# connector statically, which is the path the telemetry assertion covers.
+TEMPLATE_MANAGED_API_VERSION = "2026-07-01"
+
+
+def _release_config(orchestrator, site_name: str) -> dict:
+    """The release configuration the deployment reads for one site."""
+    _, data = load_aio_release(orchestrator, site_name, WORKSPACE_PATH)
+    return data
+
+
+def _aio_api_version(orchestrator, site_name: str) -> str:
+    """The AIO control-plane API version the site's release declares.
+
+    A release that declares no version is a workspace defect rather than an
+    older generation, so it is reported here. Defaulting instead would silently
+    pick a branch, and the quiet choice is the one that spends the subscribe
+    budget waiting for data that may never arrive.
+    """
+    data = _release_config(orchestrator, site_name)
+    api_version = str(data.get("aioApiVersion") or "")
+    assert api_version, (
+        f"Site '{site_name}': its release declares no `aioApiVersion`, which "
+        "every release config supplies and the AIO templates require."
+    )
+    return api_version
+
+
+def _opcua_connector_version(orchestrator, site_name: str) -> str:
+    """The connector version whose presence enables the template-managed path."""
+    data = _release_config(orchestrator, site_name)
+    release_configuration = data.get("aioReleaseConfiguration") or {}
+    connector_configuration = (
+        release_configuration.get("resources", {})
+        .get("opcUaConnector", {})
+    )
+    return str(connector_configuration.get("version") or "")
 
 
 class TestOpcUaSolutionDeployment:
@@ -291,6 +334,53 @@ class TestOpcUaSolutionDataflowRuntime:
             )
 
 
+class TestOpcUaConnectorTemplate:
+    """Validate the template required by supervisor-managed connectors."""
+
+    def test_connector_template_present_on_cluster(
+        self, opc_ua_solution_result, aio_namespace, kubectl_available, orchestrator
+    ):
+        checked = 0
+        for name in opc_ua_solution_result["sites"]:
+            if not _opcua_connector_version(orchestrator, name):
+                continue
+            try:
+                templates = kubectl_json(
+                    [
+                        "get",
+                        "connectortemplates.akri.iotoperations.azure.com",
+                        "-n",
+                        aio_namespace,
+                    ]
+                )
+            except KubectlError as e:
+                pytest.fail(
+                    f"Site '{name}': connector templates not retrievable in "
+                    f"`{aio_namespace}`: {e}"
+                )
+            names = [
+                item.get("metadata", {}).get("name", "")
+                for item in templates.get("items", [])
+            ]
+            matching = [
+                value
+                for value in names
+                if value.startswith("azureiotoperationsconnectorforopcua-")
+            ]
+            assert matching, (
+                f"Site '{name}': no OPC UA connector template is present in "
+                f"`{aio_namespace}`. The cluster reports {len(names)} connector "
+                "template(s), none for OPC UA."
+            )
+            checked += 1
+
+        if checked == 0:
+            pytest.skip(
+                "No site under test declares an OPC UA connector version, so "
+                "none deploys a connector template."
+            )
+
+
 class TestOpcUaSolutionDataFlowing:
     """Prove data is flowing from the simulator through the AIO MQTT broker.
 
@@ -299,6 +389,12 @@ class TestOpcUaSolutionDataFlowing:
     Proves the full upstream half of the data path: simulator → OPC UA
     connector → broker. The dataflow → Event Hub egress is not asserted
     here. That is the cloud-side scope deferred to a follow-up.
+
+    Earlier releases deploy the connector statically. Template-managed
+    releases run when their release configuration declares the connector
+    version. `samples/opc-ua-solution/README.md` links the Microsoft issue
+    explaining why release 2607 has neither path, so that site is skipped
+    without spending the subscribe budget.
     """
 
     SA_NAME = "scalekit-mqtt-test-client"
@@ -313,17 +409,15 @@ class TestOpcUaSolutionDataFlowing:
     SUBSCRIBE_WAIT_SECONDS = 360
     POD_TIMEOUT_SECONDS = 600
 
-    @pytest.mark.skip(
-        reason=(
-            "Skipped pending follow-up. Namespace-asset connector does not "
-            "launch a per-asset connector pod on AIO 2603 within the test "
-            "budget. Tracked as `opc-ua-connector-namespace-asset-launch`."
-        )
-    )
     def test_oven_telemetry_observed_on_mqtt(
-        self, opc_ua_solution_result, aio_namespace, kubectl_available
+        self, opc_ua_solution_result, aio_namespace, kubectl_available, orchestrator
     ):
+        checked = 0
         for name in opc_ua_solution_result["sites"]:
+            api_version = _aio_api_version(orchestrator, name)
+            connector_version = _opcua_connector_version(orchestrator, name)
+            if api_version >= TEMPLATE_MANAGED_API_VERSION and not connector_version:
+                continue
             manifest = mqtt_subscriber_pod_manifest(
                 sa_name=self.SA_NAME,
                 pod_name=self.POD_NAME,
@@ -352,7 +446,10 @@ class TestOpcUaSolutionDataFlowing:
                 except (RuntimeError, TimeoutError) as e:
                     logs = get_pod_logs(self.POD_NAME, aio_namespace)
                     connector_diag = dump_opc_ua_connector_status(
-                        OVEN_ASSET_NAME, OVEN_DATAFLOW_NAME, aio_namespace
+                        OVEN_ASSET_NAME,
+                        OVEN_DATAFLOW_NAME,
+                        aio_namespace,
+                        OVEN_DEVICE_NAME,
                     )
                     pytest.fail(
                         f"Site '{name}': MQTT subscriber pod did not "
@@ -387,4 +484,11 @@ class TestOpcUaSolutionDataFlowing:
             finally:
                 delete_resource("pod", self.POD_NAME, aio_namespace)
                 delete_resource("serviceaccount", self.SA_NAME, aio_namespace)
+            checked += 1
 
+        if checked == 0:
+            pytest.skip(
+                "Every site under test uses the template-managed connector "
+                "without a release-provided ConnectorTemplate. Release 2607 "
+                "has this documented limitation, so no telemetry is expected."
+            )

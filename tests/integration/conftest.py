@@ -74,9 +74,16 @@ _UPGRADE_PHASE_ALLOWED_CLASSES = frozenset({
     "TestAioUpgradeIdempotency",
     "TestAioUpgradeTargetVersion",
     "TestAioExtensionInvariants",
+    "TestOpcUaConnectorTemplateUpgrade",
     "TestSecretStoreExtensionInvariants",
     "TestCertManagerExtensionInvariants",
     "TestExtensionAdditiveOverrides",
+})
+
+# Classes in test_aio_upgrade_manifest.py that deliberately need install-phase
+# state and therefore stay skipped when the upgrade phase stubs aio_install_result.
+_UPGRADE_PHASE_INSTALL_ONLY_CLASSES = frozenset({
+    "TestAioUpgradePreservation",
 })
 
 

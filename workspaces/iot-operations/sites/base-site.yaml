@@ -11,7 +11,7 @@ labels:
 properties:
   # AIO version (release moniker) - determines extension versions
   # See: parameters/aio-releases/ for available releases
-  aioRelease: "2607"
+  aioRelease: "2608"
 
   # Catalog resource sets. Each key names a file in the matching parameters/
   # subdirectory, so `dataflows: opc-to-fabric` loads
