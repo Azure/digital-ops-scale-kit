@@ -13,7 +13,6 @@ to Bicep.
 import base64
 import json
 import os
-import subprocess
 import sys
 import time
 import uuid
@@ -26,6 +25,7 @@ from tests.integration.helpers.assertions import (
     assert_output_exists,
     assert_step_succeeded,
 )
+from tests.integration.helpers.azure import run_az
 from tests.integration.helpers.kube import (
     KubectlError,
     assert_secret_value_equals,
@@ -524,7 +524,7 @@ class TestEnablementPreservesSyncedObjects:
 
 def _read_spc_objects(spc_resource_id: str) -> str:
     """Return `properties.objects` off the Secret Provider Class, or empty."""
-    proc = _run_az(
+    proc = run_az(
         ["az", "resource", "show", "--ids", spc_resource_id, "-o", "json"],
         timeout=180,
     )
@@ -547,49 +547,6 @@ def _object_names(objects_yaml: str) -> set[str]:
     return names
 
 
-def _run_az(
-    args: list[str], *, timeout: int = 120, redact: tuple[str, ...] = ()
-) -> subprocess.CompletedProcess:
-    """Run an `az` CLI command with leak-proof error handling.
-
-    Uses `check=False` so the args list is never exposed via
-    `CalledProcessError.cmd` in pytest's traceback. On non-zero exit,
-    raises a `RuntimeError` whose message carries only the program name,
-    the first arg, the exit code, and stderr with any value in `redact`
-    substituted with `***`. The chained CalledProcessError is suppressed
-    via `from None` so frame locals from this helper are the only
-    surface, and pytest's default tb output never sees the raw args.
-
-    Args:
-        args: full argv (typically starts with `az`).
-        timeout: subprocess timeout in seconds.
-        redact: values to substitute with `***` in stderr before raising,
-            for defense in depth when a secret could appear in stderr
-            from a misbehaving CLI. The args list is already not exposed
-            on failure since the caller passes secret material via file
-            or stdin, never as a CLI arg.
-
-    Returns:
-        CompletedProcess on success.
-
-    Raises:
-        RuntimeError: on non-zero exit. Carries redacted stderr only.
-    """
-    proc = subprocess.run(args, check=False, capture_output=True, text=True, timeout=timeout)
-    if proc.returncode != 0:
-        stderr = proc.stderr or ""
-        for value in redact:
-            if value:
-                stderr = stderr.replace(value, "***")
-        program = args[0] if args else "<empty>"
-        first_arg = args[1] if len(args) > 1 else ""
-        raise RuntimeError(
-            f"{program} {first_arg} failed (exit {proc.returncode}): "
-            f"{stderr.strip()}"
-        ) from None
-    return proc
-
-
 def _discover_caller_principal() -> tuple[str, str]:
     """Return `(object_id, assignee_principal_type)` for the current `az` caller.
 
@@ -607,18 +564,18 @@ def _discover_caller_principal() -> tuple[str, str]:
     Raises:
         RuntimeError: if `az account show` returns an unsupported `type`.
     """
-    account = json.loads(_run_az(
+    account = json.loads(run_az(
         ["az", "account", "show", "--query", "user", "-o", "json"]
     ).stdout)
     user_name = account.get("name", "")
     user_type = account.get("type", "")
     if user_type == "user":
-        oid = _run_az(
+        oid = run_az(
             ["az", "ad", "signed-in-user", "show", "--query", "id", "-o", "tsv"]
         ).stdout.strip()
         return oid, "User"
     if user_type == "servicePrincipal":
-        oid = _run_az(
+        oid = run_az(
             ["az", "ad", "sp", "show", "--id", user_name, "--query", "id", "-o", "tsv"]
         ).stdout.strip()
         return oid, "ServicePrincipal"
@@ -716,7 +673,7 @@ class TestSyncSecretsExistingKvSecret:
             f"/providers/Microsoft.SecretSyncController"
             f"/azureKeyVaultSecretProviderClasses/{spc_name}"
         )
-        spc_show = _run_az([
+        spc_show = run_az([
             "az", "resource", "show",
             "--ids", spc_resource_id,
             "--api-version", "2024-08-21-preview",
@@ -744,7 +701,7 @@ class TestSyncSecretsExistingKvSecret:
             f"/providers/Microsoft.KeyVault/vaults/{kv_name}"
         )
         role_assignment_name = str(uuid.uuid4())
-        _run_az([
+        run_az([
             "az", "role", "assignment", "create",
             "--assignee-object-id", caller_oid,
             "--assignee-principal-type", caller_principal_type,
@@ -758,7 +715,7 @@ class TestSyncSecretsExistingKvSecret:
         # but `list` returns empty, the management-plane projection is
         # lagging and we surface a distinct error to keep "propagation
         # in progress" from being conflated with "grant never happened".
-        assignment_list = json.loads(_run_az([
+        assignment_list = json.loads(run_az([
             "az", "role", "assignment", "list",
             "--assignee", caller_oid,
             "--scope", vault_id,
@@ -814,7 +771,7 @@ class TestSyncSecretsExistingKvSecret:
             # in depth.
             os.chmod(params_path, 0o600)
             deploy_param_files.append(params_path)
-            _run_az(
+            run_az(
                 [
                     "az", "deployment", "group", "create",
                     "-g", site.resource_group,
@@ -843,7 +800,7 @@ class TestSyncSecretsExistingKvSecret:
             last_error: str | None = None
             while time.monotonic() < deadline:
                 try:
-                    _run_az(
+                    run_az(
                         [
                             "az", "keyvault", "secret", "set",
                             "--vault-name", kv_name,
@@ -935,7 +892,7 @@ class TestSyncSecretsExistingKvSecret:
                 f"/secretSyncs/{k8s_secret_name}"
             )
             try:
-                _run_az([
+                run_az([
                     "az", "resource", "delete",
                     "--ids", secretsync_resource_id,
                     "-o", "none",
@@ -949,7 +906,7 @@ class TestSyncSecretsExistingKvSecret:
                 sys.stderr.write(f"[cleanup] K8s Secret delete failed: {e}\n")
 
             try:
-                _run_az([
+                run_az([
                     "az", "keyvault", "secret", "delete",
                     "--vault-name", kv_name,
                     "--name", kv_secret_name,
@@ -965,7 +922,7 @@ class TestSyncSecretsExistingKvSecret:
             # Purge protection is not set on the vault by
             # enable-secretsync.bicep, so this is expected to succeed.
             try:
-                _run_az([
+                run_az([
                     "az", "keyvault", "secret", "purge",
                     "--vault-name", kv_name,
                     "--name", kv_secret_name,
@@ -976,7 +933,7 @@ class TestSyncSecretsExistingKvSecret:
                 sys.stderr.write(f"[cleanup] KV secret purge failed: {e}\n")
 
             try:
-                _run_az([
+                run_az([
                     "az", "role", "assignment", "delete",
                     "--ids",
                     f"{vault_id}/providers/Microsoft.Authorization"
@@ -996,4 +953,3 @@ class TestSyncSecretsExistingKvSecret:
                     path.unlink(missing_ok=True)
                 except OSError:
                     pass
-

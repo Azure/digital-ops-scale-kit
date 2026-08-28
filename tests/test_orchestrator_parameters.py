@@ -908,7 +908,12 @@ class TestUnresolvedParameterPath:
     At fleet scale either is a silent partial deployment.
     """
 
-    def _workspace_with_selected_path(self, tmp_path, site_properties: str):
+    def _workspace_with_selected_path(
+        self,
+        tmp_path,
+        site_properties: str,
+        parameter_path: str = "parameters/{{ site.properties.setName }}.yaml",
+    ):
         workspace = tmp_path / "workspace"
         for sub in ("parameters", "templates", "sites", "manifests"):
             (workspace / sub).mkdir(parents=True)
@@ -925,7 +930,7 @@ class TestUnresolvedParameterPath:
         (workspace / "manifests" / "test.yaml").write_text(
             "apiVersion: siteops/v1\nkind: Manifest\nname: test\n"
             "sites: [test-site]\n"
-            'parameters: ["parameters/{{ site.properties.setName }}.yaml"]\n'
+            f"parameters: [{json.dumps(parameter_path)}]\n"
             "steps:\n  - name: test-step\n    template: templates/test.json\n"
         )
 
@@ -1022,6 +1027,86 @@ class TestUnresolvedParameterPath:
         message = str(excinfo.value)
         assert "test-site" in message
         assert "setName" in message
+
+    def test_dynamic_absolute_path_is_rejected(self, tmp_path):
+        outside = tmp_path / "outside.yaml"
+        outside.write_text('selected: "outside"\n')
+        site_properties = f"properties:\n  setPath: {json.dumps(str(outside))}\n"
+        orchestrator, manifest, site = self._workspace_with_selected_path(
+            tmp_path,
+            site_properties,
+            "{{ site.properties.setPath }}",
+        )
+
+        with pytest.raises(ParameterSelectionError, match="must be relative"):
+            orchestrator.resolve_parameters(manifest.steps[0], site, manifest, {})
+
+    def test_dynamic_traversal_is_rejected_even_when_target_is_inside(self, tmp_path):
+        orchestrator, manifest, site = self._workspace_with_selected_path(
+            tmp_path, "properties:\n  setName: nested/../chosen\n"
+        )
+
+        with pytest.raises(ParameterSelectionError, match=r"must not contain '\.\.'"):
+            orchestrator.resolve_parameters(manifest.steps[0], site, manifest, {})
+
+    def test_dynamic_nested_subdirectory_is_supported(self, tmp_path):
+        orchestrator, manifest, site = self._workspace_with_selected_path(
+            tmp_path, "properties:\n  setName: regions/eu/chosen\n"
+        )
+        selected = orchestrator.workspace / "parameters" / "regions" / "eu" / "chosen.yaml"
+        selected.parent.mkdir(parents=True)
+        selected.write_text('selected: "nested"\n')
+
+        result = orchestrator.resolve_parameters(manifest.steps[0], site, manifest, {})
+
+        assert result["selected"] == "nested"
+
+    def test_repeated_dots_inside_a_filename_are_supported(self, tmp_path):
+        orchestrator, manifest, site = self._workspace_with_selected_path(
+            tmp_path, "properties:\n  setName: release..candidate\n"
+        )
+        selected = (
+            orchestrator.workspace
+            / "parameters"
+            / "release..candidate.yaml"
+        )
+        selected.write_text('selected: "dotted"\n')
+
+        result = orchestrator.resolve_parameters(manifest.steps[0], site, manifest, {})
+
+        assert result["selected"] == "dotted"
+
+    def test_fixed_absolute_path_remains_supported(self, tmp_path):
+        outside = tmp_path / "trusted-runtime-parameters.yaml"
+        outside.write_text('selected: "yes"\n')
+        orchestrator, manifest, site = self._workspace_with_selected_path(
+            tmp_path,
+            "",
+            str(outside),
+        )
+
+        result = orchestrator.resolve_parameters(manifest.steps[0], site, manifest, {})
+
+        assert result["selected"] == "yes"
+
+    def test_validation_rejects_dynamic_traversal(self, tmp_path):
+        orchestrator, manifest, _ = self._workspace_with_selected_path(
+            tmp_path, "properties:\n  setName: nested/../chosen\n"
+        )
+
+        errors = orchestrator.validate(orchestrator.workspace / "manifests" / "test.yaml")
+
+        assert any("must not contain '..'" in error for error in errors)
+
+    def test_subscription_dependency_scan_rejects_dynamic_traversal(self, tmp_path):
+        orchestrator, manifest, site = self._workspace_with_selected_path(
+            tmp_path, "properties:\n  setName: nested/../chosen\n"
+        )
+
+        with pytest.raises(ParameterSelectionError, match=r"must not contain '\.\.'"):
+            orchestrator._site_depends_on_subscription_outputs(
+                manifest, site, {"subscription-step"}
+            )
 
 
 class TestResolveParametersManifestLevel:

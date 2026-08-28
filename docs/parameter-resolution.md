@@ -43,6 +43,19 @@ When a manifest pulls in others via `include:` (see [manifest-includes.md](manif
 | `{{ site.properties.X[0] }}` | Array indexing |
 | `{{ steps.X.outputs.Y }}` | Output from step X |
 
+### Dynamic parameter paths
+
+A parameter file path containing a site template is site-selected:
+
+```yaml
+parameters:
+  - "parameters/aio-releases/{{ site.properties.aioRelease }}.yaml"
+```
+
+After substitution, the path must be relative to the workspace, contain no `..` path segments, and
+resolve to a file inside the workspace. A fixed path without a template may still be absolute when
+a trusted runtime supplies the file.
+
 ## Output chaining
 
 Reference outputs from previous steps:
@@ -71,7 +84,7 @@ A step that has both fan-in inputs and fan-out outputs gets two files: one under
 
 A file may instead be named for a class of steps when they all read the same upstream values. `inputs/catalog.yaml` is the fan-in every resource catalog family step reads, so one file serves each family a workspace adds. See [resource-catalog.md](resource-catalog.md).
 
-When one chaining file would be shared by multiple consumer steps **within the same manifest**, prefer one file per consumer step named `<manifest>-<step>.yaml` (e.g. `inputs/aio-upgrade-resolve-extensions.yaml`, `inputs/aio-upgrade-update-extensions.yaml`). A single shared file ends up with `{{ steps.X.outputs.Y }}` references that look forward from the perspective of the earliest consumer, which structural validation correctly rejects.
+When one chaining file would be shared by multiple consumer steps **within the same manifest**, prefer one file per consumer step named `<manifest>-<step>.yaml` (e.g. `inputs/aio-upgrade-resolve-extensions.yaml`, `inputs/aio-upgrade-update-extensions.yaml`, and `inputs/aio-upgrade-deploy-release-resources.yaml`). A single shared file ends up with `{{ steps.X.outputs.Y }}` references that look forward from the perspective of the earliest consumer, which structural validation correctly rejects.
 
 Samples co-locate their input and output files inside `samples/<name>/` rather than `parameters/`. The roles are the same. Only the location differs.
 

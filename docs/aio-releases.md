@@ -5,10 +5,10 @@ Azure IoT Operations (AIO) ships on a release cadence. Each release pins specifi
 ## How release selection works
 
 ```
-site.properties.aioRelease: "2607"
+site.properties.aioRelease: "2608"
             │
             ▼
-workspaces/iot-operations/parameters/aio-releases/2607.yaml
+workspaces/iot-operations/parameters/aio-releases/2608.yaml
             │
             ▼  (siteops auto-forwards matching params to Bicep)
 templates/aio/enablement.bicep       ──► cert-manager, secret store extensions
@@ -17,24 +17,47 @@ templates/secretsync/enable-secretsync.bicep  ──► instance update (dispatc
 templates/deps/adr-ns.bicep          ──► ADR namespace (dispatches on adrApiVersion)
 ```
 
-Each release YAML is a flat schema:
+Each release YAML has a stable top-level schema. `aioReleaseConfiguration`
+holds release-owned behavior that can differ even when two releases use the
+same ARM API generation:
 
 ```yaml
-# parameters/aio-releases/2607.yaml
-aioVersion: "1.4.41"            # AIO extension version pinned in Arc
+# parameters/aio-releases/2608.yaml
+aioVersion: "1.4.73"            # AIO extension version pinned in Arc
 aioTrain: stable                # Extension release train
 aioApiVersion: "2026-07-01"     # Microsoft.IoTOperations/instances API version
 adrApiVersion: "2026-04-01"     # Microsoft.DeviceRegistry/namespaces API version
-certManagerVersion: "0.14.0"
+aioReleaseConfiguration:
+  extension:
+    wasmGraphControllerMqttTrust: true
+  resources:
+    opcUaConnector:
+      version: "1.4.10"
+certManagerVersion: "1.0.0"
 certManagerTrain: stable
 certManagerConfigurationOverrides:
   trust-manager.secretTargets.enabled: "false"
   trust-manager.secretTargets.authorizedSecretsAll: "false"
-secretStoreVersion: "1.5.1"
+secretStoreVersion: "1.5.2"
 secretStoreTrain: stable
 ```
 
 The `aioApiVersion` and `adrApiVersion` values route CREATE and UPDATE operations through their matching versioned modules (for example `templates/aio/modules/instance-2026-07-01.bicep` and `templates/deps/modules/adr-ns-2026-04-01.bicep`). Release-specific configuration override objects are auto-forwarded to templates that declare them. Bicep cannot parameterize API version strings, so the dispatchers use `@allowed` + conditional modules. See [Adding a new AIO release](#adding-a-new-aio-release) below.
+
+The 2608 release configuration also deploys the OPC UA connector template and
+supplies the MQTT trust settings required by its WebAssembly graph controller.
+Install and upgrade use the same typed connector-template module.
+Settings under `aioReleaseConfiguration.extension` belong to the AIO Arc
+extension. Settings under `aioReleaseConfiguration.resources` describe
+release-required child resources. `extension.configurationOverrides` is
+available for static release-owned extension settings. Site or deployment
+overrides remain in the top-level `aioConfigurationOverrides` parameter and
+take precedence. Release-required resources have no separate site override
+because they describe the component bundle needed by that release.
+`extension.securityPkiSubjectName` enables the OPC UA certificate subject for
+releases where it is not yet an API-generation default.
+`extension.wasmGraphControllerMqttTrust` enables the derived MQTT trust settings
+required by the WebAssembly graph controller.
 
 ## Pinning a site to a release
 
@@ -48,10 +71,10 @@ name: munich-prod
 inherits: base-site.yaml
 
 properties:
-  aioRelease: "2607"    # must match parameters/aio-releases/2607.yaml
+  aioRelease: "2608"    # must match parameters/aio-releases/2608.yaml
 ```
 
-If not specified, the site inherits whatever `base-site.yaml` declares (`"2607"` today).
+If not specified, the site inherits whatever `base-site.yaml` declares (`"2608"` today).
 
 ## Available releases
 
@@ -65,15 +88,16 @@ Every file in `workspaces/iot-operations/parameters/aio-releases/` is a shipped 
 | `2604` | `2026-03-01` | `2026-04-01` | |
 | `2605` | `2026-03-01` | `2026-04-01` | |
 | `2606` | `2026-03-01` | `2026-04-01` | |
-| `2607` | `2026-07-01` | `2026-04-01` | base-site default |
+| `2607` | `2026-07-01` | `2026-04-01` | OPC connector template affected by [Microsoft known issue 1330](https://learn.microsoft.com/azure/iot-operations/troubleshoot/known-issues#opc-connector-template-missing) |
+| `2608` | `2026-07-01` | `2026-04-01` | base-site default |
 
 Source of truth for every pinned version number is the YAML itself. Cross-reference against the [IoT Operations release matrix](https://github.com/Azure/azure-iot-ops-cli-extension/wiki/IoT-Operations-versions) before shipping a new one.
 
 ## Upgrading an existing site
 
-Use `aio-upgrade.yaml` to move a site to a newer `aioRelease`. It bumps the Arc extension versions for AIO, secret-store, and (when the site declares `deployOptions.enableCertManager: true`) cert-manager, preserving each extension's existing `configurationSettings`, `releaseTrain`, and identity.
+Use `aio-upgrade.yaml` to move a site to a newer `aioRelease`. It bumps the Arc extension versions for AIO, secret-store, and (when the site declares `deployOptions.enableCertManager: true`) cert-manager, preserving each extension's existing `configurationSettings`, `releaseTrain`, and identity. After the extension update completes, a separate API-versioned step deploys resources explicitly named by the target release configuration. Upgrades to 2608 and later add the OPC UA connector template.
 
-The IoT Operations instance ARM resource has no writable version property and is not mutated by this manifest. New instance child resource types introduced by future AIO releases (broker properties, dataflow profile schema changes, etc.) are out of scope and will need a future tier of upgrade manifests.
+The IoT Operations instance ARM resource has no writable version property and is not mutated by this manifest. Other new instance child resource types, such as broker or dataflow-profile changes, remain out of scope until their release configuration names an explicit upgrade path.
 
 ```bash
 # 1. Bump aioRelease on the site (or its parent) to the new YAML filename (without extension).
@@ -99,7 +123,7 @@ This applies to every family a site selects through `properties.resourceSets`. S
 
 Azure IoT Operations supports upgrade to any patch of the same minor version, or to the next minor version. Other transitions (downgrades, multi-minor jumps, preview/GA crossings) require uninstall and reinstall. See [Upgrade Azure IoT Operations](https://learn.microsoft.com/en-us/azure/iot-operations/deploy-iot-ops/howto-upgrade) for the authoritative rules.
 
-The scalekit exercises adjacent-release upgrades (e.g. `2606` -> `2607`) in CI per E2E dispatch.
+The scalekit exercises adjacent-release upgrades (for example `2607` to `2608`) in CI per E2E dispatch.
 
 ### Sample template API-version policy
 
@@ -109,18 +133,27 @@ This policy applies to samples. The platform fundamentals (`templates/aio/` top 
 
 ## Adding a new AIO release
 
-1. **Ship the release YAML.** Create `parameters/aio-releases/<release>.yaml` with the required version, train, API, and configuration override fields used by the supported release matrix.
+1. **Ship the release YAML.** Create `parameters/aio-releases/<release>.yaml` with the required version, train, API, dependency, and `aioReleaseConfiguration` fields used by the supported release matrix.
 2. **If `aioApiVersion` is new**, extend every AIO API-version consumer:
    - `templates/aio/instance.bicep`: add to `@allowed` on `param aioApiVersion`, add a new conditional `module instance_<YYYY>` block, push the previously-newest version from `else` into an explicit equality, make the new version the `else`.
    - `templates/aio/modules/update-instance.bicep`: same pattern. The file header has a checklist.
    - `templates/aio/resolve-aio.bicep`: add the matching version-bound read module and active-output branch.
    - `templates/secretsync/enable-secretsync.bicep`: extend the `aioApiVersion` allowlist used by the instance update.
    - `templates/aio/upgrade/update-extensions.bicep`: extend the allowlist used by release-specific extension defaults.
+   - `templates/aio/upgrade/deploy-release-resources.bicep`: add the matching conditional module.
    - Add `templates/aio/modules/instance-<YYYY-MM-DD>.bicep`, `resolve-instance-<YYYY-MM-DD>.bicep`, and `update-instance-<YYYY-MM-DD>.bicep`. Seed them from the previous API version, then apply every verified schema change for the new API.
+   - Add `templates/aio/upgrade/modules/deploy-release-resources-<YYYY-MM-DD>.bicep` with the same public parameter surface as the earlier generation modules.
 3. **If `adrApiVersion` is new**, extend the ADR dispatch:
    - `templates/deps/adr-ns.bicep`: add to `@allowed` on `param adrApiVersion`, add a new conditional `module ns_<YYYY>` block, fold the previously-newest version into an explicit equality.
    - Add `templates/deps/modules/adr-ns-<YYYY-MM-DD>.bicep` by copying the previous version verbatim and changing the API version string.
-4. **If neither API version is new**, no Bicep changes are needed. Siteops forwards the new extension versions via parameter auto-filtering.
+4. **If neither API version is new**, no API-dispatch Bicep changes are needed,
+   and parameter auto-filtering forwards the new extension versions. Extend
+   `aioReleaseConfiguration` and the existing
+   `templates/aio/modules/instance-<generation>.bicep` module when the release
+   adds behavior that the API version alone cannot distinguish. A new
+   `resources` entry must also be implemented by the matching
+   `templates/aio/upgrade/modules/deploy-release-resources-<generation>.bicep`
+   module.
 5. **Run the workspace suite**: `pytest tests/workspace/ -q`. The relevant checks are:
    - `test_release_api_versions_are_accepted_by_every_consumer`: every API version a release selects appears in the `@allowed` list of every consumer that dispatches on it, discovered rather than listed.
    - `test_allowed_sets_match_across_consumers`: the consumers agree on which versions they accept.
@@ -162,4 +195,4 @@ Release misconfigurations surface at four points:
 - [Site configuration](site-configuration.md): the `aioRelease` field lives in `properties:`. Inheritance and overlays apply normally.
 - [Parameter resolution](parameter-resolution.md): how release YAML values are auto-forwarded to Bicep.
 - [E2E testing](e2e-testing.md): how to dispatch a matrix over multiple releases.
-- `templates/aio/instance.bicep`, `templates/aio/resolve-aio.bicep`, `templates/aio/modules/update-instance.bicep`, and `templates/aio/upgrade/update-extensions.bicep`: dispatcher and release-default checklists.
+- `templates/aio/instance.bicep`, `templates/aio/resolve-aio.bicep`, `templates/aio/modules/update-instance.bicep`, `templates/aio/upgrade/update-extensions.bicep`, and `templates/aio/upgrade/deploy-release-resources.bicep`: dispatcher and release-default checklists.

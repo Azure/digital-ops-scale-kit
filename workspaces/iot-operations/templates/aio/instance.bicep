@@ -100,6 +100,9 @@ param aioApiVersion string
 @description('Additional configuration settings for the AIO extension. Merged with defaults.')
 param aioConfigurationOverrides object = {}
 
+@description('Release-owned AIO settings that distinguish releases sharing an ARM API generation.')
+param aioReleaseConfiguration object = {}
+
 /*****************************************************************************/
 /*                                Variables                                     */
 /********************************************************************************/
@@ -140,6 +143,7 @@ module resources_2025 './modules/instance-2025-10-01.bicep' = if (aioApiVersion 
     defaultDataflowInstanceCount: defaultDataflowInstanceCount
     aioVersion: aioVersion
     aioTrain: aioTrain
+    aioReleaseConfiguration: aioReleaseConfiguration
     observabilityEnabled: observabilityEnabled
     otelCollectorAddress: otelCollectorAddress
     aioConfigurationOverrides: aioConfigurationOverrides
@@ -165,6 +169,7 @@ module resources_2026 './modules/instance-2026-03-01.bicep' = if (aioApiVersion 
     defaultDataflowInstanceCount: defaultDataflowInstanceCount
     aioVersion: aioVersion
     aioTrain: aioTrain
+    aioReleaseConfiguration: aioReleaseConfiguration
     observabilityEnabled: observabilityEnabled
     otelCollectorAddress: otelCollectorAddress
     aioConfigurationOverrides: aioConfigurationOverrides
@@ -190,6 +195,7 @@ module resources_2026_07 './modules/instance-2026-07-01.bicep' = if (aioApiVersi
     defaultDataflowInstanceCount: defaultDataflowInstanceCount
     aioVersion: aioVersion
     aioTrain: aioTrain
+    aioReleaseConfiguration: aioReleaseConfiguration
     observabilityEnabled: observabilityEnabled
     otelCollectorAddress: otelCollectorAddress
     aioConfigurationOverrides: aioConfigurationOverrides

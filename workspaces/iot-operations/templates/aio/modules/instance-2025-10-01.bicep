@@ -31,6 +31,7 @@ param defaultDataflowInstanceCount int
 // AIO extension
 param aioVersion string
 param aioTrain string
+param aioReleaseConfiguration object
 param observabilityEnabled bool
 param otelCollectorAddress string
 param aioConfigurationOverrides object
@@ -81,6 +82,9 @@ var BROKER_CONFIG = {
   logsLevel: brokerConfig.?logsLevel ?? 'info'
 }
 
+var releaseExtensionConfiguration = aioReleaseConfiguration.?extension ?? {}
+var releaseAioConfigurationOverrides = releaseExtensionConfiguration.?configurationOverrides ?? {}
+
 var defaultAioConfigurationSettings = {
   AgentOperationTimeoutInMinutes: '120'
   'connectors.values.mqttBroker.address': 'mqtts://${MQTT_SETTINGS.brokerListenerHost}:${MQTT_SETTINGS.brokerListenerPort}'
@@ -127,7 +131,11 @@ resource aioExtension 'Microsoft.KubernetesConfiguration/extensions@2023-05-01' 
         releaseNamespace: clusterNamespace
       }
     }
-    configurationSettings: union(defaultAioConfigurationSettings, aioConfigurationOverrides)
+    configurationSettings: union(
+      defaultAioConfigurationSettings,
+      releaseAioConfigurationOverrides,
+      aioConfigurationOverrides
+    )
   }
 }
 

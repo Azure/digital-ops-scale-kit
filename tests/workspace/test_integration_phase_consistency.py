@@ -25,6 +25,8 @@ GITHUB_INTEGRATION = REPO_ROOT / ".github" / "workflows" / "integration-test.yam
 ADO_INTEGRATION = REPO_ROOT / ".pipelines" / "integration-test.yaml"
 E2E_TESTING_DOC = REPO_ROOT / "docs" / "e2e-testing.md"
 INTEGRATION_DIR = REPO_ROOT / "tests" / "integration"
+INTEGRATION_CONFTEST = INTEGRATION_DIR / "conftest.py"
+AIO_UPGRADE_TEST = INTEGRATION_DIR / "test_aio_upgrade_manifest.py"
 
 # `"opc-ua-solution": "tests/integration/test_opc_ua_solution_manifest.py",`
 _MAP_ENTRY = re.compile(r'"([a-z0-9-]+)":\s*"(tests/integration/test_\w+\.py)"')
@@ -43,6 +45,20 @@ _GUARD_SET = re.compile(r"secret_sync_tests\s*=\s*\{([^}]*)\}")
 
 # `if upgrade_to and "aio-upgrade" not in ordered:`
 _GUARD_LITERAL = re.compile(r'"([a-z0-9-]+)"\s+not in ordered')
+
+_TEST_CLASS = re.compile(r"^class\s+(Test\w+)\b", re.MULTILINE)
+
+
+def _class_set(name: str) -> set[str]:
+    """Read a frozenset of quoted class names from integration conftest."""
+    text = INTEGRATION_CONFTEST.read_text(encoding="utf-8")
+    match = re.search(
+        rf"{name}\s*=\s*frozenset\(\{{(?P<body>.*?)\}}\)",
+        text,
+        re.DOTALL,
+    )
+    assert match, f"No {name} frozenset found in {INTEGRATION_CONFTEST.name}"
+    return set(re.findall(r'"(Test\w+)"', match.group("body")))
 
 
 def _phase_to_file(phase: str) -> str:
@@ -245,4 +261,27 @@ class TestIntegrationPhaseConsistency:
             "map, so those guards no longer match anything an operator can "
             f"select.\n  Stale in guards: {stale}\n"
             f"  Known phases:    {sorted(mapped)}"
+        )
+
+    def test_aio_upgrade_classes_have_an_explicit_phase(self):
+        """Every upgrade test class is allowlisted or intentionally install-only.
+
+        A class omitted from both sets is collected and silently skipped during
+        the upgrade phase. That can leave new upgrade behavior covered only by
+        a same-version install-phase reapply.
+        """
+        classes = set(
+            _TEST_CLASS.findall(AIO_UPGRADE_TEST.read_text(encoding="utf-8"))
+        )
+        allowed = _class_set("_UPGRADE_PHASE_ALLOWED_CLASSES")
+        install_only = _class_set("_UPGRADE_PHASE_INSTALL_ONLY_CLASSES")
+
+        assert allowed.isdisjoint(install_only), (
+            "An AIO upgrade test class is both upgrade-phase and install-only: "
+            f"{sorted(allowed & install_only)}"
+        )
+        assert classes == allowed | install_only, (
+            "AIO upgrade test classes do not have an explicit phase.\n"
+            f"  Unclassified: {sorted(classes - allowed - install_only)}\n"
+            f"  Stale names:  {sorted((allowed | install_only) - classes)}"
         )

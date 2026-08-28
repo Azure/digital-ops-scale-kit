@@ -114,6 +114,7 @@ resource device 'Microsoft.DeviceRegistry/namespaces/devices@2025-10-01' = {
     name: customLocation.id
   }
   properties: {
+    enabled: true
     endpoints: {
       outbound: {
         assigned: {}

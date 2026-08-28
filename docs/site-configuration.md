@@ -164,7 +164,7 @@ properties:
   # `parameters/aio-releases/<release>.yaml` gets loaded. This must be a
   # property, not a parameter: parameter-file path interpolation reads
   # `site.properties` and `site.labels`, never `site.parameters`.
-  aioRelease: "2607"
+  aioRelease: "2608"
 
   # Config-driven resource sets. Each key names a file in the matching
   # `parameters/` subdirectory, so `dataflows: opc-to-fabric` loads

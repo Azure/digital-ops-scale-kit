@@ -90,7 +90,7 @@ dataflowProfiles:
 # declaration moves telemetry from whatever assets a site has without naming them.
 # Deploy `samples/opc-ua-solution/manifest.yaml` first to have it carry real oven
 # telemetry, or publish to the prefix yourself to exercise it standalone. On
-# release `2607` and later, publishing yourself is the quickest route, for the
+# release `2607`, publishing yourself is the quickest route, for the
 # reason that sample's README gives.
 #
 # The second reads a narrower topic and writes to its own endpoint through its own

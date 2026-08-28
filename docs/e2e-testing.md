@@ -107,7 +107,7 @@ From the **Actions** tab, dispatch **E2E Tests** with the defaults to run a sing
 
 | Input | Typical value | Notes |
 |-------|--------------|-------|
-| `aio-releases` | `2607` or `2606,2607` | Comma-separated. Ephemeral fans out in parallel. Persistent serializes cells in the same RG. See [aio-releases.md](aio-releases.md) for how releases are defined and pinned. |
+| `aio-releases` | `2608` or `2607,2608` | Comma-separated. Ephemeral fans out in parallel. Persistent serializes cells in the same RG. See [aio-releases.md](aio-releases.md) for how releases are defined and pinned. |
 | `environment` | `dev` | GitHub Environment whose secrets/approvers apply. |
 | `location` | `eastus2` | ephemeral mode only. Persistent derives from the RG. |
 | `resource-group` | empty (ephemeral) or existing RG (persistent) | |
@@ -116,15 +116,15 @@ From the **Actions** tab, dispatch **E2E Tests** with the defaults to run a sing
 | `skip-teardown` | false | Preserve the deployment for inspection. Scope depends on mode (see below). |
 | `keep-cluster-alive-minutes` | `0` | Hold the runner for N min before teardown for debugging. Clamped to what is left of the job budget so teardown still runs. Nothing should be added to the persistent RG during the hold (it'll be deleted by teardown). |
 | `tests` | empty (run all) or `aio-install,enable-secretsync` | Comma-separated allowlist of test phases to deploy and run. Valid values: `aio-install`, `enable-secretsync`, `sync-secrets`, `opc-ua-solution`, `dataflow-sample`, `aio-resources`, `aio-upgrade`. Useful for demos and focused debugging when paired with `keep-cluster-alive-minutes`. |
-| `upgrade-to` | empty or `2607` | Optional AIO release to upgrade to after install-phase tests pass. Empty skips the upgrade phase. Per-cell skip when equal to the cell's `aio-releases` value. Requires `aio-upgrade` to be in the `tests` allowlist (or `tests` empty). |
+| `upgrade-to` | empty or `2608` | Optional AIO release to upgrade to after install-phase tests pass. Empty skips the upgrade phase. Per-cell skip when equal to the cell's `aio-releases` value. Requires `aio-upgrade` to be in the `tests` allowlist (or `tests` empty). |
 | `secret-sync-modes` | `enabled` or `enabled,disabled` | Matrix modes for Secret Sync and workload identity. Use `enabled,disabled` with `tests=aio-upgrade` to qualify upgrade behavior with and without the OIDC profile. |
 
 Qualify both AIO upgrade optionality paths in one dispatch:
 
 ```bash
 gh workflow run e2e-test.yaml \
-  -f aio-releases=2606 \
-  -f upgrade-to=2607 \
+  -f aio-releases=2607 \
+  -f upgrade-to=2608 \
   -f tests=aio-upgrade \
   -f secret-sync-modes=enabled,disabled
 ```
@@ -171,7 +171,7 @@ Set three required env vars. Three more are auto-computed on first use.
 ```powershell
 $env:E2E_RESOURCE_GROUP = "rg-e2e-dev"
 $env:E2E_CLUSTER_NAME   = "arc-e2e-dev"
-$env:E2E_AIO_RELEASE    = "2607"
+$env:E2E_AIO_RELEASE    = "2608"
 $env:E2E_SITE_NAME      = "e2e-local-$([DateTimeOffset]::Now.ToUnixTimeSeconds())"
 
 $sitesDir = Join-Path $env:TEMP "e2e-sites"
@@ -188,7 +188,7 @@ pytest tests/integration/ -v -m integration
 ```bash
 export E2E_RESOURCE_GROUP=rg-e2e-dev
 export E2E_CLUSTER_NAME=arc-e2e-dev
-export E2E_AIO_RELEASE=2607
+export E2E_AIO_RELEASE=2608
 export E2E_SITE_NAME="e2e-local-$(date +%s)"
 
 SITES_DIR="${TMPDIR:-/tmp}/e2e-sites"
@@ -210,7 +210,7 @@ To exercise the cross-release upgrade locally, install at one release first (blo
 
 ```bash
 # Re-render with the upgrade target. Same E2E_SITE_NAME so the file overwrites in place.
-export E2E_AIO_RELEASE=2607
+export E2E_AIO_RELEASE=2608
 python scripts/render-e2e-site.py --output-dir "$SITES_DIR"
 
 export SITEOPS_E2E_UPGRADE_PHASE=1
@@ -219,7 +219,7 @@ pytest tests/integration/ -v -m integration
 
 `SITEOPS_E2E_UPGRADE_PHASE=1` does two things:
 
-- **Narrows test collection** to the upgrade allowlist, `_UPGRADE_PHASE_ALLOWED_CLASSES` in `tests/integration/conftest.py`: the `TestAioUpgrade*` classes plus the extension invariant classes for AIO, Secret Store, cert-manager, and additive overrides. Everything else is skipped. A test asserts that constant matches the classes that exist, so it is the list to read. `TestAioUpgradePreservation` is excluded because its assertions consume install-phase outputs that are not available across separately rendered phases.
+- **Narrows test collection** to `_UPGRADE_PHASE_ALLOWED_CLASSES` in `tests/integration/conftest.py`. Classes whose assertions require install-phase outputs are listed in `_UPGRADE_PHASE_INSTALL_ONLY_CLASSES` instead. A workspace test requires every class in the upgrade module to appear in exactly one collection.
 - **Short-circuits the `aio_install_result` fixture** so `aio-install.yaml` is not re-deployed at the new release on top of the existing instance.
 
 ## Troubleshooting

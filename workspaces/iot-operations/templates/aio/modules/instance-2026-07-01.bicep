@@ -35,6 +35,7 @@ param defaultDataflowInstanceCount int
 // AIO extension
 param aioVersion string
 param aioTrain string
+param aioReleaseConfiguration object
 param observabilityEnabled bool
 param otelCollectorAddress string
 param aioConfigurationOverrides object
@@ -66,6 +67,9 @@ var ISSUER_NAME = customerManagedTrust
 var TRUST_CONFIG_MAP = customerManagedTrust
   ? trustConfig.settings.configMapName
   : '${clusterNamespace}-aio-ca-trust-bundle'
+var TRUST_CONFIG_MAP_KEY = customerManagedTrust
+  ? trustConfig.settings.configMapKey
+  : 'ca.crt'
 
 var MQTT_SETTINGS = {
   brokerListenerServiceName: 'aio-broker'
@@ -85,6 +89,21 @@ var BROKER_CONFIG = {
   persistence: brokerConfig.?persistence
   logsLevel: brokerConfig.?logsLevel ?? 'info'
 }
+
+// Keep these ownership groups aligned with the matching upgrade generation
+// module under templates/aio/upgrade/modules/.
+var releaseExtensionConfiguration = aioReleaseConfiguration.?extension ?? {}
+var releaseResourceConfiguration = aioReleaseConfiguration.?resources ?? {}
+var opcUaConnectorConfiguration = releaseResourceConfiguration.?opcUaConnector ?? {}
+var releaseAioConfigurationOverrides = releaseExtensionConfiguration.?configurationOverrides ?? {}
+var opcuaConnectorVersion = string(opcUaConnectorConfiguration.?version ?? '')
+var configureWasmGraphControllerMqttTrust = bool(releaseExtensionConfiguration.?wasmGraphControllerMqttTrust ?? false)
+var releaseDerivedAioConfiguration = configureWasmGraphControllerMqttTrust
+  ? {
+      'dataFlows.values.wasmGraphController.mqttBroker.caCertConfigMapRef': TRUST_CONFIG_MAP
+      'dataFlows.values.wasmGraphController.mqttBroker.caCertFileName': TRUST_CONFIG_MAP_KEY
+    }
+  : {}
 
 var defaultAioConfigurationSettings = {
   AgentOperationTimeoutInMinutes: '120'
@@ -134,7 +153,12 @@ resource aioExtension 'Microsoft.KubernetesConfiguration/extensions@2023-05-01' 
         releaseNamespace: clusterNamespace
       }
     }
-    configurationSettings: union(defaultAioConfigurationSettings, aioConfigurationOverrides)
+    configurationSettings: union(
+      defaultAioConfigurationSettings,
+      releaseAioConfigurationOverrides,
+      releaseDerivedAioConfiguration,
+      aioConfigurationOverrides
+    )
   }
 }
 
@@ -306,6 +330,15 @@ resource artifactRegistryEndpoint 'Microsoft.IoTOperations/instances/registryEnd
       method: 'Anonymous'
       anonymousSettings: {}
     }
+  }
+}
+
+module opcUaConnectorTemplate './opcua-connector-template-2026-07-01.bicep' = if (!empty(opcuaConnectorVersion)) {
+  name: 'opcua-connector-template-${uniqueString(aioInstance.name)}'
+  params: {
+    aioInstanceName: aioInstance.name
+    connectorVersion: opcuaConnectorVersion
+    customLocationId: customLocation.id
   }
 }
 

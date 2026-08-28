@@ -1,8 +1,10 @@
 """Integration tests for the aio-install.yaml manifest."""
 
+import json
 import time
 
 import pytest
+import yaml
 
 from tests.integration.conftest import WORKSPACE_PATH
 from tests.integration.helpers.assertions import (
@@ -11,9 +13,46 @@ from tests.integration.helpers.assertions import (
     assert_step_succeeded,
     find_step,
 )
+from tests.integration.helpers.azure import run_az
 from tests.integration.helpers.kube import is_pod_ready, list_pods
+from tests.integration.helpers.releases import load_aio_release
 
 pytestmark = [pytest.mark.integration]
+
+SECURITY_PKI_APPLICATION_URI = "connectors.values.securityPki.applicationUri"
+SECURITY_PKI_SUBJECT_NAME = "connectors.values.securityPki.subjectName"
+EXTENSION_API_VERSION = "2023-05-01"
+
+
+def _extension_configuration_keys(extension_id: str) -> set[str]:
+    """Read live ARM state without adding test-only template outputs."""
+    proc = run_az(
+        [
+            "az",
+            "resource",
+            "show",
+            "--ids",
+            extension_id,
+            "--api-version",
+            EXTENSION_API_VERSION,
+            "--query",
+            "properties.configurationSettings",
+            "-o",
+            "json",
+        ],
+        timeout=120,
+    )
+    try:
+        configuration = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        raise AssertionError(
+            "The deployed AIO extension configuration was not valid JSON."
+        ) from None
+    if not isinstance(configuration, dict):
+        raise AssertionError(
+            "The deployed AIO extension configuration was not an object."
+        )
+    return set(configuration)
 
 
 class TestAioInstallDeployment:
@@ -96,8 +135,6 @@ class TestAioInstallVersioning:
         A drift here means the wrong template dispatched, even if everything
         else looks green.
         """
-        import yaml
-
         for name in aio_install_result["sites"]:
             step = assert_step_succeeded(aio_install_result, name, "aio-instance")
             aio_extension = assert_output_exists(step, "aioExtension")
@@ -126,6 +163,45 @@ class TestAioInstallVersioning:
                 f"expected {expected!r} (from {version_config.name}), "
                 f"deployed {deployed_version!r}. The versioned-templates dispatch "
                 f"selected the wrong API version or the version YAML is stale."
+            )
+
+    def test_security_pki_settings_match_release_contract(
+        self, aio_install_result, orchestrator
+    ):
+        for name in aio_install_result["sites"]:
+            step = assert_step_succeeded(aio_install_result, name, "aio-instance")
+            aio_extension = assert_output_exists(step, "aioExtension")
+            assert isinstance(aio_extension, dict), (
+                f"Site '{name}': aioExtension output is not an object"
+            )
+            extension_id = aio_extension.get("id")
+            assert isinstance(extension_id, str) and extension_id, (
+                f"Site '{name}': aioExtension.id is missing"
+            )
+            configuration_keys = _extension_configuration_keys(extension_id)
+
+            release_key, release = load_aio_release(
+                orchestrator, name, WORKSPACE_PATH
+            )
+            aio_api_version = release["aioApiVersion"]
+            extension = release["aioReleaseConfiguration"].get("extension", {})
+
+            expected = {
+                SECURITY_PKI_APPLICATION_URI: aio_api_version
+                in {"2026-03-01", "2026-07-01"},
+                SECURITY_PKI_SUBJECT_NAME: (
+                    aio_api_version == "2026-07-01"
+                    or extension.get("securityPkiSubjectName") is True
+                ),
+            }
+            actual = {
+                setting: setting in configuration_keys
+                for setting in expected
+            }
+            assert actual == expected, (
+                f"Site '{name}': deployed security PKI key presence "
+                f"{actual!r}, expected {expected!r} for "
+                f"release {release_key}"
             )
 
 

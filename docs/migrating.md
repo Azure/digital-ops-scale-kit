@@ -27,6 +27,15 @@ a site that does not load is not a site that deploys. Then dry run each manifest
 siteops -w <workspace> deploy <manifest> --dry-run -l <selector>
 ```
 
+## To v1.0.0b7
+
+### Parameter file selection
+
+**A site-selected parameter path stays within the workspace.** A parameter path containing a
+template must resolve to a relative path with no `..` segments, and the resulting file must remain
+inside the workspace. Keep the selectable value to a file or subdirectory name under the manifest's
+intended parameter directory.
+
 ## To v1.0.0b6
 
 Site files and manifests are checked more strictly. Every check exists because the shape it rejects

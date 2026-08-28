@@ -529,13 +529,14 @@ class TestAioUpgradeChaining:
     """Structural integrity of the aio-upgrade.yaml chain.
 
     The upgrade manifest fans resolve-aio -> resolve-extensions ->
-    update-extensions through per-consumer chaining files (one chaining
-    YAML per consumer step, named after the manifest + consumer step).
+    update-extensions -> deploy-release-resources through per-consumer
+    chaining files (one chaining YAML per consumer step, named after the
+    manifest + consumer step).
     Each consumer step's required Bicep params must be satisfied by
-    either its chaining file or the version YAML
-    (parameters/aio-releases/<release>.yaml), and every chained
-    `{{ steps.X.outputs.Y }}` reference must hit a real output. A break
-    here would silently produce wrong PUTs at deploy time.
+    its chaining file, a fixed manifest-level parameter file, or the
+    version YAML (parameters/aio-releases/<release>.yaml), and every
+    chained `{{ steps.X.outputs.Y }}` reference must hit a real output.
+    A break here would silently produce wrong PUTs at deploy time.
 
     Also asserts the install-side `aioExtensionName(clusterId)` deriver
     invariant: the upgrade flow MUST receive the connected cluster's full
@@ -559,6 +560,11 @@ class TestAioUpgradeChaining:
             "update-extensions",
             ("inputs", "aio-upgrade-update-extensions.yaml"),
             ("templates", "aio", "upgrade", "update-extensions.bicep"),
+        ),
+        (
+            "deploy-release-resources",
+            ("inputs", "aio-upgrade-deploy-release-resources.yaml"),
+            ("templates", "aio", "upgrade", "deploy-release-resources.bicep"),
         ),
     ]
 
@@ -599,6 +605,17 @@ class TestAioUpgradeChaining:
                 data = yaml.safe_load(f) or {}
             per_file_keys.append(set(data.keys()))
         return set.intersection(*per_file_keys)
+
+    def _fixed_manifest_parameter_keys(self, workspace: Path) -> set[str]:
+        manifest_path = workspace / "manifests" / "aio-upgrade.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+        keys: set[str] = set()
+        for parameter_path in manifest.get("parameters", []):
+            if "{{" in parameter_path:
+                continue
+            with open(workspace / parameter_path, "r", encoding="utf-8") as f:
+                keys.update((yaml.safe_load(f) or {}).keys())
+        return keys
 
     def _get_chaining_refs(self, chaining: Path) -> list[tuple[str, str, str]]:
         text = chaining.read_text(encoding="utf-8")
@@ -649,18 +666,21 @@ class TestAioUpgradeChaining:
     def test_aio_upgrade_required_params_satisfied(self, workspace):
         """Every required Bicep param on each upgrade consumer must be supplied."""
         release_keys = self._release_yaml_keys(workspace)
+        fixed_manifest_keys = self._fixed_manifest_parameter_keys(workspace)
         for _, chaining_parts, bicep_parts in self.CONSUMERS:
             chaining_path = workspace / "parameters" / Path(*chaining_parts)
             chaining_name = chaining_parts[-1]
             chaining_keys = self._chaining_keys(chaining_path)
-            supplied = chaining_keys | release_keys
+            supplied = chaining_keys | release_keys | fixed_manifest_keys
             consumer = workspace.joinpath(*bicep_parts)
             _, required = self._bicep_params(consumer)
             missing = required - supplied
             assert missing == set(), (
                 f"{consumer.name} has required params not satisfied by "
-                f"{chaining_name} or aio-releases YAML: {sorted(missing)}.\n"
+                f"{chaining_name}, fixed manifest parameters, or "
+                f"aio-releases YAML: {sorted(missing)}.\n"
                 f"Chaining keys: {sorted(chaining_keys)}\n"
+                f"Fixed manifest keys: {sorted(fixed_manifest_keys)}\n"
                 f"Release keys: {sorted(release_keys)}"
             )
 
@@ -733,11 +753,29 @@ VERSION_CONFIG_REQUIRED_FIELDS = {
     "aioTrain",
     "aioApiVersion",
     "adrApiVersion",
+    "aioReleaseConfiguration",
     "certManagerVersion",
     "certManagerTrain",
     "certManagerConfigurationOverrides",
     "secretStoreVersion",
     "secretStoreTrain",
+}
+
+VERSION_CONFIG_OBJECT_FIELDS = {
+    "aioReleaseConfiguration",
+    "certManagerConfigurationOverrides",
+}
+
+AIO_RELEASE_CONFIGURATION_SECTIONS = {"extension", "resources"}
+AIO_RELEASE_EXTENSION_OPTIONAL_FIELDS = {
+    "configurationOverrides": dict,
+}
+AIO_RELEASE_EXTENSION_SCOPED_FIELDS = {
+    "securityPkiSubjectName": ({2605, 2606}, bool),
+    "wasmGraphControllerMqttTrust": ({2608}, bool),
+}
+AIO_RELEASE_RESOURCE_SCOPED_FIELDS = {
+    "opcUaConnector": (2608, dict),
 }
 
 
@@ -773,7 +811,7 @@ class TestReleaseConfigs:
 
             for key in VERSION_CONFIG_REQUIRED_FIELDS:
                 value = config.get(key)
-                if key.endswith("ConfigurationOverrides"):
+                if key in VERSION_CONFIG_OBJECT_FIELDS:
                     assert isinstance(value, dict), (
                         f"{release_file.name}: '{key}' must be an object"
                     )
@@ -809,6 +847,113 @@ class TestReleaseConfigs:
             for key in ("aioApiVersion", "adrApiVersion"):
                 assert api_version.match(str(config[key])), (
                     f"{release_file.name}: '{key}' is not an ARM API version: {config[key]!r}"
+                )
+
+            release_configuration = config["aioReleaseConfiguration"]
+            unknown = set(release_configuration) - AIO_RELEASE_CONFIGURATION_SECTIONS
+            assert not unknown, (
+                f"{release_file.name}: aioReleaseConfiguration has unknown "
+                f"sections: {sorted(unknown)}"
+            )
+
+            extension = release_configuration.get("extension", {})
+            resources = release_configuration.get("resources", {})
+            assert isinstance(extension, dict), (
+                f"{release_file.name}: aioReleaseConfiguration.extension "
+                "must be a mapping"
+            )
+            assert isinstance(resources, dict), (
+                f"{release_file.name}: aioReleaseConfiguration.resources "
+                "must be a mapping"
+            )
+
+            allowed_extension = (
+                set(AIO_RELEASE_EXTENSION_OPTIONAL_FIELDS)
+                | set(AIO_RELEASE_EXTENSION_SCOPED_FIELDS)
+            )
+            unknown_extension = set(extension) - allowed_extension
+            assert not unknown_extension, (
+                f"{release_file.name}: aioReleaseConfiguration.extension has "
+                f"unknown fields: {sorted(unknown_extension)}"
+            )
+
+            unknown_resources = set(resources) - set(
+                AIO_RELEASE_RESOURCE_SCOPED_FIELDS
+            )
+            assert not unknown_resources, (
+                f"{release_file.name}: aioReleaseConfiguration.resources has "
+                f"unknown fields: {sorted(unknown_resources)}"
+            )
+
+            release_number = int(release_file.stem)
+            expected_extension = {
+                key
+                for key, (
+                    releases,
+                    _,
+                ) in AIO_RELEASE_EXTENSION_SCOPED_FIELDS.items()
+                if release_number in releases
+            }
+            actual_extension = (
+                set(extension) & set(AIO_RELEASE_EXTENSION_SCOPED_FIELDS)
+            )
+            assert actual_extension == expected_extension, (
+                f"{release_file.name}: aioReleaseConfiguration.extension "
+                f"scoped fields are {sorted(actual_extension)}, expected "
+                f"{sorted(expected_extension)}."
+            )
+
+            expected_resources = {
+                key
+                for key, (
+                    introduced,
+                    _,
+                ) in AIO_RELEASE_RESOURCE_SCOPED_FIELDS.items()
+                if release_number >= introduced
+            }
+            actual_resources = (
+                set(resources) & set(AIO_RELEASE_RESOURCE_SCOPED_FIELDS)
+            )
+            assert actual_resources == expected_resources, (
+                f"{release_file.name}: aioReleaseConfiguration.resources "
+                f"scoped fields are {sorted(actual_resources)}, expected "
+                f"{sorted(expected_resources)}."
+            )
+
+            for key, expected_type in AIO_RELEASE_EXTENSION_OPTIONAL_FIELDS.items():
+                if key in extension:
+                    assert isinstance(extension[key], expected_type), (
+                        f"{release_file.name}: "
+                        f"aioReleaseConfiguration.extension.{key} "
+                        f"must be a {expected_type.__name__}"
+                    )
+
+            for key, (_, expected_type) in AIO_RELEASE_EXTENSION_SCOPED_FIELDS.items():
+                if key in extension:
+                    assert isinstance(extension[key], expected_type), (
+                        f"{release_file.name}: "
+                        f"aioReleaseConfiguration.extension.{key} must be a "
+                        f"{expected_type.__name__}, got {extension[key]!r}"
+                    )
+
+            connector = resources.get("opcUaConnector")
+            if connector is not None:
+                assert isinstance(connector, dict), (
+                    f"{release_file.name}: "
+                    "aioReleaseConfiguration.resources.opcUaConnector must be "
+                    "a mapping"
+                )
+                unknown_connector = set(connector) - {"version"}
+                assert not unknown_connector, (
+                    f"{release_file.name}: "
+                    "aioReleaseConfiguration.resources.opcUaConnector has "
+                    f"unknown fields: {sorted(unknown_connector)}"
+                )
+                connector_version = connector.get("version")
+                assert semver.match(str(connector_version)), (
+                    f"{release_file.name}: "
+                    "aioReleaseConfiguration.resources.opcUaConnector.version "
+                    f"is not a version: {connector_version!r}"
                 )
 
             overrides = config["certManagerConfigurationOverrides"]
