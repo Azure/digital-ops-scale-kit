@@ -2,7 +2,7 @@
 
 Dataflows move data between endpoints: from the MQTT broker to Event Hubs, from an asset to Fabric OneLake, from one broker topic to another. This page covers the dataflow family's declaration keys and behavior.
 
-For what a declaration is, how to attach one, when to write Bicep instead, and the API-version policy, see [resource-catalog.md](resource-catalog.md). Those rules apply to every family.
+For what a declaration is, how to attach one, when to write Bicep instead, and the API-version policy, see [resource-catalog.md](resource-catalog.md). Those rules apply to every resource area. For declaring the devices and assets a dataflow reads from, see [assets.md](assets.md).
 
 ## The three keys
 
@@ -88,7 +88,10 @@ siteops -w workspaces/iot-operations sites munich-dev --render
 
 The family deploys as one step, `dataflow-resources`. Inside it, endpoints and profiles are created before the dataflows that name them. A dataflow references an endpoint by name through `endpointRef`, and ARM does not model that relationship, so the ordering is what guarantees the target exists. Each per-version module expresses it with `dependsOn`, so ARM enforces it.
 
-A reference to a name nothing declares deploys clean and never moves data. The workspace tests check every `endpointRef` and `profileRef` against the declarations in the same file.
+An endpoint or profile name that nothing supplies fails before ARM is called.
+Site Ops checks every `endpointRef` and `profileRef` against the effective
+composition, including endpoints and profiles supplied by another selected
+dataflow set and the `default` resources created with the AIO instance.
 
 ## Composing with other steps
 

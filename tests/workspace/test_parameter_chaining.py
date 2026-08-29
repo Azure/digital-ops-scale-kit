@@ -336,7 +336,15 @@ class TestParameterAttachmentTier:
         """Read the raw manifest-level `parameters:` list, path variables intact."""
         with open(manifest_path, "r", encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
-        return [p for p in (raw.get("parameters") or []) if isinstance(p, str)]
+        return [
+            value.get("path") if isinstance(value, dict) else value
+            for value in (raw.get("parameters") or [])
+            if isinstance(value, (str, dict))
+            and isinstance(
+                value.get("path") if isinstance(value, dict) else value,
+                str,
+            )
+        ]
 
     def test_manifest_level_parameters_carry_no_step_output_refs(self, workspace):
         """Manifest-level parameter files declare values rather than wire steps.
@@ -377,15 +385,20 @@ class TestParameterAttachmentTier:
 
 
 class TestConditionalStepCoverage:
-    """Every when: condition should reference a property that exists in base-site.yaml."""
+    """Every condition reads a defaulted property or a declared selection."""
 
     def _get_conditions_from_manifest(self, manifest_path: Path, workspace: Path) -> list[tuple[str, str]]:
         """Extract (step_name, condition) pairs from a manifest."""
-        from siteops.models import Manifest
+        from siteops.models import AnyCondition, Manifest
         manifest = Manifest.from_file(manifest_path, workspace_root=workspace)
         conditions = []
         for step in manifest.steps:
-            if step.when:
+            if isinstance(step.when, AnyCondition):
+                conditions.extend(
+                    (step.name, expression)
+                    for expression in step.when.expressions
+                )
+            elif step.when:
                 conditions.append((step.name, step.when))
         return conditions
 
@@ -409,13 +422,33 @@ class TestConditionalStepCoverage:
         return paths
 
     def test_all_when_conditions_reference_known_properties(self, workspace):
-        """Every when: condition property path should exist in base-site.yaml."""
+        """Every condition path has an owning base default or parameter source."""
         known_paths = self._get_base_site_property_paths(workspace)
         prop_pattern = re.compile(r"site\.properties\.([\w.]+)")
+        selection_pattern = re.compile(
+            r"\{\{\s*site\.properties\.([\w.-]+)\s*\}\}"
+        )
 
         manifests_dir = workspace / "manifests"
         for manifest_file in sorted(manifests_dir.glob("*.yaml")):
-            conditions = self._get_conditions_from_manifest(manifest_file, workspace)
+            from siteops.models import Manifest, ParameterSource
+
+            manifest = Manifest.from_file(
+                manifest_file,
+                workspace_root=workspace,
+            )
+            conditions = self._get_conditions_from_manifest(
+                manifest_file,
+                workspace,
+            )
+            selected_paths = {
+                match.group(1)
+                for source in manifest.parameters
+                if isinstance(source, ParameterSource)
+                and source.for_each is not None
+                for match in [selection_pattern.fullmatch(source.for_each)]
+                if match is not None
+            }
 
             for step_name, condition in conditions:
                 match = prop_pattern.search(condition)
@@ -423,10 +456,11 @@ class TestConditionalStepCoverage:
                     continue
 
                 prop_path = match.group(1)
-                assert prop_path in known_paths, (
+                assert prop_path in known_paths or prop_path in selected_paths, (
                     f"{manifest_file.name} step '{step_name}' references unknown property "
                     f"'site.properties.{prop_path}' in when condition.\n"
-                    f"Known property paths: {sorted(known_paths)}"
+                    f"Base property paths: {sorted(known_paths)}\n"
+                    f"Selection paths: {sorted(selected_paths)}"
                 )
 
     def test_output_consumers_share_their_producer_guard(self, workspace):

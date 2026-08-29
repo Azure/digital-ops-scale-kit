@@ -51,11 +51,24 @@ SCRIPT_PATH = Path(__file__).parent.parent.parent / "scripts" / "generate-site-o
 _EXTRA_SITES_DIRS_ENV = "SITEOPS_EXTRA_SITES_DIRS"
 _UPGRADE_PHASE_ENV = "SITEOPS_E2E_UPGRADE_PHASE"
 
-# The catalog family and committed set the `aio-resources` phase deploys. The
-# set ships at parameters/dataflows/site-telemetry.yaml, so a rename there has
-# to reach this constant or the deploy resolves nothing.
+# The catalog resource areas and committed sets the `aio-resources` phase deploys. Each
+# set ships at parameters/<area>/<set>.yaml, so a rename there has to reach
+# these constants or the deploy resolves nothing.
 CATALOG_FAMILY = "dataflows"
 CATALOG_SET = "site-telemetry"
+DEVICE_CATALOG_FAMILY = "devices"
+DEVICE_CATALOG_SET = "site-devices"
+ASSET_CATALOG_FAMILY = "assets"
+ASSET_CATALOG_SET = "site-assets"
+
+# Every (resource area, set) pair the phase selects on each resolved site. Named as a
+# pair rather than applied inline, so `tests/workspace/test_integration_constants.py`
+# can hold each one against the committed sets.
+CATALOG_SELECTIONS = (
+    (DEVICE_CATALOG_FAMILY, DEVICE_CATALOG_SET),
+    (ASSET_CATALOG_FAMILY, ASSET_CATALOG_SET),
+    (CATALOG_FAMILY, CATALOG_SET),
+)
 
 # Sentinel returned by `aio_install_result` in upgrade phase. Shape is
 # deliberately not a real deploy result so any leaked consumer fails loudly.
@@ -383,27 +396,35 @@ def dataflow_sample_result(
 def aio_resources_result(
     orchestrator: Orchestrator, selector: str | None, aio_install_result: dict
 ) -> dict:
-    """Deploy manifests/aio-resources.yaml with a site selecting a dataflow set.
+    """Deploy `aio-resources.yaml` with one set selected per resource area.
 
     This is the fleet route: a site names a committed set through
-    `properties.resourceSets.<family>`, the catalog resolves that to a
-    declaration file, and the family gate opens. `dataflow_sample_result`
-    covers the same templates through a manifest-attached declaration, so this
-    fixture exists for the selection mechanism rather than for the templates.
+    `properties.resourceSets.<area>`, the catalog resolves that to a
+    definition file, and the deployment-family gate opens. `dataflow_sample_result`
+    covers the dataflow templates through a manifest-attached declaration, so
+    this fixture exists for the selection mechanism rather than for the
+    templates.
 
-    The set is applied to the resolved sites here rather than in the site
-    template, so a default run keeps every family at `none` and pays nothing
-    for a phase it did not select. `Orchestrator` caches and returns the same
+    Every resource area is selected in one deploy. The
+    catalog is a single entry point whose steps are independently gated, so
+    selecting every area shows both deployment families opening and ordering
+    correctly.
+
+    The sets are applied to the resolved sites here rather than in the site
+    template, so a default run omits every resource area and pays
+    nothing for a phase it did not select. `Orchestrator` caches and returns the same
     `Site` objects to every fixture in the session, so the original properties
     are restored afterwards. Without that, a later fixture would resolve a site
-    that permanently selects this set.
+    that permanently selects these sets.
     """
     manifest_path = WORKSPACE_PATH / "manifests" / "aio-resources.yaml"
     manifest, sites = _resolve_or_fail(orchestrator, manifest_path, selector)
 
     original = {id(site): copy.deepcopy(site.properties) for site in sites}
     for site in sites:
-        site.properties.setdefault("resourceSets", {})[CATALOG_FAMILY] = CATALOG_SET
+        selections = site.properties.setdefault("resourceSets", {})
+        for family, selected in CATALOG_SELECTIONS:
+            selections[family] = [selected]
 
     try:
         result = orchestrator.deploy(

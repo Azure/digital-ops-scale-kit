@@ -1,22 +1,13 @@
-# A dataflow set that gives every site its own telemetry topic.
-#
-# One declaration, deployed to every site that selects it, where each site
-# publishes under a topic carrying its own name. This is the fleet shape: the
-# definition is shared, the values are per site.
-#
-# Select it from a site:
+# A reusable dataflow set that gives each site its own telemetry topic:
 #
 #   # sites/<site>.yaml
 #   properties:
 #     resourceSets:
-#       dataflows: site-telemetry
+#       dataflows:
+#         - site-telemetry
 #
-# then deploy manifests/aio-resources.yaml. See docs/dataflows.md for the keys and
-# docs/resource-catalog.md for the selection mechanism.
-#
-# `dataflowProfiles` is omitted, so these dataflows run in the `default` pool the
-# instance template creates. Every key is optional, and an omitted one creates
-# nothing.
+# `dataflowProfiles` is omitted, so the dataflow uses the instance-owned
+# `default` profile. See docs/dataflows.md and docs/resource-catalog.md.
 # Consumed by: dataflow-resources
 
 # The host and trust bundle name the in-cluster broker service for an install in
@@ -36,10 +27,6 @@ dataflowEndpoints:
           mode: Enabled
           trustedCaCertificateConfigMapRef: azure-iot-operations-aio-ca-trust-bundle
 
-# `{{ site.name }}` resolves per site, so a hundred sites deploying this one file
-# each publish to their own topic and a central subscriber can tell them apart.
-# Any site value works the same way, including `{{ site.labels.country }}` and
-# `{{ site.parameters.clusterName }}`, at any depth in the declaration.
 dataflows:
   - name: site-telemetry
     properties:

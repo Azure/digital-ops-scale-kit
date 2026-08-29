@@ -10,7 +10,9 @@ Parameter YAML files referenced by manifest steps. All paths in this dir are wor
 | `inputs/` | Per-step **fan-in** files: `<step>.yaml` wires upstream step outputs into the named step's parameters. |
 | `outputs/` | Per-step **fan-out** files: `<step>.yaml` exposes a step's outputs for downstream consumers. |
 | `aio-releases/` | Release pinning. One YAML per AIO release (e.g. `2608.yaml`) with the API, extension versions, and release-specific AIO configuration. The site's `properties.aioRelease` selects which file is loaded. |
-| `dataflows/` | Dataflow declaration sets. One YAML per set, selected by the site's `properties.resourceSets.dataflows`. `none.yaml` is the empty default every site inherits, and `site-telemetry.yaml` is a worked example carrying per-site values. See `docs/dataflows.md` for the keys and `docs/resource-catalog.md` for the mechanism. |
+| `devices/` | Device definition sets selected by `properties.resourceSets.devices`. `site-devices.yaml` is the worked OPC UA device set. |
+| `assets/` | Asset definition sets selected by `properties.resourceSets.assets`. `site-assets.yaml` is the worked per-site asset set. |
+| `dataflows/` | Endpoint, profile, and dataflow definition sets selected by `properties.resourceSets.dataflows`. `site-telemetry.yaml` is the worked per-site routing set. |
 
 ## Conventions
 

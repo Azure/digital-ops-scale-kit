@@ -76,6 +76,3 @@ resource dataflowResources 'Microsoft.IoTOperations/instances/dataflowProfiles/d
     ]
   }
 ]
-
-@description('The generation this module writes at. main.bicep selects it so a deploy reports the module that actually ran.')
-output deployedApiVersion string = '2026-03-01'

@@ -1,0 +1,114 @@
+apiVersion: siteops/v1
+kind: ParameterComposition
+name: aio-catalog
+
+collections:
+  devices:
+    path: devices
+    identity:
+      name: name
+    members:
+      inboundEndpoints:
+        path: properties.endpoints.inbound
+        shape: map
+
+  assets:
+    path: assets
+    identity:
+      name: name
+
+  dataflowEndpoints:
+    path: dataflowEndpoints
+    identity:
+      name: name
+    seeds:
+      - name: default
+
+  dataflowProfiles:
+    path: dataflowProfiles
+    identity:
+      name: name
+    seeds:
+      - name: default
+
+  dataflows:
+    path: dataflows
+    identity:
+      profile:
+        path: profileRef
+        default: default
+      name: name
+
+references:
+  - id: asset-device-endpoint
+    source:
+      collection: assets
+      select: properties.deviceRef
+      bind:
+        device: deviceName
+        endpoint: endpointName
+    target:
+      collection: devices
+      match:
+        name: device
+      member:
+        name: inboundEndpoints
+        match:
+          key: endpoint
+
+  - id: dataflow-profile
+    source:
+      collection: dataflows
+      bind:
+        profile:
+          path: profileRef
+          default: default
+    target:
+      collection: dataflowProfiles
+      match:
+        name: profile
+
+  - id: dataflow-source-endpoint
+    source:
+      collection: dataflows
+      select: properties.operations[*]
+      bind:
+        endpoint:
+          path: sourceSettings.endpointRef
+          optional: true
+    target:
+      collection: dataflowEndpoints
+      match:
+        name: endpoint
+
+  - id: dataflow-destination-endpoint
+    source:
+      collection: dataflows
+      select: properties.operations[*]
+      bind:
+        endpoint:
+          path: destinationSettings.endpointRef
+          optional: true
+    target:
+      collection: dataflowEndpoints
+      match:
+        name: endpoint
+
+  - id: dataflow-source-asset
+    source:
+      collection: dataflows
+      select: properties.operations[*]
+      bind:
+        asset:
+          path: sourceSettings.assetRef
+          optional: true
+    unverified: The accepted asset reference value domain is not confirmed.
+
+  - id: dataflow-endpoint-trust-bundle
+    source:
+      collection: dataflowEndpoints
+      bind:
+        configMap:
+          path: properties.mqttSettings.tls.trustedCaCertificateConfigMapRef
+          optional: true
+    unverified: Names a cluster ConfigMap that the resource catalog does not apply.

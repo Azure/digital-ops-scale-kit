@@ -1,12 +1,12 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-"""Main orchestration engine.
+"""Workspace resolution, composition, planning, and execution.
 
 This module provides the Orchestrator class which handles:
 - Loading sites and manifests from the workspace
-- Resolving parameters with template variable substitution
-- Executing deployment steps (Bicep/ARM and kubectl) across sites
+- Resolving and composing parameters with template variable substitution
+- Executing Bicep/ARM, kubectl, and wait steps across sites
 - Parallel and sequential deployment modes with configurable concurrency
 """
 
@@ -18,7 +18,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import replace
+from dataclasses import fields, is_dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -26,15 +26,29 @@ from typing import Any, Callable, Iterator
 import yaml
 
 from siteops import yamlio
+from siteops.composition import (
+    CompositionContract,
+    CompositionError,
+    CompositionResult,
+    LoadedParameterSource,
+    compose_sources,
+    contains_composition_metadata,
+    format_identity,
+    load_contract,
+    merge_contracts,
+    report_composition_error,
+)
 from siteops.executor import (
     AzCliExecutor,
     DeploymentResult,
     KubectlResult,
     WaitResult,
     filter_parameters,
+    get_template_parameters,
 )
 from siteops.models import (
     CONDITION_PATTERN,
+    AnyCondition,
     DeploymentStep,
     KubectlStep,
     Manifest,
@@ -43,16 +57,66 @@ from siteops.models import (
     NoTargetingError,
     ParallelConfig,
     ParameterSelectionError,
+    ParameterSource,
     SelectorParseError,
     Site,
     WaitStep,
     _normalize_site_identifier,
     _validate_resource,
+    format_when_condition,
     parse_selector,
 )
-from siteops.sanitize import scrub_for_output
+from siteops.sanitize import (
+    is_redaction_enabled,
+    report_parameter_selection_error,
+    scrub_for_output,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _freeze_cache_state(value: Any) -> Any:
+    """Convert nested runtime state into a deterministic, type-aware value."""
+    if is_dataclass(value) and not isinstance(value, type):
+        return (
+            "dataclass",
+            f"{type(value).__module__}.{type(value).__qualname__}",
+            tuple(
+                (item.name, _freeze_cache_state(getattr(value, item.name)))
+                for item in fields(value)
+            ),
+        )
+    if isinstance(value, dict):
+        items = [
+            (_freeze_cache_state(key), _freeze_cache_state(item))
+            for key, item in value.items()
+        ]
+        return (
+            "mapping",
+            tuple(sorted(items, key=lambda item: repr(item[0]))),
+        )
+    if isinstance(value, list):
+        return ("list", tuple(_freeze_cache_state(item) for item in value))
+    if isinstance(value, tuple):
+        return ("tuple", tuple(_freeze_cache_state(item) for item in value))
+    if isinstance(value, (set, frozenset)):
+        frozen = [_freeze_cache_state(item) for item in value]
+        return ("set", tuple(sorted(frozen, key=repr)))
+    if isinstance(value, Path):
+        return ("path", str(value))
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return (type(value).__name__, value)
+    return (
+        "object",
+        f"{type(value).__module__}.{type(value).__qualname__}",
+        repr(value),
+    )
+
+
+def _cache_state_digest(value: Any) -> str:
+    frozen = repr(_freeze_cache_state(value)).encode("utf-8")
+    return hashlib.sha256(frozen).hexdigest()
+
 
 # Pattern for {{ steps.<step_name>.outputs.<output_path> }}
 # Supports nested paths like: steps.X.outputs.Y.Z.A
@@ -77,12 +141,34 @@ SITE_PROPERTIES_PATTERN = re.compile(r"\{\{\s*site\.properties\.([a-zA-Z0-9_.\[\
 # Pattern for {{ site.parameters.<path> }}
 # Supports nested paths like: site.parameters.brokerConfig.memoryProfile
 SITE_PARAMETERS_PATTERN = re.compile(r"\{\{\s*site\.parameters\.([a-zA-Z0-9_.\[\]]+)\s*\}\}")
+FOR_EACH_SITE_PROPERTY_PATTERN = re.compile(
+    r"^\{\{\s*site\.properties\.([a-zA-Z0-9_.\[\]-]+)\s*\}\}$"
+)
 
 # Result type that can be a deployment, kubectl, or wait result
 StepResult = DeploymentResult | KubectlResult | WaitResult
 
 # Type alias for subscription-scoped outputs: subscription_id -> step_name -> outputs
 SubscriptionOutputs = dict[str, dict[str, dict[str, Any]]]
+
+
+def _normalize_null_site_mappings(data: dict[str, Any]) -> dict[str, Any]:
+    """Treat an explicitly empty site mapping as an empty mapping before merge."""
+    result = copy.deepcopy(data)
+    if "spec" in result and isinstance(result.get("spec"), dict):
+        spec = result["spec"]
+        for key in ("properties", "parameters"):
+            if key in spec and spec[key] is None:
+                spec[key] = {}
+        metadata = result.get("metadata")
+        if isinstance(metadata, dict) and metadata.get("labels") is None:
+            metadata["labels"] = {}
+        return result
+
+    for key in ("labels", "properties", "parameters"):
+        if key in result and result[key] is None:
+            result[key] = {}
+    return result
 
 
 def _resolve_parameter_mapping(
@@ -262,12 +348,12 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 class Orchestrator:
-    """Orchestrates deployments across sites.
+    """Resolve, validate, plan, and execute manifests across sites.
 
     The orchestrator is responsible for:
     - Loading and caching sites from the workspace
-    - Resolving manifest steps with parameter files and template variables
-    - Executing deployment steps (Bicep/ARM deployments and kubectl operations)
+    - Resolving manifest steps, parameter composition, and template variables
+    - Executing deployment, kubectl, and wait steps
     - Managing parallel deployment to multiple sites with configurable concurrency
 
     Attributes:
@@ -287,6 +373,15 @@ class Orchestrator:
         self.executor = AzCliExecutor(workspace=self.workspace, dry_run=dry_run)
         self._params_cache: dict[Path, dict[str, Any]] = {}
         self._params_cache_lock = threading.Lock()
+        self._composition_cache: dict[
+            tuple[str, str, str, str],
+            tuple[
+                dict[str, Any],
+                CompositionResult | None,
+                CompositionContract | None,
+            ],
+        ] = {}
+        self._composition_cache_lock = threading.Lock()
         self._site_cache: dict[str, Site] = {}
         self._cache_lock = threading.Lock()
         # Lazy site indexes built on first lookup. Workspace-load
@@ -563,7 +658,7 @@ class Orchestrator:
         for path in basename_to_path.values():
             try:
                 with open(path, "r", encoding="utf-8") as f:
-                    data = yamlio.load(f) or {}
+                    data = _normalize_null_site_mappings(yamlio.load(f) or {})
             except (yaml.YAMLError, OSError):
                 # Defer parse errors to load_site() for context-rich reporting.
                 continue
@@ -822,7 +917,7 @@ class Orchestrator:
             raise FileNotFoundError(f"Inherited file not found: {path}")
 
         with open(path, "r", encoding="utf-8") as f:
-            data = yamlio.load(f) or {}
+            data = _normalize_null_site_mappings(yamlio.load(f) or {})
 
         # Inherits parents must be SiteTemplates. A `kind: Site` parent
         # would chain deployable sites together, where editing one would
@@ -935,7 +1030,9 @@ class Orchestrator:
                 path = sites_dir / f"{name}{ext}"
                 if path.exists():
                     with open(path, "r", encoding="utf-8") as f:
-                        data = yamlio.load(f) or {}
+                        data = _normalize_null_site_mappings(
+                            yamlio.load(f) or {}
+                        )
 
                     # Process inheritance only on the first file found (the base)
                     if is_base_file and "inherits" in data:
@@ -1662,7 +1759,7 @@ class Orchestrator:
         """Fail when a site-selected parameter file does not resolve to a real file.
 
         A path carrying a variable, such as
-        `parameters/<family>/{{ site.properties.X }}.yaml`, means the site picks
+        `parameters/<area>/{{ site.properties.X }}.yaml`, means the site picks
         which file to load. Two cases are rejected:
 
         - The site does not carry the property, so the variable survives and the
@@ -1722,6 +1819,414 @@ class Orchestrator:
                 f"Check the value the site selects for a typo, or add the file."
             )
 
+    def _resolve_property_path_with_presence(
+        self,
+        obj: Any,
+        path: str,
+    ) -> tuple[bool, Any]:
+        """Resolve a property path while distinguishing absent from null."""
+        segments = re.split(r"\.(?![^\[]*\])", path)
+        current = obj
+        traversed: list[str] = []
+        for segment in segments:
+            array_match = re.match(r"^([a-zA-Z0-9_-]*)\[(\d+)\]$", segment)
+            if array_match:
+                key = array_match.group(1)
+                index = int(array_match.group(2))
+                if key:
+                    if not isinstance(current, dict):
+                        parent = ".".join(traversed) or "properties"
+                        raise ParameterSelectionError(
+                            f"site.properties.{parent} must be a mapping to "
+                            f"resolve site.properties.{path}, got "
+                            f"{type(current).__name__}."
+                        )
+                    if key not in current:
+                        return False, None
+                    current = current[key]
+                    traversed.append(key)
+                if not isinstance(current, list) or index >= len(current):
+                    parent = ".".join(traversed) or "properties"
+                    raise ParameterSelectionError(
+                        f"site.properties.{parent} must be a list containing "
+                        f"index {index} to resolve site.properties.{path}."
+                    )
+                current = current[index]
+                traversed.append(f"[{index}]")
+                continue
+            if not isinstance(current, dict):
+                parent = ".".join(traversed) or "properties"
+                raise ParameterSelectionError(
+                    f"site.properties.{parent} must be a mapping to resolve "
+                    f"site.properties.{path}, got "
+                    f"{type(current).__name__}."
+                )
+            if segment not in current:
+                return False, None
+            current = current[segment]
+            traversed.append(segment)
+        return True, current
+
+    def _expand_manifest_parameter_source(
+        self,
+        source: str | ParameterSource,
+        manifest: Manifest,
+        site: Site,
+    ) -> list[tuple[str, tuple[str, ...]]]:
+        """Resolve one manifest parameter source into ordered file paths."""
+        if isinstance(source, str):
+            resolved = manifest.resolve_parameter_path(source, site)
+            self._require_selected_parameter_file(
+                source,
+                resolved,
+                site,
+                self.workspace,
+                "Manifest",
+            )
+            return [(resolved, ())]
+
+        if source.for_each is None:
+            resolved = manifest.resolve_parameter_path(source.path, site)
+            self._require_selected_parameter_file(
+                source.path,
+                resolved,
+                site,
+                self.workspace,
+                "Manifest",
+            )
+            return [(resolved, source.collections)]
+
+        match = FOR_EACH_SITE_PROPERTY_PATTERN.fullmatch(source.for_each)
+        if not match:
+            raise ParameterSelectionError(
+                f"Manifest parameter source '{source.path}' declares forEach "
+                f"as '{source.for_each}', but forEach must be one complete "
+                "`{{ site.properties.X }}` expression."
+            )
+
+        property_path = match.group(1)
+        found, values = self._resolve_property_path_with_presence(
+            site.properties,
+            property_path,
+        )
+        if not found:
+            return []
+        if values is None:
+            raise ParameterSelectionError(
+                f"Site '{site.name}' sets properties.{property_path} to null. "
+                "Omit the key for no selection, or use [] to clear an "
+                "inherited selection."
+            )
+        if isinstance(values, str):
+            if values == "none":
+                replacement = "[]"
+            else:
+                replacement = f"[{values}]"
+            raise ParameterSelectionError(
+                f"Site '{site.name}' sets properties.{property_path} to the "
+                f"legacy scalar {values!r}. Replace it with the ordered list "
+                f"{replacement}."
+            )
+        if not isinstance(values, list):
+            raise ParameterSelectionError(
+                f"Site '{site.name}' properties.{property_path} must be an "
+                f"ordered list of resource set names, got "
+                f"{type(values).__name__}."
+            )
+
+        items: list[str] = []
+        for index, value in enumerate(values):
+            if not isinstance(value, str) or not value.strip():
+                raise ParameterSelectionError(
+                    f"Site '{site.name}' properties.{property_path}[{index}] "
+                    "must be a non-empty resource set name."
+                )
+            item = value.strip()
+            if item in items:
+                raise ParameterSelectionError(
+                    f"Site '{site.name}' properties.{property_path} selects "
+                    f"resource set '{item}' more than once."
+                )
+            items.append(item)
+
+        expanded: list[tuple[str, tuple[str, ...]]] = []
+        for item in items:
+            declared = source.path
+            item_path = declared.replace("{{ item }}", item)
+            resolved = manifest.resolve_parameter_path(item_path, site)
+            self._require_selected_parameter_file(
+                declared,
+                resolved,
+                site,
+                self.workspace,
+                "Manifest",
+            )
+            expanded.append((resolved, source.collections))
+        return expanded
+
+    def _load_composition_contract(
+        self,
+        manifest: Manifest,
+    ) -> CompositionContract | None:
+        if not manifest.parameter_compositions:
+            return None
+        contracts = [
+            load_contract((self.workspace / path).resolve())
+            for path in manifest.parameter_compositions
+        ]
+        return merge_contracts(contracts)
+
+    def _resolve_manifest_parameters(
+        self,
+        manifest: Manifest,
+        site: Site,
+    ) -> tuple[
+        dict[str, Any],
+        CompositionResult | None,
+        CompositionContract | None,
+    ]:
+        """Resolve and compose the manifest parameter tier once per site."""
+        manifest_key = (
+            str(manifest.source_path)
+            if manifest.source_path is not None
+            else "<memory>"
+        )
+        manifest_state = {
+            "parameters": manifest.parameters,
+            "parameterCompositions": manifest.parameter_compositions,
+            "steps": manifest.steps,
+        }
+        site_state = {
+                "name": site.name,
+                "subscription": site.subscription,
+                "resourceGroup": site.resource_group,
+                "location": site.location,
+                "labels": site.labels,
+                "properties": site.properties,
+                "parameters": site.parameters,
+        }
+        key = (
+            manifest_key,
+            _cache_state_digest(manifest_state),
+            site.name,
+            _cache_state_digest(site_state),
+        )
+        with self._composition_cache_lock:
+            cached = self._composition_cache.get(key)
+        if cached is not None:
+            parameters, result, contract = cached
+            return copy.deepcopy(parameters), result, contract
+
+        contract = self._load_composition_contract(manifest)
+        loaded: list[LoadedParameterSource] = []
+        plain_parameters: dict[str, Any] = {}
+        resolved_sources: dict[Path, tuple[str, tuple[str, ...]]] = {}
+        for source in manifest.parameters:
+            for resolved_path, collections in (
+                self._expand_manifest_parameter_source(
+                    source,
+                    manifest,
+                    site,
+                )
+            ):
+                full_path = (self.workspace / resolved_path).resolve()
+                previous = resolved_sources.get(full_path)
+                if previous is not None:
+                    previous_path, previous_collections = previous
+                    detail = (
+                        ""
+                        if previous_collections == collections
+                        else " with different `collections` metadata"
+                    )
+                    raise ParameterSelectionError(
+                        "Manifest parameter sources "
+                        f"{previous_path!r} and {resolved_path!r} resolve to "
+                        f"'{resolved_path}' more than once for site "
+                        f"'{site.name}'{detail}. Select each source once."
+                    )
+                resolved_sources[full_path] = (resolved_path, collections)
+                if not full_path.exists():
+                    if collections:
+                        raise CompositionError(
+                            f"Governed parameter source '{resolved_path}' "
+                            "does not exist."
+                        )
+                    logger.warning(
+                        f"Manifest parameter file not found: {full_path}"
+                    )
+                    continue
+                file_parameters = self.load_parameters(full_path)
+                resolved_parameters = self._resolve_template_strings(
+                    file_parameters,
+                    site,
+                )
+                if contract is None:
+                    if collections:
+                        raise CompositionError(
+                            f"{resolved_path}: parameter source declares "
+                            "`collections` but the manifest has no "
+                            "`parameterCompositions` contract."
+                        )
+                    if contains_composition_metadata(resolved_parameters):
+                        raise CompositionError(
+                            f"{resolved_path}: `_siteops` requires an active "
+                            "`ParameterComposition` contract."
+                        )
+                    plain_parameters = self._deep_merge(
+                        plain_parameters,
+                        resolved_parameters,
+                    )
+                    continue
+                loaded.append(
+                    LoadedParameterSource(
+                        path=Path(resolved_path),
+                        data=resolved_parameters,
+                        collections=collections,
+                    )
+                )
+
+        result: CompositionResult | None = None
+        if contract is not None:
+            result = compose_sources(contract, loaded)
+            plain_parameters = result.parameters
+            self._validate_composition_step_coverage(
+                manifest,
+                site,
+                contract,
+                result,
+            )
+        self._validate_composition_lower_tiers(
+            manifest,
+            site,
+            contract,
+        )
+
+        cached = (copy.deepcopy(plain_parameters), result, contract)
+        with self._composition_cache_lock:
+            self._composition_cache[key] = cached
+        return copy.deepcopy(plain_parameters), result, contract
+
+    def _validate_composition_lower_tiers(
+        self,
+        manifest: Manifest,
+        site: Site,
+        contract: CompositionContract | None,
+    ) -> None:
+        """Keep composition metadata and governed arrays at manifest level."""
+        if contains_composition_metadata(site.parameters):
+            raise CompositionError(
+                f"Site '{site.name}' carries `_siteops` in site.parameters. "
+                "Composition metadata is allowed only in manifest-level "
+                "parameter sources."
+            )
+        governed_paths = (
+            {spec.path for spec in contract.collections.values()}
+            if contract is not None
+            else set()
+        )
+        governed_site_keys = governed_paths & set(site.parameters)
+        if governed_site_keys:
+            raise CompositionError(
+                f"Site '{site.name}' writes composed collection(s) "
+                f"{sorted(governed_site_keys)} in site.parameters. Select a "
+                "manifest-level resource set instead."
+            )
+
+        for step in manifest.steps:
+            if not isinstance(step, DeploymentStep):
+                continue
+            for param_path in step.parameters:
+                resolved_path = manifest.resolve_parameter_path(
+                    param_path,
+                    site,
+                )
+                if "{{" in resolved_path:
+                    continue
+                full_path = (self.workspace / resolved_path).resolve()
+                if not full_path.is_file():
+                    continue
+                file_params = self.load_parameters(full_path)
+                if contains_composition_metadata(file_params):
+                    raise CompositionError(
+                        f"Step parameter file '{resolved_path}' carries "
+                        "`_siteops`. Composition metadata is allowed only in "
+                        "manifest-level parameter sources."
+                    )
+                governed_step_keys = governed_paths & set(file_params)
+                if governed_step_keys:
+                    raise CompositionError(
+                        f"Step parameter file '{resolved_path}' writes "
+                        f"composed collection(s) "
+                        f"{sorted(governed_step_keys)}. Attach resource "
+                        "definitions at manifest level."
+                    )
+
+    def _validate_composition_step_coverage(
+        self,
+        manifest: Manifest,
+        site: Site,
+        contract: CompositionContract,
+        result: CompositionResult,
+    ) -> None:
+        """Require each composed writer to reach an ordered deployment step."""
+        collection_steps: dict[str, list[int]] = {
+            name: [] for name in contract.collections
+        }
+        for index, step in enumerate(manifest.steps):
+            if not isinstance(step, DeploymentStep):
+                continue
+            if self._check_step_site_compatibility(step, site) is not None:
+                continue
+            if not self._evaluate_condition(step.when, site):
+                continue
+            template_path = (self.workspace / step.template).resolve()
+            if not template_path.is_file():
+                continue
+            accepted = get_template_parameters(str(template_path))
+            for name, spec in contract.collections.items():
+                if spec.path in accepted:
+                    collection_steps[name].append(index)
+
+        for name, composed_entries in result.entries.items():
+            if not composed_entries:
+                continue
+            if not collection_steps[name]:
+                raise CompositionError(
+                    f"Site '{site.name}' composes collection '{name}', but no "
+                    "selected deployment step accepts its parameter path "
+                    f"'{contract.collections[name].path}'."
+                )
+            if len(collection_steps[name]) > 1:
+                step_names = [
+                    manifest.steps[index].name
+                    for index in collection_steps[name]
+                ]
+                raise CompositionError(
+                    f"Site '{site.name}' composes collection '{name}', but "
+                    "more than one selected deployment step accepts its "
+                    f"parameter path '{contract.collections[name].path}': "
+                    f"{step_names}."
+                )
+
+        for reference in result.references:
+            if (
+                reference.target_collection is None
+                or reference.external
+                or reference.target_source is None
+            ):
+                continue
+            provider_steps = collection_steps[reference.target_collection]
+            consumer_steps = collection_steps[reference.source_collection]
+            if not provider_steps or not consumer_steps:
+                continue
+            if min(provider_steps) > min(consumer_steps):
+                raise CompositionError(
+                    f"Site '{site.name}' rule '{reference.rule_id}' deploys "
+                    f"provider collection '{reference.target_collection}' "
+                    f"after consumer collection "
+                    f"'{reference.source_collection}'."
+                )
+
     def resolve_parameters(
         self,
         step: DeploymentStep,
@@ -1737,6 +2242,10 @@ class Orchestrator:
         2. Site-level parameters (from site definition) - site-specific overrides
         3. Step-level parameter files (from step.parameters) - step-specific overrides
 
+        Collections governed by a `ParameterComposition` contract are the
+        exception. They compose only from manifest-level sources, and writing
+        one at site or step level is an error.
+
         After merging, parameters are:
         - Resolved with template variable substitution ({{ site.X }}, {{ steps.X.outputs.Y }})
         - Filtered to only include parameters accepted by the template
@@ -1751,18 +2260,11 @@ class Orchestrator:
         Returns:
             Fully resolved and filtered parameters dict
         """
-        # 1. Start with manifest-level parameter files (shared defaults)
-        params: dict[str, Any] = {}
-        for param_path in manifest.parameters:
-            resolved_path = manifest.resolve_parameter_path(param_path, site)
-            self._require_selected_parameter_file(param_path, resolved_path, site, self.workspace, "Manifest")
-            full_path = (self.workspace / resolved_path).resolve()
-            if full_path.exists():
-                file_params = self.load_parameters(full_path)
-                params = self._deep_merge(params, file_params)
-            else:
-                logger.warning(f"Manifest parameter file not found: {full_path}")
-
+        # 1. Start with the resolved manifest parameter tier.
+        params, _, _ = self._resolve_manifest_parameters(
+            manifest,
+            site,
+        )
         # 2. Merge site-level parameters (site-specific overrides)
         params = self._deep_merge(params, site.get_all_parameters())
 
@@ -1922,7 +2424,11 @@ class Orchestrator:
             return
         raise ValueError(message)
 
-    def _evaluate_condition(self, condition: str | None, site: Site) -> bool:
+    def _evaluate_condition(
+        self,
+        condition: str | AnyCondition | None,
+        site: Site,
+    ) -> bool:
         """Evaluate a step condition against a site.
 
         Supports:
@@ -1935,6 +2441,7 @@ class Orchestrator:
         - {{ site.properties.path == true }}
         - {{ site.properties.path == false }}
         - {{ site.properties.path }} (truthy check)
+        - any: [<expression>, ...] (passes when any expression passes)
 
         Truthy check returns True if:
         - Boolean: value is True
@@ -1951,6 +2458,11 @@ class Orchestrator:
         """
         if not condition:
             return True
+        if isinstance(condition, AnyCondition):
+            return any(
+                self._evaluate_condition(expression, site)
+                for expression in condition.expressions
+            )
 
         condition = condition.strip()
         match = CONDITION_PATTERN.fullmatch(condition)
@@ -2143,19 +2655,25 @@ class Orchestrator:
             return False
 
         # Check manifest-level parameters (apply to all steps)
-        for param_path in manifest.parameters:
-            resolved_path = manifest.resolve_parameter_path(param_path, site)
-            self._require_selected_parameter_file(
-                param_path, resolved_path, site, self.workspace, "Manifest"
-            )
-            full_path = (self.workspace / resolved_path).resolve()
-            if full_path.exists():
-                try:
-                    params = self.load_parameters(full_path)
-                    if self._references_any_step(params, subscription_step_names):
-                        return True
-                except (ValueError, yaml.YAMLError, OSError) as e:
-                    logger.debug(f"Could not read parameter file {full_path}: {e}")
+        for source in manifest.parameters:
+            for resolved_path, _ in self._expand_manifest_parameter_source(
+                source,
+                manifest,
+                site,
+            ):
+                full_path = (self.workspace / resolved_path).resolve()
+                if full_path.exists():
+                    try:
+                        params = self.load_parameters(full_path)
+                        if self._references_any_step(
+                            params,
+                            subscription_step_names,
+                        ):
+                            return True
+                    except (ValueError, yaml.YAMLError, OSError) as e:
+                        logger.debug(
+                            f"Could not read parameter file {full_path}: {e}"
+                        )
 
         # Check step-level parameters for RG-scoped steps
         for step in manifest.steps:
@@ -2390,7 +2908,7 @@ class Orchestrator:
         step_outputs: dict[str, dict[str, Any]],
         subscription_outputs: SubscriptionOutputs | None = None,
     ) -> StepResult:
-        """Execute a single step (deployment or kubectl).
+        """Execute one deployment, kubectl, or wait step.
 
         Args:
             site: Target site
@@ -2401,7 +2919,7 @@ class Orchestrator:
             subscription_outputs: Outputs from subscription-scoped steps
 
         Returns:
-            StepResult (DeploymentResult or KubectlResult)
+            StepResult for the executed step type
         """
         if isinstance(step, KubectlStep):
             return self._execute_kubectl_step(site, step, step_outputs, subscription_outputs)
@@ -2470,7 +2988,10 @@ class Orchestrator:
                     {
                         "step": step.name,
                         "status": "skipped",
-                        "reason": f"Condition not met: {step.when}",
+                        "reason": (
+                            "Condition not met: "
+                            f"{format_when_condition(step.when)}"
+                        ),
                     }
                 )
                 continue
@@ -2576,10 +3097,15 @@ class Orchestrator:
                 # parameter file, an unresolved template) fails one site and
                 # leaves the rest of the run reportable, so the operator can
                 # still read the fleet state from the summary.
+                reportable = self._reportable_deploy_error(e)
                 logger.error(
-                    f"Unexpected error deploying to {site.name}: {scrub_for_output(str(e))}"
+                    f"Unexpected error deploying to {site.name}: {reportable}"
                 )
-                result = self._site_failure_result(site, manifest, f"Unexpected error: {e}")
+                result = self._site_failure_result(
+                    site,
+                    manifest,
+                    f"Unexpected error: {reportable}",
+                )
             results.append(result)
         return results
 
@@ -2650,12 +3176,18 @@ class Orchestrator:
                         with results_lock:
                             results.append(result)
                     except Exception as e:
+                        reportable = self._reportable_deploy_error(e)
                         logger.error(
-                            f"Unexpected error deploying to {site.name}: {scrub_for_output(str(e))}"
+                            f"Unexpected error deploying to {site.name}: "
+                            f"{reportable}"
                         )
                         with results_lock:
                             results.append(
-                                self._site_failure_result(site, manifest, f"Unexpected error: {e}")
+                                self._site_failure_result(
+                                    site,
+                                    manifest,
+                                    f"Unexpected error: {reportable}",
+                                )
                             )
             except BaseException:
                 # Leaving the pool waits for everything already queued, so an
@@ -2669,6 +3201,14 @@ class Orchestrator:
                 raise
 
         return results
+
+    @staticmethod
+    def _reportable_deploy_error(error: Exception) -> str:
+        if isinstance(error, CompositionError):
+            return report_composition_error(error)
+        if isinstance(error, ParameterSelectionError):
+            return report_parameter_selection_error(error)
+        return scrub_for_output(str(error))
 
     @staticmethod
     def _group_sites_by_subscription(
@@ -2772,11 +3312,18 @@ class Orchestrator:
                         self._extract_subscription_outputs(result, site.subscription, subscription_outputs)
                         results.append(result)
                     except Exception as e:
+                        reportable = self._reportable_deploy_error(e)
                         logger.error(
                             f"Error deploying subscription-level site {site.name}: "
-                            f"{scrub_for_output(str(e))}"
+                            f"{reportable}"
                         )
-                        results.append(self._site_failure_result(site, manifest, str(e)))
+                        results.append(
+                            self._site_failure_result(
+                                site,
+                                manifest,
+                                reportable,
+                            )
+                        )
 
         return subscription_outputs, results
 
@@ -2820,6 +3367,33 @@ class Orchestrator:
         print("  Deployment Summary")
         print("=" * 60)
         print()
+
+        if is_redaction_enabled():
+            summary_parts = [f"{succeeded} succeeded", f"{failed} failed"]
+            if blocked:
+                summary_parts.append(f"{blocked} blocked")
+            print(f"  Total: {', '.join(summary_parts)} ({total} sites)")
+            print(f"  Duration: {total_elapsed:.1f}s")
+
+            reportable_errors: dict[str, int] = {}
+            for result in results:
+                if result["status"] == "success":
+                    continue
+                error = str(result.get("error", "Unknown error"))
+                site = str(result.get("site", ""))
+                if site:
+                    error = error.replace(site, "<site>")
+                reportable = scrub_for_output(error) or "Unknown error"
+                reportable_errors[reportable] = (
+                    reportable_errors.get(reportable, 0) + 1
+                )
+            if reportable_errors:
+                print()
+                print("  Failures:")
+                for error, count in reportable_errors.items():
+                    print(f"    {count} site(s): {error}")
+            print()
+            return
 
         # Results table header
         print(f"  {'SITE':<25} {'STATUS':<10} {'STEPS':<15} {'DURATION':<10}")
@@ -3098,6 +3672,9 @@ class Orchestrator:
         Checks:
         - Manifest parses correctly
         - Sites exist and match criteria
+        - Manifest parameter sources expand to valid workspace files
+        - Parameter composition contracts, identities, references, and requirements are valid
+        - Governed collections and composition metadata stay at manifest level
         - Template files exist
         - Parameter files exist and are valid YAML (manifest and step level)
         - Kubectl files exist (for local files) and use HTTPS
@@ -3157,33 +3734,71 @@ class Orchestrator:
                 errors.append("No sites matched the specified criteria")
 
         # Validate manifest-level parameter files
-        for param_path in manifest.parameters:
-            if "{{" in param_path:
-                # Dynamic path: validate resolved path for each site
-                for site in sites:
-                    resolved = manifest.resolve_parameter_path(param_path, site)
+        if sites:
+            for site in sites:
+                source_error = False
+                for source in manifest.parameters:
                     try:
-                        # One implementation, so `validate` and `deploy` agree
-                        # on both the predicate and the wording.
-                        self._require_selected_parameter_file(
-                            param_path, resolved, site, self.workspace, "Manifest"
+                        expanded = self._expand_manifest_parameter_source(
+                            source,
+                            manifest,
+                            site,
                         )
                     except ParameterSelectionError as e:
-                        errors.append(str(e))
+                        errors.append(report_parameter_selection_error(e))
+                        source_error = True
                         continue
-                    try:
-                        self.load_parameters((self.workspace / resolved).resolve())
-                    except Exception as e:
-                        errors.append(f"Invalid manifest parameter file {resolved}: {e}")
-            else:
-                full_path = (self.workspace / param_path).resolve()
+                    for resolved, _ in expanded:
+                        full_path = (self.workspace / resolved).resolve()
+                        if not full_path.is_file():
+                            errors.append(
+                                "Manifest parameter file not found: "
+                                f"{resolved}"
+                            )
+                            source_error = True
+                            continue
+                        try:
+                            self.load_parameters(full_path)
+                        except Exception as e:
+                            errors.append(
+                                f"Invalid manifest parameter file "
+                                f"{resolved}: {e}"
+                            )
+                            source_error = True
+                if source_error:
+                    continue
+                try:
+                    self._resolve_manifest_parameters(manifest, site)
+                except CompositionError as e:
+                    errors.append(report_composition_error(e))
+                except ParameterSelectionError as e:
+                    errors.append(report_parameter_selection_error(e))
+                except (
+                    ValueError,
+                    yaml.YAMLError,
+                    OSError,
+                ) as e:
+                    errors.append(str(e))
+        else:
+            for source in manifest.parameters:
+                raw_path = source if isinstance(source, str) else source.path
+                if "{{" in raw_path or (
+                    isinstance(source, ParameterSource)
+                    and source.for_each is not None
+                ):
+                    continue
+                full_path = (self.workspace / raw_path).resolve()
                 if not full_path.exists():
-                    errors.append(f"Manifest parameter file not found: {param_path}")
+                    errors.append(
+                        f"Manifest parameter file not found: {raw_path}"
+                    )
                 else:
                     try:
                         self.load_parameters(full_path)
                     except Exception as e:
-                        errors.append(f"Invalid manifest parameter file {param_path}: {e}")
+                        errors.append(
+                            f"Invalid manifest parameter file {raw_path}: {e}"
+                        )
 
         # Build step name lookup for output reference validation
         all_step_names = {step.name for step in manifest.steps}
@@ -3251,7 +3866,10 @@ class Orchestrator:
                                     param_path, resolved, site, self.workspace, "Step"
                                 )
                             except ParameterSelectionError as e:
-                                errors.append(f"{e} (step: {step.name})")
+                                errors.append(
+                                    f"{report_parameter_selection_error(e)} "
+                                    f"(step: {step.name})"
+                                )
                                 continue
                             try:
                                 params = self.load_parameters(
@@ -3310,9 +3928,12 @@ class Orchestrator:
             errors.append("Manifest has no steps defined")
 
         for step in manifest.steps:
-            if step.when:
+            if step.when and isinstance(step.when, str):
                 if not CONDITION_PATTERN.fullmatch(step.when.strip()):
-                    errors.append(f"Invalid 'when' condition in step '{step.name}': {step.when}")
+                    errors.append(
+                        f"Invalid 'when' condition in step '{step.name}': "
+                        f"{step.when}"
+                    )
 
         for step in manifest.steps:
             if isinstance(step, DeploymentStep) and step.scope == "resourceGroup":
@@ -3386,6 +4007,62 @@ class Orchestrator:
                 if match.group(1) == step_name:
                     return True
         return False
+
+    def _composition_source_origins(
+        self,
+        manifest: Manifest,
+        site: Site,
+    ) -> dict[Path, str]:
+        """Map selected composition files to what chose them."""
+        try:
+            loaded_site, provenance = self.load_site_with_provenance(site.name)
+            runtime_override = (
+                loaded_site.properties != site.properties
+                or loaded_site.parameters != site.parameters
+                or loaded_site.labels != site.labels
+            )
+        except (FileNotFoundError, ValueError):
+            provenance = {}
+            runtime_override = True
+
+        result: dict[Path, str] = {}
+        for source in manifest.parameters:
+            if not isinstance(source, ParameterSource) or not source.collections:
+                continue
+            if source.for_each is None:
+                origin = (
+                    self._origin_label(source.declared_in)
+                    if source.declared_in is not None
+                    else "manifest"
+                )
+            else:
+                match = FOR_EACH_SITE_PROPERTY_PATTERN.fullmatch(
+                    source.for_each
+                )
+                property_path = match.group(1) if match else ""
+                origin = (
+                    "<runtime site state>"
+                    if runtime_override
+                    else provenance.get(
+                        f"properties.{property_path}",
+                        "<site default>",
+                    )
+                )
+            for resolved, _ in self._expand_manifest_parameter_source(
+                source,
+                manifest,
+                site,
+            ):
+                result[Path(resolved)] = origin
+        return result
+
+    @staticmethod
+    def _reportable_composition_origin(origin: str) -> str:
+        """Hide machine-specific roots from plan provenance."""
+        path = Path(origin)
+        if path.is_absolute():
+            return f"<extra-sites>/{path.name}"
+        return origin
 
     def _validate_output_references(
         self,
@@ -3480,7 +4157,7 @@ class Orchestrator:
     ) -> None:
         """Display deployment plan without executing.
 
-        Shows which sites will be deployed to and what steps will run.
+        Shows selected sites, effective resource composition, and steps.
         Called by `validate --plan` and by `deploy --dry-run`.
 
         Args:
@@ -3499,24 +4176,197 @@ class Orchestrator:
             print()
             return
 
+        redacted = is_redaction_enabled()
+
         print(f"{'═'*60}")
         print(f"  DEPLOYMENT PLAN: {manifest.name}")
-        if selector:
+        if selector and not redacted:
             print(f"  (filtered by: {selector})")
         print(f"{'═'*60}")
 
         if manifest.description:
             print(f"\n  {manifest.description}")
 
-        print(f"\n  Sites ({len(sites)}):")
-        for site in sites:
-            print(f"    • {site.name} ({site.location})")
+        if redacted:
+            print(f"\n  Sites: {len(sites)} selected")
+        else:
+            print(f"\n  Sites ({len(sites)}):")
+            for site in sites:
+                print(f"    • {site.name} ({site.location})")
 
         print(f"\n  Parallel: {manifest.parallel}")
 
+        composition_failed_sites: set[str] = set()
+        if manifest.parameter_compositions:
+            print("\n  Resource composition:")
+            if redacted:
+                source_count = 0
+                applied_count = 0
+                external_count = 0
+                verified_count = 0
+                unverified_count = 0
+                error_counts: dict[str, int] = {}
+                for site in sites:
+                    try:
+                        _, composition, contract = (
+                            self._resolve_manifest_parameters(
+                                manifest,
+                                site,
+                            )
+                        )
+                    except (CompositionError, ParameterSelectionError) as error:
+                        composition_failed_sites.add(site.name)
+                        message = (
+                            report_composition_error(error)
+                            if isinstance(error, CompositionError)
+                            else report_parameter_selection_error(error)
+                        )
+                        error_counts[message] = error_counts.get(message, 0) + 1
+                        continue
+                    if composition is None or contract is None:
+                        continue
+                    source_count += len(composition.sources)
+                    applied_count += sum(
+                        len(values) for values in composition.entries.values()
+                    )
+                    external_count += sum(
+                        len(values) for values in composition.external.values()
+                    )
+                    site_verified = sum(
+                        1
+                        for reference in composition.references
+                        if not reference.unverified_reason
+                    )
+                    verified_count += site_verified
+                    unverified_count += (
+                        len(composition.references) - site_verified
+                    )
+                print(
+                    f"    Across {len(sites)} site(s): "
+                    f"{source_count} selected source(s), "
+                    f"{applied_count} applied resource(s), "
+                    f"{external_count} external assertion(s)"
+                )
+                print(
+                    f"    {verified_count} verified reference(s), "
+                    f"{unverified_count} recorded reference(s)"
+                )
+                for message, count in error_counts.items():
+                    print(f"    {count} site(s): {message}")
+                print(
+                    "    apply semantics: only listed definitions are applied. "
+                    "Deselecting a set does not delete existing resources"
+                )
+            else:
+                for site in sites:
+                    try:
+                        _, composition, contract = (
+                            self._resolve_manifest_parameters(
+                                manifest,
+                                site,
+                            )
+                        )
+                    except (CompositionError, ParameterSelectionError) as error:
+                        composition_failed_sites.add(site.name)
+                        print(f"    {site.name}:")
+                        print(f"      error: {error}")
+                        continue
+                    if composition is None or contract is None:
+                        continue
+                    source_origins = self._composition_source_origins(
+                        manifest,
+                        site,
+                    )
+                    print(f"    {site.name}:")
+                    selected = list(composition.sources)
+                    if selected:
+                        print("      sets:")
+                        for source in selected:
+                            origin = self._reportable_composition_origin(
+                                source_origins.get(source.path, "<unknown>")
+                            )
+                            print(
+                                f"        {source.path.as_posix()} "
+                                f"[selected by {origin}]"
+                            )
+                    else:
+                        print("      sets: none selected")
+                    for name, spec in contract.collections.items():
+                        applied = composition.entries[name]
+                        external = composition.external[name]
+                        if not applied and not external:
+                            continue
+                        print(f"      {name}:")
+                        for entry in applied:
+                            print(
+                                "        apply     "
+                                f"{format_identity(spec, entry.identity)} "
+                                f"({entry.source.as_posix()})"
+                            )
+                        for entry in external:
+                            print(
+                                "        external  "
+                                f"{format_identity(spec, entry.identity)} "
+                                f"({entry.source.as_posix()}): {entry.reason}"
+                            )
+                    for reference in composition.references:
+                        source_spec = contract.collections[
+                            reference.source_collection
+                        ]
+                        source_identity = format_identity(
+                            source_spec,
+                            reference.source_identity,
+                        )
+                        if reference.unverified_reason:
+                            print(
+                                f"      reference [{reference.rule_id}]: "
+                                f"{source_identity} recorded, not verified: "
+                                f"{reference.unverified_reason}"
+                            )
+                            continue
+                        assert reference.target_collection is not None
+                        assert reference.target_identity is not None
+                        target_spec = contract.collections[
+                            reference.target_collection
+                        ]
+                        target_identity = format_identity(
+                            target_spec,
+                            reference.target_identity,
+                        )
+                        suffix = " (external)" if reference.external else ""
+                        member = ""
+                        if reference.target_member_name is not None:
+                            member = (
+                                f"/{reference.target_member_name}"
+                                f"[key={reference.target_member_identity!r}]"
+                            )
+                        print(
+                            f"      reference [{reference.rule_id}]: "
+                            f"{source_identity} -> "
+                            f"{target_identity}{member}{suffix}"
+                        )
+                    for requirement in composition.requirements:
+                        requirement_spec = contract.collections[
+                            requirement.collection
+                        ]
+                        print(
+                            "      requires: "
+                            f"{format_identity(requirement_spec, requirement.identity)} "
+                            f"({requirement.source.as_posix()})"
+                        )
+                    print(
+                        "      apply semantics: only listed definitions are "
+                        "applied. Deselecting a set does not delete existing "
+                        "resources"
+                    )
+
         print(f"\n  Steps ({len(manifest.steps)}):")
         for i, step in enumerate(manifest.steps, 1):
-            condition_info = f" [when: {step.when}]" if step.when else ""
+            condition_info = (
+                f" [when: {format_when_condition(step.when)}]"
+                if step.when
+                else ""
+            )
 
             if isinstance(step, KubectlStep):
                 print(f"    {i}. {step.name} (kubectl:{step.operation}){condition_info}")
@@ -3548,7 +4398,8 @@ class Orchestrator:
             1
             for site in sites
             for step in manifest.steps
-            if self._check_step_site_compatibility(step, site) is None
+            if site.name not in composition_failed_sites
+            and self._check_step_site_compatibility(step, site) is None
             and self._evaluate_condition(step.when, site)
         )
         print(f"  Total: {total} operation(s)")

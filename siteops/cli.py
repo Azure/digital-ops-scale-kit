@@ -21,8 +21,14 @@ from pathlib import Path
 from typing import Any
 
 from siteops import __version__
-from siteops.models import MultipleSubscriptionSitesError, _merge_selector_strings
+from siteops.composition import CompositionError, report_composition_error
+from siteops.models import (
+    MultipleSubscriptionSitesError,
+    ParameterSelectionError,
+    _merge_selector_strings,
+)
 from siteops.orchestrator import Orchestrator
+from siteops.sanitize import report_parameter_selection_error
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -103,11 +109,10 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     # the plan without being asked. The executor's per-command lines stay
     # behind `-v`, since they are a different question and a much longer
     # answer.
-    if getattr(args, "dry_run", False):
-        orchestrator.show_plan(manifest_path, selector=cli_selector)
-
-    # Execute deployment
     try:
+        if getattr(args, "dry_run", False):
+            orchestrator.show_plan(manifest_path, selector=cli_selector)
+
         result = orchestrator.deploy(
             manifest_path,
             selector=getattr(args, "selector", None),
@@ -115,6 +120,14 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
             manifest=manifest,
             sites=sites,
         )
+    except (CompositionError, ParameterSelectionError) as e:
+        detail = (
+            report_composition_error(e)
+            if isinstance(e, CompositionError)
+            else report_parameter_selection_error(e)
+        )
+        print(f"\nError: {detail}\n", file=sys.stderr)
+        return 1
     except MultipleSubscriptionSitesError as e:
         # Raised late, after site resolution, so it lands outside the guard
         # around loading. Printed rather than raised so the operator sees which

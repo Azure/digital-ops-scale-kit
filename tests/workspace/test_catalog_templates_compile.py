@@ -24,6 +24,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.workspace import catalog_harness as harness
 from tests.workspace.conftest import az_path
 
 # `<file>(LINE,COL) : Error BCP104: ...` or the same at Warning severity. The
@@ -46,8 +47,16 @@ def _family_entry_points(workspace: Path) -> list[Path]:
     Discovered by location rather than listed, so a family added under
     `templates/aio/<family>/` is compiled without editing this file. A family
     is exactly a subdirectory of `templates/aio/` carrying a `main.bicep`.
+
+    Deliberately not read from `catalog_harness.CATALOG_FAMILIES`. A family
+    template that compiles is worth checking before anyone registers a spec for
+    it, and the registry is held against this same layout in
+    `test_catalog_family_contracts.py`.
     """
-    return sorted((workspace / "templates" / "aio").glob("*/main.bicep"))
+    return [
+        workspace / "templates" / "aio" / family / "main.bicep"
+        for family in harness.template_family_dirs(workspace)
+    ]
 
 
 def test_at_least_one_family_entry_point_is_discovered(workspace):

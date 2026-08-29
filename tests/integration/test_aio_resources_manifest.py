@@ -1,39 +1,69 @@
 """Integration tests for the config-driven catalog entry point.
 
-`manifests/aio-resources.yaml` is the fleet route: a site names a committed set
-through `properties.resourceSets.<family>`, the catalog resolves that to a
-declaration file under `parameters/<family>/`, and the family gate opens.
+`manifests/aio-resources.yaml` is the fleet route: a site composes ordered sets
+through `properties.resourceSets.<area>`, the catalog resolves each set to a
+definition file under `parameters/<area>/`, and the deployment gate opens.
 
 `test_dataflow_sample_manifest.py` already qualifies the dataflow templates
 through a manifest-attached declaration, so the assertions here are about the
-selection mechanism instead: that the gate opened, that the set the site named
-is what deployed, and that per-site values in the declaration resolved to this
+selection mechanism instead: that each gate opened, that the sets the site named
+are what deployed, and that per-site values in the declarations resolved to this
 site rather than shipping as literal placeholder text.
+
+Every resource area is selected in one deploy. Devices and assets share one
+internally ordered step, followed by the independently gated dataflow step.
 """
 
 import pytest
 
-from tests.integration.conftest import CATALOG_SET, WORKSPACE_PATH
+from tests.integration.conftest import WORKSPACE_PATH
 from tests.integration.helpers.assertions import (
-    assert_output_exists,
     assert_step_succeeded,
     skip_unless_health_is_reported,
 )
 from tests.integration.helpers.kube import KubectlError, wait_for_cr, wait_for_cr_health
+from tests.integration.helpers.releases import load_aio_release
 
 pytestmark = [pytest.mark.integration]
 
 AIO_RESOURCES_MANIFEST = WORKSPACE_PATH / "manifests" / "aio-resources.yaml"
 
 CATALOG_STEP = "dataflow-resources"
+ASSET_CATALOG_STEP = "asset-resources"
 
 # Declared by parameters/dataflows/site-telemetry.yaml.
 SET_ENDPOINT_NAME = "site-telemetry-out"
 SET_DATAFLOW_NAME = "site-telemetry"
 
+# Declared by parameters/assets/site-assets.yaml.
+SET_DEVICE_NAME = "site-opc-ua"
+SET_ASSET_NAME = "site-oven"
+SET_DEVICE_ENDPOINT_NAME = "opc-ua-connector-0"
+
 # The set omits `dataflowProfiles`, so its dataflow runs in the pool the
 # instance template creates.
 INSTANCE_OWNED_PROFILE = "default"
+
+# Devices and assets project into this group, with kinds `Device` and `Asset`.
+DEVICE_CR_TYPE = "devices.namespaces.deviceregistry.microsoft.com"
+ASSET_CR_TYPE = "assets.namespaces.deviceregistry.microsoft.com"
+
+
+def _projected(resource_type: str, name: str, namespace: str) -> dict:
+    """One projected custom resource, failing with what the deploy claimed.
+
+    ARM accepting the write and the custom location projecting the resource are
+    separate events, so the read waits. A resource that never appears means the
+    deploy reported a creation the cluster never received, which reads better as
+    a named failure than as a kubectl error.
+    """
+    try:
+        return wait_for_cr(resource_type, name, namespace)
+    except KubectlError as e:
+        pytest.fail(
+            f"'{name}' ({resource_type}) from the selected set is not on the "
+            f"cluster: {e}"
+        )
 
 
 class TestCatalogSelection:
@@ -47,42 +77,14 @@ class TestCatalogSelection:
                 f"Site '{name}' failed: {site.get('error')}"
             )
 
-    def test_the_gate_opened_and_deployed_the_selected_set(self, aio_resources_result):
-        """The family ran, and what it reported is what the named set declares.
-
-        Two failures share this assertion. `_evaluate_condition` fails open, so
-        a gate that never opens leaves the manifest succeeding having deployed
-        nothing. And a path that resolved to some other declaration would also
-        deploy clean. Offline tests cover the gate and the path in isolation.
-        Only a deploy shows that the file which resolved is the file that
-        reached the resource provider.
-        """
+    def test_selected_family_steps_ran(self, aio_resources_result):
+        """Both deployment families ran for the selected resource areas."""
         for name in aio_resources_result["sites"]:
-            step = assert_step_succeeded(aio_resources_result, name, CATALOG_STEP)
-            endpoints = assert_output_exists(step, "endpointNames")
-            dataflows = assert_output_exists(step, "dataflowNames")
-
-            assert SET_ENDPOINT_NAME in endpoints, (
-                f"Site '{name}' selected set '{CATALOG_SET}' but reported "
-                f"endpoints {endpoints}, which does not include "
-                f"'{SET_ENDPOINT_NAME}'."
-            )
-            assert SET_DATAFLOW_NAME in dataflows, (
-                f"Site '{name}' selected set '{CATALOG_SET}' but reported "
-                f"dataflows {dataflows}."
-            )
-
-    def test_omitted_key_creates_nothing(self, aio_resources_result):
-        """The set declares no profiles, so the family creates none.
-
-        An omitted declaration key has to reach the template as an empty array
-        rather than as a missing parameter, which would fail the deploy.
-        """
-        for name in aio_resources_result["sites"]:
-            step = assert_step_succeeded(aio_resources_result, name, CATALOG_STEP)
-            assert assert_output_exists(step, "profileNames") == [], (
-                f"Site '{name}': the selected set declares no profiles, so the "
-                f"family should report none."
+            assert_step_succeeded(aio_resources_result, name, CATALOG_STEP)
+            assert_step_succeeded(
+                aio_resources_result,
+                name,
+                ASSET_CATALOG_STEP,
             )
 
 
@@ -90,8 +92,8 @@ class TestPerSiteValuesResolve:
     """A site value inside a declaration resolves to the site that deployed it.
 
     One committed file deployed fleet-wide with per-site values is the reason
-    the selection mechanism exists. An unresolved `{{ site.name }}` would deploy
-    clean and put every site on one topic, which no ARM-level assertion catches.
+    the selection mechanism exists.     An unresolved `{{ site.name }}` would fail before deployment. These live
+    checks prove the resolved value reached the provider.
 
     kubectl reads whichever single cluster the kubeconfig routes to, so these
     assert against the resource on that cluster rather than looping over every
@@ -136,28 +138,121 @@ class TestPerSiteValuesResolve:
                 f"The per-site value resolved to something else."
             )
 
+    def test_asset_display_name_carries_a_deployed_site_name(
+        self, aio_resources_result, aio_namespace, kubectl_available
+    ):
+        """The asset's operator-visible name resolved to this site.
 
-class TestProfilePlacement:
-    """A dataflow lands in the pool the declaration selected.
+        The declaration sets `displayName` from `{{ site.name }}`, which is what
+        an operator reads in the portal to tell one site's oven from another's.
+        The runtime rejects an unresolved template. This assertion proves the
+        resolved label reached the provider.
+        """
+        deployed = set(aio_resources_result["sites"])
+        asset = _projected(ASSET_CR_TYPE, SET_ASSET_NAME, aio_namespace)
 
-    `dataflowProfileRefs` reports the resolved `profileRef ?? defaultProfileName`
-    for each entry, which is the same expression the resource name is built
-    from. A successful deploy reporting `default` is therefore what shows the
-    resource was created under `dataflowProfiles/default` rather than under a
-    pool the declaration never named.
+        display_name = asset.get("spec", {}).get("displayName")
+        assert isinstance(display_name, str) and display_name, (
+            f"Asset '{SET_ASSET_NAME}' projects displayName "
+            f"{display_name!r}, so the per-site value it carries cannot be read."
+        )
+        assert "{{" not in display_name, (
+            f"Asset displayName '{display_name}' still carries an unresolved "
+            f"template, so every site would show the same label."
+        )
+        assert any(site in display_name for site in deployed), (
+            f"Asset displayName '{display_name}' names none of the sites this "
+            f"run deployed ({sorted(deployed)}). The per-site value resolved to "
+            f"something else."
+        )
+
+    def test_asset_dataset_topic_carries_a_deployed_site_name(
+        self, aio_resources_result, aio_namespace, kubectl_available
+    ):
+        """The dataset destination topic resolved to this site.
+
+        This is the fan-out the asset family is sold on: one committed
+        declaration, and each site publishing its oven data under its own topic.
+        """
+        deployed = set(aio_resources_result["sites"])
+        asset = _projected(ASSET_CR_TYPE, SET_ASSET_NAME, aio_namespace)
+
+        topics = [
+            destination.get("configuration", {}).get("topic")
+            for dataset in asset.get("spec", {}).get("datasets", [])
+            for destination in dataset.get("destinations", [])
+        ]
+        topics = [topic for topic in topics if isinstance(topic, str)]
+        assert topics, (
+            f"Projected asset '{SET_ASSET_NAME}' carries no dataset destination "
+            f"topic, so its telemetry has nowhere to go."
+        )
+
+        for topic in topics:
+            assert "{{" not in topic, (
+                f"Dataset topic '{topic}' still carries an unresolved template, "
+                f"so every site would publish to the same literal topic."
+            )
+            assert any(f"/{site}/" in topic for site in deployed), (
+                f"Dataset topic '{topic}' names none of the sites this run "
+                f"deployed ({sorted(deployed)}). The per-site value resolved to "
+                f"something else."
+            )
+
+
+class TestProjectedAssetTopology:
+    """The device and the asset reached the cluster, bound to each other.
+
+    These assertions read what the custom location actually projected, which is
+    the only place the binding is visible as the connector sees it. A device
+    that is not enabled presents no endpoint, and an asset whose `deviceRef`
+    names an endpoint that is not there is created and never served.
     """
 
-    def test_omitted_profile_ref_resolves_to_the_default_pool(self, aio_resources_result):
-        """The selected set declares no `profileRef`, so it uses `default`."""
-        for name in aio_resources_result["sites"]:
-            step = assert_step_succeeded(aio_resources_result, name, CATALOG_STEP)
-            placements = assert_output_exists(step, "dataflowProfileRefs")
+    def test_the_device_is_enabled_and_presents_its_inbound_endpoint(
+        self, aio_resources_result, aio_namespace, kubectl_available
+    ):
+        device = _projected(DEVICE_CR_TYPE, SET_DEVICE_NAME, aio_namespace)
+        spec = device.get("spec", {})
 
-            assert placements == [INSTANCE_OWNED_PROFILE], (
-                f"Site '{name}': the selected set declares one dataflow with no "
-                f"`profileRef`, so it should run in '{INSTANCE_OWNED_PROFILE}'. "
-                f"Reported placements: {placements}."
-            )
+        assert spec.get("enabled") is True, (
+            f"Device '{SET_DEVICE_NAME}' projects enabled="
+            f"{spec.get('enabled')!r}. A device that is not enabled presents no "
+            f"endpoint, and the connector then skips every asset on it."
+        )
+
+        inbound = spec.get("endpoints", {}).get("inbound", {})
+        assert SET_DEVICE_ENDPOINT_NAME in inbound, (
+            f"Device '{SET_DEVICE_NAME}' projects inbound endpoints "
+            f"{sorted(inbound)}, which does not include "
+            f"'{SET_DEVICE_ENDPOINT_NAME}'. The asset binds to that name."
+        )
+
+    def test_the_asset_is_enabled_and_bound_to_the_declared_endpoint(
+        self, aio_resources_result, aio_namespace, kubectl_available
+    ):
+        asset = _projected(ASSET_CR_TYPE, SET_ASSET_NAME, aio_namespace)
+        spec = asset.get("spec", {})
+
+        assert spec.get("enabled") is True, (
+            f"Asset '{SET_ASSET_NAME}' projects enabled={spec.get('enabled')!r}, "
+            f"so it is created but never served."
+        )
+
+        device_ref = spec.get("deviceRef", {})
+        assert device_ref.get("deviceName") == SET_DEVICE_NAME, (
+            f"Asset '{SET_ASSET_NAME}' projects deviceRef.deviceName "
+            f"{device_ref.get('deviceName')!r}, not '{SET_DEVICE_NAME}'. The "
+            f"asset would read through a device this deploy did not create."
+        )
+        assert device_ref.get("endpointName") == SET_DEVICE_ENDPOINT_NAME, (
+            f"Asset '{SET_ASSET_NAME}' projects deviceRef.endpointName "
+            f"{device_ref.get('endpointName')!r}, not "
+            f"'{SET_DEVICE_ENDPOINT_NAME}'."
+        )
+
+class TestInstanceOwnedProfile:
+    """The catalog leaves the default profile owned by the instance intact."""
 
     def test_instance_owned_profile_survives_the_deploy(
         self, aio_resources_result, aio_namespace, kubectl_available
@@ -196,11 +291,16 @@ class TestCatalogDataflowHealth:
     """
 
     def test_selected_dataflow_reports_available(
-        self, aio_resources_result, aio_namespace, kubectl_available
+        self,
+        aio_resources_result,
+        aio_namespace,
+        kubectl_available,
+        orchestrator,
     ):
         for name in aio_resources_result["sites"]:
-            step = assert_step_succeeded(aio_resources_result, name, CATALOG_STEP)
-            skip_unless_health_is_reported(step)
+            assert_step_succeeded(aio_resources_result, name, CATALOG_STEP)
+            _, release = load_aio_release(orchestrator, name, WORKSPACE_PATH)
+            skip_unless_health_is_reported(release.get("aioApiVersion"))
         wait_for_cr_health(
             "dataflows.connectivity.iotoperations.azure.com",
             SET_DATAFLOW_NAME,

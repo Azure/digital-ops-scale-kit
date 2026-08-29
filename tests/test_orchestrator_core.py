@@ -856,6 +856,43 @@ class TestPrintSummary:
         assert "[bad-site]" in captured.out
         assert "resource conflict" in captured.out
 
+    def test_redacted_summary_omits_site_identities(
+        self,
+        tmp_workspace,
+        capsys,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1")
+        orchestrator = Orchestrator(tmp_workspace)
+        results = [
+            {
+                "site": "private-good-site",
+                "status": "success",
+                "steps_completed": 3,
+                "steps_total": 3,
+                "steps_skipped": 0,
+                "elapsed": 10.0,
+            },
+            {
+                "site": "private-bad-site",
+                "status": "failed",
+                "error": "private-bad-site failed on a private resource",
+                "steps_completed": 1,
+                "steps_total": 3,
+                "steps_skipped": 0,
+                "elapsed": 5.0,
+            },
+        ]
+
+        orchestrator._print_deployment_summary(results, 15.0)
+
+        output = capsys.readouterr().out
+        assert "private-good-site" not in output
+        assert "private-bad-site" not in output
+        assert "1 succeeded" in output
+        assert "1 failed" in output
+        assert "<site> failed" in output
+
     def test_summary_with_blocked_sites(self, tmp_workspace, capsys):
         """Test summary output shows blocked sites section."""
         orchestrator = Orchestrator(tmp_workspace)

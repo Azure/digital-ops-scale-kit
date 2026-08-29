@@ -51,6 +51,44 @@ siteops deploy manifest.yaml -l name=munich-dev,name=seattle-dev
 
 A manifest with neither `sites:` nor `selector:` is a library or partial. It requires `-l` at deploy time. See [targeting.md](targeting.md) for the full grammar, the no-match diagnostic, and validation rules.
 
+## Manifest-level parameters
+
+A string loads one fixed or site-selected parameter file:
+
+```yaml
+parameters:
+  - parameters/common/common.yaml
+  - "parameters/aio-releases/{{ site.properties.aioRelease }}.yaml"
+```
+
+Use the object form when one site property selects an ordered list of files:
+
+```yaml
+parameters:
+  - path: "parameters/devices/{{ item }}.yaml"
+    forEach: "{{ site.properties.resourceSets.devices }}"
+    collections: [devices]
+```
+
+`forEach` must resolve to a list of unique, non-empty strings. Each item
+replaces `{{ item }}` in order. An omitted property or `[]` loads no files. A
+scalar value reports the list migration rather than iterating its characters.
+Every expanded path stays inside the workspace.
+
+`collections` names the composed parameter arrays that source may contribute.
+A source carrying a governed collection must use the object form. The
+composition rules come from one or more fixed workspace contracts:
+
+```yaml
+parameterCompositions:
+  - contracts/aio-catalog.yaml
+```
+
+Included manifests may contribute the same contract path. Paths are
+canonicalized and deduplicated during include flattening. See
+[Resource catalog](resource-catalog.md) for resource identity, references,
+external assertions, and provenance.
+
 ## Step types
 
 ### Bicep/ARM steps (default)
@@ -146,6 +184,14 @@ Control step execution based on site labels or properties:
   template: templates/feature.bicep
   scope: resourceGroup
   when: "{{ site.labels.environment == 'prod' }}"
+
+# Run one shared step when either resource area has a selection
+- name: device-registry-resources
+  template: templates/device-registry/main.bicep
+  when:
+    any:
+      - "{{ site.properties.resourceSets.devices }}"
+      - "{{ site.properties.resourceSets.assets }}"
 ```
 
 ### Supported syntax
@@ -156,11 +202,15 @@ Control step execution based on site labels or properties:
 | Equals | `{{ site.labels.env == 'prod' }}` | String comparison |
 | Not equals | `{{ site.labels.env != 'dev' }}` | Exclusion |
 | Boolean comparison | `{{ site.properties.flag == true }}` | Explicit boolean check |
+| Any | `when: { any: [...] }` | Run when any listed atomic condition passes |
 
 Truthy evaluation:
 
 - `true` → runs step
 - `false`, `""`, `"false"`, `"0"`, `0`, `[]`, `{}` → skips step
+
+The structured `any` form takes a non-empty list of the atomic expressions
+above. Invalid structured conditions fail manifest loading.
 
 ## Parallel execution
 

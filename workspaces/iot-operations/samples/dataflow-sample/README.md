@@ -21,7 +21,7 @@ The declaration reads site values, so one committed file gives every site its ow
 - destination topics carry `{{ site.labels.country }}`, `{{ site.labels.city }}`, and `{{ site.name }}`, so a central subscriber can tell sites apart
 - each endpoint sets `clientIdPrefix` from `{{ site.name }}`, which resolves two levels below `properties`
 
-A site value resolves at any depth in a declaration. Use one every target site carries, since a site missing that label ships the literal `{{ ... }}` through to the resource provider. `tests/workspace/test_catalog_gating.py` checks every committed declaration against every committed site for exactly that.
+A site value resolves at any depth in a declaration. Use one every target site carries. A site that leaves a `{{ ... }}` unresolved fails the step before it deploys. `tests/workspace/test_catalog_gating.py` checks every committed definition against every committed site earlier in CI.
 
 ## Prerequisites
 
@@ -41,19 +41,11 @@ The dataflows move what assets publish. A stock AIO install has no assets, so th
 
 ## Configure before deploying
 
-`dataflows.yaml` attaches at manifest level, so a site or a `sites.local/` overlay overrides any of its three keys. Because lists replace wholesale rather than merging, an override supplies the complete array:
-
-```yaml
-# sites.local/<site>.yaml
-parameters:
-  dataflows:
-    - name: my-dataflow
-      properties:
-        mode: Enabled
-        operations: [ ... ]
-```
-
-The endpoint host and trust bundle name in `dataflows.yaml` assume an install in the default `azure-iot-operations` namespace. Adjust both when the install uses a different namespace.
+Edit `dataflows.yaml` for this one-off sample. Composed resource arrays are
+owned by manifest-level definition sources, so `site.parameters` and step
+parameter files cannot replace them. The endpoint host and trust bundle name in
+`dataflows.yaml` assume an install in the default `azure-iot-operations`
+namespace. Adjust both when the install uses a different namespace.
 
 ## Deploy
 
@@ -71,7 +63,8 @@ This sample keeps its declaration next to itself. A fleet usually wants the oppo
 # sites/<site>.yaml
 properties:
   resourceSets:
-    dataflows: my-set
+    dataflows:
+      - my-set
 ```
 
 The declaration is unchanged by the move. Only its location and the manifest that attaches it differ. See `docs/resource-catalog.md`.

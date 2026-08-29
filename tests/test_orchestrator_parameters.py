@@ -13,12 +13,16 @@ import logging
 from unittest.mock import patch
 
 import pytest
+import yaml
 
+from siteops.composition import CompositionError
 from siteops.models import (
+    AnyCondition,
     DeploymentStep,
     Manifest,
     MultipleSubscriptionSitesError,
     ParameterSelectionError,
+    ParameterSource,
     Site,
 )
 from siteops.orchestrator import Orchestrator
@@ -267,6 +271,61 @@ class TestConditionEvaluation:
 
         assert orchestrator._evaluate_condition(None, site) is True
         assert orchestrator._evaluate_condition("", site) is True
+
+    def test_any_condition_runs_when_one_expression_is_truthy(
+        self,
+        complete_workspace,
+    ):
+        orchestrator = Orchestrator(complete_workspace)
+        site = Site(
+            name="test",
+            subscription="sub",
+            resource_group="rg",
+            location="eastus",
+            properties={
+                "resourceSets": {
+                    "devices": [],
+                    "assets": ["bakery-assets"],
+                }
+            },
+        )
+
+        result = orchestrator._evaluate_condition(
+            AnyCondition(
+                (
+                    "{{ site.properties.resourceSets.devices }}",
+                    "{{ site.properties.resourceSets.assets }}",
+                )
+            ),
+            site,
+        )
+
+        assert result is True
+
+    def test_any_condition_skips_when_every_expression_is_false(
+        self,
+        complete_workspace,
+    ):
+        orchestrator = Orchestrator(complete_workspace)
+        site = Site(
+            name="test",
+            subscription="sub",
+            resource_group="rg",
+            location="eastus",
+            properties={"resourceSets": {"devices": [], "assets": []}},
+        )
+
+        result = orchestrator._evaluate_condition(
+            AnyCondition(
+                (
+                    "{{ site.properties.resourceSets.devices }}",
+                    "{{ site.properties.resourceSets.assets }}",
+                )
+            ),
+            site,
+        )
+
+        assert result is False
 
     def test_equals_condition_match(self, complete_workspace):
         orchestrator = Orchestrator(complete_workspace)
@@ -901,7 +960,7 @@ class TestPropertiesResolution:
 class TestUnresolvedParameterPath:
     """A site-selected parameter file that names nothing fails the step.
 
-    `parameters/<family>/{{ site.properties.X }}.yaml` lets a site choose which
+    `parameters/<area>/{{ site.properties.X }}.yaml` lets a site choose which
     file to load. Two ways that goes wrong, and both would otherwise deploy the
     step with those parameters absent and report success: the site does not
     carry the property, or it carries a value naming a file that does not exist.
@@ -1192,6 +1251,813 @@ steps:
         assert result["sharedValue"] == "from-manifest"
         assert result["stepOnlyValue"] == "from-step"
         assert result["location"] == "westus"
+
+
+class TestManifestParameterSourceExpansion:
+    def _setup_workspace(self, tmp_path):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / "parameters").mkdir()
+        (workspace / "templates").mkdir()
+        (workspace / "sites").mkdir()
+        (workspace / "manifests").mkdir()
+        return workspace
+
+    def _create_site(self, workspace, content):
+        (workspace / "sites" / "test-site.yaml").write_text(content)
+
+    def _create_template(self, workspace, params):
+        (workspace / "templates" / "test.json").write_text(
+            json.dumps({"parameters": params})
+        )
+
+    def _workspace(self, tmp_path, selection):
+        workspace = tmp_path / "workspace"
+        for name in ("manifests", "parameters/dataflows", "sites", "templates"):
+            (workspace / name).mkdir(parents=True, exist_ok=True)
+        (workspace / "sites" / "test-site.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "apiVersion": "siteops/v1",
+                    "kind": "Site",
+                    "name": "test-site",
+                    "subscription": "00000000-0000-0000-0000-000000000000",
+                    "resourceGroup": "rg-test",
+                    "location": "eastus",
+                    "properties": {
+                        "resourceSets": {
+                            "dataflows": selection,
+                        }
+                    },
+                },
+                sort_keys=False,
+            )
+        )
+        (workspace / "templates" / "test.json").write_text(
+            json.dumps(
+                {
+                    "parameters": {
+                        "first": {"type": "string"},
+                        "second": {"type": "string"},
+                    }
+                }
+            )
+        )
+        (workspace / "manifests" / "test.yaml").write_text(
+            """
+apiVersion: siteops/v1
+kind: Manifest
+name: test
+sites: [test-site]
+parameters:
+  - path: "parameters/dataflows/{{ item }}.yaml"
+    forEach: "{{ site.properties.resourceSets.dataflows }}"
+steps:
+  - name: deploy
+    template: templates/test.json
+"""
+        )
+        return workspace
+
+    def _resolve(self, workspace):
+        orchestrator = Orchestrator(workspace)
+        manifest = Manifest.from_file(
+            workspace / "manifests" / "test.yaml",
+            workspace_root=workspace,
+        )
+        site = orchestrator.load_site("test-site")
+        return orchestrator.resolve_parameters(
+            manifest.steps[0],
+            site,
+            manifest,
+            {},
+        )
+
+    def test_expands_ordered_resource_set_files(self, tmp_path):
+        workspace = self._workspace(tmp_path, ["shared", "site"])
+        (workspace / "parameters" / "dataflows" / "shared.yaml").write_text(
+            "first: shared\n"
+        )
+        (workspace / "parameters" / "dataflows" / "site.yaml").write_text(
+            "second: site\n"
+        )
+
+        assert self._resolve(workspace) == {
+            "first": "shared",
+            "second": "site",
+        }
+
+    def test_absent_resource_set_key_expands_to_no_files(self, tmp_path):
+        workspace = self._workspace(tmp_path, [])
+        site_path = workspace / "sites" / "test-site.yaml"
+        site = yaml.safe_load(site_path.read_text())
+        del site["properties"]["resourceSets"]["dataflows"]
+        site_path.write_text(yaml.safe_dump(site, sort_keys=False))
+
+        assert self._resolve(workspace) == {}
+
+    @pytest.mark.parametrize("selection", ["site", "none"])
+    def test_legacy_scalar_has_a_migration_error(self, tmp_path, selection):
+        workspace = self._workspace(tmp_path, selection)
+
+        with pytest.raises(ParameterSelectionError, match="legacy scalar"):
+            self._resolve(workspace)
+
+    def test_scalar_path_reports_the_list_to_for_each_migration(self, tmp_path):
+        workspace = self._workspace(tmp_path, ["shared"])
+        (workspace / "parameters" / "dataflows" / "shared.yaml").write_text(
+            "first: shared\n"
+        )
+        manifest_path = workspace / "manifests" / "test.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text())
+        manifest["parameters"] = [
+            "parameters/dataflows/"
+            "{{ site.properties.resourceSets.dataflows }}.yaml"
+        ]
+        manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
+
+        with pytest.raises(
+            ParameterSelectionError,
+            match="ordered list.*path.*forEach",
+        ):
+            self._resolve(workspace)
+
+    def test_null_selection_is_not_treated_as_empty(self, tmp_path):
+        workspace = self._workspace(tmp_path, None)
+
+        with pytest.raises(ParameterSelectionError, match="sets .* to null"):
+            self._resolve(workspace)
+
+    @pytest.mark.parametrize("resource_sets", [None, [], "site-devices"])
+    def test_malformed_resource_sets_container_is_rejected(
+        self,
+        tmp_path,
+        resource_sets,
+    ):
+        workspace = self._workspace(tmp_path, [])
+        site_path = workspace / "sites" / "test-site.yaml"
+        site = yaml.safe_load(site_path.read_text())
+        site["properties"]["resourceSets"] = resource_sets
+        site_path.write_text(yaml.safe_dump(site, sort_keys=False))
+
+        errors = Orchestrator(workspace).validate(
+            workspace / "manifests" / "test.yaml"
+        )
+        assert any("must be a mapping" in error for error in errors)
+        with pytest.raises(ParameterSelectionError, match="must be a mapping"):
+            self._resolve(workspace)
+
+    def test_duplicate_selection_is_rejected(self, tmp_path):
+        workspace = self._workspace(tmp_path, ["site", "site"])
+
+        with pytest.raises(ParameterSelectionError, match="more than once"):
+            self._resolve(workspace)
+
+    def test_redacted_validation_suppresses_selected_set_details(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        workspace = self._workspace(tmp_path, ["private-device-set"])
+        monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1")
+
+        errors = Orchestrator(workspace).validate(
+            workspace / "manifests" / "test.yaml"
+        )
+
+        assert errors == [
+            "Parameter file selection failed. Re-run locally with output "
+            "redaction disabled for site and path details."
+        ]
+
+    def _composition_workspace(self, tmp_path):
+        workspace = tmp_path / "composition-workspace"
+        for name in (
+            "contracts",
+            "manifests",
+            "parameters/devices",
+            "parameters/assets",
+            "sites",
+            "templates",
+        ):
+            (workspace / name).mkdir(parents=True, exist_ok=True)
+        (workspace / "contracts" / "catalog.yaml").write_text(
+            """
+apiVersion: siteops/v1
+kind: ParameterComposition
+name: test
+collections:
+  devices:
+    path: devices
+    identity:
+      name: name
+    members:
+      inboundEndpoints:
+        path: properties.endpoints.inbound
+        shape: map
+  assets:
+    path: assets
+    identity:
+      name: name
+references:
+  - id: asset-device
+    source:
+      collection: assets
+      select: properties.deviceRef
+      bind:
+        device: deviceName
+        endpoint: endpointName
+    target:
+      collection: devices
+      match:
+        name: device
+      member:
+        name: inboundEndpoints
+        match:
+          key: endpoint
+"""
+        )
+        (workspace / "templates" / "resources.json").write_text(
+            json.dumps(
+                {
+                    "parameters": {
+                        "devices": {"type": "array"},
+                        "assets": {"type": "array"},
+                    }
+                }
+            )
+        )
+        (workspace / "parameters" / "devices" / "shared.yaml").write_text(
+            """
+devices:
+  - name: plant-opc
+    properties:
+      endpoints:
+        inbound:
+          opc: {}
+"""
+        )
+        (workspace / "parameters" / "assets" / "bakery.yaml").write_text(
+            """
+assets:
+  - name: oven
+    properties:
+      deviceRef:
+        deviceName: plant-opc
+        endpointName: opc
+"""
+        )
+        (workspace / "sites" / "test-site.yaml").write_text(
+            """
+apiVersion: siteops/v1
+kind: Site
+name: test-site
+subscription: "00000000-0000-0000-0000-000000000000"
+resourceGroup: rg-test
+location: eastus
+properties:
+  resourceSets:
+    devices: [shared]
+    assets: [bakery]
+"""
+        )
+        (workspace / "manifests" / "resources.yaml").write_text(
+            """
+apiVersion: siteops/v1
+kind: Manifest
+name: resources
+sites: [test-site]
+parameterCompositions:
+  - contracts/catalog.yaml
+parameters:
+  - path: "parameters/devices/{{ item }}.yaml"
+    forEach: "{{ site.properties.resourceSets.devices }}"
+    collections: [devices]
+  - path: "parameters/assets/{{ item }}.yaml"
+    forEach: "{{ site.properties.resourceSets.assets }}"
+    collections: [assets]
+steps:
+  - name: resources
+    template: templates/resources.json
+"""
+        )
+        return workspace
+
+    def test_orchestrator_composes_and_validates_resource_references(
+        self,
+        tmp_path,
+    ):
+        workspace = self._composition_workspace(tmp_path)
+        orchestrator = Orchestrator(workspace)
+        manifest = Manifest.from_file(
+            workspace / "manifests" / "resources.yaml",
+            workspace_root=workspace,
+        )
+        site = orchestrator.load_site("test-site")
+
+        result = orchestrator.resolve_parameters(
+            manifest.steps[0],
+            site,
+            manifest,
+            {},
+        )
+
+        assert [entry["name"] for entry in result["devices"]] == ["plant-opc"]
+        assert [entry["name"] for entry in result["assets"]] == ["oven"]
+
+    def test_validate_reports_composed_reference_failure(self, tmp_path):
+        workspace = self._composition_workspace(tmp_path)
+        asset_path = workspace / "parameters" / "assets" / "bakery.yaml"
+        asset_path.write_text(
+            asset_path.read_text().replace("deviceName: plant-opc", "deviceName: missing")
+        )
+
+        errors = Orchestrator(workspace).validate(
+            workspace / "manifests" / "resources.yaml"
+        )
+
+        assert any("does not resolve to devices" in error for error in errors)
+
+    def test_redacted_validation_suppresses_composition_details(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        workspace = self._composition_workspace(tmp_path)
+        asset_path = workspace / "parameters" / "assets" / "bakery.yaml"
+        asset_path.write_text(
+            asset_path.read_text().replace(
+                "deviceName: plant-opc",
+                "deviceName: private-device",
+            )
+        )
+        monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1")
+
+        errors = Orchestrator(workspace).validate(
+            workspace / "manifests" / "resources.yaml"
+        )
+
+        assert errors == [
+            "Resource composition failed. Re-run locally with output "
+            "redaction disabled for source and identity details."
+        ]
+
+    def test_redacted_deploy_error_suppresses_composition_details(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1")
+
+        message = Orchestrator._reportable_deploy_error(
+            CompositionError("private-set references private-resource")
+        )
+
+        assert "private-set" not in message
+        assert message.startswith("Resource composition failed")
+
+    def test_redacted_deploy_error_suppresses_parameter_selection_details(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1")
+
+        message = Orchestrator._reportable_deploy_error(
+            ParameterSelectionError("private-site selected private-set")
+        )
+
+        assert "private-set" not in message
+        assert message.startswith("Parameter file selection failed")
+
+    def test_site_parameters_cannot_replace_composed_collection(self, tmp_path):
+        workspace = self._composition_workspace(tmp_path)
+        site_path = workspace / "sites" / "test-site.yaml"
+        site = yaml.safe_load(site_path.read_text())
+        site["parameters"] = {"devices": []}
+        site_path.write_text(yaml.safe_dump(site, sort_keys=False))
+        orchestrator = Orchestrator(workspace)
+        manifest = Manifest.from_file(
+            workspace / "manifests" / "resources.yaml",
+            workspace_root=workspace,
+        )
+
+        errors = orchestrator.validate(
+            workspace / "manifests" / "resources.yaml"
+        )
+        assert any("site.parameters" in error for error in errors)
+        with pytest.raises(CompositionError, match="site.parameters"):
+            orchestrator.resolve_parameters(
+                manifest.steps[0],
+                orchestrator.load_site("test-site"),
+                manifest,
+                {},
+            )
+
+    def test_site_parameters_cannot_carry_nested_siteops_metadata(
+        self,
+        tmp_path,
+    ):
+        workspace = self._composition_workspace(tmp_path)
+        site_path = workspace / "sites" / "test-site.yaml"
+        site = yaml.safe_load(site_path.read_text())
+        site["parameters"] = {
+            "wrapper": {"_siteops": {"requires": {}}}
+        }
+        site_path.write_text(yaml.safe_dump(site, sort_keys=False))
+        orchestrator = Orchestrator(workspace)
+        manifest = Manifest.from_file(
+            workspace / "manifests" / "resources.yaml",
+            workspace_root=workspace,
+        )
+
+        errors = orchestrator.validate(
+            workspace / "manifests" / "resources.yaml"
+        )
+        assert any("site.parameters" in error for error in errors)
+        with pytest.raises(CompositionError, match="site.parameters"):
+            orchestrator.resolve_parameters(
+                manifest.steps[0],
+                orchestrator.load_site("test-site"),
+                manifest,
+                {},
+            )
+
+    def test_step_parameters_cannot_carry_nested_siteops_metadata(
+        self,
+        tmp_path,
+    ):
+        workspace = self._composition_workspace(tmp_path)
+        step_parameters = workspace / "parameters" / "step.yaml"
+        step_parameters.write_text(
+            "wrapper:\n  _siteops:\n    requires: {}\n"
+        )
+        orchestrator = Orchestrator(workspace)
+        manifest = Manifest.from_file(
+            workspace / "manifests" / "resources.yaml",
+            workspace_root=workspace,
+        )
+        manifest.steps[0].parameters.append("parameters/step.yaml")
+
+        manifest_path = workspace / "manifests" / "resources.yaml"
+        raw = yaml.safe_load(manifest_path.read_text())
+        raw["steps"][0]["parameters"] = ["parameters/step.yaml"]
+        manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False))
+        errors = orchestrator.validate(manifest_path)
+        assert any("Step parameter file" in error for error in errors)
+        with pytest.raises(CompositionError, match="Step parameter file"):
+            orchestrator.resolve_parameters(
+                manifest.steps[0],
+                orchestrator.load_site("test-site"),
+                manifest,
+                {},
+            )
+
+    def test_composed_writer_requires_a_selected_consumer_step(self, tmp_path):
+        workspace = self._composition_workspace(tmp_path)
+        (workspace / "templates" / "resources.json").write_text(
+            json.dumps({"parameters": {"assets": {"type": "array"}}})
+        )
+        orchestrator = Orchestrator(workspace)
+        manifest = Manifest.from_file(
+            workspace / "manifests" / "resources.yaml",
+            workspace_root=workspace,
+        )
+
+        with pytest.raises(CompositionError, match="no selected deployment step"):
+            orchestrator.resolve_parameters(
+                manifest.steps[0],
+                orchestrator.load_site("test-site"),
+                manifest,
+                {},
+            )
+
+    def test_missing_fixed_governed_source_fails_deploy_resolution(
+        self,
+        tmp_path,
+    ):
+        workspace = self._composition_workspace(tmp_path)
+        manifest_path = workspace / "manifests" / "resources.yaml"
+        manifest_data = yaml.safe_load(manifest_path.read_text())
+        manifest_data["parameters"] = [
+            {
+                "path": "parameters/devices/missing.yaml",
+                "collections": ["devices"],
+            }
+        ]
+        manifest_path.write_text(
+            yaml.safe_dump(manifest_data, sort_keys=False)
+        )
+        orchestrator = Orchestrator(workspace)
+        manifest = Manifest.from_file(manifest_path, workspace_root=workspace)
+
+        with pytest.raises(CompositionError, match="does not exist"):
+            orchestrator.resolve_parameters(
+                manifest.steps[0],
+                orchestrator.load_site("test-site"),
+                manifest,
+                {},
+            )
+
+    def test_reference_provider_step_must_precede_consumer(self, tmp_path):
+        workspace = self._composition_workspace(tmp_path)
+        (workspace / "templates" / "devices.json").write_text(
+            json.dumps({"parameters": {"devices": {"type": "array"}}})
+        )
+        (workspace / "templates" / "assets.json").write_text(
+            json.dumps({"parameters": {"assets": {"type": "array"}}})
+        )
+        manifest_path = workspace / "manifests" / "resources.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text())
+        manifest["steps"] = [
+            {"name": "assets", "template": "templates/assets.json"},
+            {"name": "devices", "template": "templates/devices.json"},
+        ]
+        manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
+        orchestrator = Orchestrator(workspace)
+        parsed = Manifest.from_file(manifest_path, workspace_root=workspace)
+
+        with pytest.raises(CompositionError, match="after consumer collection"):
+            orchestrator.resolve_parameters(
+                parsed.steps[0],
+                orchestrator.load_site("test-site"),
+                parsed,
+                {},
+            )
+
+    def test_plan_shows_composed_resources_and_apply_semantics(
+        self,
+        tmp_path,
+        capsys,
+    ):
+        workspace = self._composition_workspace(tmp_path)
+
+        Orchestrator(workspace).show_plan(
+            workspace / "manifests" / "resources.yaml"
+        )
+
+        output = capsys.readouterr().out
+        assert "Resource composition:" in output
+        assert "selected by sites/test-site.yaml" in output
+        assert "apply     devices[name='plant-opc']" in output
+        assert "apply     assets[name='oven']" in output
+        assert "assets[name='oven'] -> devices[name='plant-opc']" in output
+        assert "/inboundEndpoints[key='opc']" in output
+        assert "does not delete existing resources" in output
+
+    def test_plan_hides_absolute_extra_site_roots(self, tmp_path):
+        origin = str(tmp_path / "private" / "sites" / "seattle-dev.yaml")
+        assert (
+            Orchestrator._reportable_composition_origin(origin)
+            == "<extra-sites>/seattle-dev.yaml"
+        )
+
+    def test_redacted_plan_suppresses_resource_identities(
+        self,
+        tmp_path,
+        capsys,
+        monkeypatch,
+    ):
+        workspace = self._composition_workspace(tmp_path)
+        monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1")
+
+        Orchestrator(workspace).show_plan(
+            workspace / "manifests" / "resources.yaml",
+            selector="name=test-site",
+        )
+
+        output = capsys.readouterr().out
+        assert "1 selected set(s)" not in output
+        assert "2 selected source(s)" in output
+        assert "plant-opc" not in output
+        assert "oven" not in output
+        assert "parameters/devices" not in output
+        assert "test-site" not in output
+        assert "eastus" not in output
+        assert "name=test-site" not in output
+        assert "applied resource(s)" in output
+
+    def test_composition_cache_tracks_site_selection_changes(self, tmp_path):
+        workspace = self._composition_workspace(tmp_path)
+        orchestrator = Orchestrator(workspace)
+        manifest = Manifest.from_file(
+            workspace / "manifests" / "resources.yaml",
+            workspace_root=workspace,
+        )
+        site = orchestrator.load_site("test-site")
+        site.properties["resourceSets"] = {"devices": [], "assets": []}
+
+        empty = orchestrator.resolve_parameters(
+            manifest.steps[0],
+            site,
+            manifest,
+            {},
+        )
+        site.properties["resourceSets"] = {
+            "devices": ["shared"],
+            "assets": ["bakery"],
+        }
+        selected = orchestrator.resolve_parameters(
+            manifest.steps[0],
+            site,
+            manifest,
+            {},
+        )
+
+        assert empty["devices"] == []
+        assert empty["assets"] == []
+        assert [entry["name"] for entry in selected["devices"]] == [
+            "plant-opc"
+        ]
+        assert [entry["name"] for entry in selected["assets"]] == ["oven"]
+
+    def test_composition_cache_tracks_manifest_source_changes(self, tmp_path):
+        workspace = self._composition_workspace(tmp_path)
+        orchestrator = Orchestrator(workspace)
+        manifest = Manifest.from_file(
+            workspace / "manifests" / "resources.yaml",
+            workspace_root=workspace,
+        )
+        site = orchestrator.load_site("test-site")
+
+        selected = orchestrator.resolve_parameters(
+            manifest.steps[0],
+            site,
+            manifest,
+            {},
+        )
+        manifest.parameters.clear()
+        empty = orchestrator.resolve_parameters(
+            manifest.steps[0],
+            site,
+            manifest,
+            {},
+        )
+
+        assert [entry["name"] for entry in selected["devices"]] == [
+            "plant-opc"
+        ]
+        assert [entry["name"] for entry in selected["assets"]] == ["oven"]
+        assert empty["devices"] == []
+        assert empty["assets"] == []
+
+    def test_composition_cache_rechecks_step_parameter_tiers(self, tmp_path):
+        workspace = self._composition_workspace(tmp_path)
+        orchestrator = Orchestrator(workspace)
+        manifest = Manifest.from_file(
+            workspace / "manifests" / "resources.yaml",
+            workspace_root=workspace,
+        )
+        site = orchestrator.load_site("test-site")
+        orchestrator.resolve_parameters(
+            manifest.steps[0],
+            site,
+            manifest,
+            {},
+        )
+
+        step_path = workspace / "parameters" / "step.yaml"
+        step_path.write_text("devices: []\n")
+        manifest.steps[0].parameters.append("parameters/step.yaml")
+
+        with pytest.raises(CompositionError, match="Step parameter file"):
+            orchestrator.resolve_parameters(
+                manifest.steps[0],
+                site,
+                manifest,
+                {},
+            )
+
+    def test_composition_cache_accepts_heterogeneous_site_mapping_keys(
+        self,
+        tmp_path,
+    ):
+        workspace = self._composition_workspace(tmp_path)
+        orchestrator = Orchestrator(workspace)
+        manifest = Manifest.from_file(
+            workspace / "manifests" / "resources.yaml",
+            workspace_root=workspace,
+        )
+        site = orchestrator.load_site("test-site")
+        site.properties["freeform"] = {
+            1: "numeric",
+            "one": "text",
+        }
+
+        result = orchestrator.resolve_parameters(
+            manifest.steps[0],
+            site,
+            manifest,
+            {},
+        )
+
+        assert [entry["name"] for entry in result["devices"]] == ["plant-opc"]
+        assert [entry["name"] for entry in result["assets"]] == ["oven"]
+
+    def test_same_resolved_source_cannot_be_selected_twice(self, tmp_path):
+        workspace = self._composition_workspace(tmp_path)
+        orchestrator = Orchestrator(workspace)
+        manifest = Manifest.from_file(
+            workspace / "manifests" / "resources.yaml",
+            workspace_root=workspace,
+        )
+        manifest.parameters.insert(
+            0,
+            ParameterSource(
+                path="parameters/devices/shared.yaml",
+                collections=("devices",),
+            ),
+        )
+
+        with pytest.raises(ParameterSelectionError, match="resolve to .* more than once"):
+            orchestrator.resolve_parameters(
+                manifest.steps[0],
+                orchestrator.load_site("test-site"),
+                manifest,
+                {},
+            )
+
+    def test_composed_collection_has_one_selected_deployment_step(self, tmp_path):
+        workspace = self._composition_workspace(tmp_path)
+        orchestrator = Orchestrator(workspace)
+        manifest = Manifest.from_file(
+            workspace / "manifests" / "resources.yaml",
+            workspace_root=workspace,
+        )
+        manifest.steps.append(
+            DeploymentStep(
+                name="resources-again",
+                template="templates/resources.json",
+            )
+        )
+
+        with pytest.raises(
+            CompositionError,
+            match="more than one selected deployment step",
+        ):
+            orchestrator.resolve_parameters(
+                manifest.steps[0],
+                orchestrator.load_site("test-site"),
+                manifest,
+                {},
+            )
+
+    def test_plan_continues_after_one_site_has_an_invalid_selection(
+        self,
+        tmp_path,
+        capsys,
+    ):
+        workspace = self._composition_workspace(tmp_path)
+        first = yaml.safe_load(
+            (workspace / "sites" / "test-site.yaml").read_text()
+        )
+        first["name"] = "invalid-site"
+        first["properties"]["resourceSets"]["assets"] = ["missing"]
+        (workspace / "sites" / "invalid-site.yaml").write_text(
+            yaml.safe_dump(first, sort_keys=False)
+        )
+        manifest_path = workspace / "manifests" / "resources.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text())
+        manifest["sites"] = ["invalid-site", "test-site"]
+        manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
+
+        Orchestrator(workspace).show_plan(manifest_path)
+
+        output = capsys.readouterr().out
+        assert "invalid-site" in output
+        assert "does not exist" in output
+        assert "apply     devices[name='plant-opc']" in output
+        assert "Total: 1 operation(s)" in output
+
+    def test_redacted_plan_aggregates_selection_errors(
+        self,
+        tmp_path,
+        capsys,
+        monkeypatch,
+    ):
+        workspace = self._composition_workspace(tmp_path)
+        invalid = yaml.safe_load(
+            (workspace / "sites" / "test-site.yaml").read_text()
+        )
+        invalid["name"] = "invalid-site"
+        invalid["properties"]["resourceSets"]["assets"] = ["private-missing"]
+        (workspace / "sites" / "invalid-site.yaml").write_text(
+            yaml.safe_dump(invalid, sort_keys=False)
+        )
+        manifest_path = workspace / "manifests" / "resources.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text())
+        manifest["sites"] = ["invalid-site", "test-site"]
+        manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
+        monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1")
+
+        Orchestrator(workspace).show_plan(manifest_path)
+
+        output = capsys.readouterr().out
+        assert "invalid-site" not in output
+        assert "test-site" not in output
+        assert "private-missing" not in output
+        assert "parameters/assets" not in output
+        assert "1 site(s): Parameter file selection failed" in output
+        assert "2 selected source(s)" in output
+        assert "Total: 1 operation(s)" in output
 
     def test_manifest_parameters_resolved_with_site_variables(self, tmp_path):
         """Test that {{ site.X }} templates in manifest params are resolved."""

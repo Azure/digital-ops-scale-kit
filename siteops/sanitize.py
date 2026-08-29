@@ -250,6 +250,16 @@ def is_redaction_enabled() -> bool:
     return any(os.environ.get(marker) for marker in _CI_ENV_MARKERS)
 
 
+def report_parameter_selection_error(error: Exception) -> str:
+    """Hide selected values, site names, and paths on published surfaces."""
+    if is_redaction_enabled():
+        return (
+            "Parameter file selection failed. Re-run locally with output "
+            "redaction disabled for site and path details."
+        )
+    return str(error)
+
+
 def scrub_for_output(text: str | None) -> str | None:
     """Scrub `text` when the destination is a published surface.
 

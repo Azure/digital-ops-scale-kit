@@ -1,0 +1,36 @@
+apiVersion: siteops/v1
+kind: Manifest
+name: asset-sample
+
+description: |
+  Reference sample that declares Azure Device Registry devices and assets in YAML
+  and deploys them onto an existing AIO instance, carrying no Bicep of its own.
+  It attaches the committed device and asset sets, which declare one OPC UA
+  device and one oven asset bound to that device's inbound endpoint. The
+  asset's display name, attributes, and MQTT topic carry the site's own name,
+  so every site publishes under its own topic.
+
+  The device's inbound endpoint addresses the OPC PLC simulator that
+  `samples/opc-ua-solution/` brings up. The resources deploy without it, and
+  telemetry starts once a reachable OPC UA server answers at that address.
+
+  Prerequisites:
+    - AIO instance must be deployed and running (run aio-install first)
+    - The site's aioRelease must point to a parameters/aio-releases/<release>.yaml file
+
+parallel: 3
+
+# Default selector. Override at the CLI with `-l <key>=<value>`.
+selector: "environment=dev"
+
+parameters:
+  - parameters/common/common.yaml
+  - "parameters/aio-releases/{{ site.properties.aioRelease }}.yaml"
+  - path: parameters/devices/site-devices.yaml
+    collections: [devices]
+  - path: parameters/assets/site-assets.yaml
+    collections: [assets]
+
+steps:
+  - include: ../../manifests/_resolve-aio.yaml
+  - include: ../../manifests/_assets.yaml

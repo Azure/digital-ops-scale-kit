@@ -2,15 +2,15 @@ apiVersion: siteops/v1
 kind: Manifest
 name: aio-resources
 description: |
-  Config-driven AIO workload resources for an existing instance. Each family
-  deploys only when the site selects a set for it, so one entry point serves
-  every combination.
+  Config-driven AIO workload resources for an existing instance. Each
+  deployment family runs only when the site selects a resource area it serves,
+  so one entry point serves every combination.
 
-  A site selects sets through `properties.resourceSets.<family>`, which resolves
-  to `parameters/<family>/<set>.yaml`. Every site inherits `none` for each
-  family, which deploys nothing. Families are ordered here to satisfy
-  cross-family references, since a reference to a resource that does not exist
-  yet deploys clean and never runs.
+  A site composes ordered sets through `properties.resourceSets.<area>`, which
+  resolves to `parameters/<area>/<set>.yaml`. Omitted areas and empty lists
+  apply nothing. Devices and assets share one internally ordered Device
+  Registry step. That step runs before dataflows so a dataflow naming an asset
+  finds it already there.
 
   Prerequisites:
     - AIO instance must be deployed and running
@@ -22,16 +22,27 @@ parallel: 3
 # Default selector. Override at the CLI with `-l <key>=<value>`.
 selector: "environment=dev"
 
-# Declaration files load for every site regardless of the gates below, so every
-# family needs a `resourceSets` key on the site and a matching `none.yaml`.
-# `siteops validate` reports a missing one rather than deploying nothing.
 parameters:
   - parameters/common/common.yaml
   - "parameters/aio-releases/{{ site.properties.aioRelease }}.yaml"
-  - "parameters/dataflows/{{ site.properties.resourceSets.dataflows }}.yaml"
+  - path: "parameters/devices/{{ item }}.yaml"
+    forEach: "{{ site.properties.resourceSets.devices }}"
+    collections: [devices]
+  - path: "parameters/assets/{{ item }}.yaml"
+    forEach: "{{ site.properties.resourceSets.assets }}"
+    collections: [assets]
+  - path: "parameters/dataflows/{{ item }}.yaml"
+    forEach: "{{ site.properties.resourceSets.dataflows }}"
+    collections: [dataflowEndpoints, dataflowProfiles, dataflows]
 
 steps:
   - include: _resolve-aio.yaml
 
+  - include: _assets.yaml
+    when:
+      any:
+        - "{{ site.properties.resourceSets.devices }}"
+        - "{{ site.properties.resourceSets.assets }}"
+
   - include: _dataflows.yaml
-    when: "{{ site.properties.resourceSets.dataflows != 'none' }}"
+    when: "{{ site.properties.resourceSets.dataflows }}"

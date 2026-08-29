@@ -374,6 +374,97 @@ class TestParameterMerge:
         m = Manifest.from_file(parent, workspace_root=workspace)
         assert m.parameters == ["params/x.yaml"]
 
+    def test_object_source_metadata_must_match(self, workspace: Path):
+        _write_manifest(
+            workspace / "manifests" / "f.yaml",
+            {
+                "name": "f",
+                "parameters": [
+                    {
+                        "path": "params/{{ item }}.yaml",
+                        "forEach": "{{ site.properties.items }}",
+                        "collections": ["assets"],
+                    }
+                ],
+                "steps": [_step("f-1")],
+            },
+        )
+        parent = _write_manifest(
+            workspace / "manifests" / "p.yaml",
+            {
+                "name": "p",
+                "parameters": [
+                    {
+                        "path": "./params/{{ item }}.yaml",
+                        "forEach": "{{ site.properties.items }}",
+                        "collections": ["devices"],
+                    }
+                ],
+                "steps": [{"include": "f.yaml"}],
+            },
+        )
+
+        with pytest.raises(IncludeError, match="different `collections`"):
+            Manifest.from_file(parent, workspace_root=workspace)
+
+
+class TestParameterCompositionMerge:
+    def _contract(self, workspace: Path) -> None:
+        path = workspace / "contracts" / "aio-catalog.yaml"
+        path.parent.mkdir()
+        path.write_text(
+            "apiVersion: siteops/v1\n"
+            "kind: ParameterComposition\n"
+            "name: aio-catalog\n"
+            "collections: {}\n"
+        )
+
+    def test_included_contract_paths_are_canonicalized_and_deduped(
+        self,
+        workspace: Path,
+    ):
+        self._contract(workspace)
+        _write_manifest(
+            workspace / "manifests" / "f.yaml",
+            {
+                "name": "f",
+                "parameterCompositions": ["./contracts/aio-catalog.yaml"],
+                "steps": [_step("f-1")],
+            },
+        )
+        parent = _write_manifest(
+            workspace / "manifests" / "p.yaml",
+            {
+                "name": "p",
+                "parameterCompositions": ["contracts/aio-catalog.yaml"],
+                "steps": [
+                    {
+                        "include": "f.yaml",
+                        "when": "{{ site.properties.enabled }}",
+                    }
+                ],
+            },
+        )
+
+        manifest = Manifest.from_file(parent, workspace_root=workspace)
+
+        assert manifest.parameter_compositions == ["contracts/aio-catalog.yaml"]
+
+    def test_contract_path_cannot_escape_workspace(self, workspace: Path):
+        outside = workspace.parent / "outside.yaml"
+        outside.write_text("kind: ParameterComposition\n")
+        parent = _write_manifest(
+            workspace / "manifests" / "p.yaml",
+            {
+                "name": "p",
+                "parameterCompositions": ["../outside.yaml"],
+                "steps": [_step("p-1")],
+            },
+        )
+
+        with pytest.raises(ValueError, match="contain no '..'"):
+            Manifest.from_file(parent, workspace_root=workspace)
+
 
 class TestWhenPropagation:
     def test_when_inherited_by_spliced_steps(self, workspace: Path):
@@ -396,6 +487,36 @@ class TestWhenPropagation:
 
         m = Manifest.from_file(parent, workspace_root=workspace)
         assert all(s.when == "{{ site.properties.gate == 'on' }}" for s in m.steps)
+
+    def test_structured_any_is_inherited_by_spliced_steps(self, workspace: Path):
+        _write_manifest(
+            workspace / "manifests" / "f.yaml",
+            {"name": "f", "steps": [_step("f-1")]},
+        )
+        parent = _write_manifest(
+            workspace / "manifests" / "p.yaml",
+            {
+                "name": "p",
+                "steps": [
+                    {
+                        "include": "f.yaml",
+                        "when": {
+                            "any": [
+                                "{{ site.properties.devices }}",
+                                "{{ site.properties.assets }}",
+                            ]
+                        },
+                    }
+                ],
+            },
+        )
+
+        manifest = Manifest.from_file(parent, workspace_root=workspace)
+
+        assert manifest.steps[0].when.expressions == (
+            "{{ site.properties.devices }}",
+            "{{ site.properties.assets }}",
+        )
 
     def test_when_inheritance_through_nested_include(self, workspace: Path):
         _write_manifest(
@@ -449,9 +570,10 @@ class TestWhenPropagation:
     def test_malformed_include_when_raises(self, workspace: Path):
         """An include's gate is validated like a step's own.
 
-        Condition evaluation fails open, so an unvalidated typo turns a gate
-        meant to exclude into one that includes on every site. A single `=`
-        instead of `==` is the realistic case.
+        The evaluator has a defensive permissive fallback for unvalidated
+        programmatic input. Manifest parsing must reject an authored typo
+        before it reaches that path. A single `=` instead of `==` is the
+        realistic case.
         """
         _write_manifest(
             workspace / "manifests" / "f.yaml",

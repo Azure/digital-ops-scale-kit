@@ -8,7 +8,7 @@ Knowing which kind you are in tells you how to add to it.
 |---|---|---|
 | **Platform lifecycle** | `enablement.bicep`, `instance.bicep`, `resolve-aio.bicep` | Top-level templates a manifest step points at directly. `instance.bicep` and `resolve-aio.bicep` are dispatchers that switch on the AIO API version. |
 | **Per-API-version modules** | `modules/` | Inner modules a dispatcher routes to, one per API version. Added only where an API version genuinely diverges. |
-| **Resource catalog families** | `dataflows/` | A `main.bicep` routing on the AIO API version to one module per API version under the family's own `modules/`. Deployed through `manifests/aio-resources.yaml`, gated per site. |
+| **Resource catalog families** | `assets/`, `dataflows/` | A `main.bicep` routing on its provider's API version to one module per API version under the family's own `modules/`. Deployed through `manifests/aio-resources.yaml`, gated per site. |
 | **Lifecycle phases** | `upgrade/` | Templates for one operation that spans several steps, kept together rather than at the top level. |
 
 ## Platform lifecycle and dispatchers
@@ -23,16 +23,18 @@ Arc-mapped resource provider the pinned API version selects the resource shape
 the provider projects through, so `resolve-aio.bicep` is a dispatcher rather
 than a single `existing` reference.
 
-## Resource catalog families
+## Resource catalog deployment families
 
 A family is a group of related resource kinds deployed as one step. Each family
-directory ships a `main.bicep` that routes on `aioApiVersion` to one module per
-supported AIO API version, and each module creates every kind the family owns,
-ordered with `dependsOn`.
+directory ships a `main.bicep` that routes on the release key its resource
+provider is versioned by, `aioApiVersion` for dataflows and `adrApiVersion` for
+Device Registry resources, to one module per supported API version. Each module
+creates every kind the family groups, ordered with `dependsOn`.
 
-One name identifies a family everywhere: the directory here, the partial at
-`manifests/_<family>.yaml`, the declaration directory at `parameters/<family>/`,
-and the `resourceSets.<family>` key on a site.
+Public resource areas do not have to match deployment families. Sites select
+`devices` and `assets` independently, while `templates/aio/assets/` deploys
+both in one step. The `dataflows` area and deployment family both cover
+endpoints, profiles, and dataflows.
 
 A family writes at the API version the site's release ships, matching the platform
 templates. The writable surface of these resources is identical across supported
@@ -42,8 +44,9 @@ version means extending `@allowed` on `main.bicep` and copying the newest
 module with its API version literals changed.
 
 See [resource-catalog.md](../../../../docs/resource-catalog.md) for the
-authoring contract and [dataflows.md](../../../../docs/dataflows.md) for the
-dataflow family's keys.
+authoring contract, [assets.md](../../../../docs/assets.md) for the asset
+family's keys, and [dataflows.md](../../../../docs/dataflows.md) for the
+dataflow family's.
 
 ## Adding to this area
 
