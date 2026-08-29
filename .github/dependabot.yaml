@@ -22,3 +22,5 @@ updates:
       interval: "weekly"
     commit-message:
       prefix: "chore(actions)"
+    cooldown:
+      default-days: 7
