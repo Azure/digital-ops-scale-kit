@@ -105,6 +105,17 @@ properties:
 Selecting a set applies its definitions. Deselecting it stops applying them and
 does not delete resources from an earlier deployment.
 
+### Catalog step outputs
+
+**Catalog deployment steps now keep a parameter-only interface.** If a custom
+manifest reads catalog step outputs, remove references to `endpointNames`,
+`profileNames`, `dataflowNames`, `dataflowProfileRefs`, `deviceNames`,
+`assetNames`, `assetDeviceRefs`, or `apiVersion`.
+
+Use `siteops validate <manifest> --plan` to inspect the effective composition
+before deployment. Read the deployed resources from Azure or their projected
+custom resources when verifying provider state.
+
 ### Empty site mappings
 
 **A mapping key with no value no longer erases its inherited mapping.** A bare
