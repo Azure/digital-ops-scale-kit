@@ -138,6 +138,7 @@ class ReferenceResult:
     target_collection: str | None
     target_identity: tuple[str, ...] | None
     target_source: Path | None
+    source_bindings: tuple[tuple[str, str], ...] = ()
     target_member_name: str | None = None
     target_member_identity: str | None = None
     external: bool = False
@@ -1072,6 +1073,7 @@ def compose_sources(
                             target_collection=None,
                             target_identity=None,
                             target_source=None,
+                            source_bindings=tuple(bindings.items()),
                             unverified_reason=rule.unverified,
                         )
                     )
@@ -1156,6 +1158,7 @@ def compose_sources(
                                 target_collection=rule.target.collection,
                                 target_identity=target_identity,
                                 target_source=target_source,
+                                source_bindings=tuple(bindings.items()),
                                 target_member_name=member.name,
                                 target_member_identity=member_identity,
                                 external=True,
@@ -1193,6 +1196,7 @@ def compose_sources(
                         target_collection=rule.target.collection,
                         target_identity=target_identity,
                         target_source=target_source,
+                        source_bindings=tuple(bindings.items()),
                         target_member_name=(
                             rule.target.member.name
                             if rule.target.member is not None

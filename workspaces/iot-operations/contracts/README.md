@@ -9,7 +9,8 @@ template receives them.
 - provider-owned seed identities such as `default`
 - provider references such as asset `deviceRef` and dataflow `endpointRef`
 - nested lookup from an asset endpoint name into its selected device
-- fields recorded as unverified because the current catalog cannot resolve them
+- fields recorded with their bound value and reason when the current catalog
+  cannot resolve their target
 
 Site Ops interprets only the generic path and identity grammar. Azure IoT
 Operations names and reference semantics remain in this workspace.

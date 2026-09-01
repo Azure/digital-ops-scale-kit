@@ -4318,9 +4318,17 @@ class Orchestrator:
                             reference.source_identity,
                         )
                         if reference.unverified_reason:
+                            bindings = ", ".join(
+                                f"{name}={value!r}"
+                                for name, value in reference.source_bindings
+                            )
+                            binding_suffix = (
+                                f" [{bindings}]" if bindings else ""
+                            )
                             print(
                                 f"      reference [{reference.rule_id}]: "
-                                f"{source_identity} recorded, not verified: "
+                                f"{source_identity}{binding_suffix} recorded, "
+                                "not verified: "
                                 f"{reference.unverified_reason}"
                             )
                             continue

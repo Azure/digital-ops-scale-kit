@@ -747,6 +747,7 @@ def test_unverified_reference_is_recorded(contract, tmp_path):
     ]
     assert len(unverified) == 1
     assert unverified[0].unverified_reason
+    assert unverified[0].source_bindings == (("asset", "oven"),)
 
 
 def test_siteops_metadata_is_rejected_inside_resource_entry(contract, tmp_path):

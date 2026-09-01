@@ -1543,6 +1543,25 @@ steps:
         )
         return workspace
 
+    @staticmethod
+    def _add_unverified_endpoint_rule(workspace):
+        contract_path = workspace / "contracts" / "catalog.yaml"
+        contract = yaml.safe_load(contract_path.read_text())
+        contract["references"].append(
+            {
+                "id": "asset-endpoint-name",
+                "source": {
+                    "collection": "assets",
+                    "select": "properties.deviceRef",
+                    "bind": {
+                        "endpoint": "endpointName",
+                    },
+                },
+                "unverified": "Recorded for an external inventory.",
+            }
+        )
+        contract_path.write_text(yaml.safe_dump(contract, sort_keys=False))
+
     def test_orchestrator_composes_and_validates_resource_references(
         self,
         tmp_path,
@@ -1802,6 +1821,38 @@ steps:
         assert "assets[name='oven'] -> devices[name='plant-opc']" in output
         assert "/inboundEndpoints[key='opc']" in output
         assert "does not delete existing resources" in output
+
+    def test_plan_shows_unverified_binding_values(self, tmp_path, capsys):
+        workspace = self._composition_workspace(tmp_path)
+        self._add_unverified_endpoint_rule(workspace)
+
+        Orchestrator(workspace).show_plan(
+            workspace / "manifests" / "resources.yaml"
+        )
+
+        output = capsys.readouterr().out
+        assert "endpoint='opc'" in output
+        assert "recorded, not verified" in output
+        assert "Recorded for an external inventory." in output
+
+    def test_redacted_plan_hides_unverified_binding_values(
+        self,
+        tmp_path,
+        capsys,
+        monkeypatch,
+    ):
+        workspace = self._composition_workspace(tmp_path)
+        self._add_unverified_endpoint_rule(workspace)
+        monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1")
+
+        Orchestrator(workspace).show_plan(
+            workspace / "manifests" / "resources.yaml"
+        )
+
+        output = capsys.readouterr().out
+        assert "endpoint='opc'" not in output
+        assert "Recorded for an external inventory." not in output
+        assert "1 recorded reference(s)" in output
 
     def test_plan_hides_absolute_extra_site_roots(self, tmp_path):
         origin = str(tmp_path / "private" / "sites" / "seattle-dev.yaml")
