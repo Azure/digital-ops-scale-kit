@@ -6,6 +6,19 @@ import pytest
 import yaml
 
 
+@pytest.fixture(autouse=True)
+def default_non_integration_output_to_local(monkeypatch, request):
+    """Keep unit and workspace output assertions independent of their host.
+
+    GitHub Actions and Azure Pipelines enable redaction automatically. Most
+    non-integration tests assert local operator output, so make that mode
+    explicit. Integration tests retain the CI default because their logs and
+    artifacts are published.
+    """
+    if request.node.get_closest_marker("integration") is None:
+        monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "0")
+
+
 @pytest.fixture
 def tmp_workspace(tmp_path):
     """Create a minimal workspace structure."""
