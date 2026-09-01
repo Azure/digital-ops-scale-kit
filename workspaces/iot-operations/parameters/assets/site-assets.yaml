@@ -1,0 +1,45 @@
+# A reusable oven asset set. Select it with the device set it references:
+#
+#   # sites/<site>.yaml
+#   properties:
+#     resourceSets:
+#       devices:
+#         - site-devices
+#       assets:
+#         - site-assets
+#
+# The composition contract validates `deviceRef` against the selected device
+# and endpoint. The shared deployment creates devices before assets.
+# `{{ site.name }}` gives each site its own display name, attribute, and topic.
+# See docs/assets.md and docs/resource-catalog.md.
+# Consumed by: asset-resources
+assets:
+  - name: site-oven
+    properties:
+      displayName: "Oven at {{ site.name }}"
+      description: "Multi-function large oven for baked goods."
+      enabled: true
+      deviceRef:
+        deviceName: site-opc-ua
+        endpointName: opc-ua-connector-0
+      attributes:
+        manufacturer: Contoso
+        model: Oven-003
+        line: bakery
+        site: "{{ site.name }}"
+      datasets:
+        - name: oven-telemetry
+          dataPoints:
+            - name: Temperature
+              dataSource: "ns=3;s=SpikeData"
+              dataPointConfiguration: '{"samplingInterval":500,"queueSize":1}'
+            - name: EnergyUse
+              dataSource: "ns=3;s=FastUInt10"
+              dataPointConfiguration: '{"samplingInterval":500,"queueSize":1}'
+          destinations:
+            - target: Mqtt
+              configuration:
+                topic: "azure-iot-operations/data/{{ site.name }}/oven"
+                retain: Never
+                qos: Qos1
+      defaultDatasetsConfiguration: '{"publishingInterval":1000,"samplingInterval":500,"queueSize":1}'

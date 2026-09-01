@@ -8,6 +8,7 @@ Tests cover:
 - Error handling for invalid inputs
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -15,11 +16,13 @@ import yaml
 
 from siteops.models import (
     CONDITION_PATTERN,
+    AnyCondition,
     ArcCluster,
     DeploymentStep,
     KubectlStep,
     Manifest,
     ParallelConfig,
+    ParameterSource,
     SelectorParseError,
     Site,
     _validate_resource,
@@ -352,6 +355,41 @@ class TestDeploymentStepConditionValidation:
         error_msg = str(exc_info.value)
         assert "truthy check" in error_msg
         assert "site.properties.path" in error_msg
+
+    def test_structured_any_condition_is_normalized(self):
+        step = DeploymentStep(
+            name="test",
+            template="test.bicep",
+            when={
+                "any": [
+                    "{{ site.properties.resourceSets.devices }}",
+                    "{{ site.properties.resourceSets.assets }}",
+                ]
+            },
+        )
+
+        assert step.when == AnyCondition(
+            (
+                "{{ site.properties.resourceSets.devices }}",
+                "{{ site.properties.resourceSets.assets }}",
+            )
+        )
+
+    @pytest.mark.parametrize(
+        "when",
+        [
+            {"all": ["{{ site.properties.enabled }}"]},
+            {"any": []},
+            {"any": [7]},
+        ],
+    )
+    def test_invalid_structured_condition_is_rejected(self, when):
+        with pytest.raises(ValueError, match="structured 'when' condition"):
+            DeploymentStep(
+                name="test",
+                template="test.bicep",
+                when=when,
+            )
 
 
 class TestKubectlStepConditionValidation:
@@ -1400,6 +1438,104 @@ steps:
         manifest = Manifest.from_file(manifest_file, workspace_root=manifest_file.parent)
 
         assert manifest.parameters == ["parameters/common.yaml", "parameters/shared.yaml"]
+
+    def test_manifest_parameter_source_object_is_typed(self, tmp_path):
+        manifest_file = tmp_path / "manifest.yaml"
+        manifest_file.write_text(
+            """
+apiVersion: siteops/v1
+kind: Manifest
+name: test-manifest
+sites: [site-a]
+parameters:
+  - path: "parameters/devices/{{ item }}.yaml"
+    forEach: "{{ site.properties.resourceSets.devices }}"
+    collections: [devices]
+steps:
+  - name: deploy
+    template: templates/test.bicep
+"""
+        )
+
+        manifest = Manifest.from_file(
+            manifest_file,
+            workspace_root=manifest_file.parent,
+        )
+
+        assert manifest.parameters == [
+            ParameterSource(
+                path="parameters/devices/{{ item }}.yaml",
+                for_each="{{ site.properties.resourceSets.devices }}",
+                collections=("devices",),
+                declared_in=manifest_file,
+            )
+        ]
+
+    @pytest.mark.parametrize(
+        ("source", "message"),
+        [
+            (
+                {"path": "parameters/{{ item }}.yaml"},
+                "declares no `forEach`",
+            ),
+            (
+                {
+                    "path": "parameters/static.yaml",
+                    "forEach": "{{ site.properties.resourceSets.devices }}",
+                },
+                "contains no `{{ item }}`",
+            ),
+            (
+                {
+                    "path": "parameters/{{ item }}.yaml",
+                    "forEach": "{{ site.properties.resourceSets.devices }}",
+                    "collections": ["devices", "devices"],
+                },
+                "duplicate name 'devices'",
+            ),
+            (
+                {
+                    "path": (
+                        "parameters/devices/"
+                        "{{ site.properties.resourceSets.devices }}.yaml"
+                    ),
+                    "collections": ["devices"],
+                },
+                "dynamic path without `forEach`",
+            ),
+        ],
+    )
+    def test_invalid_manifest_parameter_source_is_rejected(
+        self,
+        tmp_path,
+        source,
+        message,
+    ):
+        manifest_file = tmp_path / "manifest.yaml"
+        manifest_file.write_text(
+            yaml.safe_dump(
+                {
+                    "apiVersion": "siteops/v1",
+                    "kind": "Manifest",
+                    "name": "test-manifest",
+                    "sites": ["site-a"],
+                    "parameters": [source],
+                    "steps": [
+                        {
+                            "name": "deploy",
+                            "template": "templates/test.bicep",
+                        }
+                    ],
+                },
+                sort_keys=False,
+            )
+        )
+
+        with pytest.raises(ValueError, match=re.escape(message)):
+            Manifest.from_file(
+                manifest_file,
+                workspace_root=manifest_file.parent,
+            )
 
     def test_manifest_without_parameters_field(self, tmp_path):
         """Test that missing parameters field defaults to empty list."""
@@ -2810,7 +2946,8 @@ class TestAListEntryIsHeldToItsType:
         )
 
         with pytest.raises(
-            ValueError, match=r"Entry 0 of 'parameters'.*must be str, got int"
+            ValueError,
+            match=r"parameters\[0\] must be a path string or a mapping",
         ):
             Manifest.from_file(path, workspace_root=tmp_path)
 

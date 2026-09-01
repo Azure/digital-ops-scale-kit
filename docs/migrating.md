@@ -29,6 +29,100 @@ siteops -w <workspace> deploy <manifest> --dry-run -l <selector>
 
 ## To v1.0.0b7
 
+### Resource sets
+
+**Resource-set selections are ordered lists.** Replace each scalar set name
+with a one-item list:
+
+```yaml
+# Before
+properties:
+  resourceSets:
+    dataflows: site-telemetry
+
+# After
+properties:
+  resourceSets:
+    dataflows:
+      - site-telemetry
+```
+
+Remove `none`. Omit an area for no selection, or use `[]` when a child site
+must clear a list inherited from its parent. The old scalar and `none` forms
+report `to the legacy scalar`, naming the site and the ordered list to write
+instead.
+
+A plain manifest parameter path that carries a governed collection must become
+the typed object form even when it loads one fixed file:
+
+```yaml
+# Before
+parameters:
+  - samples/my-sample/resources.yaml
+
+# After
+parameters:
+  - path: samples/my-sample/resources.yaml
+    collections: [devices, assets]
+```
+
+Update a custom catalog manifest from scalar path interpolation and the
+`none` comparison:
+
+```yaml
+# Before
+parameters:
+  - "parameters/dataflows/{{ site.properties.resourceSets.dataflows }}.yaml"
+steps:
+  - include: _dataflows.yaml
+    when: "{{ site.properties.resourceSets.dataflows != 'none' }}"
+
+# After
+parameters:
+  - path: "parameters/dataflows/{{ item }}.yaml"
+    forEach: "{{ site.properties.resourceSets.dataflows }}"
+    collections: [dataflowEndpoints, dataflowProfiles, dataflows]
+steps:
+  - include: _dataflows.yaml
+    when: "{{ site.properties.resourceSets.dataflows }}"
+```
+
+The included family partial contributes its `parameterCompositions` contract.
+See [Manifest reference](manifest-reference.md) when a custom partial needs to
+declare one directly.
+
+Device and asset sets are selected independently:
+
+```yaml
+properties:
+  resourceSets:
+    devices:
+      - site-devices
+    assets:
+      - site-assets
+```
+
+Selecting a set applies its definitions. Deselecting it stops applying them and
+does not delete resources from an earlier deployment.
+
+### Catalog step outputs
+
+**Catalog deployment steps now keep a parameter-only interface.** If a custom
+manifest reads catalog step outputs, remove references to `endpointNames`,
+`profileNames`, `dataflowNames`, `dataflowProfileRefs`, `deviceNames`,
+`assetNames`, `assetDeviceRefs`, or `apiVersion`.
+
+Use `siteops validate <manifest> --plan` to inspect the effective composition
+before deployment. Read the deployed resources from Azure or their projected
+custom resources when verifying provider state.
+
+### Empty site mappings
+
+**A mapping key with no value no longer erases its inherited mapping.** A bare
+`labels:`, `properties:`, or `parameters:` is normalized as an empty mapping
+before inheritance merge. Use an explicit field value, such as
+`resourceSets.dataflows: []`, when a child needs to clear supported state.
+
 ### Parameter file selection
 
 **A site-selected parameter path stays within the workspace.** A parameter path containing a

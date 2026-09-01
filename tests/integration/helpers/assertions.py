@@ -69,28 +69,21 @@ def assert_output_exists(step_result: dict[str, Any], output_name: str) -> Any:
 CR_HEALTH_MIN_API_VERSION = "2026-03-01"
 
 
-def skip_unless_health_is_reported(step_result: dict[str, Any]) -> str:
+def skip_unless_health_is_reported(api_version: str) -> str:
     """Skip the calling test when the deployed generation predates health reporting.
 
-    Reads the generation the family entry point reports, so the decision
-    follows what was actually deployed rather than what a release file names.
-
     Args:
-        step_result: The result of the catalog family step.
+        api_version: AIO API version from the target site's release file.
 
     Returns:
         The API version that deployed, when it reports health.
     """
     import pytest
 
-    # Read through the unwrapping helper. ARM returns an output as
-    # `{"value": ..., "type": ...}`, so reading the mapping directly yields a
-    # dict and every caller skips on a release that does report health.
-    api_version = assert_output_exists(step_result, "apiVersion")
     if not isinstance(api_version, str) or not api_version:
-        pytest.skip(
-            f"The family step reported apiVersion as {api_version!r}, so whether "
-            f"this release reports workload health cannot be determined."
+        raise AssertionError(
+            f"The target release declares aioApiVersion as {api_version!r}, "
+            "so whether it reports workload health cannot be determined."
         )
     if api_version < CR_HEALTH_MIN_API_VERSION:
         pytest.skip(

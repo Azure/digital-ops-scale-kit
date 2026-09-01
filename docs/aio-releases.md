@@ -117,7 +117,7 @@ Deploy catalog families outside that window, and reapply them once the upgrade f
 siteops -w workspaces/iot-operations deploy manifests/aio-resources.yaml -l "name=<site>"
 ```
 
-This applies to every family a site selects through `properties.resourceSets`. See [resource-catalog.md](resource-catalog.md).
+This applies to every resource area a site selects through `properties.resourceSets`. See [resource-catalog.md](resource-catalog.md).
 
 ### Supported upgrade paths
 

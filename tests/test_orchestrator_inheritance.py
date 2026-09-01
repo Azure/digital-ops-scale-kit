@@ -643,6 +643,80 @@ labels:
         # Site-specific labels
         assert site.labels["environment"] == "dev"
 
+    def test_null_open_mappings_do_not_erase_inherited_values(self, tmp_workspace):
+        (tmp_workspace / "sites" / "base-site.yaml").write_text(
+            """
+apiVersion: siteops/v1
+kind: SiteTemplate
+name: base-site
+labels:
+  environment: dev
+properties:
+  resourceSets:
+    dataflows:
+      - site-telemetry
+parameters:
+  clusterName: inherited-cluster
+"""
+        )
+        (tmp_workspace / "sites" / "dev-site.yaml").write_text(
+            """
+apiVersion: siteops/v1
+kind: Site
+name: dev-site
+inherits: base-site.yaml
+subscription: "00000000-0000-0000-0000-000000000000"
+resourceGroup: rg-dev
+location: eastus
+labels:
+properties:
+parameters:
+"""
+        )
+
+        site = Orchestrator(tmp_workspace).load_site("dev-site")
+
+        assert site.labels == {"environment": "dev"}
+        assert site.properties == {
+            "resourceSets": {"dataflows": ["site-telemetry"]}
+        }
+        assert site.parameters == {"clusterName": "inherited-cluster"}
+
+    def test_explicit_empty_resource_set_clears_inherited_selection(
+        self,
+        tmp_workspace,
+    ):
+        (tmp_workspace / "sites" / "base-site.yaml").write_text(
+            """
+apiVersion: siteops/v1
+kind: SiteTemplate
+name: base-site
+properties:
+  resourceSets:
+    dataflows:
+      - site-telemetry
+"""
+        )
+        (tmp_workspace / "sites" / "dev-site.yaml").write_text(
+            """
+apiVersion: siteops/v1
+kind: Site
+name: dev-site
+inherits: base-site.yaml
+subscription: "00000000-0000-0000-0000-000000000000"
+resourceGroup: rg-dev
+location: eastus
+properties:
+  resourceSets:
+    dataflows: []
+"""
+        )
+
+        site = Orchestrator(tmp_workspace).load_site("dev-site")
+
+        assert site.properties["resourceSets"]["dataflows"] == []
+
+
 class TestSiteProvenance:
     """Tests for `load_site_with_provenance` per-key origin tracking."""
 

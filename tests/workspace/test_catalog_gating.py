@@ -1,15 +1,13 @@
-"""Tests for the catalog's family gating and per-family completeness.
+"""Tests for catalog gating and deployment-family completeness.
 
-`manifests/aio-resources.yaml` deploys a family only when the site selects a set
-for it, so the gate is what keeps an unconfigured site from deploying every
-family. Two properties matter:
+`manifests/aio-resources.yaml` deploys a family only when the site selects a
+resource set it serves, so the gate keeps an unconfigured site from running
+empty deployments. These properties matter:
 
-- The gate has to evaluate the way the design intends. `_evaluate_condition`
-  fails open, returning True for a malformed condition or a missing property, so
-  a broken gate deploys a family to every site rather than none.
+- The manifest parser rejects malformed gates, and the evaluator treats an
+  absent or empty selection as false.
 - A family has several pieces that must all be present. Adding one and missing a
-  piece degrades quietly: a missing site key or set file makes the manifest
-  invalid for every site, and an ungated include deploys unconditionally.
+  piece can otherwise leave definitions loaded without a deployment step.
 """
 
 import copy
@@ -20,16 +18,12 @@ import pytest
 import yaml
 
 from siteops.models import Manifest
-
-CATALOG_MANIFEST = "manifests/aio-resources.yaml"
-
-# `parameters/dataflows/{{ site.properties.resourceSets.dataflows }}.yaml`
-_SET_PATH = re.compile(
-    r"parameters/(?P<family>[\w-]+)/\{\{\s*site\.properties\.resourceSets\.(?P<key>[\w-]+)\s*\}\}"
+from tests.workspace import catalog_harness as harness
+from tests.workspace.catalog_harness import (
+    CATALOG_FAMILIES,
+    CATALOG_MANIFEST,
+    DATAFLOWS,
 )
-
-# The value every site inherits, meaning "deploy nothing for this family".
-_EMPTY_SET = "none"
 
 # Step-level chaining every family step reads, carrying values resolved from an
 # upstream step rather than derived by naming convention.
@@ -70,39 +64,34 @@ def _unresolved_paths(value, path: str = "") -> list[str]:
     return found
 
 
-def _catalog_families(workspace) -> dict[str, str]:
-    """Map each family directory to the `resourceSets` key that selects it."""
-    raw = yaml.safe_load((workspace / CATALOG_MANIFEST).read_text(encoding="utf-8"))
-    families = {}
-    for entry in raw.get("parameters") or []:
-        match = _SET_PATH.search(entry) if isinstance(entry, str) else None
-        if match:
-            families[match.group("family")] = match.group("key")
-    assert families, (
-        f"No catalog family declaration paths found in {CATALOG_MANIFEST}. If "
-        f"the selection mechanism changed, update this test rather than "
-        f"deleting it."
+def _selection_keys() -> list[str]:
+    """The public `resourceSets` keys the catalog reads.
+
+    Registered rather than rediscovered here. `catalog_harness.CATALOG_FAMILIES`
+    is the one list, and `test_catalog_family_contracts.py` holds it against the
+    declaration paths in the catalog manifest, so a family cannot be wired
+    without a spec or described by a stale one.
+    """
+    return sorted(
+        {
+            key
+            for spec in CATALOG_FAMILIES
+            for key in spec.resource_set_keys
+        }
     )
-    return families
-
-
-@pytest.fixture(scope="module")
-def catalog_families(workspace) -> dict[str, str]:
-    return _catalog_families(workspace)
 
 
 class TestCatalogGateSemantics:
     """The gate deploys a family when a site selects a set, and not otherwise.
 
-    `_evaluate_condition` fails open, so a gate that is subtly wrong is invisible
-    at authoring time and shows up as every site deploying every family.
+    Manifest parsing holds the gate to the evaluator's supported grammar.
     """
 
     def _gated_steps(self, workspace):
         manifest = Manifest.from_file(workspace / CATALOG_MANIFEST, workspace_root=workspace)
         return [step for step in manifest.steps if step.when]
 
-    def test_every_catalog_step_is_gated(self, workspace, catalog_families):
+    def test_every_catalog_step_is_gated(self, workspace):
         """Only the resolve step runs unconditionally.
 
         An ungated family step deploys to every site, including sites that
@@ -116,22 +105,22 @@ class TestCatalogGateSemantics:
         )
 
     def test_gate_skips_a_site_that_selected_no_set(self, workspace, orchestrator, selectable_site):
-        """`none` evaluates false, so the family contributes no deployment."""
+        """Empty lists evaluate false, so no family deployment runs."""
         site = selectable_site
-        for family, key in _catalog_families(workspace).items():
-            site.properties["resourceSets"][key] = _EMPTY_SET
+        for key in _selection_keys():
+            site.properties["resourceSets"][key] = []
 
         for step in self._gated_steps(workspace):
             assert orchestrator._evaluate_condition(step.when, site) is False, (
                 f"Step '{step.name}' would deploy for a site that selected "
-                f"'{_EMPTY_SET}'. Its gate is `{step.when}`."
+                f"no resource set. Its gate is `{step.when}`."
             )
 
     def test_gate_runs_a_site_that_selected_a_set(self, workspace, orchestrator, selectable_site):
         """A named set evaluates true, so the family deploys."""
         site = selectable_site
-        for family, key in _catalog_families(workspace).items():
-            site.properties["resourceSets"][key] = "some-committed-set"
+        for key in _selection_keys():
+            site.properties["resourceSets"][key] = ["some-committed-set"]
 
         for step in self._gated_steps(workspace):
             assert orchestrator._evaluate_condition(step.when, site) is True, (
@@ -139,109 +128,75 @@ class TestCatalogGateSemantics:
                 f"a set. Its gate is `{step.when}`."
             )
 
-    def test_gate_opens_when_the_key_is_absent(self, workspace, orchestrator, selectable_site):
-        """An absent key opens the gate, so the entry point must attach the set file.
+    @pytest.mark.parametrize("selected_key", ["devices", "assets"])
+    def test_device_registry_gate_runs_for_either_public_selection(
+        self,
+        workspace,
+        orchestrator,
+        selectable_site,
+        selected_key,
+    ):
+        site = selectable_site
+        site.properties["resourceSets"] = {
+            "devices": [],
+            "assets": [],
+            "dataflows": [],
+        }
+        site.properties["resourceSets"][selected_key] = ["selected"]
+        steps = {
+            step.name: step
+            for step in Manifest.from_file(
+                workspace / CATALOG_MANIFEST,
+                workspace_root=workspace,
+            ).steps
+        }
 
-        `_evaluate_condition` reads a missing property as empty, and empty is not
-        `none`, so a site carrying no `resourceSets` key selects the family rather
-        than skipping it. Every committed site inherits the key from
-        `base-site.yaml`, and the manifest-level declaration path names the same
-        key, so `_require_selected_parameter_file` stops such a site before any
-        family deploys. Both of those are load-bearing: a family whose entry point
-        omits the declaration path would deploy to every site with template
-        defaults. Asserting the polarity here keeps that dependency visible.
-        """
+        assert orchestrator._evaluate_condition(
+            steps["asset-resources"].when,
+            site,
+        )
+        assert not orchestrator._evaluate_condition(
+            steps["dataflow-resources"].when,
+            site,
+        )
+
+    def test_gate_closes_when_the_key_is_absent(self, workspace, orchestrator, selectable_site):
+        """An omitted resource area selects nothing."""
         site = selectable_site
         site.properties["resourceSets"] = {}
 
         for step in self._gated_steps(workspace):
-            assert orchestrator._evaluate_condition(step.when, site) is True, (
-                f"Step '{step.name}' no longer opens for a site missing its "
-                f"`resourceSets` key. Its gate is `{step.when}`. If the gate now "
-                f"closes instead, the manifest may no longer need to attach the "
-                f"declaration file to catch this case."
+            assert orchestrator._evaluate_condition(step.when, site) is False, (
+                f"Step '{step.name}' would run for a site missing its "
+                f"`resourceSets` key. Its gate is `{step.when}`."
             )
 
 
 class TestCatalogFamilyCompleteness:
     """Every family carries all the pieces a family needs."""
 
-    def test_every_family_ships_an_empty_set(self, workspace, catalog_families):
-        missing = [
-            family
-            for family in catalog_families
-            if not (workspace / "parameters" / family / f"{_EMPTY_SET}.yaml").is_file()
+    def test_no_resource_area_ships_a_none_sentinel(self, workspace):
+        stale = [
+            str((directory / "none.yaml").relative_to(workspace))
+            for spec in CATALOG_FAMILIES
+            for directory in harness.parameter_dirs(workspace, spec)
+            if (directory / "none.yaml").exists()
         ]
-        assert not missing, (
-            f"A family has no `{_EMPTY_SET}.yaml`. The declaration path resolves "
-            f"for every site regardless of the gate, so a site that selected no "
-            f"set would fail to resolve.\n{missing}"
+        assert not stale, (
+            "Empty resource-set lists load no files, so `none.yaml` is a stale "
+            f"sentinel rather than a no-op declaration: {stale}"
         )
 
-    def test_the_empty_set_declares_every_kind_as_empty(self, workspace, catalog_families):
-        """`none.yaml` declares each of the family's kinds, each an empty list.
-
-        Every site inherits this file and it loads regardless of the gate, so a
-        real entry here deploys to the whole fleet. A key present but null, or
-        a kind omitted entirely, is the quieter failure: the family's template
-        falls back to its own default and the file stops meaning "nothing".
-
-        The kinds come from the family template's array parameters, so adding a
-        resource kind to a family without extending its empty set fails here.
-        """
-        array_param = re.compile(r"^\s*param\s+(\w+)\s+array\b", re.MULTILINE)
-        failures: list[str] = []
-
-        for family in catalog_families:
-            entry_point = workspace / "templates" / "aio" / family / "main.bicep"
-            if not entry_point.is_file():
-                entry_point = workspace / "templates" / "aio" / family / "main.bicep"
-            assert entry_point.is_file(), (
-                f"No family entry point found for '{family}'. If the layout "
-                f"changed, update this test rather than deleting it."
-            )
-
-            kinds = set(array_param.findall(entry_point.read_text(encoding="utf-8")))
-            assert kinds, f"{entry_point.name} declares no array parameters."
-
-            empty_set = workspace / "parameters" / family / f"{_EMPTY_SET}.yaml"
-            declared = yaml.safe_load(empty_set.read_text(encoding="utf-8")) or {}
-
-            for kind in sorted(kinds):
-                if kind not in declared:
-                    failures.append(
-                        f"{empty_set.relative_to(workspace)} omits '{kind}', "
-                        f"which {entry_point.name} accepts."
-                    )
-                elif declared[kind] != []:
-                    failures.append(
-                        f"{empty_set.relative_to(workspace)} sets '{kind}' to "
-                        f"{declared[kind]!r}, expected an empty list. Every "
-                        f"site inherits this file."
-                    )
-
-        assert not failures, "\n".join(failures)
-
-    def test_base_site_declares_every_family_key(self, workspace, catalog_families):
+    def test_base_site_omits_resource_set_selections(self, workspace):
         base = yaml.safe_load((workspace / "sites" / "base-site.yaml").read_text(encoding="utf-8"))
-        declared = (base.get("properties") or {}).get("resourceSets") or {}
-        missing = sorted(set(catalog_families.values()) - set(declared))
-        assert not missing, (
-            "base-site.yaml does not default every catalog family, so a site "
-            "that never sets one cannot resolve its declaration path.\n"
-            f"  Missing keys: {missing}"
+        properties = base.get("properties") or {}
+        assert "resourceSets" not in properties, (
+            "Omitting resourceSets is the no-selection default. Keep explicit "
+            "[] for a child site that clears an inherited selection rather "
+            "than enumerating every resource area on the base template."
         )
 
-    def test_base_site_defaults_every_family_to_the_empty_set(self, workspace, catalog_families):
-        base = yaml.safe_load((workspace / "sites" / "base-site.yaml").read_text(encoding="utf-8"))
-        declared = (base.get("properties") or {}).get("resourceSets") or {}
-        wrong = {k: v for k, v in declared.items() if v != _EMPTY_SET}
-        assert not wrong, (
-            f"Every catalog family defaults to '{_EMPTY_SET}' in base-site.yaml, "
-            f"so inheriting a site deploys nothing until it opts in.\n{wrong}"
-        )
-
-    def test_every_family_partial_is_composed_by_the_catalog(self, workspace, catalog_families):
+    def test_every_family_partial_is_composed_by_the_catalog(self, workspace):
         """A family partial that nothing includes is dead content."""
         raw = yaml.safe_load((workspace / CATALOG_MANIFEST).read_text(encoding="utf-8"))
         included = {
@@ -250,10 +205,10 @@ class TestCatalogFamilyCompleteness:
             if isinstance(step, dict) and "include" in step
         }
         missing = [
-            family
-            for family in catalog_families
-            if f"_{family.rstrip('s')}.yaml" not in included
-            and f"_{family}.yaml" not in included
+            spec.family
+            for spec in CATALOG_FAMILIES
+            if f"_{spec.family.rstrip('s')}.yaml" not in included
+            and f"_{spec.family}.yaml" not in included
         ]
         assert not missing, (
             "A family has a declaration path in the catalog manifest but no "
@@ -275,42 +230,28 @@ class TestPerSiteResolution:
     """
 
     def _resolved_declarations(self, workspace, orchestrator):
-        """Resolve every committed declaration for every site that could deploy it.
+        """Every committed declaration, resolved for every site, with its family.
 
-        All declaration files, not only the sets under `parameters/`, since a
-        sample attaches one the same way and its variables resolve the same way.
-
-        All committed sites, not only those the catalog's own selector matches.
-        A selector is overridable from the CLI, so any site can be handed any
-        declaration, and a variable that resolves for the dev sites while
-        leaving a literal `{{ ... }}` on another is the failure this catches.
+        Sourced from `catalog_harness`, so this covers each registered family
+        rather than one, and a family added later is rendered here without an
+        edit. The family travels with each result, since the name rules and the
+        kinds a declaration carries are per family.
         """
-        from tests.workspace.test_dataflow_validation import _declaration_files
-
-        sites = orchestrator.load_all_sites()
-        assert sites, "No sites loaded from the workspace."
-
-        resolutions: dict[Path, dict[str, dict]] = {}
-        for set_file in _declaration_files(workspace):
-            if set_file.stem == _EMPTY_SET:
-                continue
-            declaration = yaml.safe_load(set_file.read_text(encoding="utf-8")) or {}
-            resolutions[set_file] = {
-                site.name: orchestrator._resolve_template_strings(declaration, site)
-                for site in sites
-            }
-        return resolutions
+        resolved: list[tuple[harness.FamilySpec, Path, dict[str, dict]]] = []
+        for spec in CATALOG_FAMILIES:
+            rendered = harness.resolved_declarations(workspace, orchestrator, spec)
+            resolved.extend((spec, set_path, per_site) for set_path, per_site in rendered.items())
+        return resolved
 
     def test_no_committed_set_leaves_an_unresolved_variable(self, workspace, orchestrator):
         """Every `{{ ... }}` in a declaration resolves for every site.
 
-        A variable naming a label only some sites carry resolves for the rest
-        and ships the literal `{{ ... }}` to the resource provider on the
-        others, which deploys clean and puts those sites on a topic nobody
-        reads.
+        A variable naming a label only some sites carry fails at deployment
+        resolution for the others. Committed definitions should fail here
+        first, before reaching that runtime boundary.
         """
         failures: list[str] = []
-        for set_path, per_site in self._resolved_declarations(workspace, orchestrator).items():
+        for _, set_path, per_site in self._resolved_declarations(workspace, orchestrator):
             for site_name, resolved in per_site.items():
                 leftovers = _unresolved_paths(resolved)
                 if leftovers:
@@ -325,10 +266,14 @@ class TestPerSiteResolution:
 
         This is what proves the fan-out claim. A set whose variables all
         resolved to the same thing would put the whole fleet on one topic.
+
+        Non-vacuity is held twice. Here, that some committed declaration reads a
+        site value at all. In a family's own module, that the worked example the
+        documentation points at is the one still doing it.
         """
         checked: list[Path] = []
-        for set_path, per_site in self._resolved_declarations(workspace, orchestrator).items():
-            source = yaml.safe_load(set_path.read_text(encoding="utf-8"))
+        for _, set_path, per_site in self._resolved_declarations(workspace, orchestrator):
+            source = harness.load_yaml(set_path)
             if "{{ site." not in yaml.safe_dump(source):
                 continue
             checked.append(set_path)
@@ -342,78 +287,76 @@ class TestPerSiteResolution:
                 f"one destination."
             )
 
-        # Named rather than counted. Another declaration carrying a site value
-        # would keep a count above zero while this one quietly stopped using one.
-        worked_example = workspace / "parameters" / "dataflows" / "site-telemetry.yaml"
-        assert worked_example in checked, (
-            f"{worked_example.relative_to(workspace)} is the worked example for "
-            f"per-site values and no longer carries one, so the fan-out claim is "
-            f"unproven by the file the documentation points at. Checked: "
-            f"{[str(p.relative_to(workspace)) for p in checked]}"
+        assert checked, (
+            "No committed declaration reads a site value, so this check "
+            "compared nothing and the fan-out the selection mechanism is sold "
+            "on is unproven."
         )
 
     def test_rendered_names_are_valid_for_every_site(self, workspace, orchestrator):
         """A name carrying a site variable is valid once resolved, on every site.
 
-        The contract test matches the name pattern against the declared string
+        The contract test matches the name rules against the declared string
         with variables replaced by a representative site name, which is the
         shape a site name has. A name may interpolate any site value, and a
         label carries whatever the operator wrote: every committed site spells
         `labels.city` with a capital, so `flow-{{ site.labels.city }}` renders
         `flow-Seattle` and the resource provider rejects it. Length behaves the
-        same way, since a composed name grows with the site values it reads.
+        same way at both ends, since a composed name grows and shrinks with the
+        site values it reads.
 
         Checked here because this is where every declaration is already
         rendered for every committed site.
         """
-        from tests.workspace.test_dataflow_validation import (
-            _KINDS,
-            _MAX_NAME_LENGTH,
-            _NAME_PATTERN,
-            _entries,
-        )
-
         failures: list[str] = []
-        for set_path, per_site in self._resolved_declarations(workspace, orchestrator).items():
+        for spec, set_path, per_site in self._resolved_declarations(workspace, orchestrator):
             for site_name, resolved in per_site.items():
-                for kind in _KINDS:
-                    for entry in _entries(resolved, kind):
+                for kind in spec.kinds:
+                    pattern, min_length, max_length = spec.name_rules(kind)
+                    for entry in harness.entries(resolved, kind.key):
                         name = entry.get("name")
                         if not isinstance(name, str):
                             continue
                         where = (
-                            f"{set_path.relative_to(workspace)} {kind} name "
+                            f"{set_path.relative_to(workspace)} {kind.key} name "
                             f"{name!r} on site '{site_name}'"
                         )
-                        if not _NAME_PATTERN.match(name):
+                        if not pattern.match(name):
                             failures.append(
                                 f"{where} does not match "
-                                f"{_NAME_PATTERN.pattern} once resolved. Site "
+                                f"{pattern.pattern} once resolved. Site "
                                 f"values reach the name verbatim, so lowercase "
                                 f"the label or use a value that is already "
                                 f"lowercase, such as {{{{ site.name }}}}."
                             )
-                        elif len(name) > _MAX_NAME_LENGTH:
+                        elif len(name) < min_length:
                             failures.append(
                                 f"{where} resolves to {len(name)} characters, "
-                                f"over the {_MAX_NAME_LENGTH} the resource "
+                                f"under the {min_length} the resource provider "
+                                f"requires. Lengthen the literal part or read a "
+                                f"longer site value."
+                            )
+                        elif len(name) > max_length:
+                            failures.append(
+                                f"{where} resolves to {len(name)} characters, "
+                                f"over the {max_length} the resource "
                                 f"provider allows. Shorten the literal part or "
                                 f"read a shorter site value."
                             )
         assert not failures, "\n".join(failures)
 
     def test_every_site_selects_a_family_the_catalog_knows(self, workspace, orchestrator):
-        """A `resourceSets` key on a site names a family the catalog deploys.
+        """A `resourceSets` key on a site names a public resource area.
 
-        The gate reads one key per family. A key that names no family is inert:
-        the site keeps the inherited empty set, the family is skipped, and the
-        deploy reports success having created nothing the operator asked for.
+        The gate reads each public resource area. An unknown key is inert:
+        known areas remain absent, the deployment family is skipped, and the
+        deploy reports success without creating what the operator requested.
         Neither the gate nor the parameter path can catch it, since both resolve
         correctly for the key they name.
         """
         import difflib
 
-        known = _catalog_families(workspace)
+        known = _selection_keys()
         failures: list[str] = []
         for site in orchestrator.load_all_sites():
             selections = (site.properties or {}).get("resourceSets") or {}
@@ -421,19 +364,18 @@ class TestPerSiteResolution:
                 failures.append(
                     f"Site '{site.name}' declares `resourceSets` as "
                     f"{type(selections).__name__}, which selects nothing. It is "
-                    f"a mapping of family key to set name."
+                    "a mapping of resource area to an ordered set-name list."
                 )
                 continue
             for key in selections:
-                if key in known.values():
+                if key in known:
                     continue
-                hint = difflib.get_close_matches(str(key), sorted(known.values()), n=1)
+                hint = difflib.get_close_matches(str(key), known, n=1)
                 suggestion = f" Did you mean '{hint[0]}'?" if hint else ""
                 failures.append(
                     f"Site '{site.name}' selects a set for '{key}', which no "
-                    f"family reads, so the selection is discarded and that "
-                    f"family deploys nothing.{suggestion} Families: "
-                    f"{sorted(known.values())}."
+                    f"resource area reads, so the selection is discarded and "
+                    f"deploys nothing.{suggestion} Areas: {known}."
                 )
         assert not failures, "\n".join(failures)
 
@@ -488,6 +430,89 @@ class TestPerSiteResolution:
             f"family against a guessed name rather than the resolved one."
         )
 
+    def test_the_catalog_chaining_file_supplies_every_discovered_name(self, workspace):
+        """A name the resolve step discovers reaches the family through the chain.
+
+        `parameters/common/common.yaml` derives several names from the site name
+        by convention, and those attach at manifest level to every catalog step.
+        A family template that accepts such a name and is not handed the resolved
+        one deploys against the convention default. That succeeds on every site
+        following the convention and writes to the wrong resource, or fails, on
+        any that does not, and nothing else in the suite can see it: the
+        parameter is supplied, so the required-parameter sweep is satisfied, and
+        the template compiles either way.
+
+        The at-risk set is derived rather than listed, so a family accepting a
+        new discovered name is covered on arrival. An output that merely echoes
+        an input of the same name is excluded, since chaining it would return
+        the value the site already supplied.
+        """
+        resolve = (workspace / "templates" / "aio" / "resolve-aio.bicep").read_text(
+            encoding="utf-8"
+        )
+        discovered = {
+            name
+            for name, expression in re.findall(
+                r"^output\s+(\w+)\s+\w+\s*=\s*(.+)$", resolve, re.MULTILINE
+            )
+            if expression.strip() != name
+        }
+        assert discovered, (
+            "resolve-aio.bicep emits no output that is more than an echo of its "
+            "input, so this check covers nothing."
+        )
+
+        common = yaml.safe_load(
+            (workspace / "parameters" / "common" / "common.yaml").read_text(encoding="utf-8")
+        ) or {}
+        chained = set(
+            yaml.safe_load((workspace / _CATALOG_CHAINING).read_text(encoding="utf-8")) or {}
+        )
+
+        failures: list[str] = []
+        for spec in CATALOG_FAMILIES:
+            entry_point = harness.entry_point(workspace, spec)
+            if not entry_point.is_file():
+                continue
+            accepted = set(
+                re.findall(
+                    r"^\s*param\s+(\w+)\s+", entry_point.read_text(encoding="utf-8"), re.MULTILINE
+                )
+            )
+            for name in sorted(accepted & set(common) & discovered):
+                if name not in chained:
+                    failures.append(
+                        f"templates/aio/{spec.template_dir}/main.bicep accepts "
+                        f"`{name}`, which common.yaml derives by convention and "
+                        f"the resolve step reads back. {_CATALOG_CHAINING} does "
+                        f"not chain it, so the family would deploy against the "
+                        f"derived name rather than the resolved one."
+                    )
+
+        assert not failures, "\n".join(failures)
+
+    def test_every_catalog_chaining_value_comes_from_a_step(self, workspace):
+        """Nothing in the chaining file is a literal or a site variable.
+
+        The file exists to carry values an upstream step read back. A key that
+        stopped being a step reference would still satisfy the template's
+        required parameter, so the family would deploy against whatever the
+        chaining file now says with no other signal.
+        """
+        chaining = yaml.safe_load(
+            (workspace / _CATALOG_CHAINING).read_text(encoding="utf-8")
+        ) or {}
+        assert chaining, f"{_CATALOG_CHAINING} carries no keys."
+
+        wrong = {
+            key: value for key, value in chaining.items() if "{{ steps." not in str(value)
+        }
+        assert not wrong, (
+            f"{_CATALOG_CHAINING} carries values that are not step outputs, so "
+            f"a family would deploy against a guessed name rather than a "
+            f"resolved one.\n{wrong}"
+        )
+
 
 class TestCatalogStepOrder:
     """Resources within a family are ordered before anything that references them.
@@ -508,6 +533,78 @@ class TestCatalogStepOrder:
             workspace / "manifests" / "_dataflows.yaml", workspace_root=workspace
         )
         assert [s.name for s in manifest.steps] == ["dataflow-resources"]
+
+    def test_asset_family_is_one_step(self, workspace):
+        """Devices and assets deploy together, in one round trip per site.
+
+        The asset family groups two resource kinds with an ordering between them.
+        Splitting them into two steps would express that ordering in the manifest
+        rather than in `dependsOn`, and would double the deployments a fleet run
+        issues for this family.
+        """
+        manifest = Manifest.from_file(
+            workspace / "manifests" / "_assets.yaml", workspace_root=workspace
+        )
+        assert [s.name for s in manifest.steps] == ["asset-resources"]
+
+    def test_assets_deploy_before_dataflows(self, workspace):
+        """A dataflow may name an asset as its source, so the asset comes first.
+
+        Family order in the catalog manifest is the only thing sequencing two
+        families, since each deploys as its own step and ARM cannot see across
+        them. A dataflow whose source names an asset that does not exist yet
+        deploys clean and moves nothing, which is the same silent failure the
+        within-family `dependsOn` exists to prevent.
+
+        Asserted on both surfaces the manifest carries. The include order is what
+        sequences the deploy, and the declaration paths load in the same order, so
+        keeping them aligned keeps the file readable as one ordering rather than
+        two.
+        """
+        raw = yaml.safe_load((workspace / CATALOG_MANIFEST).read_text(encoding="utf-8"))
+
+        includes = [
+            step["include"]
+            for step in raw.get("steps") or []
+            if isinstance(step, dict) and "include" in step
+        ]
+        for family in ("_assets.yaml", "_dataflows.yaml"):
+            assert family in includes, (
+                f"The catalog manifest no longer includes {family}, so the "
+                f"ordering between the asset and dataflow families is unchecked. "
+                f"Includes present: {includes}"
+            )
+        assert includes.index("_assets.yaml") < includes.index("_dataflows.yaml"), (
+            "The catalog manifest includes _dataflows.yaml before _assets.yaml, "
+            "so a dataflow sourcing an asset would deploy before the asset "
+            f"exists. Includes in order: {includes}"
+        )
+
+        paths = [
+            entry["path"] if isinstance(entry, dict) else entry
+            for entry in raw.get("parameters") or []
+        ]
+        devices_path = next(
+            (i for i, p in enumerate(paths) if "parameters/devices/" in p),
+            None,
+        )
+        assets_path = next((i for i, p in enumerate(paths) if "parameters/assets/" in p), None)
+        dataflows_path = next(
+            (i for i, p in enumerate(paths) if "parameters/dataflows/" in p), None
+        )
+        assert (
+            devices_path is not None
+            and assets_path is not None
+            and dataflows_path is not None
+        ), (
+            "The catalog manifest no longer loads every resource declaration path.\n"
+            f"  Paths: {paths}"
+        )
+        assert devices_path < assets_path < dataflows_path, (
+            "The catalog manifest lists the dataflow declaration path before the "
+            "device or asset path. Keep the source list in dependency order and "
+            f"the family includes in deployment order.\n  Paths: {paths}"
+        )
 
     def test_every_family_step_deploys_the_family_entry_point(self, workspace):
         """A family step points at its `main.bicep`, not at a version module.
@@ -549,9 +646,11 @@ class TestCatalogStepOrder:
         data. Losing this `dependsOn` would be invisible until a live run, and it
         has to hold in each module rather than in one of them.
         """
-        modules = sorted(
-            (workspace / "templates" / "aio" / "dataflows" / "modules").glob("dataflows-*.bicep")
-        )
+        modules = [
+            harness.version_module(workspace, DATAFLOWS, version)
+            for version in harness.supported_api_versions(workspace, DATAFLOWS)
+        ]
+        modules = sorted(module for module in modules if module.is_file())
         assert modules, (
             "No per-generation dataflow modules found, so this check covers "
             "nothing. Either the family moved or its layout changed."
@@ -560,7 +659,8 @@ class TestCatalogStepOrder:
         for module in modules:
             text = module.read_text(encoding="utf-8")
             dataflow_block = text.split(
-                "resource dataflowResources 'Microsoft.IoTOperations/instances/dataflowProfiles/dataflows"
+                f"resource dataflowResources "
+                f"'{DATAFLOWS.kind('dataflows').resource_type}"
             )
             assert len(dataflow_block) == 2, (
                 f"{module.name} declares no dataflows resource, so ordering "

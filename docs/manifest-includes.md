@@ -66,17 +66,30 @@ Manifest-level `parameters:` lists merge across includes:
 
 - The parent's `parameters:` come first.
 - Each include's manifest-level `parameters:` are appended after, in include order.
-- Duplicate paths (compared as normalized POSIX strings) are dropped on the first wins basis, so the same file declared by both is loaded once, in the parent's position.
-- That is path deduplication, not key precedence. When the parent and an include attach *different* files that both set one key, the files load in list order and the include's value survives.
+- Duplicate string paths are compared as normalized POSIX strings. Parameter
+  source objects are compared by normalized `path` and `forEach`. The first
+  occurrence keeps its position, and duplicate sources must declare the same
+  `collections` metadata.
+- That is path deduplication, not key precedence. When the parent and an include
+  attach different files that both set one key, the files load in list order.
+  The later file's scalar or ungoverned list value survives. A collection
+  governed by a `ParameterComposition` contract composes by identity instead,
+  and two sources writing one identity are rejected.
 
 Step-level `parameters:` (on individual steps) are not affected by include resolution. They follow the existing per-step rules.
+
+`parameterCompositions:` paths also merge across includes. They are
+workspace-relative, canonicalized, and deduplicated. A gated include contributes
+its contracts unconditionally because the contract describes parameter
+identity and references, while rules over unselected collections bind nothing.
 
 ## Standalone manifests vs partials
 
 Any manifest can be included. When it is, top-level fields that only make sense for standalone deployment are silently ignored:
 
 - `name`, `description`, `selector`, `sites`, and `parallel` flow no further than the included file.
-- Only `steps:` and manifest-level `parameters:` are spliced into the parent.
+- Only `steps:`, manifest-level `parameters:`, and
+  `parameterCompositions:` are spliced into the parent.
 
 The convention for files authored primarily to be included is the `_` filename prefix (e.g., `_aio-fundamentals.yaml`, `_partial.yaml`). Standalone manifests such as `manifests/aio-install.yaml` exist as convenience entry points for `siteops deploy`. **Compositions should include the `_` partials, not the standalone manifests**, so that two siblings can share a common preamble without colliding on step names.
 

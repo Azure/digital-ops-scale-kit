@@ -16,6 +16,8 @@ from pathlib import Path
 
 import yaml
 
+from tests.workspace import catalog_harness as harness
+
 INTEGRATION_DIR = Path(__file__).parent.parent / "integration"
 
 
@@ -34,23 +36,65 @@ def _module_constants(path: Path) -> dict[str, str]:
     return constants
 
 
-def _declared_names(workspace: Path) -> set[str]:
-    """Every resource name any committed dataflow declaration carries."""
-    from tests.workspace.test_dataflow_validation import (
-        _KINDS,
-        _declaration_files,
-        _entries,
-        _load_yaml,
-    )
+def _selected_area_sets(path: Path) -> list[tuple[str, str]]:
+    """The resource-area and set pairs applied to each resolved site.
 
+    Read as names rather than as literals, then resolved through the module's
+    own constants. A pair built from something other than a module constant is
+    reported rather than skipped, since the point of the tuple is that every
+    value it carries is checkable from here.
+    """
+    constants = _module_constants(path)
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+
+    selections: list[tuple[str, str]] | None = None
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(
+            isinstance(target, ast.Name) and target.id == "CATALOG_SELECTIONS"
+            for target in node.targets
+        ):
+            continue
+        assert isinstance(node.value, (ast.Tuple, ast.List)), (
+            f"{path.name} declares CATALOG_SELECTIONS as "
+            f"{type(node.value).__name__}, where a tuple of (family, set) pairs "
+            f"belongs."
+        )
+        selections = []
+        for element in node.value.elts:
+            assert isinstance(element, (ast.Tuple, ast.List)) and len(element.elts) == 2, (
+                f"{path.name}: every CATALOG_SELECTIONS entry is a (family, set) "
+                f"pair."
+            )
+            resolved: list[str] = []
+            for item in element.elts:
+                assert isinstance(item, ast.Name) and item.id in constants, (
+                    f"{path.name}: CATALOG_SELECTIONS carries a value that is "
+                    f"not a module constant, so this check cannot resolve it. "
+                    f"Name each family and set as a constant."
+                )
+                resolved.append(constants[item.id])
+            selections.append((resolved[0], resolved[1]))
+
+    assert selections is not None, (
+        f"{path.name} no longer defines CATALOG_SELECTIONS. Update this check "
+        f"rather than deleting it."
+    )
+    return selections
+
+
+def _declared_names(workspace: Path) -> set[str]:
+    """Every resource name any committed catalog declaration carries."""
     names: set[str] = set()
-    for path in _declaration_files(workspace):
-        data = _load_yaml(path) or {}
-        for key in _KINDS:
-            for entry in _entries(data, key):
-                name = entry.get("name")
-                if isinstance(name, str):
-                    names.add(name)
+    for spec, paths in harness.declarations_by_family(workspace):
+        for path in paths:
+            data = harness.load_yaml(path) or {}
+            for key in spec.kind_keys:
+                for entry in harness.entries(data, key):
+                    name = entry.get("name")
+                    if isinstance(name, str):
+                        names.add(name)
     return names
 
 
@@ -71,6 +115,8 @@ class TestIntegrationConstantsMatchTheWorkspace:
         "test_aio_resources_manifest.py": (
             "SET_ENDPOINT_NAME",
             "SET_DATAFLOW_NAME",
+            "SET_DEVICE_NAME",
+            "SET_ASSET_NAME",
         ),
     }
 
@@ -104,39 +150,110 @@ class TestIntegrationConstantsMatchTheWorkspace:
         assert checked > 0, "No constants were checked."
         assert not failures, "\n".join(failures)
 
-    def test_the_selected_set_constant_names_a_real_set(self, workspace):
-        """`CATALOG_SET` in the integration conftest names a committed file."""
+    def test_the_selected_set_constants_name_real_sets(self, workspace):
+        """Every set the `aio-resources` phase selects names a committed file."""
         conftest = INTEGRATION_DIR / "conftest.py"
-        constants = _module_constants(conftest)
-
-        family = constants.get("CATALOG_FAMILY")
-        selected = constants.get("CATALOG_SET")
-        assert family and selected, (
-            "tests/integration/conftest.py no longer defines CATALOG_FAMILY "
-            "and CATALOG_SET. Update this check rather than deleting it."
+        selections = _selected_area_sets(conftest)
+        assert selections, (
+            "tests/integration/conftest.py selects no catalog set, so the "
+            "`aio-resources` phase would deploy nothing and report success."
         )
 
-        set_file = workspace / "parameters" / family / f"{selected}.yaml"
-        assert set_file.is_file(), (
-            f"The integration fixture selects set '{selected}' for family "
-            f"'{family}', but {set_file.relative_to(workspace)} does not "
-            f"exist. A live run would deploy nothing and report success."
+        registered = {
+            key: spec
+            for spec in harness.CATALOG_FAMILIES
+            for key in spec.resource_set_keys
+        }
+        for area, selected in selections:
+            set_file = workspace / "parameters" / area / f"{selected}.yaml"
+            assert set_file.is_file(), (
+                f"The integration fixture selects set '{selected}' for resource "
+                f"area '{area}', but parameters/{area}/{selected}.yaml does not "
+                f"exist. A live run would deploy nothing and report success."
+            )
+
+            assert area in registered, (
+                f"The integration fixture selects resource area '{area}', "
+                "which no catalog family spec describes. A live run would "
+                "select content nothing else in this suite checks. Registered: "
+                f"{sorted(registered)}"
+            )
+
+            spec = registered[area]
+            declaration = harness.load_yaml(set_file) or {}
+            # Counted over the kinds a template deploys, not over every key. A
+            # file whose only entries sit under an unknown key deploys nothing,
+            # which is the outcome this guard exists to reject.
+            selected_kinds = [
+                kind.key
+                for kind in spec.kinds
+                if (kind.resource_set_key or spec.resource_set_key) == area
+            ]
+            declared = sum(
+                len(harness.entries(declaration, key))
+                for key in selected_kinds
+            )
+            assert declared > 0, (
+                f"The integration fixture selects set '{selected}' for resource "
+                f"area '{area}', which declares no resources that its deployment "
+                "family handles. The live run would deploy nothing, and every "
+                "assertion that reads a name from this set would pass against a "
+                "run that created nothing. Select a set that declares at least "
+                f"one resource. Known kinds: {sorted(spec.kind_keys)}"
+            )
+
+    def test_each_named_resource_area_and_set_pair_is_selected(self):
+        """The named resource-area constants are the pairs the fixture applies.
+
+        The fixture loops `CATALOG_SELECTIONS`, and each area also carries its
+        own named constants so an assertion elsewhere can read one. A constant
+        left out of the tuple names a set nothing selects, and the assertions
+        keyed on it would run against resources that never deployed.
+        """
+        constants = _module_constants(INTEGRATION_DIR / "conftest.py")
+        selected = set(_selected_area_sets(INTEGRATION_DIR / "conftest.py"))
+
+        pairs = {
+            "dataflow": ("CATALOG_FAMILY", "CATALOG_SET"),
+            "device": ("DEVICE_CATALOG_FAMILY", "DEVICE_CATALOG_SET"),
+            "asset": ("ASSET_CATALOG_FAMILY", "ASSET_CATALOG_SET"),
+        }
+        for label, (family_constant, set_constant) in pairs.items():
+            for constant in (family_constant, set_constant):
+                assert constant in constants, (
+                    f"tests/integration/conftest.py no longer defines "
+                    f"{constant}. Update this check rather than deleting it."
+                )
+            pair = (constants[family_constant], constants[set_constant])
+            assert pair in selected, (
+                f"The {label} pair {pair} is named in conftest but is not in "
+                f"CATALOG_SELECTIONS, so the fixture never selects it. "
+                f"Selected: {sorted(selected)}"
+            )
+
+    def test_every_registered_family_is_exercised_by_the_phase(self):
+        """Every deployment family is reached by a selected resource area.
+
+        The phase deploys one entry point whose steps are gated by public
+        resource areas. A family with no selected area would pass every offline
+        contract without being written to a real provider.
+        """
+        selected_areas = {
+            area
+            for area, _ in _selected_area_sets(
+                INTEGRATION_DIR / "conftest.py"
+            )
+        }
+        missing = sorted(
+            spec.family
+            for spec in harness.CATALOG_FAMILIES
+            if not selected_areas.intersection(spec.resource_set_keys)
         )
-
-        from tests.workspace.test_dataflow_validation import _KINDS, _entries, _load_yaml
-
-        declaration = _load_yaml(set_file) or {}
-        # Counted over the kinds a template deploys, not over every key. A file
-        # whose only entries sit under an unknown key deploys nothing, which is
-        # the outcome this guard exists to reject.
-        declared = sum(len(_entries(declaration, key)) for key in _KINDS)
-        assert declared > 0, (
-            f"The integration fixture selects set '{selected}' for family "
-            f"'{family}', which declares no resources of any kind the family "
-            f"deploys. The live run would deploy nothing, and every assertion "
-            f"that reads a name from this set would pass against a run that "
-            f"created nothing. Select a set that declares at least one "
-            f"resource. Known kinds: {sorted(_KINDS)}"
+        assert not missing, (
+            f"These catalog families are never selected by the `aio-resources` "
+            f"integration phase, so nothing deploys them against a real "
+            f"subscription: {missing}. Add a (resource area, set) pair to "
+            f"CATALOG_SELECTIONS in tests/integration/conftest.py."
         )
 
 
@@ -144,8 +261,8 @@ class TestIntegrationStepNamesMatchTheManifests:
     """A step name an integration module asserts is a step some manifest has."""
 
     _STEP_CONSTANTS = {
-        "test_dataflow_sample_manifest.py": "CATALOG_STEP",
-        "test_aio_resources_manifest.py": "CATALOG_STEP",
+        "test_dataflow_sample_manifest.py": ("CATALOG_STEP",),
+        "test_aio_resources_manifest.py": ("CATALOG_STEP", "ASSET_CATALOG_STEP"),
     }
 
     def test_expected_step_names_exist(self, workspace):
@@ -160,16 +277,17 @@ class TestIntegrationStepNamesMatchTheManifests:
         assert step_names, "No step names found across the workspace manifests."
 
         failures: list[str] = []
-        for module_name, constant in self._STEP_CONSTANTS.items():
+        for module_name, constant_names in self._STEP_CONSTANTS.items():
             constants = _module_constants(INTEGRATION_DIR / module_name)
-            expected = constants.get(constant)
-            assert expected, f"{module_name} no longer defines {constant}."
-            if expected not in step_names:
-                failures.append(
-                    f"{module_name}: {constant} = '{expected}', which no "
-                    f"manifest declares as a step. A live run would assert "
-                    f"against a step that never executes."
-                )
+            for constant in constant_names:
+                expected = constants.get(constant)
+                assert expected, f"{module_name} no longer defines {constant}."
+                if expected not in step_names:
+                    failures.append(
+                        f"{module_name}: {constant} = '{expected}', which no "
+                        f"manifest declares as a step. A live run would assert "
+                        f"against a step that never executes."
+                    )
 
         assert not failures, "\n".join(failures)
 
@@ -209,7 +327,14 @@ class TestIntegrationApiVersionsMatchTheWorkspace:
 class TestKubernetesResourceTypesAreConsistent:
     """The projected resource types are spelled the same in every module."""
 
-    _TYPE_PATTERN = re.compile(r"['\"]([a-z]+\.connectivity\.iotoperations\.azure\.com)['\"]")
+    # AIO workload resources project into `<kind>.connectivity.iotoperations.azure.com`,
+    # and namespace-scoped Device Registry resources into
+    # `<kind>.namespaces.deviceregistry.microsoft.com`. Both groups are matched, since
+    # a module spelling either one differently reads a resource type nothing serves.
+    _TYPE_PATTERN = re.compile(
+        r"['\"]([a-z]+\.(?:connectivity\.iotoperations\.azure\.com"
+        r"|namespaces\.deviceregistry\.microsoft\.com))['\"]"
+    )
 
     def test_no_two_spellings_of_one_resource_type(self):
         by_kind: dict[str, set[str]] = {}

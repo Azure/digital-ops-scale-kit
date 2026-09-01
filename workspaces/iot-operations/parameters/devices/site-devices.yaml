@@ -1,0 +1,27 @@
+# A reusable OPC UA device definition for the worked asset set.
+#
+# Select it from a site:
+#
+#   properties:
+#     resourceSets:
+#       devices:
+#         - site-devices
+#
+# The inbound endpoint addresses the simulator deployed by
+# samples/opc-ua-solution/. Point it at a reachable OPC UA server when the site
+# uses a different server.
+# Consumed by: asset-resources
+
+devices:
+  - name: site-opc-ua
+    properties:
+      enabled: true
+      endpoints:
+        outbound:
+          assigned: {}
+        inbound:
+          opc-ua-connector-0:
+            endpointType: Microsoft.OpcUa
+            address: "opc.tcp://opcplc-000000:50000"
+            authentication:
+              method: Anonymous

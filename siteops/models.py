@@ -43,6 +43,7 @@ MAX_INCLUDE_DEPTH = 8
 # Reserved keys for the `include:` step shape. Any other key on an include step
 # is an authoring error.
 _INCLUDE_ALLOWED_KEYS = {"include", "when"}
+_PARAMETER_SOURCE_KEYS = {"path", "forEach", "collections"}
 
 # Allowed top-level keys on a flat-shape Manifest (most common form). Any
 # other key triggers a parse-time error with a "did you mean?" hint when the
@@ -58,6 +59,7 @@ _MANIFEST_FLAT_KNOWN_KEYS = {
     "siteSelector",
     "parallel",
     "parameters",
+    "parameterCompositions",
     "steps",
 }
 
@@ -450,11 +452,82 @@ CONDITION_PATTERN = re.compile(
     r"(?:\s*(==|!=)\s*(?:['\"]([^'\"]*?)['\"]|(true|false)))?\s*\}\}"
 )
 
-# Supported kubectl operations (extensible for future operations like 'wait', 'delete')
+
+@dataclass(frozen=True)
+class AnyCondition:
+    """A structured gate that passes when any atomic condition passes."""
+
+    expressions: tuple[str, ...]
+
+
+WhenCondition = str | AnyCondition
+
+
+def parse_when_condition(
+    when: WhenCondition | dict[str, Any] | None,
+    context: str,
+) -> WhenCondition | None:
+    """Parse one atomic condition or the structured `any` form."""
+    if when is None:
+        return None
+    if isinstance(when, AnyCondition):
+        expressions = when.expressions
+    elif isinstance(when, str):
+        expression = when.strip()
+        if not CONDITION_PATTERN.fullmatch(expression):
+            raise ConditionSyntaxError(
+                f"Invalid 'when' condition syntax on {context}: {when}. "
+                "Expected: {{ site.labels.X == 'value' }}, "
+                "{{ site.properties.path == true }}, "
+                "{{ site.properties.path }} (truthy check), or "
+                "a mapping with one `any` list."
+            )
+        return expression
+    elif isinstance(when, dict):
+        if set(when) != {"any"}:
+            raise ConditionSyntaxError(
+                f"Invalid structured 'when' condition on {context}: "
+                f"expected only `any`, got "
+                f"{sorted(str(key) for key in when)}."
+            )
+        raw_expressions = when.get("any")
+        if not isinstance(raw_expressions, list) or not raw_expressions:
+            raise ConditionSyntaxError(
+                f"Invalid structured 'when' condition on {context}: "
+                "`any` must be a non-empty list of condition strings."
+            )
+        expressions = tuple(raw_expressions)
+    else:
+        raise ConditionSyntaxError(
+            f"Invalid 'when' condition on {context}: expected a string or "
+            "a mapping with one `any` list."
+        )
+
+    parsed: list[str] = []
+    for index, expression in enumerate(expressions):
+        if not isinstance(expression, str) or not expression.strip():
+            raise ConditionSyntaxError(
+                f"Invalid structured 'when' condition on {context}: "
+                f"`any[{index}]` must be a non-empty string."
+            )
+        parsed_expression = parse_when_condition(
+            expression,
+            f"{context} `any[{index}]`",
+        )
+        assert isinstance(parsed_expression, str)
+        parsed.append(parsed_expression)
+    return AnyCondition(tuple(parsed))
+
+
+# Supported kubectl operations. Add provider operations such as `delete` here
+# only when their execution and validation contracts are implemented.
 KUBECTL_OPERATIONS = {"apply"}
 
 
-def validate_condition_syntax(when: str | None, context: str) -> None:
+def validate_condition_syntax(
+    when: WhenCondition | dict[str, Any] | None,
+    context: str,
+) -> None:
     """Reject a `when:` expression the condition evaluator cannot parse.
 
     Condition evaluation fails OPEN, returning True for an expression it cannot
@@ -469,12 +542,14 @@ def validate_condition_syntax(when: str | None, context: str) -> None:
     Raises:
         ValueError: If the expression does not match the supported grammar.
     """
-    if when and not CONDITION_PATTERN.fullmatch(when.strip()):
-        raise ConditionSyntaxError(
-            f"Invalid 'when' condition syntax on {context}: {when}. "
-            "Expected: {{ site.labels.X == 'value' }}, {{ site.properties.path == true }}, "
-            "or {{ site.properties.path }} (truthy check)"
-        )
+    parse_when_condition(when, context)
+
+
+def format_when_condition(when: WhenCondition | None) -> str:
+    """Render a parsed condition for plans and skip diagnostics."""
+    if isinstance(when, AnyCondition):
+        return "any(" + ", ".join(when.expressions) + ")"
+    return when or ""
 
 # Supported wait-step condition types. The first is `arm-tag` (poll an Azure
 # tag on an ARM resource). The dispatch shape accommodates future condition
@@ -515,23 +590,15 @@ class MultipleSubscriptionSitesError(ValueError):
 
 
 class ParameterSelectionError(ValueError):
-    """Raised when a site-selected parameter file does not resolve to a real file.
-
-    A parameter path carrying a variable lets a site choose which file to load.
-    When the site lacks the property, or names a file that does not exist, the
-    step would otherwise deploy with those parameters absent and report success.
-    Distinct from generic `ValueError` so a caller can tell an engine guard from
-    an incidental failure while reading a file.
-    """
+    """Raised for malformed, duplicated, legacy, or unresolved selections."""
 
 
 class ConditionSyntaxError(ValueError):
     """Raised when a `when:` expression does not match the supported grammar.
 
-    Condition evaluation fails open, returning True for anything it cannot
-    parse, so an unvalidated expression turns a gate meant to exclude into one
-    that runs everywhere. Distinct from generic `ValueError` so a caller can
-    tell this from an unrelated model validation failure.
+    Manifest parsing rejects unsupported syntax before the evaluator's
+    defensive fallback can run it. The distinct type lets callers separate an
+    authored condition error from unrelated model validation.
     """
 
 
@@ -1028,7 +1095,7 @@ class DeploymentStep:
     template: str
     parameters: list[str] = field(default_factory=list)
     scope: str = "resourceGroup"
-    when: str | None = None
+    when: WhenCondition | dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         _normalize_null_collections(self)
@@ -1036,7 +1103,7 @@ class DeploymentStep:
         if self.scope not in VALID_SCOPES:
             raise ValueError(f"Invalid scope '{self.scope}'. Must be one of: {VALID_SCOPES}")
 
-        validate_condition_syntax(self.when, f"step '{self.name}'")
+        self.when = parse_when_condition(self.when, f"step '{self.name}'")
 
 
 @dataclass
@@ -1085,7 +1152,7 @@ class KubectlStep:
     operation: str
     arc: ArcCluster
     files: list[str] = field(default_factory=list)
-    when: str | None = None
+    when: WhenCondition | dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         _normalize_null_collections(self)
@@ -1098,7 +1165,7 @@ class KubectlStep:
         if not self.files:
             raise ValueError(f"KubectlStep '{self.name}' must specify at least one file")
 
-        validate_condition_syntax(self.when, f"step '{self.name}'")
+        self.when = parse_when_condition(self.when, f"step '{self.name}'")
 
 
 @dataclass(frozen=True)
@@ -1188,7 +1255,7 @@ class WaitStep:
     condition: WaitCondition
     timeout_minutes: int = 30
     poll_interval_seconds: int = 30
-    when: str | None = None
+    when: WhenCondition | dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.timeout_minutes <= 0:
@@ -1206,11 +1273,24 @@ class WaitStep:
                 f"would be checked only once."
             )
 
-        validate_condition_syntax(self.when, f"step '{self.name}'")
+        self.when = parse_when_condition(self.when, f"step '{self.name}'")
 
 
 # Union type for manifest steps - allows type checking to distinguish step types
 ManifestStep = DeploymentStep | KubectlStep | WaitStep
+
+
+@dataclass(frozen=True)
+class ParameterSource:
+    """A manifest parameter file, optionally expanded over a site list."""
+
+    path: str
+    for_each: str | None = None
+    collections: tuple[str, ...] = ()
+    declared_in: Path | None = field(default=None, compare=False, repr=False)
+
+
+ManifestParameter = str | ParameterSource
 
 
 @dataclass
@@ -1219,7 +1299,7 @@ class Manifest:
 
     A manifest defines:
     - Which sites to deploy to (explicit list or label selector)
-    - What steps to execute (Bicep/ARM deployments or kubectl operations)
+    - What steps to execute (Bicep/ARM deployments, kubectl operations, or waits)
     - The order of deployment (steps execute sequentially per site)
     - Whether to deploy to sites in parallel
     - Shared parameters applied to all steps (with auto-filtering)
@@ -1228,10 +1308,13 @@ class Manifest:
         name: Unique identifier for the manifest
         description: Human-readable description
         sites: Explicit list of site names to deploy to
-        steps: Ordered list of steps (DeploymentStep or KubectlStep)
+        steps: Ordered list of deployment, kubectl, and wait steps
         site_selector: Label selector string (e.g., 'environment=prod')
         parallel: Parallelization config (int, bool, or object with 'sites' key)
-        parameters: Manifest-level parameter files applied to all steps
+        parameters: Manifest-level parameter sources, each a path string or a
+            typed source with `path`, `forEach`, and `collections`
+        parameter_compositions: Workspace contracts governing collection
+            identity and reference validation
 
     Parallel Configuration:
         - parallel: 0           # Unlimited concurrency (all sites at once)
@@ -1249,7 +1332,9 @@ class Manifest:
     steps: list[ManifestStep]
     site_selector: str | None = None
     parallel: ParallelConfig = field(default_factory=ParallelConfig)
-    parameters: list[str] = field(default_factory=list)
+    parameters: list[ManifestParameter] = field(default_factory=list)
+    parameter_compositions: list[str] = field(default_factory=list)
+    source_path: Path | None = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
         """Hold the optional fields to the types this class declares."""
@@ -1346,7 +1431,7 @@ class Manifest:
         # Recursive include resolution. The recursion stack tracks the current
         # DFS path so a fragment shared by two siblings is not flagged as a
         # cycle. The include chain captures the full provenance for diagnostics.
-        steps, parameters = _resolve_steps_and_params(
+        steps, parameters, parameter_compositions = _resolve_steps_and_params(
             spec=spec,
             manifest_path=path,
             workspace_root=root.resolve(),
@@ -1365,6 +1450,8 @@ class Manifest:
             site_selector=site_selector,
             parallel=parallel,
             parameters=parameters,
+            parameter_compositions=parameter_compositions,
+            source_path=path.resolve(),
         )
 
     def resolve_parameter_path(self, param_path: str, site: "Site") -> str:
@@ -1405,6 +1492,15 @@ class Manifest:
                     value = None
                     break
             if value is not None:
+                if isinstance(value, list):
+                    item_path = result.replace(match.group(0), "{{ item }}")
+                    raise ParameterSelectionError(
+                        f"Parameter path '{param_path}' reads "
+                        f"site.properties.{prop_path} as an ordered list. "
+                        "Replace the scalar source with an object using "
+                        f"path: {item_path!r} and forEach: "
+                        f"'{{{{ site.properties.{prop_path} }}}}'."
+                    )
                 result = result.replace(match.group(0), str(value))
 
         return result
@@ -1497,7 +1593,11 @@ def _resolve_include_path(raw: str, parent_path: Path, workspace_root: Path) -> 
     return candidate
 
 
-def _propagate_when(step: "ManifestStep", include_when: str | None, source: Path) -> None:
+def _propagate_when(
+    step: "ManifestStep",
+    include_when: WhenCondition | dict[str, Any] | None,
+    source: Path,
+) -> None:
     """Apply an include's `when:` to a spliced step.
 
     Raises IncludeError if the step already has its own `when:`. Combining
@@ -1513,12 +1613,14 @@ def _propagate_when(step: "ManifestStep", include_when: str | None, source: Path
         )
     # Assignment here bypasses the step's own __post_init__ validation, so
     # validate explicitly. An include's gate is the same contract as a step's.
-    validate_condition_syntax(include_when, f"include of '{source.name}'")
-    step.when = include_when
+    step.when = parse_when_condition(
+        include_when,
+        f"include of '{source.name}'",
+    )
 
 
 def _parse_inline_step(step_data: dict[str, Any], source_path: Path, index: int) -> "ManifestStep":
-    """Parse a single non-include step into a DeploymentStep or KubectlStep."""
+    """Parse one deployment, kubectl, or wait step."""
     if "name" not in step_data:
         raise ValueError(f"Step {index + 1} missing required field 'name' in manifest: {source_path}")
 
@@ -1636,24 +1738,189 @@ def _parse_arm_tag_condition(step_name: str, condition_data: dict[str, Any], sou
     )
 
 
-def _merge_parameters(parent: list[str], fragment: list[str]) -> list[str]:
-    """Append fragment parameters after parent's, deduplicating by raw path.
+def _parse_parameter_source(
+    value: Any,
+    manifest_path: Path,
+    index: int,
+) -> ManifestParameter:
+    """Parse one string or object entry from manifest `parameters`."""
+    if isinstance(value, str):
+        if not value.strip():
+            raise ValueError(
+                f"Manifest '{manifest_path}' parameters[{index}] must be a "
+                "non-empty path string."
+            )
+        return value
 
-    Deduplication is by raw path string, so the same file declared by both is
-    listed once, in the parent's position. It does not make the parent win on a
-    parameter *key*: two different files that both set one key are both loaded,
-    and `resolve_parameters` applies them in list order, so the fragment's value
-    is the one that survives. A parent that needs to override a fragment's
-    default sets it on the site rather than in its own parameter file.
+    if not isinstance(value, dict):
+        raise ValueError(
+            f"Manifest '{manifest_path}' parameters[{index}] must be a path "
+            "string or a mapping with `path`."
+        )
+
+    extra = sorted(set(value) - _PARAMETER_SOURCE_KEYS)
+    if extra:
+        raise ValueError(
+            f"Manifest '{manifest_path}' parameters[{index}] has unknown "
+            f"key(s): {extra}. Allowed: {sorted(_PARAMETER_SOURCE_KEYS)}."
+        )
+
+    path = value.get("path")
+    if not isinstance(path, str) or not path.strip():
+        raise ValueError(
+            f"Manifest '{manifest_path}' parameters[{index}].path must be a "
+            "non-empty string."
+        )
+
+    for_each = value.get("forEach")
+    if for_each is not None and (
+        not isinstance(for_each, str) or not for_each.strip()
+    ):
+        raise ValueError(
+            f"Manifest '{manifest_path}' parameters[{index}].forEach must be "
+            "a non-empty string."
+        )
+    if for_each is not None and "{{ item }}" not in path:
+        raise ValueError(
+            f"Manifest '{manifest_path}' parameters[{index}] declares "
+            "`forEach` but its path contains no `{{ item }}` placeholder."
+        )
+    if for_each is None and "{{ item }}" in path:
+        raise ValueError(
+            f"Manifest '{manifest_path}' parameters[{index}].path contains "
+            "`{{ item }}` but declares no `forEach` expression."
+        )
+
+    raw_collections = value.get("collections", [])
+    if not isinstance(raw_collections, list):
+        raise ValueError(
+            f"Manifest '{manifest_path}' parameters[{index}].collections "
+            "must be a list of names."
+        )
+    collections: list[str] = []
+    for collection_index, collection in enumerate(raw_collections):
+        if not isinstance(collection, str) or not collection.strip():
+            raise ValueError(
+                f"Manifest '{manifest_path}' "
+                f"parameters[{index}].collections[{collection_index}] must "
+                "be a non-empty string."
+            )
+        name = collection.strip()
+        if name in collections:
+            raise ValueError(
+                f"Manifest '{manifest_path}' parameters[{index}].collections "
+                f"contains duplicate name '{name}'."
+            )
+        collections.append(name)
+
+    if collections and for_each is None and "{{" in path:
+        raise ValueError(
+            f"Manifest '{manifest_path}' parameters[{index}] selects governed "
+            "collections through a dynamic path without `forEach`. Use a fixed "
+            "path or explicit `path` plus `forEach` expansion."
+        )
+
+    return ParameterSource(
+        path=path.strip(),
+        for_each=for_each.strip() if for_each is not None else None,
+        collections=tuple(collections),
+        declared_in=manifest_path,
+    )
+
+
+def _parameter_source_key(source: ManifestParameter) -> tuple[str, str | None]:
+    if isinstance(source, str):
+        return Path(source).as_posix(), None
+    return Path(source.path).as_posix(), source.for_each
+
+
+def _parameter_source_collections(source: ManifestParameter) -> tuple[str, ...]:
+    return source.collections if isinstance(source, ParameterSource) else ()
+
+
+def _merge_parameters(
+    parent: list[ManifestParameter],
+    fragment: list[ManifestParameter],
+) -> list[ManifestParameter]:
+    """Append fragment parameters after the parent's parameter sources.
+
+    Sources deduplicate by normalized path and `forEach`, preserving the
+    parent's position. A repeated source with different `collections` metadata
+    is rejected. Different files still load in order, so the fragment's value
+    wins for an ordinary parameter key both files set.
     """
-    seen = {Path(p).as_posix() for p in parent}
+    seen = {_parameter_source_key(source): source for source in parent}
     merged = list(parent)
-    for p in fragment:
-        key = Path(p).as_posix()
+    for source in fragment:
+        key = _parameter_source_key(source)
         if key not in seen:
-            merged.append(p)
-            seen.add(key)
+            merged.append(source)
+            seen[key] = source
+            continue
+        if _parameter_source_collections(seen[key]) != _parameter_source_collections(
+            source
+        ):
+            raise IncludeError(
+                "Manifest parameter source "
+                f"{key[0]!r} is declared more than once with different "
+                "`collections` metadata."
+            )
     return merged
+
+
+def _parse_parameter_sources(
+    spec: dict[str, Any],
+    manifest_path: Path,
+) -> list[ManifestParameter]:
+    raw = _require_collection(spec, "parameters", manifest_path, list)
+    return [
+        _parse_parameter_source(value, manifest_path, index)
+        for index, value in enumerate(raw)
+    ]
+
+
+def _parse_parameter_compositions(
+    spec: dict[str, Any],
+    manifest_path: Path,
+    workspace_root: Path,
+) -> list[str]:
+    raw_paths = _require_collection(
+        spec,
+        "parameterCompositions",
+        manifest_path,
+        list,
+        str,
+    )
+    result: list[str] = []
+    for index, raw in enumerate(raw_paths):
+        if not raw.strip():
+            raise ValueError(
+                f"Manifest '{manifest_path}' "
+                f"parameterCompositions[{index}] must be a non-empty path."
+            )
+        path = Path(raw)
+        if path.is_absolute() or ".." in path.parts:
+            raise ValueError(
+                f"Manifest '{manifest_path}' parameter composition path "
+                f"'{raw}' must be relative and contain no '..' segments."
+            )
+        resolved = (workspace_root / path).resolve()
+        try:
+            relative = resolved.relative_to(workspace_root)
+        except ValueError:
+            raise ValueError(
+                f"Manifest '{manifest_path}' parameter composition path "
+                f"'{raw}' resolves outside the workspace."
+            ) from None
+        if not resolved.is_file():
+            raise ValueError(
+                f"Manifest '{manifest_path}' parameter composition path "
+                f"'{raw}' does not exist."
+            )
+        normalized = relative.as_posix()
+        if normalized not in result:
+            result.append(normalized)
+    return result
 
 
 def _resolve_steps_and_params(
@@ -1663,8 +1930,8 @@ def _resolve_steps_and_params(
     recursion_stack: list[Path],
     include_chain: list[Path],
     depth: int,
-) -> tuple[list["ManifestStep"], list[str]]:
-    """Recursively resolve `include:` steps into a flat (steps, parameters) pair.
+) -> tuple[list["ManifestStep"], list[ManifestParameter], list[str]]:
+    """Resolve includes into flat steps, parameters, and composition contracts.
 
     Args:
         spec: The current manifest's parsed `spec` dict (i.e., the body
@@ -1683,8 +1950,11 @@ def _resolve_steps_and_params(
         )
 
     steps: list[ManifestStep] = []
-    parameters: list[str] = list(
-        _require_collection(spec, "parameters", manifest_path, list, str)
+    parameters = _parse_parameter_sources(spec, manifest_path)
+    parameter_compositions = _parse_parameter_compositions(
+        spec,
+        manifest_path,
+        workspace_root,
     )
 
     raw_steps = _require_collection(spec, "steps", manifest_path, list)
@@ -1716,7 +1986,7 @@ def _resolve_steps_and_params(
                 f"Include '{raw_target}' in '{manifest_path}' could not be loaded as a Manifest: {exc}"
             ) from exc
 
-        sub_steps, sub_params = _resolve_steps_and_params(
+        sub_steps, sub_params, sub_compositions = _resolve_steps_and_params(
             spec=sub_spec,
             manifest_path=target_path,
             workspace_root=workspace_root,
@@ -1749,8 +2019,11 @@ def _resolve_steps_and_params(
 
         steps.extend(sub_steps)
         parameters = _merge_parameters(parameters, sub_params)
+        for composition in sub_compositions:
+            if composition not in parameter_compositions:
+                parameter_compositions.append(composition)
 
-    return steps, parameters
+    return steps, parameters, parameter_compositions
 
 
 def _validate_no_step_name_collisions(steps: list["ManifestStep"]) -> None:

@@ -1772,6 +1772,111 @@ class TestPlanOutputIsSeparateFromLogVerbosity:
         assert exit_code == 0
         assert show_plan.called is dry_run
 
+    def test_dry_run_reports_composition_error_without_traceback(
+        self,
+        complete_workspace,
+        capsys,
+    ):
+        from siteops.composition import CompositionError
+        from siteops.orchestrator import Orchestrator
+
+        orchestrator = Orchestrator(complete_workspace)
+        manifest = complete_workspace / "manifests" / "test-manifest.yaml"
+        args = self._args(
+            complete_workspace,
+            manifest,
+            dry_run=True,
+            parallel=None,
+        )
+
+        with (
+            patch.object(
+                orchestrator,
+                "show_plan",
+                side_effect=CompositionError("reference does not resolve"),
+            ),
+            patch.object(orchestrator, "deploy") as deploy,
+        ):
+            exit_code = cmd_deploy(args, orchestrator)
+
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert "Error: reference does not resolve" in captured.err
+        assert "Traceback" not in captured.err
+        deploy.assert_not_called()
+
+    def test_redacted_dry_run_suppresses_composition_details(
+        self,
+        complete_workspace,
+        capsys,
+        monkeypatch,
+    ):
+        from siteops.composition import CompositionError
+        from siteops.orchestrator import Orchestrator
+
+        monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1")
+        orchestrator = Orchestrator(complete_workspace)
+        manifest = complete_workspace / "manifests" / "test-manifest.yaml"
+        args = self._args(
+            complete_workspace,
+            manifest,
+            dry_run=True,
+            parallel=None,
+        )
+        detail = "private-set references private-resource"
+
+        with (
+            patch.object(
+                orchestrator,
+                "show_plan",
+                side_effect=CompositionError(detail),
+            ),
+            patch.object(orchestrator, "deploy") as deploy,
+        ):
+            exit_code = cmd_deploy(args, orchestrator)
+
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert detail not in captured.err
+        assert "Resource composition failed" in captured.err
+        deploy.assert_not_called()
+
+    def test_redacted_dry_run_suppresses_parameter_selection_details(
+        self,
+        complete_workspace,
+        capsys,
+        monkeypatch,
+    ):
+        from siteops.models import ParameterSelectionError
+        from siteops.orchestrator import Orchestrator
+
+        monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1")
+        orchestrator = Orchestrator(complete_workspace)
+        manifest = complete_workspace / "manifests" / "test-manifest.yaml"
+        args = self._args(
+            complete_workspace,
+            manifest,
+            dry_run=True,
+            parallel=None,
+        )
+        detail = "private-site selected private-set"
+
+        with (
+            patch.object(
+                orchestrator,
+                "show_plan",
+                side_effect=ParameterSelectionError(detail),
+            ),
+            patch.object(orchestrator, "deploy") as deploy,
+        ):
+            exit_code = cmd_deploy(args, orchestrator)
+
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert detail not in captured.err
+        assert "Parameter file selection failed" in captured.err
+        deploy.assert_not_called()
+
 
 class TestVerboseSaysWhereTheOutputMoved:
     """`-v` sets log verbosity and nothing else.

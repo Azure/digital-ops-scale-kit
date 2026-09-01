@@ -27,6 +27,7 @@ parameters:
       - samples/secretsync-sample/manifest.yaml
       - samples/opc-ua-solution/manifest.yaml
       - samples/dataflow-sample/manifest.yaml
+      - samples/asset-sample/manifest.yaml
       - samples/aio-with-opc-ua/manifest.yaml
       - samples/aio-with-aksee-bootstrap/manifest.yaml
 

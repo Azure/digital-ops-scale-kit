@@ -11,10 +11,11 @@ Standalone manifests and their internal partials for the AIO platform.
 | `aksee-bootstrap.yaml` | Standalone | yes | AKS Edge Essentials host bootstrap, gated on the completion tag the host worker writes. |
 | `aksee-upgrade.yaml` | Standalone | yes | Day-2 in-place AKS Edge Essentials cluster upgrade. |
 | `secretsync.yaml` | Standalone | yes | Day-2 enable secret sync on an existing AIO install. |
-| `aio-resources.yaml` | Standalone | yes | Config-driven AIO workload resources. Each family deploys only when the site selects a set for it. See `docs/resource-catalog.md`. |
+| `aio-resources.yaml` | Standalone | yes | Config-driven AIO workload resources. Each deployment family runs only when the site selects a resource area it serves. See `docs/resource-catalog.md`. |
 | `_aio-fundamentals.yaml` | Partial | no | Arc extensions, custom location, instance, schema registry, ADR namespace, plus optional global/edge sites. |
 | `_resolve-aio.yaml` | Partial | no | Reads instance and custom-location names from the existing AIO instance for downstream chaining. |
 | `_secretsync.yaml` | Partial | no | Workload-identity-backed secret sync step. |
+| `_assets.yaml` | Partial | no | Device Registry devices and assets. Carries no manifest-level parameters, so a composing manifest can gate it. |
 | `_dataflows.yaml` | Partial | no | Dataflow endpoints, profiles, and dataflows. Carries no manifest-level parameters, so a composing manifest can gate it. |
 
 ## Conventions

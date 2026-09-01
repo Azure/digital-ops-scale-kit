@@ -13,12 +13,6 @@ properties:
   # See: parameters/aio-releases/ for available releases
   aioRelease: "2608"
 
-  # Catalog resource sets. Each key names a file in the matching parameters/
-  # subdirectory, so `dataflows: opc-to-fabric` loads
-  # parameters/dataflows/opc-to-fabric.yaml. `none` deploys nothing.
-  resourceSets:
-    dataflows: "none"
-
   # Deployment options - control which components are deployed
   deployOptions:
     enableGlobalSite: false      # Subscription-scoped edge site

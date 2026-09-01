@@ -6,7 +6,7 @@ templates. Compiling proves the Bicep is well formed. Only a deploy proves the
 declaration reaches the resource provider in a shape it accepts and that the
 resources project to the cluster.
 
-Cluster-side assertions matter more here than the ARM outputs. A dataflow whose
+Cluster-side assertions are the live source of truth. A dataflow whose
 `endpointRef` names an endpoint that does not exist is accepted by ARM, reports
 success, and never moves data. The CR checks below are what catch that.
 """
@@ -15,7 +15,6 @@ import pytest
 
 from tests.integration.conftest import WORKSPACE_PATH
 from tests.integration.helpers.assertions import (
-    assert_output_exists,
     assert_step_succeeded,
     skip_unless_health_is_reported,
 )
@@ -25,6 +24,7 @@ from tests.integration.helpers.kube import (
     wait_for_cr,
     wait_for_cr_health,
 )
+from tests.integration.helpers.releases import load_aio_release
 
 pytestmark = [pytest.mark.integration]
 
@@ -93,50 +93,6 @@ class TestDataflowSampleDeployment:
             )
 
 
-class TestDataflowSampleOutputs:
-    """The family reports what it declared, so a silent empty deploy fails."""
-
-    def test_declared_names_are_reported(self, dataflow_sample_result):
-        """The declaration reached the templates non-empty.
-
-        These outputs echo the input arrays, so they prove the declaration
-        attached and the step ran rather than anything about the deployed
-        resource. That is still the assertion that catches a declaration which
-        silently resolved to nothing, which deploys clean and creates no
-        resources. Resource-level truth is asserted from the cluster below.
-        """
-        for name in dataflow_sample_result["sites"]:
-            step = assert_step_succeeded(dataflow_sample_result, name, CATALOG_STEP)
-            endpoints = assert_output_exists(step, "endpointNames")
-            profiles = assert_output_exists(step, "profileNames")
-            dataflows = assert_output_exists(step, "dataflowNames")
-
-            # Every declared entry, not just the first. A loop that created only
-            # its first item would satisfy a check on one name.
-            for declared, reported, kind in (
-                ((SAMPLE_ENDPOINT_NAME, SAMPLE_ALERTS_ENDPOINT_NAME), endpoints, "endpoint"),
-                ((SAMPLE_PROFILE_NAME, SAMPLE_ALERTS_PROFILE_NAME), profiles, "profile"),
-                ((SAMPLE_DATAFLOW_NAME, SAMPLE_ALERTS_DATAFLOW_NAME), dataflows, "dataflow"),
-            ):
-                missing = [d for d in declared if d not in reported]
-                assert not missing, (
-                    f"Site '{name}': declared {kind}(s) {missing} absent from "
-                    f"the reported names {reported}. The declaration names "
-                    f"{len(declared)} of them, so a collection was not fully "
-                    f"created."
-                )
-
-            # The sample is the only place two dataflows sit in two named pools,
-            # so it is the only case where this output can be wrong and noticed.
-            placements = assert_output_exists(step, "dataflowProfileRefs")
-            assert placements == [SAMPLE_PROFILE_NAME, SAMPLE_ALERTS_PROFILE_NAME], (
-                f"Site '{name}': the declaration puts each dataflow in its own "
-                f"pool, so the reported placements should be "
-                f"{[SAMPLE_PROFILE_NAME, SAMPLE_ALERTS_PROFILE_NAME]}. Reported: "
-                f"{placements}."
-            )
-
-
 class TestDataflowSampleIdempotency:
     """Re-deploying a declaration is a reconcile, not a recreate."""
 
@@ -145,11 +101,10 @@ class TestDataflowSampleIdempotency:
     ):
         """The cluster resources survive a second deploy as the same objects.
 
-        Comparing the deploy's own outputs across two runs proves nothing, since
-        they echo the declaration both runs read. `metadata.uid` is assigned at
-        creation and stable for the object's lifetime, so an unchanged uid is
-        what separates a reconcile from a delete and recreate. A recreate would
-        drop in-flight messages and still report a successful deploy.
+        Two successful deployment results do not distinguish a reconcile from
+        a recreate. `metadata.uid` is assigned at creation and stable for the
+        object's lifetime, so an unchanged uid proves the distinction. A
+        recreate would drop in-flight messages and still report success.
 
         Projection lags ARM, so a recreate is caught once observed rather than
         the instant it happens.
@@ -311,9 +266,15 @@ class TestDataflowSampleHealth:
         [SAMPLE_DATAFLOW_NAME, SAMPLE_ALERTS_DATAFLOW_NAME],
     )
     def test_declared_dataflow_reports_available(
-        self, dataflow_sample_result, aio_namespace, kubectl_available, dataflow_name
+        self,
+        dataflow_sample_result,
+        aio_namespace,
+        kubectl_available,
+        dataflow_name,
+        orchestrator,
     ):
         for site in dataflow_sample_result["sites"]:
-            step = assert_step_succeeded(dataflow_sample_result, site, CATALOG_STEP)
-            skip_unless_health_is_reported(step)
+            assert_step_succeeded(dataflow_sample_result, site, CATALOG_STEP)
+            _, release = load_aio_release(orchestrator, site, WORKSPACE_PATH)
+            skip_unless_health_is_reported(release.get("aioApiVersion"))
         wait_for_cr_health(_DATAFLOW_TYPE, dataflow_name, aio_namespace)

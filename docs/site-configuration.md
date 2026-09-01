@@ -166,12 +166,16 @@ properties:
   # `site.properties` and `site.labels`, never `site.parameters`.
   aioRelease: "2608"
 
-  # Config-driven resource sets. Each key names a file in the matching
-  # `parameters/` subdirectory, so `dataflows: opc-to-fabric` loads
-  # `parameters/dataflows/opc-to-fabric.yaml`. `none` deploys nothing.
-  # See docs/resource-catalog.md.
+  # Ordered resource sets. Each list item names a YAML file in the matching
+  # `parameters/` subdirectory. Omit an area for no selection, or use [] to
+  # clear an inherited list. Deselecting a set does not delete resources.
   resourceSets:
-    dataflows: "none"
+    devices:
+      - site-devices
+    assets:
+      - site-assets
+    dataflows:
+      - site-telemetry
 
   # Capability toggles, kept in one place. Some gate a whole step via
   # `when:` (enableSecretSync, enableGlobalSite, enableEdgeSite). Others
@@ -196,7 +200,7 @@ properties:
 Use properties for:
 
 - Capability toggles, gated via `when:` or passed through to a template (`deployOptions.*`)
-- Path-selection keys the engine reads (`aioRelease` picks a `parameters/aio-releases/<release>.yaml` file, and each key under `resourceSets` picks a file in the matching `parameters/` subdirectory)
+- Path-selection keys the engine reads (`aioRelease` picks one release file, and each list under `resourceSets` selects ordered files from the matching `parameters/` subdirectory)
 - Free-form data structures consumed via `{{ site.properties.X }}`
 
 > **Template values go in `parameters:`. Capability toggles are the one
@@ -255,10 +259,10 @@ Further rules apply:
   Give it a value, inherit one from a parent template, or remove the key, since
   a blank key overrides the inherited value.
 - **`labels`, `properties`, and `parameters` must be mappings** when present.
-  Writing one with no value empties it. On a site with nothing to inherit that
-  reads the same as leaving the key out. On a site that inherits it replaces the
-  parent's block with nothing, which is the rule the first bullet states for
-  scalars. Leave the key out, or write `{}`, to keep what the parent supplies.
+  Writing one with no value is normalized as an empty mapping before
+  inheritance merge, so it preserves values from the parent. Use an explicit
+  nested value to clear supported state, such as
+  `resourceSets.dataflows: []`.
 - **A label value must be text.** Selectors compare text, so `release: 2607`
   matches nothing. Quote it as `release: "2607"`.
 - **A field that holds text must hold text.** `name`, `subscription`,

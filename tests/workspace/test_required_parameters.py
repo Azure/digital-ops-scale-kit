@@ -61,14 +61,20 @@ def _keys_from(path: Path) -> set[str]:
 
 
 def _supplied_keys(
-    workspace: Path, manifest: Manifest, step, site
+    workspace: Path,
+    orchestrator: Orchestrator,
+    manifest: Manifest,
+    step,
+    site,
 ) -> set[str]:
     """Parameter names reaching a step, across the three merge tiers."""
     supplied: set[str] = set()
 
-    for param_path in manifest.parameters or []:
-        resolved = manifest.resolve_parameter_path(param_path, site)
-        supplied |= _keys_from(workspace / resolved)
+    manifest_parameters, _, _ = orchestrator._resolve_manifest_parameters(
+        manifest,
+        site,
+    )
+    supplied |= set(manifest_parameters)
 
     supplied |= set(site.get_all_parameters().keys())
 
@@ -113,7 +119,13 @@ class TestRequiredParametersAreSatisfied:
 
                 for site in sites:
                     checked += 1
-                    missing = required - _supplied_keys(workspace, manifest, step, site)
+                    missing = required - _supplied_keys(
+                        workspace,
+                        orchestrator,
+                        manifest,
+                        step,
+                        site,
+                    )
                     if missing:
                         failures.append(
                             f"{manifest_path.relative_to(workspace)} | site "

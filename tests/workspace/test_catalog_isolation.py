@@ -2,10 +2,10 @@
 
 The install, upgrade, Secret Sync, and host manifests are the heavily exercised
 paths. The catalog is additive: it ships its own entry point, its own partials,
-and its own templates, and a site opts in per family. Nothing here is about the
-catalog working. It is about the catalog staying out of the way.
+and its own templates, and a site opts in by resource area. Nothing here is
+about the catalog working. It is about the catalog staying out of the way.
 
-Three properties make that true, and each is checked below.
+These properties make that true, and each is checked below.
 
 - A base-path manifest never deploys a catalog template, so adding a family
   cannot add a step to an install.
@@ -13,8 +13,8 @@ Three properties make that true, and each is checked below.
   Parameters are filtered per template by name, so even if a declaration
   reached an install step's merge, the step would not receive it. Disjoint
   names are what guarantee the drop rather than relying on it.
-- Every family defaults to its empty set on the base site, so a site that has
-  never heard of the catalog deploys exactly what it did before.
+- The base site omits `resourceSets`, so a site that has never heard of the
+  catalog deploys exactly what it did before.
 """
 
 import re
@@ -22,7 +22,9 @@ from pathlib import Path
 
 import yaml
 
-from siteops.models import DeploymentStep, Manifest
+from siteops.models import DeploymentStep, Manifest, ParameterSource
+from tests.workspace import catalog_harness as harness
+from tests.workspace.catalog_harness import CATALOG_FAMILIES
 
 # `param <name> <type>`, matching the declaration form used across the workspace.
 _PARAM_DECL = re.compile(r"^\s*param\s+(\w+)\s+", re.MULTILINE)
@@ -31,44 +33,39 @@ _PARAM_DECL = re.compile(r"^\s*param\s+(\w+)\s+", re.MULTILINE)
 _CATALOG_ENTRY_POINT = "aio-resources.yaml"
 
 
-def _families(workspace: Path) -> list[str]:
-    """Catalog family directory names, discovered by their composing template."""
-    return sorted(p.parent.name for p in (workspace / "templates" / "aio").glob("*/main.bicep"))
-
-
 def _catalog_template_dirs(workspace: Path) -> set[Path]:
-    return {workspace / "templates" / "aio" / family for family in _families(workspace)}
+    """The template directory each registered family composes from."""
+    return {harness.family_dir(workspace, spec) for spec in CATALOG_FAMILIES}
 
 
 def _declaration_keys(workspace: Path) -> set[str]:
-    """Every top-level key a committed declaration set uses.
+    """Every top-level key a family's declarations use.
 
-    Read from the sets themselves rather than from a list, so a key added to a
-    family's declaration contract is covered without editing this file.
+    Taken from the specs and from the committed sets together. The specs cover a
+    kind that ships before a set declares it, and the sets cover a key an
+    author added ahead of the spec, so a name reaching a base-path template is
+    caught either way.
     """
-    keys: set[str] = set()
-    for family in _families(workspace):
-        # The directory is the plural of the family, matching the selection key.
-        for candidate in (f"{family}s", family):
-            directory = workspace / "parameters" / candidate
+    keys: set[str] = {key for spec in CATALOG_FAMILIES for key in spec.kind_keys}
+    for spec in CATALOG_FAMILIES:
+        for directory in harness.parameter_dirs(workspace, spec):
             if not directory.is_dir():
                 continue
             for path in directory.glob("*.yaml"):
-                data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+                data = harness.load_yaml(path) or {}
                 if isinstance(data, dict):
-                    keys.update(data.keys())
+                    keys.update(key for key in data if key != "_siteops")
     return keys
 
 
 def _declaration_dirs(workspace: Path) -> set[Path]:
     """Directories holding a family's declaration sets."""
-    dirs: set[Path] = set()
-    for family in _families(workspace):
-        for candidate in (f"{family}s", family):
-            directory = workspace / "parameters" / candidate
-            if directory.is_dir():
-                dirs.add(directory.resolve())
-    return dirs
+    return {
+        directory.resolve()
+        for spec in CATALOG_FAMILIES
+        for directory in harness.parameter_dirs(workspace, spec)
+        if directory.is_dir()
+    }
 
 
 def _catalog_sibling_parameter_files(workspace: Path) -> list[Path]:
@@ -84,7 +81,8 @@ def _catalog_sibling_parameter_files(workspace: Path) -> list[Path]:
     )
     declaration_dirs = _declaration_dirs(workspace)
     files: list[Path] = []
-    for raw in manifest.parameters:
+    for source in manifest.parameters:
+        raw = source.path if isinstance(source, ParameterSource) else source
         directory = (workspace / raw).parent.resolve()
         if directory in declaration_dirs:
             continue

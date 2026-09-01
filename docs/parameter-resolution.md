@@ -19,7 +19,7 @@ A parameter file's tier follows from what the file holds, not from which step co
 | The file holds | Attach at | Why |
 |---|---|---|
 | **Chaining**: `{{ steps.X.outputs.Y }}` wiring | Step level | Wiring belongs to one consumer and must not be overridable. Step level is the highest-precedence tier. |
-| **Declaration**: operator-authored values | Manifest level | Sits below site parameters, so a site or a `sites.local/` overlay overrides it. Applies to every step, so several steps can read one source. |
+| **Declaration**: operator-authored values | Manifest level | Sits below site parameters, so a site or a `sites.local/` overlay overrides ordinary values. Applies to every step, so several steps can read one source. Composed resource collections are the exception below. |
 
 The quick test is whether the file contains `{{ steps.`. If it does, it is a chaining file.
 
@@ -27,7 +27,12 @@ Attaching a declaration at step level makes it unoverridable, because step level
 
 Manifest-level attachment is safe to use broadly because parameters are filtered per template: a step receives only the keys its own template declares. A `@secure()` value therefore reaches only the template that declares it.
 
-When a manifest pulls in others via `include:` (see [manifest-includes.md](manifest-includes.md)), each included manifest's manifest-level `parameters:` are appended after the parent's. Duplicate paths (normalized POSIX strings) are dropped on a first-wins basis, so the same file declared by both is loaded once, in the parent's position. That is not the same as the parent winning on a *key*: when the parent and an included manifest attach different files that both set one key, the files load in list order and the included manifest's value survives. A parent that needs to override an included default sets it on the site instead.
+Resource collections governed by a `ParameterComposition` contract are the
+exception to ordinary tier precedence. They compose only from manifest-level
+sources. Change them by selecting resource sets under `site.properties`, not by
+writing the collection array in `site.parameters` or a step parameter file.
+
+When a manifest pulls in others via `include:` (see [manifest-includes.md](manifest-includes.md)), each included manifest's manifest-level `parameters:` are appended after the parent's. Duplicate strings compare by normalized path. Source objects compare by normalized `path` and `forEach`, and their `collections` metadata must agree. The first occurrence keeps its position. That is not the same as the parent winning on a parameter key: different files still load in order, so the later file's scalar or ungoverned list value survives.
 
 ## Template variables
 
@@ -78,7 +83,9 @@ The directory groups files by the role they play in the parameter merge:
 | `parameters/inputs/` | Consumer fan-in (a step pulls outputs from upstream producers) | `inputs/aio-instance.yaml` pulls from `schema-registry`, `adr-ns`, `aio-enablement` |
 | `parameters/outputs/` | Producer fan-out (a single step's outputs feed multiple downstream consumers) | `outputs/aio-instance.yaml` feeds `schema-registry-role` |
 | `parameters/aio-releases/` | Per-release version pin files (selected via `site.properties.aioRelease`) | `aio-releases/2607.yaml` |
-| `parameters/dataflows/` | Dataflow declaration sets (selected via `site.properties.resourceSets.dataflows`) | `dataflows/none.yaml` |
+| `parameters/devices/` | Device definition sets selected through `site.properties.resourceSets.devices` | `devices/site-devices.yaml` |
+| `parameters/assets/` | Asset definition sets selected through `site.properties.resourceSets.assets` | `assets/site-assets.yaml` |
+| `parameters/dataflows/` | Dataflow definition sets selected through `site.properties.resourceSets.dataflows` | `dataflows/site-telemetry.yaml` |
 
 A step that has both fan-in inputs and fan-out outputs gets two files: one under `inputs/`, one under `outputs/`, named after the step (e.g. `inputs/aio-instance.yaml` and `outputs/aio-instance.yaml`).
 
