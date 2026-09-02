@@ -1,0 +1,33 @@
+# An oven asset that shares `composition-opc-ua` with the independently
+# selected boiler set.
+# Consumed by: asset-resources
+
+assets:
+  - name: composition-oven
+    properties:
+      displayName: "Composition oven at {{ site.name }}"
+      description: Oven telemetry from the OPC PLC simulator.
+      enabled: true
+      deviceRef:
+        deviceName: composition-opc-ua
+        endpointName: opc-ua-connector-0
+      attributes:
+        manufacturer: Contoso
+        model: Oven-003
+        site: "{{ site.name }}"
+      datasets:
+        - name: oven-telemetry
+          dataPoints:
+            - name: Temperature
+              dataSource: "ns=3;s=SpikeData"
+              dataPointConfiguration: '{"samplingInterval":500,"queueSize":1}'
+            - name: EnergyUse
+              dataSource: "ns=3;s=FastUInt10"
+              dataPointConfiguration: '{"samplingInterval":500,"queueSize":1}'
+          destinations:
+            - target: Mqtt
+              configuration:
+                topic: "azure-iot-operations/data/{{ site.name }}/resource-set-composition/oven"
+                retain: Never
+                qos: Qos1
+      defaultDatasetsConfiguration: '{"publishingInterval":1000,"samplingInterval":500,"queueSize":1}'

@@ -69,7 +69,10 @@ from siteops.models import (
 from siteops.sanitize import (
     is_redaction_enabled,
     report_parameter_selection_error,
+    report_site_load_error,
     scrub_for_output,
+    scrub_site_for_output,
+    site_name_for_output,
 )
 
 logger = logging.getLogger(__name__)
@@ -1419,10 +1422,13 @@ class Orchestrator:
                 site = self.load_site(name)
                 sites.append(site)
             except (ValueError, yaml.YAMLError, OSError) as e:
-                # Scrubbed once, here, so the log line and the notice below
-                # carry the same text on a published surface.
-                reportable = scrub_for_output(str(e))
-                logger.warning(f"Failed to load site '{name}': {reportable}")
+                # Site errors can carry trusted directory paths and internal
+                # names, so published output uses one generic diagnostic.
+                reportable = report_site_load_error(e)
+                logger.warning(
+                    f"Failed to load site '{site_name_for_output(name)}': "
+                    f"{reportable}"
+                )
                 skipped.append((name, reportable))
 
         if skipped:
@@ -1430,7 +1436,10 @@ class Orchestrator:
 
             print(f"\n\u26a0 Skipped {len(skipped)} site(s) due to errors:", file=sys.stderr)
             for name, error in skipped:
-                print(f"  \u2022 {name}: {error}", file=sys.stderr)
+                print(
+                    f"  \u2022 {site_name_for_output(name)}: {error}",
+                    file=sys.stderr,
+                )
             print(file=sys.stderr)
 
         # Recorded so a caller can fail on it. A site that does not load is one
@@ -2958,6 +2967,7 @@ class Orchestrator:
         site_start = time.time()
         step_outputs: dict[str, dict[str, Any]] = {}
         log = _thread_safe_print if parallel_mode else print
+        site_label = site_name_for_output(site.name)
 
         steps_completed = 0
         steps_skipped = 0
@@ -2969,7 +2979,7 @@ class Orchestrator:
             # Check step/site scope compatibility
             skip_reason = self._check_step_site_compatibility(step, site)
             if skip_reason:
-                log(f"[{site.name}] - {step.name} (skipped: {skip_reason})")
+                log(f"[{site_label}] - {step.name} (skipped: {skip_reason})")
                 steps_skipped += 1
                 step_results.append(
                     {
@@ -2982,7 +2992,7 @@ class Orchestrator:
 
             # Evaluate condition
             if not self._evaluate_condition(step.when, site):
-                log(f"[{site.name}] - {step.name} (skipped: condition not met)")
+                log(f"[{site_label}] - {step.name} (skipped: condition not met)")
                 steps_skipped += 1
                 step_results.append(
                     {
@@ -2997,7 +3007,7 @@ class Orchestrator:
                 continue
 
             step_type = self._get_step_type_label(step)
-            log(f"[{site.name}] > {step.name} ({step_type})...")
+            log(f"[{site_label}] > {step.name} ({step_type})...")
 
             result = self._execute_step(site, step, manifest, timestamp, step_outputs, subscription_outputs)
 
@@ -3006,7 +3016,7 @@ class Orchestrator:
                 outputs = result.outputs or {} if isinstance(result, DeploymentResult) else {}
                 if outputs:
                     step_outputs[step.name] = outputs
-                log(f"[{site.name}] + {step.name}")
+                log(f"[{site_label}] + {step.name}")
                 steps_completed += 1
                 step_results.append(
                     {
@@ -3019,8 +3029,11 @@ class Orchestrator:
                 # Scrubbed once here, so the log line, the site result, and the
                 # step result all carry the same text, and none of them can publish a
                 # resource identity from a CI run.
-                reportable_error = scrub_for_output(result.error)
-                log(f"[{site.name}] x {step.name}: {reportable_error}")
+                reportable_error = scrub_site_for_output(
+                    result.error,
+                    site.name,
+                )
+                log(f"[{site_label}] x {step.name}: {reportable_error}")
                 status = "failed"
                 error_message = reportable_error
                 step_results.append(
@@ -3038,7 +3051,7 @@ class Orchestrator:
         skip_info = f", {steps_skipped} skipped" if steps_skipped > 0 else ""
         status_symbol = "+" if status == "success" else "x"
         log(
-            f"[{site.name}] {status_symbol} completed in {elapsed:.1f}s "
+            f"[{site_label}] {status_symbol} completed in {elapsed:.1f}s "
             f"({steps_completed}/{total_steps - steps_skipped} steps{skip_info})"
         )
 
@@ -3051,7 +3064,7 @@ class Orchestrator:
                 {r["reason"] for r in step_results if r.get("status") == "skipped" and r.get("reason")}
             )
             detail = f" ({'; '.join(reasons)})" if reasons else ""
-            log(f"[{site.name}] ! nothing deployed: every step was skipped{detail}.")
+            log(f"[{site_label}] ! nothing deployed: every step was skipped{detail}.")
 
         return {
             "site": site.name,
@@ -3097,9 +3110,10 @@ class Orchestrator:
                 # parameter file, an unresolved template) fails one site and
                 # leaves the rest of the run reportable, so the operator can
                 # still read the fleet state from the summary.
-                reportable = self._reportable_deploy_error(e)
+                reportable = self._reportable_deploy_error(e, site.name)
                 logger.error(
-                    f"Unexpected error deploying to {site.name}: {reportable}"
+                    "Unexpected error deploying to "
+                    f"{site_name_for_output(site.name)}: {reportable}"
                 )
                 result = self._site_failure_result(
                     site,
@@ -3123,7 +3137,7 @@ class Orchestrator:
         return {
             "site": site.name,
             "status": "failed",
-            "error": scrub_for_output(error),
+            "error": scrub_site_for_output(error, site.name),
             "steps_completed": 0,
             "steps_skipped": 0,
             "steps_total": len(manifest.steps),
@@ -3176,9 +3190,10 @@ class Orchestrator:
                         with results_lock:
                             results.append(result)
                     except Exception as e:
-                        reportable = self._reportable_deploy_error(e)
+                        reportable = self._reportable_deploy_error(e, site.name)
                         logger.error(
-                            f"Unexpected error deploying to {site.name}: "
+                            "Unexpected error deploying to "
+                            f"{site_name_for_output(site.name)}: "
                             f"{reportable}"
                         )
                         with results_lock:
@@ -3203,12 +3218,15 @@ class Orchestrator:
         return results
 
     @staticmethod
-    def _reportable_deploy_error(error: Exception) -> str:
+    def _reportable_deploy_error(
+        error: Exception,
+        site_name: str = "",
+    ) -> str:
         if isinstance(error, CompositionError):
             return report_composition_error(error)
         if isinstance(error, ParameterSelectionError):
             return report_parameter_selection_error(error)
-        return scrub_for_output(str(error))
+        return scrub_site_for_output(str(error), site_name) or ""
 
     @staticmethod
     def _group_sites_by_subscription(
@@ -3312,9 +3330,10 @@ class Orchestrator:
                         self._extract_subscription_outputs(result, site.subscription, subscription_outputs)
                         results.append(result)
                     except Exception as e:
-                        reportable = self._reportable_deploy_error(e)
+                        reportable = self._reportable_deploy_error(e, site.name)
                         logger.error(
-                            f"Error deploying subscription-level site {site.name}: "
+                            "Error deploying subscription-level site "
+                            f"{site_name_for_output(site.name)}: "
                             f"{reportable}"
                         )
                         results.append(
@@ -3381,9 +3400,11 @@ class Orchestrator:
                     continue
                 error = str(result.get("error", "Unknown error"))
                 site = str(result.get("site", ""))
-                if site:
-                    error = error.replace(site, "<site>")
-                reportable = scrub_for_output(error) or "Unknown error"
+                reportable = (
+                    scrub_site_for_output(error, site)
+                    if site
+                    else scrub_for_output(error)
+                ) or "Unknown error"
                 reportable_errors[reportable] = (
                     reportable_errors.get(reportable, 0) + 1
                 )
@@ -3710,26 +3731,34 @@ class Orchestrator:
             # (operator sees it alongside other manifest issues in one
             # diagnostic pass) but suppress the no-match diagnostic
             # below since the parse error is the higher-signal cause.
-            errors.append(str(e))
+            errors.append(
+                "Invalid site selector."
+                if is_redaction_enabled()
+                else str(e)
+            )
             sites = []
             selector_parse_failed = True
         except ValueError as e:
             # Site-resolution failure (cycle, overlay-rename, missing
             # field, etc.). Append and continue so other manifest
             # issues still surface in this pass.
-            errors.append(str(e))
+            errors.append(report_site_load_error(e))
             sites = []
             selector_parse_failed = False
         except FileNotFoundError as e:
             # Manifest `sites:` entry without a workspace file.
-            errors.append(str(e))
+            errors.append(report_site_load_error(e))
             sites = []
             selector_parse_failed = False
         if not sites and (manifest.sites or manifest.site_selector or selector):
             if selector and not selector_parse_failed:
                 # Rich diagnostic when CLI selector knocked everything
                 # out and the selector itself parsed cleanly.
-                errors.append(self.explain_no_match(selector))
+                errors.append(
+                    "CLI selector matched no sites."
+                    if is_redaction_enabled()
+                    else self.explain_no_match(selector)
+                )
             elif not selector:
                 errors.append("No sites matched the specified criteria")
 
@@ -3979,6 +4008,18 @@ class Orchestrator:
                         f"Only one subscription-level site per subscription is allowed."
                     )
 
+        if is_redaction_enabled():
+            site_names = {
+                site.name for site in sites
+            } | {
+                name for name, _ in self.skipped_sites
+            }
+            for site_name in sorted(site_names, key=len, reverse=True):
+                errors = [
+                    scrub_site_for_output(error, site_name) or ""
+                    for error in errors
+                ]
+
         return errors
 
     def _contains_self_reference(self, value: Any, step_name: str) -> bool:
@@ -4166,17 +4207,16 @@ class Orchestrator:
         """
         manifest = Manifest.from_file(manifest_path, workspace_root=self.workspace)
         sites = self.resolve_sites(manifest, selector)
+        redacted = is_redaction_enabled()
 
         if not sites:
             print(f"⚠ No sites matched for manifest '{manifest.name}'")
-            if selector:
+            if selector and not redacted:
                 print(f"  Selector: {selector}")
-            elif manifest.site_selector:
+            elif manifest.site_selector and not redacted:
                 print(f"  Manifest selector: {manifest.site_selector}")
             print()
             return
-
-        redacted = is_redaction_enabled()
 
         print(f"{'═'*60}")
         print(f"  DEPLOYMENT PLAN: {manifest.name}")
@@ -4524,7 +4564,7 @@ class Orchestrator:
                         if self._site_depends_on_subscription_outputs(manifest, site, sub_step_names):
                             # Site depends on failed subscription outputs - block it
                             _thread_safe_print(
-                                f"[{site.name}] - blocked "
+                                f"[{site_name_for_output(site.name)}] - blocked "
                                 "(subscription deployment failed, site depends on its outputs)"
                             )
                             results.append(

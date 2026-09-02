@@ -22,6 +22,7 @@ from tests.workspace import catalog_harness as harness
 from tests.workspace.catalog_harness import (
     CATALOG_FAMILIES,
     CATALOG_MANIFEST,
+    CATALOG_PARTIAL,
     DATAFLOWS,
 )
 
@@ -198,7 +199,7 @@ class TestCatalogFamilyCompleteness:
 
     def test_every_family_partial_is_composed_by_the_catalog(self, workspace):
         """A family partial that nothing includes is dead content."""
-        raw = yaml.safe_load((workspace / CATALOG_MANIFEST).read_text(encoding="utf-8"))
+        raw = yaml.safe_load((workspace / CATALOG_PARTIAL).read_text(encoding="utf-8"))
         included = {
             step["include"]
             for step in raw.get("steps") or []
@@ -391,7 +392,7 @@ class TestPerSiteResolution:
         deploys against a guessed name that works on every site following the
         convention and fails on any that does not.
         """
-        raw = yaml.safe_load((workspace / CATALOG_MANIFEST).read_text(encoding="utf-8"))
+        raw = yaml.safe_load((workspace / CATALOG_PARTIAL).read_text(encoding="utf-8"))
         family_includes = [
             step["include"]
             for step in raw.get("steps") or []
@@ -561,7 +562,7 @@ class TestCatalogStepOrder:
         keeping them aligned keeps the file readable as one ordering rather than
         two.
         """
-        raw = yaml.safe_load((workspace / CATALOG_MANIFEST).read_text(encoding="utf-8"))
+        raw = yaml.safe_load((workspace / CATALOG_PARTIAL).read_text(encoding="utf-8"))
 
         includes = [
             step["include"]
@@ -614,7 +615,7 @@ class TestCatalogStepOrder:
         writes every site at that generation, ignoring the release each site
         actually runs.
         """
-        raw = yaml.safe_load((workspace / CATALOG_MANIFEST).read_text(encoding="utf-8"))
+        raw = yaml.safe_load((workspace / CATALOG_PARTIAL).read_text(encoding="utf-8"))
         includes = [
             step["include"]
             for step in raw.get("steps") or []

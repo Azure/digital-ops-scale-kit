@@ -1,0 +1,36 @@
+# A boiler asset that shares the managed `composition-opc-ua` device with the
+# independently selected oven set. The OPC PLC simulator exposes these nodes.
+# Consumed by: asset-resources
+
+assets:
+  - name: composition-boiler
+    properties:
+      displayName: "Boiler at {{ site.name }}"
+      description: Boiler telemetry from the OPC PLC simulator.
+      enabled: true
+      deviceRef:
+        deviceName: composition-opc-ua
+        endpointName: opc-ua-connector-0
+      attributes:
+        manufacturer: Contoso
+        model: Boiler-001
+        site: "{{ site.name }}"
+      datasets:
+        - name: boiler-telemetry
+          dataPoints:
+            - name: CurrentTemperature
+              dataSource: "nsu=http://microsoft.com/Opc/OpcPlc/Boiler;i=6211"
+              dataPointConfiguration: '{"samplingInterval":500,"queueSize":1}'
+            - name: HeaterState
+              dataSource: "nsu=http://microsoft.com/Opc/OpcPlc/Boiler;i=6212"
+              dataPointConfiguration: '{"samplingInterval":500,"queueSize":1}'
+            - name: TargetTemperature
+              dataSource: "nsu=http://microsoft.com/Opc/OpcPlc/Boiler;i=6217"
+              dataPointConfiguration: '{"samplingInterval":500,"queueSize":1}'
+          destinations:
+            - target: Mqtt
+              configuration:
+                topic: "azure-iot-operations/data/{{ site.name }}/resource-set-composition/boiler"
+                retain: Never
+                qos: Qos1
+      defaultDatasetsConfiguration: '{"publishingInterval":1000,"samplingInterval":500,"queueSize":1}'

@@ -1,0 +1,34 @@
+# An asset managed by the catalog that reads through the externally asserted
+# `external-opc-ua` device from the advanced sample's Bicep-owned provider
+# step.
+# Consumed by: asset-resources
+
+assets:
+  - name: composition-external-oven
+    properties:
+      displayName: "Externally connected oven at {{ site.name }}"
+      description: Oven telemetry through a device managed outside the catalog.
+      enabled: true
+      deviceRef:
+        deviceName: external-opc-ua
+        endpointName: opc-ua-connector-0
+      attributes:
+        manufacturer: Contoso
+        model: Oven-003
+        site: "{{ site.name }}"
+      datasets:
+        - name: external-oven-telemetry
+          dataPoints:
+            - name: Temperature
+              dataSource: "ns=3;s=SpikeData"
+              dataPointConfiguration: '{"samplingInterval":500,"queueSize":1}'
+            - name: EnergyUse
+              dataSource: "ns=3;s=FastUInt10"
+              dataPointConfiguration: '{"samplingInterval":500,"queueSize":1}'
+          destinations:
+            - target: Mqtt
+              configuration:
+                topic: "azure-iot-operations/data/{{ site.name }}/resource-set-composition/external-oven"
+                retain: Never
+                qos: Qos1
+      defaultDatasetsConfiguration: '{"publishingInterval":1000,"samplingInterval":500,"queueSize":1}'

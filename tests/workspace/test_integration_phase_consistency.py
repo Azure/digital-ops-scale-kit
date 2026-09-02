@@ -19,6 +19,8 @@ against them.
 import re
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).parent.parent.parent
 E2E_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "e2e-test.yaml"
 GITHUB_INTEGRATION = REPO_ROOT / ".github" / "workflows" / "integration-test.yaml"
@@ -285,3 +287,23 @@ class TestIntegrationPhaseConsistency:
             f"  Unclassified: {sorted(classes - allowed - install_only)}\n"
             f"  Stale names:  {sorted((allowed | install_only) - classes)}"
         )
+
+
+@pytest.mark.parametrize("marker", ["GITHUB_ACTIONS", "TF_BUILD"])
+def test_supported_ci_markers_fail_closed(monkeypatch, marker):
+    from tests.integration.conftest import _in_ci
+
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    monkeypatch.delenv("TF_BUILD", raising=False)
+    monkeypatch.setenv(marker, "true")
+
+    assert _in_ci()
+
+
+def test_e2e_masks_the_site_name_before_publishing_it():
+    text = E2E_WORKFLOW.read_text(encoding="utf-8")
+
+    mask = 'echo "::add-mask::$SN"'
+    output = 'echo "site_name=$SN" >> "$GITHUB_OUTPUT"'
+    assert mask in text
+    assert text.index(mask) < text.index(output)

@@ -1,0 +1,17 @@
+# One managed OPC UA device shared by the advanced sample's oven and boiler
+# asset sets.
+# Consumed by: asset-resources
+
+devices:
+  - name: composition-opc-ua
+    properties:
+      enabled: true
+      endpoints:
+        outbound:
+          assigned: {}
+        inbound:
+          opc-ua-connector-0:
+            endpointType: Microsoft.OpcUa
+            address: "opc.tcp://resource-set-opc-plc:50000"
+            authentication:
+              method: Anonymous

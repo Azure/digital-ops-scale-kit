@@ -139,7 +139,7 @@ stages:
 
                       [[ -n "$SELECTOR" ]] && CMD_ARGS+=(-l "$SELECTOR")
 
-                      echo "Executing: siteops ${CMD_ARGS[*]}"
+                      echo "Executing Site Ops deployment"
                       if siteops "${CMD_ARGS[@]}" 2>&1; then
                         DEPLOY_EXIT_CODE=0
                       else

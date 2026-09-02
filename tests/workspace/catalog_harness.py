@@ -44,6 +44,7 @@ from siteops.models import Manifest, ParameterSource
 
 # The catalog entry point. A family is wired by having a declaration path here.
 CATALOG_MANIFEST = "manifests/aio-resources.yaml"
+CATALOG_PARTIAL = "manifests/_aio-resources.yaml"
 CATALOG_CONTRACT = "contracts/aio-catalog.yaml"
 _RESOURCE_SET_EXPRESSION = re.compile(
     r"\{\{\s*site\.properties\.resourceSets\.(?P<key>[\w-]+)\s*\}\}"

@@ -23,6 +23,7 @@ from siteops.sanitize import (
     scrub_command,
     scrub_command_for_output,
     scrub_for_output,
+    scrub_site_for_output,
 )
 
 # A realistic ARM resource id, the shape that appears throughout a deployment
@@ -271,11 +272,19 @@ class TestOrchestratorAppliesRedaction:
         manifest = SimpleNamespace(steps=[])
 
         result = Orchestrator._site_failure_result(
-            site, manifest, f"Unexpected error: could not read {RESOURCE_ID}"
+            site,
+            manifest,
+            (
+                "Unexpected error in deployment "
+                "'manifest-munich-prod-step-20260902000000': "
+                f"could not read {RESOURCE_ID}"
+            ),
         )
 
         assert SUBSCRIPTION not in result["error"]
         assert "contoso-munich-rg" not in result["error"]
+        assert "munich-prod" not in result["error"]
+        assert "manifest-<site>-step" in result["error"]
         assert "Unexpected error" in result["error"]
 
     def test_site_failure_result_keeps_detail_for_a_local_run(self, clean_env):
@@ -358,7 +367,10 @@ class TestOrchestratorAppliesRedaction:
                 step_name="aio-instance",
                 site_name="munich-prod",
                 deployment_name="d",
-                error=f"BadRequest: {RESOURCE_ID} is invalid",
+                error=(
+                    "Deployment 'm-munich-prod-aio-instance-ts' failed. "
+                    f"BadRequest: {RESOURCE_ID} is invalid"
+                ),
             ),
         )
         monkeypatch.setattr(
@@ -372,8 +384,326 @@ class TestOrchestratorAppliesRedaction:
         step_error = result["steps"][0]["error"]
         assert SUBSCRIPTION not in step_error
         assert "contoso-munich-rg" not in step_error
+        assert "munich-prod" not in step_error
+        assert "m-<site>-aio-instance-ts" in step_error
         assert "BadRequest" in step_error
-        assert SUBSCRIPTION not in capsys.readouterr().out
+        output = capsys.readouterr().out
+        assert SUBSCRIPTION not in output
+        assert "munich-prod" not in output
+        assert "[<site>]" in output
+
+    def test_a_local_step_log_keeps_the_site_name(
+        self, clean_env, capsys, monkeypatch
+    ):
+        """Local output keeps the identity that lets an operator act."""
+        from siteops.executor import DeploymentResult
+        from siteops.models import DeploymentStep
+
+        orch = self._orchestrator()
+        step = DeploymentStep(name="aio-instance", template="templates/x.bicep")
+        manifest = SimpleNamespace(name="m", steps=[step], parameters=[])
+        site = SimpleNamespace(
+            name="munich-prod",
+            subscription="s",
+            resource_group="rg",
+            properties={},
+            parameters={},
+        )
+
+        monkeypatch.setattr(
+            type(orch),
+            "_execute_step",
+            lambda self, *a, **k: DeploymentResult(
+                success=True,
+                step_name="aio-instance",
+                site_name="munich-prod",
+                deployment_name="d",
+            ),
+        )
+        monkeypatch.setattr(
+            type(orch),
+            "_check_step_site_compatibility",
+            lambda self, *a, **k: None,
+        )
+
+        orch._deploy_site(manifest, site, "ts", parallel_mode=False)
+
+        assert "[munich-prod]" in capsys.readouterr().out
+
+    def test_a_redacted_empty_plan_omits_the_selector(
+        self,
+        clean_env,
+        tmp_workspace,
+        capsys,
+    ):
+        clean_env.setenv(REDACT_ENV, "1")
+        manifest_path = tmp_workspace / "manifests" / "private-selector.yaml"
+        manifest_path.write_text(
+            """
+apiVersion: siteops/v1
+kind: Manifest
+name: private-selector
+selector: "name=private-site"
+steps: []
+""",
+            encoding="utf-8",
+        )
+
+        Orchestrator(tmp_workspace).show_plan(manifest_path)
+
+        output = capsys.readouterr().out
+        assert "No sites matched" in output
+        assert "private-site" not in output
+
+    def test_a_local_empty_plan_keeps_the_selector(
+        self,
+        clean_env,
+        tmp_workspace,
+        capsys,
+    ):
+        manifest_path = tmp_workspace / "manifests" / "private-selector.yaml"
+        manifest_path.write_text(
+            """
+apiVersion: siteops/v1
+kind: Manifest
+name: private-selector
+selector: "name=private-site"
+steps: []
+""",
+            encoding="utf-8",
+        )
+
+        Orchestrator(tmp_workspace).show_plan(manifest_path)
+
+        assert "Manifest selector: name=private-site" in capsys.readouterr().out
+
+    def test_site_load_failure_uses_a_generic_published_diagnostic(
+        self,
+        clean_env,
+        tmp_workspace,
+        caplog,
+        capsys,
+    ):
+        clean_env.setenv(REDACT_ENV, "1")
+        site_path = tmp_workspace / "sites" / "private-site.yaml"
+        site_path.write_text(
+            """
+apiVersion: siteops/v1
+kind: Site
+name: private-site
+subscription:
+resourceGroup: private-resource-group
+location: eastus
+""",
+            encoding="utf-8",
+        )
+
+        with caplog.at_level(logging.WARNING):
+            orchestrator = Orchestrator(tmp_workspace)
+            assert orchestrator.load_all_sites() == []
+
+        published = caplog.text + capsys.readouterr().err
+        assert "private-site" not in published
+        assert "private-resource-group" not in published
+        assert str(site_path) not in published
+        assert "Site configuration could not be loaded" in published
+        assert orchestrator.skipped_sites[0][0] == "private-site"
+
+    @pytest.mark.parametrize("parallel", [False, True], ids=["sequential", "parallel"])
+    def test_an_unexpected_site_failure_keeps_internal_identity_only(
+        self,
+        clean_env,
+        tmp_workspace,
+        caplog,
+        monkeypatch,
+        parallel,
+    ):
+        from siteops.models import ParallelConfig, Site
+
+        clean_env.setenv(REDACT_ENV, "1")
+        orchestrator = Orchestrator(tmp_workspace)
+        manifest = SimpleNamespace(name="m", steps=[])
+        site = Site(
+            name="private-site",
+            subscription="s",
+            resource_group="rg",
+            location="eastus",
+        )
+
+        def fail(*args, **kwargs):
+            raise RuntimeError(
+                "Deployment 'm-private-site-step-ts' failed for private-site"
+            )
+
+        monkeypatch.setattr(orchestrator, "_deploy_site", fail)
+        with caplog.at_level(logging.ERROR):
+            if parallel:
+                result = orchestrator._deploy_parallel(
+                    manifest,
+                    [site],
+                    "ts",
+                    ParallelConfig(sites=1),
+                )
+            else:
+                result = orchestrator._deploy_sequential(
+                    manifest,
+                    [site],
+                    "ts",
+                )
+
+        assert result[0]["site"] == "private-site"
+        assert "private-site" not in result[0]["error"]
+        assert "m-<site>-step-ts" in result[0]["error"]
+        assert "private-site" not in caplog.text
+
+    def test_deployment_command_and_timeout_warning_hide_the_site(
+        self,
+        clean_env,
+        tmp_workspace,
+        caplog,
+        monkeypatch,
+    ):
+        from siteops.executor import (
+            DEFAULT_DEPLOYMENT_SUBMIT_TIMEOUT_SECONDS,
+            ENGINE_TIMEOUT_SENTINEL,
+            AzCliExecutor,
+        )
+
+        clean_env.setenv(REDACT_ENV, "1")
+        executor = AzCliExecutor(tmp_workspace, dry_run=True)
+        executor._az_path = "az"
+
+        with caplog.at_level(logging.INFO, logger="siteops.executor"):
+            executor._run_az(
+                [
+                    "deployment",
+                    "group",
+                    "create",
+                    "--name",
+                    "m-private-site-step-ts",
+                ],
+                site_name="private-site",
+            )
+
+        assert "private-site" not in caplog.text
+        assert "m-<site>-step-ts" in caplog.text
+
+        monkeypatch.setattr(
+            executor,
+            "_run_az",
+            lambda *args, **kwargs: (
+                False,
+                "",
+                ENGINE_TIMEOUT_SENTINEL.format(
+                    timeout=DEFAULT_DEPLOYMENT_SUBMIT_TIMEOUT_SECONDS
+                ),
+            ),
+        )
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            executor._submit_deployment(
+                [],
+                "m-private-site-step-ts",
+                "step",
+                "private-site",
+            )
+
+        assert "private-site" not in caplog.text
+        assert "m-<site>-step-ts" in caplog.text
+
+    def test_integration_failure_does_not_reinsert_the_site_name(
+        self,
+        clean_env,
+    ):
+        from tests.integration.conftest import _assert_deployed
+
+        clean_env.setenv(REDACT_ENV, "1")
+        result = {
+            "summary": {"failed": 1},
+            "sites": {
+                "private-site": {
+                    "error": "Deployment 'm-private-site-step-ts' failed"
+                }
+            },
+        }
+
+        with pytest.raises(AssertionError) as excinfo:
+            _assert_deployed(result, "sample")
+
+        message = str(excinfo.value)
+        assert "private-site" not in message
+        assert "m-<site>-step-ts" in message
+
+    def test_validation_error_omits_the_selected_site_name(
+        self,
+        clean_env,
+        tmp_workspace,
+    ):
+        import json
+
+        clean_env.setenv(REDACT_ENV, "1")
+        for name in ("private-site-a", "private-site-b"):
+            (tmp_workspace / "sites" / f"{name}.yaml").write_text(
+                f"""
+apiVersion: siteops/v1
+kind: Site
+name: {name}
+subscription: sub
+location: eastus
+labels:
+  environment: dev
+""",
+                encoding="utf-8",
+            )
+        (tmp_workspace / "templates" / "empty.json").write_text(
+            json.dumps(
+                {
+                    "$schema": (
+                        "https://schema.management.azure.com/schemas/"
+                        "2019-04-01/deploymentTemplate.json#"
+                    ),
+                    "contentVersion": "1.0.0.0",
+                    "resources": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        manifest_path = tmp_workspace / "manifests" / "validate.yaml"
+        manifest_path.write_text(
+            """
+apiVersion: siteops/v1
+kind: Manifest
+name: validate
+sites: [private-site-a, private-site-b]
+steps:
+  - name: deploy
+    template: templates/empty.json
+    scope: subscription
+""",
+            encoding="utf-8",
+        )
+
+        errors = Orchestrator(tmp_workspace).validate(manifest_path)
+
+        assert errors
+        assert all("private-site-a" not in error for error in errors)
+        assert all("private-site-b" not in error for error in errors)
+        assert any("<site>" in error for error in errors)
+
+    def test_contextual_scrubbing_keeps_the_local_error(self, clean_env):
+        error = "Deployment 'm-private-site-step-ts' failed"
+
+        assert scrub_site_for_output(error, "private-site") == error
+
+    def test_contextual_scrubbing_does_not_replace_a_name_inside_words(
+        self,
+        clean_env,
+    ):
+        clean_env.setenv(REDACT_ENV, "1")
+
+        assert scrub_site_for_output("Site s succeeded", "s") == (
+            "Site <site> succeeded"
+        )
 
 
 class TestCommandScrubbing:

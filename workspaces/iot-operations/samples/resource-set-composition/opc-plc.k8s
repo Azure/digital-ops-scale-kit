@@ -1,0 +1,234 @@
+# Sample only. Do not use this simulator deployment in production.
+# Adapted from Azure-Samples/explore-iot-operations at commit
+# 0072eb6cdd3602bbd48858f21cf097e36a6b0b7e. The OPC PLC image is pinned
+# to the multi-architecture digest resolved on 2026-09-02.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: resource-set-opc-plc
+  namespace: azure-iot-operations
+  labels:
+    app.kubernetes.io/component: resource-set-opc-plc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: resource-set-opc-plc
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: resource-set-opc-plc
+    spec:
+      containers:
+        - name: opc-plc
+          image: mcr.microsoft.com/iotedge/opc-plc@sha256:fa926a6fc4a58d77abe034c8483d91e91aa768c5a50ea3f5d86e45b66d955486
+          args:
+            - "--ph=resource-set-opc-plc"
+            - "--cdn=resource-set-opc-plc"
+            - "--ut"
+            - "--sn=5"
+            - "--sr=10"
+            - "--fn=10"
+            - "--ftl=212"
+            - "--ftu=273"
+            - "--ftr=True"
+            - "--veryfastrate=1000"
+            - "--gn=1"
+            - "--pn=50000"
+            - "--at=FlatDirectory"
+            - "--drurs"
+          ports:
+            - containerPort: 50000
+          volumeMounts:
+            - name: resource-set-opc-plc-cert
+              mountPath: /app/pki/own
+            - name: resource-set-opc-plc-trust
+              mountPath: /app/pki/trusted
+      volumes:
+        - name: resource-set-opc-plc-cert
+          secret:
+            secretName: resource-set-opc-plc-cert
+        - name: resource-set-opc-plc-trust
+          secret:
+            secretName: resource-set-opc-plc-trust
+      serviceAccountName: resource-set-opc-plc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: resource-set-opc-plc
+  namespace: azure-iot-operations
+  labels:
+    app.kubernetes.io/component: resource-set-opc-plc
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/component: resource-set-opc-plc
+  ports:
+    - port: 50000
+      protocol: TCP
+      targetPort: 50000
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: resource-set-opc-plc-issuer
+  namespace: azure-iot-operations
+  labels:
+    app.kubernetes.io/component: resource-set-opc-plc
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: resource-set-opc-plc-cert
+  namespace: azure-iot-operations
+  labels:
+    app.kubernetes.io/component: resource-set-opc-plc
+spec:
+  secretName: resource-set-opc-plc-cert
+  duration: 2160h
+  renewBefore: 360h
+  issuerRef:
+    name: resource-set-opc-plc-issuer
+    kind: Issuer
+  commonName: ResourceSetOpcPlc
+  dnsNames:
+    - resource-set-opc-plc
+    - resource-set-opc-plc.azure-iot-operations.svc.cluster.local
+    - resource-set-opc-plc.azure-iot-operations
+  uris:
+    - urn:OpcPlc:resource-set-opc-plc
+  usages:
+    - digital signature
+    - key encipherment
+    - data encipherment
+    - server auth
+    - client auth
+  privateKey:
+    algorithm: RSA
+    size: 2048
+  encodeUsagesInRequest: true
+  isCA: false
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: resource-set-opc-plc-trust
+  namespace: azure-iot-operations
+  labels:
+    app.kubernetes.io/component: resource-set-opc-plc
+data: {}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: resource-set-opc-plc-trust
+  namespace: azure-iot-operations
+  labels:
+    app.kubernetes.io/component: resource-set-opc-plc
+spec:
+  backoffLimit: 6
+  template:
+    spec:
+      containers:
+        - name: kubectl
+          image: mcr.microsoft.com/oss/kubernetes/kubectl@sha256:ba03c1d67f7761c122f3bcf7eb999febe1407337a0b1b65bebca7f1018aa6a14
+          imagePullPolicy: Always
+          command: ["/bin/sh"]
+          args: ["/scripts/execute-commands.sh"]
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+      restartPolicy: Never
+      serviceAccountName: resource-set-opc-plc
+      volumes:
+        - name: scripts
+          configMap:
+            name: resource-set-opc-plc-trust-script
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: resource-set-opc-plc-trust-script
+  namespace: azure-iot-operations
+  labels:
+    app.kubernetes.io/component: resource-set-opc-plc
+data:
+  execute-commands.sh: |
+    #!/bin/sh
+    set -eu
+
+    wait_for_certificate() {
+      secret_name="$1"
+      attempts=0
+      while [ "$attempts" -lt 60 ]; do
+        encoded=$(kubectl -n azure-iot-operations get secret "$secret_name" -o jsonpath='{.data.tls\.crt}' 2>/dev/null || true)
+        if [ -n "$encoded" ]; then
+          printf '%s' "$encoded" | base64 -d
+          return 0
+        fi
+        attempts=$((attempts + 1))
+        sleep 5
+      done
+      echo "Timed out waiting for certificate Secret $secret_name" >&2
+      return 1
+    }
+
+    wait_for_secret() {
+      secret_name="$1"
+      attempts=0
+      while [ "$attempts" -lt 60 ]; do
+        if kubectl -n azure-iot-operations get secret "$secret_name" >/dev/null 2>&1; then
+          return 0
+        fi
+        attempts=$((attempts + 1))
+        sleep 5
+      done
+      echo "Timed out waiting for Secret $secret_name" >&2
+      return 1
+    }
+
+    connector_cert=$(wait_for_certificate aio-opc-opcuabroker-default-application-cert)
+    connector_data=$(kubectl create secret generic temp --from-literal=opcuabroker.crt="$connector_cert" --dry-run=client -o jsonpath='{.data}')
+    kubectl patch secret resource-set-opc-plc-trust -n azure-iot-operations -p "{\"data\": $connector_data}"
+
+    simulator_cert=$(wait_for_certificate resource-set-opc-plc-cert)
+    simulator_data=$(kubectl create secret generic temp --from-literal=resource-set-opc-plc.crt="$simulator_cert" --dry-run=client -o jsonpath='{.data}')
+    wait_for_secret aio-opc-ua-broker-trust-list
+    kubectl patch secret aio-opc-ua-broker-trust-list -n azure-iot-operations -p "{\"data\": $simulator_data}"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: resource-set-opc-plc
+  namespace: azure-iot-operations
+  labels:
+    app.kubernetes.io/component: resource-set-opc-plc
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: resource-set-opc-plc-secret-access
+  namespace: azure-iot-operations
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: resource-set-opc-plc-secret-access
+  namespace: azure-iot-operations
+subjects:
+  - kind: ServiceAccount
+    name: resource-set-opc-plc
+    namespace: azure-iot-operations
+roleRef:
+  kind: Role
+  name: resource-set-opc-plc-secret-access
+  apiGroup: rbac.authorization.k8s.io

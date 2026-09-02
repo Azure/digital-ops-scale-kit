@@ -118,6 +118,16 @@ class TestIntegrationConstantsMatchTheWorkspace:
             "SET_DEVICE_NAME",
             "SET_ASSET_NAME",
         ),
+        "test_resource_set_samples_manifest.py": (
+            "_BASIC_DATAFLOW",
+            "_MANAGED_DEVICE",
+            "_MANAGED_OVEN",
+            "_MANAGED_BOILER",
+            "_EXTERNAL_OVEN",
+            "_ADVANCED_ENDPOINT",
+            "_ADVANCED_PROFILE",
+            "_ADVANCED_DATAFLOW",
+        ),
     }
 
     def test_expected_resource_names_are_declared_somewhere(self, workspace):

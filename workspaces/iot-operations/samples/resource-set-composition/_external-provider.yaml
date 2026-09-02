@@ -1,0 +1,21 @@
+apiVersion: siteops/v1
+kind: Manifest
+name: resource-set-external-provider
+description: |
+  Internal advanced-sample partial. Creates one Bicep-owned OPC UA device and
+  starts the simulator it addresses, leaving the catalog to manage only the
+  assets that consume it.
+
+steps:
+  - name: external-opc-plc-simulator
+    type: kubectl
+    operation: apply
+    arc:
+      name: "{{ site.parameters.clusterName }}"
+      resourceGroup: "{{ site.resourceGroup }}"
+    files:
+      - samples/resource-set-composition/opc-plc.k8s
+
+  - name: external-opc-ua-device
+    template: samples/resource-set-composition/external-provider.bicep
+    scope: resourceGroup

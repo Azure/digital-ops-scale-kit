@@ -1,0 +1,19 @@
+# The smallest useful dataflow set. The instance-owned `default` endpoint is
+# both the source and destination, and the destination sits outside the source
+# wildcard so the republished message cannot loop.
+# Consumed by: dataflow-resources
+
+dataflows:
+  - name: basic-routing
+    properties:
+      mode: Enabled
+      operations:
+        - operationType: Source
+          sourceSettings:
+            endpointRef: default
+            dataSources:
+              - "azure-iot-operations/data/siteops-samples/basic/#"
+        - operationType: Destination
+          destinationSettings:
+            endpointRef: default
+            dataDestination: "siteops-samples/{{ site.name }}/basic"

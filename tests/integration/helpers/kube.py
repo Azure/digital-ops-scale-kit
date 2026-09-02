@@ -566,9 +566,10 @@ def delete_resource(
     namespace: str,
     *,
     ignore_not_found: bool = True,
+    wait: bool = True,
     timeout: int = 30,
 ) -> None:
-    """Delete a Kubernetes resource. Best-effort, intended for test teardown."""
+    """Delete a Kubernetes resource during test teardown."""
     args = [
         *_kubectl_base(),
         "delete",
@@ -580,6 +581,8 @@ def delete_resource(
     ]
     if ignore_not_found:
         args.append("--ignore-not-found=true")
+    if not wait:
+        args.append("--wait=false")
     proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
     if proc.returncode != 0 and not (ignore_not_found and _is_not_found_text(proc.stderr)):
         raise KubectlError(
@@ -650,6 +653,39 @@ def wait_for_deployment_ready(
         f"Deployment `{name}` in `{namespace}` did not reach "
         f"readyReplicas>={min_ready_replicas} within {timeout}s. {observation}"
     )
+
+
+def wait_for_job_complete(
+    name: str,
+    namespace: str,
+    *,
+    timeout: int = 360,
+) -> dict[str, Any]:
+    """Wait for one Kubernetes Job to report its Complete condition."""
+    args = [
+        *_kubectl_base(),
+        "wait",
+        "--for=condition=complete",
+        f"job/{name}",
+        "-n",
+        namespace,
+        f"--timeout={timeout}s",
+        f"--request-timeout={KUBECTL_REQUEST_TIMEOUT}",
+    ]
+    proc = subprocess.run(
+        args,
+        capture_output=True,
+        text=True,
+        timeout=timeout + 30,
+    )
+    if proc.returncode != 0:
+        raise KubectlError(
+            f"kubectl wait for job/{name} failed (exit {proc.returncode}): "
+            f"{proc.stderr.strip()}",
+            proc.returncode,
+            proc.stderr,
+        )
+    return kubectl_json(["get", "job", name, "-n", namespace])
 
 
 def get_endpoint_addresses(
