@@ -137,6 +137,16 @@ class TestDeployDropdownRegistration:
             f"  Registered but not deployable: {sorted(registered - deployable)}"
         )
 
+    def test_sample_dropdown_entries_are_alphabetical(self):
+        options = _github_manifest_options()
+        samples = [
+            option
+            for option in options
+            if option.startswith("samples/")
+        ]
+
+        assert samples == sorted(samples)
+
     def test_resource_set_samples_keep_their_site_selector(self, workspace):
         """The environment selector alone would target every development site."""
         expected = {}
