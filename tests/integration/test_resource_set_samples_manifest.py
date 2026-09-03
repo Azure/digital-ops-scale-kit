@@ -1,4 +1,4 @@
-"""Live qualification for the site-authored resource-set samples."""
+"""Live qualification for resource sets selected through site configuration."""
 
 import copy
 import json
