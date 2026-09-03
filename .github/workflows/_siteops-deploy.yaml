@@ -49,7 +49,7 @@ on:
         description: "JSON object with site overrides"
         required: false
       SITE_SELECTOR:
-        description: "Composed site selector, masked in runner output"
+        description: "Site selector used for targeting (for example environment=prod). Passed as a secret because it may contain site names or private label values."
         required: false
 
 env:
