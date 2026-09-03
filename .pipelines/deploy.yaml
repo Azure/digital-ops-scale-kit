@@ -18,18 +18,22 @@ parameters:
     type: string
     default: manifests/aio-install.yaml
     values:
+      # Core entry points follow the common operator lifecycle.
       - manifests/aio-install.yaml
       - manifests/aio-upgrade.yaml
       - manifests/secretsync.yaml
       - manifests/aksee-bootstrap.yaml
       - manifests/aksee-upgrade.yaml
       - manifests/aio-resources.yaml
-      - samples/secretsync-sample/manifest.yaml
-      - samples/opc-ua-solution/manifest.yaml
-      - samples/dataflow-sample/manifest.yaml
-      - samples/asset-sample/manifest.yaml
-      - samples/aio-with-opc-ua/manifest.yaml
+      # Samples are alphabetical for predictable scanning.
       - samples/aio-with-aksee-bootstrap/manifest.yaml
+      - samples/aio-with-opc-ua/manifest.yaml
+      - samples/asset-sample/manifest.yaml
+      - samples/dataflow-sample/manifest.yaml
+      - samples/opc-ua-solution/manifest.yaml
+      - samples/resource-set-basic/manifest.yaml
+      - samples/resource-set-composition/manifest.yaml
+      - samples/secretsync-sample/manifest.yaml
 
   - name: environment
     displayName: Target environment
@@ -111,12 +115,14 @@ stages:
             displayName: Validate manifest exists
 
           - script: |
-              SELECTOR="$(echo "$INPUT_SELECTOR" | xargs)"
-              if [ -n "$SELECTOR" ]; then
-                COMBINED="environment=$ENV,$SELECTOR"
-              else
-                COMBINED="environment=$ENV"
-              fi
+              case "$MANIFEST_REL" in
+                samples/resource-set-basic/manifest.yaml|samples/resource-set-composition/manifest.yaml)
+                  if [[ "$ENV" != "dev" ]]; then
+                    echo "##vso[task.logissue type=error]Resource-set samples use the dev deployment environment"
+                    exit 1
+                  fi
+                  ;;
+              esac
 
               SUMMARY_FILE="$(Build.ArtifactStagingDirectory)/deploy-config.md"
               echo "### Deployment Configuration" > "$SUMMARY_FILE"
@@ -125,7 +131,7 @@ stages:
               echo "| Workspace | \`$WORKSPACE_DIR\` |" >> "$SUMMARY_FILE"
               echo "| Manifest | \`$MANIFEST_REL\` |" >> "$SUMMARY_FILE"
               echo "| Environment | \`$ENV\` |" >> "$SUMMARY_FILE"
-              echo "| Selector | \`$COMBINED\` |" >> "$SUMMARY_FILE"
+              echo "| Selector | \`<redacted>\` |" >> "$SUMMARY_FILE"
               echo "| Dry Run | \`$DRY_RUN\` |" >> "$SUMMARY_FILE"
               echo "##vso[task.uploadsummary]$SUMMARY_FILE"
             displayName: Write deployment summary
@@ -134,7 +140,6 @@ stages:
             # shell metachars cannot break out of the command.
             env:
               ENV: ${{ parameters.environment }}
-              INPUT_SELECTOR: ${{ parameters.selector }}
               WORKSPACE_DIR: workspaces/${{ parameters.workspace }}
               MANIFEST_REL: ${{ parameters.manifest }}
               DRY_RUN: ${{ parameters.dryRun }}
@@ -145,7 +150,17 @@ stages:
       workspace: workspaces/${{ parameters.workspace }}
       manifest: ${{ parameters.manifest }}
       environment: ${{ parameters.environment }}
-      ${{ if not(in(parameters.selector, '', ' ')) }}:
+      ${{ if eq(parameters.manifest, 'samples/resource-set-basic/manifest.yaml') }}:
+        ${{ if not(in(parameters.selector, '', ' ')) }}:
+          selector: environment=sample,sample=resource-set-basic,${{ parameters.selector }}
+        ${{ else }}:
+          selector: environment=sample,sample=resource-set-basic
+      ${{ elseif eq(parameters.manifest, 'samples/resource-set-composition/manifest.yaml') }}:
+        ${{ if not(in(parameters.selector, '', ' ')) }}:
+          selector: environment=sample,sample=resource-set-composition,${{ parameters.selector }}
+        ${{ else }}:
+          selector: environment=sample,sample=resource-set-composition
+      ${{ elseif not(in(parameters.selector, '', ' ')) }}:
         selector: environment=${{ parameters.environment }},${{ parameters.selector }}
       ${{ else }}:
         selector: environment=${{ parameters.environment }}

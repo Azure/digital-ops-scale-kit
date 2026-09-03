@@ -120,6 +120,13 @@ siteops -w workspaces/iot-operations deploy manifests/aio-resources.yaml -l envi
 
 Site values resolve inside each definition at any depth.
 
+For runnable examples, start with
+[`resource-set-basic`](../workspaces/iot-operations/samples/resource-set-basic/README.md),
+which selects one dataflow set. Then use
+[`resource-set-composition`](../workspaces/iot-operations/samples/resource-set-composition/README.md)
+for inherited device selections, independent asset sets, an externally managed
+device, and separately selected dataflow endpoint, profile, and route sources.
+
 ## Compose sets by resource identity
 
 Distinct resources append in selection order. Two selected sources writing the

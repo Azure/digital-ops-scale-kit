@@ -28,7 +28,12 @@ from siteops.models import (
     _merge_selector_strings,
 )
 from siteops.orchestrator import Orchestrator
-from siteops.sanitize import report_parameter_selection_error
+from siteops.sanitize import (
+    is_redaction_enabled,
+    report_parameter_selection_error,
+    report_site_load_error,
+    scrub_site_for_output,
+)
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -71,7 +76,7 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         # ValueError: selector parse, no-targeting, overlay-rename, etc.
         # OSError: missing or unreadable file (includes FileNotFoundError).
         # YAMLError: malformed manifest YAML.
-        print(f"\nError: {e}\n", file=sys.stderr)
+        print(f"\nError: {report_site_load_error(e)}\n", file=sys.stderr)
         return 1
 
     if orchestrator.skipped_sites:
@@ -79,7 +84,11 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         # that fails to load drops out of the target set. Deploying the rest
         # reports success for a smaller fleet than the selector names. The
         # failing sites were already reported by name.
-        names = ", ".join(name for name, _ in orchestrator.skipped_sites)
+        names = (
+            "<site identities omitted>"
+            if is_redaction_enabled()
+            else ", ".join(name for name, _ in orchestrator.skipped_sites)
+        )
         print(
             f"\nError: {len(orchestrator.skipped_sites)} site(s) could not be loaded "
             f"({names}), so the target set is incomplete. Fix those files, or narrow "
@@ -94,7 +103,9 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
             # nothing. Surface the diagnostic and exit non-zero so the
             # condition is not silently masked in CI.
             print(
-                f"\nError: {orchestrator.explain_no_match(cli_selector)}\n",
+                "\nError: CLI selector matched no sites.\n"
+                if is_redaction_enabled()
+                else f"\nError: {orchestrator.explain_no_match(cli_selector)}\n",
                 file=sys.stderr,
             )
             return 1
@@ -132,7 +143,10 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         # Raised late, after site resolution, so it lands outside the guard
         # around loading. Printed rather than raised so the operator sees which
         # sites collide instead of a traceback.
-        print(f"\nError: {e}\n", file=sys.stderr)
+        detail = str(e)
+        for site in sites:
+            detail = scrub_site_for_output(detail, site.name) or ""
+        print(f"\nError: {detail}\n", file=sys.stderr)
         return 1
 
     # Return exit code based on results
@@ -367,7 +381,8 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         try:
             selector = parse_selector(selector_str)
         except ValueError as e:
-            print(f"\nError: {e}\n", file=sys.stderr)
+            detail = "Invalid site selector." if is_redaction_enabled() else str(e)
+            print(f"\nError: {detail}\n", file=sys.stderr)
             return 1
         # Use filter_sites for parity with deploy: trusted-file fast
         # path resolves path-form names like `regions/eu/munich-dev`.
@@ -377,13 +392,13 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
             # `sites` is the command an operator reaches for to find out why a
             # site was rejected, so it has to report that rather than raise
             # through as a traceback.
-            print(f"\nError: {e}\n", file=sys.stderr)
+            print(f"\nError: {report_site_load_error(e)}\n", file=sys.stderr)
             return 1
     else:
         try:
             sites = orchestrator.load_all_sites()
         except (ValueError, FileNotFoundError) as e:
-            print(f"\nError: {e}\n", file=sys.stderr)
+            print(f"\nError: {report_site_load_error(e)}\n", file=sys.stderr)
             return 1
 
     if not sites:
@@ -392,7 +407,11 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
             # a workspace that has nothing to offer. Here it has site files and
             # every one of them was rejected, which is a different problem with
             # a different fix.
-            names = ", ".join(name for name, _ in orchestrator.skipped_sites)
+            names = (
+                "<site identities omitted>"
+                if is_redaction_enabled()
+                else ", ".join(name for name, _ in orchestrator.skipped_sites)
+            )
             print(
                 f"\nError: no site could be loaded. "
                 f"{len(orchestrator.skipped_sites)} site file(s) were rejected "
@@ -405,7 +424,12 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
             # `name` or `-l`) and got nothing. Exit non-zero so wrapper
             # scripts and `&&`-chained commands surface the failure
             # instead of silently treating "0 sites" as success.
-            print(f"\nNo sites matched selector: {selector_str}\n", file=sys.stderr)
+            message = (
+                "No sites matched selector."
+                if is_redaction_enabled()
+                else f"No sites matched selector: {selector_str}"
+            )
+            print(f"\n{message}\n", file=sys.stderr)
             return 1
         print("\nNo sites found in workspace\n")
         return 0

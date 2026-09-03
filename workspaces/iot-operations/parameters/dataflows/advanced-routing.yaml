@@ -1,0 +1,20 @@
+# A dataflow that resolves its profile and destination endpoint from two other
+# selected resource sets. It republishes catalog asset telemetry under a
+# site-specific topic outside its own source wildcard.
+# Consumed by: dataflow-resources
+
+dataflows:
+  - name: catalog-routing
+    profileRef: catalog-profile
+    properties:
+      mode: Enabled
+      operations:
+        - operationType: Source
+          sourceSettings:
+            endpointRef: default
+            dataSources:
+              - "azure-iot-operations/data/{{ site.name }}/resource-set-composition/#"
+        - operationType: Destination
+          destinationSettings:
+            endpointRef: catalog-mqtt-out
+            dataDestination: "catalog/{{ site.name }}/${inputTopic}"

@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import yaml
 
-from tests.integration.helpers.mqtt import mqtt_subscriber_pod_manifest
+from tests.integration.helpers.mqtt import (
+    mqtt_roundtrip_pod_manifest,
+    mqtt_subscriber_pod_manifest,
+)
 
 DEFAULT_KWARGS = {
     "sa_name": "mqtt-test-sa",
@@ -95,7 +98,7 @@ def test_mosquitto_command_carries_required_flags():
     command = args[0]
     # Subscription
     assert "mosquitto_sub" in command
-    assert f"--topic '{DEFAULT_KWARGS['topic']}'" in command
+    assert f"--topic {DEFAULT_KWARGS['topic']}" in command
     # TLS
     assert "--cafile /var/run/certs/ca.crt" in command
     # SAT auth via MQTTv5 -D CONNECT. Ordering matters because mosquitto
@@ -132,8 +135,17 @@ def test_topic_and_wait_substitute_into_command():
     command = _parse(_render(topic="my/custom/topic", wait_seconds=42))[1][
         "spec"
     ]["containers"][0]["args"][0]
-    assert "--topic 'my/custom/topic'" in command
+    assert "--topic my/custom/topic" in command
     assert "-W 42" in command
+
+
+def test_message_count_and_verbose_topic_are_optional():
+    command = _parse(
+        _render(message_count=3, include_topic=True)
+    )[1]["spec"]["containers"][0]["args"][0]
+
+    assert "-C 3" in command
+    assert " -v " in command
 
 
 def test_image_is_pinned_by_default():
@@ -179,3 +191,37 @@ def test_overrides_threaded_through():
     assert "--host custom-broker --port 8883" in command
     assert "--qos 0" in command
     assert pod["spec"]["containers"][0]["image"] == "alpine:3.21"
+
+
+def test_roundtrip_subscribes_before_publishing_a_probe():
+    docs = _parse(
+        mqtt_roundtrip_pod_manifest(
+            sa_name="mqtt-roundtrip-sa",
+            pod_name="mqtt-roundtrip-pod",
+            namespace="azure-iot-operations",
+            source_topic="azure-iot-operations/data/probe",
+            destination_topic="siteops-samples/test/basic",
+            payload='{"probe":"value"}',
+            subscriber_ready_delay_seconds=7,
+        )
+    )
+
+    assert [document["kind"] for document in docs] == [
+        "ServiceAccount",
+        "Pod",
+    ]
+    pod = docs[1]
+    command = pod["spec"]["containers"][0]["args"][0]
+    assert pod["spec"]["containers"][0]["name"] == "mqtt-roundtrip"
+    assert command.index("mosquitto_sub") < command.index("sleep 7")
+    assert command.index("sleep 7") < command.index("mosquitto_pub")
+    assert "sleep 7" in command
+    assert "subscriber_pid=$!" in command
+    assert "mosquitto_pub" in command
+    assert "--topic azure-iot-operations/data/probe" in command
+    assert "--topic siteops-samples/test/basic" in command
+    assert "--message '{\"probe\":\"value\"}'" in command
+    assert "wait $subscriber_pid" in command
+    assert "cat /tmp/received" in command
+    assert "--cafile /var/run/certs/ca.crt" in command
+    assert "authentication-method 'K8S-SAT'" in command

@@ -1,0 +1,32 @@
+apiVersion: siteops/v1
+kind: Manifest
+name: aio-resource-steps
+description: |
+  Internal catalog partial. Resolves the existing AIO instance, expands the
+  resource sets selected by each site, and deploys Device Registry resources
+  before the dataflows that can consume them.
+
+parameters:
+  - parameters/common/common.yaml
+  - "parameters/aio-releases/{{ site.properties.aioRelease }}.yaml"
+  - path: "parameters/devices/{{ item }}.yaml"
+    forEach: "{{ site.properties.resourceSets.devices }}"
+    collections: [devices]
+  - path: "parameters/assets/{{ item }}.yaml"
+    forEach: "{{ site.properties.resourceSets.assets }}"
+    collections: [assets]
+  - path: "parameters/dataflows/{{ item }}.yaml"
+    forEach: "{{ site.properties.resourceSets.dataflows }}"
+    collections: [dataflowEndpoints, dataflowProfiles, dataflows]
+
+steps:
+  - include: _resolve-aio.yaml
+
+  - include: _assets.yaml
+    when:
+      any:
+        - "{{ site.properties.resourceSets.devices }}"
+        - "{{ site.properties.resourceSets.assets }}"
+
+  - include: _dataflows.yaml
+    when: "{{ site.properties.resourceSets.dataflows }}"

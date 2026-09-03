@@ -602,7 +602,7 @@ class TestDeployResourceGroup:
 
         calls = []
 
-        def record(args, timeout=None):
+        def record(args, timeout=None, **kwargs):
             calls.append(args)
             if "create" in args:
                 return _SUBMIT_OK
@@ -655,7 +655,7 @@ class TestDeployResourceGroup:
         executor = AzCliExecutor(workspace=tmp_workspace)
         monkeypatch.setattr(executor, "_az_path", "/usr/bin/az")
 
-        def guard(args, timeout=None):
+        def guard(args, timeout=None, **kwargs):
             if "show" in args:
                 raise AssertionError("must not poll after a fail-fast submit error")
             return (False, "", "InvalidTemplate: the template resource is not valid")
@@ -1071,7 +1071,7 @@ class TestDeploySubscription:
 
         calls = []
 
-        def record(args, timeout=None):
+        def record(args, timeout=None, **kwargs):
             calls.append(args)
             if "create" in args:
                 return _SUBMIT_OK
@@ -1098,7 +1098,7 @@ class TestDeploySubscription:
 
         calls = []
 
-        def record(args, timeout=None):
+        def record(args, timeout=None, **kwargs):
             calls.append(args)
             if "create" in args:
                 return _SUBMIT_OK

@@ -1,0 +1,27 @@
+# Advanced resource-set composition sample site
+
+apiVersion: siteops/v1
+kind: Site
+name: catalog-composition
+inherits: shared/catalog-composition.yaml
+
+resourceGroup: rg-iot-catalog-composition
+
+labels:
+  environment: sample
+  city: Seattle
+  sample: resource-set-composition
+
+properties:
+  resourceSets:
+    assets:
+      - composition-oven-assets
+      - boiler-assets
+      - external-oven-assets
+    dataflows:
+      - shared-mqtt-endpoint
+      - shared-dataflow-profile
+      - advanced-routing
+
+parameters:
+  clusterName: catalog-composition-arc

@@ -89,6 +89,7 @@ RESOURCE_GROUP_PLACEHOLDER = "<resource-group>"
 KUBECONFIG_PLACEHOLDER = "<kubeconfig>"
 UPN_PLACEHOLDER = "<user>"
 TOKEN_PLACEHOLDER = "<token>"
+SITE_PLACEHOLDER = "<site>"
 
 
 def _replace_resource_id(match: re.Match[str]) -> str:
@@ -270,6 +271,34 @@ def scrub_for_output(text: str | None) -> str | None:
     skips this, not the primary boundary.
     """
     return scrub(text) if is_redaction_enabled() else text
+
+
+def site_name_for_output(site_name: str) -> str:
+    """Return a site label suitable for the current output destination."""
+    return SITE_PLACEHOLDER if is_redaction_enabled() else site_name
+
+
+def scrub_site_for_output(text: str | None, site_name: str) -> str | None:
+    """Scrub ordinary identifiers plus one known site name."""
+    if not is_redaction_enabled():
+        return text
+    scrubbed = scrub(text)
+    if not scrubbed or not site_name:
+        return scrubbed
+    pattern = re.compile(
+        rf"(?<![A-Za-z0-9_]){re.escape(site_name)}(?![A-Za-z0-9_])"
+    )
+    return pattern.sub(SITE_PLACEHOLDER, scrubbed)
+
+
+def report_site_load_error(error: Exception) -> str:
+    """Keep site names and trusted local paths out of published diagnostics."""
+    if is_redaction_enabled():
+        return (
+            "Site configuration could not be loaded. Re-run locally with "
+            "output redaction disabled for site and path details."
+        )
+    return str(error)
 
 
 def scrub_command_for_output(argv: list[str]) -> str:

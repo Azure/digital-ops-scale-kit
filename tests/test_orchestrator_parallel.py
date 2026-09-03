@@ -470,6 +470,37 @@ class TestSubscriptionFailureBlastRadius:
         assert blocked["steps_completed"] == 0
         assert blocked["steps_skipped"] == 2
 
+    def test_redacted_block_notice_omits_the_site(
+        self,
+        tmp_workspace,
+        capsys,
+        monkeypatch,
+    ):
+        monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1")
+        sites = [
+            Site(
+                name="private-global",
+                subscription="sub-a",
+                resource_group="",
+                location="eastus",
+                labels={},
+            ),
+            Site(
+                name="private-edge",
+                subscription="sub-a",
+                resource_group="rg-a",
+                location="eastus",
+                labels={},
+            ),
+        ]
+
+        summary, _ = self._run_deploy(tmp_workspace, sites, depends=True)
+
+        output = capsys.readouterr().out
+        assert "private-edge" not in output
+        assert "[<site>] - blocked" in output
+        assert summary["sites"]["private-edge"]["status"] == "blocked"
+
     def test_independent_site_in_failed_subscription_proceeds(self, tmp_workspace):
         sites = [
             Site(name="global-a", subscription="sub-a", resource_group="", location="eastus", labels={}),

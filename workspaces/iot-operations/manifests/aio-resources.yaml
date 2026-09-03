@@ -22,27 +22,5 @@ parallel: 3
 # Default selector. Override at the CLI with `-l <key>=<value>`.
 selector: "environment=dev"
 
-parameters:
-  - parameters/common/common.yaml
-  - "parameters/aio-releases/{{ site.properties.aioRelease }}.yaml"
-  - path: "parameters/devices/{{ item }}.yaml"
-    forEach: "{{ site.properties.resourceSets.devices }}"
-    collections: [devices]
-  - path: "parameters/assets/{{ item }}.yaml"
-    forEach: "{{ site.properties.resourceSets.assets }}"
-    collections: [assets]
-  - path: "parameters/dataflows/{{ item }}.yaml"
-    forEach: "{{ site.properties.resourceSets.dataflows }}"
-    collections: [dataflowEndpoints, dataflowProfiles, dataflows]
-
 steps:
-  - include: _resolve-aio.yaml
-
-  - include: _assets.yaml
-    when:
-      any:
-        - "{{ site.properties.resourceSets.devices }}"
-        - "{{ site.properties.resourceSets.assets }}"
-
-  - include: _dataflows.yaml
-    when: "{{ site.properties.resourceSets.dataflows }}"
+  - include: _aio-resources.yaml

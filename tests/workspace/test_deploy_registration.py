@@ -11,6 +11,7 @@ so adding a manifest fails CI until it is registered on both, and removing one
 fails until it is de-registered.
 """
 
+import re
 from pathlib import Path
 
 import yaml
@@ -20,6 +21,14 @@ from tests.workspace.test_manifest_validation import _all_manifest_files
 REPO_ROOT = Path(__file__).parent.parent.parent
 GITHUB_DEPLOY = REPO_ROOT / ".github" / "workflows" / "deploy.yaml"
 ADO_DEPLOY = REPO_ROOT / ".pipelines" / "deploy.yaml"
+REUSABLE_GITHUB_DEPLOY = REPO_ROOT / ".github" / "workflows" / "_siteops-deploy.yaml"
+REUSABLE_ADO_DEPLOY = REPO_ROOT / ".pipelines" / "templates" / "siteops-deploy.yaml"
+GITHUB_INTEGRATION = REPO_ROOT / ".github" / "workflows" / "integration-test.yaml"
+
+_RESOURCE_SET_SAMPLES = (
+    "samples/resource-set-basic/manifest.yaml",
+    "samples/resource-set-composition/manifest.yaml",
+)
 
 
 def _github_manifest_options() -> list[str]:
@@ -56,6 +65,44 @@ def _deployable_manifests(workspace: Path) -> set[str]:
     return deployable
 
 
+def _github_sample_selectors() -> dict[str, str]:
+    text = GITHUB_DEPLOY.read_text(encoding="utf-8")
+    return {
+        manifest: selector
+        for manifest, selector in re.findall(
+            r"^\s+(samples/resource-set-[^)]+)\)\s*$"
+            r".*?^\s+SELECTOR=\"([^\"]+)\"",
+            text,
+            re.MULTILINE | re.DOTALL,
+        )
+    }
+
+
+def _ado_sample_selectors() -> dict[str, tuple[str, str]]:
+    lines = ADO_DEPLOY.read_text(encoding="utf-8").splitlines()
+    result: dict[str, tuple[str, str]] = {}
+    for index, line in enumerate(lines):
+        match = re.search(
+            r"if eq\(parameters\.manifest, '([^']+)'\)",
+            line,
+        )
+        if not match or not match.group(1).startswith("samples/resource-set-"):
+            continue
+        selectors: list[str] = []
+        for candidate in lines[index + 1:]:
+            if "${{ elseif" in candidate:
+                break
+            stripped = candidate.strip()
+            if stripped.startswith("selector: "):
+                selectors.append(stripped.removeprefix("selector: "))
+        assert len(selectors) == 2, (
+            f"{match.group(1)} should have one selector with the optional "
+            f"filter and one without it. Found: {selectors}"
+        )
+        result[match.group(1)] = (selectors[0], selectors[1])
+    return result
+
+
 class TestDeployDropdownRegistration:
     """Both platforms offer exactly the deployable manifests the workspace has."""
 
@@ -90,3 +137,71 @@ class TestDeployDropdownRegistration:
             f"  Registered but not deployable: {sorted(registered - deployable)}"
         )
 
+    def test_sample_dropdown_entries_are_alphabetical(self):
+        options = _github_manifest_options()
+        samples = [
+            option
+            for option in options
+            if option.startswith("samples/")
+        ]
+
+        assert samples == sorted(samples)
+
+    def test_resource_set_samples_keep_their_site_selector(self, workspace):
+        """The environment selector alone would target every development site."""
+        expected = {}
+        for manifest_path in _RESOURCE_SET_SAMPLES:
+            raw = yaml.safe_load(
+                (workspace / manifest_path).read_text(encoding="utf-8")
+            )
+            expected[manifest_path] = raw["selector"]
+
+        assert _github_sample_selectors() == expected
+        assert _ado_sample_selectors() == {
+            manifest: (
+                f"{selector},${{{{ parameters.selector }}}}",
+                selector,
+            )
+            for manifest, selector in expected.items()
+        }
+
+    def test_published_delivery_output_omits_selector_identity(self):
+        github = GITHUB_DEPLOY.read_text(encoding="utf-8")
+        ado = ADO_DEPLOY.read_text(encoding="utf-8")
+        reusable = REUSABLE_GITHUB_DEPLOY.read_text(encoding="utf-8")
+        reusable_ado = REUSABLE_ADO_DEPLOY.read_text(encoding="utf-8")
+        integration = GITHUB_INTEGRATION.read_text(encoding="utf-8")
+
+        assert "| Selector | \\`<redacted>\\` |" in github
+        assert "| Selector | \\`<redacted>\\` |" in ado
+        assert "INPUT_SELECTOR: ${{ inputs.selector }}" not in github
+        assert "GITHUB_EVENT_PATH" in github
+        validation = (
+            '[[ -n "$INPUT_SELECTOR" && ! "$INPUT_SELECTOR" =~ '
+            "^[a-zA-Z0-9_=,./:-]+$ ]]"
+        )
+        assert validation in github
+        assert github.index(validation) < github.index(
+            'echo "selector=$SELECTOR" >> $GITHUB_OUTPUT'
+        )
+        integration_validation = (
+            '[[ -n "$SELECTOR" && ! "$SELECTOR" =~ '
+            "^[a-zA-Z0-9_=,./:-]+$ ]]"
+        )
+        assert integration_validation in integration
+        assert integration.index(integration_validation) < integration.index(
+            'echo "INTEGRATION_SELECTOR=$SELECTOR" >> "$GITHUB_ENV"'
+        )
+        assert "SITE_SELECTOR: ${{ needs.prepare.outputs.selector }}" in github
+        assert "SITE_SELECTOR:" in reusable
+        assert "INPUT_SELECTOR: ${{ secrets.SITE_SELECTOR }}" in reusable
+        assert "INPUT_SELECTOR: ${{ inputs.selector }}" not in reusable
+        assert "Executing: siteops ${CMD_ARGS[*]}" not in reusable
+        assert "Executing: siteops ${CMD_ARGS[*]}" not in reusable_ado
+        assert github.count(
+            "Resource-set samples use the dev deployment environment"
+        ) == 2
+        assert (
+            "Resource-set samples use the dev deployment environment"
+            in ado
+        )

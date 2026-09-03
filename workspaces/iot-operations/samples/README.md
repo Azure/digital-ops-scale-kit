@@ -1,11 +1,19 @@
 # Samples
 
-Deployable examples for Azure IoT Operations. Each sample teaches one thing, so start with the one closest to what you are building: `aio-with-opc-ua` for a full solution on a fresh install, `dataflow-sample` for declaring workload resources in YAML, `asset-sample` for declaring devices and assets the same way, `secretsync-sample` for Key Vault secrets on the cluster, and `aio-with-aksee-bootstrap` when the host does not exist yet.
+Deployable examples for Azure IoT Operations. Each sample teaches one thing,
+so start with the one closest to what you are building:
+`resource-set-basic` for the simplest site-selected resource set,
+`resource-set-composition` for inherited multi-set composition,
+`aio-with-opc-ua` for a full solution on a fresh install,
+`dataflow-sample` for declaring workload resources in YAML, `asset-sample` for
+declaring devices and assets the same way, `secretsync-sample` for Key Vault
+secrets on the cluster, and `aio-with-aksee-bootstrap` when the host does not
+exist yet.
 
 Two shapes are supported, and the line between them is whether other samples can compose the directory.
 
 - **Self-contained workload bundle.** The directory carries a `_partial.yaml` defining its own steps, so other samples can compose it. It may also carry a Bicep template, chaining inputs, and declaration files. Examples: `opc-ua-solution` (with its own template), `secretsync-sample`.
-- **Composition.** The directory carries no `_partial.yaml`, so it is an endpoint rather than a building block. Its manifest `include:`s leaf partials from `manifests/` and other samples into one deploy, adds any glue step those partials need such as a `wait` gate, and may attach declaration files supplying what they deploy. Examples: `aio-with-opc-ua`, `aio-with-aksee-bootstrap`, `dataflow-sample` (a declaration over the shared `templates/aio/dataflows/`), `asset-sample` (committed device and asset sets over the shared `templates/aio/assets/`).
+- **Composition.** The directory carries no `_partial.yaml`, so it is an endpoint rather than a building block. Its manifest `include:`s leaf partials from `manifests/` and other samples into one deploy, adds any glue step those partials need such as a `wait` gate, and may attach declaration files supplying what they deploy. Examples: `aio-with-opc-ua`, `aio-with-aksee-bootstrap`, `dataflow-sample` (a declaration over the shared `templates/aio/dataflows/`), `asset-sample` (committed device and asset sets over the shared `templates/aio/assets/`), and the resource-set samples that include the catalog partial and take their declarations from site selections.
 
 Both shapes are deployable from the same path convention:
 
@@ -100,9 +108,16 @@ Omit `_resolve-aio.yaml` when the composition has no downstream consumer of the 
 | `opc-ua-solution/` | Bundle | A full solution in Bicep: device, asset, dataflow, and cloud egress | template + inputs + partial |
 | `dataflow-sample/` | Composition | Declaring dataflows in YAML | declaration + `_resolve-aio` + `manifests/_dataflows`, over `templates/aio/dataflows/` |
 | `asset-sample/` | Composition | Declaring Device Registry devices and assets in YAML | `parameters/devices/site-devices.yaml` + `parameters/assets/site-assets.yaml` + `_resolve-aio` + `manifests/_assets`, over `templates/aio/assets/` |
+| `resource-set-basic/` | Composition | Selecting one reusable set from a site | `sites/catalog-basic.yaml` + `manifests/_aio-resources.yaml` |
+| `resource-set-composition/` | Composition | Inheritance, shared and external providers, independent assets, and cross-set dataflow references | `sites/shared/catalog-composition.yaml` + `sites/catalog-composition.yaml` + `manifests/_aio-resources.yaml` |
 | `aio-with-opc-ua/` | Composition | Installing the platform and a full solution in one deploy | `_aio-fundamentals` + `_resolve-aio` + `_secretsync` (gated) + `opc-ua-solution/_partial` |
 | `aio-with-aksee-bootstrap/` | Composition | Bringing up a host before installing AIO | `host-bootstrap/aksee/_partial` + a wait on the bootstrap tag + `_aio-fundamentals` |
 
 See each sample's own `README.md` for what it deploys, prerequisites, and how to configure before deploying.
 
-`dataflow-sample` and `parameters/dataflows/` reach the same templates by different routes. The sample attaches its definition on its own manifest, which suits a one-off or a demo. A fleet composes committed sets through the ordered lists under `properties.resourceSets`. `asset-sample` attaches the same separate device and asset sets a fleet selects through `resourceSets.devices` and `resourceSets.assets`. See [resource-catalog.md](../../../docs/resource-catalog.md).
+`dataflow-sample` and `asset-sample` attach fixed definitions to their own
+manifests, which suits a one-off deployment. The resource-set samples use the
+fleet route: committed sites compose ordered sets under
+`properties.resourceSets`, and each sample includes the same catalog partial
+as `manifests/aio-resources.yaml`. See
+[resource-catalog.md](../../../docs/resource-catalog.md).

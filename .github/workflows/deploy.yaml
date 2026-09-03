@@ -28,18 +28,22 @@ on:
                 required: true
                 type: choice
                 options:
+                    # Core entry points follow the common operator lifecycle.
                     - manifests/aio-install.yaml
                     - manifests/aio-upgrade.yaml
                     - manifests/secretsync.yaml
                     - manifests/aksee-bootstrap.yaml
                     - manifests/aksee-upgrade.yaml
                     - manifests/aio-resources.yaml
-                    - samples/secretsync-sample/manifest.yaml
-                    - samples/opc-ua-solution/manifest.yaml
-                    - samples/dataflow-sample/manifest.yaml
-                    - samples/asset-sample/manifest.yaml
-                    - samples/aio-with-opc-ua/manifest.yaml
+                    # Samples are alphabetical for predictable scanning.
                     - samples/aio-with-aksee-bootstrap/manifest.yaml
+                    - samples/aio-with-opc-ua/manifest.yaml
+                    - samples/asset-sample/manifest.yaml
+                    - samples/dataflow-sample/manifest.yaml
+                    - samples/opc-ua-solution/manifest.yaml
+                    - samples/resource-set-basic/manifest.yaml
+                    - samples/resource-set-composition/manifest.yaml
+                    - samples/secretsync-sample/manifest.yaml
                 default: "manifests/aio-install.yaml"
             environment:
                 description: "Target environment"
@@ -92,7 +96,6 @@ jobs:
             manifest: ${{ steps.map.outputs.manifest }}
         env:
             INPUT_ENVIRONMENT: ${{ inputs.environment }}
-            INPUT_SELECTOR: ${{ inputs.selector }}
             INPUT_WORKSPACE: "workspaces/${{ inputs.workspace }}"
             INPUT_MANIFEST: ${{ inputs.manifest }}
             INPUT_REF: ${{ inputs.ref }}
@@ -145,13 +148,35 @@ jobs:
               shell: bash
               run: |
                   ENV="$INPUT_ENVIRONMENT"
-                  SELECTOR="$INPUT_SELECTOR"
+                  INPUT_SELECTOR="$(
+                    python3 -c 'import json, os; data = json.load(open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8")); print((data.get("inputs", {}).get("selector") or "").strip())'
+                  )"
+                  if [[ -n "$INPUT_SELECTOR" && ! "$INPUT_SELECTOR" =~ ^[a-zA-Z0-9_=,./:-]+$ ]]; then
+                    echo "::error::Invalid selector format"
+                    exit 1
+                  fi
+                  case "$INPUT_MANIFEST" in
+                    samples/resource-set-basic/manifest.yaml)
+                      if [[ "$ENV" != "dev" ]]; then
+                        echo "::error::Resource-set samples use the dev deployment environment"
+                        exit 1
+                      fi
+                      SELECTOR="environment=sample,sample=resource-set-basic"
+                      ;;
+                    samples/resource-set-composition/manifest.yaml)
+                      if [[ "$ENV" != "dev" ]]; then
+                        echo "::error::Resource-set samples use the dev deployment environment"
+                        exit 1
+                      fi
+                      SELECTOR="environment=sample,sample=resource-set-composition"
+                      ;;
+                    *)
+                      SELECTOR="environment=$ENV"
+                      ;;
+                  esac
 
-                  # Add environment label to selector
-                  if [ -n "$SELECTOR" ]; then
-                    SELECTOR="environment=$ENV,$SELECTOR"
-                  else
-                    SELECTOR="environment=$ENV"
+                  if [ -n "$INPUT_SELECTOR" ]; then
+                    SELECTOR="$SELECTOR,$INPUT_SELECTOR"
                   fi
 
                   echo "environment=$ENV" >> $GITHUB_OUTPUT
@@ -166,7 +191,7 @@ jobs:
                   echo "| Workspace | \`$INPUT_WORKSPACE\` |" >> $GITHUB_STEP_SUMMARY
                   echo "| Manifest | \`$INPUT_MANIFEST\` |" >> $GITHUB_STEP_SUMMARY
                   echo "| Environment | \`$ENV\` |" >> $GITHUB_STEP_SUMMARY
-                  echo "| Selector | \`$SELECTOR\` |" >> $GITHUB_STEP_SUMMARY
+                  echo "| Selector | \`<redacted>\` |" >> $GITHUB_STEP_SUMMARY
                   echo "| Dry Run | \`${{ inputs.dry-run }}\` |" >> $GITHUB_STEP_SUMMARY
 
     deploy:
@@ -175,9 +200,13 @@ jobs:
         with:
             manifest: ${{ needs.prepare.outputs.manifest }}
             workspace: ${{ needs.prepare.outputs.workspace }}
-            selector: ${{ needs.prepare.outputs.selector }}
             dry-run: ${{ inputs.dry-run }}
             environment: ${{ needs.prepare.outputs.github-environment }}
             ref: ${{ needs.prepare.outputs.ref }}
             siteops-source: ${{ inputs.siteops-source }}
-        secrets: inherit
+        secrets:
+            AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+            AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+            AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+            SITE_OVERRIDES: ${{ secrets.SITE_OVERRIDES }}
+            SITE_SELECTOR: ${{ needs.prepare.outputs.selector }}

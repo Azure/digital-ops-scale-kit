@@ -44,6 +44,7 @@ import yaml
 
 from siteops.models import Manifest
 from siteops.orchestrator import Orchestrator
+from siteops.sanitize import scrub_site_for_output, site_name_for_output
 
 WORKSPACE_PATH = Path(__file__).parent.parent.parent / "workspaces" / "iot-operations"
 SCRIPT_PATH = Path(__file__).parent.parent.parent / "scripts" / "generate-site-overrides.py"
@@ -105,13 +106,16 @@ def _is_upgrade_phase() -> bool:
 
 
 def _in_ci() -> bool:
-    """True when running on a GitHub Actions runner.
+    """True when running on a supported CI runner.
 
     Used to turn a skip into a failure: locally a missing prerequisite is a
     clean skip, while in CI it means a misconfigured workflow that would
     otherwise report success after provisioning real resources.
     """
-    return os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
+    return (
+        os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
+        or os.environ.get("TF_BUILD", "").lower() == "true"
+    )
 
 
 def _extra_sites_dirs() -> list[Path]:
@@ -314,7 +318,9 @@ def _assert_deployed(result: dict, label: str) -> dict:
     summary = result.get("summary", {})
     if summary.get("failed"):
         errors = [
-            f"  {name}: {site.get('error', 'no error reported')}"
+            "  "
+            f"{site_name_for_output(name)}: "
+            f"{scrub_site_for_output(site.get('error', 'no error reported'), name)}"
             for name, site in (result.get("sites") or {}).items()
             if site.get("error")
         ]
@@ -572,8 +578,7 @@ def kubectl_available() -> None:
 
     if is_available():
         return
-    in_ci = os.environ.get("GITHUB_ACTIONS", "").lower() == "true"
-    if in_ci:
+    if _in_ci():
         pytest.fail(
             "kubectl is required in CI but is unavailable or cannot reach a "
             "cluster. Check the runner's kubeconfig and that k3s is running. "

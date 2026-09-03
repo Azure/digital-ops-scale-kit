@@ -1,0 +1,24 @@
+# Beginner resource-set sample site
+
+apiVersion: siteops/v1
+kind: Site
+name: catalog-basic
+inherits: base-site.yaml
+
+subscription: "00000000-0000-0000-0000-000000000000"
+resourceGroup: rg-iot-catalog-basic
+location: westus2
+
+labels:
+  environment: sample
+  country: US
+  city: Seattle
+  sample: resource-set-basic
+
+properties:
+  resourceSets:
+    dataflows:
+      - basic-routing
+
+parameters:
+  clusterName: catalog-basic-arc

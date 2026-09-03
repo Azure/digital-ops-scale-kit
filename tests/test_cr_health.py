@@ -12,6 +12,8 @@ patch, which lags a successful deploy by up to about two minutes.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from tests.integration.helpers import kube
@@ -55,6 +57,55 @@ def no_sleep():
 # seconds is longer than any test needs to observe a settled status and short
 # enough that a timeout path resolves immediately.
 _BUDGET = {"timeout": 10, "interval": 0}
+
+
+def test_cleanup_delete_can_opt_out_of_waiting(monkeypatch):
+    captured = {}
+
+    def run(args, **kwargs):
+        captured["args"] = args
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(kube.subprocess, "run", run)
+
+    kube.delete_resource("pod", "probe", "ns", wait=False)
+
+    assert "--wait=false" in captured["args"]
+
+
+def test_cleanup_delete_waits_by_default(monkeypatch):
+    captured = {}
+
+    def run(args, **kwargs):
+        captured["args"] = args
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(kube.subprocess, "run", run)
+
+    kube.delete_resource("pod", "probe", "ns")
+
+    assert "--wait=false" not in captured["args"]
+
+
+def test_job_wait_requires_the_complete_condition(monkeypatch):
+    captured = {}
+
+    def run(args, **kwargs):
+        captured["args"] = args
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(kube.subprocess, "run", run)
+    monkeypatch.setattr(
+        kube,
+        "kubectl_json",
+        lambda args: {"metadata": {"name": "trust"}},
+    )
+
+    result = kube.wait_for_job_complete("trust", "ns", timeout=15)
+
+    assert result["metadata"]["name"] == "trust"
+    assert "--for=condition=complete" in captured["args"]
+    assert "--timeout=15s" in captured["args"]
 
 
 def test_available_returns_the_health_block(monkeypatch, no_sleep):

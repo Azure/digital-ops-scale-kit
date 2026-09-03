@@ -1,0 +1,7 @@
+# A dedicated execution pool shared by separately selected dataflows.
+# Consumed by: dataflow-resources
+
+dataflowProfiles:
+  - name: catalog-profile
+    properties:
+      instanceCount: 1

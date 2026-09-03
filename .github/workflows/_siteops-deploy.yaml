@@ -25,11 +25,6 @@ on:
         required: false
         type: string
         default: ""
-      selector:
-        description: "Site selector (e.g., environment=prod)"
-        required: false
-        type: string
-        default: ""
       dry-run:
         description: "Dry run mode (no actual deployment)"
         required: false
@@ -52,6 +47,9 @@ on:
         required: true
       SITE_OVERRIDES:
         description: "JSON object with site overrides"
+        required: false
+      SITE_SELECTOR:
+        description: "Site selector used for targeting (for example environment=prod). Passed as a secret because it may contain site names or private label values."
         required: false
 
 env:
@@ -76,7 +74,7 @@ jobs:
     env:
       INPUT_WORKSPACE: ${{ inputs.workspace }}
       INPUT_MANIFEST: ${{ inputs.manifest }}
-      INPUT_SELECTOR: ${{ inputs.selector }}
+      INPUT_SELECTOR: ${{ secrets.SITE_SELECTOR }}
       INPUT_DRY_RUN: ${{ inputs.dry-run }}
 
     steps:
@@ -132,9 +130,9 @@ jobs:
       - name: Validate and show target sites
         shell: bash
         run: |
-          # Use `validate --plan` instead of `sites`. It shows only site names
-          # and locations, not subscription IDs, resource groups, or parameters
-          # which may contain sensitive values from SITE_OVERRIDES.
+          # Use `validate --plan` instead of `sites`. Published plans show
+          # aggregate counts and omit site names, locations, resource identity,
+          # parameter values, and source paths.
           CMD_ARGS=(-w "$INPUT_WORKSPACE" validate "$INPUT_MANIFEST")
           [[ -n "$INPUT_SELECTOR" ]] && CMD_ARGS+=(-l "$INPUT_SELECTOR")
           CMD_ARGS+=(--plan)
@@ -199,7 +197,7 @@ jobs:
 
           [[ -n "$INPUT_SELECTOR" ]] && CMD_ARGS+=(-l "$INPUT_SELECTOR")
 
-          echo "Executing: siteops ${CMD_ARGS[*]}"
+          echo "Executing Site Ops deployment"
           if siteops "${CMD_ARGS[@]}" 2>&1; then
             DEPLOY_EXIT_CODE=0
           else

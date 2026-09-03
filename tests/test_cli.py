@@ -378,6 +378,28 @@ class TestCmdSites:
         captured = capsys.readouterr()
         assert "No sites matched" in captured.err
 
+    def test_sites_redacted_no_match_omits_selector(
+        self,
+        complete_workspace,
+        capsys,
+        monkeypatch,
+    ):
+        from siteops.orchestrator import Orchestrator
+
+        monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1")
+        args = Namespace(
+            name=None,
+            workspace=complete_workspace,
+            selector="private-label=private-value",
+        )
+
+        assert cmd_sites(args, Orchestrator(complete_workspace)) == 1
+
+        error = capsys.readouterr().err
+        assert "No sites matched selector" in error
+        assert "private-label" not in error
+        assert "private-value" not in error
+
     def test_sites_path_form_name_resolves(self, tmp_path, capsys):
         """`siteops sites regions/eu/munich-dev` resolves the nested
         site via the trusted-file fast path. Without parity to deploy,
@@ -739,6 +761,39 @@ class TestCmdDeploy:
         # Diagnostic should mention the missing label so the operator
         # sees the typo.
         assert "nonexistent" in captured.err
+
+    def test_deploy_redacted_selector_no_match_omits_selector(
+        self,
+        complete_workspace,
+        capsys,
+        monkeypatch,
+    ):
+        """Published diagnostics keep the failure and omit selector identity."""
+        from siteops.orchestrator import Orchestrator
+
+        manifest_data = {
+            "name": "test",
+            "sites": ["test-site"],
+            "steps": [{"name": "step1", "template": "templates/test.bicep"}],
+        }
+        manifest_path = complete_workspace / "manifests" / "test.yaml"
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            yaml.dump(manifest_data, f)
+
+        monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1")
+        args = Namespace(
+            manifest=manifest_path,
+            workspace=complete_workspace,
+            selector="private-label=private-value",
+            parallel=None,
+        )
+
+        assert cmd_deploy(args, Orchestrator(complete_workspace)) == 1
+
+        error = capsys.readouterr().err
+        assert "CLI selector matched no sites" in error
+        assert "private-label" not in error
+        assert "private-value" not in error
 
     def test_deploy_cli_name_typo_errors_with_workspace_names(
         self, complete_workspace, capsys

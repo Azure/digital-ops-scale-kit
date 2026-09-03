@@ -1,0 +1,16 @@
+# The advanced sample owns this device in Bicep rather than through the
+# catalog. Selecting the assertion lets catalog-managed assets refer to it
+# without claiming that the catalog applies it.
+# Consumed by: asset-resources
+
+_siteops:
+  external:
+    devices:
+      - name: external-opc-ua
+        reason: Created by the advanced sample's Bicep-owned provider step.
+        expects:
+          properties:
+            endpoints:
+              inbound:
+                opc-ua-connector-0:
+                  endpointType: Microsoft.OpcUa

@@ -37,7 +37,11 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from siteops import __version__
-from siteops.sanitize import scrub_command_for_output, scrub_for_output
+from siteops.sanitize import (
+    scrub_command_for_output,
+    scrub_for_output,
+    scrub_site_for_output,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -865,7 +869,12 @@ class AzCliExecutor:
                     self._tmp_dir.mkdir(parents=True, exist_ok=True)
         return self._tmp_dir
 
-    def _run_az(self, args: list[str], timeout: int = DEFAULT_AZ_TIMEOUT_SECONDS) -> tuple[bool, str, str]:
+    def _run_az(
+        self,
+        args: list[str],
+        timeout: int = DEFAULT_AZ_TIMEOUT_SECONDS,
+        site_name: str = "",
+    ) -> tuple[bool, str, str]:
         """Run an Azure CLI command.
 
         Args:
@@ -884,6 +893,7 @@ class AzCliExecutor:
         # below carry the subscription and resource group the command targets,
         # and a dry run is what an operator runs in CI to preview a change.
         cmd_display = scrub_command_for_output(cmd)
+        cmd_display = scrub_site_for_output(cmd_display, site_name) or ""
 
         if self.dry_run:
             logger.info(f"[DRY-RUN] {cmd_display}")
@@ -1294,7 +1304,7 @@ class AzCliExecutor:
 
             if self.dry_run:
                 # Log the intended submit. Never submit or poll in dry-run.
-                self._run_az(submit_args)
+                self._run_az(submit_args, site_name=site_name)
                 return DeploymentResult(
                     success=True,
                     step_name=step_name,
@@ -1359,7 +1369,9 @@ class AzCliExecutor:
         last_error = ""
         for attempt in range(1, DEFAULT_DEPLOYMENT_SUBMIT_MAX_RETRIES + 1):
             ok, _stdout, stderr = self._run_az(
-                submit_args, timeout=DEFAULT_DEPLOYMENT_SUBMIT_TIMEOUT_SECONDS
+                submit_args,
+                timeout=DEFAULT_DEPLOYMENT_SUBMIT_TIMEOUT_SECONDS,
+                site_name=site_name,
             )
             if ok:
                 return True, None
@@ -1371,8 +1383,11 @@ class AzCliExecutor:
                 # The engine's own timeout, not an ARM error. The PUT may have
                 # reached ARM, so poll and let the not-found grace decide.
                 logger.warning(
-                    f"Submit of '{deployment_name}' timed out. Polling in case ARM "
-                    f"accepted the request."
+                    scrub_site_for_output(
+                        f"Submit of '{deployment_name}' timed out. Polling in "
+                        "case ARM accepted the request.",
+                        site_name,
+                    )
                 )
                 return True, None
 
@@ -1436,7 +1451,9 @@ class AzCliExecutor:
         while True:
             poll_count += 1
             ok, stdout, stderr = self._run_az(
-                show_args, timeout=DEFAULT_WAIT_POLL_AZ_TIMEOUT_SECONDS
+                show_args,
+                timeout=DEFAULT_WAIT_POLL_AZ_TIMEOUT_SECONDS,
+                site_name=site_name,
             )
 
             deployment_obj: dict[str, Any] | None = None
@@ -1460,7 +1477,11 @@ class AzCliExecutor:
                 if observed_state in _DEPLOYMENT_TERMINAL_SUCCESS:
                     outputs = deployment_obj.get("properties", {}).get("outputs") or {}
                     logger.debug(
-                        f"Deployment '{deployment_name}' succeeded after {poll_count} poll(s)"
+                        scrub_site_for_output(
+                            f"Deployment '{deployment_name}' succeeded after "
+                            f"{poll_count} poll(s)",
+                            site_name,
+                        )
                     )
                     return DeploymentResult(
                         success=True,
@@ -1471,7 +1492,11 @@ class AzCliExecutor:
                     )
 
                 if observed_state in _DEPLOYMENT_TERMINAL_FAILURE:
-                    detail = self._format_deployment_failure(deployment_obj, ops_args)
+                    detail = self._format_deployment_failure(
+                        deployment_obj,
+                        ops_args,
+                        site_name,
+                    )
                     return DeploymentResult(
                         success=False,
                         step_name=step_name,
@@ -1538,7 +1563,10 @@ class AzCliExecutor:
             time.sleep(min(DEFAULT_DEPLOYMENT_POLL_INTERVAL_SECONDS, remaining))
 
     def _format_deployment_failure(
-        self, deployment_obj: dict[str, Any], ops_args: list[str]
+        self,
+        deployment_obj: dict[str, Any],
+        ops_args: list[str],
+        site_name: str = "",
     ) -> str:
         """Build a diagnostic for a Failed or Canceled deployment.
 
@@ -1547,7 +1575,7 @@ class AzCliExecutor:
         lives in the deployment operations, so fetch those first and fall back to the
         top-level error only when the operations cannot be read.
         """
-        detail = self._fetch_failed_operations(ops_args)
+        detail = self._fetch_failed_operations(ops_args, site_name)
         if detail:
             return detail
         error_node = deployment_obj.get("properties", {}).get("error")
@@ -1555,14 +1583,20 @@ class AzCliExecutor:
             return _format_arm_error(error_node)
         return "No error detail was reported by ARM."
 
-    def _fetch_failed_operations(self, ops_args: list[str]) -> str | None:
+    def _fetch_failed_operations(
+        self,
+        ops_args: list[str],
+        site_name: str = "",
+    ) -> str | None:
         """Fetch failed deployment operations and format their root-cause errors.
 
         Returns a joined diagnostic string, or None when the operations cannot be read so
         the caller falls back to the deployment's top-level error.
         """
         ok, stdout, _stderr = self._run_az(
-            ops_args, timeout=DEFAULT_WAIT_POLL_AZ_TIMEOUT_SECONDS
+            ops_args,
+            timeout=DEFAULT_WAIT_POLL_AZ_TIMEOUT_SECONDS,
+            site_name=site_name,
         )
         if not ok or not stdout:
             return None

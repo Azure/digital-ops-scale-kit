@@ -1,0 +1,14 @@
+apiVersion: siteops/v1
+kind: Manifest
+name: resource-set-composition
+description: |
+  Advanced resource-set example. Site inheritance selects shared managed and
+  external devices, while the concrete site selects independent asset sets and
+  composes a dataflow endpoint, profile, and route from separate sources.
+
+parallel: 1
+selector: "environment=sample,sample=resource-set-composition"
+
+steps:
+  - include: _external-provider.yaml
+  - include: ../../manifests/_aio-resources.yaml

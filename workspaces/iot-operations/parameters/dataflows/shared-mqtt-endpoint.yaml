@@ -1,0 +1,17 @@
+# A destination endpoint shared by dataflows selected separately.
+# Consumed by: dataflow-resources
+
+dataflowEndpoints:
+  - name: catalog-mqtt-out
+    properties:
+      endpointType: Mqtt
+      mqttSettings:
+        host: "aio-broker.azure-iot-operations:18883"
+        clientIdPrefix: "catalog-{{ site.name }}"
+        authentication:
+          method: ServiceAccountToken
+          serviceAccountTokenSettings:
+            audience: aio-internal
+        tls:
+          mode: Enabled
+          trustedCaCertificateConfigMapRef: azure-iot-operations-aio-ca-trust-bundle
