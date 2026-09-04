@@ -5,52 +5,17 @@ Covers:
 - Site overlay merging (sites/, sites.local/)
 - Site resolution from manifests
 - Deployment name generation
-- Output path resolution
 """
 
 import hashlib
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 import yaml
 
 from siteops.models import DeploymentStep, Manifest, ParallelConfig, Site
-from siteops.orchestrator import Orchestrator, _resolve_output_path
-
-
-class TestResolveOutputPath:
-    """Tests for the _resolve_output_path helper function."""
-
-    def test_simple_path(self):
-        obj = {"name": "test-value"}
-        assert _resolve_output_path(obj, "name") == "test-value"
-
-    def test_nested_path(self):
-        obj = {"resource": {"id": "resource-123", "name": "myresource"}}
-        assert _resolve_output_path(obj, "resource.id") == "resource-123"
-
-    def test_azure_output_unwrap(self):
-        # Azure ARM outputs are wrapped in {"value": X, "type": "..."}
-        obj = {"storageId": {"value": "storage-123", "type": "String"}}
-        assert _resolve_output_path(obj, "storageId") == "storage-123"
-
-    def test_nested_azure_output(self):
-        obj = {
-            "resource": {
-                "value": {"id": "res-123", "name": "myres"},
-                "type": "Object",
-            }
-        }
-        assert _resolve_output_path(obj, "resource.id") == "res-123"
-
-    def test_missing_path(self):
-        obj = {"name": "test"}
-        assert _resolve_output_path(obj, "nonexistent") is None
-        assert _resolve_output_path(obj, "name.nested") is None
-
-    def test_none_input(self):
-        assert _resolve_output_path(None, "anything") is None
+from siteops.orchestrator import Orchestrator
 
 
 class TestOrchestratorSiteLoading:
@@ -498,53 +463,35 @@ class TestDeploymentNameGeneration:
 
     def test_short_name_no_truncation(self, complete_workspace):
         orchestrator = Orchestrator(complete_workspace)
-        site = Site(
-            name="dev",
-            subscription="sub",
-            resource_group="rg",
-            location="eastus",
+        deployment_name = orchestrator._prepared_deployment_name(
+            "short",
+            "dev",
+            "step",
+            "20260102120000",
         )
-        manifest = Manifest(name="short", description="", sites=[], steps=[])
-        step = DeploymentStep(name="step", template="test.bicep")
 
-        with patch.object(orchestrator.executor, "deploy_resource_group") as mock_deploy:
-            mock_deploy.return_value = MagicMock(success=True, outputs={})
-            orchestrator._deploy_bicep_step(site, step, manifest, "20260102120000", {})
-
-            call_args = mock_deploy.call_args
-            deployment_name = call_args.kwargs["deployment_name"]
-
-            assert len(deployment_name) <= 64
-            assert deployment_name == "short-dev-step-20260102120000"
+        assert len(deployment_name) <= 64
+        assert deployment_name == "short-dev-step-20260102120000"
 
     def test_long_name_gets_hash_suffix(self, complete_workspace):
         """Long deployment names use a SHA-256 suffix when truncated."""
         orchestrator = Orchestrator(complete_workspace)
-        site = Site(
-            name="very-long-site-name-that-exceeds-limits",
-            subscription="sub",
-            resource_group="rg",
-            location="eastus",
+        deployment_name = orchestrator._prepared_deployment_name(
+            "very-long-manifest-name",
+            "very-long-site-name-that-exceeds-limits",
+            "very-long-step-name",
+            "20260102120000",
         )
-        manifest = Manifest(name="very-long-manifest-name", description="", sites=[], steps=[])
-        step = DeploymentStep(name="very-long-step-name", template="test.bicep")
 
-        with patch.object(orchestrator.executor, "deploy_resource_group") as mock_deploy:
-            mock_deploy.return_value = MagicMock(success=True, outputs={})
-            orchestrator._deploy_bicep_step(site, step, manifest, "20260102120000", {})
-
-            call_args = mock_deploy.call_args
-            deployment_name = call_args.kwargs["deployment_name"]
-
-            assert len(deployment_name) <= 64
-            assert deployment_name.endswith("20260102120000")
-            base_name = (
-                "very-long-manifest-name-very-long-site-name-that-exceeds-limits-"
-                "very-long-step-name"
-            )
-            expected_hash = hashlib.sha256(base_name.encode()).hexdigest()[:10]
-            expected_base = f"{base_name[:38]}-{expected_hash}"
-            assert deployment_name == f"{expected_base}-20260102120000"
+        assert len(deployment_name) <= 64
+        assert deployment_name.endswith("20260102120000")
+        base_name = (
+            "very-long-manifest-name-very-long-site-name-that-exceeds-limits-"
+            "very-long-step-name"
+        )
+        expected_hash = hashlib.sha256(base_name.encode()).hexdigest()[:10]
+        expected_base = f"{base_name[:38]}-{expected_hash}"
+        assert deployment_name == f"{expected_base}-20260102120000"
 
 
 class TestDeployParallelConfig:
@@ -586,22 +533,25 @@ steps:
             parallel=ParallelConfig(sites=1),  # Sequential in manifest
         )
 
-        # When parallel_override is provided, it should be used
-        with patch.object(orchestrator, "_deploy_sequential") as mock_seq:
-            with patch.object(orchestrator, "_deploy_parallel") as mock_par:
-                mock_seq.return_value = []
-                mock_par.return_value = []
+        with (
+            patch(
+                "siteops.orchestrator.get_template_parameters",
+                return_value=frozenset(),
+            ),
+            patch.object(
+                orchestrator,
+                "_run_prepared_targets",
+                return_value=([], {}),
+            ) as run_targets,
+        ):
+            orchestrator.deploy(
+                complete_workspace / "manifests" / "test-manifest.yaml",
+                parallel_override=3,
+                manifest=manifest,
+                sites=[orchestrator.load_site("test-site")],
+            )
 
-                # Override to parallel mode
-                orchestrator.deploy(
-                    complete_workspace / "manifests" / "test-manifest.yaml",
-                    parallel_override=3,
-                    manifest=manifest,
-                    sites=[orchestrator.load_site("test-site")],
-                )
-
-                # Should use parallel, not sequential
-                assert mock_par.called or mock_seq.called
+        assert run_targets.call_args.args[0].max_parallel_sites == 3
 
     def test_deploy_single_site_always_sequential(self, complete_workspace):
         """Test that single site deployment is always sequential regardless of config."""
@@ -615,23 +565,73 @@ steps:
             parallel=ParallelConfig(sites=0),  # Unlimited in manifest
         )
 
-        with patch.object(orchestrator, "_deploy_sequential") as mock_seq:
-            with patch.object(orchestrator, "_deploy_parallel") as mock_par:
-                mock_seq.return_value = []
+        target_result = {
+            "site": "test-site",
+            "status": "success",
+            "error": None,
+            "steps_completed": 1,
+            "steps_skipped": 0,
+            "steps_total": 1,
+            "elapsed": 0.0,
+            "steps": [],
+        }
+        with (
+            patch(
+                "siteops.orchestrator.get_template_parameters",
+                return_value=frozenset(),
+            ),
+            patch.object(
+                orchestrator,
+                "_execute_prepared_target",
+                return_value=(target_result, {}),
+            ) as execute_target,
+        ):
+            orchestrator.deploy(
+                complete_workspace / "manifests" / "test-manifest.yaml",
+                manifest=manifest,
+                sites=[orchestrator.load_site("test-site")],
+            )
 
-                orchestrator.deploy(
-                    complete_workspace / "manifests" / "test-manifest.yaml",
-                    manifest=manifest,
-                    sites=[orchestrator.load_site("test-site")],
-                )
-
-                # Single site should use sequential
-                mock_seq.assert_called_once()
-                mock_par.assert_not_called()
+        assert execute_target.call_args.kwargs["parallel_mode"] is False
 
 
 class TestPlanParallelDisplay:
     """Tests for parallel config display in show_plan output."""
+
+    def test_plain_plan_output_is_byte_compatible(
+        self,
+        complete_workspace,
+        capsys,
+    ):
+        orchestrator = Orchestrator(complete_workspace)
+        manifest_path = (
+            complete_workspace / "manifests" / "test-manifest.yaml"
+        )
+        border = "═" * 60
+
+        orchestrator.show_plan(manifest_path)
+
+        assert capsys.readouterr().out == (
+            f"{border}\n"
+            "  DEPLOYMENT PLAN: test-manifest\n"
+            f"{border}\n"
+            "\n"
+            "  Test manifest\n"
+            "\n"
+            "  Sites (1):\n"
+            "    • test-site (eastus)\n"
+            "\n"
+            "  Parallel: sequential\n"
+            "\n"
+            "  Steps (1):\n"
+            "    1. deploy-storage (resourceGroup)\n"
+            "       └─ templates/test.bicep\n"
+            "\n"
+            f"{border}\n"
+            "  Total: 1 operation(s)\n"
+            f"{border}\n"
+            "\n"
+        )
 
     def test_plan_shows_parallel_config(self, complete_workspace, capsys):
         """Test that show_plan output shows parallel configuration."""
@@ -699,7 +699,7 @@ class TestStepSiteCompatibility:
 
     def test_kubectl_step_always_compatible(self, tmp_workspace):
         """Kubectl steps should run on any site type."""
-        from siteops.models import ArcCluster, KubectlStep, Site
+        from siteops.models import ArcCluster, KubectlStep
 
         orchestrator = Orchestrator(tmp_workspace)
 
@@ -730,7 +730,7 @@ class TestStepSiteCompatibility:
 
     def test_subscription_step_with_rg_site_skipped(self, tmp_workspace):
         """Subscription-scoped step should be skipped for RG-level site."""
-        from siteops.models import DeploymentStep, Site
+        from siteops.models import DeploymentStep
 
         orchestrator = Orchestrator(tmp_workspace)
 
@@ -752,7 +752,7 @@ class TestStepSiteCompatibility:
 
     def test_rg_step_with_subscription_site_skipped(self, tmp_workspace):
         """ResourceGroup-scoped step should be skipped for subscription-level site."""
-        from siteops.models import DeploymentStep, Site
+        from siteops.models import DeploymentStep
 
         orchestrator = Orchestrator(tmp_workspace)
 
@@ -774,7 +774,7 @@ class TestStepSiteCompatibility:
 
     def test_matching_scope_returns_none(self, tmp_workspace):
         """Matching scope/site level should return None (compatible)."""
-        from siteops.models import DeploymentStep, Site
+        from siteops.models import DeploymentStep
 
         orchestrator = Orchestrator(tmp_workspace)
 
@@ -1352,7 +1352,7 @@ class TestNestedSiteDiscovery:
             )
         orchestrator = Orchestrator(tmp_workspace, extra_trusted_sites_dirs=[extras])
         site = orchestrator.load_site("munich")
-        # Identity preserved from base; overlay fields applied on top.
+        # Identity comes from the base. Overlay fields apply on top.
         assert site.name == "munich"
         assert site.subscription == "11111111-1111-1111-1111-111111111111"
         assert site.labels.get("overlay") == "yes"
@@ -1380,37 +1380,6 @@ class TestNestedSiteDiscovery:
         site_forward = orchestrator.load_site("regions/eu/munich")
         site_backslash = orchestrator.load_site("regions\\eu\\munich")
         assert site_forward is site_backslash
-
-
-class TestGetStepTypeLabel:
-    """Tests for step type display labels."""
-
-    def test_kubectl_step_label(self, tmp_workspace):
-        """Test that kubectl steps produce 'kubectl:<operation>' label."""
-        from siteops.models import ArcCluster, KubectlStep
-
-        orchestrator = Orchestrator(tmp_workspace)
-        step = KubectlStep(
-            name="apply-config",
-            operation="apply",
-            arc=ArcCluster(name="cluster", resource_group="rg"),
-            files=["config.yaml"],
-        )
-
-        label = orchestrator._get_step_type_label(step)
-        assert label == "kubectl:apply"
-
-    def test_deployment_step_label(self, tmp_workspace):
-        """Test that deployment steps return their scope as label."""
-        orchestrator = Orchestrator(tmp_workspace)
-        step = DeploymentStep(
-            name="deploy",
-            template="test.bicep",
-            scope="subscription",
-        )
-
-        label = orchestrator._get_step_type_label(step)
-        assert label == "subscription"
 
 
 class TestAllStepsSkipped:

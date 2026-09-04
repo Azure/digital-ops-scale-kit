@@ -33,7 +33,6 @@ from siteops.composition import (
     LoadedParameterSource,
     compose_sources,
     contains_composition_metadata,
-    format_identity,
     load_contract,
     merge_contracts,
     report_composition_error,
@@ -43,12 +42,12 @@ from siteops.executor import (
     DeploymentResult,
     KubectlResult,
     WaitResult,
-    filter_parameters,
     get_template_parameters,
 )
 from siteops.models import (
     CONDITION_PATTERN,
     AnyCondition,
+    ArmTagCondition,
     DeploymentStep,
     KubectlStep,
     Manifest,
@@ -65,6 +64,47 @@ from siteops.models import (
     _validate_resource,
     format_when_condition,
     parse_selector,
+)
+from siteops.planning import (
+    STEP_OUTPUT_PATTERN,
+    ArmTagWaitOperation,
+    CompositionReference,
+    CompositionRequirement,
+    CompositionResource,
+    CompositionSource,
+    DataReference,
+    DeploymentOperation,
+    DeploymentPlan,
+    DiagnosticSeverity,
+    InputStatus,
+    KubectlOperation,
+    LiteralValue,
+    MappingValue,
+    OperationIdentity,
+    OperationKind,
+    OperationScope,
+    OutputValue,
+    PlanBuildResult,
+    PlanComposition,
+    PlanDiagnostic,
+    PlanDisposition,
+    PlanExecutionMode,
+    PlanIntent,
+    PlanNotExecutableError,
+    PlanSkipReason,
+    PlanStatus,
+    PlanStep,
+    PlanValueResolutionError,
+    PreparedOperation,
+    PreparedTarget,
+    ResourceDisposition,
+    ResourceIdentity,
+    SkipReasonCode,
+    TargetKind,
+    classify_plan_value,
+    collect_data_references,
+    render_plain_plan,
+    resolve_plan_value,
 )
 from siteops.sanitize import (
     is_redaction_enabled,
@@ -121,10 +161,6 @@ def _cache_state_digest(value: Any) -> str:
     return hashlib.sha256(frozen).hexdigest()
 
 
-# Pattern for {{ steps.<step_name>.outputs.<output_path> }}
-# Supports nested paths like: steps.X.outputs.Y.Z.A
-STEP_OUTPUT_PATTERN = re.compile(r"\{\{\s*steps\.([a-zA-Z0-9_-]+)\.outputs\.([a-zA-Z0-9_.-]+)\s*\}\}")
-
 # A template whose closing delimiter is intact but whose opening one is not,
 # such as `{ site.name }}`. Anchored on a template path so that data rendered
 # into a string, which ends in `}}` whenever it nests, is not mistaken for one.
@@ -150,10 +186,6 @@ FOR_EACH_SITE_PROPERTY_PATTERN = re.compile(
 
 # Result type that can be a deployment, kubectl, or wait result
 StepResult = DeploymentResult | KubectlResult | WaitResult
-
-# Type alias for subscription-scoped outputs: subscription_id -> step_name -> outputs
-SubscriptionOutputs = dict[str, dict[str, dict[str, Any]]]
-
 
 def _normalize_null_site_mappings(data: dict[str, Any]) -> dict[str, Any]:
     """Treat an explicitly empty site mapping as an empty mapping before merge."""
@@ -247,34 +279,6 @@ def _carries_template(text: str) -> bool:
     return bool(_MALFORMED_TEMPLATE_PATTERN.search(text))
 
 
-def _only_a_dry_run_could_not_resolve_this(
-    text: str, available_steps: frozenset[str] | None = None
-) -> bool:
-    """True when a real deployment would resolve this and a dry run cannot.
-
-    Only a step output qualifies, and only one naming a step that runs before
-    the step being checked. No step has produced an output during a dry run, so
-    failing on those would make dry run useless on any manifest that chains.
-
-    A reference to a step that does not exist, or that runs later, resolves in
-    neither a dry run nor a real one, so it is not excused. `available_steps`
-    is the set of names that qualify. Passing None excuses any step output,
-    which suits a caller that has no step list to check against.
-
-    Nothing else qualifies. A `{{ site.X }}` path that did not resolve, and a
-    mistyped delimiter, fail exactly the same way on the real deployment, so
-    excusing them would let a dry run pass a gate that exists to predict it.
-    """
-    if _MALFORMED_TEMPLATE_PATTERN.search(text):
-        return False
-    if available_steps is not None:
-        for match in STEP_OUTPUT_PATTERN.finditer(text):
-            if match.group(1) not in available_steps:
-                return False
-    remaining = STEP_OUTPUT_PATTERN.sub("", text)
-    return "{{" not in remaining and "}}" not in remaining
-
-
 def _reportable_subscription(sub_id: str) -> str:
     """Return a subscription id short enough to name without identifying a tenant.
 
@@ -283,39 +287,6 @@ def _reportable_subscription(sub_id: str) -> str:
     placeholder would not.
     """
     return scrub_for_output(f"{sub_id[:8]}...") or ""
-
-
-def _resolve_output_path(obj: Any, path: str) -> Any:
-    """Resolve a dot-separated path into an object.
-
-    Handles Azure ARM output format which wraps values in {"value": X, "type": "..."}
-
-    Args:
-        obj: The object to traverse (dict or value)
-        path: Dot-separated path like "adrNamespace.id"
-
-    Returns:
-        The value at the path, or None if not found
-    """
-    parts = path.split(".")
-    current = obj
-
-    for part in parts:
-        if current is None:
-            return None
-        # Unwrap Azure output format at each level
-        if isinstance(current, dict) and "value" in current and "type" in current:
-            current = current["value"]
-        if isinstance(current, dict) and part in current:
-            current = current[part]
-        else:
-            return None
-
-    # Final unwrap if needed
-    if isinstance(current, dict) and "value" in current and "type" in current:
-        current = current["value"]
-
-    return current
 
 
 # Lock for thread-safe console output
@@ -452,14 +423,14 @@ class Orchestrator:
             if resolved == primary:
                 raise ValueError(
                     f"Extra site dir '{candidate}' is the workspace's "
-                    f"sites/ directory; already included by default."
+                    f"sites/ directory, which is already included by default."
                 )
             if resolved == overlay:
                 raise ValueError(
                     f"Extra site dir '{candidate}' is the workspace's "
                     f"sites.local/ directory. Registering it as trusted "
-                    f"would allow overlays to inject inheritance; refused "
-                    f"for security."
+                    f"would allow overlays to inject inheritance, so it is "
+                    f"refused for security."
                 )
             if resolved in seen:
                 continue
@@ -500,7 +471,7 @@ class Orchestrator:
         error rather than a generic "not found".
 
         `sites.local/` is never searched. Sites must live in a
-        code-reviewed or caller-vouched-for trusted location.
+        repository-controlled or operator-vouched trusted location.
         """
         self._ensure_site_indexes()
         # Path-form lookup first. A `/` in the identifier signals an
@@ -723,7 +694,7 @@ class Orchestrator:
 
         Used to key the overlay merge in `_load_site_data`. Falls back to
         the basename when the path is not under any trusted directory
-        (defensive; should not happen in practice).
+        as a defensive fallback that should not be needed in practice.
         """
         for sites_dir in self._trusted_sites_dirs:
             try:
@@ -778,24 +749,42 @@ class Orchestrator:
         when the dict subtree is new (not present in `base`).
 
         `prov` is mutated in place. The returned dict is a new merged
-        result; neither input is modified.
+        result. Neither input is modified.
         """
         result = copy.deepcopy(base)
         for key, value in override.items():
             full_key = f"{prefix}.{key}" if prefix else key
             if isinstance(value, dict):
+                if key in result and not isinstance(result[key], dict):
+                    self._remove_provenance_subtree(prov, full_key)
                 # Recurse whether or not the dict subtree exists in base.
                 # When base lacks the key the inner walk attributes every
-                # leaf; otherwise it merges and only re-attributes leaves
-                # the override actually touched.
+                # leaf. Otherwise it merges and only re-attributes leaves the
+                # override actually touched.
                 base_subtree = result[key] if key in result and isinstance(result[key], dict) else {}
                 result[key] = self._deep_merge_provenance(
                     base_subtree, value, origin, prov, full_key
                 )
             else:
+                self._remove_provenance_subtree(prov, full_key)
                 result[key] = copy.deepcopy(value)
                 prov[full_key] = origin
         return result
+
+    @staticmethod
+    def _remove_provenance_subtree(
+        prov: dict[str, str],
+        path: str,
+    ) -> None:
+        """Remove an origin for `path` and every descendant below it."""
+        descendant_prefix = f"{path}."
+        stale = [
+            key
+            for key in prov
+            if key == path or key.startswith(descendant_prefix)
+        ]
+        for key in stale:
+            del prov[key]
 
     def _resolve_inherits(self, child_path: Path, inherits_value: str) -> Path:
         """Resolve an `inherits:` reference to an absolute path.
@@ -924,7 +913,7 @@ class Orchestrator:
 
         # Inherits parents must be SiteTemplates. A `kind: Site` parent
         # would chain deployable sites together, where editing one would
-        # silently change the other; that is almost always an authoring
+        # silently change the other. That is almost always an authoring
         # mistake. Use SiteTemplate for any reusable base.
         kind = data.get("kind")
         if kind is not None and kind != "SiteTemplate":
@@ -1047,8 +1036,8 @@ class Orchestrator:
                         # Merge inherited into the working dict WITHOUT
                         # re-attribution. The per-leaf provenance for
                         # inherited keys was already set during the chain
-                        # walk; the outer merge would otherwise clobber it
-                        # with the parent file's label.
+                        # walk. The outer merge would otherwise clobber it with
+                        # the parent file's label.
                         merged_data = self._deep_merge(merged_data, inherited_data)
                         # Remove inherits from data before merging
                         data = {k: v for k, v in data.items() if k != "inherits"}
@@ -1061,8 +1050,8 @@ class Orchestrator:
                         data = {k: v for k, v in data.items() if k != "inherits"}
 
                     # Reject overlay-renames-site. Identity is set by the
-                    # base file; the workspace name indexes are built
-                    # from base files, so an overlay rename produces a
+                    # base file. The workspace name indexes are built from
+                    # base files, so an overlay rename produces a
                     # site unfindable through any index. Allow overlays
                     # to RESTATE the same name (the common case where
                     # extras-dir overlays mirror the base shape) and
@@ -1405,8 +1394,8 @@ class Orchestrator:
         dirs (last wins) > `sites/`.
 
         Memoized for the orchestrator's lifetime. The result is a stable
-        snapshot of every site once the workspace finishes loading;
-        subsequent commands like `explain_no_match` reuse it.
+        snapshot of every site once the workspace finishes loading.
+        Subsequent commands like `explain_no_match` reuse it.
 
         Returns:
             List of all Site instances found (with merged configuration).
@@ -1653,114 +1642,6 @@ class Orchestrator:
 
         return current
 
-    def _resolve_step_outputs(
-        self,
-        value: Any,
-        step_outputs: dict[str, dict[str, Any]],
-        subscription_outputs: SubscriptionOutputs | None = None,
-        subscription_id: str | None = None,
-    ) -> Any:
-        """Recursively resolve {{ steps.<name>.outputs.<path> }} templates.
-
-        Supports output chaining between steps, including cross-scope chaining
-        where RG-level sites can reference outputs from subscription-scoped steps.
-
-        Resolution order:
-        1. Per-site step_outputs (from RG-scoped steps executed for this site)
-        2. Subscription outputs (from subscription-scoped steps for this subscription)
-
-        Args:
-            value: Value to resolve (string, dict, list, or other)
-            step_outputs: Dict mapping step names to their outputs (per-site)
-            subscription_outputs: Dict mapping subscription_id -> step_name -> outputs
-            subscription_id: Current site's subscription (for cross-scope resolution)
-
-        Returns:
-            Value with all step output references resolved
-        """
-        if isinstance(value, str):
-            # Check if entire string is a single template (for complex types like arrays)
-            stripped = value.strip()
-            full_match = STEP_OUTPUT_PATTERN.fullmatch(stripped)
-            if full_match:
-                step_name = full_match.group(1)
-                output_path = full_match.group(2)
-
-                # Try per-site outputs first, then subscription outputs
-                output_value = self._resolve_output_from_sources(
-                    step_name, output_path, step_outputs, subscription_outputs, subscription_id
-                )
-                if output_value is not None:
-                    return output_value
-                return value
-
-            # For strings with embedded templates, do string substitution
-            def replacer(match: re.Match) -> str:
-                step_name = match.group(1)
-                output_path = match.group(2)
-
-                output_value = self._resolve_output_from_sources(
-                    step_name, output_path, step_outputs, subscription_outputs, subscription_id
-                )
-                if output_value is None:
-                    return match.group(0)
-
-                if isinstance(output_value, (list, dict)):
-                    logger.warning(f"Cannot embed complex output '{output_path}' in string: {value}")
-                    return match.group(0)
-
-                return str(output_value)
-
-            return STEP_OUTPUT_PATTERN.sub(replacer, value)
-
-        elif isinstance(value, dict):
-            return _resolve_parameter_mapping(
-                value,
-                lambda v: self._resolve_step_outputs(
-                    v, step_outputs, subscription_outputs, subscription_id
-                ),
-            )
-        elif isinstance(value, list):
-            return [
-                self._resolve_step_outputs(item, step_outputs, subscription_outputs, subscription_id) for item in value
-            ]
-        return value
-
-    @staticmethod
-    def _resolve_output_from_sources(
-        step_name: str,
-        output_path: str,
-        step_outputs: dict[str, dict[str, Any]],
-        subscription_outputs: SubscriptionOutputs | None,
-        subscription_id: str | None,
-    ) -> Any:
-        """Resolve an output reference from available sources.
-
-        Args:
-            step_name: Name of the step to get outputs from
-            output_path: Dot-separated path within the outputs
-            step_outputs: Per-site step outputs
-            subscription_outputs: Subscription-level step outputs
-            subscription_id: Current subscription ID
-
-        Returns:
-            Resolved value or None if not found
-        """
-        # Try per-site outputs first
-        step_data = step_outputs.get(step_name)
-        if step_data is not None:
-            output_value = _resolve_output_path(step_data, output_path)
-            if output_value is not None:
-                return output_value
-
-        # Fall back to subscription outputs
-        if subscription_outputs and subscription_id:
-            sub_step_data = subscription_outputs.get(subscription_id, {}).get(step_name)
-            if sub_step_data is not None:
-                return _resolve_output_path(sub_step_data, output_path)
-
-        return None
-
     @staticmethod
     def _require_selected_parameter_file(
         declared: str, resolved: str, site: Site, workspace: Path, tier: str
@@ -1989,6 +1870,8 @@ class Orchestrator:
         self,
         manifest: Manifest,
         site: Site,
+        *,
+        validate_step_coverage: bool = True,
     ) -> tuple[
         dict[str, Any],
         CompositionResult | None,
@@ -2019,6 +1902,7 @@ class Orchestrator:
             _cache_state_digest(manifest_state),
             site.name,
             _cache_state_digest(site_state),
+            validate_step_coverage,
         )
         with self._composition_cache_lock:
             cached = self._composition_cache.get(key)
@@ -2098,12 +1982,13 @@ class Orchestrator:
         if contract is not None:
             result = compose_sources(contract, loaded)
             plain_parameters = result.parameters
-            self._validate_composition_step_coverage(
-                manifest,
-                site,
-                contract,
-                result,
-            )
+            if validate_step_coverage:
+                self._validate_composition_step_coverage(
+                    manifest,
+                    site,
+                    contract,
+                    result,
+                )
         self._validate_composition_lower_tiers(
             manifest,
             site,
@@ -2236,40 +2121,13 @@ class Orchestrator:
                     f"'{reference.source_collection}'."
                 )
 
-    def resolve_parameters(
+    def _merge_known_parameters(
         self,
         step: DeploymentStep,
         site: Site,
         manifest: Manifest,
-        step_outputs: dict[str, dict[str, Any]] | None = None,
-        subscription_outputs: SubscriptionOutputs | None = None,
     ) -> dict[str, Any]:
-        """Merge and resolve parameters for a deployment step.
-
-        Parameter merge order (later overrides earlier):
-        1. Manifest-level parameter files (from manifest.parameters) - shared defaults
-        2. Site-level parameters (from site definition) - site-specific overrides
-        3. Step-level parameter files (from step.parameters) - step-specific overrides
-
-        Collections governed by a `ParameterComposition` contract are the
-        exception. They compose only from manifest-level sources, and writing
-        one at site or step level is an error.
-
-        After merging, parameters are:
-        - Resolved with template variable substitution ({{ site.X }}, {{ steps.X.outputs.Y }})
-        - Filtered to only include parameters accepted by the template
-
-        Args:
-            step: The deployment step
-            site: Target site
-            manifest: The manifest being deployed
-            step_outputs: Outputs from previous steps (for chaining)
-            subscription_outputs: Outputs from subscription-scoped steps (for cross-scope chaining)
-
-        Returns:
-            Fully resolved and filtered parameters dict
-        """
-        # 1. Start with the resolved manifest parameter tier.
+        """Merge parameter tiers and resolve values known from the site."""
         params, _, _ = self._resolve_manifest_parameters(
             manifest,
             site,
@@ -2289,149 +2147,75 @@ class Orchestrator:
                 logger.warning(f"Step parameter file not found: {full_path}")
 
         # 4. Resolve template variables ({{ site.X }})
-        params = self._resolve_template_strings(params, site)
+        return self._resolve_template_strings(params, site)
 
-        # 5. Resolve step output references ({{ steps.X.outputs.Y }})
-        # Includes cross-scope resolution from subscription outputs
-        if step_outputs or subscription_outputs:
-            params = self._resolve_step_outputs(
-                params,
-                step_outputs or {},
-                subscription_outputs,
-                site.subscription,
+    def resolve_parameters(
+        self,
+        step: DeploymentStep,
+        site: Site,
+        manifest: Manifest,
+        step_outputs: dict[str, dict[str, Any]] | None = None,
+        subscription_outputs: (
+            dict[str, dict[str, dict[str, Any]]] | None
+        ) = None,
+    ) -> dict[str, Any]:
+        """Resolve and filter parameters for one deployment step.
+
+        Use this for a single step. `build_plan()` and `execute_plan()` cover a
+        whole manifest. The step must belong to `manifest`, and each prior-step
+        output reference must have supplied outputs.
+        """
+        if step not in manifest.steps:
+            raise ValueError(
+                f"Step '{step.name}' is not part of manifest "
+                f"'{manifest.name}'."
             )
+        step_index = manifest.steps.index(step)
+        prior_names = {
+            prior.name for prior in manifest.steps[:step_index]
+        }
+        available_sources: dict[str, OperationIdentity] = {}
+        outputs: dict[OperationIdentity, dict[str, Any]] = {}
 
-        # 6. Filter to template-accepted parameters before the unresolved-check
-        # so that defaults injected for steps that don't consume them (e.g.
-        # `siteAddress.{country,city}` from common.yaml) don't trip the check.
-        #
-        # Check top-level KEYS first. Filtering drops any key the template does
-        # not declare, and a key still carrying `{{ }}` never matches one, so
-        # without this the guard at step 7 sees an empty mapping and reports
-        # nothing. That turns a typo in a parameter name into a step that
-        # deploys defaults and reports success.
-        # A step output can only resolve from a step that already ran, so a dry
-        # run excuses a reference to one of those and nothing else.
-        available_steps = frozenset(
-            s.name for s in manifest.steps[: manifest.steps.index(step)]
-        ) if step in manifest.steps else None
+        for name, values in (step_outputs or {}).items():
+            if name not in prior_names:
+                continue
+            identity = OperationIdentity(target=site.name, step=name)
+            available_sources[name] = identity
+            outputs[identity] = values
 
-        self._check_unresolved_keys(params, site.name, step.name, available_steps)
+        if subscription_outputs is not None:
+            for name, values in subscription_outputs.get(
+                site.subscription,
+                {},
+            ).items():
+                if name not in prior_names:
+                    continue
+                identity = OperationIdentity(target=site.name, step=name)
+                available_sources[name] = identity
+                outputs[identity] = values
 
-        template_path = (self.workspace / step.template).resolve()
-        filter_succeeded = False
-        if template_path.exists():
-            try:
-                params = filter_parameters(params, str(template_path), step.name)
-                filter_succeeded = True
-            except (ValueError, FileNotFoundError) as e:
-                logger.warning(
-                    f"Could not filter parameters for step '{step.name}': {e}; "
-                    f"skipping unresolved-template precheck so the original error "
-                    f"is not masked by a follow-on 'unresolved templates' failure"
-                )
-
-        # 7. Fail fast on any unresolved {{ ... }} templates. A dry run warns
-        # only for `{{ steps.X.outputs.Y }}`, which it genuinely cannot
-        # resolve. Skipped when filtering failed: an unfiltered param set may
-        # carry tokens for params the template doesn't accept (which filtering
-        # would have stripped), and raising here would hide the upstream filter
-        # failure.
-        if filter_succeeded:
-            self._check_unresolved_templates(params, site.name, step.name, available_steps)
-
-        return params
-
-    def _check_unresolved_keys(
-        self,
-        params: dict[str, Any],
-        site_name: str,
-        step_name: str,
-        available_steps: frozenset[str] | None = None,
-    ) -> None:
-        """Fail on a top-level parameter name that still carries a template.
-
-        Runs before `filter_parameters`, which is what makes it necessary. A
-        name that did not resolve cannot match a declared template parameter,
-        so filtering silently discards it and the guard that runs afterwards
-        has nothing left to see.
-
-        Only the top level is checked here. A nested key survives filtering
-        when its parent is accepted, so `_check_unresolved_templates` catches
-        it afterwards with the full path in the message.
-        """
-        unresolved = [k for k in params if isinstance(k, str) and _carries_template(k)]
-        if not unresolved:
-            return
-
-        details = "; ".join(sorted(unresolved))
-        message = (
-            f"Unresolved template(s) in parameter name(s) for step "
-            f"'{step_name}' (site: {site_name}): {details}"
+        details, _ = self._prepare_operation_details(
+            step,
+            site,
+            manifest,
+            available_sources,
         )
-        if self.dry_run and all(
-            _only_a_dry_run_could_not_resolve_this(name, available_steps)
-            for name in unresolved
+        if (
+            not isinstance(details, DeploymentOperation)
+            or details.parameters is None
         ):
-            logger.warning(scrub_for_output(message))
-            return
-        raise ValueError(message)
-
-    def _check_unresolved_templates(
-        self,
-        params: dict[str, Any],
-        site_name: str,
-        step_name: str,
-        available_steps: frozenset[str] | None = None,
-    ) -> None:
-        """Fail (or warn in dry-run) if any {{ ... }} templates remain.
-
-        Unresolved templates at this stage mean a parameter source did not
-        produce the expected output, a step reference points at a non-existent
-        step/output, or a `{{ site.X }}` path is wrong. Letting the deployment
-        proceed would silently send literal `{{ ... }}` strings to ARM.
-
-        A dry run warns only when every remaining token is a step-output
-        reference, which is the one thing it cannot resolve. Anything else
-        fails, since it fails on the real deployment too and a dry run that
-        passes is what a gate reads as a prediction of it.
-        """
-        unresolved: list[tuple[str, str]] = []
-
-        def collect(v: Any, path: str = "") -> None:
-            if isinstance(v, str) and _carries_template(v):
-                unresolved.append((path, v))
-            elif isinstance(v, dict):
-                for k, val in v.items():
-                    here = f"{path}.{k}" if path else k
-                    # Keys are walked as well as values, since a key is a place
-                    # a template can survive resolution and reach ARM.
-                    if isinstance(k, str) and _carries_template(k):
-                        unresolved.append((f"{here} (key)", k))
-                    collect(val, here)
-            elif isinstance(v, list):
-                for i, item in enumerate(v):
-                    collect(item, f"{path}[{i}]")
-
-        collect(params)
-
-        if not unresolved:
-            return
-
-        details = "; ".join(f"{path}={value}" for path, value in unresolved)
-        message = (
-            f"Unresolved template(s) for step '{step_name}' (site: {site_name}): "
-            f"{details}"
-        )
-        if self.dry_run and all(
-            _only_a_dry_run_could_not_resolve_this(value, available_steps)
-            for _, value in unresolved
-        ):
-            # Scrubbed because a reported path can carry a resolved key, which
-            # is a site value, and a dry run is what an operator runs in CI.
-            logger.warning(scrub_for_output(message))
-            return
-        raise ValueError(message)
+            raise TypeError(
+                "Deployment parameter preparation did not produce a "
+                "deployment operation."
+            )
+        parameters = resolve_plan_value(details.parameters, outputs)
+        if not isinstance(parameters, dict):
+            raise TypeError(
+                "Prepared deployment parameters did not resolve to a mapping."
+            )
+        self._validate_prepared_parameter_names(details, parameters)
+        return parameters
 
     def _evaluate_condition(
         self,
@@ -2555,36 +2339,6 @@ class Orchestrator:
 
         return None
 
-    @staticmethod
-    def _get_step_type_label(step: ManifestStep) -> str:
-        """Get a display label for the step type.
-
-        Args:
-            step: The manifest step
-
-        Returns:
-            Display string like 'resourceGroup', 'subscription', or 'kubectl:apply'
-        """
-        if isinstance(step, KubectlStep):
-            return f"kubectl:{step.operation}"
-        if isinstance(step, WaitStep):
-            return "wait"
-        return step.scope
-
-    @staticmethod
-    def _get_subscription_step_names(manifest: Manifest) -> set[str]:
-        """Get names of all subscription-scoped steps in a manifest.
-
-        Args:
-            manifest: The manifest to inspect
-
-        Returns:
-            Set of step names that have scope: subscription
-        """
-        return {
-            step.name for step in manifest.steps if isinstance(step, DeploymentStep) and step.scope == "subscription"
-        }
-
     def _any_subscription_step_would_execute(
         self,
         subscription_steps: list[DeploymentStep],
@@ -2616,608 +2370,6 @@ class Orchestrator:
         return False
 
     @staticmethod
-    def _references_any_step(value: Any, step_names: set[str]) -> bool:
-        """Check if a value contains output references to any of the given steps.
-
-        Recursively searches dict/list/str for {{ steps.<name>.outputs.* }} patterns.
-
-        Args:
-            value: Parameter value to check
-            step_names: Set of step names to look for
-
-        Returns:
-            True if value references any step in step_names
-        """
-        if isinstance(value, dict):
-            return any(Orchestrator._references_any_step(v, step_names) for v in value.values())
-        elif isinstance(value, list):
-            return any(Orchestrator._references_any_step(item, step_names) for item in value)
-        elif isinstance(value, str):
-            # Quick check before regex
-            if "steps." not in value:
-                return False
-            for match in STEP_OUTPUT_PATTERN.finditer(value):
-                if match.group(1) in step_names:
-                    return True
-        return False
-
-    def _site_depends_on_subscription_outputs(
-        self,
-        manifest: Manifest,
-        site: Site,
-        subscription_step_names: set[str],
-    ) -> bool:
-        """Check if a site's RG-scoped steps reference subscription-scoped outputs.
-
-        Scans manifest-level and step-level parameter files for references to
-        subscription-scoped step outputs.
-
-        Args:
-            manifest: The manifest being deployed
-            site: The site to check
-            subscription_step_names: Names of subscription-scoped steps
-
-        Returns:
-            True if site has steps that depend on subscription-scoped outputs
-        """
-        if not subscription_step_names:
-            return False
-
-        # Check manifest-level parameters (apply to all steps)
-        for source in manifest.parameters:
-            for resolved_path, _ in self._expand_manifest_parameter_source(
-                source,
-                manifest,
-                site,
-            ):
-                full_path = (self.workspace / resolved_path).resolve()
-                if full_path.exists():
-                    try:
-                        params = self.load_parameters(full_path)
-                        if self._references_any_step(
-                            params,
-                            subscription_step_names,
-                        ):
-                            return True
-                    except (ValueError, yaml.YAMLError, OSError) as e:
-                        logger.debug(
-                            f"Could not read parameter file {full_path}: {e}"
-                        )
-
-        # Check step-level parameters for RG-scoped steps
-        for step in manifest.steps:
-            if isinstance(step, DeploymentStep) and step.scope == "resourceGroup":
-                for param_path in step.parameters:
-                    resolved_path = manifest.resolve_parameter_path(param_path, site)
-                    self._require_selected_parameter_file(
-                        param_path, resolved_path, site, self.workspace, "Step"
-                    )
-                    full_path = (self.workspace / resolved_path).resolve()
-                    if full_path.exists():
-                        try:
-                            params = self.load_parameters(full_path)
-                            if self._references_any_step(params, subscription_step_names):
-                                return True
-                        except (ValueError, yaml.YAMLError, OSError) as e:
-                            logger.debug(f"Could not read parameter file {full_path}: {e}")
-
-        return False
-
-    def _deploy_bicep_step(
-        self,
-        site: Site,
-        step: DeploymentStep,
-        manifest: Manifest,
-        timestamp: str,
-        step_outputs: dict[str, dict[str, Any]],
-        subscription_outputs: SubscriptionOutputs | None = None,
-    ) -> DeploymentResult:
-        """Execute a Bicep/ARM deployment step.
-
-        Args:
-            site: Target site
-            step: The deployment step
-            manifest: The manifest being deployed
-            timestamp: Shared timestamp for deployment naming
-            step_outputs: Outputs from previous steps (per-site)
-            subscription_outputs: Outputs from subscription-scoped steps (for cross-scope chaining)
-
-        Returns:
-            DeploymentResult with success status and outputs
-        """
-        params = self.resolve_parameters(step, site, manifest, step_outputs, subscription_outputs)
-        template_path = (self.workspace / step.template).resolve()
-
-        # Azure deployment names have a 64 char limit
-        # Format: {base_name}-{timestamp} where timestamp is 14 chars (YYYYMMDDHHmmss)
-        base_name = f"{manifest.name}-{site.name}-{step.name}"
-        MAX_LEN = 64
-        TIMESTAMP_LEN = 14
-        HASH_LEN = 10
-        max_base = MAX_LEN - TIMESTAMP_LEN - 1  # -1 for the separator
-
-        if len(base_name) > max_base:
-            # Keep a deterministic suffix when truncating similar long names.
-            name_hash = hashlib.sha256(base_name.encode()).hexdigest()[:HASH_LEN]
-            base_name = f"{base_name[:max_base - HASH_LEN - 1]}-{name_hash}"
-
-        deployment_name = f"{base_name}-{timestamp}"
-
-        if step.scope == "subscription":
-            return self.executor.deploy_subscription(
-                subscription=site.subscription,
-                location=site.location,
-                template_path=template_path,
-                parameters=params,
-                deployment_name=deployment_name,
-                step_name=step.name,
-                site_name=site.name,
-            )
-        else:
-            return self.executor.deploy_resource_group(
-                subscription=site.subscription,
-                resource_group=site.resource_group,
-                template_path=template_path,
-                parameters=params,
-                deployment_name=deployment_name,
-                step_name=step.name,
-                site_name=site.name,
-            )
-
-    def _execute_kubectl_step(
-        self,
-        site: Site,
-        step: KubectlStep,
-        step_outputs: dict[str, dict[str, Any]],
-        subscription_outputs: SubscriptionOutputs | None = None,
-    ) -> KubectlResult:
-        """Execute a kubectl step against an Arc-connected cluster.
-
-        Args:
-            site: Target site
-            step: The kubectl step
-            step_outputs: Outputs from previous steps (per-site)
-            subscription_outputs: Outputs from subscription-scoped steps
-
-        Returns:
-            KubectlResult with success status
-        """
-        # Resolve template variables in Arc config
-        cluster_name = self._resolve_template_strings(step.arc.name, site)
-        resource_group = self._resolve_template_strings(step.arc.resource_group, site)
-
-        if step_outputs or subscription_outputs:
-            cluster_name = self._resolve_step_outputs(
-                cluster_name, step_outputs, subscription_outputs, site.subscription
-            )
-            resource_group = self._resolve_step_outputs(
-                resource_group, step_outputs, subscription_outputs, site.subscription
-            )
-
-        # Resolve template variables in files list
-        resolved_files = []
-        for f in step.files:
-            resolved = self._resolve_template_strings(f, site)
-            if step_outputs or subscription_outputs:
-                resolved = self._resolve_step_outputs(resolved, step_outputs, subscription_outputs, site.subscription)
-            resolved_files.append(resolved)
-
-        if step.operation == "apply":
-            return self.executor.kubectl_apply(
-                cluster_name=cluster_name,
-                resource_group=resource_group,
-                subscription=site.subscription,
-                files=resolved_files,
-                step_name=step.name,
-                site_name=site.name,
-            )
-        else:
-            # Should not happen due to model validation
-            return KubectlResult(
-                success=False,
-                step_name=step.name,
-                site_name=site.name,
-                error=f"Unsupported kubectl operation: {step.operation}",
-            )
-
-    def _execute_wait_step(
-        self,
-        site: Site,
-        step: WaitStep,
-        step_outputs: dict[str, dict[str, Any]],
-        subscription_outputs: SubscriptionOutputs | None = None,
-    ) -> WaitResult:
-        """Execute a wait step: resolve the condition, then poll until satisfied.
-
-        Resolves template variables and step-output references in the
-        condition's string fields (mirroring `_execute_kubectl_step`), guards
-        against an unresolved or empty resourceId/expectedValue, then hands the
-        resolved condition to the executor's poll loop.
-
-        Args:
-            site: Target site
-            step: The wait step
-            step_outputs: Outputs from previous steps (per-site)
-            subscription_outputs: Outputs from subscription-scoped steps
-
-        Returns:
-            WaitResult with success status and, on failure, a diagnostic.
-        """
-
-        def _resolve(value: str) -> str:
-            resolved = self._resolve_template_strings(value, site)
-            if step_outputs or subscription_outputs:
-                resolved = self._resolve_step_outputs(
-                    resolved, step_outputs, subscription_outputs, site.subscription
-                )
-            return str(resolved)
-
-        condition = step.condition
-
-        if condition.type == "arm-tag":
-            resolved_resource_id = _resolve(condition.resource_id)
-            resolved_expected = _resolve(condition.expected_value)
-
-            # Runtime guard: an unresolved template ({{ ... }} left intact) or an
-            # empty value would silently poll a bogus resource for the full
-            # timeout. Fail fast with a clear message instead.
-            for label, val in (
-                ("resourceId", resolved_resource_id),
-                ("expectedValue", resolved_expected),
-            ):
-                if not val.strip() or _carries_template(val):
-                    return WaitResult(
-                        success=False,
-                        step_name=step.name,
-                        site_name=site.name,
-                        error=(
-                            f"Wait step '{step.name}' has an unresolved or empty {label} after "
-                            f"template resolution: {val!r}. Check the site provides the referenced "
-                            f"variables."
-                        ),
-                    )
-
-            try:
-                resolved_condition = replace(
-                    condition,
-                    resource_id=resolved_resource_id,
-                    expected_value=resolved_expected,
-                )
-            except ValueError as e:
-                return WaitResult(
-                    success=False,
-                    step_name=step.name,
-                    site_name=site.name,
-                    error=f"Wait step '{step.name}' condition invalid after resolution: {e}",
-                )
-        else:
-            # Defensive: unknown condition types are rejected at parse/validate.
-            return WaitResult(
-                success=False,
-                step_name=step.name,
-                site_name=site.name,
-                error=f"Unsupported wait condition type: {condition.type}",
-            )
-
-        return self.executor.wait_for_condition(
-            condition=resolved_condition,
-            timeout_minutes=step.timeout_minutes,
-            poll_interval_seconds=step.poll_interval_seconds,
-            subscription=site.subscription,
-            step_name=step.name,
-            site_name=site.name,
-        )
-
-    def _execute_step(
-        self,
-        site: Site,
-        step: ManifestStep,
-        manifest: Manifest,
-        timestamp: str,
-        step_outputs: dict[str, dict[str, Any]],
-        subscription_outputs: SubscriptionOutputs | None = None,
-    ) -> StepResult:
-        """Execute one deployment, kubectl, or wait step.
-
-        Args:
-            site: Target site
-            step: The step to execute
-            manifest: The manifest being deployed
-            timestamp: Shared timestamp for deployment naming
-            step_outputs: Outputs from previous steps (per-site)
-            subscription_outputs: Outputs from subscription-scoped steps
-
-        Returns:
-            StepResult for the executed step type
-        """
-        if isinstance(step, KubectlStep):
-            return self._execute_kubectl_step(site, step, step_outputs, subscription_outputs)
-        elif isinstance(step, WaitStep):
-            return self._execute_wait_step(site, step, step_outputs, subscription_outputs)
-        else:
-            return self._deploy_bicep_step(site, step, manifest, timestamp, step_outputs, subscription_outputs)
-
-    def _deploy_site(
-        self,
-        manifest: Manifest,
-        site: Site,
-        timestamp: str,
-        parallel_mode: bool = False,
-        subscription_outputs: SubscriptionOutputs | None = None,
-    ) -> dict[str, Any]:
-        """Deploy all applicable steps to a single site.
-
-        Steps are executed sequentially. If a step fails, remaining steps
-        are skipped for that site.
-
-        Step applicability based on site type:
-        - Subscription-level sites: Only execute subscription-scoped steps
-        - RG-level sites: Only execute RG-scoped steps (can reference subscription outputs)
-
-        Args:
-            manifest: The manifest being deployed
-            site: Target site
-            timestamp: Shared timestamp for deployment naming
-            parallel_mode: If True, use thread-safe printing
-            subscription_outputs: Outputs from subscription-scoped steps (for cross-scope chaining)
-
-        Returns:
-            Dict with site deployment result including status, steps, and timing
-        """
-        site_start = time.time()
-        step_outputs: dict[str, dict[str, Any]] = {}
-        log = _thread_safe_print if parallel_mode else print
-        site_label = site_name_for_output(site.name)
-
-        steps_completed = 0
-        steps_skipped = 0
-        status = "success"
-        error_message: str | None = None
-        step_results: list[dict[str, Any]] = []
-
-        for step in manifest.steps:
-            # Check step/site scope compatibility
-            skip_reason = self._check_step_site_compatibility(step, site)
-            if skip_reason:
-                log(f"[{site_label}] - {step.name} (skipped: {skip_reason})")
-                steps_skipped += 1
-                step_results.append(
-                    {
-                        "step": step.name,
-                        "status": "skipped",
-                        "reason": skip_reason,
-                    }
-                )
-                continue
-
-            # Evaluate condition
-            if not self._evaluate_condition(step.when, site):
-                log(f"[{site_label}] - {step.name} (skipped: condition not met)")
-                steps_skipped += 1
-                step_results.append(
-                    {
-                        "step": step.name,
-                        "status": "skipped",
-                        "reason": (
-                            "Condition not met: "
-                            f"{format_when_condition(step.when)}"
-                        ),
-                    }
-                )
-                continue
-
-            step_type = self._get_step_type_label(step)
-            log(f"[{site_label}] > {step.name} ({step_type})...")
-
-            result = self._execute_step(site, step, manifest, timestamp, step_outputs, subscription_outputs)
-
-            if result.success:
-                # Only DeploymentResult has outputs for chaining
-                outputs = result.outputs or {} if isinstance(result, DeploymentResult) else {}
-                if outputs:
-                    step_outputs[step.name] = outputs
-                log(f"[{site_label}] + {step.name}")
-                steps_completed += 1
-                step_results.append(
-                    {
-                        "step": step.name,
-                        "status": "success",
-                        "outputs": outputs,
-                    }
-                )
-            else:
-                # Scrubbed once here, so the log line, the site result, and the
-                # step result all carry the same text, and none of them can publish a
-                # resource identity from a CI run.
-                reportable_error = scrub_site_for_output(
-                    result.error,
-                    site.name,
-                )
-                log(f"[{site_label}] x {step.name}: {reportable_error}")
-                status = "failed"
-                error_message = reportable_error
-                step_results.append(
-                    {
-                        "step": step.name,
-                        "status": "failed",
-                        "error": reportable_error,
-                    }
-                )
-                break
-
-        elapsed = time.time() - site_start
-        total_steps = len(manifest.steps)
-
-        skip_info = f", {steps_skipped} skipped" if steps_skipped > 0 else ""
-        status_symbol = "+" if status == "success" else "x"
-        log(
-            f"[{site_label}] {status_symbol} completed in {elapsed:.1f}s "
-            f"({steps_completed}/{total_steps - steps_skipped} steps{skip_info})"
-        )
-
-        # A closed gate and a mistyped one produce the same silent success, so
-        # name the reasons rather than blaming gates. A scope mismatch skips
-        # steps too, and a site with no gates would otherwise be told to check
-        # conditions it does not have.
-        if steps_completed == 0 and steps_skipped == total_steps and total_steps > 0:
-            reasons = sorted(
-                {r["reason"] for r in step_results if r.get("status") == "skipped" and r.get("reason")}
-            )
-            detail = f" ({'; '.join(reasons)})" if reasons else ""
-            log(f"[{site_label}] ! nothing deployed: every step was skipped{detail}.")
-
-        return {
-            "site": site.name,
-            "status": status,
-            "error": error_message,
-            "steps_completed": steps_completed,
-            "steps_skipped": steps_skipped,
-            "steps_total": total_steps,
-            "elapsed": elapsed,
-            "steps": step_results,
-        }
-
-    def _deploy_sequential(
-        self,
-        manifest: Manifest,
-        sites: list[Site],
-        timestamp: str,
-        subscription_outputs: SubscriptionOutputs | None = None,
-    ) -> list[dict[str, Any]]:
-        """Deploy to sites sequentially (one at a time).
-
-        Args:
-            manifest: The manifest being deployed
-            sites: List of target sites
-            timestamp: Shared timestamp for deployment naming
-            subscription_outputs: Outputs from subscription-scoped steps (for RG-scoped steps)
-
-        Returns:
-            List of deployment results per site
-        """
-        results: list[dict[str, Any]] = []
-        for site in sites:
-            try:
-                result = self._deploy_site(
-                    manifest,
-                    site,
-                    timestamp,
-                    parallel_mode=False,
-                    subscription_outputs=subscription_outputs,
-                )
-            except Exception as e:
-                # Match the parallel path. An unexpected error (a malformed
-                # parameter file, an unresolved template) fails one site and
-                # leaves the rest of the run reportable, so the operator can
-                # still read the fleet state from the summary.
-                reportable = self._reportable_deploy_error(e, site.name)
-                logger.error(
-                    "Unexpected error deploying to "
-                    f"{site_name_for_output(site.name)}: {reportable}"
-                )
-                result = self._site_failure_result(
-                    site,
-                    manifest,
-                    f"Unexpected error: {reportable}",
-                )
-            results.append(result)
-        return results
-
-    @staticmethod
-    def _site_failure_result(
-        site: Site, manifest: Manifest, error: str
-    ) -> dict[str, Any]:
-        """Build the result row for a site that failed before reporting its own.
-
-        Keeps the shape identical to a normal `_deploy_site` return so a caller
-        reading the summary cannot tell which path produced it. The message
-        comes from an exception rather than from a step, so it is scrubbed here
-        for the same reason a step's error is.
-        """
-        return {
-            "site": site.name,
-            "status": "failed",
-            "error": scrub_site_for_output(error, site.name),
-            "steps_completed": 0,
-            "steps_skipped": 0,
-            "steps_total": len(manifest.steps),
-            "elapsed": 0.0,
-            "steps": [],
-        }
-
-    def _deploy_parallel(
-        self,
-        manifest: Manifest,
-        sites: list[Site],
-        timestamp: str,
-        parallel_config: ParallelConfig,
-        subscription_outputs: SubscriptionOutputs | None = None,
-    ) -> list[dict[str, Any]]:
-        """Deploy to sites in parallel with controlled concurrency.
-
-        Args:
-            manifest: The manifest being deployed
-            sites: List of target sites
-            timestamp: Shared timestamp for deployment naming
-            parallel_config: Parallelism configuration
-            subscription_outputs: Outputs from subscription-scoped steps (for RG-scoped steps)
-
-        Returns:
-            List of deployment results per site
-        """
-        max_workers = parallel_config.max_workers
-        # If unlimited (None), cap at number of sites
-        num_workers = len(sites) if max_workers is None else min(len(sites), max_workers)
-
-        print(f"\n  [Parallel] Deploying to {len(sites)} sites ({num_workers} concurrent)")
-
-        results: list[dict[str, Any]] = []
-        results_lock = threading.Lock()
-        future_to_site = {}
-
-        with ThreadPoolExecutor(max_workers=num_workers) as executor:
-            try:
-                for site in sites:
-                    future = executor.submit(
-                        self._deploy_site, manifest, site, timestamp, True, subscription_outputs
-                    )
-                    future_to_site[future] = site
-
-                for future in as_completed(future_to_site):
-                    site = future_to_site[future]
-                    try:
-                        result = future.result()
-                        with results_lock:
-                            results.append(result)
-                    except Exception as e:
-                        reportable = self._reportable_deploy_error(e, site.name)
-                        logger.error(
-                            "Unexpected error deploying to "
-                            f"{site_name_for_output(site.name)}: "
-                            f"{reportable}"
-                        )
-                        with results_lock:
-                            results.append(
-                                self._site_failure_result(
-                                    site,
-                                    manifest,
-                                    f"Unexpected error: {reportable}",
-                                )
-                            )
-            except BaseException:
-                # Leaving the pool waits for everything already queued, so an
-                # interrupted deploy would still reach every remaining site.
-                # Cancelling first stops the fleet at what is already running.
-                cancelled = sum(1 for pending in future_to_site if pending.cancel())
-                logger.error(
-                    f"Deployment stopped. {len(results)} site(s) reported, "
-                    f"{cancelled} not started."
-                )
-                raise
-
-        return results
-
-    @staticmethod
     def _reportable_deploy_error(
         error: Exception,
         site_name: str = "",
@@ -3226,6 +2378,11 @@ class Orchestrator:
             return report_composition_error(error)
         if isinstance(error, ParameterSelectionError):
             return report_parameter_selection_error(error)
+        if (
+            isinstance(error, PlanValueResolutionError)
+            and is_redaction_enabled()
+        ):
+            return error.public_message
         return scrub_site_for_output(str(error), site_name) or ""
 
     @staticmethod
@@ -3254,116 +2411,6 @@ class Orchestrator:
                 rg_sites.append(site)
 
         return groups
-
-    @staticmethod
-    def _has_subscription_scoped_steps(manifest: Manifest) -> bool:
-        """Check if manifest has any subscription-scoped steps.
-
-        Args:
-            manifest: The manifest to check
-
-        Returns:
-            True if any step has scope: subscription
-        """
-        for step in manifest.steps:
-            if isinstance(step, DeploymentStep) and step.scope == "subscription":
-                return True
-        return False
-
-    def _collect_subscription_outputs(
-        self,
-        manifest: Manifest,
-        subscription_sites: dict[str, Site],
-        timestamp: str,
-        parallel_config: ParallelConfig,
-    ) -> tuple[SubscriptionOutputs, list[dict[str, Any]]]:
-        """Execute subscription-scoped steps and collect outputs.
-
-        Args:
-            manifest: The manifest being deployed
-            subscription_sites: Dict mapping subscription_id to subscription-level site
-            timestamp: Shared timestamp for deployment naming
-            parallel_config: Parallelism configuration
-
-        Returns:
-            Tuple of (subscription_outputs, results)
-        """
-        subscription_outputs: SubscriptionOutputs = {}
-        results: list[dict[str, Any]] = []
-
-        # Get subscription-level sites as a list
-        sub_level_sites = list(subscription_sites.values())
-
-        if not sub_level_sites:
-            return subscription_outputs, results
-
-        print(f"\n  [Phase 1] Subscription-scoped steps: {len(subscription_sites)} subscription(s)")
-
-        # Deploy to subscription-level sites (they'll skip RG-scoped steps)
-        if parallel_config.is_sequential or len(sub_level_sites) == 1:
-            for site in sub_level_sites:
-                result = self._deploy_site(
-                    manifest,
-                    site,
-                    timestamp,
-                    parallel_mode=False,
-                    subscription_outputs=subscription_outputs,
-                )
-                results.append(result)
-                # Collect outputs into subscription_outputs keyed by subscription
-                self._extract_subscription_outputs(result, site.subscription, subscription_outputs)
-        else:
-            # Parallel deployment across subscriptions
-            max_workers = parallel_config.max_workers
-            num_workers = len(sub_level_sites) if max_workers is None else min(len(sub_level_sites), max_workers)
-
-            with ThreadPoolExecutor(max_workers=num_workers) as executor:
-                future_to_site = {
-                    executor.submit(self._deploy_site, manifest, site, timestamp, True, subscription_outputs): site
-                    for site in sub_level_sites
-                }
-
-                for future in as_completed(future_to_site):
-                    site = future_to_site[future]
-                    try:
-                        result = future.result()
-                        self._extract_subscription_outputs(result, site.subscription, subscription_outputs)
-                        results.append(result)
-                    except Exception as e:
-                        reportable = self._reportable_deploy_error(e, site.name)
-                        logger.error(
-                            "Error deploying subscription-level site "
-                            f"{site_name_for_output(site.name)}: "
-                            f"{reportable}"
-                        )
-                        results.append(
-                            self._site_failure_result(
-                                site,
-                                manifest,
-                                reportable,
-                            )
-                        )
-
-        return subscription_outputs, results
-
-    @staticmethod
-    def _extract_subscription_outputs(
-        result: dict[str, Any],
-        subscription_id: str,
-        subscription_outputs: SubscriptionOutputs,
-    ) -> None:
-        """Extract step outputs from a deployment result into subscription_outputs.
-
-        Args:
-            result: Deployment result from _deploy_site
-            subscription_id: The subscription ID to key outputs by
-            subscription_outputs: Dict to populate (mutated in place)
-        """
-        sub_outputs = subscription_outputs.setdefault(subscription_id, {})
-        for step_result in result.get("steps", []):
-            outputs = step_result.get("outputs")
-            if step_result.get("status") == "success" and outputs:
-                sub_outputs[step_result["step"]] = outputs
 
     def _print_deployment_summary(
         self,
@@ -3553,9 +2600,9 @@ class Orchestrator:
         """
         # Hard error when the manifest declares no targeting AND the operator
         # passed no -l/--selector. Today this would silently resolve to the
-        # empty set and cause a confusing "nothing to deploy" exit; surface
-        # the missing-targeting case loudly so the operator can either add
-        # targeting to the manifest or pass it on the CLI.
+        # empty set and cause a confusing "nothing to deploy" exit. Surface
+        # the missing-targeting case so the operator can add targeting to the
+        # manifest or pass it on the CLI.
         if not cli_selector and not manifest.sites and not manifest.site_selector:
             raise NoTargetingError(
                 f"Manifest '{manifest.name}' has no targeting. "
@@ -3639,7 +2686,7 @@ class Orchestrator:
                     f"({names}). Fix those files rather than adding a new site."
                 )
             return (
-                f"No sites in workspace; CLI selector `-l {cli_selector}` "
+                f"No sites in workspace. CLI selector `-l {cli_selector}` "
                 f"cannot match. Add a site file under `sites/` or pass "
                 f"`--extra-sites-dir` to point at one."
             )
@@ -3654,9 +2701,9 @@ class Orchestrator:
                         f"site names: {', '.join(names_in_ws)}."
                     )
                 else:
-                    # Names matched; another selector key must have
-                    # filtered them out. Surface the matched names so
-                    # the operator does not get a generic "no match".
+                    # Names matched. Another selector key must have filtered
+                    # them out. Surface the matched names so the operator does
+                    # not get a generic "no match".
                     matched = ",".join(requested)
                     parts.append(
                         f"`name={matched}` matched a workspace site but "
@@ -4191,303 +3238,1369 @@ class Orchestrator:
 
         return errors
 
+    @staticmethod
+    def _plan_resource_identity(
+        contract: CompositionContract,
+        collection: str,
+        identity: tuple[str, ...],
+    ) -> ResourceIdentity:
+        spec = contract.collections[collection]
+        return ResourceIdentity(
+            collection=collection,
+            components=tuple(
+                (field.path, value)
+                for field, value in zip(
+                    spec.identity,
+                    identity,
+                    strict=True,
+                )
+            ),
+        )
+
+    def _build_plan_composition(
+        self,
+        manifest: Manifest,
+        site: Site,
+        composition: CompositionResult,
+        contract: CompositionContract,
+    ) -> PlanComposition:
+        source_origins = self._composition_source_origins(manifest, site)
+        sources = tuple(
+            CompositionSource(
+                path=source.path,
+                selected_by=self._reportable_composition_origin(
+                    source_origins.get(source.path, "<unknown>")
+                ),
+            )
+            for source in composition.sources
+        )
+
+        resources: list[CompositionResource] = []
+        for collection in contract.collections:
+            resources.extend(
+                CompositionResource(
+                    identity=self._plan_resource_identity(
+                        contract,
+                        collection,
+                        entry.identity,
+                    ),
+                    disposition=ResourceDisposition.APPLY,
+                    source=entry.source,
+                )
+                for entry in composition.entries[collection]
+            )
+            resources.extend(
+                CompositionResource(
+                    identity=self._plan_resource_identity(
+                        contract,
+                        collection,
+                        entry.identity,
+                    ),
+                    disposition=ResourceDisposition.EXTERNAL,
+                    source=entry.source,
+                    reason=entry.reason,
+                )
+                for entry in composition.external[collection]
+            )
+
+        references = tuple(
+            CompositionReference(
+                rule_id=reference.rule_id,
+                source=self._plan_resource_identity(
+                    contract,
+                    reference.source_collection,
+                    reference.source_identity,
+                ),
+                source_bindings=reference.source_bindings,
+                target=(
+                    self._plan_resource_identity(
+                        contract,
+                        reference.target_collection,
+                        reference.target_identity,
+                    )
+                    if reference.target_collection is not None
+                    and reference.target_identity is not None
+                    else None
+                ),
+                target_member_name=reference.target_member_name,
+                target_member_identity=reference.target_member_identity,
+                external=reference.external,
+                unverified_reason=reference.unverified_reason,
+            )
+            for reference in composition.references
+        )
+        requirements = tuple(
+            CompositionRequirement(
+                identity=self._plan_resource_identity(
+                    contract,
+                    requirement.collection,
+                    requirement.identity,
+                ),
+                source=requirement.source,
+            )
+            for requirement in composition.requirements
+        )
+        return PlanComposition(
+            sources=sources,
+            resources=tuple(resources),
+            references=references,
+            requirements=requirements,
+        )
+
+    @staticmethod
+    def _build_plan_step(
+        step: ManifestStep,
+        sequence: int,
+    ) -> PlanStep:
+        condition = format_when_condition(step.when) if step.when else None
+        if isinstance(step, KubectlStep):
+            kind = OperationKind.KUBECTL
+            scope = OperationScope.TARGET
+            details = KubectlOperation(
+                input_status=InputStatus.DESCRIBED,
+                operation=step.operation,
+                cluster_name=LiteralValue(step.arc.name),
+                cluster_resource_group=LiteralValue(
+                    step.arc.resource_group
+                ),
+                files=tuple(LiteralValue(path) for path in step.files),
+            )
+        elif isinstance(step, WaitStep):
+            kind = OperationKind.WAIT
+            scope = OperationScope.TARGET
+            details = ArmTagWaitOperation(
+                input_status=InputStatus.DESCRIBED,
+                resource_id=LiteralValue(step.condition.resource_id),
+                tag_key=LiteralValue(step.condition.tag_key),
+                expected_value=LiteralValue(
+                    step.condition.expected_value
+                ),
+                failure_pattern=(
+                    LiteralValue(step.condition.failure_pattern)
+                    if step.condition.failure_pattern is not None
+                    else None
+                ),
+                timeout_minutes=step.timeout_minutes,
+                poll_interval_seconds=step.poll_interval_seconds,
+            )
+        else:
+            kind = OperationKind.DEPLOYMENT
+            scope = OperationScope(step.scope)
+            details = DeploymentOperation(
+                template=Path(step.template),
+                input_status=InputStatus.DESCRIBED,
+            )
+        return PlanStep(
+            name=step.name,
+            sequence=sequence,
+            kind=kind,
+            scope=scope,
+            details=details,
+            condition=condition,
+        )
+
+    @staticmethod
+    def _available_plan_sources(
+        site: Site,
+        prior_steps: list[ManifestStep],
+        operations: dict[OperationIdentity, PreparedOperation],
+        subscription_targets: dict[str, str],
+    ) -> dict[str, OperationIdentity]:
+        available: dict[str, OperationIdentity] = {}
+        for step in prior_steps:
+            if not isinstance(step, DeploymentStep):
+                continue
+            if step.scope == "subscription":
+                target_name = (
+                    site.name
+                    if site.is_subscription_level
+                    else subscription_targets.get(site.subscription)
+                )
+            elif site.is_subscription_level:
+                target_name = None
+            else:
+                target_name = site.name
+            if target_name is None:
+                continue
+            identity = OperationIdentity(
+                target=target_name,
+                step=step.name,
+            )
+            operation = operations.get(identity)
+            if (
+                operation is not None
+                and operation.disposition is PlanDisposition.EXECUTE
+                and isinstance(
+                    operation.details,
+                    DeploymentOperation,
+                )
+                and operation.details.input_status is InputStatus.PREPARED
+            ):
+                available[step.name] = identity
+        return available
+
+    def _prepare_operation_details(
+        self,
+        step: ManifestStep,
+        site: Site,
+        manifest: Manifest,
+        available_sources: dict[str, OperationIdentity],
+    ) -> tuple[
+        DeploymentOperation | KubectlOperation | ArmTagWaitOperation,
+        tuple[DataReference, ...],
+    ]:
+        if isinstance(step, DeploymentStep):
+            params = self._merge_known_parameters(step, site, manifest)
+            template_path = (self.workspace / step.template).resolve()
+            accepted_parameters = get_template_parameters(
+                str(template_path)
+            )
+            filtered: dict[Any, Any] = {}
+            unused: list[Any] = []
+            for key, value in params.items():
+                if (
+                    isinstance(key, str)
+                    and _carries_template(key)
+                ) or key in accepted_parameters:
+                    filtered[key] = value
+                else:
+                    unused.append(key)
+            if unused:
+                logger.debug(
+                    scrub_for_output(
+                        f"Step '{step.name}': Filtered out parameters not "
+                        f"in template: {unused}"
+                    )
+                )
+            classified = classify_plan_value(
+                filtered,
+                available_sources,
+                f"{site.name}.{step.name}.parameters",
+            )
+            if not isinstance(classified, MappingValue):
+                raise TypeError(
+                    "Prepared deployment parameters must be a mapping."
+                )
+            return (
+                DeploymentOperation(
+                    template=template_path,
+                    input_status=InputStatus.PREPARED,
+                    parameters=classified,
+                    accepted_parameters=tuple(
+                        sorted(accepted_parameters)
+                    ),
+                ),
+                collect_data_references(classified),
+            )
+
+        if isinstance(step, KubectlStep):
+            cluster_name = classify_plan_value(
+                self._resolve_template_strings(step.arc.name, site),
+                available_sources,
+                f"{site.name}.{step.name}.clusterName",
+            )
+            cluster_resource_group = classify_plan_value(
+                self._resolve_template_strings(
+                    step.arc.resource_group,
+                    site,
+                ),
+                available_sources,
+                f"{site.name}.{step.name}.clusterResourceGroup",
+            )
+            files = tuple(
+                classify_plan_value(
+                    self._resolve_template_strings(path, site),
+                    available_sources,
+                    f"{site.name}.{step.name}.files[{index}]",
+                )
+                for index, path in enumerate(step.files)
+            )
+            details = KubectlOperation(
+                input_status=InputStatus.PREPARED,
+                operation=step.operation,
+                cluster_name=cluster_name,
+                cluster_resource_group=cluster_resource_group,
+                files=files,
+            )
+            references: list[DataReference] = []
+            for value in (
+                cluster_name,
+                cluster_resource_group,
+                *files,
+            ):
+                for reference in collect_data_references(value):
+                    if reference not in references:
+                        references.append(reference)
+            return details, tuple(references)
+
+        condition = step.condition
+        resource_id = classify_plan_value(
+            self._resolve_template_strings(condition.resource_id, site),
+            available_sources,
+            f"{site.name}.{step.name}.resourceId",
+        )
+        tag_key = classify_plan_value(
+            self._resolve_template_strings(condition.tag_key, site),
+            available_sources,
+            f"{site.name}.{step.name}.tagKey",
+        )
+        expected_value = classify_plan_value(
+            self._resolve_template_strings(
+                condition.expected_value,
+                site,
+            ),
+            available_sources,
+            f"{site.name}.{step.name}.expectedValue",
+        )
+        failure_pattern = (
+            classify_plan_value(
+                self._resolve_template_strings(
+                    condition.failure_pattern,
+                    site,
+                ),
+                available_sources,
+                f"{site.name}.{step.name}.failurePattern",
+            )
+            if condition.failure_pattern is not None
+            else None
+        )
+        details = ArmTagWaitOperation(
+            input_status=InputStatus.PREPARED,
+            resource_id=resource_id,
+            tag_key=tag_key,
+            expected_value=expected_value,
+            failure_pattern=failure_pattern,
+            timeout_minutes=step.timeout_minutes,
+            poll_interval_seconds=step.poll_interval_seconds,
+        )
+        references = []
+        for value in (
+            resource_id,
+            tag_key,
+            expected_value,
+            failure_pattern,
+        ):
+            if value is None:
+                continue
+            for reference in collect_data_references(value):
+                if reference not in references:
+                    references.append(reference)
+        return details, tuple(references)
+
+    def _prepare_plan_targets(
+        self,
+        manifest: Manifest,
+        sites: list[Site],
+        targets: list[PreparedTarget],
+    ) -> tuple[list[PreparedTarget], list[PlanDiagnostic]]:
+        site_by_name = {site.name: site for site in sites}
+        subscription_targets = {
+            target.subscription: target.name
+            for target in targets
+            if target.kind is TargetKind.SUBSCRIPTION
+        }
+        operations = {
+            operation.identity: operation
+            for target in targets
+            for operation in target.operations
+        }
+        prepared_targets: dict[str, PreparedTarget] = {}
+        diagnostics: list[PlanDiagnostic] = []
+
+        ordered_targets = [
+            target
+            for target in targets
+            if target.kind is TargetKind.SUBSCRIPTION
+        ] + [
+            target
+            for target in targets
+            if target.kind is not TargetKind.SUBSCRIPTION
+        ]
+        for target in ordered_targets:
+            site = site_by_name[target.name]
+            target_diagnostics = list(target.diagnostics)
+            target_failed = bool(target_diagnostics)
+            prepared_operations: list[PreparedOperation] = []
+            for index, (source_step, operation) in enumerate(
+                zip(
+                    manifest.steps,
+                    target.operations,
+                    strict=True,
+                )
+            ):
+                if operation.disposition is not PlanDisposition.EXECUTE:
+                    prepared_operations.append(operation)
+                    operations[operation.identity] = operation
+                    continue
+                if target_failed:
+                    blocked = replace(
+                        operation,
+                        disposition=PlanDisposition.BLOCKED,
+                        skip_reason=PlanSkipReason(
+                            code=SkipReasonCode.TARGET_PREPARATION_FAILED,
+                            detail="Target preparation failed.",
+                        ),
+                    )
+                    prepared_operations.append(blocked)
+                    operations[operation.identity] = blocked
+                    continue
+
+                available_sources = self._available_plan_sources(
+                    site,
+                    manifest.steps[:index],
+                    operations,
+                    subscription_targets,
+                )
+                try:
+                    details, references = self._prepare_operation_details(
+                        source_step,
+                        site,
+                        manifest,
+                        available_sources,
+                    )
+                    prepared = replace(
+                        operation,
+                        details=details,
+                        data_references=references,
+                    )
+                except (
+                    CompositionError,
+                    ParameterSelectionError,
+                    TypeError,
+                    ValueError,
+                    FileNotFoundError,
+                    OSError,
+                    yaml.YAMLError,
+                ) as error:
+                    diagnostic = PlanDiagnostic(
+                        code="operation-preparation.invalid",
+                        severity=DiagnosticSeverity.ERROR,
+                        summary="Operation preparation failed.",
+                        detail=str(error),
+                    )
+                    target_diagnostics.append(diagnostic)
+                    diagnostics.append(diagnostic)
+                    target_failed = True
+                    prepared = replace(
+                        operation,
+                        disposition=PlanDisposition.BLOCKED,
+                        skip_reason=PlanSkipReason(
+                            code=SkipReasonCode.TARGET_PREPARATION_FAILED,
+                            detail="Target preparation failed.",
+                        ),
+                    )
+                prepared_operations.append(prepared)
+                operations[operation.identity] = prepared
+
+            prepared_targets[target.name] = replace(
+                target,
+                operations=tuple(prepared_operations),
+                diagnostics=tuple(target_diagnostics),
+            )
+
+        return (
+            [prepared_targets[target.name] for target in targets],
+            diagnostics,
+        )
+
+    def build_plan(
+        self,
+        manifest_path: Path,
+        selector: str | None = None,
+        *,
+        intent: PlanIntent = PlanIntent.DESCRIBE,
+        manifest: Manifest | None = None,
+        sites: list[Site] | None = None,
+        parallel_override: int | None = None,
+    ) -> PlanBuildResult:
+        """Build one immutable plan without printing or deploying.
+
+        Describe intent reads workspace inputs. Executable intent also reads
+        template schemas.
+        """
+        if manifest is None:
+            manifest = Manifest.from_file(
+                manifest_path,
+                workspace_root=self.workspace,
+            )
+        if sites is None:
+            sites = self.resolve_sites(manifest, selector)
+        preexisting_target_diagnostics: dict[
+            str,
+            list[PlanDiagnostic],
+        ] = {}
+        if intent is PlanIntent.EXECUTABLE:
+            site_groups = self._group_sites_by_subscription(sites)
+            subscription_steps = [
+                step
+                for step in manifest.steps
+                if isinstance(step, DeploymentStep)
+                and step.scope == "subscription"
+            ]
+            for subscription, (
+                subscription_sites,
+                resource_group_sites,
+            ) in site_groups.items():
+                if len(subscription_sites) > 1:
+                    names = ", ".join(
+                        site.name for site in subscription_sites
+                    )
+                    raise MultipleSubscriptionSitesError(
+                        f"Subscription "
+                        f"'{_reportable_subscription(subscription)}' has "
+                        f"multiple subscription-level sites: {names}. Only "
+                        "one subscription-level site per subscription is "
+                        "allowed."
+                    )
+                if (
+                    not subscription_sites
+                    and resource_group_sites
+                    and self._any_subscription_step_would_execute(
+                        subscription_steps,
+                        resource_group_sites,
+                    )
+                ):
+                    names = ", ".join(
+                        site.name for site in resource_group_sites[:3]
+                    )
+                    if len(resource_group_sites) > 3:
+                        names += (
+                            f"... and {len(resource_group_sites) - 3} more"
+                        )
+                    for site in resource_group_sites:
+                        preexisting_target_diagnostics.setdefault(
+                            site.name,
+                            [],
+                        ).append(
+                            PlanDiagnostic(
+                                code="subscription-target.missing",
+                                severity=DiagnosticSeverity.ERROR,
+                                summary=(
+                                    "A required subscription target is "
+                                    "missing."
+                                ),
+                                detail=(
+                                    f"Subscription "
+                                    f"'{_reportable_subscription(subscription)}' "
+                                    f"has RG-level sites ({names}) but no "
+                                    "subscription-level site for "
+                                    "subscription-scoped steps."
+                                ),
+                                serialized_detail=(
+                                    "Add one subscription-level site for "
+                                    "each selected subscription that needs "
+                                    "subscription-scoped steps."
+                                ),
+                            )
+                        )
+        plan_steps = tuple(
+            self._build_plan_step(step, sequence)
+            for sequence, step in enumerate(manifest.steps, 1)
+        )
+
+        targets: list[PreparedTarget] = []
+        diagnostics: list[PlanDiagnostic] = []
+        for site in sites:
+            target_diagnostics = list(
+                preexisting_target_diagnostics.get(site.name, ())
+            )
+            plan_composition: PlanComposition | None = None
+            if manifest.parameter_compositions:
+                try:
+                    _, composition, contract = (
+                        self._resolve_manifest_parameters(
+                            manifest,
+                            site,
+                            validate_step_coverage=(
+                                intent is PlanIntent.EXECUTABLE
+                            ),
+                        )
+                    )
+                    if composition is not None and contract is not None:
+                        plan_composition = self._build_plan_composition(
+                            manifest,
+                            site,
+                            composition,
+                            contract,
+                        )
+                except CompositionError as error:
+                    target_diagnostics.append(
+                        PlanDiagnostic(
+                            code="composition.invalid",
+                            severity=DiagnosticSeverity.ERROR,
+                            summary=(
+                                "Resource composition failed. Set "
+                                "SITEOPS_REDACT_OUTPUT=0, then rerun the "
+                                "command locally for source and identity "
+                                "details."
+                            ),
+                            detail=str(error),
+                        )
+                    )
+                except ParameterSelectionError as error:
+                    target_diagnostics.append(
+                        PlanDiagnostic(
+                            code="parameter-selection.invalid",
+                            severity=DiagnosticSeverity.ERROR,
+                            summary=(
+                                "Parameter file selection failed. Set "
+                                "SITEOPS_REDACT_OUTPUT=0, then rerun the "
+                                "command locally for site and path details."
+                            ),
+                            detail=str(error),
+                        )
+                    )
+
+            operations: list[PreparedOperation] = []
+            target_failed = bool(target_diagnostics)
+            for source_step, plan_step in zip(
+                manifest.steps,
+                plan_steps,
+                strict=True,
+            ):
+                skip_reason: PlanSkipReason | None = None
+                if target_failed:
+                    disposition = PlanDisposition.BLOCKED
+                    skip_reason = PlanSkipReason(
+                        code=SkipReasonCode.TARGET_PREPARATION_FAILED,
+                        detail="Target preparation failed.",
+                    )
+                else:
+                    compatibility = self._check_step_site_compatibility(
+                        source_step,
+                        site,
+                    )
+                    if compatibility is not None:
+                        disposition = PlanDisposition.SKIP
+                        skip_reason = PlanSkipReason(
+                            code=SkipReasonCode.SCOPE_MISMATCH,
+                            detail=compatibility,
+                        )
+                    elif not self._evaluate_condition(
+                        source_step.when,
+                        site,
+                    ):
+                        disposition = PlanDisposition.SKIP
+                        skip_reason = PlanSkipReason(
+                            code=SkipReasonCode.CONDITION_FALSE,
+                            detail=(
+                                "Condition not met: "
+                                f"{format_when_condition(source_step.when)}"
+                            ),
+                        )
+                    else:
+                        disposition = PlanDisposition.EXECUTE
+                operations.append(
+                    PreparedOperation(
+                        identity=OperationIdentity(
+                            target=site.name,
+                            step=source_step.name,
+                        ),
+                        step=plan_step,
+                        disposition=disposition,
+                        details=plan_step.details,
+                        skip_reason=skip_reason,
+                    )
+                )
+
+            target = PreparedTarget(
+                name=site.name,
+                kind=(
+                    TargetKind.SUBSCRIPTION
+                    if site.is_subscription_level
+                    else TargetKind.RESOURCE_GROUP
+                ),
+                subscription=site.subscription,
+                resource_group=site.resource_group or None,
+                location=site.location,
+                operations=tuple(operations),
+                composition=plan_composition,
+                diagnostics=tuple(target_diagnostics),
+            )
+            targets.append(target)
+            diagnostics.extend(target_diagnostics)
+
+        if intent is PlanIntent.EXECUTABLE:
+            targets, preparation_diagnostics = (
+                self._prepare_plan_targets(
+                    manifest,
+                    sites,
+                    targets,
+                )
+            )
+            diagnostics.extend(preparation_diagnostics)
+
+        effective_parallel = (
+            parallel_override
+            if parallel_override is not None
+            else manifest.parallel.sites
+        )
+        plan = DeploymentPlan(
+            manifest_name=manifest.name,
+            source_path=manifest.source_path or manifest_path,
+            intent=intent,
+            description=manifest.description,
+            max_parallel_sites=effective_parallel,
+            steps=plan_steps,
+            targets=tuple(targets),
+            cli_selector=selector,
+            manifest_selector=manifest.site_selector,
+            composition_enabled=bool(manifest.parameter_compositions),
+        )
+        return PlanBuildResult(
+            status=(
+                PlanStatus.INVALID
+                if diagnostics
+                else PlanStatus.PLANNED
+            ),
+            executable=(
+                intent is PlanIntent.EXECUTABLE
+                and not diagnostics
+            ),
+            plan=plan,
+            diagnostics=tuple(diagnostics),
+        )
+
     def show_plan(
         self,
         manifest_path: Path,
         selector: str | None = None,
     ) -> None:
-        """Display deployment plan without executing.
+        """Print the plain plan without compiling templates or deploying."""
+        result = self.build_plan(manifest_path, selector)
+        print(
+            render_plain_plan(
+                result,
+                redacted=is_redaction_enabled(),
+            ),
+            end="",
+        )
 
-        Shows selected sites, effective resource composition, and steps.
-        Called by `validate --plan` and by `deploy --dry-run`.
+    @staticmethod
+    def _prepared_deployment_name(
+        manifest_name: str,
+        target_name: str,
+        step_name: str,
+        timestamp: str,
+    ) -> str:
+        base_name = f"{manifest_name}-{target_name}-{step_name}"
+        max_length = 64
+        timestamp_length = 14
+        hash_length = 10
+        max_base = max_length - timestamp_length - 1
+        if len(base_name) > max_base:
+            name_hash = hashlib.sha256(
+                base_name.encode()
+            ).hexdigest()[:hash_length]
+            base_name = (
+                f"{base_name[:max_base - hash_length - 1]}-{name_hash}"
+            )
+        return f"{base_name}-{timestamp}"
 
-        Args:
-            manifest_path: Path to manifest file
-            selector: Optional site selector
-        """
-        manifest = Manifest.from_file(manifest_path, workspace_root=self.workspace)
-        sites = self.resolve_sites(manifest, selector)
-        redacted = is_redaction_enabled()
+    @staticmethod
+    def _resolved_plan_string(
+        value: Any,
+        label: str,
+        *,
+        allow_deferred: bool = False,
+    ) -> str:
+        if isinstance(value, (dict, list)) or value is None:
+            raise ValueError(
+                f"{label} must resolve to a scalar value, got "
+                f"{type(value).__name__}."
+            )
+        resolved = str(value)
+        if not resolved.strip():
+            raise ValueError(f"{label} must resolve to a non-empty value.")
+        if not allow_deferred and _carries_template(resolved):
+            raise PlanValueResolutionError(
+                detail=f"{label} remains unresolved: {resolved!r}.",
+                public_message=(
+                    "A required runtime value remains unresolved."
+                ),
+            )
+        return resolved
 
-        if not sites:
-            print(f"⚠ No sites matched for manifest '{manifest.name}'")
-            if selector and not redacted:
-                print(f"  Selector: {selector}")
-            elif manifest.site_selector and not redacted:
-                print(f"  Manifest selector: {manifest.site_selector}")
-            print()
-            return
-
-        print(f"{'═'*60}")
-        print(f"  DEPLOYMENT PLAN: {manifest.name}")
-        if selector and not redacted:
-            print(f"  (filtered by: {selector})")
-        print(f"{'═'*60}")
-
-        if manifest.description:
-            print(f"\n  {manifest.description}")
-
-        if redacted:
-            print(f"\n  Sites: {len(sites)} selected")
-        else:
-            print(f"\n  Sites ({len(sites)}):")
-            for site in sites:
-                print(f"    • {site.name} ({site.location})")
-
-        print(f"\n  Parallel: {manifest.parallel}")
-
-        composition_failed_sites: set[str] = set()
-        if manifest.parameter_compositions:
-            print("\n  Resource composition:")
-            if redacted:
-                source_count = 0
-                applied_count = 0
-                external_count = 0
-                verified_count = 0
-                unverified_count = 0
-                error_counts: dict[str, int] = {}
-                for site in sites:
-                    try:
-                        _, composition, contract = (
-                            self._resolve_manifest_parameters(
-                                manifest,
-                                site,
-                            )
-                        )
-                    except (CompositionError, ParameterSelectionError) as error:
-                        composition_failed_sites.add(site.name)
-                        message = (
-                            report_composition_error(error)
-                            if isinstance(error, CompositionError)
-                            else report_parameter_selection_error(error)
-                        )
-                        error_counts[message] = error_counts.get(message, 0) + 1
-                        continue
-                    if composition is None or contract is None:
-                        continue
-                    source_count += len(composition.sources)
-                    applied_count += sum(
-                        len(values) for values in composition.entries.values()
-                    )
-                    external_count += sum(
-                        len(values) for values in composition.external.values()
-                    )
-                    site_verified = sum(
-                        1
-                        for reference in composition.references
-                        if not reference.unverified_reason
-                    )
-                    verified_count += site_verified
-                    unverified_count += (
-                        len(composition.references) - site_verified
-                    )
-                print(
-                    f"    Across {len(sites)} site(s): "
-                    f"{source_count} selected source(s), "
-                    f"{applied_count} applied resource(s), "
-                    f"{external_count} external assertion(s)"
-                )
-                print(
-                    f"    {verified_count} verified reference(s), "
-                    f"{unverified_count} recorded reference(s)"
-                )
-                for message, count in error_counts.items():
-                    print(f"    {count} site(s): {message}")
-                print(
-                    "    apply semantics: only listed definitions are applied. "
-                    "Deselecting a set does not delete existing resources"
-                )
-            else:
-                for site in sites:
-                    try:
-                        _, composition, contract = (
-                            self._resolve_manifest_parameters(
-                                manifest,
-                                site,
-                            )
-                        )
-                    except (CompositionError, ParameterSelectionError) as error:
-                        composition_failed_sites.add(site.name)
-                        print(f"    {site.name}:")
-                        print(f"      error: {error}")
-                        continue
-                    if composition is None or contract is None:
-                        continue
-                    source_origins = self._composition_source_origins(
-                        manifest,
-                        site,
-                    )
-                    print(f"    {site.name}:")
-                    selected = list(composition.sources)
-                    if selected:
-                        print("      sets:")
-                        for source in selected:
-                            origin = self._reportable_composition_origin(
-                                source_origins.get(source.path, "<unknown>")
-                            )
-                            print(
-                                f"        {source.path.as_posix()} "
-                                f"[selected by {origin}]"
-                            )
-                    else:
-                        print("      sets: none selected")
-                    for name, spec in contract.collections.items():
-                        applied = composition.entries[name]
-                        external = composition.external[name]
-                        if not applied and not external:
-                            continue
-                        print(f"      {name}:")
-                        for entry in applied:
-                            print(
-                                "        apply     "
-                                f"{format_identity(spec, entry.identity)} "
-                                f"({entry.source.as_posix()})"
-                            )
-                        for entry in external:
-                            print(
-                                "        external  "
-                                f"{format_identity(spec, entry.identity)} "
-                                f"({entry.source.as_posix()}): {entry.reason}"
-                            )
-                    for reference in composition.references:
-                        source_spec = contract.collections[
-                            reference.source_collection
-                        ]
-                        source_identity = format_identity(
-                            source_spec,
-                            reference.source_identity,
-                        )
-                        if reference.unverified_reason:
-                            bindings = ", ".join(
-                                f"{name}={value!r}"
-                                for name, value in reference.source_bindings
-                            )
-                            binding_suffix = (
-                                f" [{bindings}]" if bindings else ""
-                            )
-                            print(
-                                f"      reference [{reference.rule_id}]: "
-                                f"{source_identity}{binding_suffix} recorded, "
-                                "not verified: "
-                                f"{reference.unverified_reason}"
-                            )
-                            continue
-                        assert reference.target_collection is not None
-                        assert reference.target_identity is not None
-                        target_spec = contract.collections[
-                            reference.target_collection
-                        ]
-                        target_identity = format_identity(
-                            target_spec,
-                            reference.target_identity,
-                        )
-                        suffix = " (external)" if reference.external else ""
-                        member = ""
-                        if reference.target_member_name is not None:
-                            member = (
-                                f"/{reference.target_member_name}"
-                                f"[key={reference.target_member_identity!r}]"
-                            )
-                        print(
-                            f"      reference [{reference.rule_id}]: "
-                            f"{source_identity} -> "
-                            f"{target_identity}{member}{suffix}"
-                        )
-                    for requirement in composition.requirements:
-                        requirement_spec = contract.collections[
-                            requirement.collection
-                        ]
-                        print(
-                            "      requires: "
-                            f"{format_identity(requirement_spec, requirement.identity)} "
-                            f"({requirement.source.as_posix()})"
-                        )
-                    print(
-                        "      apply semantics: only listed definitions are "
-                        "applied. Deselecting a set does not delete existing "
-                        "resources"
-                    )
-
-        print(f"\n  Steps ({len(manifest.steps)}):")
-        for i, step in enumerate(manifest.steps, 1):
-            condition_info = (
-                f" [when: {format_when_condition(step.when)}]"
-                if step.when
-                else ""
+    @staticmethod
+    def _validate_prepared_parameter_names(
+        details: DeploymentOperation,
+        parameters: dict[Any, Any],
+    ) -> None:
+        invalid_names = [
+            name
+            for name in parameters
+            if not isinstance(name, str)
+            or name not in details.accepted_parameters
+        ]
+        if invalid_names:
+            raise PlanValueResolutionError(
+                detail=(
+                    "The deployment template does not accept the resolved "
+                    f"parameter name(s): {invalid_names}."
+                ),
+                public_message=(
+                    "A deferred parameter name is not accepted by the "
+                    "deployment template."
+                ),
             )
 
-            if isinstance(step, KubectlStep):
-                print(f"    {i}. {step.name} (kubectl:{step.operation}){condition_info}")
-                print(f"       ├─ cluster: {step.arc.name}")
-                for j, f in enumerate(step.files):
-                    prefix = "└─" if j == len(step.files) - 1 else "├─"
-                    print(f"       {prefix} {f}")
-            elif isinstance(step, WaitStep):
-                condition = step.condition
-                print(f"    {i}. {step.name} (wait){condition_info}")
-                if condition.type == "arm-tag":
-                    # Printed as written in the manifest, not resolved. The
-                    # text is committed content, so scrubbing it protects
-                    # nothing and corrupts an unresolved `{{ }}` template,
-                    # which is what a plan usually shows here.
-                    print(f"       ├─ resource: {condition.resource_id}")
-                    print(f"       ├─ tag: {condition.tag_key} == {condition.expected_value}")
-                    if condition.failure_pattern:
-                        print(f"       ├─ failurePattern: {condition.failure_pattern}")
-                print(
-                    f"       └─ timeout {step.timeout_minutes}m, poll {step.poll_interval_seconds}s"
-                )
-            else:
-                print(f"    {i}. {step.name} ({step.scope}){condition_info}")
-                print(f"       └─ {step.template}")
-
-        print(f"\n{'═'*60}")
-        total = sum(
-            1
-            for site in sites
-            for step in manifest.steps
-            if site.name not in composition_failed_sites
-            and self._check_step_site_compatibility(step, site) is None
-            and self._evaluate_condition(step.when, site)
-        )
-        print(f"  Total: {total} operation(s)")
-
-        if len(sites) > 1:
-            if manifest.parallel.is_sequential:
-                print("  Execution: Sequential (one site at a time)")
-            elif manifest.parallel.is_unlimited:
-                print("  Execution: Parallel (all sites concurrently)")
-            else:
-                print(f"  Execution: Parallel (max {manifest.parallel.sites} concurrent)")
-        print(f"{'═'*60}\n")
-
-    def deploy(
+    def _execute_prepared_operation(
         self,
-        manifest_path: Path,
-        selector: str | None = None,
-        parallel_override: int | None = None,
-        manifest: Manifest | None = None,
-        sites: list[Site] | None = None,
+        plan: DeploymentPlan,
+        target: PreparedTarget,
+        operation: PreparedOperation,
+        timestamp: str,
+        outputs: dict[OperationIdentity, dict[str, Any]],
+        execution_mode: PlanExecutionMode,
+    ) -> StepResult:
+        details = operation.details
+        if isinstance(details, DeploymentOperation):
+            if (
+                details.input_status is not InputStatus.PREPARED
+                or details.parameters is None
+            ):
+                raise ValueError(
+                    f"Deployment step '{operation.identity.step}' on site "
+                    f"'{operation.identity.target}' has no prepared "
+                    "parameters."
+                )
+            parameters = resolve_plan_value(
+                details.parameters,
+                outputs,
+                mode=execution_mode,
+            )
+            if not isinstance(parameters, dict):
+                raise TypeError(
+                    "Prepared deployment parameters did not resolve to a "
+                    "mapping."
+                )
+            if execution_mode is PlanExecutionMode.APPLY:
+                self._validate_prepared_parameter_names(
+                    details,
+                    parameters,
+                )
+            deployment_name = self._prepared_deployment_name(
+                plan.manifest_name,
+                target.name,
+                operation.identity.step,
+                timestamp,
+            )
+            if operation.scope is OperationScope.SUBSCRIPTION:
+                return self.executor.deploy_subscription(
+                    subscription=target.subscription,
+                    location=target.location,
+                    template_path=details.template,
+                    parameters=parameters,
+                    deployment_name=deployment_name,
+                    step_name=operation.identity.step,
+                    site_name=target.name,
+                )
+            return self.executor.deploy_resource_group(
+                subscription=target.subscription,
+                resource_group=target.resource_group or "",
+                template_path=details.template,
+                parameters=parameters,
+                deployment_name=deployment_name,
+                step_name=operation.identity.step,
+                site_name=target.name,
+            )
+
+        if isinstance(details, KubectlOperation):
+            if details.input_status is not InputStatus.PREPARED:
+                raise ValueError(
+                    f"Kubectl step '{operation.identity.step}' on site "
+                    f"'{operation.identity.target}' has no prepared inputs."
+                )
+            cluster_name = self._resolved_plan_string(
+                resolve_plan_value(
+                    details.cluster_name,
+                    outputs,
+                    mode=execution_mode,
+                ),
+                "Kubectl cluster name",
+                allow_deferred=(
+                    execution_mode is PlanExecutionMode.PREVIEW
+                ),
+            )
+            resource_group = self._resolved_plan_string(
+                resolve_plan_value(
+                    details.cluster_resource_group,
+                    outputs,
+                    mode=execution_mode,
+                ),
+                "Kubectl cluster resource group",
+                allow_deferred=(
+                    execution_mode is PlanExecutionMode.PREVIEW
+                ),
+            )
+            files = [
+                self._resolved_plan_string(
+                    resolve_plan_value(
+                        file_value,
+                        outputs,
+                        mode=execution_mode,
+                    ),
+                    "Kubectl file",
+                    allow_deferred=(
+                        execution_mode is PlanExecutionMode.PREVIEW
+                    ),
+                )
+                for file_value in details.files
+            ]
+            if details.operation == "apply":
+                return self.executor.kubectl_apply(
+                    cluster_name=cluster_name,
+                    resource_group=resource_group,
+                    subscription=target.subscription,
+                    files=files,
+                    step_name=operation.identity.step,
+                    site_name=target.name,
+                )
+            return KubectlResult(
+                success=False,
+                step_name=operation.identity.step,
+                site_name=target.name,
+                error=(
+                    "Unsupported kubectl operation: "
+                    f"{details.operation}"
+                ),
+            )
+
+        if details.input_status is not InputStatus.PREPARED:
+            raise ValueError(
+                f"Wait step '{operation.identity.step}' on site "
+                f"'{operation.identity.target}' has no prepared inputs."
+            )
+        resource_id = self._resolved_plan_string(
+            resolve_plan_value(
+                details.resource_id,
+                outputs,
+                mode=execution_mode,
+            ),
+            "Wait resource ID",
+            allow_deferred=(
+                execution_mode is PlanExecutionMode.PREVIEW
+            ),
+        )
+        tag_key = self._resolved_plan_string(
+            resolve_plan_value(
+                details.tag_key,
+                outputs,
+                mode=execution_mode,
+            ),
+            "Wait tag key",
+            allow_deferred=(
+                execution_mode is PlanExecutionMode.PREVIEW
+            ),
+        )
+        expected_value = self._resolved_plan_string(
+            resolve_plan_value(
+                details.expected_value,
+                outputs,
+                mode=execution_mode,
+            ),
+            "Wait expected value",
+            allow_deferred=(
+                execution_mode is PlanExecutionMode.PREVIEW
+            ),
+        )
+        failure_pattern = (
+            self._resolved_plan_string(
+                resolve_plan_value(
+                    details.failure_pattern,
+                    outputs,
+                    mode=execution_mode,
+                ),
+                "Wait failure pattern",
+                allow_deferred=(
+                    execution_mode is PlanExecutionMode.PREVIEW
+                ),
+            )
+            if details.failure_pattern is not None
+            else None
+        )
+        try:
+            condition = ArmTagCondition(
+                type="arm-tag",
+                resource_id=resource_id,
+                tag_key=tag_key,
+                expected_value=expected_value,
+                failure_pattern=failure_pattern,
+            )
+        except ValueError as error:
+            raise PlanValueResolutionError(
+                detail=(
+                    f"Wait step '{operation.identity.step}' condition "
+                    f"invalid after resolution: {error}"
+                ),
+                public_message=(
+                    "The resolved wait condition is invalid."
+                ),
+            ) from error
+        return self.executor.wait_for_condition(
+            condition=condition,
+            timeout_minutes=details.timeout_minutes,
+            poll_interval_seconds=details.poll_interval_seconds,
+            subscription=target.subscription,
+            step_name=operation.identity.step,
+            site_name=target.name,
+        )
+
+    def _execute_prepared_target(
+        self,
+        plan: DeploymentPlan,
+        target: PreparedTarget,
+        timestamp: str,
+        inherited_outputs: dict[OperationIdentity, dict[str, Any]],
+        *,
+        parallel_mode: bool,
+        execution_mode: PlanExecutionMode,
+    ) -> tuple[dict[str, Any], dict[OperationIdentity, dict[str, Any]]]:
+        target_start = time.time()
+        outputs = dict(inherited_outputs)
+        produced_outputs: dict[
+            OperationIdentity,
+            dict[str, Any],
+        ] = {}
+        log = _thread_safe_print if parallel_mode else print
+        target_label = site_name_for_output(target.name)
+
+        steps_completed = 0
+        steps_skipped = 0
+        status = "success"
+        error_message: str | None = None
+        step_results: list[dict[str, Any]] = []
+
+        for operation in target.operations:
+            if operation.disposition is PlanDisposition.SKIP:
+                if operation.skip_reason is None:
+                    raise ValueError(
+                        f"Skipped step '{operation.identity.step}' on site "
+                        f"'{operation.identity.target}' has no reason."
+                    )
+                reason = operation.skip_reason.detail
+                shown_reason = (
+                    "condition not met"
+                    if operation.skip_reason.code
+                    is SkipReasonCode.CONDITION_FALSE
+                    else reason
+                )
+                log(
+                    f"[{target_label}] - {operation.identity.step} "
+                    f"(skipped: {shown_reason})"
+                )
+                steps_skipped += 1
+                step_results.append(
+                    {
+                        "step": operation.identity.step,
+                        "status": "skipped",
+                        "reason": reason,
+                    }
+                )
+                continue
+            if operation.disposition is PlanDisposition.BLOCKED:
+                raise ValueError(
+                    f"Step '{operation.identity.step}' on site "
+                    f"'{operation.identity.target}' is blocked."
+                )
+
+            details = operation.details
+            if isinstance(details, KubectlOperation):
+                step_type = f"kubectl:{details.operation}"
+            elif isinstance(details, ArmTagWaitOperation):
+                step_type = "wait"
+            else:
+                step_type = operation.scope.value
+            log(
+                f"[{target_label}] > {operation.identity.step} "
+                f"({step_type})..."
+            )
+
+            try:
+                result = self._execute_prepared_operation(
+                    plan,
+                    target,
+                    operation,
+                    timestamp,
+                    outputs,
+                    execution_mode,
+                )
+            except (
+                PlanValueResolutionError,
+                TypeError,
+                ValueError,
+            ) as error:
+                reportable = self._reportable_deploy_error(
+                    error,
+                    target.name,
+                )
+                if operation.kind is OperationKind.DEPLOYMENT:
+                    result = DeploymentResult(
+                        success=False,
+                        step_name=operation.identity.step,
+                        site_name=target.name,
+                        deployment_name=self._prepared_deployment_name(
+                            plan.manifest_name,
+                            target.name,
+                            operation.identity.step,
+                            timestamp,
+                        ),
+                        error=reportable,
+                    )
+                elif operation.kind is OperationKind.KUBECTL:
+                    result = KubectlResult(
+                        success=False,
+                        step_name=operation.identity.step,
+                        site_name=target.name,
+                        error=reportable,
+                    )
+                else:
+                    result = WaitResult(
+                        success=False,
+                        step_name=operation.identity.step,
+                        site_name=target.name,
+                        error=reportable,
+                    )
+            if result.success:
+                step_outputs = (
+                    result.outputs or {}
+                    if isinstance(result, DeploymentResult)
+                    else {}
+                )
+                if step_outputs:
+                    outputs[operation.identity] = step_outputs
+                    produced_outputs[operation.identity] = step_outputs
+                log(f"[{target_label}] + {operation.identity.step}")
+                steps_completed += 1
+                step_results.append(
+                    {
+                        "step": operation.identity.step,
+                        "status": "success",
+                        "outputs": step_outputs,
+                    }
+                )
+                continue
+
+            reportable_error = scrub_site_for_output(
+                result.error,
+                target.name,
+            )
+            log(
+                f"[{target_label}] x {operation.identity.step}: "
+                f"{reportable_error}"
+            )
+            status = "failed"
+            error_message = reportable_error
+            step_results.append(
+                {
+                    "step": operation.identity.step,
+                    "status": "failed",
+                    "error": reportable_error,
+                }
+            )
+            break
+
+        elapsed = time.time() - target_start
+        total_steps = len(plan.steps)
+        skip_info = (
+            f", {steps_skipped} skipped"
+            if steps_skipped > 0
+            else ""
+        )
+        status_symbol = "+" if status == "success" else "x"
+        log(
+            f"[{target_label}] {status_symbol} completed in {elapsed:.1f}s "
+            f"({steps_completed}/{total_steps - steps_skipped} steps"
+            f"{skip_info})"
+        )
+
+        if (
+            steps_completed == 0
+            and steps_skipped == total_steps
+            and total_steps > 0
+        ):
+            reasons = sorted(
+                {
+                    step_result["reason"]
+                    for step_result in step_results
+                    if step_result.get("status") == "skipped"
+                    and step_result.get("reason")
+                }
+            )
+            detail = f" ({' | '.join(reasons)})" if reasons else ""
+            log(
+                f"[{target_label}] ! nothing deployed: every step was "
+                f"skipped{detail}."
+            )
+
+        return (
+            {
+                "site": target.name,
+                "status": status,
+                "error": error_message,
+                "steps_completed": steps_completed,
+                "steps_skipped": steps_skipped,
+                "steps_total": total_steps,
+                "elapsed": elapsed,
+                "steps": step_results,
+            },
+            produced_outputs,
+        )
+
+    @staticmethod
+    def _prepared_target_failure_result(
+        target: PreparedTarget,
+        plan: DeploymentPlan,
+        error: str,
     ) -> dict[str, Any]:
-        """Execute deployment from manifest.
+        return {
+            "site": target.name,
+            "status": "failed",
+            "error": scrub_site_for_output(error, target.name),
+            "steps_completed": 0,
+            "steps_skipped": 0,
+            "steps_total": len(plan.steps),
+            "elapsed": 0.0,
+            "steps": [],
+        }
 
-        Args:
-            manifest_path: Path to manifest file
-            selector: Optional site selector
-            parallel_override: Override manifest's parallel.sites setting.
-                              None = use manifest setting.
-            manifest: Pre-loaded manifest (avoids re-parsing)
-            sites: Pre-resolved sites (avoids re-resolving)
+    def _run_prepared_targets(
+        self,
+        plan: DeploymentPlan,
+        targets: list[PreparedTarget],
+        timestamp: str,
+        inherited_outputs: dict[OperationIdentity, dict[str, Any]],
+        execution_mode: PlanExecutionMode,
+    ) -> tuple[
+        list[dict[str, Any]],
+        dict[OperationIdentity, dict[str, Any]],
+    ]:
+        if not targets:
+            return [], {}
 
-        Returns:
-            Dict with deployment results keyed by site name and summary
-        """
-        if manifest is None:
-            manifest = Manifest.from_file(manifest_path, workspace_root=self.workspace)
-        if sites is None:
-            sites = self.resolve_sites(manifest, selector)
+        parallel = ParallelConfig(sites=plan.max_parallel_sites)
+        if parallel.is_sequential or len(targets) == 1:
+            results: list[dict[str, Any]] = []
+            produced: dict[OperationIdentity, dict[str, Any]] = {}
+            for target in targets:
+                try:
+                    result, target_outputs = self._execute_prepared_target(
+                        plan,
+                        target,
+                        timestamp,
+                        inherited_outputs,
+                        parallel_mode=False,
+                        execution_mode=execution_mode,
+                    )
+                except Exception as error:
+                    reportable = self._reportable_deploy_error(
+                        error,
+                        target.name,
+                    )
+                    logger.error(
+                        "Unexpected error deploying to "
+                        f"{site_name_for_output(target.name)}: {reportable}"
+                    )
+                    result = self._prepared_target_failure_result(
+                        target,
+                        plan,
+                        f"Unexpected error: {reportable}",
+                    )
+                    target_outputs = {}
+                results.append(result)
+                produced.update(target_outputs)
+            return results, produced
 
-        if not sites:
+        max_workers = parallel.max_workers
+        worker_count = (
+            len(targets)
+            if max_workers is None
+            else min(len(targets), max_workers)
+        )
+        print(
+            f"\n  [Parallel] Deploying to {len(targets)} sites "
+            f"({worker_count} concurrent)"
+        )
+        results = []
+        produced = {}
+        result_lock = threading.Lock()
+        future_to_target = {}
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            try:
+                for target in targets:
+                    future = executor.submit(
+                        self._execute_prepared_target,
+                        plan,
+                        target,
+                        timestamp,
+                        inherited_outputs,
+                        parallel_mode=True,
+                        execution_mode=execution_mode,
+                    )
+                    future_to_target[future] = target
+                for future in as_completed(future_to_target):
+                    target = future_to_target[future]
+                    try:
+                        result, target_outputs = future.result()
+                    except Exception as error:
+                        reportable = self._reportable_deploy_error(
+                            error,
+                            target.name,
+                        )
+                        logger.error(
+                            "Unexpected error deploying to "
+                            f"{site_name_for_output(target.name)}: "
+                            f"{reportable}"
+                        )
+                        result = self._prepared_target_failure_result(
+                            target,
+                            plan,
+                            f"Unexpected error: {reportable}",
+                        )
+                        target_outputs = {}
+                    with result_lock:
+                        results.append(result)
+                        produced.update(target_outputs)
+            except BaseException:
+                cancelled = sum(
+                    1
+                    for pending in future_to_target
+                    if pending.cancel()
+                )
+                logger.error(
+                    f"Deployment stopped. {len(results)} site(s) reported, "
+                    f"{cancelled} not started."
+                )
+                raise
+        return results, produced
+
+    @staticmethod
+    def _target_has_unavailable_source_reference(
+        target: PreparedTarget,
+        source_target: str,
+        outputs: dict[OperationIdentity, dict[str, Any]],
+    ) -> bool:
+        for operation in target.operations:
+            for reference in operation.data_references:
+                if reference.source.target != source_target:
+                    continue
+                try:
+                    resolve_plan_value(OutputValue(reference), outputs)
+                except PlanValueResolutionError:
+                    return True
+        return False
+
+    def execute_plan(
+        self,
+        result: PlanBuildResult,
+        *,
+        mode: PlanExecutionMode = PlanExecutionMode.APPLY,
+    ) -> dict[str, Any]:
+        """Execute one previously prepared plan without replanning."""
+        if not result.executable or result.plan is None:
+            raise PlanNotExecutableError(result)
+        plan = result.plan
+        if not plan.targets:
             logger.warning("No sites to deploy to")
             return {
                 "sites": {},
@@ -4499,128 +4612,167 @@ class Orchestrator:
                 },
             }
 
-        # Determine effective parallelism
-        if parallel_override is not None:
-            effective_parallel = ParallelConfig(sites=parallel_override)
-        else:
-            effective_parallel = manifest.parallel
-
-        logger.info(f"Deploying '{manifest.name}' to {len(sites)} site(s) " f"(parallel: {effective_parallel})")
-
+        logger.info(
+            f"Deploying '{plan.manifest_name}' to "
+            f"{len(plan.targets)} site(s) "
+            f"(parallel: {ParallelConfig(plan.max_parallel_sites)})"
+        )
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
         start_time = time.time()
-
-        # Group sites by subscription
-        site_groups = self._group_sites_by_subscription(sites)
-
-        # Check if we have subscription-scoped steps
-        has_sub_steps = self._has_subscription_scoped_steps(manifest)
-
         results: list[dict[str, Any]] = []
-        subscription_outputs: SubscriptionOutputs = {}
+        operation_outputs: dict[
+            OperationIdentity,
+            dict[str, Any],
+        ] = {}
 
-        if has_sub_steps:
-            # Build map of subscription_id -> subscription-level site
-            subscription_sites: dict[str, Site] = {}
-            rg_sites: list[Site] = []
-            for sub_id, (sub_level, rg_level) in site_groups.items():
-                if sub_level:
-                    if len(sub_level) > 1:
-                        # Subscription-scoped steps run once per subscription
-                        # and their outputs feed every resource-group site under
-                        # it, so there is no correct choice between two
-                        # candidates. `deploy` does not run `validate`, so the
-                        # check is repeated here rather than picking one and
-                        # deploying the fleet against outputs from a site the
-                        # operator did not intend.
-                        names = ", ".join(s.name for s in sub_level)
-                        raise MultipleSubscriptionSitesError(
-                            f"Subscription '{_reportable_subscription(sub_id)}' has multiple "
-                            f"subscription-level sites: {names}. Only one "
-                            f"subscription-level site per subscription is allowed."
-                        )
-                    subscription_sites[sub_id] = sub_level[0]
-                rg_sites.extend(rg_level)
+        subscription_targets: dict[str, PreparedTarget] = {}
+        resource_group_targets: list[PreparedTarget] = []
+        for target in plan.targets:
+            if target.kind is TargetKind.SUBSCRIPTION:
+                existing = subscription_targets.get(target.subscription)
+                if existing is not None:
+                    names = f"{existing.name}, {target.name}"
+                    raise MultipleSubscriptionSitesError(
+                        f"Subscription "
+                        f"'{_reportable_subscription(target.subscription)}' "
+                        f"has multiple subscription-level sites: {names}. "
+                        "Only one subscription-level site per subscription "
+                        "is allowed."
+                    )
+                subscription_targets[target.subscription] = target
+            else:
+                resource_group_targets.append(target)
 
-            # Phase 1: Execute subscription-scoped steps
-            subscription_outputs, sub_results = self._collect_subscription_outputs(
-                manifest, subscription_sites, timestamp, effective_parallel
+        has_subscription_steps = any(
+            step.scope is OperationScope.SUBSCRIPTION
+            for step in plan.steps
+        )
+        if has_subscription_steps:
+            if subscription_targets:
+                print(
+                    "\n  [Phase 1] Subscription-scoped steps: "
+                    f"{len(subscription_targets)} subscription(s)"
+                )
+            subscription_results, subscription_outputs = (
+                self._run_prepared_targets(
+                    plan,
+                    list(subscription_targets.values()),
+                    timestamp,
+                    operation_outputs,
+                    mode,
+                )
             )
-            results.extend(sub_results)
-
-            # Identify failed subscriptions and filter blocked sites
-            failed_subscriptions = {
-                sub_id
-                for sub_id, site in subscription_sites.items()
-                if any(r["site"] == site.name and r["status"] == "failed" for r in sub_results)
+            results.extend(subscription_results)
+            operation_outputs.update(subscription_outputs)
+            failed_subscription_targets = {
+                row["site"]
+                for row in subscription_results
+                if row["status"] == "failed"
             }
 
-            # Filter RG-level sites: block those with dependencies on failed subscriptions
-            if failed_subscriptions and rg_sites:
-                sub_step_names = self._get_subscription_step_names(manifest)
-                proceeding_sites = []
-                for site in rg_sites:
-                    if site.subscription in failed_subscriptions:
-                        if self._site_depends_on_subscription_outputs(manifest, site, sub_step_names):
-                            # Site depends on failed subscription outputs - block it
-                            _thread_safe_print(
-                                f"[{site_name_for_output(site.name)}] - blocked "
-                                "(subscription deployment failed, site depends on its outputs)"
-                            )
-                            results.append(
-                                {
-                                    "site": site.name,
-                                    "status": "blocked",
-                                    "error": "Subscription deployment failed and site depends on its outputs",
-                                    "steps_completed": 0,
-                                    "steps_skipped": len(manifest.steps),
-                                    "steps_total": len(manifest.steps),
-                                    "elapsed": 0.0,
-                                    "steps": [],
-                                }
-                            )
-                        else:
-                            # Site doesn't depend on subscription outputs - let it proceed
-                            proceeding_sites.append(site)
-                    else:
-                        # Site is in a different subscription - unaffected
-                        proceeding_sites.append(site)
-                rg_sites = proceeding_sites
-
-            # Phase 2: Execute RG-scoped steps for all RG-level sites
-            if rg_sites:
-                print(f"\n  [Phase 2] Resource group-scoped steps: {len(rg_sites)} site(s)")
-                if effective_parallel.is_sequential or len(rg_sites) == 1:
-                    rg_results = self._deploy_sequential(manifest, rg_sites, timestamp, subscription_outputs)
-                else:
-                    rg_results = self._deploy_parallel(
-                        manifest, rg_sites, timestamp, effective_parallel, subscription_outputs
+            proceeding_targets: list[PreparedTarget] = []
+            for target in resource_group_targets:
+                subscription_target = subscription_targets.get(
+                    target.subscription
+                )
+                if (
+                    subscription_target is not None
+                    and subscription_target.name
+                    in failed_subscription_targets
+                    and self._target_has_unavailable_source_reference(
+                        target,
+                        subscription_target.name,
+                        operation_outputs,
                     )
-                results.extend(rg_results)
+                ):
+                    _thread_safe_print(
+                        f"[{site_name_for_output(target.name)}] - blocked "
+                        "(subscription deployment failed, site depends on "
+                        "its outputs)"
+                    )
+                    results.append(
+                        {
+                            "site": target.name,
+                            "status": "blocked",
+                            "error": (
+                                "Subscription deployment failed and site "
+                                "depends on its outputs"
+                            ),
+                            "steps_completed": 0,
+                            "steps_skipped": len(plan.steps),
+                            "steps_total": len(plan.steps),
+                            "elapsed": 0.0,
+                            "steps": [],
+                        }
+                    )
+                else:
+                    proceeding_targets.append(target)
+
+            if proceeding_targets:
+                print(
+                    "\n  [Phase 2] Resource group-scoped steps: "
+                    f"{len(proceeding_targets)} site(s)"
+                )
+                resource_results, _ = self._run_prepared_targets(
+                    plan,
+                    proceeding_targets,
+                    timestamp,
+                    operation_outputs,
+                    mode,
+                )
+                results.extend(resource_results)
         else:
-            # No subscription-scoped steps - simple execution
-            if effective_parallel.is_sequential or len(sites) == 1:
-                results = self._deploy_sequential(manifest, sites, timestamp)
-            else:
-                results = self._deploy_parallel(manifest, sites, timestamp, effective_parallel)
+            all_results, _ = self._run_prepared_targets(
+                plan,
+                list(plan.targets),
+                timestamp,
+                operation_outputs,
+                mode,
+            )
+            results.extend(all_results)
 
         total_elapsed = time.time() - start_time
-
-        # Build summary
-        succeeded = sum(1 for r in results if r["status"] == "success")
-        failed = sum(1 for r in results if r["status"] == "failed")
-
         summary = {
             "total": len(results),
-            "succeeded": succeeded,
-            "failed": failed,
+            "succeeded": sum(
+                row["status"] == "success"
+                for row in results
+            ),
+            "failed": sum(
+                row["status"] == "failed"
+                for row in results
+            ),
             "elapsed": total_elapsed,
         }
-
-        # Print summary
         self._print_deployment_summary(results, total_elapsed)
-
         return {
-            "sites": {r["site"]: r for r in results},
+            "sites": {row["site"]: row for row in results},
             "summary": summary,
         }
+
+    def deploy(
+        self,
+        manifest_path: Path,
+        selector: str | None = None,
+        parallel_override: int | None = None,
+        manifest: Manifest | None = None,
+        sites: list[Site] | None = None,
+        plan_result: PlanBuildResult | None = None,
+    ) -> dict[str, Any]:
+        """Prepare one deployment plan and execute it."""
+        result = plan_result or self.build_plan(
+            manifest_path,
+            selector,
+            intent=PlanIntent.EXECUTABLE,
+            manifest=manifest,
+            sites=sites,
+            parallel_override=parallel_override,
+        )
+        return self.execute_plan(
+            result,
+            mode=(
+                PlanExecutionMode.PREVIEW
+                if self.dry_run
+                else PlanExecutionMode.APPLY
+            ),
+        )

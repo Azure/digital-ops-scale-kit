@@ -11,7 +11,6 @@ asserting the local default would otherwise pass locally and fail in CI.
 
 import logging
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -266,14 +265,72 @@ class TestOrchestratorAppliesRedaction:
         """An instance without running `__init__`, which needs a workspace."""
         return Orchestrator.__new__(Orchestrator)
 
+    @staticmethod
+    def _prepared_plan_target():
+        from siteops.planning import (
+            DeploymentOperation,
+            DeploymentPlan,
+            InputStatus,
+            MappingValue,
+            OperationIdentity,
+            OperationKind,
+            OperationScope,
+            PlanDisposition,
+            PlanIntent,
+            PlanStep,
+            PreparedOperation,
+            PreparedTarget,
+            TargetKind,
+        )
+
+        details = DeploymentOperation(
+            template=Path("templates/x.bicep"),
+            input_status=InputStatus.PREPARED,
+            parameters=MappingValue(()),
+        )
+        step = PlanStep(
+            name="aio-instance",
+            sequence=1,
+            kind=OperationKind.DEPLOYMENT,
+            scope=OperationScope.RESOURCE_GROUP,
+            details=details,
+        )
+        target = PreparedTarget(
+            name="munich-prod",
+            kind=TargetKind.RESOURCE_GROUP,
+            subscription="s",
+            resource_group="rg",
+            location="eastus",
+            operations=(
+                PreparedOperation(
+                    identity=OperationIdentity(
+                        target="munich-prod",
+                        step="aio-instance",
+                    ),
+                    step=step,
+                    disposition=PlanDisposition.EXECUTE,
+                    details=details,
+                ),
+            ),
+        )
+        plan = DeploymentPlan(
+            manifest_name="m",
+            source_path=Path("manifests/m.yaml"),
+            intent=PlanIntent.EXECUTABLE,
+            description=None,
+            max_parallel_sites=1,
+            steps=(step,),
+            targets=(target,),
+        )
+        return plan, target
+
     def test_site_failure_result_is_scrubbed(self, clean_env):
         clean_env.setenv(REDACT_ENV, "1")
-        site = SimpleNamespace(name="munich-prod")
-        manifest = SimpleNamespace(steps=[])
+        plan, target = self._prepared_plan_target()
 
-        result = Orchestrator._site_failure_result(
-            site,
-            manifest,
+        result = Orchestrator._prepared_target_failure_result(
+            target,
+            plan,
             (
                 "Unexpected error in deployment "
                 "'manifest-munich-prod-step-20260902000000': "
@@ -288,10 +345,13 @@ class TestOrchestratorAppliesRedaction:
         assert "Unexpected error" in result["error"]
 
     def test_site_failure_result_keeps_detail_for_a_local_run(self, clean_env):
-        site = SimpleNamespace(name="munich-prod")
-        manifest = SimpleNamespace(steps=[])
+        plan, target = self._prepared_plan_target()
 
-        result = Orchestrator._site_failure_result(site, manifest, RESOURCE_ID)
+        result = Orchestrator._prepared_target_failure_result(
+            target,
+            plan,
+            RESOURCE_ID,
+        )
 
         assert result["error"] == RESOURCE_ID
 
@@ -350,19 +410,15 @@ class TestOrchestratorAppliesRedaction:
         clean_env.setenv(REDACT_ENV, "1")
 
         from siteops.executor import DeploymentResult
-        from siteops.models import DeploymentStep
+        from siteops.planning import PlanExecutionMode
 
         orch = self._orchestrator()
-        step = DeploymentStep(name="aio-instance", template="templates/x.bicep")
-        manifest = SimpleNamespace(name="m", steps=[step], parameters=[])
-        site = SimpleNamespace(
-            name="munich-prod", subscription="s", resource_group="rg", properties={}, parameters={}
-        )
+        plan, target = self._prepared_plan_target()
 
         monkeypatch.setattr(
-            type(orch),
-            "_execute_step",
-            lambda self, *a, **k: DeploymentResult(
+            orch,
+            "_execute_prepared_operation",
+            lambda *a, **k: DeploymentResult(
                 success=False,
                 step_name="aio-instance",
                 site_name="munich-prod",
@@ -373,13 +429,15 @@ class TestOrchestratorAppliesRedaction:
                 ),
             ),
         )
-        monkeypatch.setattr(
-            type(orch),
-            "_check_step_site_compatibility",
-            lambda self, *a, **k: None,
-        )
 
-        result = orch._deploy_site(manifest, site, "ts", parallel_mode=False)
+        result, _ = orch._execute_prepared_target(
+            plan,
+            target,
+            "ts",
+            {},
+            parallel_mode=False,
+            execution_mode=PlanExecutionMode.APPLY,
+        )
 
         step_error = result["steps"][0]["error"]
         assert SUBSCRIPTION not in step_error
@@ -397,38 +455,69 @@ class TestOrchestratorAppliesRedaction:
     ):
         """Local output keeps the identity that lets an operator act."""
         from siteops.executor import DeploymentResult
-        from siteops.models import DeploymentStep
+        from siteops.planning import PlanExecutionMode
 
         orch = self._orchestrator()
-        step = DeploymentStep(name="aio-instance", template="templates/x.bicep")
-        manifest = SimpleNamespace(name="m", steps=[step], parameters=[])
-        site = SimpleNamespace(
-            name="munich-prod",
-            subscription="s",
-            resource_group="rg",
-            properties={},
-            parameters={},
-        )
+        plan, target = self._prepared_plan_target()
 
         monkeypatch.setattr(
-            type(orch),
-            "_execute_step",
-            lambda self, *a, **k: DeploymentResult(
+            orch,
+            "_execute_prepared_operation",
+            lambda *a, **k: DeploymentResult(
                 success=True,
                 step_name="aio-instance",
                 site_name="munich-prod",
                 deployment_name="d",
             ),
         )
-        monkeypatch.setattr(
-            type(orch),
-            "_check_step_site_compatibility",
-            lambda self, *a, **k: None,
+
+        orch._execute_prepared_target(
+            plan,
+            target,
+            "ts",
+            {},
+            parallel_mode=False,
+            execution_mode=PlanExecutionMode.APPLY,
         )
 
-        orch._deploy_site(manifest, site, "ts", parallel_mode=False)
-
         assert "[munich-prod]" in capsys.readouterr().out
+
+    def test_unexpected_prepared_target_failure_redacts_log_identity(
+        self,
+        clean_env,
+        tmp_workspace,
+        caplog,
+        monkeypatch,
+    ):
+        from siteops.planning import PlanExecutionMode
+
+        clean_env.setenv(REDACT_ENV, "1")
+        orchestrator = Orchestrator(tmp_workspace)
+        plan, target = self._prepared_plan_target()
+        monkeypatch.setattr(
+            orchestrator,
+            "_execute_prepared_target",
+            lambda *args, **kwargs: (_ for _ in ()).throw(
+                RuntimeError(
+                    "Deployment 'm-munich-prod-step-ts' failed for "
+                    "munich-prod"
+                )
+            ),
+        )
+
+        with caplog.at_level(logging.ERROR):
+            results, _ = orchestrator._run_prepared_targets(
+                plan,
+                [target],
+                "ts",
+                {},
+                PlanExecutionMode.APPLY,
+            )
+
+        assert results[0]["site"] == "munich-prod"
+        assert "munich-prod" not in results[0]["error"]
+        assert "m-<site>-step-ts" in results[0]["error"]
+        assert "munich-prod" not in caplog.text
 
     def test_a_redacted_empty_plan_omits_the_selector(
         self,
@@ -508,53 +597,6 @@ location: eastus
         assert str(site_path) not in published
         assert "Site configuration could not be loaded" in published
         assert orchestrator.skipped_sites[0][0] == "private-site"
-
-    @pytest.mark.parametrize("parallel", [False, True], ids=["sequential", "parallel"])
-    def test_an_unexpected_site_failure_keeps_internal_identity_only(
-        self,
-        clean_env,
-        tmp_workspace,
-        caplog,
-        monkeypatch,
-        parallel,
-    ):
-        from siteops.models import ParallelConfig, Site
-
-        clean_env.setenv(REDACT_ENV, "1")
-        orchestrator = Orchestrator(tmp_workspace)
-        manifest = SimpleNamespace(name="m", steps=[])
-        site = Site(
-            name="private-site",
-            subscription="s",
-            resource_group="rg",
-            location="eastus",
-        )
-
-        def fail(*args, **kwargs):
-            raise RuntimeError(
-                "Deployment 'm-private-site-step-ts' failed for private-site"
-            )
-
-        monkeypatch.setattr(orchestrator, "_deploy_site", fail)
-        with caplog.at_level(logging.ERROR):
-            if parallel:
-                result = orchestrator._deploy_parallel(
-                    manifest,
-                    [site],
-                    "ts",
-                    ParallelConfig(sites=1),
-                )
-            else:
-                result = orchestrator._deploy_sequential(
-                    manifest,
-                    [site],
-                    "ts",
-                )
-
-        assert result[0]["site"] == "private-site"
-        assert "private-site" not in result[0]["error"]
-        assert "m-<site>-step-ts" in result[0]["error"]
-        assert "private-site" not in caplog.text
 
     def test_deployment_command_and_timeout_warning_hide_the_site(
         self,

@@ -4,7 +4,7 @@ import subprocess
 
 import pytest
 
-from tests.integration.helpers.azure import run_az
+from tests.integration.helpers.azure import delete_arm_resource, run_az
 
 RESOURCE_ID = (
     "/subscriptions/00000000-0000-0000-0000-000000000000/"
@@ -94,3 +94,36 @@ def test_os_error_does_not_expose_the_argument_vector(monkeypatch):
 
     assert RESOURCE_ID not in str(excinfo.value)
     assert excinfo.value.__cause__ is None
+
+
+def test_delete_arm_resource_uses_exact_id_and_api_version(monkeypatch):
+    seen = {}
+
+    def run(args, **kwargs):
+        seen["args"] = args
+        seen["kwargs"] = kwargs
+
+    monkeypatch.setattr(
+        "tests.integration.helpers.azure.run_az",
+        run,
+    )
+
+    delete_arm_resource(
+        RESOURCE_ID,
+        "2026-07-01",
+        redact=("private-name",),
+    )
+
+    assert seen["args"] == [
+        "az",
+        "resource",
+        "delete",
+        "--ids",
+        RESOURCE_ID,
+        "--api-version",
+        "2026-07-01",
+    ]
+    assert seen["kwargs"]["redact"] == (
+        RESOURCE_ID,
+        "private-name",
+    )

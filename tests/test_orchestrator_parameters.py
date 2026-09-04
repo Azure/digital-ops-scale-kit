@@ -26,6 +26,7 @@ from siteops.models import (
     Site,
 )
 from siteops.orchestrator import Orchestrator
+from siteops.planning import PlanDisposition, PlanStatus
 
 
 class TestTemplateResolution:
@@ -79,95 +80,6 @@ class TestTemplateResolution:
         result = orchestrator._resolve_template_strings(value, site)
 
         assert result == ["test", "static", "eastus"]
-
-
-class TestStepOutputChaining:
-    """Tests for {{ steps.X.outputs.Y }} resolution."""
-
-    def test_resolve_step_output_simple(self, complete_workspace):
-        orchestrator = Orchestrator(complete_workspace)
-        step_outputs = {"deploy-storage": {"storageId": "storage-123"}}
-
-        value = "{{ steps.deploy-storage.outputs.storageId }}"
-        result = orchestrator._resolve_step_outputs(value, step_outputs)
-
-        assert result == "storage-123"
-
-    def test_resolve_step_output_nested(self, complete_workspace):
-        orchestrator = Orchestrator(complete_workspace)
-        step_outputs = {
-            "deploy-network": {
-                "vnet": {"value": {"id": "vnet-123"}, "type": "Object"},
-            },
-        }
-
-        value = "{{ steps.deploy-network.outputs.vnet.id }}"
-        result = orchestrator._resolve_step_outputs(value, step_outputs)
-
-        assert result == "vnet-123"
-
-    def test_resolve_step_output_in_string(self, complete_workspace):
-        orchestrator = Orchestrator(complete_workspace)
-        step_outputs = {"step1": {"name": "myresource"}}
-
-        value = "Resource: {{ steps.step1.outputs.name }} is ready"
-        result = orchestrator._resolve_step_outputs(value, step_outputs)
-
-        assert result == "Resource: myresource is ready"
-
-    def test_resolve_step_output_missing(self, complete_workspace):
-        orchestrator = Orchestrator(complete_workspace)
-        step_outputs = {}
-
-        value = "{{ steps.missing.outputs.value }}"
-        result = orchestrator._resolve_step_outputs(value, step_outputs)
-
-        assert result == value
-
-    def test_resolve_complex_output_type(self, complete_workspace):
-        """When entire value is a template, return the actual type (list/dict)."""
-        orchestrator = Orchestrator(complete_workspace)
-        step_outputs = {"step1": {"ids": ["id-1", "id-2", "id-3"]}}
-
-        value = "{{ steps.step1.outputs.ids }}"
-        result = orchestrator._resolve_step_outputs(value, step_outputs)
-
-        assert result == ["id-1", "id-2", "id-3"]
-
-    def test_deep_nested_output_three_plus_levels(self, complete_workspace):
-        """Test resolving output nested 3+ levels deep."""
-        orchestrator = Orchestrator(complete_workspace)
-        step_outputs = {
-            "deploy": {
-                "config": {
-                    "value": {"nested": {"deep": {"value": "found"}}},
-                    "type": "Object",
-                },
-            },
-        }
-
-        value = "{{ steps.deploy.outputs.config.nested.deep.value }}"
-        result = orchestrator._resolve_step_outputs(value, step_outputs)
-
-        assert result == "found"
-
-    def test_output_with_missing_mid_path(self, complete_workspace):
-        """Test resolving output when an intermediate key is missing."""
-        orchestrator = Orchestrator(complete_workspace)
-        step_outputs = {
-            "deploy": {
-                "config": {
-                    "value": {"a": "b"},
-                    "type": "Object",
-                },
-            },
-        }
-
-        value = "{{ steps.deploy.outputs.config.nonexistent.subfield }}"
-        result = orchestrator._resolve_step_outputs(value, step_outputs)
-
-        # Missing path should leave the template unresolved
-        assert result == value
 
 
 class TestConditionEvaluationOnAMissingProperty:
@@ -1157,17 +1069,6 @@ class TestUnresolvedParameterPath:
 
         assert any("must not contain '..'" in error for error in errors)
 
-    def test_subscription_dependency_scan_rejects_dynamic_traversal(self, tmp_path):
-        orchestrator, manifest, site = self._workspace_with_selected_path(
-            tmp_path, "properties:\n  setName: nested/../chosen\n"
-        )
-
-        with pytest.raises(ParameterSelectionError, match=r"must not contain '\.\.'"):
-            orchestrator._site_depends_on_subscription_outputs(
-                manifest, site, {"subscription-step"}
-            )
-
-
 class TestResolveParametersManifestLevel:
     """Tests for manifest-level parameter resolution and filtering."""
 
@@ -1647,6 +1548,31 @@ steps:
         assert "private-set" not in message
         assert message.startswith("Parameter file selection failed")
 
+    def test_redacted_deploy_error_uses_typed_value_resolution_summary(
+        self,
+        monkeypatch,
+    ):
+        from siteops.planning import PlanValueResolutionError
+
+        monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1")
+        error = PlanValueResolutionError(
+            detail="private-site resolved private-parameter",
+            public_message=(
+                "A deferred parameter name is not accepted by the "
+                "deployment template."
+            ),
+        )
+
+        message = Orchestrator._reportable_deploy_error(
+            error,
+            "private-site",
+        )
+
+        assert message == (
+            "A deferred parameter name is not accepted by the deployment "
+            "template."
+        )
+
     def test_site_parameters_cannot_replace_composed_collection(self, tmp_path):
         workspace = self._composition_workspace(tmp_path)
         site_path = workspace / "sites" / "test-site.yaml"
@@ -1821,6 +1747,33 @@ steps:
         assert "assets[name='oven'] -> devices[name='plant-opc']" in output
         assert "/inboundEndpoints[key='opc']" in output
         assert "does not delete existing resources" in output
+
+    def test_build_plan_is_silent_and_does_not_compile_templates(
+        self,
+        tmp_path,
+        capsys,
+    ):
+        workspace = self._composition_workspace(tmp_path)
+        orchestrator = Orchestrator(workspace)
+
+        with patch(
+            "siteops.orchestrator.get_template_parameters",
+            side_effect=AssertionError("describe planning compiled a template"),
+        ):
+            result = orchestrator.build_plan(
+                workspace / "manifests" / "resources.yaml"
+            )
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert captured.err == ""
+        assert result.status is PlanStatus.PLANNED
+        assert result.plan is not None
+        assert result.plan.targets[0].composition is not None
+        assert {
+            operation.disposition
+            for operation in result.plan.targets[0].operations
+        } == {PlanDisposition.EXECUTE}
 
     def test_plan_shows_unverified_binding_values(self, tmp_path, capsys):
         workspace = self._composition_workspace(tmp_path)
@@ -2829,242 +2782,6 @@ steps:
         # Non-overridden value preserved from base
         assert result["customLocationName"] == "placeholder-cl"
 
-class TestSubscriptionOutputExtraction:
-    """Tests for extracting outputs from subscription-scoped step results."""
-
-    def test_extract_subscription_outputs_basic(self, complete_workspace):
-        """Test that outputs are correctly extracted from step results."""
-        orchestrator = Orchestrator(complete_workspace)
-
-        result = {
-            "site": "sub-site",
-            "status": "success",
-            "steps": [
-                {
-                    "step": "shared-resource",
-                    "status": "success",
-                    "outputs": {"resourceId": "/subscriptions/123/resource"},
-                },
-                {
-                    "step": "another-step",
-                    "status": "success",
-                    "outputs": {"value": "test"},
-                },
-            ],
-        }
-
-        subscription_outputs = {}
-        orchestrator._extract_subscription_outputs(result, "sub-123", subscription_outputs)
-
-        assert "sub-123" in subscription_outputs
-        assert subscription_outputs["sub-123"]["shared-resource"] == {"resourceId": "/subscriptions/123/resource"}
-        assert subscription_outputs["sub-123"]["another-step"] == {"value": "test"}
-
-    def test_extract_subscription_outputs_skips_failed_steps(self, complete_workspace):
-        """Test that failed steps don't have outputs extracted."""
-        orchestrator = Orchestrator(complete_workspace)
-
-        result = {
-            "site": "sub-site",
-            "status": "failed",
-            "steps": [
-                {
-                    "step": "success-step",
-                    "status": "success",
-                    "outputs": {"value": "ok"},
-                },
-                {
-                    "step": "failed-step",
-                    "status": "failed",
-                    "error": "Something went wrong",
-                },
-            ],
-        }
-
-        subscription_outputs = {}
-        orchestrator._extract_subscription_outputs(result, "sub-123", subscription_outputs)
-
-        assert "success-step" in subscription_outputs["sub-123"]
-        assert "failed-step" not in subscription_outputs["sub-123"]
-
-    def test_extract_subscription_outputs_skips_empty_outputs(self, complete_workspace):
-        """Test that steps with no outputs are skipped."""
-        orchestrator = Orchestrator(complete_workspace)
-
-        result = {
-            "site": "sub-site",
-            "status": "success",
-            "steps": [
-                {
-                    "step": "no-output-step",
-                    "status": "success",
-                    "outputs": {},
-                },
-                {
-                    "step": "with-output",
-                    "status": "success",
-                    "outputs": {"id": "123"},
-                },
-            ],
-        }
-
-        subscription_outputs = {}
-        orchestrator._extract_subscription_outputs(result, "sub-123", subscription_outputs)
-
-        assert "no-output-step" not in subscription_outputs["sub-123"]
-        assert "with-output" in subscription_outputs["sub-123"]
-
-    def test_extract_subscription_outputs_multiple_subscriptions(self, complete_workspace):
-        """Test outputs are keyed by subscription ID correctly."""
-        orchestrator = Orchestrator(complete_workspace)
-
-        subscription_outputs = {}
-
-        result1 = {
-            "site": "sub-site-1",
-            "status": "success",
-            "steps": [{"step": "step1", "status": "success", "outputs": {"id": "a"}}],
-        }
-        orchestrator._extract_subscription_outputs(result1, "sub-111", subscription_outputs)
-
-        result2 = {
-            "site": "sub-site-2",
-            "status": "success",
-            "steps": [{"step": "step1", "status": "success", "outputs": {"id": "b"}}],
-        }
-        orchestrator._extract_subscription_outputs(result2, "sub-222", subscription_outputs)
-
-        assert subscription_outputs["sub-111"]["step1"]["id"] == "a"
-        assert subscription_outputs["sub-222"]["step1"]["id"] == "b"
-
-
-class TestCrossScopeOutputResolution:
-    """Tests for resolving outputs across subscription/RG scope boundaries."""
-
-    def test_resolve_output_from_subscription_outputs(self, complete_workspace):
-        """Test that subscription outputs can be resolved for RG-level sites."""
-        orchestrator = Orchestrator(complete_workspace)
-
-        step_outputs = {}  # Per-site outputs (empty for this test)
-        subscription_outputs = {
-            "sub-123": {
-                "shared-resource": {"resourceId": "/subscriptions/123/shared"}
-            }
-        }
-
-        value = "{{ steps.shared-resource.outputs.resourceId }}"
-        result = orchestrator._resolve_step_outputs(
-            value, step_outputs, subscription_outputs, "sub-123"
-        )
-
-        assert result == "/subscriptions/123/shared"
-
-    def test_per_site_outputs_take_precedence(self, complete_workspace):
-        """Test that per-site outputs override subscription outputs."""
-        orchestrator = Orchestrator(complete_workspace)
-
-        step_outputs = {
-            "shared-resource": {"resourceId": "/per-site-value"}
-        }
-        subscription_outputs = {
-            "sub-123": {
-                "shared-resource": {"resourceId": "/subscription-value"}
-            }
-        }
-
-        value = "{{ steps.shared-resource.outputs.resourceId }}"
-        result = orchestrator._resolve_step_outputs(
-            value, step_outputs, subscription_outputs, "sub-123"
-        )
-
-        # Per-site should win
-        assert result == "/per-site-value"
-
-    def test_subscription_output_fallback(self, complete_workspace):
-        """Test fallback to subscription outputs when per-site not found."""
-        orchestrator = Orchestrator(complete_workspace)
-
-        step_outputs = {
-            "rg-step": {"value": "rg-only"}
-        }
-        subscription_outputs = {
-            "sub-123": {
-                "sub-step": {"value": "sub-only"}
-            }
-        }
-
-        # RG step output
-        result1 = orchestrator._resolve_step_outputs(
-            "{{ steps.rg-step.outputs.value }}",
-            step_outputs, subscription_outputs, "sub-123"
-        )
-        assert result1 == "rg-only"
-
-        # Subscription step output
-        result2 = orchestrator._resolve_step_outputs(
-            "{{ steps.sub-step.outputs.value }}",
-            step_outputs, subscription_outputs, "sub-123"
-        )
-        assert result2 == "sub-only"
-
-    def test_cross_scope_nested_output(self, complete_workspace):
-        """Test nested output paths work with cross-scope resolution."""
-        orchestrator = Orchestrator(complete_workspace)
-
-        subscription_outputs = {
-            "sub-123": {
-                "registry": {
-                    "schema": {"id": "schema-123", "name": "my-schema"}
-                }
-            }
-        }
-
-        value = "{{ steps.registry.outputs.schema.id }}"
-        result = orchestrator._resolve_step_outputs(
-            value, {}, subscription_outputs, "sub-123"
-        )
-
-        assert result == "schema-123"
-
-    def test_cross_scope_complex_type_output(self, complete_workspace):
-        """Test that complex types (arrays, objects) are returned correctly."""
-        orchestrator = Orchestrator(complete_workspace)
-
-        subscription_outputs = {
-            "sub-123": {
-                "enablement": {
-                    "extensionIds": ["ext-1", "ext-2", "ext-3"]
-                }
-            }
-        }
-
-        value = "{{ steps.enablement.outputs.extensionIds }}"
-        result = orchestrator._resolve_step_outputs(
-            value, {}, subscription_outputs, "sub-123"
-        )
-
-        assert result == ["ext-1", "ext-2", "ext-3"]
-
-    def test_wrong_subscription_not_resolved(self, complete_workspace):
-        """Test outputs from different subscription aren't accidentally resolved."""
-        orchestrator = Orchestrator(complete_workspace)
-
-        subscription_outputs = {
-            "sub-AAA": {
-                "step1": {"value": "from-AAA"}
-            }
-        }
-
-        # Request with different subscription ID
-        value = "{{ steps.step1.outputs.value }}"
-        result = orchestrator._resolve_step_outputs(
-            value, {}, subscription_outputs, "sub-BBB"
-        )
-
-        # Should remain unresolved
-        assert result == value
-
-
 class TestMultipleSubscriptionLevelSites:
     """Deploy rejects an ambiguous subscription-level site rather than picking one.
 
@@ -3129,7 +2846,7 @@ class TestMultipleSubscriptionLevelSites:
         orchestrator = Orchestrator(complete_workspace)
         manifest = self._manifest_with_a_subscription_step()
 
-        with patch.object(orchestrator, "_deploy_site", return_value={
+        target_result = {
             "site": "x",
             "status": "success",
             "error": None,
@@ -3138,7 +2855,18 @@ class TestMultipleSubscriptionLevelSites:
             "steps_total": 2,
             "elapsed": 0.0,
             "steps": [],
-        }):
+        }
+        with (
+            patch(
+                "siteops.orchestrator.get_template_parameters",
+                return_value=frozenset(),
+            ),
+            patch.object(
+                orchestrator,
+                "_execute_prepared_target",
+                return_value=(target_result, {}),
+            ),
+        ):
             result = orchestrator.deploy(
                 manifest_path=complete_workspace / "manifests" / "test.yaml",
                 manifest=manifest,
@@ -3207,291 +2935,6 @@ class TestGroupSitesBySubscription:
         assert len(rg_sites) == 2
 
 
-class TestSubscriptionFailureIsolation:
-    """Tests for subscription-level failure isolation in two-phase deployment."""
-
-    def test_get_subscription_step_names(self, tmp_workspace, sample_bicep_template):
-        """Test extracting subscription-scoped step names from manifest."""
-        manifest_path = tmp_workspace / "manifests" / "mixed.yaml"
-        manifest_path.write_text(
-            """
-name: mixed
-sites:
-  - test-site
-steps:
-  - name: sub-step-1
-    template: templates/test.bicep
-    scope: subscription
-  - name: rg-step
-    template: templates/test.bicep
-    scope: resourceGroup
-  - name: sub-step-2
-    template: templates/test.bicep
-    scope: subscription
-"""
-        )
-
-        from siteops.models import Manifest
-
-        manifest = Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
-        step_names = Orchestrator._get_subscription_step_names(manifest)
-
-        assert step_names == {"sub-step-1", "sub-step-2"}
-        assert "rg-step" not in step_names
-
-    def test_references_any_step_finds_reference(self):
-        """Test detecting step output references in parameters."""
-        value = {"id": "{{ steps.shared.outputs.resourceId }}"}
-        assert Orchestrator._references_any_step(value, {"shared"}) is True
-        assert Orchestrator._references_any_step(value, {"other"}) is False
-
-    def test_references_any_step_nested_dict(self):
-        """Test detecting step references in nested structures."""
-        value = {
-            "config": {
-                "nested": {
-                    "ref": "{{ steps.deep-step.outputs.value }}"
-                }
-            }
-        }
-        assert Orchestrator._references_any_step(value, {"deep-step"}) is True
-        assert Orchestrator._references_any_step(value, {"shallow-step"}) is False
-
-    def test_references_any_step_in_list(self):
-        """Test detecting step references in list values."""
-        value = ["static", "{{ steps.list-step.outputs.item }}"]
-        assert Orchestrator._references_any_step(value, {"list-step"}) is True
-
-    def test_references_any_step_no_references(self):
-        """Test no false positives on values without step references."""
-        assert Orchestrator._references_any_step("plain string", {"any"}) is False
-        assert Orchestrator._references_any_step({"key": "value"}, {"any"}) is False
-        assert Orchestrator._references_any_step(123, {"any"}) is False
-
-    def test_site_depends_on_subscription_outputs_with_dependency(
-        self, tmp_workspace, sample_bicep_template
-    ):
-        """Test site dependency detection when parameter file references subscription step."""
-        # Create site
-        (tmp_workspace / "sites" / "rg-site.yaml").write_text(
-            """
-apiVersion: siteops/v1
-kind: Site
-name: rg-site
-subscription: "sub-123"
-resourceGroup: rg-test
-location: eastus
-"""
-        )
-
-        # Create parameter file that references subscription step
-        (tmp_workspace / "parameters" / "chaining.yaml").write_text(
-            """
-sharedId: "{{ steps.sub-step.outputs.resourceId }}"
-"""
-        )
-
-        # Create manifest with subscription and RG steps
-        manifest_path = tmp_workspace / "manifests" / "test.yaml"
-        manifest_path.write_text(
-            """
-name: test
-sites:
-  - rg-site
-steps:
-  - name: sub-step
-    template: templates/test.bicep
-    scope: subscription
-  - name: rg-step
-    template: templates/test.bicep
-    scope: resourceGroup
-    parameters:
-      - parameters/chaining.yaml
-"""
-        )
-
-        orchestrator = Orchestrator(tmp_workspace)
-        from siteops.models import Manifest
-
-        manifest = Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
-        site = orchestrator.load_site("rg-site")
-        sub_step_names = {"sub-step"}
-
-        assert orchestrator._site_depends_on_subscription_outputs(
-            manifest, site, sub_step_names
-        ) is True
-
-    def test_site_depends_on_subscription_outputs_no_dependency(
-        self, tmp_workspace, sample_bicep_template
-    ):
-        """Test site dependency detection when no subscription outputs are referenced."""
-        # Create site
-        (tmp_workspace / "sites" / "rg-site.yaml").write_text(
-            """
-apiVersion: siteops/v1
-kind: Site
-name: rg-site
-subscription: "sub-123"
-resourceGroup: rg-test
-location: eastus
-"""
-        )
-
-        # Create parameter file that only references RG-scoped steps
-        (tmp_workspace / "parameters" / "chaining.yaml").write_text(
-            """
-localId: "{{ steps.rg-step-1.outputs.id }}"
-"""
-        )
-
-        # Create manifest with subscription and RG steps
-        manifest_path = tmp_workspace / "manifests" / "test.yaml"
-        manifest_path.write_text(
-            """
-name: test
-sites:
-  - rg-site
-steps:
-  - name: sub-step
-    template: templates/test.bicep
-    scope: subscription
-  - name: rg-step-1
-    template: templates/test.bicep
-    scope: resourceGroup
-  - name: rg-step-2
-    template: templates/test.bicep
-    scope: resourceGroup
-    parameters:
-      - parameters/chaining.yaml
-"""
-        )
-
-        orchestrator = Orchestrator(tmp_workspace)
-        from siteops.models import Manifest
-
-        manifest = Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
-        site = orchestrator.load_site("rg-site")
-        sub_step_names = {"sub-step"}
-
-        assert orchestrator._site_depends_on_subscription_outputs(
-            manifest, site, sub_step_names
-        ) is False
-
-    def test_site_depends_checks_manifest_level_params(
-        self, tmp_workspace, sample_bicep_template
-    ):
-        """Test that manifest-level parameters are also checked for dependencies."""
-        # Create site
-        (tmp_workspace / "sites" / "rg-site.yaml").write_text(
-            """
-apiVersion: siteops/v1
-kind: Site
-name: rg-site
-subscription: "sub-123"
-resourceGroup: rg-test
-location: eastus
-"""
-        )
-
-        # Create manifest-level parameter file with subscription reference
-        (tmp_workspace / "parameters" / "common.yaml").write_text(
-            """
-sharedId: "{{ steps.sub-step.outputs.resourceId }}"
-"""
-        )
-
-        manifest_path = tmp_workspace / "manifests" / "test.yaml"
-        manifest_path.write_text(
-            """
-name: test
-sites:
-  - rg-site
-parameters:
-  - parameters/common.yaml
-steps:
-  - name: sub-step
-    template: templates/test.bicep
-    scope: subscription
-  - name: rg-step
-    template: templates/test.bicep
-    scope: resourceGroup
-"""
-        )
-
-        orchestrator = Orchestrator(tmp_workspace)
-        from siteops.models import Manifest
-
-        manifest = Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
-        site = orchestrator.load_site("rg-site")
-        sub_step_names = {"sub-step"}
-
-        assert orchestrator._site_depends_on_subscription_outputs(
-            manifest, site, sub_step_names
-        ) is True
-
-
-class TestComplexOutputHandling:
-    """Tests for handling complex outputs (list/dict) in string contexts."""
-
-    def test_complex_output_in_string_context_warns(self, tmp_workspace, sample_bicep_template, caplog):
-        """Test that embedding a complex output in a string logs a warning."""
-        import logging
-
-        # Create site
-        (tmp_workspace / "sites" / "test-site.yaml").write_text(
-            """
-apiVersion: siteops/v1
-kind: Site
-name: test-site
-subscription: sub-123
-resourceGroup: rg-test
-location: eastus
-"""
-        )
-
-        orchestrator = Orchestrator(tmp_workspace)
-
-        # Simulate step outputs with a complex value (list)
-        step_outputs = {"setup": {"items": ["a", "b", "c"]}}
-
-        # Try to embed the list in a string context (should warn and leave unresolved)
-        value = "Items are: {{ steps.setup.outputs.items }} - done"
-
-        with caplog.at_level(logging.WARNING):
-            result = orchestrator._resolve_step_outputs(value, step_outputs)
-
-        # The complex output should not be embedded - original template preserved
-        assert "{{ steps.setup.outputs.items }}" in result
-        assert "Cannot embed complex output" in caplog.text
-
-    def test_complex_output_standalone_resolves(self, tmp_workspace, sample_bicep_template):
-        """Test that a complex output as the sole value resolves correctly."""
-        # Create site
-        (tmp_workspace / "sites" / "test-site.yaml").write_text(
-            """
-apiVersion: siteops/v1
-kind: Site
-name: test-site
-subscription: sub-123
-resourceGroup: rg-test
-location: eastus
-"""
-        )
-
-        orchestrator = Orchestrator(tmp_workspace)
-
-        # Simulate step outputs with a complex value
-        step_outputs = {"setup": {"config": {"key": "value", "nested": True}}}
-
-        # Complex output as standalone value (entire string is the template)
-        value = "{{ steps.setup.outputs.config }}"
-
-        result = orchestrator._resolve_step_outputs(value, step_outputs)
-
-        # Standalone complex outputs should resolve to the dict
-        assert result == {"key": "value", "nested": True}
-
-
 class TestPropertyPathEdgeCases:
     """Tests for _resolve_property_path edge cases."""
 
@@ -3539,57 +2982,6 @@ class TestPropertyPathEdgeCases:
         result = orchestrator._resolve_property_path(obj, "missing")
 
         assert result is None
-
-
-class TestResolveStepOutputsRecursion:
-    """Tests for dict/list recursion in _resolve_step_outputs."""
-
-    def test_resolve_outputs_in_nested_dict(self, tmp_workspace):
-        """Test that step output references in nested dicts are resolved."""
-        orchestrator = Orchestrator(tmp_workspace)
-
-        step_outputs = {"step1": {"id": "resource-123"}}
-        value = {
-            "config": {
-                "resourceId": "{{ steps.step1.outputs.id }}",
-                "static": "unchanged",
-            }
-        }
-
-        result = orchestrator._resolve_step_outputs(value, step_outputs)
-
-        assert result["config"]["resourceId"] == "resource-123"
-        assert result["config"]["static"] == "unchanged"
-
-    def test_resolve_outputs_in_list(self, tmp_workspace):
-        """Test that step output references in lists are resolved."""
-        orchestrator = Orchestrator(tmp_workspace)
-
-        step_outputs = {"step1": {"id": "resource-123"}}
-        value = ["{{ steps.step1.outputs.id }}", "static", 42]
-
-        result = orchestrator._resolve_step_outputs(value, step_outputs)
-
-        assert result == ["resource-123", "static", 42]
-
-    def test_resolve_outputs_non_string_passthrough(self, tmp_workspace):
-        """Test that non-string/dict/list values pass through unchanged."""
-        orchestrator = Orchestrator(tmp_workspace)
-
-        assert orchestrator._resolve_step_outputs(42, {}) == 42
-        assert orchestrator._resolve_step_outputs(True, {}) is True
-        assert orchestrator._resolve_step_outputs(None, {}) is None
-
-    def test_resolve_unresolved_output_in_embedded_string(self, tmp_workspace):
-        """Test that unresolved output in embedded string preserves the template."""
-        orchestrator = Orchestrator(tmp_workspace)
-
-        step_outputs = {"step1": {"id": "resource-123"}}
-        value = "prefix-{{ steps.missing.outputs.val }}-suffix"
-
-        result = orchestrator._resolve_step_outputs(value, step_outputs)
-
-        assert result == "prefix-{{ steps.missing.outputs.val }}-suffix"
 
 
 class TestParameterTemplateFallbacks:

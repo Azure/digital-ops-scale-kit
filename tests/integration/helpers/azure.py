@@ -76,3 +76,26 @@ def run_az(
             f"az {operation} failed (exit {proc.returncode}){detail}"
         ) from None
     return proc
+
+
+def delete_arm_resource(
+    resource_id: str,
+    api_version: str,
+    *,
+    timeout: int = 300,
+    redact: tuple[str, ...] = (),
+) -> None:
+    """Delete one ARM resource without publishing its identity."""
+    run_az(
+        [
+            "az",
+            "resource",
+            "delete",
+            "--ids",
+            resource_id,
+            "--api-version",
+            api_version,
+        ],
+        timeout=timeout,
+        redact=(resource_id, *redact),
+    )

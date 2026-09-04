@@ -14,6 +14,7 @@ Extended documentation for the Digital Operations Scale Kit.
 | [manifest-reference.md](manifest-reference.md) | Manifest syntax, step types, conditions |
 | [manifest-includes.md](manifest-includes.md) | Splicing one manifest into another via `include:` |
 | [parameter-resolution.md](parameter-resolution.md) | Template variables, output chaining, auto-filtering |
+| [plan-output.md](plan-output.md) | Plain and JSON deployment plans, projections, and publication boundaries |
 | [aio-releases.md](aio-releases.md) | Pinning an AIO release per site, in-place upgrades, adding a new release |
 | [resource-catalog.md](resource-catalog.md) | Declaring AIO workload resources in YAML, attachment routes, when to use Bicep |
 | [assets.md](assets.md) | Device Registry devices and assets |

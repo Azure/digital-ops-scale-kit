@@ -38,6 +38,7 @@ import os
 import shutil
 import subprocess
 import time
+from collections import Counter
 from typing import Any, Callable
 
 # Hard timeout per kubectl call so a flaky API server cannot hang a test.
@@ -299,6 +300,40 @@ def wait_for_cr(
             time.sleep(interval)
 
 
+def wait_for_cr_deleted(
+    resource_type: str,
+    name: str,
+    namespace: str,
+    *,
+    timeout: int = 300,
+    interval: int = 5,
+) -> None:
+    """Wait until a projected custom resource no longer exists."""
+    deadline = time.monotonic() + timeout
+    last: KubectlError | None = None
+    while True:
+        try:
+            kubectl_json(["get", resource_type, name, "-n", namespace])
+            last = None
+        except KubectlError as error:
+            if _is_not_found(error):
+                return
+            last = error
+        if time.monotonic() >= deadline:
+            detail = (
+                f" Last kubectl error: {last}"
+                if last is not None
+                else ""
+            )
+            raise KubectlError(
+                f"'{name}' ({resource_type}) still exists in namespace "
+                f"'{namespace}' after {timeout}s.{detail}",
+                last.returncode if last is not None else 1,
+                last.stderr if last is not None else "",
+            )
+        time.sleep(interval)
+
+
 def cr_identity(resource_type: str, name: str, namespace: str) -> tuple[str, str]:
     """Return the `(uid, creationTimestamp)` identifying one projected resource.
 
@@ -364,6 +399,144 @@ def cr_health(
     return (cr.get("status") or {}).get("healthState") or {}
 
 
+_POD_PHASES = {
+    "Pending",
+    "Running",
+    "Succeeded",
+    "Failed",
+    "Unknown",
+}
+_CONTAINER_WAIT_REASONS = {
+    "BackOff",
+    "ContainerCreating",
+    "CrashLoopBackOff",
+    "CreateContainerConfigError",
+    "CreateContainerError",
+    "ErrImagePull",
+    "ImagePullBackOff",
+    "PodInitializing",
+    "RunContainerError",
+}
+_WARNING_EVENT_REASONS = {
+    "BackOff",
+    "Evicted",
+    "Failed",
+    "FailedAttachVolume",
+    "FailedCreate",
+    "FailedMount",
+    "FailedPostStartHook",
+    "FailedPreStopHook",
+    "FailedScheduling",
+    "NodeNotReady",
+    "Unhealthy",
+}
+
+
+def _allowlisted_reason(value: Any, allowed: set[str]) -> str:
+    return value if isinstance(value, str) and value in allowed else "Other"
+
+
+def dataflow_runtime_summary(
+    profile_name: str,
+    namespace: str,
+) -> str:
+    """Return allowlisted workload counts for a failed dataflow profile."""
+    try:
+        pod_list = kubectl_json(["get", "pods", "-n", namespace])
+        event_list = kubectl_json(["get", "events", "-n", namespace])
+    except (KubectlError, subprocess.TimeoutExpired, OSError):
+        return "Runtime summary unavailable."
+
+    pods = pod_list.get("items", []) if isinstance(pod_list, dict) else []
+    events = (
+        event_list.get("items", [])
+        if isinstance(event_list, dict)
+        else []
+    )
+    phase_counts: Counter[str] = Counter()
+    profile_pods = 0
+    unschedulable = 0
+    waiting_reasons: Counter[str] = Counter()
+    for pod in pods:
+        if not isinstance(pod, dict):
+            continue
+        metadata = pod.get("metadata", {})
+        status = pod.get("status", {})
+        if not isinstance(metadata, dict) or not isinstance(status, dict):
+            continue
+        phase_counts[
+            _allowlisted_reason(status.get("phase"), _POD_PHASES)
+        ] += 1
+        labels = metadata.get("labels", {})
+        owners = metadata.get("ownerReferences", [])
+        searchable = [
+            metadata.get("name"),
+            *(
+                labels.values()
+                if isinstance(labels, dict)
+                else ()
+            ),
+            *(
+                owner.get("name")
+                for owner in owners
+                if isinstance(owner, dict)
+            ),
+        ]
+        if any(
+            isinstance(value, str) and profile_name in value
+            for value in searchable
+        ):
+            profile_pods += 1
+        conditions = status.get("conditions", [])
+        if any(
+            isinstance(condition, dict)
+            and condition.get("reason") == "Unschedulable"
+            for condition in conditions
+        ):
+            unschedulable += 1
+        for container in status.get("containerStatuses", []):
+            if not isinstance(container, dict):
+                continue
+            state = container.get("state", {})
+            waiting = (
+                state.get("waiting", {})
+                if isinstance(state, dict)
+                else {}
+            )
+            if isinstance(waiting, dict) and waiting:
+                waiting_reasons[
+                    _allowlisted_reason(
+                        waiting.get("reason"),
+                        _CONTAINER_WAIT_REASONS,
+                    )
+                ] += 1
+
+    warning_reasons: Counter[str] = Counter()
+    for event in events:
+        if not isinstance(event, dict) or event.get("type") != "Warning":
+            continue
+        warning_reasons[
+            _allowlisted_reason(
+                event.get("reason"),
+                _WARNING_EVENT_REASONS,
+            )
+        ] += 1
+
+    def render(counts: Counter[str]) -> str:
+        return ",".join(
+            f"{name}:{counts[name]}"
+            for name in sorted(counts)
+        ) or "none"
+
+    return (
+        f"Runtime summary: profilePods={profile_pods}, "
+        f"podPhases={render(phase_counts)}, "
+        f"unschedulablePods={unschedulable}, "
+        f"waitingReasons={render(waiting_reasons)}, "
+        f"warningEvents={render(warning_reasons)}."
+    )
+
+
 def wait_for_cr_health(
     resource_type: str,
     name: str,
@@ -372,6 +545,7 @@ def wait_for_cr_health(
     expected: str = CR_HEALTH_AVAILABLE,
     timeout: int = _HEALTH_TIMEOUT,
     interval: int = 15,
+    diagnostics: Callable[[], str] | None = None,
 ) -> dict[str, Any]:
     """Wait until AIO reports a resource healthy, and return the health block.
 
@@ -426,16 +600,27 @@ def wait_for_cr_health(
         time.sleep(min(interval, remaining))
 
     if observed is None:
+        diagnostic_suffix = (
+            f" {diagnostics()}"
+            if diagnostics is not None
+            else ""
+        )
         raise AssertionError(
             f"'{name}' never reported a health status within {timeout}s. AIO "
             f"writes `status.healthState.status` once the data plane has "
             f"reported, so the resource was projected but no instance of it "
-            f"ever reported running."
+            f"ever reported running.{diagnostic_suffix}"
         )
+    diagnostic_suffix = (
+        f" {diagnostics()}"
+        if diagnostics is not None
+        else ""
+    )
     raise AssertionError(
         f"'{name}' reports health '{observed}' after {timeout}s, expected "
         f"'{expected}'. Reason: {health.get('reasonCode') or 'none given'}. "
         f"Message: {health.get('message') or 'none given'}."
+        f"{diagnostic_suffix}"
     )
 
 

@@ -18,6 +18,7 @@ from tests.integration.helpers.assertions import (
 )
 from tests.integration.helpers.kube import (
     apply_manifest,
+    dataflow_runtime_summary,
     delete_resource,
     get_pod_logs,
     wait_for_cr,
@@ -157,6 +158,28 @@ def _delete_mqtt_clients(namespace: str, pod_names: tuple[str, ...], sa_name: st
     for pod_name in pod_names:
         delete_resource("pod", pod_name, namespace, wait=False)
     delete_resource("serviceaccount", sa_name, namespace, wait=False)
+
+
+def _wait_for_advanced_subscriber(
+    pod_name: str,
+    namespace: str,
+) -> None:
+    try:
+        wait_for_pod_phase(
+            pod_name,
+            namespace,
+            timeout=420,
+        )
+    except RuntimeError:
+        raise RuntimeError(
+            "Advanced subscriber entered a failure phase. "
+            f"{dataflow_runtime_summary(_ADVANCED_PROFILE, namespace)}"
+        ) from None
+    except TimeoutError:
+        raise TimeoutError(
+            "Advanced subscriber timed out. "
+            f"{dataflow_runtime_summary(_ADVANCED_PROFILE, namespace)}"
+        ) from None
 
 
 class TestResourceSetBasicSample:
@@ -322,6 +345,10 @@ class TestResourceSetCompositionSample:
             _DATAFLOW_TYPE,
             _ADVANCED_DATAFLOW,
             aio_namespace,
+            diagnostics=lambda: dataflow_runtime_summary(
+                _ADVANCED_PROFILE,
+                aio_namespace,
+            ),
         )
 
     def test_every_asset_topic_is_routed_independently(
@@ -368,10 +395,9 @@ class TestResourceSetCompositionSample:
                 )
 
             for pod_name in pod_names:
-                wait_for_pod_phase(
+                _wait_for_advanced_subscriber(
                     pod_name,
                     aio_namespace,
-                    timeout=420,
                 )
                 assert get_pod_logs(pod_name, aio_namespace).strip(), (
                     "An advanced-sample destination produced no MQTT payload."

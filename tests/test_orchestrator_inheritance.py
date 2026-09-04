@@ -463,8 +463,8 @@ class TestSiteInheritance:
             for i in range(5):
                 orchestrator.load_site(f"site-{i}")
 
-        # Each site file is parsed once; the shared template is parsed
-        # once total despite being inherited 5 times.
+        # Each site file is parsed once. The shared template is parsed once
+        # total despite being inherited 5 times.
         base_path = (shared_dir / "base.yaml").resolve()
         # safe_load gets file objects, not paths. Count opens of the
         # template path instead via the cache state.
@@ -790,6 +790,145 @@ class TestSiteProvenance:
         assert prov["subscription"].endswith("sites.local/munich.yaml")
         assert prov["resourceGroup"].endswith("sites/munich.yaml")
         assert prov["location"].endswith("sites/munich.yaml")
+
+    def test_load_prunes_descendants_when_mapping_becomes_scalar(
+        self,
+        tmp_workspace,
+    ):
+        self._write_yaml(
+            tmp_workspace / "sites" / "base.yaml",
+            {
+                "apiVersion": "siteops/v1",
+                "kind": "SiteTemplate",
+                "name": "base",
+                "properties": {"config": {"enabled": True}},
+            },
+        )
+        self._write_yaml(
+            tmp_workspace / "sites" / "munich.yaml",
+            {
+                "apiVersion": "siteops/v1",
+                "kind": "Site",
+                "name": "munich",
+                "inherits": "base.yaml",
+                "subscription": "sub",
+                "resourceGroup": "rg-munich",
+                "location": "eastus",
+                "properties": {"config": "disabled"},
+            },
+        )
+
+        site, prov = Orchestrator(tmp_workspace).load_site_with_provenance(
+            "munich"
+        )
+
+        assert site.properties["config"] == "disabled"
+        assert prov["properties.config"].endswith("sites/munich.yaml")
+        assert "properties.config.enabled" not in prov
+
+    def test_load_prunes_parent_when_scalar_becomes_mapping(
+        self,
+        tmp_workspace,
+    ):
+        self._write_yaml(
+            tmp_workspace / "sites" / "base.yaml",
+            {
+                "apiVersion": "siteops/v1",
+                "kind": "SiteTemplate",
+                "name": "base",
+                "properties": {"config": "disabled"},
+            },
+        )
+        self._write_yaml(
+            tmp_workspace / "sites" / "munich.yaml",
+            {
+                "apiVersion": "siteops/v1",
+                "kind": "Site",
+                "name": "munich",
+                "inherits": "base.yaml",
+                "subscription": "sub",
+                "resourceGroup": "rg-munich",
+                "location": "eastus",
+                "properties": {"config": {"enabled": True}},
+            },
+        )
+
+        site, prov = Orchestrator(tmp_workspace).load_site_with_provenance(
+            "munich"
+        )
+
+        assert site.properties["config"] == {"enabled": True}
+        assert "properties.config" not in prov
+        assert prov["properties.config.enabled"].endswith("sites/munich.yaml")
+
+    def test_mapping_replaced_by_scalar_removes_descendant_origins(
+        self,
+        tmp_workspace,
+    ):
+        orch = Orchestrator(tmp_workspace)
+        prov = {"properties.config.enabled": "base.yaml"}
+
+        merged = orch._deep_merge_provenance(
+            {"properties": {"config": {"enabled": True}}},
+            {"properties": {"config": "disabled"}},
+            "overlay.yaml",
+            prov,
+        )
+
+        assert merged["properties"]["config"] == "disabled"
+        assert prov == {"properties.config": "overlay.yaml"}
+
+    def test_scalar_replaced_by_mapping_removes_scalar_origin(
+        self,
+        tmp_workspace,
+    ):
+        orch = Orchestrator(tmp_workspace)
+        prov = {"properties.config": "base.yaml"}
+
+        merged = orch._deep_merge_provenance(
+            {"properties": {"config": "disabled"}},
+            {"properties": {"config": {"enabled": True}}},
+            "overlay.yaml",
+            prov,
+        )
+
+        assert merged["properties"]["config"] == {"enabled": True}
+        assert prov == {
+            "properties.config.enabled": "overlay.yaml",
+        }
+
+    def test_nested_mapping_merge_preserves_untouched_leaf_origin(
+        self,
+        tmp_workspace,
+    ):
+        orch = Orchestrator(tmp_workspace)
+        prov = {
+            "properties.config.enabled": "base.yaml",
+            "properties.config.mode": "base.yaml",
+        }
+
+        merged = orch._deep_merge_provenance(
+            {
+                "properties": {
+                    "config": {
+                        "enabled": True,
+                        "mode": "automatic",
+                    }
+                }
+            },
+            {"properties": {"config": {"mode": "manual"}}},
+            "overlay.yaml",
+            prov,
+        )
+
+        assert merged["properties"]["config"] == {
+            "enabled": True,
+            "mode": "manual",
+        }
+        assert prov == {
+            "properties.config.enabled": "base.yaml",
+            "properties.config.mode": "overlay.yaml",
+        }
 
     def test_load_with_provenance_returns_same_site_as_load_site(self, tmp_workspace):
         """The returned Site matches what `load_site` would return."""

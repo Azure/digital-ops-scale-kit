@@ -28,6 +28,17 @@ from siteops.models import (
     _merge_selector_strings,
 )
 from siteops.orchestrator import Orchestrator
+from siteops.planning import (
+    DiagnosticSeverity,
+    PlanBuildResult,
+    PlanDiagnostic,
+    PlanIntent,
+    PlanNotExecutableError,
+    PlanProjection,
+    PlanStatus,
+    render_plain_plan,
+    serialize_plan_json,
+)
 from siteops.sanitize import (
     is_redaction_enabled,
     report_parameter_selection_error,
@@ -69,6 +80,8 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     from siteops.models import Manifest
 
     cli_selector = getattr(args, "selector", None)
+    # A dry run prints the executable plan and passes that same plan to deploy.
+    # The executor's per-command lines stay behind `-v`.
     try:
         manifest = Manifest.from_file(manifest_path, workspace_root=args.workspace)
         sites = orchestrator.resolve_sites(manifest, cli_selector)
@@ -116,13 +129,24 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         print("\n⚠ Manifest has no steps. Nothing to deploy.\n")
         return 0
 
-    # A dry run's whole job is answering what a real run would do, so it shows
-    # the plan without being asked. The executor's per-command lines stay
-    # behind `-v`, since they are a different question and a much longer
-    # answer.
     try:
+        plan_result = None
         if getattr(args, "dry_run", False):
-            orchestrator.show_plan(manifest_path, selector=cli_selector)
+            plan_result = orchestrator.build_plan(
+                manifest_path,
+                cli_selector,
+                intent=PlanIntent.EXECUTABLE,
+                manifest=manifest,
+                sites=sites,
+                parallel_override=parallel_override,
+            )
+            print(
+                render_plain_plan(
+                    plan_result,
+                    redacted=is_redaction_enabled(),
+                ),
+                end="",
+            )
 
         result = orchestrator.deploy(
             manifest_path,
@@ -130,6 +154,7 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
             parallel_override=parallel_override,
             manifest=manifest,
             sites=sites,
+            plan_result=plan_result,
         )
     except (CompositionError, ParameterSelectionError) as e:
         detail = (
@@ -138,6 +163,13 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
             else report_parameter_selection_error(e)
         )
         print(f"\nError: {detail}\n", file=sys.stderr)
+        return 1
+    except PlanNotExecutableError as e:
+        print(
+            f"\nError: "
+            f"{e.message(redacted=is_redaction_enabled())}\n",
+            file=sys.stderr,
+        )
         return 1
     except MultipleSubscriptionSitesError as e:
         # Raised late, after site resolution, so it lands outside the guard
@@ -184,17 +216,77 @@ def cmd_validate(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
 
     selector = getattr(args, "selector", None)
     show_plan = getattr(args, "plan", False)
+    output_format = getattr(args, "output", "plain")
+    requested_projection = getattr(args, "projection", None)
+    json_output = output_format == "json"
+    if requested_projection is not None and not json_output:
+        print(
+            "Error: --projection requires --output json.",
+            file=sys.stderr,
+        )
+        return 1
+    if json_output and not show_plan:
+        print(
+            "Error: --output json requires --plan.",
+            file=sys.stderr,
+        )
+        return 1
+    projection = (
+        PlanProjection(requested_projection)
+        if requested_projection is not None
+        else (
+            PlanProjection.PUBLISHABLE
+            if is_redaction_enabled()
+            else PlanProjection.LOCAL_PRIVATE
+        )
+    )
+    if (
+        json_output
+        and projection is PlanProjection.LOCAL_PRIVATE
+        and is_redaction_enabled()
+    ):
+        print(
+            "Error: local-private plan output is unavailable while output "
+            "redaction is enabled. Use --projection publishable.",
+            file=sys.stderr,
+        )
+        return 1
+
     _note_superseded_verbose(args, show_plan, "validate", "--plan", "the deployment plan")
     errors = orchestrator.validate(manifest_path, selector=selector)
 
     if errors:
+        if json_output:
+            result = PlanBuildResult(
+                status=PlanStatus.INVALID,
+                executable=False,
+                plan=None,
+                diagnostics=tuple(
+                    PlanDiagnostic(
+                        code="validation.failed",
+                        severity=DiagnosticSeverity.ERROR,
+                        summary="Manifest validation failed.",
+                        detail=error,
+                    )
+                    for error in errors
+                ),
+            )
+            print(
+                serialize_plan_json(
+                    result,
+                    projection,
+                    engine_version=__version__,
+                )
+            )
+            return 1
         print(f"\n✗ Validation failed with {len(errors)} error(s):\n")
         for err in errors:
             print(f"  • {err}")
         print()
         return 1
 
-    print(f"\n✓ Manifest is valid: {manifest_path.name}\n")
+    if not json_output:
+        print(f"\n✓ Manifest is valid: {manifest_path.name}\n")
 
     # Heads-up when the manifest is a library/partial (no `sites:` and
     # no `selector:`) and no `-l` was provided. Validation passes, but
@@ -210,20 +302,63 @@ def cmd_validate(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
             not selector and not _m.sites and not _m.site_selector
         )
         if is_library_no_selector:
-            print(
-                "  Note: library manifest (no `sites:` or `selector:`). "
-                "Pass `-l <key>=<value>` at deploy time, or run "
-                "`siteops validate <manifest> -l ...` to exercise resolution.\n"
-            )
+            if json_output:
+                result = PlanBuildResult(
+                    status=PlanStatus.INVALID,
+                    executable=False,
+                    plan=None,
+                    diagnostics=(
+                        PlanDiagnostic(
+                            code="plan.targeting.required",
+                            severity=DiagnosticSeverity.ERROR,
+                            summary=(
+                                "Add `sites:` or `selector:` to the manifest, or "
+                                "pass `-l <key>=<value>`."
+                            ),
+                            detail=(
+                                "The manifest has no `sites:` or `selector:`. "
+                                "Pass `-l <key>=<value>` to build a plan."
+                            ),
+                        ),
+                    ),
+                )
+                print(
+                    serialize_plan_json(
+                        result,
+                        projection,
+                        engine_version=__version__,
+                    )
+                )
+                return 1
+            else:
+                print(
+                    "  Note: library manifest (no `sites:` or `selector:`). "
+                    "Pass `-l <key>=<value>` at deploy time, or run "
+                    "`siteops validate <manifest> -l ...` to exercise "
+                    "resolution.\n"
+                )
     except (ValueError, OSError, _yaml.YAMLError):
-        # Manifest parse already passed in `validate` above; any failure
-        # here is best-effort and should not change the exit code.
+        # Manifest parse already passed in `validate` above. Any failure here
+        # is best-effort and should not change the exit code.
         # Programmer errors (AttributeError, RuntimeError) still propagate.
         pass
 
     # Skip the plan render for a library manifest with no selector.
     # show_plan re-resolves and would re-raise NoTargetingError.
     if show_plan and not is_library_no_selector:
+        if json_output:
+            result = orchestrator.build_plan(
+                manifest_path,
+                selector,
+            )
+            print(
+                serialize_plan_json(
+                    result,
+                    projection,
+                    engine_version=__version__,
+                )
+            )
+            return 0 if result.status is PlanStatus.PLANNED else 1
         orchestrator.show_plan(manifest_path, selector=selector)
 
     return 0
@@ -233,8 +368,8 @@ def _origin_suffix(prov: dict[str, str] | None, key: str) -> str:
     """Format the `# <origin>` suffix for a leaf line.
 
     Returns an empty string when `prov` is None or the key is not in
-    the map (e.g., a scalar within a list element); the leaf renders
-    as today.
+    the map, such as a scalar within a list element. The leaf renders as
+    today.
     """
     if prov is None:
         return ""
@@ -436,7 +571,7 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
 
     if orchestrator.skipped_sites:
         # A site that does not load is one the operator expected to be here.
-        # The names are already reported above; this makes the shortfall
+        # The names are already reported above. This makes the shortfall
         # visible to a wrapper script and to CI rather than only to a reader.
         print(
             f"Error: {len(orchestrator.skipped_sites)} site(s) could not be "
@@ -455,8 +590,8 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
                 "name": site.name,
                 "subscription": site.subscription,
             }
-            # Subscription-scoped sites have no resourceGroup; emitting "" would
-            # falsely imply RG-scoped behavior on a round-trip.
+            # Subscription-scoped sites have no resourceGroup. Emitting ""
+            # would falsely imply RG-scoped behavior on a round-trip.
             if site.resource_group:
                 resolved["resourceGroup"] = site.resource_group
             resolved["location"] = site.location
@@ -617,7 +752,7 @@ def _auto_discover_workspace(start: Path) -> Path | None:
 _SELECTOR_HELP = (
     "Filter sites by labels (e.g., `environment=prod`, `name=munich-dev`). "
     "Repeatable: multiple `-l` flags AND-combine across distinct keys. "
-    "Duplicate `name=` values OR-combine; any other duplicate key is an "
+    "Duplicate `name=` values OR-combine. Any other duplicate key is an "
     "error. `name=` accepts the basename, the relative path under a trusted "
     "`sites/` dir, or the file's internal `name:` field."
 )
@@ -741,6 +876,22 @@ Examples:
         action="store_true",
         help="Show the deployment plan after validation (default: false)",
     )
+    p_validate.add_argument(
+        "--output",
+        choices=("plain", "json"),
+        default="plain",
+        help="Plan output format. JSON requires --plan (default: plain).",
+    )
+    p_validate.add_argument(
+        "--projection",
+        choices=("local-private", "publishable"),
+        default=None,
+        help=(
+            "JSON plan projection, valid with --output json. Defaults to "
+            "publishable when output redaction is enabled, otherwise "
+            "local-private."
+        ),
+    )
 
     # sites command
     p_sites = subparsers.add_parser(
@@ -800,8 +951,8 @@ Examples:
     setup_logging(verbose)
 
     # Workspace resolution. Explicit -w wins. Otherwise auto-discover
-    # from cwd; if discovery is ambiguous or finds nothing, fall back
-    # to cwd (the prior default).
+    # from cwd. If discovery is ambiguous or finds nothing, fall back to cwd
+    # (the prior default).
     if args.workspace is None:
         discovered = _auto_discover_workspace(Path.cwd())
         args.workspace = discovered if discovered is not None else Path.cwd()

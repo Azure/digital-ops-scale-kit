@@ -18,6 +18,33 @@ from tests.integration.helpers.assertions import (
     assert_step_succeeded,
     skip_unless_health_is_reported,
 )
+from tests.integration.helpers.dataflow_sample import (
+    ALERTS_DATAFLOW_NAME as SAMPLE_ALERTS_DATAFLOW_NAME,
+)
+from tests.integration.helpers.dataflow_sample import (
+    ALERTS_ENDPOINT_NAME as SAMPLE_ALERTS_ENDPOINT_NAME,
+)
+from tests.integration.helpers.dataflow_sample import (
+    ALERTS_PROFILE_NAME as SAMPLE_ALERTS_PROFILE_NAME,
+)
+from tests.integration.helpers.dataflow_sample import (
+    DATAFLOW_NAME as SAMPLE_DATAFLOW_NAME,
+)
+from tests.integration.helpers.dataflow_sample import (
+    DATAFLOW_TYPE as _DATAFLOW_TYPE,
+)
+from tests.integration.helpers.dataflow_sample import (
+    ENDPOINT_NAME as SAMPLE_ENDPOINT_NAME,
+)
+from tests.integration.helpers.dataflow_sample import (
+    ENDPOINT_TYPE as _ENDPOINT_TYPE,
+)
+from tests.integration.helpers.dataflow_sample import (
+    PROFILE_NAME as SAMPLE_PROFILE_NAME,
+)
+from tests.integration.helpers.dataflow_sample import (
+    PROFILE_TYPE as _PROFILE_TYPE,
+)
 from tests.integration.helpers.kube import (
     KubectlError,
     cr_identity,
@@ -31,13 +58,6 @@ pytestmark = [pytest.mark.integration]
 DATAFLOW_SAMPLE_MANIFEST = WORKSPACE_PATH / "samples" / "dataflow-sample" / "manifest.yaml"
 
 # Names declared by samples/dataflow-sample/dataflows.yaml.
-SAMPLE_ENDPOINT_NAME = "dataflow-sample-mqtt-out"
-SAMPLE_ALERTS_ENDPOINT_NAME = "dataflow-sample-alerts-out"
-SAMPLE_PROFILE_NAME = "dataflow-sample-profile"
-SAMPLE_ALERTS_PROFILE_NAME = "dataflow-sample-alerts-pool"
-SAMPLE_DATAFLOW_NAME = "dataflow-sample-passthrough"
-SAMPLE_ALERTS_DATAFLOW_NAME = "dataflow-sample-alerts"
-
 # The endpoint the sample's source reads from, created by the instance template.
 INSTANCE_OWNED_ENDPOINT = "default"
 
@@ -45,10 +65,6 @@ CATALOG_STEP = "dataflow-resources"
 
 # Kubernetes resource types the declared resources project to, paired with the
 # name each carries on the cluster.
-_ENDPOINT_TYPE = "dataflowendpoints.connectivity.iotoperations.azure.com"
-_PROFILE_TYPE = "dataflowprofiles.connectivity.iotoperations.azure.com"
-_DATAFLOW_TYPE = "dataflows.connectivity.iotoperations.azure.com"
-
 _SAMPLE_CLUSTER_RESOURCES = (
     (_ENDPOINT_TYPE, SAMPLE_ENDPOINT_NAME),
     (_ENDPOINT_TYPE, SAMPLE_ALERTS_ENDPOINT_NAME),

@@ -7,6 +7,7 @@ Tests cover:
 - Exit codes
 """
 
+import json
 import os
 import re
 import sys
@@ -200,6 +201,190 @@ class TestCmdValidate:
         assert "DEPLOYMENT PLAN" in captured.out
         assert "Sites" in captured.out
         assert "Steps" in captured.out
+
+    def test_validate_plan_json_emits_one_document(
+        self,
+        complete_workspace,
+        capsys,
+    ):
+        from siteops.orchestrator import Orchestrator
+
+        manifest_path = (
+            complete_workspace / "manifests" / "test-manifest.yaml"
+        )
+        args = Namespace(
+            manifest=manifest_path,
+            workspace=complete_workspace,
+            selector=None,
+            plan=True,
+            output="json",
+            projection="local-private",
+            verbose=False,
+        )
+
+        exit_code = cmd_validate(
+            args,
+            Orchestrator(complete_workspace),
+        )
+
+        captured = capsys.readouterr()
+        document = json.loads(captured.out)
+        assert exit_code == 0
+        assert captured.err == ""
+        assert document["apiVersion"] == "siteops/v1alpha1"
+        assert document["kind"] == "DeploymentPlan"
+        assert document["projection"] == "local-private"
+        assert document["status"] == "planned"
+        assert "Manifest is valid" not in captured.out
+
+    def test_validate_plan_json_defaults_to_publishable_in_ci(
+        self,
+        complete_workspace,
+        capsys,
+        monkeypatch,
+    ):
+        from siteops.orchestrator import Orchestrator
+
+        monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1")
+        manifest_path = (
+            complete_workspace / "manifests" / "test-manifest.yaml"
+        )
+        args = Namespace(
+            manifest=manifest_path,
+            workspace=complete_workspace,
+            selector=None,
+            plan=True,
+            output="json",
+            projection=None,
+            verbose=False,
+        )
+
+        exit_code = cmd_validate(
+            args,
+            Orchestrator(complete_workspace),
+        )
+
+        captured = capsys.readouterr()
+        document = json.loads(captured.out)
+        assert exit_code == 0
+        assert document["projection"] == "publishable"
+        assert "test-site" not in captured.out
+        assert "eastus" not in captured.out
+
+    def test_validate_failure_json_uses_typed_envelope(
+        self,
+        complete_workspace,
+        capsys,
+        monkeypatch,
+    ):
+        from siteops.orchestrator import Orchestrator
+
+        monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1")
+        manifest_path = complete_workspace / "manifests" / "invalid-json.yaml"
+        manifest_path.write_text(
+            yaml.safe_dump(
+                {
+                    "name": "private-manifest",
+                    "sites": ["test-site"],
+                    "steps": [
+                        {
+                            "name": "private-step",
+                            "template": "private/missing.bicep",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        args = Namespace(
+            manifest=manifest_path,
+            workspace=complete_workspace,
+            selector=None,
+            plan=True,
+            output="json",
+            projection=None,
+            verbose=False,
+        )
+
+        exit_code = cmd_validate(
+            args,
+            Orchestrator(complete_workspace),
+        )
+
+        captured = capsys.readouterr()
+        document = json.loads(captured.out)
+        assert exit_code == 1
+        assert document["status"] == "invalid"
+        assert document["diagnostics"][0] == {
+            "code": "validation.failed",
+            "severity": "error",
+            "summary": "Manifest validation failed.",
+        }
+        assert "private-manifest" not in captured.out
+        assert "private-step" not in captured.out
+        assert "private/missing.bicep" not in captured.out
+
+    def test_local_private_json_fails_closed_when_redaction_is_enabled(
+        self,
+        complete_workspace,
+        capsys,
+        monkeypatch,
+    ):
+        from siteops.orchestrator import Orchestrator
+
+        monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1")
+        manifest_path = (
+            complete_workspace / "manifests" / "test-manifest.yaml"
+        )
+        args = Namespace(
+            manifest=manifest_path,
+            workspace=complete_workspace,
+            selector=None,
+            plan=True,
+            output="json",
+            projection="local-private",
+            verbose=False,
+        )
+
+        exit_code = cmd_validate(
+            args,
+            Orchestrator(complete_workspace),
+        )
+
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert captured.out == ""
+        assert "local-private" in captured.err
+
+    def test_json_output_requires_plan(
+        self,
+        complete_workspace,
+        capsys,
+    ):
+        from siteops.orchestrator import Orchestrator
+
+        manifest_path = (
+            complete_workspace / "manifests" / "test-manifest.yaml"
+        )
+        args = Namespace(
+            manifest=manifest_path,
+            workspace=complete_workspace,
+            selector=None,
+            plan=False,
+            output="json",
+            projection=None,
+            verbose=False,
+        )
+
+        exit_code = cmd_validate(
+            args,
+            Orchestrator(complete_workspace),
+        )
+
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert captured.out == ""
+        assert "--output json requires --plan" in captured.err
 
     def test_validate_library_manifest_prints_note(self, complete_workspace, capsys):
         """A library/partial manifest (no `sites:` and no `selector:`)
@@ -705,7 +890,7 @@ class TestCmdDeploy:
     def test_deploy_malformed_yaml_exits_cleanly(self, complete_workspace, capsys):
         """A manifest with broken YAML must exit 1 with a one-line
         Error, not a 30-line yaml.YAMLError traceback. Manifest.from_file
-        raises yaml.YAMLError before resolve_sites; widen the try."""
+        raises yaml.YAMLError before resolve_sites. The command catches both."""
         from siteops.orchestrator import Orchestrator
 
         # Tab inside indentation breaks the YAML parser.
@@ -735,7 +920,8 @@ class TestCmdDeploy:
         diagnostic listing the workspace label values."""
         from siteops.orchestrator import Orchestrator
 
-        # Manifest exists; CLI selector overrides and matches nothing.
+        # The manifest exists. The CLI selector overrides it and matches
+        # nothing.
         manifest_data = {
             "name": "test",
             "sites": ["test-site"],
@@ -1172,8 +1358,8 @@ class TestMainArgumentParsing:
                     main()
 
                 args = mock_cmd.call_args[0][0]
-                # Joined in CLI order; downstream parse_selector applies
-                # name-OR / non-name-error rules.
+                # Joined in CLI order. Downstream parse_selector applies the
+                # name-OR and non-name-error rules.
                 assert args.selector == "name=a,name=b,env=prod"
 
     def test_validate_plan_flag(self, complete_workspace):
@@ -1820,12 +2006,31 @@ class TestPlanOutputIsSeparateFromLogVerbosity:
         args = self._args(complete_workspace, manifest, dry_run=dry_run, parallel=None)
 
         summary = {"summary": {"failed": 0, "succeeded": 1}, "sites": {}}
-        with patch.object(orchestrator, "show_plan") as show_plan, \
-             patch.object(orchestrator, "deploy", return_value=summary):
+        prepared = MagicMock()
+        with (
+            patch.object(
+                orchestrator,
+                "build_plan",
+                return_value=prepared,
+            ) as build_plan,
+            patch(
+                "siteops.cli.render_plain_plan",
+                return_value="plan\n",
+            ) as render_plan,
+            patch.object(
+                orchestrator,
+                "deploy",
+                return_value=summary,
+            ) as deploy,
+        ):
             exit_code = cmd_deploy(args, orchestrator)
 
         assert exit_code == 0
-        assert show_plan.called is dry_run
+        assert build_plan.called is dry_run
+        assert render_plan.called is dry_run
+        assert deploy.call_args.kwargs["plan_result"] is (
+            prepared if dry_run else None
+        )
 
     def test_dry_run_reports_composition_error_without_traceback(
         self,
@@ -1847,7 +2052,7 @@ class TestPlanOutputIsSeparateFromLogVerbosity:
         with (
             patch.object(
                 orchestrator,
-                "show_plan",
+                "build_plan",
                 side_effect=CompositionError("reference does not resolve"),
             ),
             patch.object(orchestrator, "deploy") as deploy,
@@ -1883,7 +2088,7 @@ class TestPlanOutputIsSeparateFromLogVerbosity:
         with (
             patch.object(
                 orchestrator,
-                "show_plan",
+                "build_plan",
                 side_effect=CompositionError(detail),
             ),
             patch.object(orchestrator, "deploy") as deploy,
@@ -1919,7 +2124,7 @@ class TestPlanOutputIsSeparateFromLogVerbosity:
         with (
             patch.object(
                 orchestrator,
-                "show_plan",
+                "build_plan",
                 side_effect=ParameterSelectionError(detail),
             ),
             patch.object(orchestrator, "deploy") as deploy,
