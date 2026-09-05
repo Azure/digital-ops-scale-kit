@@ -127,6 +127,9 @@ alternative, which keeps the decision in Azure rather than on the cluster.
 # Show the deployment plan
 siteops -w workspaces/iot-operations validate manifests/aio-install.yaml --plan
 
+# Emit one publishable JSON plan document
+siteops -w workspaces/iot-operations validate manifests/aio-install.yaml --plan --output json --projection publishable
+
 # Dry run: shows the plan, and the sites and steps it would act on
 siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml --dry-run
 

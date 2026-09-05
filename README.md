@@ -303,6 +303,7 @@ auto-filtering, merge order, and cross-scope output chaining.
 | `siteops sites <name> --render` | Show the resolved YAML after inheritance and overlays |
 | `siteops validate <manifest>` | Validate manifest and all references |
 | `siteops validate <manifest> --plan` | Validation plus the deployment plan |
+| `siteops validate <manifest> --plan --output json` | Emit one structured plan document |
 | `siteops deploy <manifest>` | Execute deployment |
 | `siteops deploy <manifest> --dry-run` | Show the plan without calling Azure |
 | `siteops -v deploy <manifest> --dry-run` | The plan plus the exact commands each step would run |
@@ -317,6 +318,7 @@ auto-filtering, merge order, and cross-scope output chaining.
 | `--extra-sites-dir` | Additional trusted `sites/` directory. Repeatable. Also accepts `SITEOPS_EXTRA_SITES_DIRS`. CLI wins on conflict | none |
 
 See [docs/targeting.md](docs/targeting.md) for the selector grammar and the no-match diagnostic.
+See [docs/plan-output.md](docs/plan-output.md) for JSON projections and publication boundaries.
 
 ---
 

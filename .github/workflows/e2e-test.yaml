@@ -91,6 +91,7 @@ jobs:
       cluster-in: ${{ steps.v.outputs.cluster_in }}
       upgrade-to: ${{ steps.v.outputs.upgrade_to }}
       pytest-paths: ${{ steps.v.outputs.pytest_paths }}
+      isolate-dataflow-sample: ${{ steps.v.outputs.isolate_dataflow_sample }}
       secret-sync-modes: ${{ steps.v.outputs.secret_sync_modes }}
       max-parallel: ${{ steps.v.outputs.max_parallel }}
     steps:
@@ -202,6 +203,10 @@ jobs:
               "resource-set-samples": "tests/integration/test_resource_set_samples_manifest.py",
               "aio-upgrade": "tests/integration/test_aio_upgrade_manifest.py",
           }
+          profile_heavy = {
+              "dataflow-sample",
+              "resource-set-samples",
+          }
           if tests_in:
               # Dedupe while preserving order so the surfaced "Available" list
               # in error messages matches what the operator typed.
@@ -225,9 +230,25 @@ jobs:
                       f"and silently 'pass'. Either add 'aio-upgrade' to "
                       f"tests or unset upgrade-to."
                   )
+              if profile_heavy.issubset(ordered):
+                  first_profile_phase = min(
+                      ordered.index(phase)
+                      for phase in profile_heavy
+                  )
+                  ordered = [
+                      phase
+                      for phase in ordered
+                      if phase not in profile_heavy
+                  ]
+                  ordered[first_profile_phase:first_profile_phase] = [
+                      "dataflow-sample",
+                      "resource-set-samples",
+                  ]
               pytest_paths = " ".join(test_map[s] for s in ordered)
           else:
               pytest_paths = "tests/integration/"
+          selected_tests = set(tests_in) if tests_in else set(test_map)
+          isolate_dataflow_sample = profile_heavy.issubset(selected_tests)
           if "disabled" in secret_sync_modes:
               secret_sync_tests = {"enable-secretsync", "sync-secrets"}
               if not tests_in or secret_sync_tests.intersection(tests_in):
@@ -247,6 +268,10 @@ jobs:
           print(f"rg_in={rg_in}")
           print(f"cluster_in={cl_in}")
           print(f"pytest_paths={pytest_paths}")
+          print(
+              "isolate_dataflow_sample="
+              f"{'true' if isolate_dataflow_sample else 'false'}"
+          )
           # Concurrency key:
           #  - persistent: shared across all dispatches against the same RG
           #    (regardless of operator-supplied cluster-name), so concurrent
@@ -572,6 +597,7 @@ jobs:
           AIO_RELEASE: ${{ matrix.aio-release }}
           SECRET_SYNC_MODE: ${{ matrix.secret-sync-mode }}
           PYTEST_PATHS: ${{ needs.prep.outputs.pytest-paths }}
+          SITEOPS_E2E_ISOLATE_DATAFLOW_SAMPLE: ${{ needs.prep.outputs.isolate-dataflow-sample }}
           # Test helpers (tests/integration/helpers/kube.py) read this env
           # var and pass --kubeconfig=<path> to every kubectl invocation.
           # This isolates direct-kubectl reads from siteops's writable

@@ -47,6 +47,11 @@ _GUARD_SET = re.compile(r"secret_sync_tests\s*=\s*\{([^}]*)\}")
 
 # `if upgrade_to and "aio-upgrade" not in ordered:`
 _GUARD_LITERAL = re.compile(r'"([a-z0-9-]+)"\s+not in ordered')
+_ISOLATION_PAIR = re.compile(
+    r"profile_heavy\s*=\s*\{\s*"
+    r'"dataflow-sample",\s*"resource-set-samples",?\s*\}',
+    re.DOTALL,
+)
 
 _TEST_CLASS = re.compile(r"^class\s+(Test\w+)\b", re.MULTILINE)
 
@@ -264,6 +269,24 @@ class TestIntegrationPhaseConsistency:
             f"select.\n  Stale in guards: {stale}\n"
             f"  Known phases:    {sorted(mapped)}"
         )
+
+    def test_profile_heavy_phases_enable_cleanup_when_selected_together(self):
+        text = E2E_WORKFLOW.read_text(encoding="utf-8")
+        assert _ISOLATION_PAIR.search(text), (
+            "The E2E workflow no longer isolates the dataflow sample before "
+            "the advanced resource-set sample when both phases share one "
+            "cluster."
+        )
+        assert (
+            "SITEOPS_E2E_ISOLATE_DATAFLOW_SAMPLE: "
+            "${{ needs.prep.outputs.isolate-dataflow-sample }}"
+        ) in text
+        assert (
+            'ordered[first_profile_phase:first_profile_phase] = [\n'
+            '                      "dataflow-sample",\n'
+            '                      "resource-set-samples",\n'
+            "                  ]"
+        ) in text
 
     def test_aio_upgrade_classes_have_an_explicit_phase(self):
         """Every upgrade test class is allowlisted or intentionally install-only.

@@ -104,13 +104,13 @@ class TestIntegrationConstantsMatchTheWorkspace:
     # Constants naming a declared catalog resource. Others in those modules
     # name instance-owned resources or steps, which are checked elsewhere.
     _DECLARED_NAME_CONSTANTS = {
-        "test_dataflow_sample_manifest.py": (
-            "SAMPLE_ENDPOINT_NAME",
-            "SAMPLE_ALERTS_ENDPOINT_NAME",
-            "SAMPLE_PROFILE_NAME",
-            "SAMPLE_ALERTS_PROFILE_NAME",
-            "SAMPLE_DATAFLOW_NAME",
-            "SAMPLE_ALERTS_DATAFLOW_NAME",
+        "helpers/dataflow_sample.py": (
+            "ENDPOINT_NAME",
+            "ALERTS_ENDPOINT_NAME",
+            "PROFILE_NAME",
+            "ALERTS_PROFILE_NAME",
+            "DATAFLOW_NAME",
+            "ALERTS_DATAFLOW_NAME",
         ),
         "test_aio_resources_manifest.py": (
             "SET_ENDPOINT_NAME",

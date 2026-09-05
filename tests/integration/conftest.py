@@ -378,24 +378,84 @@ def opc_ua_solution_result(
     )
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="module")
 def dataflow_sample_result(
-    orchestrator: Orchestrator, selector: str | None, aio_install_result: dict
-) -> dict:
+    orchestrator: Orchestrator,
+    selector: str | None,
+    aio_install_result: dict,
+    aio_namespace: str,
+):
     """Deploy samples/dataflow-sample/manifest.yaml after AIO is installed.
 
     The sample attaches its own declaration at manifest level, so this covers
     the catalog templates without depending on a site carrying a
     `resourceSets` selection.
     """
+    from tests.integration.helpers.assertions import (
+        assert_output_exists,
+        find_step,
+    )
+    from tests.integration.helpers.dataflow_sample import (
+        cleanup_dataflow_sample_resources,
+        phase_isolation_enabled,
+    )
+    from tests.integration.helpers.releases import load_aio_release
+
     manifest_path = WORKSPACE_PATH / "samples" / "dataflow-sample" / "manifest.yaml"
     manifest, sites = _resolve_or_fail(orchestrator, manifest_path, selector)
-    result = orchestrator.deploy(
-        manifest_path=manifest_path,
-        manifest=manifest,
-        sites=sites,
-    )
-    return _assert_deployed(result, "dataflow-sample")
+    try:
+        result = orchestrator.deploy(
+            manifest_path=manifest_path,
+            manifest=manifest,
+            sites=sites,
+        )
+        yield _assert_deployed(result, "dataflow-sample")
+    finally:
+        if phase_isolation_enabled():
+            for site in sites:
+                install_step = find_step(
+                    aio_install_result,
+                    site.name,
+                    "aio-instance",
+                )
+                aio = assert_output_exists(install_step, "aio")
+                if not isinstance(aio, dict) or not isinstance(
+                    aio.get("name"),
+                    str,
+                ):
+                    raise AssertionError(
+                        "The AIO install result has no instance name for "
+                        "phase cleanup."
+                    )
+                _, release = load_aio_release(
+                    orchestrator,
+                    site.name,
+                    WORKSPACE_PATH,
+                )
+                api_version = release.get("aioApiVersion")
+                if not isinstance(api_version, str) or not api_version:
+                    raise AssertionError(
+                        "The selected AIO release has no aioApiVersion for "
+                        "phase cleanup."
+                    )
+                if not site.resource_group:
+                    raise AssertionError(
+                        "The selected integration site has no resource group "
+                        "for phase cleanup."
+                    )
+                cleanup_dataflow_sample_resources(
+                    site.subscription,
+                    site.resource_group,
+                    aio["name"],
+                    api_version,
+                    aio_namespace,
+                    redact=(
+                        site.subscription,
+                        site.resource_group,
+                        aio["name"],
+                        site.name,
+                    ),
+                )
 
 
 @pytest.fixture(scope="session")

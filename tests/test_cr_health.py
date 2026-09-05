@@ -108,6 +108,52 @@ def test_job_wait_requires_the_complete_condition(monkeypatch):
     assert "--timeout=15s" in captured["args"]
 
 
+def test_wait_for_cr_deleted_polls_until_not_found(monkeypatch):
+    responses = [
+        {"metadata": {"name": "flow"}},
+        kube.KubectlError(
+            "not found",
+            1,
+            "Error from server (NotFound): dataflows flow not found",
+        ),
+    ]
+
+    def read(*_args, **_kwargs):
+        response = responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    monkeypatch.setattr(kube, "kubectl_json", read)
+
+    kube.wait_for_cr_deleted(
+        "dataflows",
+        "flow",
+        "ns",
+        timeout=10,
+        interval=0,
+    )
+
+    assert responses == []
+
+
+def test_wait_for_cr_deleted_reports_a_resource_that_remains(monkeypatch):
+    monkeypatch.setattr(
+        kube,
+        "kubectl_json",
+        lambda *_args, **_kwargs: {"metadata": {"name": "flow"}},
+    )
+
+    with pytest.raises(kube.KubectlError, match="still exists"):
+        kube.wait_for_cr_deleted(
+            "dataflows",
+            "flow",
+            "ns",
+            timeout=3,
+            interval=0,
+        )
+
+
 def test_available_returns_the_health_block(monkeypatch, no_sleep):
     monkeypatch.setattr(kube, "wait_for_cr", lambda *a, **k: _cr("Available", reasonCode="Ok"))
 
@@ -161,6 +207,130 @@ def test_unhealthy_reports_the_reason_and_message(monkeypatch, no_sleep):
     assert "Unavailable" in message
     assert "EndpointUnreachable" in message
     assert "could not connect to the configured host" in message
+
+
+def test_health_timeout_appends_allowlisted_runtime_summary(
+    monkeypatch,
+    no_sleep,
+):
+    monkeypatch.setattr(kube, "wait_for_cr", lambda *a, **k: _cr())
+
+    with pytest.raises(AssertionError) as excinfo:
+        kube.wait_for_cr_health(
+            "dataflows",
+            "flow",
+            "ns",
+            diagnostics=lambda: (
+                "Runtime summary: profilePods=0, podPhases=Pending:1."
+            ),
+            **_BUDGET,
+        )
+
+    assert "profilePods=0" in str(excinfo.value)
+
+
+def test_runtime_summary_contains_counts_without_names_or_messages(monkeypatch):
+    private_name = "private-profile-pod"
+    private_message = "private node could not schedule private workload"
+
+    def read(args, **_kwargs):
+        if args[1] == "pods":
+            return {
+                "items": [
+                    {
+                        "metadata": {
+                            "name": private_name,
+                            "labels": {"profile": "catalog-profile"},
+                        },
+                        "status": {
+                            "phase": "Pending",
+                            "conditions": [
+                                {"reason": "Unschedulable"},
+                            ],
+                            "containerStatuses": [
+                                {
+                                    "state": {
+                                        "waiting": {
+                                            "reason": "ImagePullBackOff",
+                                            "message": private_message,
+                                        }
+                                    }
+                                }
+                            ],
+                        },
+                    }
+                ]
+            }
+        return {
+            "items": [
+                {
+                    "type": "Warning",
+                    "reason": "FailedScheduling",
+                    "message": private_message,
+                }
+            ]
+        }
+
+    monkeypatch.setattr(kube, "kubectl_json", read)
+
+    summary = kube.dataflow_runtime_summary(
+        "catalog-profile",
+        "namespace",
+    )
+
+    assert "profilePods=1" in summary
+    assert "Pending:1" in summary
+    assert "unschedulablePods=1" in summary
+    assert "ImagePullBackOff:1" in summary
+    assert "FailedScheduling:1" in summary
+    assert private_name not in summary
+    assert private_message not in summary
+
+
+def test_runtime_summary_maps_unrecognized_reasons_to_other(monkeypatch):
+    private_reason = "private-profile-name"
+
+    def read(args, **_kwargs):
+        if args[1] == "pods":
+            return {
+                "items": [
+                    {
+                        "metadata": {},
+                        "status": {
+                            "phase": private_reason,
+                            "containerStatuses": [
+                                {
+                                    "state": {
+                                        "waiting": {
+                                            "reason": private_reason,
+                                        }
+                                    }
+                                }
+                            ],
+                        },
+                    }
+                ]
+            }
+        return {
+            "items": [
+                {
+                    "type": "Warning",
+                    "reason": private_reason,
+                }
+            ]
+        }
+
+    monkeypatch.setattr(kube, "kubectl_json", read)
+
+    summary = kube.dataflow_runtime_summary(
+        "catalog-profile",
+        "namespace",
+    )
+
+    assert private_reason not in summary
+    assert "podPhases=Other:1" in summary
+    assert "waitingReasons=Other:1" in summary
+    assert "warningEvents=Other:1" in summary
 
 
 def test_never_reported_is_distinguished_from_unhealthy(monkeypatch, no_sleep):

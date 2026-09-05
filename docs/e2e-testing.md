@@ -10,6 +10,13 @@ Use E2E tests when:
 
 Unit tests (`pytest tests/ -m "not integration"`) cover every code path that does not require Azure and should remain the default pre-commit gate. E2E is intentionally opt-in (`workflow_dispatch`).
 
+When one run selects both `dataflow-sample` and `resource-set-samples`, the
+test harness removes the first sample's dataflows, profiles, and endpoints
+after its module completes. It waits for their projected custom resources to
+disappear before the advanced resource-set sample starts. A focused run that
+selects only one phase preserves that phase's resources for an optional
+pre-teardown inspection hold.
+
 ## How it fits together
 
 ```text

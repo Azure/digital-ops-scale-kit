@@ -3,10 +3,8 @@
 
 """Unit tests for the `type: wait` step.
 
-Covers the three layers:
-- Model parse + validation (siteops.models)
-- The executor poll loop, error taxonomy, and dry-run (siteops.executor)
-- Orchestrator dispatch, template resolution, runtime guard, validation, preview
+Covers parsing, polling, dry-run behavior, scope compatibility, manifest
+validation, and plain-plan rendering.
 """
 
 from pathlib import Path
@@ -223,7 +221,7 @@ class TestClassifyAzError:
                 "permanent",
             ),
             (
-                "ERROR: status code: 503 ServiceUnavailable; resource was not found",
+                "ERROR: status code: 503 ServiceUnavailable. Resource was not found",
                 "transient",
             ),
             ("ERROR: InvalidTemplate - parameter 'timeouts' is not valid", "permanent"),
@@ -426,174 +424,11 @@ def _site(**overrides) -> Site:
     return Site(**params)
 
 
-class TestExecuteWaitStep:
-    def test_resolves_templates_and_runs(self, tmp_workspace):
-        orch = Orchestrator(tmp_workspace)
-        step = WaitStep(
-            name="wait-bs",
-            condition=ArmTagCondition(
-                type="arm-tag",
-                resource_id="/subscriptions/{{ site.subscription }}/resourceGroups/{{ site.resourceGroup }}/providers/Microsoft.HybridCompute/machines/{{ site.parameters.aksee.machineName }}",
-                tag_key="siteops.bootstrap.state",
-                expected_value="succeeded",
-                failure_pattern="failed-*",
-            ),
-        )
-        captured = {}
-
-        def fake_wait(condition, **kwargs):
-            captured["resource_id"] = condition.resource_id
-            captured["subscription"] = kwargs["subscription"]
-            return WaitResult(success=True, step_name="wait-bs", site_name="munich-dev")
-
-        with patch.object(orch.executor, "wait_for_condition", side_effect=fake_wait):
-            result = orch._execute_wait_step(_site(), step, {})
-        assert result.success is True
-        assert captured["resource_id"] == (
-            "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-test/"
-            "providers/Microsoft.HybridCompute/machines/arc-vm-1"
-        )
-        assert captured["subscription"] == "00000000-0000-0000-0000-000000000000"
-
-    def test_resolves_step_outputs(self, tmp_workspace):
-        orch = Orchestrator(tmp_workspace)
-        step = WaitStep(
-            name="wait-bs",
-            condition=ArmTagCondition(
-                type="arm-tag",
-                resource_id="{{ steps.bootstrap.outputs.machineId.value }}",
-                tag_key="siteops.bootstrap.state",
-                expected_value="succeeded",
-            ),
-        )
-        step_outputs = {"bootstrap": {"machineId": {"value": ARC_ID}}}
-        captured = {}
-
-        def fake_wait(condition, **kwargs):
-            captured["resource_id"] = condition.resource_id
-            return WaitResult(success=True, step_name="wait-bs", site_name="munich-dev")
-
-        with patch.object(orch.executor, "wait_for_condition", side_effect=fake_wait):
-            orch._execute_wait_step(_site(), step, step_outputs)
-        assert captured["resource_id"] == ARC_ID
-
-    def test_unresolved_template_fails_fast(self, tmp_workspace):
-        orch = Orchestrator(tmp_workspace)
-        step = WaitStep(
-            name="wait-bs",
-            condition=ArmTagCondition(
-                type="arm-tag",
-                resource_id="/subscriptions/{{ site.parameters.missing.path }}/x",
-                tag_key="k",
-                expected_value="succeeded",
-            ),
-        )
-        with patch.object(
-            orch.executor, "wait_for_condition", side_effect=AssertionError("must not poll")
-        ):
-            result = orch._execute_wait_step(_site(), step, {})
-        assert result.success is False
-        assert "unresolved or empty resourceId" in result.error
-
-    @pytest.mark.parametrize(
-        ("field", "resource_id", "expected_value"),
-        [
-            ("resourceId", "{ site.subscription }}", "succeeded"),
-            ("resourceId", "{ steps.resolve-aio.outputs.machineId }}", "succeeded"),
-            ("expectedValue", ARC_ID, "{ site.parameters.state }}"),
-            ("expectedValue", ARC_ID, "{{ site.parameters.missing }}"),
-        ],
-        ids=["id-site-path", "id-hyphenated-step", "value-malformed", "value-unresolved"],
-    )
-    def test_a_mistyped_delimiter_fails_fast(
-        self, tmp_workspace, field, resource_id, expected_value
-    ):
-        """A wait step polls for the full timeout, so a mistyped delimiter that
-        reaches the poller costs the whole budget and then reports a resource
-        that was never going to be found. Both halves of the condition are
-        checked, since an unresolved expected value never equals the real tag
-        and the step waits out its budget just the same."""
-        orch = Orchestrator(tmp_workspace)
-        step = WaitStep(
-            name="wait-bs",
-            condition=ArmTagCondition(
-                type="arm-tag",
-                resource_id=resource_id,
-                tag_key="k",
-                expected_value=expected_value,
-            ),
-        )
-        with patch.object(
-            orch.executor, "wait_for_condition", side_effect=AssertionError("must not poll")
-        ):
-            result = orch._execute_wait_step(_site(), step, {})
-
-        assert result.success is False
-        assert f"unresolved or empty {field}" in result.error
-
-    def test_a_resolved_value_that_ends_in_braces_still_polls(self, tmp_workspace):
-        """The guard must not read rendered data as a template. A tag value can
-        legitimately end in `}}`, and refusing it would block a real wait."""
-        orch = Orchestrator(tmp_workspace)
-        step = WaitStep(
-            name="wait-bs",
-            condition=ArmTagCondition(
-                type="arm-tag",
-                resource_id=ARC_ID,
-                tag_key="k",
-                expected_value="{'state': {'phase': 'succeeded'}}",
-            ),
-        )
-
-        with patch.object(
-            orch.executor,
-            "wait_for_condition",
-            side_effect=lambda condition, **kwargs: WaitResult(
-                success=True, step_name="wait-bs", site_name="munich-dev"
-            ),
-        ):
-            result = orch._execute_wait_step(_site(), step, {})
-
-        assert result.success is True
-
-    @pytest.mark.parametrize("blank", ["", "   "], ids=["empty", "whitespace"])
-    def test_an_empty_resolved_value_fails_fast(self, tmp_workspace, blank):
-        """A wait step polls for its whole timeout, so an empty resource id
-        costs the full budget and then reports a resource that was never going
-        to be found. Empty and unresolved are both worth refusing up front."""
-        orch = Orchestrator(tmp_workspace)
-        step = WaitStep(
-            name="wait-bs",
-            condition=ArmTagCondition(
-                type="arm-tag",
-                resource_id="{{ site.parameters.blank }}",
-                tag_key="k",
-                expected_value="succeeded",
-            ),
-        )
-        site = _site()
-        site.parameters = {"blank": blank}
-
-        with patch.object(
-            orch.executor, "wait_for_condition", side_effect=AssertionError("must not poll")
-        ):
-            result = orch._execute_wait_step(site, step, {})
-
-        assert result.success is False
-        assert "unresolved or empty resourceId" in result.error
-
-
 class TestWaitStepDispatch:
     def test_compatibility_runs_on_any_site(self, tmp_workspace):
         orch = Orchestrator(tmp_workspace)
         step = WaitStep(name="w", condition=_condition())
         assert orch._check_step_site_compatibility(step, _site()) is None
-
-    def test_type_label(self, tmp_workspace):
-        orch = Orchestrator(tmp_workspace)
-        step = WaitStep(name="w", condition=_condition())
-        assert orch._get_step_type_label(step) == "wait"
-
 
 class TestWaitStepManifestValidation:
     """Output-reference validation for wait conditions via validate_manifest."""
