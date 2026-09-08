@@ -13,9 +13,22 @@ from unittest.mock import patch
 
 import pytest
 
+from siteops.compilation import (
+    CompilationKey,
+    DependencyCoverage,
+    DependencyIdentity,
+    PreparedTemplateUnit,
+    SourceIdentity,
+    TemplateCompilationIdentity,
+    TemplateKind,
+    VersionProvenance,
+)
 from siteops.models import DeploymentStep, Manifest, Site
 from siteops.orchestrator import Orchestrator
 from siteops.planning import (
+    CapabilityKind,
+    CapabilityProviderIdentity,
+    CapabilityStatus,
     DataReference,
     DeploymentOperation,
     DeploymentPlan,
@@ -25,6 +38,7 @@ from siteops.planning import (
     OperationKind,
     OperationScope,
     PlanBuildResult,
+    PlanCapability,
     PlanDisposition,
     PlanExecutionMode,
     PlanIntent,
@@ -38,6 +52,52 @@ from siteops.planning import (
 )
 
 TIMESTAMP = "20260728T000000"
+
+
+def _template_unit() -> PreparedTemplateUnit:
+    source = SourceIdentity(
+        path=Path("template.json"),
+        content_digest="source",
+        size_bytes=1,
+    )
+    key = CompilationKey(
+        source_path=source.path,
+        source_content_digest=source.content_digest,
+        template_kind=TemplateKind.ARM_JSON,
+        compiler_fingerprint="arm-json",
+        configuration_digest="none",
+        invocation=("read-arm-json",),
+    )
+    return PreparedTemplateUnit(
+        key=key,
+        identity=TemplateCompilationIdentity(
+            source=source,
+            compiler_driver=None,
+            compiler=None,
+            configuration=None,
+            dependencies=DependencyIdentity(
+                coverage=DependencyCoverage.NOT_APPLICABLE,
+            ),
+            compiled_output_digest=source.content_digest,
+        ),
+        parameters=(),
+    )
+
+
+def _arm_capability(
+    identities: tuple[OperationIdentity, ...],
+) -> PlanCapability:
+    return PlanCapability(
+        kind=CapabilityKind.ARM_CONTROL_PLANE,
+        status=CapabilityStatus.AVAILABLE,
+        required_by=identities,
+        provider=CapabilityProviderIdentity(
+            name="azure-cli",
+            executable_path=Path("C:/tools/az.exe"),
+            version=None,
+            version_provenance=VersionProvenance.UNKNOWN,
+        ),
+    )
 
 
 def _make_manifest(step_count: int = 2) -> Manifest:
@@ -82,17 +142,23 @@ def _prepared_plan(
     *,
     parallel_sites: int,
 ) -> DeploymentPlan:
-    details = DeploymentOperation(
-        template=Path("template.json"),
+    unit = _template_unit()
+    described_details = DeploymentOperation(
+        template=unit.identity.source.path,
+        input_status=InputStatus.DESCRIBED,
+    )
+    prepared_details = DeploymentOperation(
+        template=unit.identity.source.path,
         input_status=InputStatus.PREPARED,
         parameters=MappingValue(()),
+        template_unit_key=unit.key,
     )
     step = PlanStep(
         name="deploy",
         sequence=1,
         kind=OperationKind.DEPLOYMENT,
         scope=OperationScope.RESOURCE_GROUP,
-        details=details,
+        details=described_details,
     )
     targets = tuple(
         PreparedTarget(
@@ -109,11 +175,15 @@ def _prepared_plan(
                     ),
                     step=step,
                     disposition=PlanDisposition.EXECUTE,
-                    details=details,
+                    details=prepared_details,
                 ),
             ),
         )
         for site in sites
+    )
+    required_by = tuple(
+        target.operations[0].identity
+        for target in targets
     )
     return DeploymentPlan(
         manifest_name="parallel-test",
@@ -123,6 +193,8 @@ def _prepared_plan(
         max_parallel_sites=parallel_sites,
         steps=(step,),
         targets=targets,
+        template_units=(unit,),
+        capabilities=(_arm_capability(required_by),),
     )
 
 
@@ -360,24 +432,30 @@ class TestSubscriptionFailureBlastRadius:
         manifest = self._manifest_with_subscription_step()
         orchestrator = Orchestrator(tmp_workspace)
         sub_site = next(s for s in sites if s.is_subscription_level)
-        deployment_details = DeploymentOperation(
-            template=Path("template.json"),
+        unit = _template_unit()
+        described_details = DeploymentOperation(
+            template=unit.identity.source.path,
+            input_status=InputStatus.DESCRIBED,
+        )
+        prepared_details = DeploymentOperation(
+            template=unit.identity.source.path,
             input_status=InputStatus.PREPARED,
             parameters=MappingValue(()),
+            template_unit_key=unit.key,
         )
         subscription_step = PlanStep(
             name="edge-site",
             sequence=1,
             kind=OperationKind.DEPLOYMENT,
             scope=OperationScope.SUBSCRIPTION,
-            details=deployment_details,
+            details=described_details,
         )
         resource_group_step = PlanStep(
             name="aio",
             sequence=2,
             kind=OperationKind.DEPLOYMENT,
             scope=OperationScope.RESOURCE_GROUP,
-            details=deployment_details,
+            details=described_details,
         )
         plan_targets: list[PreparedTarget] = []
         for site in sites:
@@ -390,7 +468,7 @@ class TestSubscriptionFailureBlastRadius:
                         ),
                         step=subscription_step,
                         disposition=PlanDisposition.EXECUTE,
-                        details=deployment_details,
+                        details=prepared_details,
                     ),
                     PreparedOperation(
                         identity=OperationIdentity(
@@ -399,7 +477,7 @@ class TestSubscriptionFailureBlastRadius:
                         ),
                         step=resource_group_step,
                         disposition=PlanDisposition.SKIP,
-                        details=deployment_details,
+                        details=described_details,
                         skip_reason=PlanSkipReason(
                             code=SkipReasonCode.SCOPE_MISMATCH,
                             detail=(
@@ -431,7 +509,7 @@ class TestSubscriptionFailureBlastRadius:
                         ),
                         step=subscription_step,
                         disposition=PlanDisposition.SKIP,
-                        details=deployment_details,
+                        details=described_details,
                         skip_reason=PlanSkipReason(
                             code=SkipReasonCode.SCOPE_MISMATCH,
                             detail=(
@@ -447,7 +525,7 @@ class TestSubscriptionFailureBlastRadius:
                         ),
                         step=resource_group_step,
                         disposition=PlanDisposition.EXECUTE,
-                        details=deployment_details,
+                        details=prepared_details,
                         data_references=data_references,
                     ),
                 )
@@ -463,6 +541,12 @@ class TestSubscriptionFailureBlastRadius:
                     operations=operations,
                 )
             )
+        required_by = tuple(
+            operation.identity
+            for target in plan_targets
+            for operation in target.operations
+            if operation.disposition is PlanDisposition.EXECUTE
+        )
         plan = DeploymentPlan(
             manifest_name=manifest.name,
             source_path=Path("manifests/two-phase.yaml"),
@@ -471,6 +555,8 @@ class TestSubscriptionFailureBlastRadius:
             max_parallel_sites=manifest.parallel.sites,
             steps=(subscription_step, resource_group_step),
             targets=tuple(plan_targets),
+            template_units=(unit,),
+            capabilities=(_arm_capability(required_by),),
         )
         plan_result = PlanBuildResult(
             status=PlanStatus.PLANNED,

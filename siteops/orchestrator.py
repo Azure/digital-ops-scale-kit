@@ -26,6 +26,14 @@ from typing import Any, Callable, Iterator
 import yaml
 
 from siteops import yamlio
+from siteops.compilation import (
+    CompilationFailure,
+    CompiledTemplate,
+    PreparedTemplateUnit,
+    TemplateCompilationSession,
+    TemplateKind,
+    detect_template_kind,
+)
 from siteops.composition import (
     CompositionContract,
     CompositionError,
@@ -38,11 +46,11 @@ from siteops.composition import (
     report_composition_error,
 )
 from siteops.executor import (
+    HTTPS_URL_PATTERN,
     AzCliExecutor,
     DeploymentResult,
     KubectlResult,
     WaitResult,
-    get_template_parameters,
 )
 from siteops.models import (
     CONDITION_PATTERN,
@@ -68,6 +76,9 @@ from siteops.models import (
 from siteops.planning import (
     STEP_OUTPUT_PATTERN,
     ArmTagWaitOperation,
+    CapabilityKind,
+    CapabilityProviderIdentity,
+    CapabilityStatus,
     CompositionReference,
     CompositionRequirement,
     CompositionResource,
@@ -85,6 +96,7 @@ from siteops.planning import (
     OperationScope,
     OutputValue,
     PlanBuildResult,
+    PlanCapability,
     PlanComposition,
     PlanDiagnostic,
     PlanDisposition,
@@ -101,9 +113,11 @@ from siteops.planning import (
     ResourceIdentity,
     SkipReasonCode,
     TargetKind,
+    UnavailableDataReferenceError,
     classify_plan_value,
     collect_data_references,
     render_plain_plan,
+    required_capability_kinds,
     resolve_plan_value,
 )
 from siteops.sanitize import (
@@ -180,6 +194,7 @@ SITE_PROPERTIES_PATTERN = re.compile(r"\{\{\s*site\.properties\.([a-zA-Z0-9_.\[\
 # Pattern for {{ site.parameters.<path> }}
 # Supports nested paths like: site.parameters.brokerConfig.memoryProfile
 SITE_PARAMETERS_PATTERN = re.compile(r"\{\{\s*site\.parameters\.([a-zA-Z0-9_.\[\]]+)\s*\}\}")
+UNRESOLVED_SITE_TEMPLATE_PATTERN = re.compile(r"\{\{\s*site\.")
 FOR_EACH_SITE_PROPERTY_PATTERN = re.compile(
     r"^\{\{\s*site\.properties\.([a-zA-Z0-9_.\[\]-]+)\s*\}\}$"
 )
@@ -1464,7 +1479,11 @@ class Orchestrator:
             if path.suffix == ".json":
                 result = json.load(f, object_pairs_hook=_reject_duplicate_json_keys)
             else:
-                result = yamlio.load(f) or {}
+                result = yamlio.load(f)
+        if result is None:
+            result = {}
+        if not isinstance(result, dict):
+            raise ValueError(f"Parameter file '{path}' must contain a mapping.")
 
         with self._params_cache_lock:
             self._params_cache[path] = result
@@ -1709,6 +1728,30 @@ class Orchestrator:
                 f"Check the value the site selects for a typo, or add the file."
             )
 
+    @staticmethod
+    def _kubectl_file_validation_error(
+        file_path: str,
+        workspace: Path,
+    ) -> str | None:
+        """Validate one known kubectl file path without contacting a cluster."""
+        if HTTPS_URL_PATTERN.match(file_path):
+            return None
+        if file_path.lower().startswith("http://"):
+            return f"HTTP URLs not allowed (use HTTPS): {file_path}"
+
+        workspace_root = workspace.resolve()
+        resolved = (workspace_root / file_path).resolve()
+        try:
+            resolved.relative_to(workspace_root)
+        except ValueError:
+            return (
+                "Kubectl file must stay within the workspace: "
+                f"{file_path}"
+            )
+        if not resolved.exists():
+            return f"Kubectl file not found: {file_path}"
+        return None
+
     def _resolve_property_path_with_presence(
         self,
         obj: Any,
@@ -1870,8 +1913,6 @@ class Orchestrator:
         self,
         manifest: Manifest,
         site: Site,
-        *,
-        validate_step_coverage: bool = True,
     ) -> tuple[
         dict[str, Any],
         CompositionResult | None,
@@ -1902,7 +1943,6 @@ class Orchestrator:
             _cache_state_digest(manifest_state),
             site.name,
             _cache_state_digest(site_state),
-            validate_step_coverage,
         )
         with self._composition_cache_lock:
             cached = self._composition_cache.get(key)
@@ -1982,13 +2022,6 @@ class Orchestrator:
         if contract is not None:
             result = compose_sources(contract, loaded)
             plain_parameters = result.parameters
-            if validate_step_coverage:
-                self._validate_composition_step_coverage(
-                    manifest,
-                    site,
-                    contract,
-                    result,
-                )
         self._validate_composition_lower_tiers(
             manifest,
             site,
@@ -2061,6 +2094,7 @@ class Orchestrator:
         site: Site,
         contract: CompositionContract,
         result: CompositionResult,
+        parameter_names_by_step: dict[str, frozenset[str]],
     ) -> None:
         """Require each composed writer to reach an ordered deployment step."""
         collection_steps: dict[str, list[int]] = {
@@ -2073,10 +2107,9 @@ class Orchestrator:
                 continue
             if not self._evaluate_condition(step.when, site):
                 continue
-            template_path = (self.workspace / step.template).resolve()
-            if not template_path.is_file():
+            accepted = parameter_names_by_step.get(step.name)
+            if accepted is None:
                 continue
-            accepted = get_template_parameters(str(template_path))
             for name, spec in contract.collections.items():
                 if spec.path in accepted:
                     collection_steps[name].append(index)
@@ -2195,11 +2228,20 @@ class Orchestrator:
                 available_sources[name] = identity
                 outputs[identity] = values
 
+        outcome = TemplateCompilationSession().acquire(
+            (self.workspace / step.template).resolve()
+        )
+        if isinstance(outcome, CompilationFailure):
+            raise ValueError(outcome.detail)
+        template_unit = outcome.prepared_unit()
         details, _ = self._prepare_operation_details(
             step,
             site,
             manifest,
             available_sources,
+            {},
+            OperationIdentity(target=site.name, step=step.name),
+            template_unit,
         )
         if (
             not isinstance(details, DeploymentOperation)
@@ -2214,7 +2256,10 @@ class Orchestrator:
             raise TypeError(
                 "Prepared deployment parameters did not resolve to a mapping."
             )
-        self._validate_prepared_parameter_names(details, parameters)
+        self._validate_prepared_parameter_names(
+            template_unit,
+            parameters,
+        )
         return parameters
 
     def _evaluate_condition(
@@ -2734,7 +2779,14 @@ class Orchestrator:
             f"CLI selector `-l {cli_selector}` matched no sites. " + " ".join(parts)
         )
 
-    def validate(self, manifest_path: Path, selector: str | None = None) -> list[str]:
+    def validate(
+        self,
+        manifest_path: Path,
+        selector: str | None = None,
+        *,
+        manifest: Manifest | None = None,
+        sites: list[Site] | None = None,
+    ) -> list[str]:
         """Validate manifest and return list of errors.
 
         Checks:
@@ -2753,19 +2805,27 @@ class Orchestrator:
         Args:
             manifest_path: Path to manifest file
             selector: Optional site selector
+            manifest: Already loaded manifest to validate without reloading.
+            sites: Already resolved targets to validate without reselection.
 
         Returns:
             List of error messages (empty if valid)
         """
         errors: list[str] = []
 
-        try:
-            manifest = Manifest.from_file(manifest_path, workspace_root=self.workspace)
-        except Exception as e:
-            return [f"Failed to parse manifest: {e}"]
+        if manifest is None:
+            try:
+                manifest = Manifest.from_file(
+                    manifest_path,
+                    workspace_root=self.workspace,
+                )
+            except (ValueError, OSError, yaml.YAMLError) as e:
+                return [f"Failed to parse manifest: {e}"]
 
+        resolve_targets = sites is None
         try:
-            sites = self.resolve_sites(manifest, selector)
+            if resolve_targets:
+                sites = self.resolve_sites(manifest, selector)
             selector_parse_failed = False
         except NoTargetingError:
             # Generic library or partial manifest. Skip site-dependent
@@ -2792,11 +2852,21 @@ class Orchestrator:
             errors.append(report_site_load_error(e))
             sites = []
             selector_parse_failed = False
-        except FileNotFoundError as e:
-            # Manifest `sites:` entry without a workspace file.
+        except OSError as e:
+            # A selected site could not be read.
             errors.append(report_site_load_error(e))
             sites = []
             selector_parse_failed = False
+        if (
+            resolve_targets
+            and (selector or (not manifest.sites and manifest.site_selector))
+            and self.skipped_sites
+        ):
+            errors.append(
+                "The selected target set is incomplete. "
+                "Fix sites that could not be loaded or narrow the selector."
+            )
+        assert sites is not None
         if not sites and (manifest.sites or manifest.site_selector or selector):
             if selector and not selector_parse_failed:
                 # Rich diagnostic when CLI selector knocked everything
@@ -2835,7 +2905,7 @@ class Orchestrator:
                             continue
                         try:
                             self.load_parameters(full_path)
-                        except Exception as e:
+                        except (ValueError, OSError, yaml.YAMLError) as e:
                             errors.append(
                                 f"Invalid manifest parameter file "
                                 f"{resolved}: {e}"
@@ -2871,7 +2941,7 @@ class Orchestrator:
                 else:
                     try:
                         self.load_parameters(full_path)
-                    except Exception as e:
+                    except (ValueError, OSError, yaml.YAMLError) as e:
                         errors.append(
                             f"Invalid manifest parameter file {raw_path}: {e}"
                         )
@@ -2891,16 +2961,50 @@ class Orchestrator:
             prior_step_names = {s.name for s in manifest.steps[:step_index]}
 
             if isinstance(step, KubectlStep):
-                # Validate kubectl files (skip URLs and templates)
-                for file_path in step.files:
-                    if file_path.startswith("https://") or "{{" in file_path:
+                for declared_path in step.files:
+                    if "{{" not in declared_path:
+                        error = self._kubectl_file_validation_error(
+                            declared_path,
+                            self.workspace,
+                        )
+                        if error is not None:
+                            errors.append(
+                                f"{error} (step: {step.name})"
+                            )
                         continue
-                    if file_path.lower().startswith("http://"):
-                        errors.append(f"HTTP URLs not allowed (use HTTPS): {file_path} (step: {step.name})")
-                        continue
-                    full_path = (self.workspace / file_path).resolve()
-                    if not full_path.exists():
-                        errors.append(f"Kubectl file not found: {file_path} (step: {step.name})")
+
+                    for site in sites:
+                        resolved_path = self._resolve_template_strings(
+                            declared_path,
+                            site,
+                        )
+                        if not isinstance(resolved_path, str):
+                            errors.append(
+                                f"Kubectl file path '{declared_path}' "
+                                "resolved to a non-string value for site "
+                                f"'{site.name}' (step: {step.name})"
+                            )
+                            continue
+                        if UNRESOLVED_SITE_TEMPLATE_PATTERN.search(
+                            resolved_path
+                        ):
+                            errors.append(
+                                f"Kubectl file path '{declared_path}' did "
+                                f"not resolve for site '{site.name}' "
+                                f"(step: {step.name})"
+                            )
+                            continue
+                        if "{{" in resolved_path:
+                            continue
+                        error = self._kubectl_file_validation_error(
+                            resolved_path,
+                            self.workspace,
+                        )
+                        if error is not None:
+                            errors.append(
+                                f"{error} (step: {step.name}, "
+                                f"site: {site.name})"
+                            )
             elif isinstance(step, WaitStep):
                 # Validate that step-output references in the condition point
                 # only to prior steps. A wait produces no outputs, so a self or
@@ -2961,7 +3065,7 @@ class Orchestrator:
                                         None,
                                     )
                                 )
-                            except Exception as e:
+                            except (ValueError, OSError, yaml.YAMLError) as e:
                                 errors.append(f"Invalid parameter file {resolved}: {e}")
                         continue
 
@@ -2972,20 +3076,6 @@ class Orchestrator:
                         try:
                             params = self.load_parameters(full_path)
 
-                            # Check if params contain self-references before expensive template parsing
-                            has_self_ref = self._contains_self_reference(params, step.name)
-
-                            template_params: frozenset | None = None
-                            if has_self_ref:
-                                # Only extract template params when needed for self-reference validation
-                                try:
-                                    from siteops.executor import get_template_parameters
-
-                                    template_params = frozenset(get_template_parameters(str(template_path)))
-                                except Exception as e:
-                                    logger.debug(f"Could not extract template params for '{step.name}': {e}")
-                                    # Continue without template params - validation will be conservative
-
                             # Validate step output references with auto-filter awareness
                             errors.extend(
                                 self._validate_output_references(
@@ -2994,10 +3084,10 @@ class Orchestrator:
                                     prior_step_names,
                                     all_step_names,
                                     param_path,
-                                    template_params,
+                                    None,
                                 )
                             )
-                        except Exception as e:
+                        except (ValueError, OSError, yaml.YAMLError) as e:
                             errors.append(f"Invalid parameter file {param_path}: {e}")
 
         if not manifest.steps:
@@ -3068,33 +3158,6 @@ class Orchestrator:
                 ]
 
         return errors
-
-    def _contains_self_reference(self, value: Any, step_name: str) -> bool:
-        """Check if a value contains a self-reference to the given step.
-
-        This is a quick check to avoid expensive template parameter extraction
-        when there are no self-references to validate.
-
-        Args:
-            value: Parameter value to check (recursively handles dict/list/str)
-            step_name: Name of the current step
-
-        Returns:
-            True if value contains {{ steps.<step_name>.outputs... }}
-        """
-        if isinstance(value, dict):
-            return any(self._contains_self_reference(v, step_name) for v in value.values())
-        elif isinstance(value, list):
-            return any(self._contains_self_reference(item, step_name) for item in value)
-        elif isinstance(value, str):
-            # Quick string check before regex
-            pattern = f"steps.{step_name}."
-            if pattern not in value:
-                return False
-            for match in STEP_OUTPUT_PATTERN.finditer(value):
-                if match.group(1) == step_name:
-                    return True
-        return False
 
     def _composition_source_origins(
         self,
@@ -3220,11 +3283,14 @@ class Orchestrator:
                 if ref_step not in all_steps:
                     errors.append(f"Step '{current_step}' references unknown step '{ref_step}' in {source_file}")
                 elif ref_step == current_step:
-                    # Self-reference: only error if template actually accepts this parameter
-                    if template_params is None:
-                        # No template info available - be conservative and flag it
-                        errors.append(f"Step '{current_step}' cannot reference its own outputs in {source_file}")
-                    elif _current_key is not None and _current_key in template_params:
+                    # Structural validation has no template schema.
+                    # Executable planning checks self-references after
+                    # compiled-schema filtering.
+                    if (
+                        template_params is not None
+                        and _current_key is not None
+                        and _current_key in template_params
+                    ):
                         # Template accepts this parameter - genuine circular dependency
                         errors.append(
                             f"Step '{current_step}' cannot reference its own outputs "
@@ -3400,13 +3466,17 @@ class Orchestrator:
         )
 
     @staticmethod
-    def _available_plan_sources(
+    def _plan_reference_sources(
         site: Site,
         prior_steps: list[ManifestStep],
         operations: dict[OperationIdentity, PreparedOperation],
         subscription_targets: dict[str, str],
-    ) -> dict[str, OperationIdentity]:
+    ) -> tuple[
+        dict[str, OperationIdentity],
+        dict[str, OperationIdentity],
+    ]:
         available: dict[str, OperationIdentity] = {}
+        unavailable: dict[str, OperationIdentity] = {}
         for step in prior_steps:
             if not isinstance(step, DeploymentStep):
                 continue
@@ -3437,7 +3507,9 @@ class Orchestrator:
                 and operation.details.input_status is InputStatus.PREPARED
             ):
                 available[step.name] = identity
-        return available
+            elif operation is not None:
+                unavailable[step.name] = identity
+        return available, unavailable
 
     def _prepare_operation_details(
         self,
@@ -3445,16 +3517,22 @@ class Orchestrator:
         site: Site,
         manifest: Manifest,
         available_sources: dict[str, OperationIdentity],
+        unavailable_sources: dict[str, OperationIdentity],
+        current_source: OperationIdentity,
+        template_unit: PreparedTemplateUnit | None = None,
     ) -> tuple[
         DeploymentOperation | KubectlOperation | ArmTagWaitOperation,
         tuple[DataReference, ...],
     ]:
         if isinstance(step, DeploymentStep):
+            if template_unit is None:
+                raise ValueError(
+                    f"Deployment step '{step.name}' has no prepared template "
+                    "unit."
+                )
             params = self._merge_known_parameters(step, site, manifest)
             template_path = (self.workspace / step.template).resolve()
-            accepted_parameters = get_template_parameters(
-                str(template_path)
-            )
+            accepted_parameters = template_unit.parameter_names
             filtered: dict[Any, Any] = {}
             unused: list[Any] = []
             for key, value in params.items():
@@ -3476,6 +3554,8 @@ class Orchestrator:
                 filtered,
                 available_sources,
                 f"{site.name}.{step.name}.parameters",
+                unavailable_sources=unavailable_sources,
+                current_source=current_source,
             )
             if not isinstance(classified, MappingValue):
                 raise TypeError(
@@ -3486,9 +3566,7 @@ class Orchestrator:
                     template=template_path,
                     input_status=InputStatus.PREPARED,
                     parameters=classified,
-                    accepted_parameters=tuple(
-                        sorted(accepted_parameters)
-                    ),
+                    template_unit_key=template_unit.key,
                 ),
                 collect_data_references(classified),
             )
@@ -3498,6 +3576,8 @@ class Orchestrator:
                 self._resolve_template_strings(step.arc.name, site),
                 available_sources,
                 f"{site.name}.{step.name}.clusterName",
+                unavailable_sources=unavailable_sources,
+                current_source=current_source,
             )
             cluster_resource_group = classify_plan_value(
                 self._resolve_template_strings(
@@ -3506,12 +3586,16 @@ class Orchestrator:
                 ),
                 available_sources,
                 f"{site.name}.{step.name}.clusterResourceGroup",
+                unavailable_sources=unavailable_sources,
+                current_source=current_source,
             )
             files = tuple(
                 classify_plan_value(
                     self._resolve_template_strings(path, site),
                     available_sources,
                     f"{site.name}.{step.name}.files[{index}]",
+                    unavailable_sources=unavailable_sources,
+                    current_source=current_source,
                 )
                 for index, path in enumerate(step.files)
             )
@@ -3538,11 +3622,15 @@ class Orchestrator:
             self._resolve_template_strings(condition.resource_id, site),
             available_sources,
             f"{site.name}.{step.name}.resourceId",
+            unavailable_sources=unavailable_sources,
+            current_source=current_source,
         )
         tag_key = classify_plan_value(
             self._resolve_template_strings(condition.tag_key, site),
             available_sources,
             f"{site.name}.{step.name}.tagKey",
+            unavailable_sources=unavailable_sources,
+            current_source=current_source,
         )
         expected_value = classify_plan_value(
             self._resolve_template_strings(
@@ -3551,6 +3639,8 @@ class Orchestrator:
             ),
             available_sources,
             f"{site.name}.{step.name}.expectedValue",
+            unavailable_sources=unavailable_sources,
+            current_source=current_source,
         )
         failure_pattern = (
             classify_plan_value(
@@ -3560,6 +3650,8 @@ class Orchestrator:
                 ),
                 available_sources,
                 f"{site.name}.{step.name}.failurePattern",
+                unavailable_sources=unavailable_sources,
+                current_source=current_source,
             )
             if condition.failure_pattern is not None
             else None
@@ -3587,11 +3679,302 @@ class Orchestrator:
                     references.append(reference)
         return details, tuple(references)
 
+    @staticmethod
+    def _compilation_diagnostic(
+        failure: CompilationFailure,
+    ) -> PlanDiagnostic:
+        return PlanDiagnostic(
+            code=failure.code.value,
+            severity=DiagnosticSeverity.ERROR,
+            summary=failure.summary,
+            detail=failure.detail,
+            serialized_detail=(
+                "Check the local template compiler and source, then rerun "
+                "executable planning."
+            ),
+        )
+
+    @staticmethod
+    def _required_capabilities(
+        targets: list[PreparedTarget],
+    ) -> dict[CapabilityKind, tuple[OperationIdentity, ...]]:
+        required: dict[CapabilityKind, list[OperationIdentity]] = {}
+
+        def add(
+            kind: CapabilityKind,
+            identity: OperationIdentity,
+        ) -> None:
+            identities = required.setdefault(kind, [])
+            if identity not in identities:
+                identities.append(identity)
+
+        for target in targets:
+            for operation in target.operations:
+                if operation.disposition is not PlanDisposition.EXECUTE:
+                    continue
+                for kind in required_capability_kinds(operation):
+                    add(kind, operation.identity)
+
+        return {
+            kind: tuple(identities)
+            for kind, identities in required.items()
+        }
+
+    @staticmethod
+    def _capability_diagnostic(
+        capability: CapabilityKind,
+        failure: CompilationFailure,
+    ) -> PlanDiagnostic:
+        return PlanDiagnostic(
+            code=f"capability.{capability.value}.missing",
+            severity=DiagnosticSeverity.ERROR,
+            summary="A required local capability is unavailable.",
+            detail=failure.detail,
+            serialized_detail=(
+                "Install the required local deployment tool, then rerun "
+                "executable planning."
+            ),
+        )
+
+    def _resolve_plan_capabilities(
+        self,
+        requirements: dict[
+            CapabilityKind,
+            tuple[OperationIdentity, ...],
+        ],
+        session: TemplateCompilationSession,
+    ) -> tuple[
+        tuple[PlanCapability, ...],
+        list[PlanDiagnostic],
+        dict[OperationIdentity, set[CapabilityKind]],
+    ]:
+        capabilities: list[PlanCapability] = []
+        diagnostics: list[PlanDiagnostic] = []
+        unavailable: dict[
+            OperationIdentity,
+            set[CapabilityKind],
+        ] = {}
+        arm_control_plane_available = True
+
+        for kind in CapabilityKind:
+            required_by = requirements.get(kind)
+            if not required_by:
+                continue
+            if kind is CapabilityKind.ARM_CONTROL_PLANE:
+                outcome = session.resolve_azure_cli()
+            elif kind is CapabilityKind.BICEP_COMPILER:
+                outcome = session.resolve_bicep_compiler()
+            elif kind is CapabilityKind.KUBECTL:
+                outcome = session.resolve_kubectl()
+            else:
+                outcome = session.resolve_azure_cli()
+
+            if isinstance(outcome, CompilationFailure):
+                capabilities.append(
+                    PlanCapability(
+                        kind=kind,
+                        status=CapabilityStatus.MISSING,
+                        required_by=required_by,
+                    )
+                )
+                for identity in required_by:
+                    unavailable.setdefault(identity, set()).add(kind)
+                if (
+                    kind is not CapabilityKind.BICEP_COMPILER
+                    or arm_control_plane_available
+                ):
+                    diagnostics.append(
+                        self._capability_diagnostic(kind, outcome)
+                    )
+                if kind is CapabilityKind.ARM_CONTROL_PLANE:
+                    arm_control_plane_available = False
+                continue
+
+            capabilities.append(
+                PlanCapability(
+                    kind=kind,
+                    status=(
+                        CapabilityStatus.UNKNOWN
+                        if kind is CapabilityKind.ARC_PROXY
+                        else CapabilityStatus.AVAILABLE
+                    ),
+                    required_by=required_by,
+                    provider=CapabilityProviderIdentity.from_tool(
+                        outcome
+                    ),
+                )
+            )
+
+        return tuple(capabilities), diagnostics, unavailable
+
+    def _acquire_plan_templates(
+        self,
+        targets: list[PreparedTarget],
+        session: TemplateCompilationSession,
+        unavailable_capabilities: dict[
+            OperationIdentity,
+            set[CapabilityKind],
+        ],
+    ) -> tuple[
+        tuple[PreparedTemplateUnit, ...],
+        dict[
+            OperationIdentity,
+            PreparedTemplateUnit | CompilationFailure,
+        ],
+        list[PlanDiagnostic],
+    ]:
+        units: dict[Any, PreparedTemplateUnit] = {}
+        operation_templates: dict[
+            OperationIdentity,
+            PreparedTemplateUnit | CompilationFailure,
+        ] = {}
+        diagnostics: list[PlanDiagnostic] = []
+        reported_failures: set[tuple[Any, ...]] = set()
+
+        for target in targets:
+            for operation in target.operations:
+                details = operation.details
+                if (
+                    operation.disposition
+                    is not PlanDisposition.EXECUTE
+                    or not isinstance(details, DeploymentOperation)
+                ):
+                    continue
+                try:
+                    template_kind = detect_template_kind(details.template)
+                except ValueError:
+                    template_kind = None
+                if (
+                    CapabilityKind.BICEP_COMPILER
+                    in unavailable_capabilities.get(
+                        operation.identity,
+                        set(),
+                    )
+                    and template_kind is TemplateKind.BICEP
+                ):
+                    continue
+                template_path = (
+                    self.workspace / details.template
+                ).resolve()
+                outcome = session.acquire(template_path)
+                if isinstance(outcome, CompiledTemplate):
+                    unit = outcome.prepared_unit()
+                    units.setdefault(unit.key, unit)
+                    operation_templates[operation.identity] = unit
+                    continue
+
+                operation_templates[operation.identity] = outcome
+                failure_identity = (
+                    outcome.key,
+                    outcome.code,
+                    template_path,
+                )
+                if failure_identity in reported_failures:
+                    continue
+                reported_failures.add(failure_identity)
+                diagnostics.append(
+                    self._compilation_diagnostic(outcome)
+                )
+
+        return (
+            tuple(units.values()),
+            operation_templates,
+            diagnostics,
+        )
+
+    def _validate_plan_composition_coverage(
+        self,
+        manifest: Manifest,
+        sites: list[Site],
+        targets: list[PreparedTarget],
+        composition_context: dict[
+            str,
+            tuple[CompositionResult, CompositionContract],
+        ],
+        operation_templates: dict[
+            OperationIdentity,
+            PreparedTemplateUnit | CompilationFailure,
+        ],
+    ) -> tuple[list[PreparedTarget], list[PlanDiagnostic]]:
+        site_by_name = {site.name: site for site in sites}
+        validated: list[PreparedTarget] = []
+        diagnostics: list[PlanDiagnostic] = []
+
+        for target in targets:
+            context = composition_context.get(target.name)
+            if context is None or target.diagnostics:
+                validated.append(target)
+                continue
+            if any(
+                not isinstance(
+                    operation_templates.get(operation.identity),
+                    PreparedTemplateUnit,
+                )
+                for operation in target.operations
+                if operation.disposition is PlanDisposition.EXECUTE
+                and isinstance(operation.details, DeploymentOperation)
+            ):
+                validated.append(target)
+                continue
+
+            parameter_names_by_step = {
+                operation.identity.step: unit.parameter_names
+                for operation in target.operations
+                if operation.disposition is PlanDisposition.EXECUTE
+                and isinstance(operation.details, DeploymentOperation)
+                and isinstance(
+                    unit := operation_templates.get(operation.identity),
+                    PreparedTemplateUnit,
+                )
+            }
+            composition, contract = context
+            try:
+                self._validate_composition_step_coverage(
+                    manifest,
+                    site_by_name[target.name],
+                    contract,
+                    composition,
+                    parameter_names_by_step,
+                )
+            except CompositionError as error:
+                diagnostic = PlanDiagnostic(
+                    code="composition.invalid",
+                    severity=DiagnosticSeverity.ERROR,
+                    summary=(
+                        "Resource composition failed. Set "
+                        "SITEOPS_REDACT_OUTPUT=0, then rerun the command "
+                        "locally for source and identity details."
+                    ),
+                    detail=str(error),
+                )
+                diagnostics.append(diagnostic)
+                validated.append(
+                    replace(
+                        target,
+                        diagnostics=(
+                            *target.diagnostics,
+                            diagnostic,
+                        ),
+                    )
+                )
+                continue
+            validated.append(target)
+
+        return validated, diagnostics
+
     def _prepare_plan_targets(
         self,
         manifest: Manifest,
         sites: list[Site],
         targets: list[PreparedTarget],
+        operation_templates: dict[
+            OperationIdentity,
+            PreparedTemplateUnit | CompilationFailure,
+        ],
+        unavailable_capabilities: dict[
+            OperationIdentity,
+            set[CapabilityKind],
+        ],
     ) -> tuple[list[PreparedTarget], list[PlanDiagnostic]]:
         site_by_name = {site.name: site for site in sites}
         subscription_targets = {
@@ -3606,6 +3989,14 @@ class Orchestrator:
         }
         prepared_targets: dict[str, PreparedTarget] = {}
         diagnostics: list[PlanDiagnostic] = []
+        manifest_steps = {
+            step.name: step
+            for step in manifest.steps
+        }
+        manifest_step_indexes = {
+            step.name: index
+            for index, step in enumerate(manifest.steps)
+        }
 
         ordered_targets = [
             target
@@ -3621,21 +4012,31 @@ class Orchestrator:
             target_diagnostics = list(target.diagnostics)
             target_failed = bool(target_diagnostics)
             prepared_operations: list[PreparedOperation] = []
-            for index, (source_step, operation) in enumerate(
-                zip(
-                    manifest.steps,
-                    target.operations,
-                    strict=True,
-                )
-            ):
+            for operation in target.operations:
+                source_step = manifest_steps[operation.identity.step]
+                source_index = manifest_step_indexes[
+                    operation.identity.step
+                ]
                 if operation.disposition is not PlanDisposition.EXECUTE:
                     prepared_operations.append(operation)
                     operations[operation.identity] = operation
                     continue
                 if target_failed:
+                    details = operation.details
+                    unit = operation_templates.get(operation.identity)
+                    if (
+                        isinstance(details, DeploymentOperation)
+                        and isinstance(unit, PreparedTemplateUnit)
+                    ):
+                        details = replace(
+                            details,
+                            template=unit.identity.source.path,
+                            template_unit_key=unit.key,
+                        )
                     blocked = replace(
                         operation,
                         disposition=PlanDisposition.BLOCKED,
+                        details=details,
                         skip_reason=PlanSkipReason(
                             code=SkipReasonCode.TARGET_PREPARATION_FAILED,
                             detail="Target preparation failed.",
@@ -3645,9 +4046,51 @@ class Orchestrator:
                     operations[operation.identity] = blocked
                     continue
 
-                available_sources = self._available_plan_sources(
+                template_unit: PreparedTemplateUnit | None = None
+                if isinstance(source_step, DeploymentStep):
+                    outcome = operation_templates.get(operation.identity)
+                    if isinstance(outcome, CompilationFailure):
+                        blocked = replace(
+                            operation,
+                            disposition=PlanDisposition.BLOCKED,
+                            skip_reason=PlanSkipReason(
+                                code=SkipReasonCode.COMPILATION_FAILED,
+                                detail="Template compilation failed.",
+                            ),
+                        )
+                        prepared_operations.append(blocked)
+                        operations[operation.identity] = blocked
+                        continue
+                    if not isinstance(outcome, PreparedTemplateUnit):
+                        if operation.identity in unavailable_capabilities:
+                            blocked = replace(
+                                operation,
+                                disposition=PlanDisposition.BLOCKED,
+                                skip_reason=PlanSkipReason(
+                                    code=(
+                                        SkipReasonCode.CAPABILITY_UNAVAILABLE
+                                    ),
+                                    detail=(
+                                        "A required local capability is "
+                                        "unavailable."
+                                    ),
+                                ),
+                            )
+                            prepared_operations.append(blocked)
+                            operations[operation.identity] = blocked
+                            continue
+                        raise RuntimeError(
+                            f"Deployment step '{source_step.name}' has no "
+                            "compilation outcome."
+                        )
+                    template_unit = outcome
+
+                (
+                    available_sources,
+                    unavailable_sources,
+                ) = self._plan_reference_sources(
                     site,
-                    manifest.steps[:index],
+                    manifest.steps[:source_index],
                     operations,
                     subscription_targets,
                 )
@@ -3657,12 +4100,72 @@ class Orchestrator:
                         site,
                         manifest,
                         available_sources,
+                        unavailable_sources,
+                        operation.identity,
+                        template_unit,
                     )
                     prepared = replace(
                         operation,
                         details=details,
                         data_references=references,
                     )
+                    if operation.identity in unavailable_capabilities:
+                        prepared = replace(
+                            prepared,
+                            disposition=PlanDisposition.BLOCKED,
+                            skip_reason=PlanSkipReason(
+                                code=(
+                                    SkipReasonCode.CAPABILITY_UNAVAILABLE
+                                ),
+                                detail=(
+                                    "A required local capability is "
+                                    "unavailable."
+                                ),
+                            ),
+                        )
+                except UnavailableDataReferenceError as error:
+                    blocked_details = operation.details
+                    if (
+                        isinstance(blocked_details, DeploymentOperation)
+                        and template_unit is not None
+                    ):
+                        blocked_details = replace(
+                            blocked_details,
+                            template=template_unit.identity.source.path,
+                            template_unit_key=template_unit.key,
+                        )
+                    prepared = replace(
+                        operation,
+                        disposition=PlanDisposition.BLOCKED,
+                        details=blocked_details,
+                        skip_reason=PlanSkipReason(
+                            code=SkipReasonCode.DEPENDENCY_BLOCKED,
+                            detail=str(error),
+                        ),
+                        data_references=(error.reference,),
+                    )
+                    source_operation = operations.get(
+                        error.reference.source
+                    )
+                    if (
+                        source_operation is not None
+                        and source_operation.disposition
+                        is PlanDisposition.SKIP
+                    ):
+                        diagnostic = PlanDiagnostic(
+                            code="operation.dependency-blocked",
+                            severity=DiagnosticSeverity.ERROR,
+                            summary=(
+                                "A required prior operation is unavailable."
+                            ),
+                            detail=str(error),
+                            serialized_detail=(
+                                "Select the required prior operation or "
+                                "remove the dependent output reference."
+                            ),
+                        )
+                        target_diagnostics.append(diagnostic)
+                        diagnostics.append(diagnostic)
                 except (
                     CompositionError,
                     ParameterSelectionError,
@@ -3680,10 +4183,20 @@ class Orchestrator:
                     )
                     target_diagnostics.append(diagnostic)
                     diagnostics.append(diagnostic)
-                    target_failed = True
+                    blocked_details = operation.details
+                    if (
+                        isinstance(blocked_details, DeploymentOperation)
+                        and template_unit is not None
+                    ):
+                        blocked_details = replace(
+                            blocked_details,
+                            template=template_unit.identity.source.path,
+                            template_unit_key=template_unit.key,
+                        )
                     prepared = replace(
                         operation,
                         disposition=PlanDisposition.BLOCKED,
+                        details=blocked_details,
                         skip_reason=PlanSkipReason(
                             code=SkipReasonCode.TARGET_PREPARATION_FAILED,
                             detail="Target preparation failed.",
@@ -3703,6 +4216,30 @@ class Orchestrator:
             diagnostics,
         )
 
+    @staticmethod
+    def _invalid_preparation(
+        errors: list[str],
+        intent: PlanIntent,
+        *,
+        code: str = "validation.failed",
+        summary: str = "Manifest validation failed.",
+    ) -> PlanBuildResult:
+        return PlanBuildResult(
+            status=PlanStatus.INVALID,
+            executable=False,
+            plan=None,
+            diagnostics=tuple(
+                PlanDiagnostic(
+                    code=code,
+                    severity=DiagnosticSeverity.ERROR,
+                    summary=summary,
+                    detail=error,
+                )
+                for error in errors
+            ),
+            intent=intent,
+        )
+
     def build_plan(
         self,
         manifest_path: Path,
@@ -3715,84 +4252,70 @@ class Orchestrator:
     ) -> PlanBuildResult:
         """Build one immutable plan without printing or deploying.
 
-        Describe intent reads workspace inputs. Executable intent also reads
-        template schemas.
+        Both intents validate the same loaded inputs. Executable intent
+        additionally acquires template schemas and local capabilities.
         """
-        if manifest is None:
-            manifest = Manifest.from_file(
-                manifest_path,
-                workspace_root=self.workspace,
-            )
-        if sites is None:
-            sites = self.resolve_sites(manifest, selector)
-        preexisting_target_diagnostics: dict[
-            str,
-            list[PlanDiagnostic],
-        ] = {}
-        if intent is PlanIntent.EXECUTABLE:
-            site_groups = self._group_sites_by_subscription(sites)
-            subscription_steps = [
-                step
-                for step in manifest.steps
-                if isinstance(step, DeploymentStep)
-                and step.scope == "subscription"
-            ]
-            for subscription, (
-                subscription_sites,
-                resource_group_sites,
-            ) in site_groups.items():
-                if len(subscription_sites) > 1:
-                    names = ", ".join(
-                        site.name for site in subscription_sites
-                    )
-                    raise MultipleSubscriptionSitesError(
-                        f"Subscription "
-                        f"'{_reportable_subscription(subscription)}' has "
-                        f"multiple subscription-level sites: {names}. Only "
-                        "one subscription-level site per subscription is "
-                        "allowed."
-                    )
+        try:
+            if manifest is None:
+                manifest = Manifest.from_file(
+                    manifest_path,
+                    workspace_root=self.workspace,
+                )
+            if sites is None:
+                sites = self.resolve_sites(manifest, selector)
                 if (
-                    not subscription_sites
-                    and resource_group_sites
-                    and self._any_subscription_step_would_execute(
-                        subscription_steps,
-                        resource_group_sites,
-                    )
+                    (selector or (not manifest.sites and manifest.site_selector))
+                    and self.skipped_sites
                 ):
-                    names = ", ".join(
-                        site.name for site in resource_group_sites[:3]
+                    return self._invalid_preparation(
+                        [
+                            f"The selected target set is incomplete. "
+                            f"{len(self.skipped_sites)} site(s) could not "
+                            "be loaded: "
+                            + ", ".join(name for name, _ in self.skipped_sites)
+                            + ". Fix those files or select explicit sites."
+                        ],
+                        intent,
+                        code="plan.target-set-incomplete",
+                        summary="The selected target set is incomplete.",
                     )
-                    if len(resource_group_sites) > 3:
-                        names += (
-                            f"... and {len(resource_group_sites) - 3} more"
-                        )
-                    for site in resource_group_sites:
-                        preexisting_target_diagnostics.setdefault(
-                            site.name,
-                            [],
-                        ).append(
-                            PlanDiagnostic(
-                                code="subscription-target.missing",
-                                severity=DiagnosticSeverity.ERROR,
-                                summary=(
-                                    "A required subscription target is "
-                                    "missing."
-                                ),
-                                detail=(
-                                    f"Subscription "
-                                    f"'{_reportable_subscription(subscription)}' "
-                                    f"has RG-level sites ({names}) but no "
-                                    "subscription-level site for "
-                                    "subscription-scoped steps."
-                                ),
-                                serialized_detail=(
-                                    "Add one subscription-level site for "
-                                    "each selected subscription that needs "
-                                    "subscription-scoped steps."
-                                ),
-                            )
-                        )
+        except NoTargetingError as error:
+            return self._invalid_preparation(
+                [str(error)],
+                intent,
+                code="plan.targeting.required",
+                summary=(
+                    "Add `sites:` or `selector:` to the manifest, or "
+                    "pass `-l <key>=<value>`."
+                ),
+            )
+        except (ValueError, OSError, yaml.YAMLError) as error:
+            return self._invalid_preparation([str(error)], intent)
+
+        if not sites:
+            return self._invalid_preparation(
+                [
+                    self.explain_no_match(selector)
+                    if selector
+                    else (
+                        "No sites matched the specified criteria. "
+                        f"Manifest selector: {manifest.site_selector}"
+                    )
+                    if manifest.site_selector
+                    else "No sites matched the specified criteria."
+                ],
+                intent,
+                code="plan.targeting.empty",
+                summary="No sites matched the selected criteria.",
+            )
+        errors = self.validate(
+            manifest_path,
+            selector,
+            manifest=manifest,
+            sites=sites,
+        )
+        if errors:
+            return self._invalid_preparation(errors, intent)
         plan_steps = tuple(
             self._build_plan_step(step, sequence)
             for sequence, step in enumerate(manifest.steps, 1)
@@ -3800,10 +4323,12 @@ class Orchestrator:
 
         targets: list[PreparedTarget] = []
         diagnostics: list[PlanDiagnostic] = []
+        composition_context: dict[
+            str,
+            tuple[CompositionResult, CompositionContract],
+        ] = {}
         for site in sites:
-            target_diagnostics = list(
-                preexisting_target_diagnostics.get(site.name, ())
-            )
+            target_diagnostics: list[PlanDiagnostic] = []
             plan_composition: PlanComposition | None = None
             if manifest.parameter_compositions:
                 try:
@@ -3811,12 +4336,13 @@ class Orchestrator:
                         self._resolve_manifest_parameters(
                             manifest,
                             site,
-                            validate_step_coverage=(
-                                intent is PlanIntent.EXECUTABLE
-                            ),
                         )
                     )
                     if composition is not None and contract is not None:
+                        composition_context[site.name] = (
+                            composition,
+                            contract,
+                        )
                         plan_composition = self._build_plan_composition(
                             manifest,
                             site,
@@ -3920,15 +4446,64 @@ class Orchestrator:
             targets.append(target)
             diagnostics.extend(target_diagnostics)
 
+        template_units: tuple[PreparedTemplateUnit, ...] = ()
+        capabilities: tuple[PlanCapability, ...] = ()
         if intent is PlanIntent.EXECUTABLE:
+            session = TemplateCompilationSession()
+            requirements = self._required_capabilities(
+                targets,
+            )
+            (
+                capabilities,
+                capability_diagnostics,
+                unavailable_capabilities,
+            ) = self._resolve_plan_capabilities(
+                requirements,
+                session,
+            )
+            diagnostics.extend(capability_diagnostics)
+            (
+                acquired_units,
+                operation_templates,
+                compilation_diagnostics,
+            ) = self._acquire_plan_templates(
+                targets,
+                session,
+                unavailable_capabilities,
+            )
+            diagnostics.extend(compilation_diagnostics)
+            targets, coverage_diagnostics = (
+                self._validate_plan_composition_coverage(
+                    manifest,
+                    sites,
+                    targets,
+                    composition_context,
+                    operation_templates,
+                )
+            )
+            diagnostics.extend(coverage_diagnostics)
             targets, preparation_diagnostics = (
                 self._prepare_plan_targets(
                     manifest,
                     sites,
                     targets,
+                    operation_templates,
+                    unavailable_capabilities,
                 )
             )
             diagnostics.extend(preparation_diagnostics)
+            referenced_unit_keys = {
+                operation.details.template_unit_key
+                for target in targets
+                for operation in target.operations
+                if isinstance(operation.details, DeploymentOperation)
+                and operation.details.template_unit_key is not None
+            }
+            template_units = tuple(
+                unit
+                for unit in acquired_units
+                if unit.key in referenced_unit_keys
+            )
 
         effective_parallel = (
             parallel_override
@@ -3943,19 +4518,31 @@ class Orchestrator:
             max_parallel_sites=effective_parallel,
             steps=plan_steps,
             targets=tuple(targets),
+            template_units=template_units,
+            capabilities=capabilities,
             cli_selector=selector,
             manifest_selector=manifest.site_selector,
             composition_enabled=bool(manifest.parameter_compositions),
         )
+        has_errors = any(
+            diagnostic.severity is DiagnosticSeverity.ERROR
+            for diagnostic in diagnostics
+        )
+        has_blocked_operations = any(
+            operation.disposition is PlanDisposition.BLOCKED
+            for target in targets
+            for operation in target.operations
+        )
         return PlanBuildResult(
             status=(
                 PlanStatus.INVALID
-                if diagnostics
+                if has_errors or has_blocked_operations
                 else PlanStatus.PLANNED
             ),
             executable=(
                 intent is PlanIntent.EXECUTABLE
-                and not diagnostics
+                and not has_errors
+                and not has_blocked_operations
             ),
             plan=plan,
             diagnostics=tuple(diagnostics),
@@ -3965,7 +4552,7 @@ class Orchestrator:
         self,
         manifest_path: Path,
         selector: str | None = None,
-    ) -> None:
+    ) -> PlanBuildResult:
         """Print the plain plan without compiling templates or deploying."""
         result = self.build_plan(manifest_path, selector)
         print(
@@ -3975,6 +4562,7 @@ class Orchestrator:
             ),
             end="",
         )
+        return result
 
     @staticmethod
     def _prepared_deployment_name(
@@ -4023,14 +4611,14 @@ class Orchestrator:
 
     @staticmethod
     def _validate_prepared_parameter_names(
-        details: DeploymentOperation,
+        template_unit: PreparedTemplateUnit,
         parameters: dict[Any, Any],
     ) -> None:
         invalid_names = [
             name
             for name in parameters
             if not isinstance(name, str)
-            or name not in details.accepted_parameters
+            or name not in template_unit.parameter_names
         ]
         if invalid_names:
             raise PlanValueResolutionError(
@@ -4074,11 +4662,21 @@ class Orchestrator:
                     "Prepared deployment parameters did not resolve to a "
                     "mapping."
                 )
+            if details.template_unit_key is None:
+                raise ValueError(
+                    f"Deployment step '{operation.identity.step}' on "
+                    f"site '{operation.identity.target}' has no prepared "
+                    "template unit."
+                )
+            template_unit = plan.template_unit(
+                details.template_unit_key
+            )
             if execution_mode is PlanExecutionMode.APPLY:
                 self._validate_prepared_parameter_names(
-                    details,
+                    template_unit,
                     parameters,
                 )
+            template_path = template_unit.identity.source.path
             deployment_name = self._prepared_deployment_name(
                 plan.manifest_name,
                 target.name,
@@ -4089,7 +4687,7 @@ class Orchestrator:
                 return self.executor.deploy_subscription(
                     subscription=target.subscription,
                     location=target.location,
-                    template_path=details.template,
+                    template_path=template_path,
                     parameters=parameters,
                     deployment_name=deployment_name,
                     step_name=operation.identity.step,
@@ -4098,7 +4696,7 @@ class Orchestrator:
             return self.executor.deploy_resource_group(
                 subscription=target.subscription,
                 resource_group=target.resource_group or "",
-                template_path=details.template,
+                template_path=template_path,
                 parameters=parameters,
                 deployment_name=deployment_name,
                 step_name=operation.identity.step,
@@ -4590,6 +5188,42 @@ class Orchestrator:
                     return True
         return False
 
+    def _bind_plan_capabilities(self, plan: DeploymentPlan) -> None:
+        azure_cli: Path | None = None
+        kubectl: Path | None = None
+        for capability in plan.capabilities:
+            if (
+                capability.status is CapabilityStatus.MISSING
+                or capability.provider is None
+            ):
+                continue
+            if capability.kind in {
+                CapabilityKind.ARM_CONTROL_PLANE,
+                CapabilityKind.ARC_PROXY,
+            } and capability.provider.name == "azure-cli":
+                candidate = capability.provider.executable_path
+                if candidate is None:
+                    raise ValueError(
+                        "Azure CLI capability provider has no executable "
+                        "path."
+                    )
+                if azure_cli is not None and azure_cli != candidate:
+                    raise ValueError(
+                        "Prepared plan selected conflicting Azure CLI "
+                        "providers."
+                    )
+                azure_cli = candidate
+            elif capability.kind is CapabilityKind.KUBECTL:
+                kubectl = capability.provider.executable_path
+                if kubectl is None:
+                    raise ValueError(
+                        "kubectl capability provider has no executable path."
+                    )
+        self.executor.bind_tool_paths(
+            azure_cli=azure_cli,
+            kubectl=kubectl,
+        )
+
     def execute_plan(
         self,
         result: PlanBuildResult,
@@ -4600,6 +5234,7 @@ class Orchestrator:
         if not result.executable or result.plan is None:
             raise PlanNotExecutableError(result)
         plan = result.plan
+        self._bind_plan_capabilities(plan)
         if not plan.targets:
             logger.warning("No sites to deploy to")
             return {

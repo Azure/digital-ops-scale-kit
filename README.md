@@ -55,7 +55,7 @@ Site Ops runs anywhere Python runs. No agents, no servers, no state to manage.
 - **Output chaining**: reference outputs from previous steps, including cross-scope resolution from subscription to resource group deployments
 - **Parallel execution**: deploy to multiple sites simultaneously with configurable concurrency
 - **Failure isolation**: one site's failure doesn't block others. Subscription failures block only dependent sites.
-- **Dry-run validation**: preview the full deployment plan without making Azure calls
+- **Executable planning**: compile and preflight the full deployment plan without making Azure calls
 - **Declarative workload resources**: compose reviewable Azure IoT Operations device, asset, and dataflow definitions in YAML, then apply them across the fleet with each site's own values substituted in
 - **Flexible step orchestration**: conditional execution, parameter auto-filtering, and mixed Bicep, kubectl, and wait steps in a single manifest
 
@@ -122,7 +122,7 @@ siteops -w workspaces/iot-operations sites
 # from "Override for your subscription" is in place, deploy against just
 # that site:
 siteops -w workspaces/iot-operations validate manifests/aio-install.yaml
-siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml -l name=munich-dev --dry-run
+siteops -w workspaces/iot-operations plan manifests/aio-install.yaml -l name=munich-dev
 siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml -l name=munich-dev
 ```
 
@@ -302,11 +302,11 @@ auto-filtering, merge order, and cross-scope output chaining.
 | `siteops sites <name> --show-sources` | Show every value with the source file it came from after inherits and overlays |
 | `siteops sites <name> --render` | Show the resolved YAML after inheritance and overlays |
 | `siteops validate <manifest>` | Validate manifest and all references |
-| `siteops validate <manifest> --plan` | Validation plus the deployment plan |
-| `siteops validate <manifest> --plan --output json` | Emit one structured plan document |
+| `siteops plan <manifest>` | Validate, compile, preflight, and show the executable deployment plan |
+| `siteops plan <manifest> --describe` | Show the compile-free plan shape |
+| `siteops plan <manifest> --output json` | Emit one structured plan document |
 | `siteops deploy <manifest>` | Execute deployment |
-| `siteops deploy <manifest> --dry-run` | Show the plan without calling Azure |
-| `siteops -v deploy <manifest> --dry-run` | The plan plus the exact commands each step would run |
+| `siteops deploy <manifest> --dry-run` | Compatibility alias for executable planning |
 
 ### Common options
 

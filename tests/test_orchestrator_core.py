@@ -8,6 +8,7 @@ Covers:
 """
 
 import hashlib
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,6 +17,18 @@ import yaml
 
 from siteops.models import DeploymentStep, Manifest, ParallelConfig, Site
 from siteops.orchestrator import Orchestrator
+
+
+def _arm_template():
+    return {
+        "$schema": (
+            "https://schema.management.azure.com/schemas/2019-04-01/"
+            "deploymentTemplate.json#"
+        ),
+        "contentVersion": "1.0.0.0",
+        "parameters": {},
+        "resources": [],
+    }
 
 
 class TestOrchestratorSiteLoading:
@@ -529,15 +542,15 @@ steps:
             name="test",
             description="",
             sites=["test-site"],
-            steps=[DeploymentStep(name="step1", template="templates/test.bicep")],
+            steps=[DeploymentStep(name="step1", template="templates/test.json")],
             parallel=ParallelConfig(sites=1),  # Sequential in manifest
+        )
+        (complete_workspace / "templates" / "test.json").write_text(
+            json.dumps(_arm_template()),
+            encoding="utf-8",
         )
 
         with (
-            patch(
-                "siteops.orchestrator.get_template_parameters",
-                return_value=frozenset(),
-            ),
             patch.object(
                 orchestrator,
                 "_run_prepared_targets",
@@ -561,8 +574,12 @@ steps:
             name="test",
             description="",
             sites=["test-site"],
-            steps=[DeploymentStep(name="step1", template="templates/test.bicep")],
+            steps=[DeploymentStep(name="step1", template="templates/test.json")],
             parallel=ParallelConfig(sites=0),  # Unlimited in manifest
+        )
+        (complete_workspace / "templates" / "test.json").write_text(
+            json.dumps(_arm_template()),
+            encoding="utf-8",
         )
 
         target_result = {
@@ -576,10 +593,6 @@ steps:
             "steps": [],
         }
         with (
-            patch(
-                "siteops.orchestrator.get_template_parameters",
-                return_value=frozenset(),
-            ),
             patch.object(
                 orchestrator,
                 "_execute_prepared_target",
@@ -598,7 +611,7 @@ steps:
 class TestPlanParallelDisplay:
     """Tests for parallel config display in show_plan output."""
 
-    def test_plain_plan_output_is_byte_compatible(
+    def test_plain_describe_plan_output_is_deterministic(
         self,
         complete_workspace,
         capsys,
@@ -617,6 +630,9 @@ class TestPlanParallelDisplay:
             f"{border}\n"
             "\n"
             "  Test manifest\n"
+            "\n"
+            "  Preflight: not performed\n"
+            "  Templates and deployment capabilities were not checked.\n"
             "\n"
             "  Sites (1):\n"
             "    • test-site (eastus)\n"

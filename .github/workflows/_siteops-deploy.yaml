@@ -127,20 +127,25 @@ jobs:
             [[ -n "$val" ]] && echo "::add-mask::${val}"
           done
 
-      - name: Validate and show target sites
+      - name: Prepare executable deployment plan
         shell: bash
         run: |
-          # Use `validate --plan` instead of `sites`. Published plans show
+          # Prepare without executing. Published plans show
           # aggregate counts and omit site names, locations, resource identity,
           # parameter values, and source paths.
-          CMD_ARGS=(-w "$INPUT_WORKSPACE" validate "$INPUT_MANIFEST")
+          set -o pipefail
+          CMD_ARGS=(-w "$INPUT_WORKSPACE" plan "$INPUT_MANIFEST")
           [[ -n "$INPUT_SELECTOR" ]] && CMD_ARGS+=(-l "$INPUT_SELECTOR")
-          CMD_ARGS+=(--plan)
 
           echo "### Deployment Plan" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          siteops "${CMD_ARGS[@]}" 2>&1 | tee -a $GITHUB_STEP_SUMMARY
+          if siteops "${CMD_ARGS[@]}" 2>&1 | tee -a $GITHUB_STEP_SUMMARY; then
+            PLAN_EXIT_CODE=0
+          else
+            PLAN_EXIT_CODE=$?
+          fi
           echo '```' >> $GITHUB_STEP_SUMMARY
+          exit "$PLAN_EXIT_CODE"
 
       - name: Azure Login (OIDC)
         uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1

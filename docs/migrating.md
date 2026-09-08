@@ -21,11 +21,48 @@ siteops -w <workspace> sites
 ```
 
 Any site missing from that listing no longer loads, and the error names it. Fix those first, since
-a site that does not load is not a site that deploys. Then dry run each manifest you deploy:
+a site that does not load is not a site that deploys. Then plan each manifest you deploy:
 
 ```bash
-siteops -w <workspace> deploy <manifest> --dry-run -l <selector>
+siteops -w <workspace> plan <manifest> -l <selector>
 ```
+
+## Current preview
+
+**Executable planning has its own command.** Use `siteops plan <manifest>` to
+validate, compile, preflight, and inspect a deployment without executing it.
+Use `siteops plan <manifest> --describe` for the faster compile-free shape.
+
+`validate --plan` remains a compatibility spelling for the describe form.
+`deploy --dry-run` remains a compatibility spelling for executable planning
+and no longer reports simulated deployment success.
+
+**Preparation uses the same validation boundary from the CLI and Python
+API.** `plan` and `deploy` validate the loaded manifest and targets before
+compilation or resource writes. Structurally invalid inputs produce an
+invalid plan rather than a partial target plan. Python callers receive
+`PlanNotExecutableError` when attempting to deploy that invalid result.
+
+**Known kubectl inputs are checked during shared validation.** After site
+values resolve, local files and directories must exist inside the workspace,
+and URLs must use HTTPS. These checks run before local tool probing. A file
+path that depends on a prior deployment output remains deferred and is
+validated when that output resolves during execution.
+
+Planning requires a target set, including `plan --describe` and its
+`validate --plan` compatibility spelling. To check a library manifest
+without targeting, use `validate` without `--plan`. A manifest or CLI
+selector matching no sites returns a nonzero exit code.
+
+Parameter files must contain a mapping. An empty document remains an empty
+parameter mapping. Scalar values and arrays report `must contain a mapping`
+before compilation or execution.
+
+**Verbose dry-run command previews are replaced by prepared-plan
+inspection.** `-v` controls logging and does not generate simulated Azure or
+kubectl commands. Use `plan --output json --projection local-private` to
+inspect operation and dependency metadata locally. Parameter values and exact
+value-bearing command lines are not exported by that projection.
 
 ## To v1.0.0b7
 
@@ -231,12 +268,12 @@ resolve. Rename one, since keeping either would drop the other.
 **A mistyped template delimiter fails the step.** `{ site.x }}` and `{{ site.x }` reached ARM as
 literal text. Both now fail.
 
-**`deploy --dry-run` fails on what the real deployment would fail on.** A dry run resolves
-everything a real run resolves, apart from `{{ steps.X.outputs.Y }}` naming a step that runs earlier
-in the same manifest, which depends on outputs no dry run produces. Those still warn. An unresolved
-`{{ site.X }}` path, a mistyped delimiter, and a reference to a step that does not exist or that runs
-later all fail the dry run, so a pipeline that gates on `--dry-run` sees the same answer the
-deployment would give it.
+**Executable planning fails on what deployment preparation would fail on.**
+`siteops plan` resolves everything available before execution. A
+`{{ steps.X.outputs.Y }}` reference to an earlier operation remains a typed
+deferred value because the deployment has not produced it yet. An unresolved
+`{{ site.X }}` path, a mistyped delimiter, and a reference to an unknown or
+later step fail planning.
 
 **A parameter path that selects a file by site value must resolve to a real file.** A path such as
 `parameters/aio-releases/{{ site.properties.aioRelease }}.yaml` lets the site choose which file to
@@ -283,8 +320,8 @@ manifest that referenced the old path reports `Parameter file not found` and doe
 
 | Previously | Now |
 |---|---|
-| `siteops validate m.yaml -v` | `siteops validate m.yaml --plan` |
+| `siteops validate m.yaml -v` | `siteops plan m.yaml --describe` |
 | `siteops sites -v` | `siteops sites --show-sources` |
 
-`siteops deploy --dry-run` prints the plan on its own. Running `-v` where one of these flags is
-meant prints a note naming the flag.
+Use `siteops plan` for executable preflight. Running `-v` where one of these
+commands is meant prints a note naming the command.

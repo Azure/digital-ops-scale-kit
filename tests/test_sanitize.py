@@ -267,7 +267,20 @@ class TestOrchestratorAppliesRedaction:
 
     @staticmethod
     def _prepared_plan_target():
+        from siteops.compilation import (
+            CompilationKey,
+            DependencyCoverage,
+            DependencyIdentity,
+            PreparedTemplateUnit,
+            SourceIdentity,
+            TemplateCompilationIdentity,
+            TemplateKind,
+            VersionProvenance,
+        )
         from siteops.planning import (
+            CapabilityKind,
+            CapabilityProviderIdentity,
+            CapabilityStatus,
             DeploymentOperation,
             DeploymentPlan,
             InputStatus,
@@ -275,6 +288,7 @@ class TestOrchestratorAppliesRedaction:
             OperationIdentity,
             OperationKind,
             OperationScope,
+            PlanCapability,
             PlanDisposition,
             PlanIntent,
             PlanStep,
@@ -283,17 +297,49 @@ class TestOrchestratorAppliesRedaction:
             TargetKind,
         )
 
-        details = DeploymentOperation(
-            template=Path("templates/x.bicep"),
+        source = SourceIdentity(
+            path=Path("templates/x.json"),
+            content_digest="source",
+            size_bytes=1,
+        )
+        key = CompilationKey(
+            source_path=source.path,
+            source_content_digest=source.content_digest,
+            template_kind=TemplateKind.ARM_JSON,
+            compiler_fingerprint="arm-json",
+            configuration_digest="none",
+            invocation=("read-arm-json",),
+        )
+        unit = PreparedTemplateUnit(
+            key=key,
+            identity=TemplateCompilationIdentity(
+                source=source,
+                compiler_driver=None,
+                compiler=None,
+                configuration=None,
+                dependencies=DependencyIdentity(
+                    coverage=DependencyCoverage.NOT_APPLICABLE,
+                ),
+                compiled_output_digest=source.content_digest,
+            ),
+            parameters=(),
+        )
+        described_details = DeploymentOperation(
+            template=source.path,
+            input_status=InputStatus.DESCRIBED,
+        )
+        prepared_details = DeploymentOperation(
+            template=source.path,
             input_status=InputStatus.PREPARED,
             parameters=MappingValue(()),
+            template_unit_key=key,
         )
         step = PlanStep(
             name="aio-instance",
             sequence=1,
             kind=OperationKind.DEPLOYMENT,
             scope=OperationScope.RESOURCE_GROUP,
-            details=details,
+            details=described_details,
         )
         target = PreparedTarget(
             name="munich-prod",
@@ -309,7 +355,7 @@ class TestOrchestratorAppliesRedaction:
                     ),
                     step=step,
                     disposition=PlanDisposition.EXECUTE,
-                    details=details,
+                    details=prepared_details,
                 ),
             ),
         )
@@ -321,6 +367,22 @@ class TestOrchestratorAppliesRedaction:
             max_parallel_sites=1,
             steps=(step,),
             targets=(target,),
+            template_units=(unit,),
+            capabilities=(
+                PlanCapability(
+                    kind=CapabilityKind.ARM_CONTROL_PLANE,
+                    status=CapabilityStatus.AVAILABLE,
+                    required_by=(target.operations[0].identity,),
+                    provider=CapabilityProviderIdentity(
+                        name="azure-cli",
+                        executable_path=Path("C:/tools/az.exe"),
+                        version=None,
+                        version_provenance=(
+                            VersionProvenance.UNKNOWN
+                        ),
+                    ),
+                ),
+            ),
         )
         return plan, target
 

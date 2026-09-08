@@ -247,7 +247,8 @@ and step.
 1. Create `parameters/<area>/<set>.yaml` with the definitions that area accepts.
 2. Add its name to the matching ordered list under
    `properties.resourceSets.<area>`.
-3. Preview the steps with `siteops validate manifests/aio-resources.yaml -l <selector> --plan`.
+3. Prepare the deployment with
+   `siteops plan manifests/aio-resources.yaml -l <selector>`.
 4. Run the workspace tests with `pytest tests/workspace/ -q`, which check name uniqueness, reference resolution, required fields, and validity at every supported API version.
 
 ## See also

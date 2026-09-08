@@ -37,6 +37,8 @@ stages:
   - stage: ${{ parameters.stageName }}
     variables:
       PYTHONUNBUFFERED: '1'
+      SITEOPS_REDACT_OUTPUT: '1'
+      AZURE_CORE_OUTPUT: none
     jobs:
       - deployment: siteops_deploy
         displayName: Deploy
@@ -100,22 +102,24 @@ stages:
                     SITE_OVERRIDES: $(SITE_OVERRIDES)
 
                 - script: |
-                    # set -o pipefail so `siteops validate ... | tee` returns
-                    # siteops's exit code, not tee's. Otherwise a validation
-                    # failure passes silently and Deploy runs against a manifest
-                    # that did not validate.
+                    # Preserve planning failures through tee and summary upload.
+                    # Planning prepares local inputs without executing operations.
                     set -o pipefail
-                    CMD_ARGS=(-w "$WORKSPACE" validate "$MANIFEST")
+                    CMD_ARGS=(-w "$WORKSPACE" plan "$MANIFEST")
                     [[ -n "$SELECTOR" ]] && CMD_ARGS+=(-l "$SELECTOR")
-                    CMD_ARGS+=(--plan)
 
                     SUMMARY_FILE="$(Build.ArtifactStagingDirectory)/deployment-plan.md"
                     echo "### Deployment Plan" > "$SUMMARY_FILE"
                     echo '```' >> "$SUMMARY_FILE"
-                    siteops "${CMD_ARGS[@]}" 2>&1 | tee -a "$SUMMARY_FILE"
+                    if siteops "${CMD_ARGS[@]}" 2>&1 | tee -a "$SUMMARY_FILE"; then
+                      PLAN_EXIT_CODE=0
+                    else
+                      PLAN_EXIT_CODE=$?
+                    fi
                     echo '```' >> "$SUMMARY_FILE"
                     echo "##vso[task.uploadsummary]$SUMMARY_FILE"
-                  displayName: Validate and show target sites
+                    exit "$PLAN_EXIT_CODE"
+                  displayName: Prepare executable deployment plan
                   env:
                     WORKSPACE: ${{ parameters.workspace }}
                     MANIFEST: ${{ parameters.manifest }}

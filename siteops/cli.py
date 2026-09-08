@@ -5,12 +5,13 @@
 
 Commands:
     deploy   - Deploy a manifest to target sites
-    validate - Validate manifest (use --plan to show the deployment plan)
+    plan     - Prepare and preflight a deployment plan
+    validate - Validate manifest structure and references
     sites    - List available sites
 
 Global flags:
-    -v/--verbose controls log verbosity only. The deployment plan comes from
-    `validate --plan` or `deploy --dry-run`.
+    -v/--verbose controls log verbosity only. Use `plan` to prepare a
+    deployment plan.
 """
 
 import argparse
@@ -20,10 +21,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from siteops import __version__
 from siteops.composition import CompositionError, report_composition_error
 from siteops.models import (
+    Manifest,
     MultipleSubscriptionSitesError,
+    NoTargetingError,
     ParameterSelectionError,
     _merge_selector_strings,
 )
@@ -43,7 +48,6 @@ from siteops.sanitize import (
     is_redaction_enabled,
     report_parameter_selection_error,
     report_site_load_error,
-    scrub_site_for_output,
 )
 
 
@@ -65,6 +69,173 @@ def resolve_manifest_path(manifest: Path, workspace: Path) -> Path:
     return workspace / manifest
 
 
+def _plan_output_settings(
+    args: argparse.Namespace,
+    *,
+    require_plan_flag: bool = False,
+) -> tuple[bool, PlanProjection]:
+    output_format = getattr(args, "output", "plain")
+    requested_projection = getattr(args, "projection", None)
+    json_output = output_format == "json"
+    if requested_projection is not None and not json_output:
+        raise ValueError("--projection requires --output json.")
+    if (
+        require_plan_flag
+        and json_output
+        and not getattr(args, "plan", False)
+    ):
+        raise ValueError("--output json requires --plan.")
+    projection = (
+        PlanProjection(requested_projection)
+        if requested_projection is not None
+        else (
+            PlanProjection.PUBLISHABLE
+            if is_redaction_enabled()
+            else PlanProjection.LOCAL_PRIVATE
+        )
+    )
+    if (
+        json_output
+        and projection is PlanProjection.LOCAL_PRIVATE
+        and is_redaction_enabled()
+    ):
+        raise ValueError(
+            "local-private plan output is unavailable while output "
+            "redaction is enabled. Use --projection publishable."
+        )
+    return json_output, projection
+
+
+def _validation_failure_result(
+    errors: list[str],
+    *,
+    intent: PlanIntent,
+) -> PlanBuildResult:
+    return PlanBuildResult(
+        status=PlanStatus.INVALID,
+        executable=False,
+        plan=None,
+        diagnostics=tuple(
+            PlanDiagnostic(
+                code="validation.failed",
+                severity=DiagnosticSeverity.ERROR,
+                summary="Manifest validation failed.",
+                detail=error,
+            )
+            for error in errors
+        ),
+        intent=intent,
+    )
+
+
+def _write_plain_validation_errors(errors: list[str]) -> None:
+    print(
+        f"\n✗ Validation failed with {len(errors)} error(s):\n",
+        file=sys.stderr,
+    )
+    for error in errors:
+        print(f"  • {error}", file=sys.stderr)
+    print(file=sys.stderr)
+
+
+def _write_plan_result(
+    result: PlanBuildResult,
+    *,
+    json_output: bool,
+    projection: PlanProjection,
+) -> None:
+    if json_output:
+        print(
+            serialize_plan_json(
+                result,
+                projection,
+                engine_version=__version__,
+            )
+        )
+        return
+    print(
+        render_plain_plan(
+            result,
+            redacted=is_redaction_enabled(),
+        ),
+        end="",
+    )
+
+
+def cmd_plan(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
+    """Validate and prepare a deployment plan without executing it."""
+    manifest_path = resolve_manifest_path(args.manifest, args.workspace)
+    if not manifest_path.exists():
+        print(f"Error: Manifest not found: {manifest_path}", file=sys.stderr)
+        return 1
+
+    try:
+        json_output, projection = _plan_output_settings(args)
+    except ValueError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        return 1
+
+    selector = getattr(args, "selector", None)
+    intent = (
+        PlanIntent.DESCRIBE
+        if getattr(args, "describe", False)
+        else PlanIntent.EXECUTABLE
+    )
+    try:
+        if intent is PlanIntent.EXECUTABLE:
+            print(
+                "Preparing executable deployment plan...",
+                file=sys.stderr,
+            )
+        result = orchestrator.build_plan(
+            manifest_path,
+            selector,
+            intent=intent,
+            parallel_override=getattr(args, "parallel", None),
+        )
+    except (CompositionError, ParameterSelectionError) as error:
+        detail = (
+            report_composition_error(error)
+            if isinstance(error, CompositionError)
+            else report_parameter_selection_error(error)
+        )
+        print(f"\nError: {detail}\n", file=sys.stderr)
+        return 1
+    except NoTargetingError:
+        result = PlanBuildResult(
+            status=PlanStatus.INVALID,
+            executable=False,
+            plan=None,
+            diagnostics=(
+                PlanDiagnostic(
+                    code="plan.targeting.required",
+                    severity=DiagnosticSeverity.ERROR,
+                    summary=(
+                        "Add `sites:` or `selector:` to the manifest, or "
+                        "pass `-l <key>=<value>`."
+                    ),
+                    detail=(
+                        "The manifest has no `sites:` or `selector:`. Pass "
+                        "`-l <key>=<value>` to build a plan."
+                    ),
+                ),
+            ),
+            intent=intent,
+        )
+    except MultipleSubscriptionSitesError as error:
+        result = _validation_failure_result(
+            [str(error)],
+            intent=intent,
+        )
+
+    _write_plan_result(
+        result,
+        json_output=json_output,
+        projection=projection,
+    )
+    return 0 if result.status is PlanStatus.PLANNED else 1
+
+
 def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     """Execute deployment."""
     manifest_path = resolve_manifest_path(args.manifest, args.workspace)
@@ -72,89 +243,18 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     if not manifest_path.exists():
         print(f"Error: Manifest not found: {manifest_path}", file=sys.stderr)
         return 1
+    if getattr(args, "dry_run", False):
+        return cmd_plan(args, orchestrator)
 
-    parallel_override = getattr(args, "parallel", None)
-
-    import yaml as _yaml
-
-    from siteops.models import Manifest
-
-    cli_selector = getattr(args, "selector", None)
-    # A dry run prints the executable plan and passes that same plan to deploy.
-    # The executor's per-command lines stay behind `-v`.
     try:
-        manifest = Manifest.from_file(manifest_path, workspace_root=args.workspace)
-        sites = orchestrator.resolve_sites(manifest, cli_selector)
-    except (ValueError, OSError, _yaml.YAMLError) as e:
-        # ValueError: selector parse, no-targeting, overlay-rename, etc.
-        # OSError: missing or unreadable file (includes FileNotFoundError).
-        # YAMLError: malformed manifest YAML.
-        print(f"\nError: {report_site_load_error(e)}\n", file=sys.stderr)
-        return 1
-
-    if orchestrator.skipped_sites:
-        # A selector resolves against every site in the workspace, so a site
-        # that fails to load drops out of the target set. Deploying the rest
-        # reports success for a smaller fleet than the selector names. The
-        # failing sites were already reported by name.
-        names = (
-            "<site identities omitted>"
-            if is_redaction_enabled()
-            else ", ".join(name for name, _ in orchestrator.skipped_sites)
-        )
         print(
-            f"\nError: {len(orchestrator.skipped_sites)} site(s) could not be loaded "
-            f"({names}), so the target set is incomplete. Fix those files, or narrow "
-            f"the selector so they are out of scope.\n",
+            "Preparing executable deployment plan...",
             file=sys.stderr,
         )
-        return 1
-
-    if not sites:
-        if cli_selector:
-            # Operator explicitly asked for a target set and got
-            # nothing. Surface the diagnostic and exit non-zero so the
-            # condition is not silently masked in CI.
-            print(
-                "\nError: CLI selector matched no sites.\n"
-                if is_redaction_enabled()
-                else f"\nError: {orchestrator.explain_no_match(cli_selector)}\n",
-                file=sys.stderr,
-            )
-            return 1
-        print("\n⚠ No sites matched. Nothing to deploy.\n")
-        return 0
-
-    if not manifest.steps:
-        print("\n⚠ Manifest has no steps. Nothing to deploy.\n")
-        return 0
-
-    try:
-        plan_result = None
-        if getattr(args, "dry_run", False):
-            plan_result = orchestrator.build_plan(
-                manifest_path,
-                cli_selector,
-                intent=PlanIntent.EXECUTABLE,
-                manifest=manifest,
-                sites=sites,
-                parallel_override=parallel_override,
-            )
-            print(
-                render_plain_plan(
-                    plan_result,
-                    redacted=is_redaction_enabled(),
-                ),
-                end="",
-            )
-
         result = orchestrator.deploy(
             manifest_path,
             selector=getattr(args, "selector", None),
-            parallel_override=parallel_override,
-            manifest=manifest,
-            sites=sites,
-            plan_result=plan_result,
+            parallel_override=getattr(args, "parallel", None),
         )
     except (CompositionError, ParameterSelectionError) as e:
         detail = (
@@ -172,12 +272,11 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         )
         return 1
     except MultipleSubscriptionSitesError as e:
-        # Raised late, after site resolution, so it lands outside the guard
-        # around loading. Printed rather than raised so the operator sees which
-        # sites collide instead of a traceback.
-        detail = str(e)
-        for site in sites:
-            detail = scrub_site_for_output(detail, site.name) or ""
+        detail = (
+            "Only one subscription-level site per subscription is allowed."
+            if is_redaction_enabled()
+            else str(e)
+        )
         print(f"\nError: {detail}\n", file=sys.stderr)
         return 1
 
@@ -216,151 +315,46 @@ def cmd_validate(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
 
     selector = getattr(args, "selector", None)
     show_plan = getattr(args, "plan", False)
-    output_format = getattr(args, "output", "plain")
-    requested_projection = getattr(args, "projection", None)
-    json_output = output_format == "json"
-    if requested_projection is not None and not json_output:
-        print(
-            "Error: --projection requires --output json.",
-            file=sys.stderr,
+    try:
+        json_output, projection = _plan_output_settings(
+            args,
+            require_plan_flag=True,
         )
-        return 1
-    if json_output and not show_plan:
-        print(
-            "Error: --output json requires --plan.",
-            file=sys.stderr,
-        )
-        return 1
-    projection = (
-        PlanProjection(requested_projection)
-        if requested_projection is not None
-        else (
-            PlanProjection.PUBLISHABLE
-            if is_redaction_enabled()
-            else PlanProjection.LOCAL_PRIVATE
-        )
-    )
-    if (
-        json_output
-        and projection is PlanProjection.LOCAL_PRIVATE
-        and is_redaction_enabled()
-    ):
-        print(
-            "Error: local-private plan output is unavailable while output "
-            "redaction is enabled. Use --projection publishable.",
-            file=sys.stderr,
-        )
+    except ValueError as error:
+        print(f"Error: {error}", file=sys.stderr)
         return 1
 
     _note_superseded_verbose(args, show_plan, "validate", "--plan", "the deployment plan")
-    errors = orchestrator.validate(manifest_path, selector=selector)
+    if show_plan:
+        plan_args = argparse.Namespace(**vars(args))
+        plan_args.describe = True
+        return cmd_plan(plan_args, orchestrator)
 
-    if errors:
-        if json_output:
-            result = PlanBuildResult(
-                status=PlanStatus.INVALID,
-                executable=False,
-                plan=None,
-                diagnostics=tuple(
-                    PlanDiagnostic(
-                        code="validation.failed",
-                        severity=DiagnosticSeverity.ERROR,
-                        summary="Manifest validation failed.",
-                        detail=error,
-                    )
-                    for error in errors
-                ),
-            )
-            print(
-                serialize_plan_json(
-                    result,
-                    projection,
-                    engine_version=__version__,
-                )
-            )
-            return 1
-        print(f"\n✗ Validation failed with {len(errors)} error(s):\n")
-        for err in errors:
-            print(f"  • {err}")
-        print()
+    try:
+        manifest = Manifest.from_file(
+            manifest_path,
+            workspace_root=args.workspace,
+        )
+    except (ValueError, OSError, yaml.YAMLError) as error:
+        _write_plain_validation_errors([report_site_load_error(error)])
         return 1
 
-    if not json_output:
-        print(f"\n✓ Manifest is valid: {manifest_path.name}\n")
+    errors = orchestrator.validate(
+        manifest_path,
+        selector=selector,
+        manifest=manifest,
+    )
+    if errors:
+        _write_plain_validation_errors(errors)
+        return 1
 
-    # Heads-up when the manifest is a library/partial (no `sites:` and
-    # no `selector:`) and no `-l` was provided. Validation passes, but
-    # `deploy` will hard-error without targeting. Surfacing this here
-    # eliminates the validate-passes-then-deploy-fails confusion class.
-    is_library_no_selector = False
-    import yaml as _yaml
-
-    from siteops.models import Manifest as _Manifest
-    try:
-        _m = _Manifest.from_file(manifest_path, workspace_root=args.workspace)
-        is_library_no_selector = (
-            not selector and not _m.sites and not _m.site_selector
+    print(f"\n✓ Manifest is valid: {manifest_path.name}\n")
+    if not selector and not manifest.sites and not manifest.site_selector:
+        print(
+            "  Note: library manifest (no `sites:` or `selector:`). "
+            "Pass `-l <key>=<value>` at deploy time, or run "
+            "`siteops validate <manifest> -l ...` to exercise resolution.\n"
         )
-        if is_library_no_selector:
-            if json_output:
-                result = PlanBuildResult(
-                    status=PlanStatus.INVALID,
-                    executable=False,
-                    plan=None,
-                    diagnostics=(
-                        PlanDiagnostic(
-                            code="plan.targeting.required",
-                            severity=DiagnosticSeverity.ERROR,
-                            summary=(
-                                "Add `sites:` or `selector:` to the manifest, or "
-                                "pass `-l <key>=<value>`."
-                            ),
-                            detail=(
-                                "The manifest has no `sites:` or `selector:`. "
-                                "Pass `-l <key>=<value>` to build a plan."
-                            ),
-                        ),
-                    ),
-                )
-                print(
-                    serialize_plan_json(
-                        result,
-                        projection,
-                        engine_version=__version__,
-                    )
-                )
-                return 1
-            else:
-                print(
-                    "  Note: library manifest (no `sites:` or `selector:`). "
-                    "Pass `-l <key>=<value>` at deploy time, or run "
-                    "`siteops validate <manifest> -l ...` to exercise "
-                    "resolution.\n"
-                )
-    except (ValueError, OSError, _yaml.YAMLError):
-        # Manifest parse already passed in `validate` above. Any failure here
-        # is best-effort and should not change the exit code.
-        # Programmer errors (AttributeError, RuntimeError) still propagate.
-        pass
-
-    # Skip the plan render for a library manifest with no selector.
-    # show_plan re-resolves and would re-raise NoTargetingError.
-    if show_plan and not is_library_no_selector:
-        if json_output:
-            result = orchestrator.build_plan(
-                manifest_path,
-                selector,
-            )
-            print(
-                serialize_plan_json(
-                    result,
-                    projection,
-                    engine_version=__version__,
-                )
-            )
-            return 0 if result.status is PlanStatus.PLANNED else 1
-        orchestrator.show_plan(manifest_path, selector=selector)
-
     return 0
 
 
@@ -778,9 +772,9 @@ Examples:
   siteops -w workspaces/iot-operations sites
   siteops -w workspaces/iot-operations sites munich-dev --render
   siteops -w workspaces/iot-operations validate manifests/aio-install.yaml
+  siteops -w workspaces/iot-operations plan manifests/aio-install.yaml
   siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml
-  siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml --dry-run
-  siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml -l environment=prod -p max
+  siteops -w workspaces/iot-operations plan manifests/aio-install.yaml -l environment=prod
 """,
     )
     parser.add_argument("--version", action="version", version=f"siteops {__version__}")
@@ -815,7 +809,7 @@ Examples:
         action="store_true",
         help=(
             "Raise log verbosity to DEBUG. Controls logging only. To see a "
-            "deployment plan use `validate --plan` or `deploy --dry-run`."
+            "deployment plan use `siteops plan`."
         ),
     )
 
@@ -831,7 +825,10 @@ Examples:
     p_deploy.add_argument(
         "--dry-run",
         action="store_true",
-        help="Show what would be deployed without executing (default: false)",
+        help=(
+            "Compatibility alias for executable planning. Prepares and shows "
+            "the plan without executing it (default: false)."
+        ),
     )
     p_deploy.add_argument(
         "-l",
@@ -850,6 +847,61 @@ Examples:
         help=(
             "Max concurrent sites. Accepts a positive integer, or 'max' / "
             "'auto' / '0' for unlimited. Overrides the manifest setting."
+        ),
+    )
+
+    # plan command
+    p_plan = subparsers.add_parser(
+        "plan",
+        help="Prepare and preflight a deployment plan",
+        description=(
+            "Validate, resolve, compile, and preflight a deployment plan "
+            "without executing it."
+        ),
+    )
+    p_plan.add_argument("manifest", type=Path, help="Path to manifest file")
+    p_plan.add_argument(
+        "-l",
+        "--selector",
+        action="append",
+        default=None,
+        metavar="KEY=VALUE",
+        help=_SELECTOR_HELP,
+    )
+    p_plan.add_argument(
+        "--describe",
+        action="store_true",
+        help=(
+            "Show the compile-free plan shape without executable preflight "
+            "(default: false)."
+        ),
+    )
+    p_plan.add_argument(
+        "-p",
+        "--parallel",
+        type=_parse_parallel,
+        default=None,
+        metavar="N",
+        help=(
+            "Max concurrent sites recorded in the plan. Accepts a positive "
+            "integer, or 'max' / 'auto' / '0' for unlimited. Overrides the "
+            "manifest setting."
+        ),
+    )
+    p_plan.add_argument(
+        "--output",
+        choices=("plain", "json"),
+        default="plain",
+        help="Plan output format (default: plain).",
+    )
+    p_plan.add_argument(
+        "--projection",
+        choices=("local-private", "publishable"),
+        default=None,
+        help=(
+            "JSON plan projection, valid with --output json. Defaults to "
+            "publishable when output redaction is enabled, otherwise "
+            "local-private."
         ),
     )
 
@@ -976,6 +1028,7 @@ Examples:
 
     commands = {
         "deploy": cmd_deploy,
+        "plan": cmd_plan,
         "validate": cmd_validate,
         "sites": cmd_sites,
     }

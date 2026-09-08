@@ -32,7 +32,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from fnmatch import fnmatchcase
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -134,10 +133,6 @@ _ARC_PROXY_PORT_IN_USE_PATTERN = re.compile(
 # Default timeout for Azure CLI deployments (60 minutes)
 # Azure deployments can take significant time for complex resources
 DEFAULT_AZ_TIMEOUT_SECONDS = 3600
-
-# Compiling one template is local work. Bounded anyway, so a wedged `az` fails
-# the step with a diagnostic rather than holding a site's thread for the run.
-DEFAULT_BICEP_BUILD_TIMEOUT_SECONDS = 300
 
 # Default timeout for kubectl operations (10 minutes)
 DEFAULT_KUBECTL_TIMEOUT_SECONDS = 600
@@ -339,144 +334,6 @@ ARC_PROXY_MAX_SLOTS = 10  # Maximum concurrent proxies
 # since searching stderr for "timeout" also matches an ARM error naming a
 # parameter such as `idleTimeoutInMinutes`.
 ENGINE_TIMEOUT_SENTINEL = "Command timed out after {timeout}s"
-
-
-@lru_cache(maxsize=128)
-def _load_template_arm_json(template_path: str) -> dict[str, Any]:
-    """Compile (or read) a template and return its ARM JSON.
-
-    Bicep is compiled to a temporary file rather than to the console, since
-    `az` decodes console output in the locale encoding and raises on content
-    that encoding cannot represent.
-
-    Results are cached per template path, so a template is compiled once no
-    matter how many callers inspect it.
-
-    The cached value is shared, and sites deploy on a thread pool, so treat
-    the return as read-only. A caller that needs to mutate takes its own copy.
-
-    Args:
-        template_path: Absolute path to a `.bicep` or `.json` template.
-
-    Returns:
-        The parsed ARM template.
-
-    Raises:
-        ValueError: If the template cannot be compiled or parsed.
-        FileNotFoundError: If the template does not exist.
-    """
-    path = Path(template_path)
-
-    if not path.exists():
-        raise FileNotFoundError(f"Template not found: {template_path}")
-
-    if path.suffix == ".bicep":
-        az_path = shutil.which("az")
-        if not az_path:
-            raise ValueError(
-                "Azure CLI (`az`) not found on PATH. Install Azure CLI and ensure "
-                "`az` is available, then retry."
-            )
-
-        with tempfile.TemporaryDirectory() as tmp:
-            out_file = Path(tmp) / "template.json"
-            try:
-                result = subprocess.run(
-                    [az_path, "bicep", "build", "--file", str(path), "--outfile", str(out_file)],
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=DEFAULT_BICEP_BUILD_TIMEOUT_SECONDS,
-                )
-            except subprocess.TimeoutExpired as e:
-                # Raised as ValueError so callers handling a bad template handle
-                # this too. `TimeoutExpired` is a `SubprocessError`, so letting it
-                # escape would bypass them and fail the whole site rather than the
-                # step.
-                raise ValueError(
-                    f"Timed out compiling Bicep template {template_path} after "
-                    f"{DEFAULT_BICEP_BUILD_TIMEOUT_SECONDS}s"
-                ) from e
-            if result.returncode != 0:
-                raise ValueError(
-                    f"Failed to compile Bicep template {template_path}: {result.stderr}"
-                )
-            try:
-                return json.loads(out_file.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError) as e:
-                raise ValueError(
-                    f"Failed to parse compiled Bicep template {template_path}: {e}"
-                ) from e
-
-    if path.suffix == ".json":
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Failed to parse ARM template {template_path}: {e}") from e
-
-    raise ValueError(f"Unsupported template format: {path.suffix}. Expected .bicep or .json")
-
-
-def get_template_parameters(template_path: str) -> frozenset[str]:
-    """Extract parameter names from a Bicep or ARM template.
-
-    Args:
-        template_path: Absolute path to the template file
-
-    Returns:
-        Frozenset of parameter names the template accepts
-
-    Raises:
-        ValueError: If template cannot be parsed
-        FileNotFoundError: If template file doesn't exist
-    """
-    arm_json = _load_template_arm_json(template_path)
-    param_names = frozenset(arm_json.get("parameters", {}).keys())
-    logger.debug(f"Template {Path(template_path).name} accepts parameters: {sorted(param_names)}")
-    return param_names
-
-
-# The compile cache lives on the loader, so expose clearing through the public
-# reader. A caller that rewrites a template in place relies on this.
-get_template_parameters.cache_clear = _load_template_arm_json.cache_clear
-
-
-def filter_parameters(
-    parameters: dict[str, Any],
-    template_path: str,
-    step_name: str,
-) -> dict[str, Any]:
-    """Filter parameters to only those accepted by the template.
-
-    Args:
-        parameters: All parameters provided for the step
-        template_path: Absolute path to the template file
-        step_name: Name of the step (for logging)
-
-    Returns:
-        Filtered parameters dict containing only keys the template accepts
-    """
-    accepted_params = get_template_parameters(template_path)
-
-    filtered = {}
-    unused = []
-
-    for key, value in parameters.items():
-        if key in accepted_params:
-            filtered[key] = value
-        else:
-            unused.append(key)
-
-    if unused:
-        logger.debug(
-            scrub_for_output(
-                f"Step '{step_name}': Filtered out parameters not in template: {unused}"
-            )
-        )
-
-    return filtered
 
 
 def _allocate_arc_port_slot() -> int:
@@ -841,18 +698,38 @@ class AzCliExecutor:
         self._tmp_dir: Path | None = None
         self._az_path: str | None = None
         self._kubectl_path: str | None = None
+        self._tool_paths_bound = False
+
+    def bind_tool_paths(
+        self,
+        *,
+        azure_cli: Path | None = None,
+        kubectl: Path | None = None,
+    ) -> None:
+        """Use the local executables resolved during plan preflight."""
+        self._az_path = (
+            str(Path(azure_cli).resolve())
+            if azure_cli is not None
+            else None
+        )
+        self._kubectl_path = (
+            str(Path(kubectl).resolve())
+            if kubectl is not None
+            else None
+        )
+        self._tool_paths_bound = True
 
     @property
     def az_path(self) -> str | None:
         """Find and cache the az CLI executable path."""
-        if self._az_path is None:
+        if self._az_path is None and not self._tool_paths_bound:
             self._az_path = shutil.which("az")
         return self._az_path
 
     @property
     def kubectl_path(self) -> str | None:
         """Find and cache the kubectl executable path."""
-        if self._kubectl_path is None:
+        if self._kubectl_path is None and not self._tool_paths_bound:
             self._kubectl_path = shutil.which("kubectl")
         return self._kubectl_path
 
@@ -1181,7 +1058,9 @@ class AzCliExecutor:
                     try:
                         proxy_process.wait(timeout=5)
                     except subprocess.TimeoutExpired:
-                        logger.debug("Proxy did not exit after kill; reap will defer.")
+                        logger.debug(
+                            "Proxy did not exit after kill. Reap will defer."
+                        )
                 except Exception as e:
                     logger.debug(f"Error during proxy cleanup: {e}")
                     try:
@@ -1629,7 +1508,7 @@ class AzCliExecutor:
                 f"{target_label}: {formatted}" if target_label else formatted
             )
 
-        return "; ".join(messages) if messages else None
+        return ". ".join(messages) if messages else None
 
     def deploy_resource_group(
         self,

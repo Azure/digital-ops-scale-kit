@@ -15,18 +15,38 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from siteops.compilation import TemplateCompilationSession
 from siteops.composition import CompositionError
 from siteops.models import (
     AnyCondition,
     DeploymentStep,
     Manifest,
-    MultipleSubscriptionSitesError,
     ParameterSelectionError,
     ParameterSource,
     Site,
 )
 from siteops.orchestrator import Orchestrator
-from siteops.planning import PlanDisposition, PlanStatus
+from siteops.planning import (
+    DeploymentOperation,
+    InputStatus,
+    PlanDisposition,
+    PlanIntent,
+    PlanNotExecutableError,
+    PlanStatus,
+    SkipReasonCode,
+)
+
+
+def _arm_template(parameters=None):
+    return {
+        "$schema": (
+            "https://schema.management.azure.com/schemas/2019-04-01/"
+            "deploymentTemplate.json#"
+        ),
+        "contentVersion": "1.0.0.0",
+        "parameters": parameters or {},
+        "resources": [],
+    }
 
 
 class TestTemplateResolution:
@@ -896,7 +916,7 @@ class TestUnresolvedParameterPath:
         )
         (workspace / "parameters" / "chosen.yaml").write_text('selected: "yes"\n')
         (workspace / "templates" / "test.json").write_text(
-            json.dumps({"parameters": {"selected": {"type": "string"}}})
+            json.dumps(_arm_template({"selected": {"type": "string"}}))
         )
         (workspace / "manifests" / "test.yaml").write_text(
             "apiVersion: siteops/v1\nkind: Manifest\nname: test\n"
@@ -904,10 +924,6 @@ class TestUnresolvedParameterPath:
             f"parameters: [{json.dumps(parameter_path)}]\n"
             "steps:\n  - name: test-step\n    template: templates/test.json\n"
         )
-
-        from siteops.executor import get_template_parameters
-
-        get_template_parameters.cache_clear()
 
         orchestrator = Orchestrator(workspace)
         manifest = Manifest.from_file(
@@ -966,7 +982,7 @@ class TestUnresolvedParameterPath:
             "resourceGroup: rg-test\nlocation: eastus\n"
         )
         (workspace / "templates" / "test.json").write_text(
-            json.dumps({"parameters": {"selected": {"type": "string"}}})
+            json.dumps(_arm_template({"selected": {"type": "string"}}))
         )
         (workspace / "manifests" / "test.yaml").write_text(
             "apiVersion: siteops/v1\nkind: Manifest\nname: test\n"
@@ -974,10 +990,6 @@ class TestUnresolvedParameterPath:
             "parameters: [parameters/absent.yaml]\n"
             "steps:\n  - name: test-step\n    template: templates/test.json\n"
         )
-
-        from siteops.executor import get_template_parameters
-
-        get_template_parameters.cache_clear()
 
         orchestrator = Orchestrator(workspace)
         manifest = Manifest.from_file(
@@ -1090,7 +1102,7 @@ class TestResolveParametersManifestLevel:
     def _create_template(self, workspace, params):
         """Create ARM JSON template with specified parameters."""
         template_file = workspace / "templates" / "test.json"
-        template_file.write_text(json.dumps({"parameters": params}))
+        template_file.write_text(json.dumps(_arm_template(params)))
 
     def test_manifest_parameters_merged_before_step_parameters(self, tmp_path):
         """Test that manifest parameters are merged before step parameters."""
@@ -1137,10 +1149,6 @@ steps:
 """
         )
 
-        from siteops.executor import get_template_parameters
-
-        get_template_parameters.cache_clear()
-
         orchestrator = Orchestrator(workspace)
         manifest = Manifest.from_file(workspace / "manifests" / "test.yaml", workspace_root=workspace)
         site = orchestrator.load_site("test-site")
@@ -1169,7 +1177,7 @@ class TestManifestParameterSourceExpansion:
 
     def _create_template(self, workspace, params):
         (workspace / "templates" / "test.json").write_text(
-            json.dumps({"parameters": params})
+            json.dumps(_arm_template(params))
         )
 
     def _workspace(self, tmp_path, selection):
@@ -1196,12 +1204,12 @@ class TestManifestParameterSourceExpansion:
         )
         (workspace / "templates" / "test.json").write_text(
             json.dumps(
-                {
-                    "parameters": {
+                _arm_template(
+                    {
                         "first": {"type": "string"},
                         "second": {"type": "string"},
                     }
-                }
+                )
             )
         )
         (workspace / "manifests" / "test.yaml").write_text(
@@ -1380,12 +1388,12 @@ references:
         )
         (workspace / "templates" / "resources.json").write_text(
             json.dumps(
-                {
-                    "parameters": {
+                _arm_template(
+                    {
                         "devices": {"type": "array"},
                         "assets": {"type": "array"},
                     }
-                }
+                )
             )
         )
         (workspace / "parameters" / "devices" / "shared.yaml").write_text(
@@ -1659,7 +1667,7 @@ steps:
     def test_composed_writer_requires_a_selected_consumer_step(self, tmp_path):
         workspace = self._composition_workspace(tmp_path)
         (workspace / "templates" / "resources.json").write_text(
-            json.dumps({"parameters": {"assets": {"type": "array"}}})
+            json.dumps(_arm_template({"assets": {"type": "array"}}))
         )
         orchestrator = Orchestrator(workspace)
         manifest = Manifest.from_file(
@@ -1667,13 +1675,62 @@ steps:
             workspace_root=workspace,
         )
 
-        with pytest.raises(CompositionError, match="no selected deployment step"):
-            orchestrator.resolve_parameters(
-                manifest.steps[0],
-                orchestrator.load_site("test-site"),
-                manifest,
-                {},
+        result = orchestrator.build_plan(
+            workspace / "manifests" / "resources.yaml",
+            intent=PlanIntent.EXECUTABLE,
+            manifest=manifest,
+            sites=[orchestrator.load_site("test-site")],
+        )
+
+        assert result.status is PlanStatus.INVALID
+        assert any(
+            "no selected deployment step" in (diagnostic.detail or "")
+            for diagnostic in result.diagnostics
+        )
+        assert result.plan is not None
+        assert len(result.plan.template_units) == 1
+        operation = result.plan.targets[0].operations[0]
+        assert operation.disposition is PlanDisposition.BLOCKED
+        assert isinstance(operation.details, DeploymentOperation)
+        assert operation.details.template_unit_key == result.plan.template_units[0].key
+
+    def test_missing_azure_cli_does_not_report_composition_coverage(
+        self,
+        tmp_path,
+    ):
+        workspace = self._composition_workspace(tmp_path)
+        orchestrator = Orchestrator(workspace)
+        manifest_path = workspace / "manifests" / "resources.yaml"
+
+        session = TemplateCompilationSession(
+            tool_resolver=lambda name: None,
+        )
+        with patch(
+            "siteops.orchestrator.TemplateCompilationSession",
+            return_value=session,
+        ):
+            result = orchestrator.build_plan(
+                manifest_path,
+                intent=PlanIntent.EXECUTABLE,
             )
+
+        assert result.status is PlanStatus.INVALID
+        assert not result.executable
+        assert result.plan is not None
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            "capability.arm-control-plane.missing"
+        ]
+        operation = result.plan.targets[0].operations[0]
+        assert operation.disposition is PlanDisposition.BLOCKED
+        assert isinstance(operation.details, DeploymentOperation)
+        assert operation.details.input_status is InputStatus.PREPARED
+        assert operation.details.template_unit_key is not None
+        assert len(result.plan.template_units) == 1
+        assert operation.skip_reason is not None
+        assert (
+            operation.skip_reason.code
+            is SkipReasonCode.CAPABILITY_UNAVAILABLE
+        )
 
     def test_missing_fixed_governed_source_fails_deploy_resolution(
         self,
@@ -1705,10 +1762,10 @@ steps:
     def test_reference_provider_step_must_precede_consumer(self, tmp_path):
         workspace = self._composition_workspace(tmp_path)
         (workspace / "templates" / "devices.json").write_text(
-            json.dumps({"parameters": {"devices": {"type": "array"}}})
+            json.dumps(_arm_template({"devices": {"type": "array"}}))
         )
         (workspace / "templates" / "assets.json").write_text(
-            json.dumps({"parameters": {"assets": {"type": "array"}}})
+            json.dumps(_arm_template({"assets": {"type": "array"}}))
         )
         manifest_path = workspace / "manifests" / "resources.yaml"
         manifest = yaml.safe_load(manifest_path.read_text())
@@ -1720,13 +1777,18 @@ steps:
         orchestrator = Orchestrator(workspace)
         parsed = Manifest.from_file(manifest_path, workspace_root=workspace)
 
-        with pytest.raises(CompositionError, match="after consumer collection"):
-            orchestrator.resolve_parameters(
-                parsed.steps[0],
-                orchestrator.load_site("test-site"),
-                parsed,
-                {},
-            )
+        result = orchestrator.build_plan(
+            manifest_path,
+            intent=PlanIntent.EXECUTABLE,
+            manifest=parsed,
+            sites=[orchestrator.load_site("test-site")],
+        )
+
+        assert result.status is PlanStatus.INVALID
+        assert any(
+            "after consumer collection" in (diagnostic.detail or "")
+            for diagnostic in result.diagnostics
+        )
 
     def test_plan_shows_composed_resources_and_apply_semantics(
         self,
@@ -1757,7 +1819,7 @@ steps:
         orchestrator = Orchestrator(workspace)
 
         with patch(
-            "siteops.orchestrator.get_template_parameters",
+            "siteops.orchestrator.TemplateCompilationSession",
             side_effect=AssertionError("describe planning compiled a template"),
         ):
             result = orchestrator.build_plan(
@@ -1993,18 +2055,21 @@ steps:
             )
         )
 
-        with pytest.raises(
-            CompositionError,
-            match="more than one selected deployment step",
-        ):
-            orchestrator.resolve_parameters(
-                manifest.steps[0],
-                orchestrator.load_site("test-site"),
-                manifest,
-                {},
-            )
+        result = orchestrator.build_plan(
+            workspace / "manifests" / "resources.yaml",
+            intent=PlanIntent.EXECUTABLE,
+            manifest=manifest,
+            sites=[orchestrator.load_site("test-site")],
+        )
 
-    def test_plan_continues_after_one_site_has_an_invalid_selection(
+        assert result.status is PlanStatus.INVALID
+        assert any(
+            "more than one selected deployment step"
+            in (diagnostic.detail or "")
+            for diagnostic in result.diagnostics
+        )
+
+    def test_plan_rejects_structurally_invalid_site_selection(
         self,
         tmp_path,
         capsys,
@@ -2023,15 +2088,16 @@ steps:
         manifest["sites"] = ["invalid-site", "test-site"]
         manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False))
 
-        Orchestrator(workspace).show_plan(manifest_path)
+        result = Orchestrator(workspace).show_plan(manifest_path)
 
         output = capsys.readouterr().out
         assert "invalid-site" in output
         assert "does not exist" in output
-        assert "apply     devices[name='plant-opc']" in output
-        assert "Total: 1 operation(s)" in output
+        assert result.status is PlanStatus.INVALID
+        assert result.plan is None
+        assert "Total:" not in output
 
-    def test_redacted_plan_aggregates_selection_errors(
+    def test_redacted_plan_omits_invalid_selection_details(
         self,
         tmp_path,
         capsys,
@@ -2059,9 +2125,8 @@ steps:
         assert "test-site" not in output
         assert "private-missing" not in output
         assert "parameters/assets" not in output
-        assert "1 site(s): Parameter file selection failed" in output
-        assert "2 selected source(s)" in output
-        assert "Total: 1 operation(s)" in output
+        assert "Manifest validation failed" in output
+        assert "Total:" not in output
 
     def test_manifest_parameters_resolved_with_site_variables(self, tmp_path):
         """Test that {{ site.X }} templates in manifest params are resolved."""
@@ -2111,10 +2176,6 @@ steps:
     template: templates/test.json
 """
         )
-
-        from siteops.executor import get_template_parameters
-
-        get_template_parameters.cache_clear()
 
         orchestrator = Orchestrator(workspace)
         manifest = Manifest.from_file(workspace / "manifests" / "test.yaml", workspace_root=workspace)
@@ -2166,10 +2227,6 @@ steps:
     parameters: [parameters/step.yaml]
 """
         )
-
-        from siteops.executor import get_template_parameters
-
-        get_template_parameters.cache_clear()
 
         orchestrator = Orchestrator(workspace)
         manifest = Manifest.from_file(workspace / "manifests" / "test.yaml", workspace_root=workspace)
@@ -2237,10 +2294,6 @@ steps:
 """
         )
 
-        from siteops.executor import get_template_parameters
-
-        get_template_parameters.cache_clear()
-
         orchestrator = Orchestrator(workspace)
         manifest = Manifest.from_file(workspace / "manifests" / "test.yaml", workspace_root=workspace)
         site = orchestrator.load_site("test-site")
@@ -2299,10 +2352,6 @@ steps:
 """
         )
 
-        from siteops.executor import get_template_parameters
-
-        get_template_parameters.cache_clear()
-
         orchestrator = Orchestrator(workspace)
         manifest = Manifest.from_file(workspace / "manifests" / "test.yaml", workspace_root=workspace)
         site = orchestrator.load_site("test-site")
@@ -2344,10 +2393,6 @@ steps:
     template: templates/test.json
 """
         )
-
-        from siteops.executor import get_template_parameters
-
-        get_template_parameters.cache_clear()
 
         orchestrator = Orchestrator(workspace)
         manifest = Manifest.from_file(workspace / "manifests" / "test.yaml", workspace_root=workspace)
@@ -2419,10 +2464,6 @@ steps:
 """
         )
 
-        from siteops.executor import get_template_parameters
-
-        get_template_parameters.cache_clear()
-
         orchestrator = Orchestrator(workspace)
         manifest = Manifest.from_file(workspace / "manifests" / "test.yaml", workspace_root=workspace)
         site = orchestrator.load_site("test-site")
@@ -2463,7 +2504,7 @@ class TestParametersResolution:
     def _create_template(self, workspace, params):
         """Create ARM JSON template with specified parameters."""
         template_file = workspace / "templates" / "test.json"
-        template_file.write_text(json.dumps({"parameters": params}))
+        template_file.write_text(json.dumps(_arm_template(params)))
 
     def test_resolve_simple_parameter(self, tmp_workspace):
         orchestrator = Orchestrator(workspace=tmp_workspace)
@@ -2688,10 +2729,6 @@ steps:
 """
         )
 
-        from siteops.executor import get_template_parameters
-
-        get_template_parameters.cache_clear()
-
         orchestrator = Orchestrator(workspace)
         manifest = Manifest.from_file(workspace / "manifests" / "test.yaml", workspace_root=workspace)
         site = orchestrator.load_site("test-site")
@@ -2766,10 +2803,6 @@ steps:
 """
         )
 
-        from siteops.executor import get_template_parameters
-
-        get_template_parameters.cache_clear()
-
         orchestrator = Orchestrator(workspace)
         manifest = Manifest.from_file(workspace / "manifests" / "test.yaml", workspace_root=workspace)
         site = orchestrator.load_site("test-site")
@@ -2819,8 +2852,18 @@ class TestMultipleSubscriptionLevelSites:
     def test_two_candidates_raise(self, complete_workspace):
         orchestrator = Orchestrator(complete_workspace)
         manifest = self._manifest_with_a_subscription_step()
+        for step in manifest.steps:
+            path = complete_workspace / step.template.replace(
+                ".bicep",
+                ".json",
+            )
+            path.write_text(
+                json.dumps(_arm_template()),
+                encoding="utf-8",
+            )
+            step.template = step.template.replace(".bicep", ".json")
 
-        with pytest.raises(MultipleSubscriptionSitesError, match="multiple"):
+        with pytest.raises(PlanNotExecutableError, match="multiple"):
             orchestrator.deploy(
                 manifest_path=complete_workspace / "manifests" / "test.yaml",
                 manifest=manifest,
@@ -2830,8 +2873,13 @@ class TestMultipleSubscriptionLevelSites:
     def test_the_error_names_every_candidate(self, complete_workspace):
         orchestrator = Orchestrator(complete_workspace)
         manifest = self._manifest_with_a_subscription_step()
+        for step in manifest.steps:
+            step.template = step.template.replace(".bicep", ".json")
+            (complete_workspace / step.template).write_text(
+                json.dumps(_arm_template()), encoding="utf-8"
+            )
 
-        with pytest.raises(MultipleSubscriptionSitesError) as excinfo:
+        with pytest.raises(PlanNotExecutableError) as excinfo:
             orchestrator.deploy(
                 manifest_path=complete_workspace / "manifests" / "test.yaml",
                 manifest=manifest,
@@ -2845,6 +2893,16 @@ class TestMultipleSubscriptionLevelSites:
         """The guard rejects ambiguity, not subscription-scoped steps."""
         orchestrator = Orchestrator(complete_workspace)
         manifest = self._manifest_with_a_subscription_step()
+        for step in manifest.steps:
+            path = complete_workspace / step.template.replace(
+                ".bicep",
+                ".json",
+            )
+            path.write_text(
+                json.dumps(_arm_template()),
+                encoding="utf-8",
+            )
+            step.template = step.template.replace(".bicep", ".json")
 
         target_result = {
             "site": "x",
@@ -2857,10 +2915,6 @@ class TestMultipleSubscriptionLevelSites:
             "steps": [],
         }
         with (
-            patch(
-                "siteops.orchestrator.get_template_parameters",
-                return_value=frozenset(),
-            ),
             patch.object(
                 orchestrator,
                 "_execute_prepared_target",

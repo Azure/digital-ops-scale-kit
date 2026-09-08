@@ -45,8 +45,6 @@ from siteops.executor import (
     _probe_arc_proxy_ready,
     _ProxyOutputDrainer,
     _release_arc_port_slot,
-    filter_parameters,
-    get_template_parameters,
 )
 
 
@@ -176,6 +174,45 @@ class TestAzCliExecutor:
         assert path2 == "/usr/local/bin/kubectl"
         # Should only call shutil.which once (cached)
         mock_which.assert_called_once_with("kubectl")
+
+    def test_bind_tool_paths_bypasses_lazy_lookup(
+        self,
+        tmp_workspace,
+        tmp_path,
+    ):
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        az_path = tmp_path / "tools" / "az.exe"
+        kubectl_path = tmp_path / "tools" / "kubectl.exe"
+
+        executor.bind_tool_paths(
+            azure_cli=az_path,
+            kubectl=kubectl_path,
+        )
+
+        with patch("siteops.executor.shutil.which") as mock_which:
+            assert executor.az_path == str(az_path.resolve())
+            assert executor.kubectl_path == str(kubectl_path.resolve())
+
+        mock_which.assert_not_called()
+
+    def test_rebinding_missing_tools_does_not_reuse_prior_paths(
+        self,
+        tmp_workspace,
+        tmp_path,
+    ):
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        executor.bind_tool_paths(
+            azure_cli=tmp_path / "tools" / "az.exe",
+            kubectl=tmp_path / "tools" / "kubectl.exe",
+        )
+
+        executor.bind_tool_paths()
+
+        with patch("siteops.executor.shutil.which") as mock_which:
+            assert executor.az_path is None
+            assert executor.kubectl_path is None
+
+        mock_which.assert_not_called()
 
 
 class TestAzCliExecutorRunAz:
@@ -1715,277 +1752,6 @@ class TestComputeProbePhaseBudget:
         tcp, total = _compute_probe_phase_budget(0.0)
         assert tcp == 0.0
         assert total == 0.0
-
-
-class TestGetTemplateParameters:
-    """Tests for get_template_parameters() function."""
-
-    def test_bicep_template_extracts_parameters(self, tmp_path):
-        """Test that Bicep template parameters are extracted via az bicep build."""
-        bicep_file = tmp_path / "test.bicep"
-        bicep_file.write_text("param location string\nparam tags object\n")
-
-        # Mock ARM JSON output from az bicep build
-        arm_json = {
-            "parameters": {
-                "location": {"type": "string"},
-                "tags": {"type": "object"},
-            }
-        }
-
-        with (
-            patch("siteops.executor.subprocess.run") as mock_run,
-            patch("siteops.executor.shutil.which", return_value="/usr/bin/az"),
-        ):
-            # `az bicep build` writes the compiled template to `--outfile`, so
-            # the fake writes it too. Returning it on stdout would pass while
-            # the real command wrote a file nothing read.
-            def _fake_build(argv, *args, **kwargs):
-                out_path = Path(argv[argv.index("--outfile") + 1])
-                out_path.write_text(json.dumps(arm_json), encoding="utf-8")
-                return MagicMock(returncode=0, stdout="", stderr="")
-
-            mock_run.side_effect = _fake_build
-
-            # Clear cache for this test
-            get_template_parameters.cache_clear()
-
-            result = get_template_parameters(str(bicep_file))
-
-            assert result == frozenset({"location", "tags"})
-            mock_run.assert_called_once()
-            assert "bicep" in mock_run.call_args[0][0]
-            assert "build" in mock_run.call_args[0][0]
-
-    def test_arm_json_template_extracts_parameters(self, tmp_path):
-        """Test that ARM JSON template parameters are parsed directly."""
-        arm_file = tmp_path / "test.json"
-        arm_json = {
-            "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
-            "parameters": {
-                "storageAccountName": {"type": "string"},
-                "location": {"type": "string"},
-                "sku": {"type": "string", "defaultValue": "Standard_LRS"},
-            },
-            "resources": [],
-        }
-        arm_file.write_text(json.dumps(arm_json))
-
-        # Clear cache for this test
-        get_template_parameters.cache_clear()
-
-        result = get_template_parameters(str(arm_file))
-
-        assert result == frozenset({"storageAccountName", "location", "sku"})
-
-    def test_arm_json_template_no_parameters(self, tmp_path):
-        """Test ARM template with no parameters returns empty set."""
-        arm_file = tmp_path / "empty.json"
-        arm_json = {
-            "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
-            "resources": [],
-        }
-        arm_file.write_text(json.dumps(arm_json))
-
-        get_template_parameters.cache_clear()
-
-        result = get_template_parameters(str(arm_file))
-
-        assert result == frozenset()
-
-    def test_file_not_found_raises_error(self):
-        """Test that missing template raises FileNotFoundError."""
-        get_template_parameters.cache_clear()
-
-        with pytest.raises(FileNotFoundError, match="Template not found"):
-            get_template_parameters("/nonexistent/path/template.bicep")
-
-    def test_unsupported_extension_raises_error(self, tmp_path):
-        """Test that unsupported file extensions raise ValueError."""
-        yaml_file = tmp_path / "template.yaml"
-        yaml_file.write_text("foo: bar")
-
-        get_template_parameters.cache_clear()
-
-        with pytest.raises(ValueError, match="Unsupported template format"):
-            get_template_parameters(str(yaml_file))
-
-    def test_bicep_compile_failure_raises_error(self, tmp_path):
-        """Test that Bicep compilation failure raises ValueError."""
-        bicep_file = tmp_path / "bad.bicep"
-        bicep_file.write_text("invalid bicep syntax {{{{")
-
-        with (
-            patch("siteops.executor.subprocess.run") as mock_run,
-            patch("siteops.executor.shutil.which", return_value="/usr/bin/az"),
-        ):
-            mock_run.return_value = MagicMock(
-                returncode=1,
-                stdout="",
-                stderr="Error: Failed to compile",
-            )
-
-            get_template_parameters.cache_clear()
-
-            with pytest.raises(ValueError, match="Failed to compile Bicep"):
-                get_template_parameters(str(bicep_file))
-
-    def test_invalid_json_raises_error(self, tmp_path):
-        """Test that invalid JSON in ARM template raises ValueError."""
-        arm_file = tmp_path / "invalid.json"
-        arm_file.write_text("{ not valid json }")
-
-        get_template_parameters.cache_clear()
-
-        with pytest.raises(ValueError, match="Failed to parse ARM template"):
-            get_template_parameters(str(arm_file))
-
-    def test_results_are_cached(self, tmp_path):
-        """Test that repeated calls use cached results."""
-        arm_file = tmp_path / "cached.json"
-        arm_json = {"parameters": {"foo": {"type": "string"}}}
-        arm_file.write_text(json.dumps(arm_json))
-
-        get_template_parameters.cache_clear()
-
-        # First call
-        result1 = get_template_parameters(str(arm_file))
-        # Modify file (shouldn't affect cached result)
-        arm_file.write_text(json.dumps({"parameters": {"bar": {"type": "string"}}}))
-        # Second call should return cached result
-        result2 = get_template_parameters(str(arm_file))
-
-        assert result1 == result2 == frozenset({"foo"})
-
-    def test_az_cli_not_found_raises_error(self, tmp_path):
-        """Test that missing Azure CLI raises ValueError for Bicep files."""
-        bicep_file = tmp_path / "test.bicep"
-        bicep_file.write_text("param location string")
-
-        with patch("siteops.executor.shutil.which", return_value=None):
-            get_template_parameters.cache_clear()
-
-            with pytest.raises(ValueError, match="Azure CLI.*not found"):
-                get_template_parameters(str(bicep_file))
-
-    def test_bicep_invalid_json_output_raises_error(self, tmp_path):
-        """Test that invalid JSON from az bicep build raises ValueError."""
-        bicep_file = tmp_path / "test.bicep"
-        bicep_file.write_text("param location string")
-
-        with (
-            patch("siteops.executor.subprocess.run") as mock_run,
-            patch("siteops.executor.shutil.which", return_value="/usr/bin/az"),
-        ):
-            mock_run.return_value = MagicMock(
-                returncode=0,
-                stdout="not valid json at all",
-                stderr="",
-            )
-
-            get_template_parameters.cache_clear()
-
-            with pytest.raises(ValueError, match="Failed to parse compiled Bicep"):
-                get_template_parameters(str(bicep_file))
-
-
-class TestFilterParameters:
-    """Tests for filter_parameters() function."""
-
-    def test_filters_to_accepted_parameters(self, tmp_path):
-        """Test that only accepted parameters are returned."""
-        arm_file = tmp_path / "template.json"
-        arm_json = {
-            "parameters": {
-                "location": {"type": "string"},
-                "name": {"type": "string"},
-            }
-        }
-        arm_file.write_text(json.dumps(arm_json))
-
-        get_template_parameters.cache_clear()
-
-        params = {
-            "location": "eastus",
-            "name": "myresource",
-            "extraParam": "should be filtered",
-            "anotherExtra": {"nested": "value"},
-        }
-
-        result = filter_parameters(params, str(arm_file), "test-step")
-
-        assert result == {"location": "eastus", "name": "myresource"}
-        assert "extraParam" not in result
-        assert "anotherExtra" not in result
-
-    def test_returns_empty_when_no_params_match(self, tmp_path):
-        """Test that empty dict is returned when no parameters match."""
-        arm_file = tmp_path / "template.json"
-        arm_json = {"parameters": {"foo": {"type": "string"}}}
-        arm_file.write_text(json.dumps(arm_json))
-
-        get_template_parameters.cache_clear()
-
-        params = {"bar": "value", "baz": "value"}
-
-        result = filter_parameters(params, str(arm_file), "test-step")
-
-        assert result == {}
-
-    def test_returns_all_when_all_match(self, tmp_path):
-        """Test that all parameters returned when all match template."""
-        arm_file = tmp_path / "template.json"
-        arm_json = {
-            "parameters": {
-                "location": {"type": "string"},
-                "name": {"type": "string"},
-                "tags": {"type": "object"},
-            }
-        }
-        arm_file.write_text(json.dumps(arm_json))
-
-        get_template_parameters.cache_clear()
-
-        params = {
-            "location": "eastus",
-            "name": "myresource",
-            "tags": {"env": "dev"},
-        }
-
-        result = filter_parameters(params, str(arm_file), "test-step")
-
-        assert result == params
-
-    def test_handles_empty_input_parameters(self, tmp_path):
-        """Test that empty input parameters returns empty dict."""
-        arm_file = tmp_path / "template.json"
-        arm_json = {"parameters": {"foo": {"type": "string"}}}
-        arm_file.write_text(json.dumps(arm_json))
-
-        get_template_parameters.cache_clear()
-
-        result = filter_parameters({}, str(arm_file), "test-step")
-
-        assert result == {}
-
-    def test_logs_filtered_parameters(self, tmp_path, caplog):
-        """Test that filtered parameters are logged at debug level."""
-        arm_file = tmp_path / "template.json"
-        arm_json = {"parameters": {"accepted": {"type": "string"}}}
-        arm_file.write_text(json.dumps(arm_json))
-
-        get_template_parameters.cache_clear()
-
-        params = {"accepted": "value", "rejected": "value"}
-
-        import logging
-
-        with caplog.at_level(logging.DEBUG, logger="siteops.executor"):
-            result = filter_parameters(params, str(arm_file), "my-step")
-
-        # Verify filtering worked
-        assert result == {"accepted": "value"}
-        assert "rejected" not in result
 
 
 class TestUserAgentConfiguration:

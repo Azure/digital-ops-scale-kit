@@ -20,12 +20,14 @@ import yaml
 
 from siteops.cli import (
     cmd_deploy,
+    cmd_plan,
     cmd_sites,
     cmd_validate,
     main,
     resolve_manifest_path,
     setup_logging,
 )
+from siteops.planning import PlanIntent, PlanStatus
 
 
 class TestResolveManifestPath:
@@ -170,8 +172,8 @@ class TestCmdValidate:
 
         assert exit_code == 1
         captured = capsys.readouterr()
-        assert "✗" in captured.out
-        assert "Template not found" in captured.out
+        assert captured.out == ""
+        assert "Template not found" in captured.err
 
     def test_validate_plan_shows_the_deployment_plan(self, complete_workspace, capsys):
         """`validate --plan` shows the deployment plan after validation.
@@ -195,9 +197,7 @@ class TestCmdValidate:
 
         assert exit_code == 0
         captured = capsys.readouterr()
-        # Should show validation success
-        assert "✓" in captured.out
-        # Should show deployment plan
+        assert "Preflight: not performed" in captured.out
         assert "DEPLOYMENT PLAN" in captured.out
         assert "Sites" in captured.out
         assert "Steps" in captured.out
@@ -316,7 +316,7 @@ class TestCmdValidate:
         assert exit_code == 1
         assert document["status"] == "invalid"
         assert document["diagnostics"][0] == {
-            "code": "validation.failed",
+            "code": "plan.validation-failed",
             "severity": "error",
             "summary": "Manifest validation failed.",
         }
@@ -416,13 +416,11 @@ class TestCmdValidate:
         assert "library manifest" in captured.out
         assert "-l" in captured.out
 
-    def test_validate_verbose_library_manifest_no_traceback(
-        self, complete_workspace, capsys
+    @pytest.mark.parametrize("request_plan", [False, True])
+    def test_library_validation_and_targeted_planning(
+        self, complete_workspace, capsys, request_plan
     ):
-        """`validate --plan` on a library manifest (no `sites:` and no
-        `selector:`) prints ✓ + Note and exits 0. Previously
-        `show_plan` re-resolved sites and re-raised NoTargetingError
-        as a traceback after the success print."""
+        """A library validates independently but planning requires targets."""
         from siteops.orchestrator import Orchestrator
 
         manifest_data = {
@@ -439,15 +437,18 @@ class TestCmdValidate:
         args.manifest = manifest_path
         args.workspace = complete_workspace
         args.selector = None
-        args.plan = True
+        args.plan = request_plan
 
         exit_code = cmd_validate(args, orchestrator)
 
-        assert exit_code == 0
+        assert exit_code == (1 if request_plan else 0)
         captured = capsys.readouterr()
-        assert "Manifest is valid" in captured.out
-        assert "library manifest" in captured.out
-        # No traceback or NoTargetingError leaked from show_plan.
+        if request_plan:
+            assert "has no targeting" in captured.out
+            assert "-l <key>=<value>" in captured.out
+        else:
+            assert "Manifest is valid" in captured.out
+            assert "library manifest" in captured.out
         assert "Traceback" not in captured.out and "Traceback" not in captured.err
         assert "NoTargetingError" not in captured.out
         assert "NoTargetingError" not in captured.err
@@ -478,9 +479,7 @@ class TestCmdValidate:
 
         assert exit_code == 1
         captured = capsys.readouterr()
-        # Should show failure
-        assert "✗" in captured.out
-        # Should NOT show deployment plan
+        assert "Template not found" in captured.out
         assert "DEPLOYMENT PLAN" not in captured.out
 
     def test_validate_with_selector(self, complete_workspace):
@@ -801,9 +800,9 @@ class TestCmdDeploy:
 
         exit_code = cmd_deploy(args, orchestrator)
 
-        assert exit_code == 0
+        assert exit_code == 1
         captured = capsys.readouterr()
-        assert "No sites matched" in captured.out
+        assert "No sites matched" in captured.err
 
     def test_deploy_generic_manifest_no_selector_errors(self, complete_workspace, capsys):
         """Generic manifest (no targeting) without `-l` is a hard error."""
@@ -912,7 +911,7 @@ class TestCmdDeploy:
 
         assert exit_code == 1
         captured = capsys.readouterr()
-        assert "Error" in captured.err
+        assert "Error:" in captured.err
         assert "Traceback" not in captured.err
 
     def test_deploy_cli_selector_no_match_errors_with_diagnostic(self, complete_workspace, capsys):
@@ -977,7 +976,7 @@ class TestCmdDeploy:
         assert cmd_deploy(args, Orchestrator(complete_workspace)) == 1
 
         error = capsys.readouterr().err
-        assert "CLI selector matched no sites" in error
+        assert "No sites matched the selected criteria" in error
         assert "private-label" not in error
         assert "private-value" not in error
 
@@ -1033,7 +1032,9 @@ class TestCmdDeploy:
         args.selector = None
         args.parallel = None
 
-        with patch.object(orchestrator, "deploy") as mock_deploy:
+        with patch.object(
+            orchestrator.executor, "deploy_resource_group"
+        ) as mock_deploy:
             exit_code = cmd_deploy(args, orchestrator)
 
         assert exit_code == 1
@@ -1065,9 +1066,9 @@ class TestCmdDeploy:
 
         exit_code = cmd_deploy(args, orchestrator)
 
-        assert exit_code == 0
+        assert exit_code == 1
         captured = capsys.readouterr()
-        assert "no steps" in captured.out.lower()
+        assert "no steps" in captured.err.lower()
 
     def test_deploy_failure_returns_exit_code_1(self, complete_workspace):
         """Test failed deployment returns exit code 1."""
@@ -1388,6 +1389,41 @@ class TestMainArgumentParsing:
                 assert args.plan is True
                 # Asking for the plan does not turn on debug logging.
                 assert args.verbose is False
+
+    def test_plan_command_defaults_to_executable_preflight(
+        self,
+        complete_workspace,
+    ):
+        manifest_path = (
+            complete_workspace
+            / "manifests"
+            / "test-manifest.yaml"
+        )
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "siteops",
+                "-w",
+                str(complete_workspace),
+                "plan",
+                str(manifest_path),
+                "--output",
+                "json",
+                "--projection",
+                "publishable",
+            ],
+        ):
+            with patch("siteops.cli.cmd_plan") as mock_cmd:
+                mock_cmd.return_value = 0
+                with pytest.raises(SystemExit):
+                    main()
+
+                args = mock_cmd.call_args[0][0]
+                assert args.describe is False
+                assert args.output == "json"
+                assert args.projection == "publishable"
 
     def test_verbose_is_global_and_reaches_every_subcommand(self, complete_workspace):
         """`-v` is global, so `deploy` can have it. Without that, a dry run
@@ -1988,11 +2024,15 @@ class TestPlanOutputIsSeparateFromLogVerbosity:
         manifest = complete_workspace / "manifests" / "test-manifest.yaml"
         args = self._args(complete_workspace, manifest, plan=plan, verbose=verbose)
 
-        with patch.object(orchestrator, "show_plan") as show_plan:
+        with patch.object(
+            orchestrator,
+            "build_plan",
+            wraps=orchestrator.build_plan,
+        ) as build_plan:
             exit_code = cmd_validate(args, orchestrator)
 
         assert exit_code == 0
-        assert show_plan.called is expect_plan
+        assert build_plan.called is expect_plan
 
     @pytest.mark.parametrize("dry_run", [True, False], ids=["dry-run", "real-run"])
     def test_deploy_shows_a_plan_only_on_a_dry_run(self, complete_workspace, dry_run):
@@ -2007,6 +2047,8 @@ class TestPlanOutputIsSeparateFromLogVerbosity:
 
         summary = {"summary": {"failed": 0, "succeeded": 1}, "sites": {}}
         prepared = MagicMock()
+        prepared.executable = True
+        prepared.status = PlanStatus.PLANNED
         with (
             patch.object(
                 orchestrator,
@@ -2028,9 +2070,180 @@ class TestPlanOutputIsSeparateFromLogVerbosity:
         assert exit_code == 0
         assert build_plan.called is dry_run
         assert render_plan.called is dry_run
-        assert deploy.call_args.kwargs["plan_result"] is (
-            prepared if dry_run else None
+        if dry_run:
+            deploy.assert_not_called()
+        else:
+            deploy.assert_called_once_with(
+                manifest, selector=None, parallel_override=None
+            )
+
+    @pytest.mark.parametrize(
+        ("describe", "intent"),
+        [
+            (False, PlanIntent.EXECUTABLE),
+            (True, PlanIntent.DESCRIBE),
+        ],
+    )
+    def test_plan_delegates_preparation_intent_once(
+        self,
+        complete_workspace,
+        describe,
+        intent,
+    ):
+        manifest = (
+            complete_workspace
+            / "manifests"
+            / "test-manifest.yaml"
         )
+        args = self._args(
+            complete_workspace,
+            manifest,
+            describe=describe,
+            output="plain",
+            projection=None,
+        )
+        orchestrator = MagicMock()
+        orchestrator.validate.return_value = []
+        orchestrator.skipped_sites = []
+        result = MagicMock()
+        result.status = PlanStatus.PLANNED
+        orchestrator.build_plan.return_value = result
+
+        with patch(
+            "siteops.cli.render_plain_plan",
+            return_value="plan\n",
+        ):
+            exit_code = cmd_plan(args, orchestrator)
+
+        assert exit_code == 0
+        orchestrator.validate.assert_not_called()
+        orchestrator.build_plan.assert_called_once_with(
+            manifest,
+            None,
+            intent=intent,
+            parallel_override=None,
+        )
+
+    def test_deploy_refuses_invalid_inputs_before_compilation(
+        self,
+        complete_workspace,
+    ):
+        manifest = (
+            complete_workspace
+            / "manifests"
+            / "test-manifest.yaml"
+        )
+        args = self._args(
+            complete_workspace,
+            manifest,
+            dry_run=False,
+            parallel=None,
+        )
+        from siteops.orchestrator import Orchestrator
+
+        document = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+        document["steps"].append(
+            {
+                "name": "apply",
+                "type": "kubectl",
+                "operation": "apply",
+                "arc": {"name": "cluster", "resourceGroup": "rg"},
+                "files": ["missing.yaml"],
+            }
+        )
+        manifest.write_text(yaml.safe_dump(document), encoding="utf-8")
+        orchestrator = Orchestrator(complete_workspace)
+        with (
+            patch(
+                "siteops.orchestrator.TemplateCompilationSession",
+                side_effect=AssertionError("Invalid inputs must not compile"),
+            ),
+            patch.object(
+                orchestrator.executor, "deploy_resource_group"
+            ) as deploy,
+        ):
+            exit_code = cmd_deploy(args, orchestrator)
+
+        assert exit_code == 1
+        deploy.assert_not_called()
+
+    def test_plan_without_targeting_returns_typed_invalid_document(
+        self,
+        complete_workspace,
+        capsys,
+    ):
+        from siteops.orchestrator import Orchestrator
+
+        manifest = complete_workspace / "manifests" / "library.yaml"
+        manifest.write_text(
+            """
+apiVersion: siteops/v1
+kind: Manifest
+name: library
+steps:
+  - name: deploy
+    template: templates/test.bicep
+""",
+            encoding="utf-8",
+        )
+        args = self._args(
+            complete_workspace,
+            manifest,
+            describe=False,
+            output="json",
+            projection="publishable",
+            parallel=None,
+        )
+
+        exit_code = cmd_plan(
+            args,
+            Orchestrator(complete_workspace),
+        )
+
+        document = json.loads(capsys.readouterr().out)
+        assert exit_code == 1
+        assert document["intent"] == "executable"
+        assert document["diagnostics"][0]["code"] == (
+            "plan.targeting-required"
+        )
+
+    def test_plan_rejects_an_incomplete_target_set(
+        self,
+        multi_site_workspace,
+        capsys,
+    ):
+        from siteops.orchestrator import Orchestrator
+
+        manifest = (
+            multi_site_workspace
+            / "manifests"
+            / "multi-site.yaml"
+        )
+        (multi_site_workspace / "sites" / "bad-site.yaml").write_text(
+            "name: bad-site\n\tlabels:\n", encoding="utf-8"
+        )
+        args = self._args(
+            multi_site_workspace,
+            manifest,
+            describe=False,
+            output="json",
+            projection="publishable",
+            parallel=None,
+        )
+        orchestrator = Orchestrator(multi_site_workspace)
+
+        exit_code = cmd_plan(args, orchestrator)
+
+        document = json.loads(capsys.readouterr().out)
+        assert exit_code == 1
+        assert document["diagnostics"] == [
+            {
+                "code": "plan.target-set-incomplete",
+                "severity": "error",
+                "summary": "The selected target set is incomplete.",
+            }
+        ]
+        assert "bad-site" not in json.dumps(document)
 
     def test_dry_run_reports_composition_error_without_traceback(
         self,

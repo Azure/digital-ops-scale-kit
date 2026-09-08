@@ -12,6 +12,16 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping, TypeAlias
 
+from siteops.compilation import (
+    CompilationKey,
+    PreparedTemplateUnit,
+    TemplateKind,
+    TemplateParameter,
+    ToolIdentity,
+    VersionProvenance,
+    detect_template_kind,
+)
+
 STEP_OUTPUT_PATTERN = re.compile(
     r"\{\{\s*steps\.([a-zA-Z0-9_-]+)\.outputs\."
     r"([a-zA-Z0-9_.-]+)\s*\}\}"
@@ -71,6 +81,8 @@ class SkipReasonCode(str, Enum):
     SCOPE_MISMATCH = "scope-mismatch"
     TARGET_PREPARATION_FAILED = "target-preparation-failed"
     DEPENDENCY_BLOCKED = "dependency-blocked"
+    COMPILATION_FAILED = "compilation-failed"
+    CAPABILITY_UNAVAILABLE = "capability-unavailable"
 
 
 class OperationKind(str, Enum):
@@ -104,6 +116,35 @@ class InputStatus(str, Enum):
     INVALID = "invalid"
 
 
+class SubmissionMode(str, Enum):
+    """Artifact form submitted to the deployment provider."""
+
+    SOURCE = "source"
+
+
+class CompilationBinding(str, Enum):
+    """Strength of the link between observed and submitted compilation."""
+
+    OBSERVED_NOT_ENFORCED = "observed-not-enforced"
+
+
+class CapabilityKind(str, Enum):
+    """Provider-independent capability required by prepared operations."""
+
+    ARM_CONTROL_PLANE = "arm-control-plane"
+    BICEP_COMPILER = "bicep-compiler"
+    KUBECTL = "kubectl"
+    ARC_PROXY = "arc-proxy"
+
+
+class CapabilityStatus(str, Enum):
+    """Planning-time availability of one capability."""
+
+    AVAILABLE = "available"
+    MISSING = "missing"
+    UNKNOWN = "unknown"
+
+
 class PlanExecutionMode(str, Enum):
     """Runtime treatment of deferred operation outputs."""
 
@@ -130,7 +171,7 @@ class PlanNotExecutableError(ValueError):
         if self.result.diagnostics:
             diagnostic = self.result.diagnostics[0]
             if redacted:
-                return diagnostic.summary
+                return _publishable_diagnostic(diagnostic)["summary"]
             return diagnostic.detail or diagnostic.summary
         return "The deployment plan is not executable."
 
@@ -182,6 +223,18 @@ class DataReference:
     ) -> DataReference:
         """Build a reference from the manifest's dotted output syntax."""
         return cls(source=source, output_path=tuple(output_path.split(".")))
+
+
+class UnavailableDataReferenceError(ValueError):
+    """A valid prior-step reference whose producer cannot execute."""
+
+    def __init__(self, reference: DataReference, path: str):
+        self.reference = reference
+        super().__init__(
+            f"{_value_location(path)} references step "
+            f"{reference.source.step!r}, whose prior operation is "
+            "unavailable."
+        )
 
 
 PlanScalar: TypeAlias = str | int | float | bool | None
@@ -268,6 +321,9 @@ def classify_plan_value(
     value: Any,
     available_sources: Mapping[str, OperationIdentity],
     path: str = "",
+    *,
+    unavailable_sources: Mapping[str, OperationIdentity] | None = None,
+    current_source: OperationIdentity | None = None,
 ) -> PlanValue:
     """Classify known and runtime-deferred values recursively.
 
@@ -275,10 +331,17 @@ def classify_plan_value(
     that execute before the operation being classified, so an unknown, current,
     or later step is rejected through the same boundary.
     """
+    unavailable = unavailable_sources or {}
     if value is None or isinstance(value, (bool, int, float)):
         return LiteralValue(value)
     if isinstance(value, str):
-        return _classify_plan_string(value, available_sources, path)
+        return _classify_plan_string(
+            value,
+            available_sources,
+            unavailable,
+            path,
+            current_source,
+        )
     if isinstance(value, list):
         return ListValue(
             tuple(
@@ -286,6 +349,8 @@ def classify_plan_value(
                     item,
                     available_sources,
                     f"{path}[{index}]",
+                    unavailable_sources=unavailable,
+                    current_source=current_source,
                 )
                 for index, item in enumerate(value)
             )
@@ -305,11 +370,15 @@ def classify_plan_value(
                         key,
                         available_sources,
                         key_path,
+                        unavailable_sources=unavailable,
+                        current_source=current_source,
                     ),
                     value=classify_plan_value(
                         item,
                         available_sources,
                         value_path,
+                        unavailable_sources=unavailable,
+                        current_source=current_source,
                     ),
                 )
             )
@@ -323,7 +392,9 @@ def classify_plan_value(
 def _classify_plan_string(
     value: str,
     available_sources: Mapping[str, OperationIdentity],
+    unavailable_sources: Mapping[str, OperationIdentity],
     path: str,
+    current_source: OperationIdentity | None,
 ) -> PlanValue:
     if (
         _MALFORMED_TEMPLATE_PATTERN.search(value)
@@ -342,7 +413,9 @@ def _classify_plan_string(
             _data_reference_from_match(
                 full_match,
                 available_sources,
+                unavailable_sources,
                 path,
+                current_source,
             )
         )
 
@@ -357,7 +430,9 @@ def _classify_plan_string(
                 _data_reference_from_match(
                     match,
                     available_sources,
+                    unavailable_sources,
                     path,
+                    current_source,
                 )
             )
             cursor = match.end()
@@ -382,11 +457,29 @@ def _classify_plan_string(
 def _data_reference_from_match(
     match: re.Match[str],
     available_sources: Mapping[str, OperationIdentity],
+    unavailable_sources: Mapping[str, OperationIdentity],
     path: str,
+    current_source: OperationIdentity | None,
 ) -> DataReference:
     step_name = match.group(1)
+    if (
+        current_source is not None
+        and step_name == current_source.step
+    ):
+        raise ValueError(
+            f"{_value_location(path)} cannot reference its own outputs."
+        )
     source = available_sources.get(step_name)
     if source is None:
+        unavailable_source = unavailable_sources.get(step_name)
+        if unavailable_source is not None:
+            raise UnavailableDataReferenceError(
+                DataReference.from_dotted_path(
+                    unavailable_source,
+                    match.group(2),
+                ),
+                path,
+            )
         raise ValueError(
             f"{_value_location(path)} references step {step_name!r}, which "
             "is not an available prior operation."
@@ -573,6 +666,75 @@ class PlanDiagnostic:
 
 
 @dataclass(frozen=True)
+class CapabilityProviderIdentity:
+    """Selected provider identity with an optional local executable."""
+
+    name: str
+    version: str | None
+    version_provenance: VersionProvenance
+    executable_path: Path | None = None
+
+    def __post_init__(self) -> None:
+        _require_text(self.name, "Capability provider name")
+        if self.version is not None:
+            _require_text(self.version, "Capability provider version")
+        if self.executable_path is not None:
+            object.__setattr__(
+                self,
+                "executable_path",
+                Path(self.executable_path).resolve(),
+            )
+
+    @classmethod
+    def from_tool(
+        cls,
+        tool: ToolIdentity,
+    ) -> CapabilityProviderIdentity:
+        """Adapt a resolved local tool into a capability provider."""
+        return cls(
+            name=tool.provider,
+            version=tool.version,
+            version_provenance=tool.version_provenance,
+            executable_path=tool.resolved_path,
+        )
+
+
+@dataclass(frozen=True)
+class PlanCapability:
+    """Resolved capability and the operations that require it."""
+
+    kind: CapabilityKind
+    status: CapabilityStatus
+    required_by: tuple[OperationIdentity, ...]
+    provider: CapabilityProviderIdentity | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "required_by", tuple(self.required_by))
+        if not self.required_by:
+            raise ValueError(
+                "Plan capabilities require at least one operation."
+            )
+        if len(self.required_by) != len(set(self.required_by)):
+            raise ValueError(
+                "Plan capability operation identities must be unique."
+            )
+        if (
+            self.status is not CapabilityStatus.MISSING
+            and self.provider is None
+        ):
+            raise ValueError(
+                "Resolved plan capabilities require a provider."
+            )
+        if (
+                self.status is CapabilityStatus.MISSING
+            and self.provider is not None
+        ):
+            raise ValueError(
+                    "Missing plan capabilities cannot carry a provider."
+            )
+
+
+@dataclass(frozen=True)
 class ResourceIdentity:
     """Provider-shaped resource identity with declaration field names."""
 
@@ -704,21 +866,10 @@ class DeploymentOperation:
     template: Path
     input_status: InputStatus
     parameters: MappingValue | None = None
-    accepted_parameters: tuple[str, ...] = ()
+    template_unit_key: CompilationKey | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "template", Path(self.template))
-        object.__setattr__(
-            self,
-            "accepted_parameters",
-            tuple(self.accepted_parameters),
-        )
-        if len(self.accepted_parameters) != len(
-            set(self.accepted_parameters)
-        ):
-            raise ValueError("Accepted deployment parameters must be unique.")
-        for name in self.accepted_parameters:
-            _require_text(name, "Accepted deployment parameter")
         if self.input_status is InputStatus.PREPARED and self.parameters is None:
             raise ValueError(
                 "Prepared deployment inputs require a parameter mapping."
@@ -931,6 +1082,12 @@ class DeploymentPlan:
     max_parallel_sites: int
     steps: tuple[PlanStep, ...]
     targets: tuple[PreparedTarget, ...]
+    template_units: tuple[PreparedTemplateUnit, ...] = ()
+    capabilities: tuple[PlanCapability, ...] = ()
+    submission_mode: SubmissionMode = SubmissionMode.SOURCE
+    compilation_binding: CompilationBinding = (
+        CompilationBinding.OBSERVED_NOT_ENFORCED
+    )
     cli_selector: str | None = None
     manifest_selector: str | None = None
     composition_enabled: bool = False
@@ -939,6 +1096,16 @@ class DeploymentPlan:
         object.__setattr__(self, "source_path", Path(self.source_path))
         object.__setattr__(self, "steps", tuple(self.steps))
         object.__setattr__(self, "targets", tuple(self.targets))
+        object.__setattr__(
+            self,
+            "template_units",
+            tuple(self.template_units),
+        )
+        object.__setattr__(
+            self,
+            "capabilities",
+            tuple(self.capabilities),
+        )
         _require_text(self.manifest_name, "Manifest name")
         if self.max_parallel_sites < 0:
             raise ValueError("Maximum parallel sites must be non-negative.")
@@ -952,12 +1119,160 @@ class DeploymentPlan:
         names = [target.name for target in self.targets]
         if len(names) != len(set(names)):
             raise ValueError("Prepared plan target names must be unique.")
+        units = {unit.key: unit for unit in self.template_units}
+        if len(units) != len(self.template_units):
+            raise ValueError("Prepared template unit keys must be unique.")
+        referenced_units: set[CompilationKey] = set()
         for target in self.targets:
             for operation in target.operations:
                 if known_steps.get(operation.step.name) != operation.step:
                     raise ValueError(
                         "Prepared operation must use a plan step definition."
                     )
+                details = operation.details
+                if not isinstance(details, DeploymentOperation):
+                    continue
+                key = details.template_unit_key
+                if key is not None:
+                    if key not in units:
+                        raise ValueError(
+                            "Prepared deployment operation references an "
+                            "unknown template unit."
+                        )
+                    unit = units[key]
+                    if details.template.resolve() != (
+                        unit.identity.source.path
+                    ):
+                        raise ValueError(
+                            "Prepared deployment operation template must "
+                            "match its template unit source."
+                        )
+                    referenced_units.add(key)
+                if operation.disposition is PlanDisposition.SKIP:
+                    if key is not None:
+                        raise ValueError(
+                            "Skipped deployment operations cannot reference "
+                            "a prepared template unit."
+                        )
+                    continue
+                if (
+                    operation.disposition is PlanDisposition.EXECUTE
+                    and self.intent is PlanIntent.EXECUTABLE
+                ):
+                    if details.input_status is not InputStatus.PREPARED:
+                        raise ValueError(
+                            "Executable deployment operations require "
+                            "prepared inputs."
+                        )
+                    if key is None:
+                        raise ValueError(
+                            "Executable deployment operations require a "
+                            "prepared template unit."
+                        )
+        if referenced_units != set(units):
+            raise ValueError(
+                "Prepared template units must be referenced by plan "
+                "operations."
+            )
+        if self.intent is PlanIntent.DESCRIBE and self.template_units:
+            raise ValueError(
+                "Describe plans cannot contain prepared template units."
+            )
+        capability_kinds = [
+            capability.kind
+            for capability in self.capabilities
+        ]
+        if len(capability_kinds) != len(set(capability_kinds)):
+            raise ValueError("Plan capability kinds must be unique.")
+        operation_by_identity = {
+            operation.identity: operation
+            for target in self.targets
+            for operation in target.operations
+        }
+        capabilities_by_kind = {
+            capability.kind: capability
+            for capability in self.capabilities
+        }
+        for capability in self.capabilities:
+            for identity in capability.required_by:
+                operation = operation_by_identity.get(identity)
+                if operation is None:
+                    raise ValueError(
+                        "Plan capability references an unknown operation."
+                    )
+                if operation.disposition is PlanDisposition.SKIP:
+                    raise ValueError(
+                        "Skipped operations cannot require capabilities."
+                    )
+                if capability.kind not in required_capability_kinds(
+                    operation
+                ):
+                    raise ValueError(
+                        "Plan capability does not apply to its referenced "
+                        "operation."
+                    )
+        if self.intent is PlanIntent.EXECUTABLE:
+            for operation in operation_by_identity.values():
+                if operation.disposition is not PlanDisposition.EXECUTE:
+                    continue
+                for kind in required_capability_kinds(operation):
+                    capability = capabilities_by_kind.get(kind)
+                    if (
+                        capability is None
+                        or operation.identity
+                        not in capability.required_by
+                    ):
+                        raise ValueError(
+                            "Executable operation is missing a required "
+                            "capability."
+                        )
+                    if (
+                        kind is not CapabilityKind.ARC_PROXY
+                        and capability.status
+                        is not CapabilityStatus.AVAILABLE
+                    ):
+                        raise ValueError(
+                            "Executable operation requires an available "
+                            "local capability."
+                        )
+        if self.intent is PlanIntent.DESCRIBE and self.capabilities:
+            raise ValueError(
+                "Describe plans cannot contain capability preflight."
+            )
+
+    def template_unit(
+        self,
+        key: CompilationKey,
+    ) -> PreparedTemplateUnit:
+        """Return one prepared template unit by its content-addressed key."""
+        for unit in self.template_units:
+            if unit.key == key:
+                return unit
+        raise KeyError(f"Prepared template unit not found: {key!r}.")
+
+
+def required_capability_kinds(
+    operation: PreparedOperation,
+) -> frozenset[CapabilityKind]:
+    """Return the provider-independent requirements of an operation."""
+    details = operation.details
+    if isinstance(details, DeploymentOperation):
+        try:
+            template_kind = detect_template_kind(details.template)
+        except ValueError:
+            return frozenset()
+        required = {CapabilityKind.ARM_CONTROL_PLANE}
+        if template_kind is TemplateKind.BICEP:
+            required.add(CapabilityKind.BICEP_COMPILER)
+        return frozenset(required)
+    if isinstance(details, KubectlOperation):
+        return frozenset(
+            {
+                CapabilityKind.KUBECTL,
+                CapabilityKind.ARC_PROXY,
+            }
+        )
+    return frozenset({CapabilityKind.ARM_CONTROL_PLANE})
 
 
 @dataclass(frozen=True)
@@ -968,9 +1283,17 @@ class PlanBuildResult:
     executable: bool
     plan: DeploymentPlan | None
     diagnostics: tuple[PlanDiagnostic, ...] = ()
+    intent: PlanIntent | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
+        if self.plan is not None:
+            if self.intent is None:
+                object.__setattr__(self, "intent", self.plan.intent)
+            elif self.intent is not self.plan.intent:
+                raise ValueError(
+                    "Plan result intent must match its prepared plan."
+                )
         if self.status is PlanStatus.PLANNED and self.plan is None:
             raise ValueError("A planned result requires a plan.")
         if self.status is PlanStatus.INVALID and self.executable:
@@ -1001,8 +1324,10 @@ def render_plain_plan(
     if plan is None:
         lines = ["Deployment plan is unavailable."]
         for diagnostic in result.diagnostics:
-            message = diagnostic.summary if redacted else (
-                diagnostic.detail or diagnostic.summary
+            message = (
+                _publishable_diagnostic(diagnostic)["summary"]
+                if redacted
+                else diagnostic.detail or diagnostic.summary
             )
             lines.append(f"  {diagnostic.severity.value}: {message}")
         lines.append("")
@@ -1028,6 +1353,35 @@ def render_plain_plan(
 
     if plan.description:
         lines.extend(("", f"  {plan.description}"))
+
+    if plan.intent is PlanIntent.EXECUTABLE:
+        lines.extend(
+            (
+                "",
+                f"  Status: {result.status.value}",
+                (
+                    "  Executable: yes"
+                    if result.executable
+                    else "  Executable: no"
+                ),
+                (
+                    "  Submission: source "
+                    "(compilation observed, not enforced)"
+                ),
+            )
+        )
+        if not result.executable:
+            lines.append(
+                "  No operations will be submitted from this plan."
+            )
+    else:
+        lines.extend(
+            (
+                "",
+                "  Preflight: not performed",
+                "  Templates and deployment capabilities were not checked.",
+            )
+        )
 
     if redacted:
         lines.extend(("", f"  Sites: {len(plan.targets)} selected"))
@@ -1056,13 +1410,43 @@ def render_plain_plan(
     for step in plan.steps:
         _render_plan_step(lines, step)
 
+    if result.diagnostics:
+        lines.extend(("", "  Diagnostics:"))
+        for diagnostic in result.diagnostics:
+            message = (
+                _publishable_diagnostic(diagnostic)["summary"]
+                if redacted
+                else diagnostic.detail or diagnostic.summary
+            )
+            lines.append(
+                f"    {diagnostic.severity.value}: {message}"
+            )
+
     lines.extend(("", border))
-    total = sum(
-        operation.disposition is PlanDisposition.EXECUTE
-        for target in plan.targets
-        for operation in target.operations
-    )
-    lines.append(f"  Total: {total} operation(s)")
+    disposition_counts = {
+        disposition: sum(
+            operation.disposition is disposition
+            for target in plan.targets
+            for operation in target.operations
+        )
+        for disposition in PlanDisposition
+    }
+    if plan.intent is PlanIntent.EXECUTABLE:
+        lines.extend(
+            (
+                "  Proposed: "
+                f"{disposition_counts[PlanDisposition.EXECUTE]} execute",
+                "  Blocked: "
+                f"{disposition_counts[PlanDisposition.BLOCKED]}",
+                "  Skipped: "
+                f"{disposition_counts[PlanDisposition.SKIP]}",
+            )
+        )
+    else:
+        lines.append(
+            "  Total: "
+            f"{disposition_counts[PlanDisposition.EXECUTE]} operation(s)"
+        )
 
     if len(plan.targets) > 1:
         if plan.max_parallel_sites == 1:
@@ -1132,8 +1516,9 @@ def _render_redacted_composition(
     error_counts: dict[str, int] = {}
     for target in targets:
         for diagnostic in target.diagnostics:
-            error_counts[diagnostic.summary] = (
-                error_counts.get(diagnostic.summary, 0) + 1
+            message = _publishable_diagnostic(diagnostic)["summary"]
+            error_counts[message] = (
+                error_counts.get(message, 0) + 1
             )
     for message, count in error_counts.items():
         lines.append(f"    {count} site(s): {message}")
@@ -1321,23 +1706,110 @@ def _render_data_reference(reference: DataReference) -> str:
 
 _PUBLISHABLE_DIAGNOSTICS = {
     "composition.invalid": (
+        "plan.composition-invalid",
         "Resource composition failed. Set SITEOPS_REDACT_OUTPUT=0, then rerun "
-        "the command locally for source and identity details."
+        "the command locally for source and identity details.",
     ),
-    "operation-preparation.invalid": "Operation preparation failed.",
+    "capability.arm-control-plane.missing": (
+        "plan.capability-unavailable",
+        "A required local deployment capability is unavailable.",
+    ),
+    "capability.bicep-compiler.missing": (
+        "plan.capability-unavailable",
+        "A required local deployment capability is unavailable.",
+    ),
+    "capability.kubectl.missing": (
+        "plan.capability-unavailable",
+        "A required local deployment capability is unavailable.",
+    ),
+    "capability.arc-proxy.missing": (
+        "plan.capability-unavailable",
+        "A required local deployment capability is unavailable.",
+    ),
+    "compilation.failed": (
+        "plan.compilation-failed",
+        "Template compilation failed.",
+    ),
+    "compilation.input-changed": (
+        "plan.compilation-failed",
+        "Template compilation failed.",
+    ),
+    "compilation.module-unavailable": (
+        "plan.compilation-failed",
+        "Template compilation failed.",
+    ),
+    "compilation.output-invalid": (
+        "plan.compilation-failed",
+        "Template compilation failed.",
+    ),
+    "compilation.source-unreadable": (
+        "plan.compilation-failed",
+        "Template compilation failed.",
+    ),
+    "compilation.timeout": (
+        "plan.compilation-failed",
+        "Template compilation failed.",
+    ),
+    "compilation.tool-missing": (
+        "plan.capability-unavailable",
+        "A required local deployment capability is unavailable.",
+    ),
+    "compilation.tool-unavailable": (
+        "plan.capability-unavailable",
+        "A required local deployment capability is unavailable.",
+    ),
+    "operation-preparation.invalid": (
+        "plan.operation-preparation-failed",
+        "Operation preparation failed.",
+    ),
+    "operation.dependency-blocked": (
+        "plan.dependency-blocked",
+        "A required prior operation is unavailable.",
+    ),
     "parameter-selection.invalid": (
+        "plan.parameter-selection-invalid",
         "Parameter file selection failed. Set SITEOPS_REDACT_OUTPUT=0, then "
-        "rerun the command locally for site and path details."
+        "rerun the command locally for site and path details.",
     ),
     "plan.targeting.required": (
+        "plan.targeting-required",
         "Add `sites:` or `selector:` to the manifest, or pass "
-        "`-l <key>=<value>`."
+        "`-l <key>=<value>`.",
+    ),
+    "plan.targeting.empty": (
+        "plan.targeting-empty",
+        "No sites matched the selected criteria.",
+    ),
+    "plan.target-set-incomplete": (
+        "plan.target-set-incomplete",
+        "The selected target set is incomplete.",
     ),
     "subscription-target.missing": (
-        "A required subscription target is missing."
+        "plan.subscription-target-missing",
+        "A required subscription target is missing.",
     ),
-    "validation.failed": "Manifest validation failed.",
+    "validation.failed": (
+        "plan.validation-failed",
+        "Manifest validation failed.",
+    ),
 }
+
+
+def _publishable_diagnostic(
+    diagnostic: PlanDiagnostic,
+) -> dict[str, str]:
+    code, summary = _PUBLISHABLE_DIAGNOSTICS.get(
+        diagnostic.code,
+        (
+            "plan.diagnostic",
+            "Plan processing reported a diagnostic.",
+        ),
+    )
+    return {
+        "code": code,
+        "severity": diagnostic.severity.value,
+        "summary": summary,
+    }
 
 
 def serialize_plan(
@@ -1381,6 +1853,11 @@ def _plan_envelope(
         "projection": projection.value,
         "status": result.status.value,
         "executable": result.executable,
+        "intent": (
+            result.intent.value
+            if result.intent is not None
+            else None
+        ),
         "engine": {
             "name": "siteops",
             "version": engine_version,
@@ -1456,18 +1933,7 @@ def _publishable_plan_document(
     )
     document["summary"] = _plan_summary(result)
     document["diagnostics"] = [
-        {
-            "code": (
-                diagnostic.code
-                if diagnostic.code in _PUBLISHABLE_DIAGNOSTICS
-                else "plan.diagnostic"
-            ),
-            "severity": diagnostic.severity.value,
-            "summary": _PUBLISHABLE_DIAGNOSTICS.get(
-                diagnostic.code,
-                "Plan processing reported a diagnostic.",
-            ),
-        }
+        _publishable_diagnostic(diagnostic)
         for diagnostic in result.diagnostics
     ]
     return document
@@ -1506,7 +1972,11 @@ def _local_diagnostic_document(
 
 
 def _local_plan_document(plan: DeploymentPlan) -> dict[str, Any]:
-    return {
+    template_units = {
+        unit.key: unit
+        for unit in plan.template_units
+    }
+    document = {
         "intent": plan.intent.value,
         "manifest": {
             "name": plan.manifest_name,
@@ -1518,15 +1988,29 @@ def _local_plan_document(plan: DeploymentPlan) -> dict[str, Any]:
         "parallel": {
             "maxSites": plan.max_parallel_sites,
         },
+        "templateUnits": [
+            _local_template_unit_document(unit)
+            for unit in plan.template_units
+        ],
+        "capabilities": [
+            _local_capability_document(capability)
+            for capability in plan.capabilities
+        ],
         "steps": [
             _local_step_document(step)
             for step in plan.steps
         ],
         "targets": [
-            _local_target_document(target)
+            _local_target_document(target, template_units)
             for target in plan.targets
         ],
     }
+    if plan.intent is PlanIntent.EXECUTABLE:
+        document["submission"] = {
+            "mode": plan.submission_mode.value,
+            "compilationBinding": plan.compilation_binding.value,
+        }
+    return document
 
 
 def _local_step_document(step: PlanStep) -> dict[str, Any]:
@@ -1543,7 +2027,10 @@ def _local_step_document(step: PlanStep) -> dict[str, Any]:
     }
 
 
-def _local_target_document(target: PreparedTarget) -> dict[str, Any]:
+def _local_target_document(
+    target: PreparedTarget,
+    template_units: Mapping[CompilationKey, PreparedTemplateUnit],
+) -> dict[str, Any]:
     return {
         "name": target.name,
         "kind": target.kind.value,
@@ -1551,7 +2038,7 @@ def _local_target_document(target: PreparedTarget) -> dict[str, Any]:
         "resourceGroup": target.resource_group,
         "location": target.location,
         "operations": [
-            _local_operation_document(operation)
+            _local_operation_document(operation, template_units)
             for operation in target.operations
         ],
         "composition": (
@@ -1568,7 +2055,14 @@ def _local_target_document(target: PreparedTarget) -> dict[str, Any]:
 
 def _local_operation_document(
     operation: PreparedOperation,
+    template_units: Mapping[CompilationKey, PreparedTemplateUnit],
 ) -> dict[str, Any]:
+    unit = (
+        template_units.get(operation.details.template_unit_key)
+        if isinstance(operation.details, DeploymentOperation)
+        and operation.details.template_unit_key is not None
+        else None
+    )
     return {
         "identity": {
             "target": operation.identity.target,
@@ -1594,6 +2088,7 @@ def _local_operation_document(
         "details": _local_operation_details(
             operation.details,
             include_parameter_descriptors=True,
+            template_unit=unit,
         ),
     }
 
@@ -1602,6 +2097,7 @@ def _local_operation_details(
     details: OperationDetails,
     *,
     include_parameter_descriptors: bool,
+    template_unit: PreparedTemplateUnit | None = None,
 ) -> dict[str, Any]:
     if isinstance(details, DeploymentOperation):
         document: dict[str, Any] = {
@@ -1611,11 +2107,19 @@ def _local_operation_details(
         }
         if include_parameter_descriptors:
             document["parameters"] = (
-                _parameter_descriptors(details.parameters)
+                _parameter_descriptors(
+                    details.parameters,
+                    template_unit,
+                )
                 if details.parameters is not None
                 else []
             )
             document["valuesSerialized"] = False
+            document["templateUnit"] = (
+                _compilation_key_document(details.template_unit_key)
+                if details.template_unit_key is not None
+                else None
+            )
         return document
     if isinstance(details, KubectlOperation):
         return {
@@ -1671,7 +2175,16 @@ def _local_operation_details(
 
 def _parameter_descriptors(
     parameters: MappingValue,
+    template_unit: PreparedTemplateUnit | None,
 ) -> list[dict[str, Any]]:
+    schema = (
+        {
+            parameter.name: parameter
+            for parameter in template_unit.parameters
+        }
+        if template_unit is not None
+        else {}
+    )
     descriptors: list[dict[str, Any]] = []
     for entry in parameters.entries:
         references = tuple(
@@ -1691,7 +2204,21 @@ def _parameter_descriptors(
         descriptors.append(
             {
                 "name": name,
-                "expectedType": None,
+                "expectedType": (
+                    schema[name].type
+                    if name is not None and name in schema
+                    else None
+                ),
+                "secure": (
+                    schema[name].secure
+                    if name is not None and name in schema
+                    else None
+                ),
+                "hasDefault": (
+                    schema[name].has_default
+                    if name is not None and name in schema
+                    else None
+                ),
                 "resolution": "deferred" if references else "known",
                 "dataReferences": [
                     _data_reference_document(reference)
@@ -1701,6 +2228,120 @@ def _parameter_descriptors(
             }
         )
     return descriptors
+
+
+def _local_template_unit_document(
+    unit: PreparedTemplateUnit,
+) -> dict[str, Any]:
+    identity = unit.identity
+    return {
+        "key": _compilation_key_document(unit.key),
+        "source": {
+            "path": identity.source.path.as_posix(),
+            "contentDigest": identity.source.content_digest,
+            "sizeBytes": identity.source.size_bytes,
+        },
+        "compilerDriver": (
+            _tool_identity_document(identity.compiler_driver)
+            if identity.compiler_driver is not None
+            else None
+        ),
+        "compiler": (
+            _tool_identity_document(identity.compiler)
+            if identity.compiler is not None
+            else None
+        ),
+        "configuration": (
+            {
+                "path": (
+                    identity.configuration.path.as_posix()
+                    if identity.configuration.path is not None
+                    else None
+                ),
+                "contentDigest": identity.configuration.content_digest,
+                "discovery": identity.configuration.discovery.value,
+            }
+            if identity.configuration is not None
+            else None
+        ),
+        "dependencies": {
+            "coverage": identity.dependencies.coverage.value,
+            "templateHashes": list(
+                identity.dependencies.template_hashes
+            ),
+        },
+        "compiledOutputDigest": identity.compiled_output_digest,
+        "outputDigestForm": identity.output_digest_form.value,
+        "parameters": [
+            _template_parameter_document(parameter)
+            for parameter in unit.parameters
+        ],
+    }
+
+
+def _local_capability_document(
+    capability: PlanCapability,
+) -> dict[str, Any]:
+    return {
+        "kind": capability.kind.value,
+        "status": capability.status.value,
+        "requiredBy": [
+            {
+                "target": identity.target,
+                "step": identity.step,
+            }
+            for identity in capability.required_by
+        ],
+        "provider": (
+            {
+                "name": capability.provider.name,
+                "version": capability.provider.version,
+                "versionProvenance": (
+                    capability.provider.version_provenance.value
+                ),
+                "executablePath": (
+                    capability.provider.executable_path.as_posix()
+                    if capability.provider.executable_path is not None
+                    else None
+                ),
+            }
+            if capability.provider is not None
+            else None
+        ),
+    }
+
+
+def _compilation_key_document(
+    key: CompilationKey,
+) -> dict[str, Any]:
+    return {
+        "sourcePath": key.source_path.as_posix(),
+        "sourceContentDigest": key.source_content_digest,
+        "templateKind": key.template_kind.value,
+        "compilerFingerprint": key.compiler_fingerprint,
+        "configurationDigest": key.configuration_digest,
+        "invocation": list(key.invocation),
+    }
+
+
+def _tool_identity_document(tool: ToolIdentity) -> dict[str, Any]:
+    return {
+        "provider": tool.provider,
+        "resolvedPath": tool.resolved_path.as_posix(),
+        "version": tool.version,
+        "versionProvenance": tool.version_provenance.value,
+    }
+
+
+def _template_parameter_document(
+    parameter: TemplateParameter,
+) -> dict[str, Any]:
+    return {
+        "name": parameter.name,
+        "type": parameter.type,
+        "secure": parameter.secure,
+        "hasDefault": parameter.has_default,
+    }
 
 
 def _plan_value_descriptor(

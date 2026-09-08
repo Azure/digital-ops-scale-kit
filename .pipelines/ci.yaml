@@ -54,6 +54,8 @@ jobs:
         parameters:
           installDev: true
 
+      # Includes bounded executable-plan coverage in tests/workspace/
+      # test_executable_plans.py, using real catalog sites and Bicep schemas.
       - script: >
           pytest tests/ -m "not integration" -v
           --cov=siteops
@@ -78,6 +80,8 @@ jobs:
 
   - job: validate
     displayName: Validate Manifests
+    variables:
+      SITEOPS_REDACT_OUTPUT: '1'
     steps:
       - checkout: self
         fetchDepth: 1
@@ -125,7 +129,7 @@ jobs:
           echo "Found manifests: $MANIFESTS"
 
           SUMMARY_FILE="$(Build.ArtifactStagingDirectory)/validation-summary.md"
-          echo "## Deployment Plans" > "$SUMMARY_FILE"
+          echo "## Manifest Validation" > "$SUMMARY_FILE"
           EXIT_CODE=0
 
           for manifest in $MANIFESTS; do
@@ -134,7 +138,9 @@ jobs:
             echo "### $(basename $manifest)" >> "$SUMMARY_FILE"
             echo '```' >> "$SUMMARY_FILE"
 
-            if siteops -w "$WORKSPACE_DIR" validate "$manifest_rel" --plan 2>&1 | tee -a "$SUMMARY_FILE"; then
+            # Libraries without targets remain structurally valid. Executable
+            # catalog coverage runs in the workspace tests, not this sweep.
+            if siteops -w "$WORKSPACE_DIR" validate "$manifest_rel" 2>&1 | tee -a "$SUMMARY_FILE"; then
               echo "✓ Valid"
             else
               EXIT_CODE=1
@@ -146,4 +152,4 @@ jobs:
 
           echo "##vso[task.uploadsummary]$SUMMARY_FILE"
           exit $EXIT_CODE
-        displayName: Validate manifests and show plans
+        displayName: Validate manifest structure

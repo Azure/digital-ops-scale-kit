@@ -69,6 +69,8 @@ jobs:
           install-dev: "true"
 
       - name: Run unit tests
+        # Includes bounded executable-plan coverage in tests/workspace/
+        # test_executable_plans.py, using real catalog sites and Bicep schemas.
         run: pytest tests/ -m "not integration" -v --cov=siteops --cov-report=term-missing --cov-report=xml:coverage.xml --junitxml=test-results.xml
 
       - name: Test Summary
@@ -128,6 +130,8 @@ jobs:
   validate:
     name: Validate Manifests
     runs-on: ubuntu-latest
+    env:
+      SITEOPS_REDACT_OUTPUT: "1"
 
     permissions:
       contents: read
@@ -187,14 +191,14 @@ jobs:
             echo "Found manifests: $MANIFESTS"
           fi
 
-      - name: Validate manifests and show plans
+      - name: Validate manifest structure
         if: steps.find.outputs.manifests != ''
         shell: bash
         env:
           MANIFESTS: ${{ steps.find.outputs.manifests }}
           WORKSPACE_DIR: workspaces/iot-operations
         run: |
-          echo "## Deployment Plans" >> $GITHUB_STEP_SUMMARY
+          echo "## Manifest Validation" >> $GITHUB_STEP_SUMMARY
           EXIT_CODE=0
 
           for manifest in $MANIFESTS; do
@@ -203,8 +207,9 @@ jobs:
             echo "### $(basename $manifest)" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
 
-            # `validate --plan` validates and shows the deployment plan
-            if siteops -w "$WORKSPACE_DIR" validate "$manifest_rel" --plan 2>&1 | tee -a $GITHUB_STEP_SUMMARY; then
+            # Libraries without targets remain structurally valid. Executable
+            # catalog coverage runs in the workspace tests, not this sweep.
+            if siteops -w "$WORKSPACE_DIR" validate "$manifest_rel" 2>&1 | tee -a $GITHUB_STEP_SUMMARY; then
               echo "✓ Valid"
             else
               EXIT_CODE=1

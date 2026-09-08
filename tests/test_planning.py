@@ -7,8 +7,22 @@ from pathlib import Path
 
 import pytest
 
+from siteops.compilation import (
+    CompilationKey,
+    DependencyCoverage,
+    DependencyIdentity,
+    PreparedTemplateUnit,
+    SourceIdentity,
+    TemplateCompilationIdentity,
+    TemplateKind,
+    TemplateParameter,
+    VersionProvenance,
+)
 from siteops.planning import (
     ArmTagWaitOperation,
+    CapabilityKind,
+    CapabilityProviderIdentity,
+    CapabilityStatus,
     CompositionReference,
     CompositionRequirement,
     CompositionResource,
@@ -29,6 +43,7 @@ from siteops.planning import (
     OperationScope,
     OutputValue,
     PlanBuildResult,
+    PlanCapability,
     PlanComposition,
     PlanDiagnostic,
     PlanDisposition,
@@ -47,10 +62,51 @@ from siteops.planning import (
     TargetKind,
     classify_plan_value,
     collect_data_references,
+    render_plain_plan,
     resolve_plan_value,
     serialize_plan,
     serialize_plan_json,
 )
+
+
+def _template_unit(
+    *,
+    parameter: str = "connection",
+) -> PreparedTemplateUnit:
+    source = SourceIdentity(
+        path=Path("templates/main.json"),
+        content_digest="source-digest",
+        size_bytes=1,
+    )
+    key = CompilationKey(
+        source_path=source.path,
+        source_content_digest=source.content_digest,
+        template_kind=TemplateKind.ARM_JSON,
+        compiler_fingerprint="arm-json",
+        configuration_digest="none",
+        invocation=("read-arm-json",),
+    )
+    return PreparedTemplateUnit(
+        key=key,
+        identity=TemplateCompilationIdentity(
+            source=source,
+            compiler_driver=None,
+            compiler=None,
+            configuration=None,
+            dependencies=DependencyIdentity(
+                coverage=DependencyCoverage.NOT_APPLICABLE,
+            ),
+            compiled_output_digest=source.content_digest,
+        ),
+        parameters=(
+            TemplateParameter(
+                name=parameter,
+                type="string",
+                secure=False,
+                has_default=False,
+            ),
+        ),
+    )
 
 
 def _deployment_details() -> DeploymentOperation:
@@ -96,6 +152,24 @@ def _target(
     )
 
 
+def _tool_identity(
+    *,
+    provider: str = "azure-cli",
+    path: Path = Path("tools/az"),
+    version: str | None = "2.87.0",
+) -> CapabilityProviderIdentity:
+    return CapabilityProviderIdentity(
+        name=provider,
+        executable_path=path,
+        version=version,
+        version_provenance=(
+            VersionProvenance.KNOWN
+            if version is not None
+            else VersionProvenance.UNKNOWN
+        ),
+    )
+
+
 def test_operation_identity_uses_only_target_and_step():
     first = OperationIdentity(target="munich", step="deploy")
     second = OperationIdentity(target="munich", step="deploy")
@@ -128,6 +202,251 @@ def test_data_reference_preserves_logical_source_and_output_path():
 
     assert reference.source is source
     assert reference.output_path == ("resource", "identity", "id")
+
+
+def test_plan_capability_requires_operations():
+    with pytest.raises(ValueError, match="at least one operation"):
+        PlanCapability(
+            kind=CapabilityKind.ARM_CONTROL_PLANE,
+            status=CapabilityStatus.UNKNOWN,
+            required_by=(),
+        )
+
+
+def test_plan_capability_rejects_duplicate_operations():
+    identity = OperationIdentity(target="munich", step="deploy")
+
+    with pytest.raises(ValueError, match="must be unique"):
+        PlanCapability(
+            kind=CapabilityKind.ARM_CONTROL_PLANE,
+            status=CapabilityStatus.UNKNOWN,
+            required_by=(identity, identity),
+        )
+
+
+def test_available_plan_capability_requires_provider():
+    with pytest.raises(ValueError, match="require a provider"):
+        PlanCapability(
+            kind=CapabilityKind.ARM_CONTROL_PLANE,
+            status=CapabilityStatus.AVAILABLE,
+            required_by=(
+                OperationIdentity(target="munich", step="deploy"),
+            ),
+        )
+
+
+def test_missing_plan_capability_rejects_provider():
+    with pytest.raises(ValueError, match="Missing plan capabilities"):
+        PlanCapability(
+            kind=CapabilityKind.ARM_CONTROL_PLANE,
+            status=CapabilityStatus.MISSING,
+            required_by=(
+                OperationIdentity(target="munich", step="deploy"),
+            ),
+            provider=_tool_identity(),
+        )
+
+
+def test_unknown_plan_capability_records_selected_provider():
+    capability = PlanCapability(
+        kind=CapabilityKind.ARC_PROXY,
+        status=CapabilityStatus.UNKNOWN,
+        required_by=(
+            OperationIdentity(target="munich", step="apply"),
+        ),
+        provider=_tool_identity(),
+    )
+
+    assert capability.provider is not None
+
+
+def test_deployment_plan_rejects_duplicate_capability_kinds():
+    target = _target()
+    capability = PlanCapability(
+        kind=CapabilityKind.ARM_CONTROL_PLANE,
+        status=CapabilityStatus.UNKNOWN,
+        required_by=(target.operations[0].identity,),
+        provider=_tool_identity(),
+    )
+
+    with pytest.raises(ValueError, match="kinds must be unique"):
+        DeploymentPlan(
+            manifest_name="install",
+            source_path=Path("manifests/install.yaml"),
+            intent=PlanIntent.DESCRIBE,
+            description=None,
+            max_parallel_sites=1,
+            steps=(target.operations[0].step,),
+            targets=(target,),
+            capabilities=(capability, capability),
+        )
+
+
+def test_deployment_plan_rejects_unknown_capability_operation():
+    target = _target()
+
+    with pytest.raises(ValueError, match="unknown operation"):
+        DeploymentPlan(
+            manifest_name="install",
+            source_path=Path("manifests/install.yaml"),
+            intent=PlanIntent.DESCRIBE,
+            description=None,
+            max_parallel_sites=1,
+            steps=(target.operations[0].step,),
+            targets=(target,),
+            capabilities=(
+                PlanCapability(
+                    kind=CapabilityKind.ARM_CONTROL_PLANE,
+                    status=CapabilityStatus.UNKNOWN,
+                    required_by=(
+                        OperationIdentity(
+                            target="other",
+                            step="deploy",
+                        ),
+                    ),
+                    provider=_tool_identity(),
+                ),
+            ),
+        )
+
+
+def test_skipped_operation_cannot_require_capability():
+    operation = _operation()
+    skipped = PreparedOperation(
+        identity=operation.identity,
+        step=operation.step,
+        disposition=PlanDisposition.SKIP,
+        details=operation.details,
+        skip_reason=PlanSkipReason(
+            code=SkipReasonCode.CONDITION_FALSE,
+            detail="Condition not met.",
+        ),
+    )
+    target = _target(skipped)
+
+    with pytest.raises(ValueError, match="Skipped operations"):
+        DeploymentPlan(
+            manifest_name="install",
+            source_path=Path("manifests/install.yaml"),
+            intent=PlanIntent.DESCRIBE,
+            description=None,
+            max_parallel_sites=1,
+            steps=(skipped.step,),
+            targets=(target,),
+            capabilities=(
+                PlanCapability(
+                    kind=CapabilityKind.ARM_CONTROL_PLANE,
+                    status=CapabilityStatus.UNKNOWN,
+                    required_by=(skipped.identity,),
+                    provider=_tool_identity(),
+                ),
+            ),
+        )
+
+
+def test_describe_plan_cannot_carry_capabilities():
+    target = _target()
+
+    with pytest.raises(ValueError, match="Describe plans"):
+        DeploymentPlan(
+            manifest_name="install",
+            source_path=Path("manifests/install.yaml"),
+            intent=PlanIntent.DESCRIBE,
+            description=None,
+            max_parallel_sites=1,
+            steps=(target.operations[0].step,),
+            targets=(target,),
+            capabilities=(
+                PlanCapability(
+                    kind=CapabilityKind.ARM_CONTROL_PLANE,
+                    status=CapabilityStatus.UNKNOWN,
+                    required_by=(target.operations[0].identity,),
+                    provider=_tool_identity(),
+                ),
+            ),
+        )
+
+
+def test_executable_plan_requires_capability_coverage():
+    unit = _template_unit()
+    step = PlanStep(
+        name="deploy",
+        sequence=1,
+        kind=OperationKind.DEPLOYMENT,
+        scope=OperationScope.RESOURCE_GROUP,
+        details=DeploymentOperation(
+            template=unit.identity.source.path,
+            input_status=InputStatus.DESCRIBED,
+        ),
+    )
+    operation = PreparedOperation(
+        identity=OperationIdentity(target="munich", step="deploy"),
+        step=step,
+        disposition=PlanDisposition.EXECUTE,
+        details=DeploymentOperation(
+            template=unit.identity.source.path,
+            input_status=InputStatus.PREPARED,
+            parameters=MappingValue(()),
+            template_unit_key=unit.key,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="missing a required capability"):
+        DeploymentPlan(
+            manifest_name="install",
+            source_path=Path("manifests/install.yaml"),
+            intent=PlanIntent.EXECUTABLE,
+            description=None,
+            max_parallel_sites=1,
+            steps=(step,),
+            targets=(_target(operation),),
+            template_units=(unit,),
+        )
+
+
+def test_executable_operation_template_matches_template_unit():
+    unit = _template_unit()
+    step = PlanStep(
+        name="deploy",
+        sequence=1,
+        kind=OperationKind.DEPLOYMENT,
+        scope=OperationScope.RESOURCE_GROUP,
+        details=DeploymentOperation(
+            template=Path("templates/other.json"),
+            input_status=InputStatus.DESCRIBED,
+        ),
+    )
+    operation = PreparedOperation(
+        identity=OperationIdentity(target="munich", step="deploy"),
+        step=step,
+        disposition=PlanDisposition.EXECUTE,
+        details=DeploymentOperation(
+            template=Path("templates/other.json"),
+            input_status=InputStatus.PREPARED,
+            parameters=MappingValue(()),
+            template_unit_key=unit.key,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="must match its template unit"):
+        DeploymentPlan(
+            manifest_name="install",
+            source_path=Path("manifests/install.yaml"),
+            intent=PlanIntent.EXECUTABLE,
+            description=None,
+            max_parallel_sites=1,
+            steps=(step,),
+            targets=(_target(operation),),
+            template_units=(unit,),
+            capabilities=(
+                PlanCapability(
+                    kind=CapabilityKind.ARM_CONTROL_PLANE,
+                    status=CapabilityStatus.AVAILABLE,
+                    required_by=(operation.identity,),
+                    provider=_tool_identity(),
+                ),
+            ),
+        )
 
 
 def test_recursive_value_preserves_deferred_mapping_keys():
@@ -589,14 +908,58 @@ def test_describe_plan_cannot_claim_executable():
 
 
 def test_executable_result_rejects_error_diagnostics():
+    unit = _template_unit()
+    details = DeploymentOperation(
+        template=unit.identity.source.path,
+        input_status=InputStatus.PREPARED,
+        parameters=MappingValue(()),
+        template_unit_key=unit.key,
+    )
+    step = PlanStep(
+        name="deploy",
+        sequence=1,
+        kind=OperationKind.DEPLOYMENT,
+        scope=OperationScope.RESOURCE_GROUP,
+        details=DeploymentOperation(
+            template=unit.identity.source.path,
+            input_status=InputStatus.DESCRIBED,
+        ),
+    )
+    target = PreparedTarget(
+        name="munich",
+        kind=TargetKind.RESOURCE_GROUP,
+        subscription="sub",
+        resource_group="rg-munich",
+        location="eastus",
+        operations=(
+            PreparedOperation(
+                identity=OperationIdentity(
+                    target="munich",
+                    step="deploy",
+                ),
+                step=step,
+                disposition=PlanDisposition.EXECUTE,
+                details=details,
+            ),
+        ),
+    )
     plan = DeploymentPlan(
         manifest_name="install",
         source_path=Path("manifests/install.yaml"),
         intent=PlanIntent.EXECUTABLE,
         description=None,
         max_parallel_sites=1,
-        steps=(_target().operations[0].step,),
-        targets=(_target(),),
+        steps=(step,),
+        targets=(target,),
+        template_units=(unit,),
+        capabilities=(
+            PlanCapability(
+                kind=CapabilityKind.ARM_CONTROL_PLANE,
+                status=CapabilityStatus.AVAILABLE,
+                required_by=(target.operations[0].identity,),
+                provider=_tool_identity(),
+            ),
+        ),
     )
 
     with pytest.raises(ValueError, match="error diagnostics"):
@@ -616,8 +979,9 @@ def test_executable_result_rejects_error_diagnostics():
 
 def test_local_private_projection_omits_parameter_values():
     secret = "SECRET_VALUE_SENTINEL"
+    unit = _template_unit()
     details = DeploymentOperation(
-        template=Path("templates/main.bicep"),
+        template=unit.identity.source.path,
         input_status=InputStatus.PREPARED,
         parameters=MappingValue(
             (
@@ -627,6 +991,7 @@ def test_local_private_projection_omits_parameter_values():
                 ),
             )
         ),
+        template_unit_key=unit.key,
     )
     step = PlanStep(
         name="deploy",
@@ -634,7 +999,7 @@ def test_local_private_projection_omits_parameter_values():
         kind=OperationKind.DEPLOYMENT,
         scope=OperationScope.RESOURCE_GROUP,
         details=DeploymentOperation(
-            template=Path("templates/main.bicep"),
+            template=unit.identity.source.path,
             input_status=InputStatus.DESCRIBED,
         ),
     )
@@ -656,6 +1021,7 @@ def test_local_private_projection_omits_parameter_values():
             ),
         ),
     )
+    provider = _tool_identity()
     result = PlanBuildResult(
         status=PlanStatus.PLANNED,
         executable=True,
@@ -667,6 +1033,15 @@ def test_local_private_projection_omits_parameter_values():
             max_parallel_sites=1,
             steps=(step,),
             targets=(target,),
+            template_units=(unit,),
+            capabilities=(
+                PlanCapability(
+                    kind=CapabilityKind.ARM_CONTROL_PLANE,
+                    status=CapabilityStatus.AVAILABLE,
+                    required_by=(target.operations[0].identity,),
+                    provider=provider,
+                ),
+            ),
         ),
     )
 
@@ -686,13 +1061,40 @@ def test_local_private_projection_omits_parameter_values():
     ]["parameters"][0]
     assert parameter == {
         "name": "connection",
-        "expectedType": None,
+        "expectedType": "string",
+        "secure": False,
+        "hasDefault": False,
         "resolution": "known",
         "dataReferences": [],
         "serialized": False,
     }
     assert secret not in encoded
     assert document["projection"] == "local-private"
+    assert document["intent"] == "executable"
+    assert document["plan"]["submission"] == {
+        "mode": "source",
+        "compilationBinding": "observed-not-enforced",
+    }
+    assert document["plan"]["capabilities"] == [
+        {
+            "kind": "arm-control-plane",
+            "status": "available",
+            "requiredBy": [
+                {
+                    "target": "munich",
+                    "step": "deploy",
+                }
+            ],
+            "provider": {
+                "name": "azure-cli",
+                "executablePath": (
+                    provider.executable_path.as_posix()
+                ),
+                "version": "2.87.0",
+                "versionProvenance": "known",
+            },
+        }
+    ]
 
 
 def test_local_private_projection_omits_raw_diagnostic_detail():
@@ -753,6 +1155,100 @@ def test_local_private_projection_can_include_explicit_value_free_detail():
     )
 
 
+def test_publishable_and_redacted_plain_collapse_compiler_detail():
+    secret = "PRIVATE_COMPILER_DETAIL_SENTINEL"
+    result = PlanBuildResult(
+        status=PlanStatus.INVALID,
+        executable=False,
+        plan=None,
+        diagnostics=(
+            PlanDiagnostic(
+                code="compilation.module-unavailable",
+                severity=DiagnosticSeverity.ERROR,
+                summary="Template compilation failed.",
+                detail=f"Private module {secret} could not be restored.",
+            ),
+        ),
+    )
+
+    document = serialize_plan(
+        result,
+        PlanProjection.PUBLISHABLE,
+        engine_version="1.0.0b1",
+    )
+    plain = render_plain_plan(result, redacted=True)
+
+    assert document["diagnostics"] == [
+        {
+            "code": "plan.compilation-failed",
+            "severity": "error",
+            "summary": "Template compilation failed.",
+        }
+    ]
+    assert secret not in serialize_plan_json(
+        result,
+        PlanProjection.PUBLISHABLE,
+        engine_version="1.0.0b1",
+    )
+    assert secret not in plain
+
+
+def test_invalid_executable_plan_states_that_nothing_will_run():
+    operation = _operation()
+    blocked = PreparedOperation(
+        identity=operation.identity,
+        step=operation.step,
+        disposition=PlanDisposition.BLOCKED,
+        details=operation.details,
+        skip_reason=PlanSkipReason(
+            code=SkipReasonCode.CAPABILITY_UNAVAILABLE,
+            detail="A required capability is unavailable.",
+        ),
+    )
+    result = PlanBuildResult(
+        status=PlanStatus.INVALID,
+        executable=False,
+        plan=DeploymentPlan(
+            manifest_name="install",
+            source_path=Path("manifests/install.yaml"),
+            intent=PlanIntent.EXECUTABLE,
+            description=None,
+            max_parallel_sites=1,
+            steps=(blocked.step,),
+            targets=(_target(blocked),),
+        ),
+    )
+
+    rendered = render_plain_plan(result, redacted=False)
+
+    assert "Status: invalid" in rendered
+    assert "Executable: no" in rendered
+    assert "No operations will be submitted from this plan." in rendered
+    assert "Blocked: 1" in rendered
+
+
+def test_describe_plan_discloses_missing_preflight():
+    target = _target()
+    result = PlanBuildResult(
+        status=PlanStatus.PLANNED,
+        executable=False,
+        plan=DeploymentPlan(
+            manifest_name="install",
+            source_path=Path("manifests/install.yaml"),
+            intent=PlanIntent.DESCRIBE,
+            description=None,
+            max_parallel_sites=1,
+            steps=(target.operations[0].step,),
+            targets=(target,),
+        ),
+    )
+
+    rendered = render_plain_plan(result, redacted=False)
+
+    assert "Preflight: not performed" in rendered
+    assert "deployment capabilities were not checked" in rendered
+
+
 def test_local_private_projection_omits_prepared_wait_values():
     secret = "PRIVATE_WAIT_VALUE_SENTINEL"
     details = ArmTagWaitOperation(
@@ -800,6 +1296,14 @@ def test_local_private_projection_omits_prepared_wait_values():
             max_parallel_sites=1,
             steps=(step,),
             targets=(target,),
+            capabilities=(
+                PlanCapability(
+                    kind=CapabilityKind.ARM_CONTROL_PLANE,
+                    status=CapabilityStatus.AVAILABLE,
+                    required_by=(target.operations[0].identity,),
+                    provider=_tool_identity(),
+                ),
+            ),
         ),
     )
 
@@ -828,6 +1332,8 @@ def test_local_private_projection_omits_prepared_wait_values():
 
 def test_publishable_projection_is_a_strict_allowlist():
     secret = "PRIVATE_SENTINEL"
+    diagnostic_secret = "PRIVATE_DIAGNOSTIC_SENTINEL"
+    unit = _template_unit(parameter=secret)
     identity = ResourceIdentity(
         collection=secret,
         components=((secret, secret),),
@@ -864,7 +1370,7 @@ def test_publishable_projection_is_a_strict_allowlist():
         ),
     )
     details = DeploymentOperation(
-        template=Path(f"{secret}/template.bicep"),
+        template=unit.identity.source.path,
         input_status=InputStatus.PREPARED,
         parameters=MappingValue(
             (
@@ -874,6 +1380,7 @@ def test_publishable_projection_is_a_strict_allowlist():
                 ),
             )
         ),
+        template_unit_key=unit.key,
     )
     step = PlanStep(
         name=secret,
@@ -903,11 +1410,21 @@ def test_publishable_projection_is_a_strict_allowlist():
         composition=composition,
         diagnostics=(
             PlanDiagnostic(
-                code=secret,
+                code=diagnostic_secret,
                 severity=DiagnosticSeverity.ERROR,
-                summary=secret,
-                detail=secret,
+                summary=diagnostic_secret,
+                detail=diagnostic_secret,
             ),
+        ),
+    )
+    capability = PlanCapability(
+        kind=CapabilityKind.ARM_CONTROL_PLANE,
+        status=CapabilityStatus.AVAILABLE,
+        required_by=(target.operations[0].identity,),
+        provider=_tool_identity(
+            provider=secret,
+            path=Path(secret) / "az",
+            version=secret,
         ),
     )
     result = PlanBuildResult(
@@ -921,6 +1438,8 @@ def test_publishable_projection_is_a_strict_allowlist():
             max_parallel_sites=1,
             steps=(step,),
             targets=(target,),
+            template_units=(unit,),
+            capabilities=(capability,),
             cli_selector=secret,
             manifest_selector=secret,
             composition_enabled=True,
@@ -938,14 +1457,17 @@ def test_publishable_projection_is_a_strict_allowlist():
         PlanProjection.PUBLISHABLE,
         engine_version="1.0.0b1",
     )
+    redacted_plain = render_plain_plan(result, redacted=True)
 
     assert secret not in encoded
+    assert diagnostic_secret not in redacted_plain
     assert set(document) == {
         "apiVersion",
         "kind",
         "projection",
         "status",
         "executable",
+        "intent",
         "engine",
         "summary",
         "diagnostics",
@@ -990,4 +1512,31 @@ def test_preview_json_is_deterministic_and_identifies_projection():
     assert first == second
     assert '"apiVersion": "siteops/v1alpha1"' in first
     assert '"kind": "DeploymentPlan"' in first
+    assert '"intent": "describe"' in first
     assert '"projection": "publishable"' in first
+
+
+def test_local_describe_plan_omits_submission_claim():
+    target = _target()
+    result = PlanBuildResult(
+        status=PlanStatus.PLANNED,
+        executable=False,
+        plan=DeploymentPlan(
+            manifest_name="install",
+            source_path=Path("manifests/install.yaml"),
+            intent=PlanIntent.DESCRIBE,
+            description=None,
+            max_parallel_sites=1,
+            steps=(target.operations[0].step,),
+            targets=(target,),
+        ),
+    )
+
+    document = serialize_plan(
+        result,
+        PlanProjection.LOCAL_PRIVATE,
+        engine_version="1.0.0b1",
+    )
+
+    assert document["intent"] == "describe"
+    assert "submission" not in document["plan"]

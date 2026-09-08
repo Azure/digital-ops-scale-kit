@@ -14,6 +14,7 @@ fails until it is de-registered.
 import re
 from pathlib import Path
 
+import pytest
 import yaml
 
 from tests.workspace.test_manifest_validation import _all_manifest_files
@@ -205,3 +206,36 @@ class TestDeployDropdownRegistration:
             "Resource-set samples use the dev deployment environment"
             in ado
         )
+
+    @pytest.mark.parametrize(
+        ("path", "plan_command"),
+        [
+            (
+                REUSABLE_GITHUB_DEPLOY,
+                'CMD_ARGS=(-w "$INPUT_WORKSPACE" plan "$INPUT_MANIFEST")',
+            ),
+            (
+                REUSABLE_ADO_DEPLOY,
+                'CMD_ARGS=(-w "$WORKSPACE" plan "$MANIFEST")',
+            ),
+        ],
+        ids=["github", "azure-pipelines"],
+    )
+    def test_executable_plan_delivery_preserves_planning_failure_exit_code(
+        self,
+        path,
+        plan_command,
+    ):
+        text = path.read_text(encoding="utf-8")
+        command_index = text.index(plan_command)
+        script = text[command_index - 500:command_index + 1500]
+
+        pipefail_index = script.index("set -o pipefail")
+        pipeline_index = script.index(
+            'if siteops "${CMD_ARGS[@]}" 2>&1 | tee -a'
+        )
+        capture_index = script.index("PLAN_EXIT_CODE=$?")
+        exit_index = script.index('exit "$PLAN_EXIT_CODE"')
+
+        assert pipefail_index < pipeline_index
+        assert pipeline_index < capture_index < exit_index

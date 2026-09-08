@@ -71,7 +71,9 @@ schemaRegistryId: "{{ steps.schema-registry.outputs.schemaRegistry.id }}"
 clExtensionIds: "{{ steps.aio-enablement.outputs.clExtensionIds }}"
 ```
 
-> **Note**: Output chaining only works during real deployments. In `--dry-run` mode, output templates remain unresolved.
+> **Note**: Prior-step outputs exist only during deployment. `siteops plan`
+> records them as typed deferred references rather than resolving them to
+> values.
 
 ## `parameters/` layout
 

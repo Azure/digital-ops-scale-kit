@@ -134,7 +134,8 @@ siteops deploy manifests/aio-install.yaml -l name=munich-dev,environment=prod
 # filtered it out.
 ```
 
-Manifest selectors that match zero sites warn but still exit zero.
+Both manifest selectors and CLI selectors that match zero sites return a
+nonzero exit code from planning and deployment.
 
 ## Validation
 

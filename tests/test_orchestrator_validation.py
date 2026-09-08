@@ -8,11 +8,11 @@ Covers:
 """
 
 import json
-from unittest.mock import patch
 
 import yaml
 
 from siteops.orchestrator import Orchestrator
+from siteops.planning import PlanIntent, PlanStatus
 
 
 class TestValidation:
@@ -952,8 +952,12 @@ steps:
         errors = orchestrator.validate(manifest_path)
         assert not any("Kubectl file not found" in e for e in errors)
 
-    def test_validate_kubectl_template_in_file_path_skipped(self, tmp_workspace, sample_site_file):
-        """Test that kubectl file paths with templates are skipped during validation."""
+    def test_validate_kubectl_unresolved_site_file_path_rejected(
+        self,
+        tmp_workspace,
+        sample_site_file,
+    ):
+        """A site-selected kubectl file must resolve before tool preflight."""
         orchestrator = Orchestrator(tmp_workspace)
 
         manifest_path = tmp_workspace / "manifests" / "kubectl-template.yaml"
@@ -970,13 +974,12 @@ steps:
       name: my-cluster
       resourceGroup: rg-test
     files:
-      - "{{ site.parameters.kubectlFile }}"
+      - "{{  site.parameters.kubectlFile }}"
 """
         )
 
         errors = orchestrator.validate(manifest_path)
-        # Template paths should be skipped, not treated as missing files
-        assert not any("Kubectl file not found" in e for e in errors)
+        assert any("did not resolve for site 'test-site'" in e for e in errors)
 
 
 class TestStepOutputReferenceValidation:
@@ -1328,10 +1331,6 @@ location: eastus
 """
         )
 
-        from siteops.executor import get_template_parameters
-
-        get_template_parameters.cache_clear()
-
         orchestrator = Orchestrator(tmp_workspace)
         errors = orchestrator.validate(manifest)
 
@@ -1339,16 +1338,26 @@ location: eastus
         assert not self_ref_errors, f"Unexpected self-reference errors: {self_ref_errors}"
 
     def test_self_reference_error_when_template_accepts_param(self, tmp_workspace):
-        """Self-references should error if template accepts the parameter."""
+        """Executable planning rejects a self-reference the schema accepts."""
         # Template that DOES accept instanceName
         template = tmp_workspace / "templates" / "instance.json"
         template.parent.mkdir(parents=True, exist_ok=True)
-        template.write_text(json.dumps({
-            "parameters": {
-                "clusterName": {"type": "string"},
-                "instanceName": {"type": "string"},
-            }
-        }))
+        template.write_text(
+            json.dumps(
+                {
+                    "$schema": (
+                        "https://schema.management.azure.com/schemas/"
+                        "2019-04-01/deploymentTemplate.json#"
+                    ),
+                    "contentVersion": "1.0.0.0",
+                    "parameters": {
+                        "clusterName": {"type": "string"},
+                        "instanceName": {"type": "string"},
+                    },
+                    "resources": [],
+                }
+            )
+        )
 
         # Parameter file with self-reference to a param the template accepts
         params = tmp_workspace / "parameters" / "bad-chaining.yaml"
@@ -1383,23 +1392,27 @@ location: eastus
 """
         )
 
-        from siteops.executor import get_template_parameters
-
-        get_template_parameters.cache_clear()
-
         orchestrator = Orchestrator(tmp_workspace)
         errors = orchestrator.validate(manifest)
+        result = orchestrator.build_plan(
+            manifest,
+            intent=PlanIntent.EXECUTABLE,
+        )
 
-        # SHOULD error - template accepts instanceName, so self-ref is invalid
-        self_ref_errors = [e for e in errors if "cannot reference its own outputs" in e]
-        assert self_ref_errors, f"Expected self-reference error, got: {errors}"
+        assert errors == []
+        assert result.status is PlanStatus.INVALID
+        assert any(
+            "cannot reference its own outputs" in (
+                diagnostic.detail or ""
+            )
+            for diagnostic in result.diagnostics
+        )
 
-    def test_self_reference_conservative_when_template_unreadable(self, tmp_workspace):
-        """Self-references should error if template params can't be extracted."""
-        # Create template that will fail to parse
-        template = tmp_workspace / "templates" / "bad.bicep"
+    def test_invalid_template_fails_during_executable_planning(self, tmp_workspace):
+        """Structural validation does not compile an invalid template."""
+        template = tmp_workspace / "templates" / "bad.json"
         template.parent.mkdir(parents=True, exist_ok=True)
-        template.write_text("param location string")
+        template.write_text("{not-json", encoding="utf-8")
 
         params = tmp_workspace / "parameters" / "chaining.yaml"
         params.parent.mkdir(parents=True, exist_ok=True)
@@ -1416,7 +1429,7 @@ sites:
   - test-site
 steps:
   - name: my-step
-    template: templates/bad.bicep
+    template: templates/bad.json
     parameters:
       - parameters/chaining.yaml
 """
@@ -1433,19 +1446,19 @@ location: eastus
 """
         )
 
-        from siteops.executor import get_template_parameters
-
-        get_template_parameters.cache_clear()
-
         orchestrator = Orchestrator(tmp_workspace)
+        errors = orchestrator.validate(manifest)
+        result = orchestrator.build_plan(
+            manifest,
+            intent=PlanIntent.EXECUTABLE,
+        )
 
-        # Mock get_template_parameters to simulate extraction failure
-        with patch("siteops.executor.get_template_parameters", side_effect=ValueError("Mock failure")):
-            errors = orchestrator.validate(manifest)
-
-        # SHOULD error - can't verify auto-filtering, be conservative
-        self_ref_errors = [e for e in errors if "cannot reference its own outputs" in e]
-        assert self_ref_errors, f"Expected conservative self-reference error, got: {errors}"
+        assert errors == []
+        assert result.status is PlanStatus.INVALID
+        assert any(
+            diagnostic.code == "compilation.output-invalid"
+            for diagnostic in result.diagnostics
+        )
 
     def test_shared_chaining_file_with_multiple_steps(self, tmp_workspace):
         """A shared chaining.yaml should work when self-refs are auto-filtered."""
@@ -1514,10 +1527,6 @@ resourceGroup: rg-test
 location: eastus
 """
         )
-
-        from siteops.executor import get_template_parameters
-
-        get_template_parameters.cache_clear()
 
         orchestrator = Orchestrator(tmp_workspace)
         errors = orchestrator.validate(manifest)

@@ -124,17 +124,14 @@ alternative, which keeps the decision in Azure rather than on the cluster.
 ## Debug commands
 
 ```bash
-# Show the deployment plan
-siteops -w workspaces/iot-operations validate manifests/aio-install.yaml --plan
+# Prepare and show the executable deployment plan
+siteops -w workspaces/iot-operations plan manifests/aio-install.yaml
 
 # Emit one publishable JSON plan document
-siteops -w workspaces/iot-operations validate manifests/aio-install.yaml --plan --output json --projection publishable
+siteops -w workspaces/iot-operations plan manifests/aio-install.yaml --output json --projection publishable
 
-# Dry run: shows the plan, and the sites and steps it would act on
-siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml --dry-run
-
-# Dry run with the exact commands each step would run
-siteops -v -w workspaces/iot-operations deploy manifests/aio-install.yaml --dry-run
+# Show the faster compile-free plan shape
+siteops -w workspaces/iot-operations plan manifests/aio-install.yaml --describe
 
 # Show every value's source file (post inherit + overlay merge)
 siteops -w workspaces/iot-operations sites <name> --show-sources

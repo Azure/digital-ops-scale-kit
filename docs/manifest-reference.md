@@ -155,7 +155,8 @@ Behavior notes:
 - The wait checks the condition once before sleeping, so an already-satisfied condition returns on the first poll.
 - A permanent error (authorization failure, resource not found, malformed `resourceId`) fails the step fast rather than polling for the full timeout. Transient errors (throttling, 5xx, network) keep polling.
 - A timeout or failure message reports the last observed tag value and the last underlying error.
-- `--dry-run` never polls. It logs the intended condition and reports success.
+- `siteops plan` and `deploy --dry-run` never poll. They record the intended
+  condition as a prepared operation without reporting runtime success.
 
 ### Include steps
 
