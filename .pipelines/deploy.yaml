@@ -1,5 +1,5 @@
 # Deploy pipeline: Manual deployment trigger
-# Equivalent to .github/workflows/deploy.yaml
+# Azure Pipelines counterpart to .github/workflows/deploy.yaml
 
 name: $(Date:yyyyMMdd)$(Rev:.r) · ${{ parameters.environment }} · ${{ parameters.manifest }}${{ iif(parameters.dryRun, ' (dry-run)', '') }}
 
@@ -47,7 +47,7 @@ parameters:
     default: ' '
 
   - name: dryRun
-    displayName: Dry run (preview only)
+    displayName: Prepare executable plan only
     type: boolean
     default: false
 

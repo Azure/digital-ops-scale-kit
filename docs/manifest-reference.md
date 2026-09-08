@@ -49,7 +49,10 @@ siteops deploy manifest.yaml -l environment=prod
 siteops deploy manifest.yaml -l name=munich-dev,name=seattle-dev
 ```
 
-A manifest with neither `sites:` nor `selector:` is a library or partial. It requires `-l` at deploy time. See [targeting.md](targeting.md) for the full grammar, the no-match diagnostic, and validation rules.
+A manifest with neither `sites:` nor `selector:` is a library or partial.
+It can be checked with `validate`, while `plan` and `deploy` require `-l`.
+See [targeting.md](targeting.md) for the full grammar, the no-match diagnostic,
+and validation rules.
 
 ## Manifest-level parameters
 
@@ -101,6 +104,11 @@ external assertions, and provenance.
     - parameters/my-params.yaml
 ```
 
+Executable preparation acquires the template schema, removes supplied
+parameters the template does not declare, and requires every parameter that
+has no default. A top-level parameter name derived from a prior operation
+remains deferred until that output resolves.
+
 ### Kubectl steps
 
 ```yaml
@@ -114,6 +122,12 @@ external assertions, and provenance.
     - https://example.com/manifest.yaml
     - configs/local-manifest.yaml
 ```
+
+Authored local paths must remain inside the workspace, and URLs must use
+HTTPS. Site-selected local files are required only for sites where the step's
+condition applies. Fully resolved cluster names, resource groups, and file
+values are checked during executable preparation. Values derived from prior
+operation outputs remain deferred until execution.
 
 ### Wait steps
 
@@ -155,8 +169,9 @@ Behavior notes:
 - The wait checks the condition once before sleeping, so an already-satisfied condition returns on the first poll.
 - A permanent error (authorization failure, resource not found, malformed `resourceId`) fails the step fast rather than polling for the full timeout. Transient errors (throttling, 5xx, network) keep polling.
 - A timeout or failure message reports the last observed tag value and the last underlying error.
-- `siteops plan` and `deploy --dry-run` never poll. They record the intended
-  condition as a prepared operation without reporting runtime success.
+- `siteops plan` and `deploy --dry-run` never poll. Fully resolved values use
+  the same scalar and success-versus-failure-pattern checks as execution.
+  Prior-operation outputs remain deferred until execution.
 
 ### Include steps
 
@@ -221,7 +236,8 @@ above. Invalid structured conditions fail manifest loading.
 | `parallel: true` | Unlimited concurrency |
 | `parallel: 5` | Up to 5 sites concurrently |
 
-CLI override: `siteops deploy manifest.yaml -p 5`
+CLI override: `siteops plan manifest.yaml -p 5` or
+`siteops deploy manifest.yaml -p 5`
 
 ## Deployment scopes
 

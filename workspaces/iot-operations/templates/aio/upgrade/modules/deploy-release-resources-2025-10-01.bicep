@@ -1,8 +1,7 @@
 // deploy-release-resources-2025-10-01.bicep
 // -------------------------------------------------------------------------------------
 // Releases on this API generation require no upgrade-time child resources.
-// The shared parameter surface keeps dispatcher arms interchangeable and gives
-// a later release a typed place to add a requirement.
+// The shared parameter surface keeps dispatcher arms interchangeable.
 // -------------------------------------------------------------------------------------
 
 @description('Name of the existing IoT Operations instance.')

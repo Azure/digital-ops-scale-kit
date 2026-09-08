@@ -6,7 +6,6 @@
 This module handles the low-level execution of:
 - Azure deployment commands (az deployment group/sub create)
 - kubectl commands via Arc-connected cluster proxy
-- Template parameter extraction for filtering
 
 The module automatically configures Azure CLI User-Agent tracking
 (AZURE_HTTP_USER_AGENT) to include "siteops/{version}" for usage
@@ -767,8 +766,9 @@ class AzCliExecutor:
         cmd = [self.az_path] + args
         # Rendered from the vector rather than scrubbed after joining, so a
         # value containing a space is replaced whole. Display only. Both lines
-        # below carry the subscription and resource group the command targets,
-        # and a dry run is what an operator runs in CI to preview a change.
+        # below carry the subscription and resource group the command targets.
+        # This low-level dry-run path remains for compatibility tests. The CLI
+        # uses executable planning for `deploy --dry-run`.
         cmd_display = scrub_command_for_output(cmd)
         cmd_display = scrub_site_for_output(cmd_display, site_name) or ""
 

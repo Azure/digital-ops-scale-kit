@@ -4,20 +4,16 @@
 # Connect a local Kubernetes cluster to Azure Arc and (optionally) configure
 # workload identity by reconfiguring the kube-apiserver's service-account-issuer.
 #
-# Reference (not a verbatim port): Azure/azure-iot-ops-cli-extension
-#   .github/actions/connect-arc/action.yml
-#
-# Improvements over the reference:
-#   - systemd drop-in for the issuer-URL change (deterministic restart) instead
-#     of `kill -9 + sleep 60s`.
-#   - Re-waits Connected status AFTER the k3s restart (the restart can flap
-#     Arc to Offline; downstream secret-sync deploys then fail confusingly).
+# Current behavior:
+#   - Applies the issuer URL through a systemd drop-in and deterministic restart.
+#   - Rechecks Connected status after the k3s restart, when Arc can
+#     transiently report Offline.
 #   - Verifies the OIDC issuer is actually being served (`/.well-known/
 #     openid-configuration`) before declaring success.
 #   - `enable-features` is wrapped in the same retry as `connect` (it can race
 #     with cluster registration completion).
-#   - `set -euo pipefail` everywhere; no `config:` input (kubeconfig comes from
-#     create-k3s-cluster's default location, no secret-leak surface).
+#   - Uses `set -euo pipefail` throughout. Kubeconfig comes from the
+#     create-k3s-cluster action rather than a separate input.
 #   - `--only-show-errors` trims non-error Azure CLI chatter from logs.
 #
 # Assumes: caller has already run `azure/login` (OIDC) and that
@@ -180,10 +176,9 @@ runs:
       run: |
         set -euo pipefail
 
-        # systemd drop-in is deterministic: override ExecStart, daemon-reload, restart.
-        # Beats the upstream `kill -9 + sleep 60s` pattern: no race, full logs.
-        # The empty ExecStart= line clears the inherited value before we set ours;
-        # without it systemd would append (invalid) and fail to start the unit.
+        # The systemd drop-in gives the restart one deterministic configuration.
+        # The empty ExecStart= line clears the inherited value before we set ours.
+        # Without it, systemd would append an invalid value and fail to start the unit.
         sudo mkdir -p /etc/systemd/system/k3s.service.d
         sudo tee /etc/systemd/system/k3s.service.d/oidc-issuer.conf >/dev/null <<EOF
         [Service]
@@ -220,9 +215,8 @@ runs:
         RESOURCE_GROUP: ${{ inputs.resource-group }}
       run: |
         set -euo pipefail
-        # Arc heartbeat can flap Offline during the API-server restart. Without
-        # this re-wait, the next deploy step fails with a confusing "cluster
-        # not connected" error 5+ minutes into the run.
+        # Arc heartbeat can flap Offline during the API-server restart. Recheck
+        # connectivity before the next deployment step uses the cluster.
         bash "${GITHUB_ACTION_PATH}/wait-connected.sh" "${CLUSTER_NAME}" "${RESOURCE_GROUP}"
 
     - name: Verify OIDC discovery endpoint

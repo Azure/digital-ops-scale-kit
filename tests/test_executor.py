@@ -1311,8 +1311,9 @@ class TestArcProxyPortAllocation:
 class TestArcProxyPortInUseRetry:
     """Tests for `_arc_proxy` retry when `az connectedk8s proxy` exits with
     "Port X is already in use". The allocated slot may collide with a process
-    outside the in-process allocator (stale proxy, unrelated tenant); the
-    fix retries with the next slot up to `ARC_PROXY_MAX_PORT_RETRIES`.
+    outside the in-process allocator, such as a stale proxy or unrelated
+    tenant. The executor retries with the next slot up to
+    `ARC_PROXY_MAX_PORT_RETRIES`.
     """
 
     def setup_method(self):

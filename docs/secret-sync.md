@@ -1,6 +1,6 @@
 # Secret Sync
 
-Enable [secret synchronization](https://learn.microsoft.com/azure/iot-operations/secure-iot-ops/howto-manage-secrets) for Azure IoT Operations instances, fully declarative with no CLI commands required.
+Enable [secret synchronization](https://learn.microsoft.com/azure/iot-operations/secure-iot-ops/howto-manage-secrets) for Azure IoT Operations instances through declarative Site Ops manifests. No imperative `az iot ops secretsync` commands are required.
 
 Secret sync bridges Azure Key Vault and your Arc-enabled Kubernetes cluster. Once enabled, you can synchronize Key Vault secrets to Kubernetes secrets that AIO workloads consume directly.
 
@@ -19,9 +19,9 @@ The enablement template (`enable-secretsync.bicep`) creates:
 
 ## Prerequisites
 
-- Azure IoT Operations instance deployed and running
+- Existing Azure IoT Operations instance
 - Connected cluster with **OIDC issuer** and **workload identity** enabled
-- Contributor + Key Vault Administrator (or equivalent) permissions on the target resource group
+- Contributor on the deployment resource group, plus permission to create role assignments at the Key Vault scope (for example, Owner, User Access Administrator, or Role Based Access Control Administrator at an applicable scope). Set `skipRoleAssignments: true` only when the secret sync managed identity already has the required Key Vault roles.
 
 ## How it works
 
@@ -34,7 +34,7 @@ resolve-aio                          enable-secretsync
 │                           │ output  │ role assignments, instance update│
 │ Outputs:                  │ chain   │                                  │
 │  • CL name, namespace    │         │ Receives all values as params;   │
-│  • Cluster name, OIDC    │         │ no cross-directory dependencies  │
+│  • Cluster name, OIDC    │         │ shared workspace modules         │
 │  • Instance properties   │         │                                  │
 └──────────────────────────┘         └──────────────────────────────────┘
 ```
@@ -79,7 +79,7 @@ parameters:
 
 Manifest-level attachment sits below site parameters in the [merge order](parameter-resolution.md#merge-order), so a site overrides the declared default. It also applies to every step in the pipeline, and each step receives only the parameters its own template declares. `secretValues` is `@secure()` and declared only by `sync-secrets.bicep`, so values reach the template that writes them to Key Vault and no other deployment.
 
-A site that declares no secrets keeps whatever object list the cluster already carries. Enablement reads the current value from the class the instance is bound to and writes it back, so running the platform install on a cluster whose secrets came from elsewhere leaves them in place. On a first install there is nothing to read, and the class is written without an `objects` field.
+A site that declares no secrets keeps whatever object list the cluster already carries. Enablement reads the current value from the class the instance is bound to and writes it back, so running the platform install on a cluster whose secrets came from elsewhere leaves them in place. On a first install there is nothing to read, and the class is written with `objects` set to an empty string.
 
 The read requires the bound class to exist. When an instance points at a class that was deleted out of band, the read fails and the deployment stops rather than writing over the reference. Set `preserveExistingSpcObjects: false` in the site's `parameters` to skip the read and let enablement create the class fresh. It belongs on the site rather than in a parameter file, because the chaining file that supplies the class reference attaches at step level and outranks a site value.
 
@@ -133,26 +133,33 @@ In CI, enable secret sync per-site via the `SITE_OVERRIDES` secret:
 By default, the enablement template creates a new Key Vault in the deployment resource group. To use an existing Key Vault, including one in a different resource group, pass its resource ID:
 
 ```yaml
-# parameters/secretsync-overrides.yaml (or in sites.local/)
-existingKeyVaultResourceId: "/subscriptions/.../resourceGroups/shared-rg/providers/Microsoft.KeyVault/vaults/my-keyvault"
+# workspaces/iot-operations/sites.local/my-site.yaml
+parameters:
+  existingKeyVaultResourceId: "/subscriptions/.../resourceGroups/shared-rg/providers/Microsoft.KeyVault/vaults/my-keyvault"
 ```
 
 When an existing Key Vault is provided:
 - No new Key Vault is created
-- Role assignments are scoped to the Key Vault's resource group (cross-RG supported)
+- Role assignments are deployed from the Key Vault's resource group and scoped to the Key Vault itself (cross-RG supported)
 - The Key Vault must have RBAC authorization enabled (`enableRbacAuthorization: true`)
 
 ## Syncing secrets to the cluster
 
-After enablement, use `sync-secrets.bicep` to synchronize one or more Key Vault secrets to Kubernetes Secrets in a single deploy:
+After enablement, use the `sync-secrets.bicep` step to configure one or more Key Vault secrets for synchronization to Kubernetes Secrets. The workspace sample composes that step and accepts secret values from a same-name local overlay:
 
+```yaml
+# workspaces/iot-operations/sites.local/my-site.yaml
+parameters:
+  secrets:
+    - secretName: my-secret
+    - secretName: existing
+      createInKv: false
+  secretValues:
+    my-secret: "<secret-value>"
 ```
-az deployment group create -g <rg> \
-  -f templates/secretsync/sync-secrets.bicep \
-  -p keyVaultName=<kv> customLocationName=<cl> spcName=<spc> \
-     managedIdentityClientId=<clientId> instanceLocation=<region> \
-     secrets='[{"secretName":"my-secret"},{"secretName":"existing","createInKv":false}]' \
-     secretValues='{"my-secret":"<value>"}'
+
+```bash
+siteops -w workspaces/iot-operations deploy samples/secretsync-sample/manifest.yaml -l "name=my-site"
 ```
 
 The template treats the `secrets` array as the desired state. Each deploy PUTs the SPC with the union of all entries' object names and creates one SecretSync per distinct `kubernetesSecretName` (defaulting to `secretName`). Entries that share a `kubernetesSecretName` are grouped into one multi-key Kubernetes Secret. See [Multi-key Secrets](#multi-key-secrets) below.
@@ -207,13 +214,16 @@ Constraints:
 - Each `secretName` must be unique across the array. Each entry corresponds to one Key Vault secret.
 - Within a group of entries sharing a `kubernetesSecretName`, each `kubernetesSecretKey` must also be unique. Like any duplicate-key situation in YAML, two entries claiming the same `(kubernetesSecretName, kubernetesSecretKey)` pair both write to the same Kubernetes Secret slot and the cluster-side reconcile order decides which value wins.
 
+Workspace tests enforce these constraints for committed declarations. A
+`sites.local/` overlay or another caller-provided array must preserve the same
+uniqueness because the template does not reject duplicates at deployment time.
+
 ### Security model
 
-The `secretValues` parameter is decorated with `@secure()` so ARM never logs values in deployment history or outputs. Provide values via:
+The `secretValues` parameter is decorated with `@secure()` so ARM does not record values in deployment history or outputs. This protection does not make shell arguments safe. Provide values via:
 
 - **`sites.local/`** parameter overrides (gitignored), the standard siteops pattern for local development
-- **CI/CD secrets** such as GitHub Actions secrets or Azure DevOps variable groups
-- **CLI `--parameters`** at deployment time
+- **The `SITE_OVERRIDES` secret** populated from GitHub Actions secrets or Azure DevOps variable groups
 
 ### Adding as a manifest step
 
@@ -321,7 +331,7 @@ If `resolve-aio` fails with an error about a property not existing on the instan
 
 ### Role assignment conflicts
 
-Role assignments use deterministic names via `guid(keyVault.id, principalId, roleId)`. Re-running the deployment is idempotent. Existing assignments are confirmed in place, not duplicated.
+Role assignments use deterministic names via `guid(keyVault.id, principalId, roleId)`, so re-running assignments created by this template is idempotent. Assignments created elsewhere are not necessarily reused. Set `skipRoleAssignments: true` when the required grants are already configured.
 
 ### Key Vault RBAC not enabled
 

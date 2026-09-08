@@ -10,7 +10,8 @@ CLI `-l/--selector` overrides the manifest. Inside a manifest, `sites:` and `sel
 2. **Manifest `sites:`** explicit list of site names.
 3. **Manifest `selector:`** label expression filter.
 
-A manifest with all three sources empty is allowed (a "library" or partial manifest). Such a manifest requires `-l` at deploy time.
+A manifest with all three sources empty is allowed as a library or partial.
+Ordinary validation needs no target. Planning and deployment require `-l`.
 
 ```yaml
 # manifests/aio-install.yaml
@@ -21,8 +22,6 @@ selector: "environment=prod"   # default scope
 siteops deploy manifests/aio-install.yaml                    # all env=prod sites
 siteops deploy manifests/aio-install.yaml -l name=munich-dev # only munich-dev
 ```
-
-Same precedence model as `kubectl`, `terraform`, and `helm`.
 
 ## Selector grammar
 
@@ -84,7 +83,8 @@ Each deployable site is reachable by three identifiers, all of which work in `-l
 
 ## Library and partial manifests
 
-A manifest with no `sites:` and no `selector:` is a library or partial. Standalone deployment requires `-l` to supply the target.
+A manifest with no `sites:` and no `selector:` is a library or partial.
+Standalone planning or deployment requires `-l` to supply the target.
 
 ```yaml
 # manifests/diagnostics.yaml
@@ -123,7 +123,7 @@ siteops deploy manifests/aio-install.yaml -l environment=prdo
 siteops deploy manifests/aio-install.yaml -l name=does-not-exist
 # Error: CLI selector `-l name=does-not-exist` matched no sites.
 # `name=does-not-exist` not found. Workspace site names:
-# chicago-staging, contoso-global, munich-dev, munich-prod, seattle-dev, seattle-prod.
+# <available-site-1>, <available-site-2>.
 ```
 
 When the site name matches but another selector key knocks it out, the diagnostic says so:
@@ -139,9 +139,16 @@ nonzero exit code from planning and deployment.
 
 ## Validation
 
-`siteops validate <manifest>` exercises the same parse and resolve paths as `deploy` without executing any steps.
+`siteops validate <manifest>` performs the shared compile-free structural
+checks used before planning and deployment. Executable `plan` and `deploy`
+then add template acquisition, required-input checks, and local capability
+preflight.
 
-- **Unknown manifest keys are rejected** with a `did you mean` hint sourced from the canonical list (`apiVersion`, `kind`, `name`, `description`, `sites`, `selector`, `siteSelector`, `parallel`, `parameters`, `steps`). `siteSelector` is the deprecated spelling of `selector` and is still accepted.
+- **Unknown manifest keys are rejected** with a `did you mean` hint sourced
+  from the canonical list (`apiVersion`, `kind`, `name`, `description`,
+  `sites`, `selector`, `siteSelector`, `parallel`, `parameters`,
+  `parameterCompositions`, `steps`). `siteSelector` is the deprecated
+  spelling of `selector` and is still accepted.
 - **Selector parse errors** (duplicate non-`name` keys, malformed pairs) are surfaced as validation errors. They no longer mask other manifest issues. The operator sees every problem in one pass.
 - **Library manifests pass validation** because no targeting is structurally OK. Add `-l` when running `validate` to exercise the resolve path against real sites.
 

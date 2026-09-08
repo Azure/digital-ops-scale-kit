@@ -108,7 +108,9 @@ edgeSiteId: "{{ steps.global-edge-site.outputs.site.id }}"
 
 `global-edge-site` is a subscription-scoped step in `manifests/_aio-fundamentals.yaml`, deployed once per subscription. `munich-dev` and `munich-prod` are RG-level sites in that same subscription, so both resolve this reference from the one set of outputs that step produced.
 
-The consuming template has to declare the parameter. Auto-filtering drops anything a template does not accept, so a chained value whose name is not a declared parameter is removed before the deployment.
+The consuming template has to declare the parameter. Auto-filtering removes a
+chained value whose name the template does not accept. Executable preparation
+also reports any required template parameter that remains absent.
 
 **Resolution priority:**
 
@@ -117,7 +119,11 @@ The consuming template has to declare the parameter. Auto-filtering drops anythi
 
 ## Auto-filtering
 
-Parameters are automatically filtered to only include values accepted by each template. This enables shared parameter files:
+Parameters are automatically filtered to include only values accepted by each
+template. Executable preparation then requires every declared parameter that
+has no default. A top-level name derived from a prior operation stays deferred
+until the output resolves, when the same schema check runs again. This enables
+shared parameter files without postponing known missing inputs:
 
 ```yaml
 # parameters/common/common.yaml - works with ANY template
@@ -134,7 +140,7 @@ When deploying:
 
 - **schema-registry template**: Receives `location`, `tags`, `schemaRegistryName`
 - **aio-instance template**: Receives `customLocationName`, `aioInstanceName`
-- Extra parameters are silently filtered out
+- Extra parameters are omitted
 
 ## Best practices
 

@@ -37,8 +37,8 @@ The generator parse-checks both variants and exits non-zero on parse or inline-s
 ### Size constraints
 
 The Bicep template inlines the minified launcher, so it must stay within the configured Arc
-`runCommands` script-body limit. The generator warns before the limit and fails after it. Move to
-`scriptUri` delivery when the launcher needs more capacity.
+`runCommands` script-body limit. The generator warns before the limit and fails after it.
+`scriptUri` delivery is an alternative when the launcher needs more capacity.
 
 ## Direct worker invocation (local testing)
 

@@ -767,8 +767,8 @@ class TestSyncSecretsExistingKvSecret:
             params_path.write_text(json.dumps(params))
             # 0600 prevents any other user on the runner from reading the
             # secretValues block while the file is on disk. tmp_path is
-            # already in a per-user dir on GH runners; this is defense
-            # in depth.
+            # already in a per-user dir on GH runners. This is defense in
+            # depth.
             os.chmod(params_path, 0o600)
             deploy_param_files.append(params_path)
             run_az(

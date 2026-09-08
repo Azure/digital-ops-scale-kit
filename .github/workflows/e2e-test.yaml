@@ -9,7 +9,7 @@
 #                           deletes it at the end. Requires subscription-level
 #                           Owner on the service principal.
 #   - persistent:           Operator supplies a pre-existing RG via the
-#                           `resource-group` input. The RG is preserved; only
+#                           `resource-group` input. The RG is preserved. Only
 #                           resources created during this run (delta vs. the
 #                           pre-run RG snapshot) are deleted. Requires
 #                           RG-level Owner on the SP.
@@ -226,8 +226,8 @@ jobs:
                   sys.exit(
                       f"upgrade-to '{upgrade_to}' is set but `tests` "
                       f"({ordered}) does not include 'aio-upgrade'. The "
-                      f"upgrade-phase pytest step would collect zero tests "
-                      f"and silently 'pass'. Either add 'aio-upgrade' to "
+                      f"upgrade-phase pytest step would collect zero tests. "
+                      f"Either add 'aio-upgrade' to "
                       f"tests or unset upgrade-to."
                   )
               if profile_heavy.issubset(ordered):
@@ -277,7 +277,7 @@ jobs:
           #    (regardless of operator-supplied cluster-name), so concurrent
           #    persistent runs on one RG serialize. Prevents races where two
           #    runs' delta snapshots each see the other's in-flight resources.
-          #  - ephemeral:  per-run key; matrix cells parallelize via the
+          #  - ephemeral:  per-run key. Matrix cells parallelize via the
           #    matrix.aio-release suffix applied at the job level.
           rg_key = f"persistent-{rg_in}" if persistent else f"ephemeral-{os.environ['RUN_ID']}"
           print(f"rg_key={rg_key}")
@@ -287,10 +287,9 @@ jobs:
     needs: prep
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
-    # A standard run installs AIO, deploys the catalog through both routes, and
-    # tears the resource group down. Sized above the observed run so the
-    # `always()` teardown still gets scheduled, since a cancelled job can skip
-    # it and leave the resource group behind.
+    # Ephemeral runs remove their resource group. Persistent runs remove only
+    # resources created during the run. The timeout leaves room for the
+    # `always()` teardown step, since cancellation can skip cleanup.
     timeout-minutes: ${{ (inputs.keep-cluster-alive-minutes > 0 || inputs.upgrade-to != '') && 360 || 180 }}
     concurrency:
       # Persistent: matrix cells share rg_key and omit the release suffix, so
@@ -329,8 +328,8 @@ jobs:
         # generating RG / cluster / site names. E2E_AIO_RELEASE still carries
         # the original string so release pinning inside the site is unaffected.
         #
-        # site_name is always runtime-unique even in persistent mode so
-        # parallel runs against the same RG cannot silently merge sites.
+        # site_name is runtime-unique even in persistent mode so parallel
+        # runs against the same RG cannot merge their generated sites.
         run: |
           set -euo pipefail
           SAFE_VER=$(printf '%s' "$RELEASE" | tr -c 'a-zA-Z0-9' '-' | sed 's/-*$//')
@@ -364,11 +363,9 @@ jobs:
         env:
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-        # Background re-auth every 4 minutes. GitHub OIDC tokens expire after
-        # ~5 minutes and Azure access tokens after ~60-90 minutes. Without this,
-        # long-running e2e jobs (upgrade phase, keep-cluster-alive, ephemeral
-        # teardown) silently fail az commands once the token expires, leaking
-        # Azure resources. Same shape as the loop in _siteops-deploy.yaml, but
+        # Background re-auth every 4 minutes keeps Azure CLI authenticated
+        # during upgrade, inspection holds, and teardown. Same shape as the
+        # loop in _siteops-deploy.yaml, but
         # the PID is not persisted because this runner is single-use: the loop
         # dies with the job and no explicit teardown is needed.
         run: |
@@ -408,11 +405,8 @@ jobs:
           RG: "${{ steps.names.outputs.rg }}"
         # Snapshot BEFORE any Azure-side creation (connect-arc, AIO deploy,
         # etc.) so every resource this run creates is in the teardown delta.
-        # Otherwise Arc resources would be treated as pre-existing, and if
-        # `az connectedk8s delete` failed in teardown they would silently
-        # survive. The teardown step now surfaces such failures as warnings
-        # in the GHA log, but the delta-vs-snapshot mechanism is still the
-        # primary safety net. Atomic write guards against a truncated snapshot.
+        # This keeps resources created by the run inside the teardown delta.
+        # Atomic write guards against a truncated snapshot.
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/e2e-teardown"
@@ -456,7 +450,7 @@ jobs:
         env:
           AUTO_LOC: ${{ inputs.location }}
           RG: ${{ steps.names.outputs.rg }}
-        # Persistent mode: the RG already has a region; using the operator
+        # Persistent mode: the RG already has a region. Using the operator
         # input would create site/cluster/RG-region mismatches. Derive from
         # `az group show` to keep them aligned.
         run: |
@@ -474,7 +468,7 @@ jobs:
         env:
           RG: ${{ steps.names.outputs.rg }}
           CLUSTER: ${{ steps.names.outputs.cluster }}
-        # Persistent mode still uses a fresh k3s on this runner; `connect-arc`
+        # Persistent mode still uses a fresh k3s on this runner. `connect-arc`
         # registers it as a NEW Arc resource. An existing connectedClusters
         # record cannot be reused (it's bound to a different k8s instance),
         # so fail fast here with an actionable message instead of letting
@@ -552,7 +546,7 @@ jobs:
         shell: bash
         # Bind a human user (or group) to cluster-admin so they can inspect
         # the k3s cluster via `az connectedk8s proxy`. Cluster-admin is
-        # appropriate for live debugging; the cluster is ephemeral. Set the
+        # appropriate for live debugging because the cluster is ephemeral. Set the
         # DEBUG_USER_OID secret to enable.
         run: |
           set -euo pipefail
@@ -725,7 +719,7 @@ jobs:
         #      shape `Compute names` emits in ephemeral mode.
         #   2. RG must carry tags `managedBy=siteops-e2e`, `ephemeral=true`,
         #      and a `run_id`/`run_attempt` that equal THIS run's values.
-        #      Class-only tags (without run provenance) are not enough; an
+        #      Class-only tags without run provenance are not enough. An
         #      unrelated RG tagged ephemeral could otherwise pass.
         #   3. If the RG is already gone (e.g. a prior retry cleaned up),
         #      treat as idempotent success, not failure.
@@ -825,8 +819,8 @@ jobs:
           # is on a throwaway runner that dies with the job, so the
           # in-cluster cleanup the CLI was trying to do is unnecessary.
           # `az rest` defaults to `https://management.azure.com` when the
-          # `--uri` is a relative path, and uses the current az login
-          # token. The ARM DELETE is async (returns 202); the retry loop
+          # `--uri` is a relative path and uses the current az login
+          # token. The ARM DELETE is async and returns 202. The retry loop
           # below re-lists and confirms the cluster eventually disappears.
           delete_arc_cluster_arm() {
             local rg="$1" cluster="$2"
@@ -876,8 +870,8 @@ jobs:
             # Parallel deletes (-P 10) with per-resource stdout/stderr
             # prefixing so the GHA log shows which delete emitted what.
             # Dependency-order failures on the first pass are expected.
-            # The retry loop handles them. We surface each failure as a
-            # warning instead of silently swallowing it with `|| true`.
+            # The retry loop handles them. Each failed delete is reported as a
+            # warning instead of being discarded with `|| true`.
             #
             # connectedClusters cannot be removed via `az resource delete`
             # (RP rejects with `ResourceDeletionValidateFailed`) and

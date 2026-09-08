@@ -16,8 +16,8 @@ Once running, the OPC UA connector polls the simulator over `opc.tcp://opcplc-00
 
 The sample creates its device, asset, Event Hub, and dataflow on every release.
 
-Release `2608`, which sites inherit by default, and later release configurations
-deploy the connector template during both install and upgrade. The supervisor
+Release `2608`, which sites inherit by default, deploys the connector template
+during both install and upgrade. The supervisor
 then creates the connector pod on demand, and the complete telemetry path
 described above is available.
 
@@ -38,9 +38,10 @@ that release does not create the connector pod that publishes their telemetry.
 Default values in `samples/opc-ua-solution/inputs.yaml` are wired from `resolve-aio` outputs, so a stock deploy works out of the box. Override the Event Hub name or skip the role assignment via a `sites.local/` overlay or CI parameter:
 
 ```yaml
-# sites.local/<site>-opc.yaml or parameters override
-eventHubName: "my-existing-eh"      # default: aio-eh-<resourceSuffix>
-createRoleAssignment: false         # default: true. Disable if the role exists at a higher scope.
+# workspaces/iot-operations/sites.local/<site>.yaml
+parameters:
+  eventHubName: "my-existing-eh"      # default: aio-eh-<resourceSuffix>
+  createRoleAssignment: false         # default: true. Disable if the role exists at a higher scope.
 ```
 
 See `template.bicep` for the full parameter list.

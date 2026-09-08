@@ -1,5 +1,5 @@
 # Stage template: Site Ops deployment
-# Equivalent to .github/workflows/_siteops-deploy.yaml
+# Azure Pipelines counterpart to .github/workflows/_siteops-deploy.yaml
 
 parameters:
   - name: serviceConnection
@@ -21,7 +21,7 @@ parameters:
     type: string
     default: ''
   - name: dryRun
-    displayName: Preview only
+    displayName: Prepare executable plan only
     type: boolean
     default: false
   - name: siteopsSource
@@ -82,8 +82,8 @@ stages:
 
                 - script: |
                     # ADO `script:` does not set pipefail by default. Without it
-                    # a python or jq failure in this pipeline would silently
-                    # leave overrides not written or values not masked.
+                    # a python or jq failure could continue with overrides not
+                    # written or values not masked.
                     set -o pipefail
                     if [[ -z "$SITE_OVERRIDES" ]]; then
                       echo "No site overrides configured, using committed sites"

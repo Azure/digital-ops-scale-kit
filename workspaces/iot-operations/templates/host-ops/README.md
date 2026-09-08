@@ -22,15 +22,15 @@ implementation.
 
 | Operation | What it does | Status |
 |---|---|---|
-| [`aksee-upgrade/`](aksee-upgrade) | Upgrades an AKS Edge Essentials node in place, hop by hop, and reconnects it to Arc. | Validated on a nested-virtualization Arc Windows host. |
+| [`aksee-upgrade/`](aksee-upgrade) | Upgrades an AKS Edge Essentials node in place, hop by hop, then verifies node readiness and Arc connectivity. | Available |
 
 ## What an operation has to get right
 
 - **Run Command success is not workload completion.** It proves the launcher
   returned. Gate later steps on the asynchronous worker's own completion signal.
-- **Clear the terminal tag synchronously before starting**, and record a
-  per-deploy run identifier. A stale `succeeded` or `failed-*` tag from an
-  earlier run otherwise satisfies a later wait.
+- **Reset terminal state before starting**, and record a per-deploy run
+  identifier. If reset is best-effort, document that the state-only wait is
+  not bound to the current run identifier.
 - **Generated launchers are built, not edited.** `Build-Launcher.ps1` embeds
   `worker.ps1` into the installer and a minified variant. Edit the source and
   rebuild. CI rebuilds and fails on a difference.

@@ -10,15 +10,11 @@ The helpers do NOT start `az connectedk8s proxy`. They route via the same
 kubeconfig kubectl would normally pick up, with one workflow-time
 override: if `SITEOPS_TEST_KUBECONFIG` is set in the environment, every
 kubectl invocation is given an explicit `--kubeconfig=<path>` flag
-pointed at that file. This isolates direct-kubectl reads from
-`~/.kube/config`, which the siteops orchestrator's `arc:` kubectl steps
-mutate via `az connectedk8s proxy` (adding a proxy-context entry that
-points at a local port and switching current-context to it). When the
-proxy process exits, the context entry is left dangling. Subsequent
-direct kubectl reads against `~/.kube/config` would hit a dead URL and
-fail with `connection refused`. The override file is read-only for the
-runner user (e.g. the k3s admin file at `/etc/rancher/k3s/k3s.yaml`,
-mode 0644 from create-k3s-cluster), so siteops cannot mutate it.
+pointed at that file. This makes direct integration-test reads independent
+of ambient kubeconfig state and of the isolated per-proxy kubeconfig that
+Site Ops creates for each `arc:` kubectl step. The override file is
+read-only for the runner user (e.g. the k3s admin file at
+`/etc/rancher/k3s/k3s.yaml`, mode 0644 from create-k3s-cluster).
 
 For a remote Arc-onboarded cluster you would need to start an Arc proxy
 before running these tests (or layer Arc-proxy management into the

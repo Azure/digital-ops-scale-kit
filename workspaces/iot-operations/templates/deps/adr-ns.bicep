@@ -37,11 +37,8 @@ param adrApiVersion string
 /*                  ADR Namespace (API-versioned dispatch)                   */
 /*****************************************************************************/
 
-// --- Adding a new API version ----------------------------------------------
-// Convention: the newest API version is always the else-branch (falsy fallback),
-// and every older version is an explicit positive equality check. Mirror this in
-// any future ADR-versioned templates that join this dispatch.
-// ---------------------------------------------------------------------------
+// The newest API version is the fallback branch. Every older version uses an
+// explicit positive equality check.
 
 module ns_2025 './modules/adr-ns-2025-10-01.bicep' = if (adrApiVersion == '2025-10-01') {
   name: 'adr-ns-2025-10-01'
@@ -82,4 +79,3 @@ output adrNamespace object = {
   name: active.name
   principalId: active.principalId
 }
-

@@ -4,17 +4,18 @@
 // and reports back into the resource's instanceView.
 //
 // The launcher writes the worker to disk, registers a Scheduled Task that drives
-// it (running as NT AUTHORITY\SYSTEM), sets the in-progress completion tag, starts
-// the task, and returns `REGISTERED`. ARM sees the runCommand succeed at that point.
+// it (running as NT AUTHORITY\SYSTEM), attempts the in-progress tag update,
+// starts the task, and returns `REGISTERED`. ARM sees the runCommand succeed at
+// that point.
 // The actual upgrade (stage, apply, inner node-VM reboot, verify) happens inside
-// the Scheduled Task asynchronously. The worker writes a
-// `siteops.aksee.upgrade.state` tag on the Arc machine when it finishes, and a
-// siteops `type: wait` step gates downstream steps on that tag.
+// the Scheduled Task asynchronously. The worker attempts to write a
+// `siteops.aksee.upgrade.state` tag on the Arc machine when it finishes. A
+// Site Ops `type: wait` step polls that state tag.
 //
 // Two upgrade modes are supported via `allowKubernetesMinorUpgrade`:
 //   false (default): patch updates within the current Kubernetes minor version.
-//   true: sequential minor-version hops. `AcceptUpgrade` is set true only for
-//   the run and re-pinned false after successful completion. A failed run
+//   true: sequential minor-version hops. `AcceptUpgrade` is set true for the
+//   run and successful finalization attempts to re-pin it false. A failed run
 //   preserves the staged update cache. Use
 //   `targetKubernetesVersion` to stop at a specific minor version. The wait
 //   step timeout should be raised for multi-hop runs.
@@ -53,10 +54,10 @@ param targetResourceGroup string = resourceGroup().name
 @description('Subscription ID where the Arc machine and connected cluster live.')
 param targetSubscription string = subscription().subscriptionId
 
-@description('Opaque per-deploy identifier recorded in the completion tag (siteops.aksee.upgrade.runId). Defaults to the deploy time so each deploy is correlatable. Re-deploys with a fresh value re-run the worker, which no-ops when no newer patch is available.')
+@description('Opaque per-deploy identifier recorded in the completion tag (siteops.aksee.upgrade.runId). Defaults to the deploy time and provides correlation metadata. The shipped wait checks only the state tag.')
 param runId string = utcNow()
 
-@description('When false (default), the worker applies patch updates within the current Kubernetes minor version. When true, the worker performs sequential minor-version hops. `AcceptUpgrade` is scoped to the run and re-pinned false after successful completion. A failed run preserves the staged update cache.')
+@description('When false (default), the worker applies patch updates within the current Kubernetes minor version. When true, the worker performs sequential minor-version hops. Successful finalization attempts to re-pin `AcceptUpgrade` false. A failed run preserves the staged update cache.')
 param allowKubernetesMinorUpgrade bool = false
 
 @description('Optional target Kubernetes minor version for minor-mode upgrades, e.g. `1.33` or `v1.33.5+k3s1`. The worker normalizes to major.minor and stops hopping once the deployed minor reaches this value. Empty string means no explicit target.')
@@ -78,7 +79,7 @@ resource upgradeCommand 'Microsoft.HybridCompute/machines/runCommands@2024-11-10
       // loadTextContent inlines the launcher at compile time. The minified
       // launcher (comments, blank lines, leading whitespace stripped) keeps the
       // inline script body within the runCommands size limit. scriptUri delivery
-      // (a blob URL) is the durable fix when the inline body no longer fits.
+      // is an alternative when the inline body no longer fits.
       script: loadTextContent('./scripts/Install-AksEeUpgrade.min.ps1')
     }
     // asyncExecution=false makes ARM block until the launcher exits. The launcher
@@ -115,5 +116,5 @@ output errorOutput string = upgradeCommand.properties.instanceView.error
 @description('Fully qualified resource ID of the Arc machine that hosts the upgrade. Useful for chaining the wait step that polls the upgrade-state tag.')
 output machineId string = machine.id
 
-@description('The runId recorded in the completion tag for this deploy.')
+@description('The runId recorded as correlation metadata in the completion tag.')
 output runId string = runId

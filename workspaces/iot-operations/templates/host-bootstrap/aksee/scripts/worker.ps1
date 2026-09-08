@@ -19,7 +19,7 @@ phases until either a reboot is pending or the bootstrap is complete.
            managed identity, Arc-connect the cluster, enable custom-locations
            and cluster-connect, and (when workload identity is requested)
            wire the OIDC issuer through the K3s apiserver.
-  Phase 99 Cleanup (unregister scheduled task, remove bootstrap user,
+  Phase 99 Cleanup (unregister scheduled task, remove transient credentials,
            write final state).
 
 Every phase is idempotent so re-runs from any state are safe. Phase 1 writes
@@ -124,8 +124,7 @@ function Test-AksEdgeDeployed {
     # API server. Try the per-user kubeconfig first, then fall back to the
     # shared copy Phase 2 writes under the config dir (which Phase 99
     # preserves). The fallback lets a -Force re-run detect an existing
-    # cluster even though Phase 99 removed the bootstrap user and its
-    # profile kubeconfig.
+    # cluster after Phase 99 purged the system-profile kubeconfig.
     $kubeconfig = Join-Path $env:USERPROFILE '.kube\config'
     if (-not (Test-Path $kubeconfig)) {
         $sharedKubeconfig = Join-Path $ConfigDir 'kubeconfig'
@@ -170,7 +169,7 @@ function Install-AzCliIfMissing {
     # Phase 3 needs `az` for connectedk8s connect + enable-features. The
     # Arc-onboarding flow uses `azcmagent`, not `az`, so a freshly-Arc-
     # connected VM may not have `az` on PATH yet. Install the official
-    # MSI silently if missing, then refresh PATH so the current process
+    # MSI unattended if missing, then refresh PATH so the current process
     # can find `az` without restarting.
     if (Get-Command az -ErrorAction SilentlyContinue) {
         Write-Log 'az CLI already present, skipping install'

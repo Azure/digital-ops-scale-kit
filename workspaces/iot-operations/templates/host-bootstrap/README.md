@@ -16,7 +16,7 @@ Implementations of host-side bootstrap for Azure IoT Operations targets. Each im
 
 | Implementation | Target | Cluster | Status |
 |---|---|---|---|
-| [`aksee/`](aksee) | Windows host | AKS Edge Essentials single-node K3s | Validated end-to-end on Windows Server 2025 Datacenter Azure Edition. |
+| [`aksee/`](aksee) | Windows host | AKS Edge Essentials single-node K3s | Available |
 
 ## Adding a new implementation
 

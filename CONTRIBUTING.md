@@ -13,10 +13,10 @@ cd digital-ops-scale-kit
 pip install -e ".[dev]"
 
 # Run tests
-pytest
+pytest -m "not integration"
 
 # Run tests with coverage
-pytest --cov=siteops --cov-report=term-missing
+pytest -m "not integration" --cov=siteops --cov-report=term-missing
 ```
 
 ## Code Style
@@ -28,12 +28,13 @@ pytest --cov=siteops --cov-report=term-missing
 ## Testing
 
 - Add tests for new functionality
-- Mock `subprocess.run` for executor tests so no real Azure calls happen
+- Inject command runners for planning and executor tests. Guard
+  `subprocess.Popen` when a real process would violate the test boundary.
 - Use fixtures from `conftest.py` for workspace setup
 
 ## Pull Request Process
 
-1. Run `pytest` and ensure all tests pass
+1. Run `pytest -m "not integration"` and `ruff check .`
 2. Update documentation if adding new features
 3. Follow the existing code style
 
@@ -71,14 +72,17 @@ stays in sync with the version in `siteops/__init__.py` (read dynamically by pyp
   - `fix(siteops):` for tool bugfixes
   - `docs:` for documentation
 
-### Example timeline
+### Example version streams
+
+These examples illustrate the version policy, not a release schedule:
 
 ```text
 v1.0.0b1 + siteops/v1.0.0b1    first public beta
-v1.1.0b1                        add secret sync templates (siteops unchanged)
-siteops/v1.0.0b2                tool bugfix (content unchanged)
-v1.2.0b1                        content needing siteops fix (requires siteops >= v1.0.0b2)
+v1.0.0b2                      another content beta, retaining siteops 1.0.0b1
 v1.0.0 + siteops/v1.0.0        stable release
+v1.1.0                        content-only feature
+siteops/v1.0.1                tool-only fix
+v1.2.0 + siteops/v1.1.0        content requiring a newer tool version
 ```
 
 ## Microsoft Open Source

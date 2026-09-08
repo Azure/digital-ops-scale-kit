@@ -8,9 +8,9 @@
 // refreshes the bootstrap state tag, registers a Scheduled Task that drives the
 // worker as NT AUTHORITY\SYSTEM, starts the task, and returns `REGISTERED`. ARM
 // sees the runCommand succeed at that point. The actual bootstrap happens inside
-// the Scheduled Task asynchronously. The worker writes a
-// `siteops.bootstrap.state` tag on the Arc machine when it finishes, and a
-// siteops `type: wait` step gates downstream steps on that tag.
+// the Scheduled Task asynchronously. The worker attempts to write a
+// `siteops.bootstrap.state` tag on the Arc machine when it finishes. A Site Ops
+// `type: wait` step polls that state tag.
 //
 // Prerequisites on the target VM (one-time per VM, outside this Bicep):
 //   1. Server is Arc-connected (e.g., via `OnboardingScript.ps1`).
@@ -46,7 +46,7 @@ param targetResourceGroup string = resourceGroup().name
 @description('Subscription ID where the cluster will be Arc-registered.')
 param targetSubscription string = subscription().subscriptionId
 
-@description('Opaque per-deploy identifier recorded in the bootstrap tags. Defaults to the deploy time so each manifest reapply reevaluates bootstrap state and records a distinct operation.')
+@description('Opaque per-deploy identifier recorded in the bootstrap tags. Defaults to the deploy time and provides correlation metadata. The shipped wait checks only the state tag.')
 param runId string = utcNow()
 
 @description('Azure region for the connectedClusters and custom-location resources the worker creates inside the VM.')
@@ -77,8 +77,8 @@ resource bootstrapCommand 'Microsoft.HybridCompute/machines/runCommands@2024-11-
       // loadTextContent inlines the launcher at compile time, so we inline the
       // minified launcher (comments, blank lines, and leading whitespace
       // stripped) to stay within the runCommands inline-script size limit. Each
-      // added feature narrows the margin. scriptUri delivery (a blob URL) is
-      // the durable fix when the inline body no longer fits.
+      // added feature narrows the margin. scriptUri delivery is an alternative
+      // when the inline body no longer fits.
       script: loadTextContent('./scripts/Install-AksEeBootstrap.min.ps1')
     }
     // asyncExecution=false makes ARM block until the script body exits. The

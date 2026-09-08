@@ -51,7 +51,7 @@ for credentials and approvals and adds the sample selector automatically.
 
 ```bash
 siteops -w workspaces/iot-operations \
-  validate samples/resource-set-basic/manifest.yaml --plan
+  plan samples/resource-set-basic/manifest.yaml --describe
 
 siteops -w workspaces/iot-operations \
   deploy samples/resource-set-basic/manifest.yaml
@@ -66,9 +66,10 @@ valid ARM declaration.
 Microsoft's
 [MQTT client walkthrough](https://learn.microsoft.com/azure/iot-operations/manage-mqtt-broker/howto-test-connection)
 shows how to run an authenticated client inside the cluster. The
-`resource-set-samples` E2E phase performs the same proof with a run-specific
-payload: it subscribes first, publishes under the sample source prefix, and
-requires that payload at the destination.
+`resource-set-samples` input in the
+[E2E workflow](../../../../docs/e2e-testing.md) performs the same proof with a
+run-specific payload: it subscribes first, publishes under the sample source
+prefix, and requires that payload at the destination.
 
 ## Remove the sample
 

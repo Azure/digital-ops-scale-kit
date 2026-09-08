@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Phase-driven worker that applies an in-place AKS Edge Essentials patch update on
+Phase-driven worker that applies an in-place AKS Edge Essentials upgrade on
 a single-node cluster and verifies the result. Runs on the VM, driven by a
 Scheduled Task the launcher registers.
 
@@ -15,8 +15,9 @@ Two modes are supported, controlled by `allowKubernetesMinorUpgrade` in config:
   Kubernetes minor version change.
 - Minor mode (true): sequential multi-hop loop (Phase 1 -> 2 -> 3 -> 1 ...),
   each hop advancing one Kubernetes minor version. `AcceptUpgrade` is set true
-  for this run only and re-pinned false on success. A failed run leaves it set so
-  the staged update-cache survives for a re-deploy to resume. An optional
+  for this run. Successful finalization attempts to re-pin it false. A failed
+  run leaves it set so the staged update-cache survives for a re-deploy to
+  resume. An optional
   `targetKubernetesVersion` config field stops the loop when the target minor is
   reached. Hop progress is tracked in `progress.json`.
 
@@ -25,8 +26,9 @@ Two modes are supported, controlled by `allowKubernetesMinorUpgrade` in config:
            as the Arc machine managed identity, set the shared kubeconfig and
            pin the AKS EE kubectl, detect AIO presence, and capture the
            pre-upgrade snapshot (deployed Kubernetes version, host AKS EE
-           version, node count, Arc + AIO state). Validate the target version
-           if set. Initialize `progress.json`. Set `AcceptUpgrade` for the run.
+           version, node count, Arc state, and AIO namespace presence).
+           Validate the target version if set. Initialize `progress.json`.
+           Set `AcceptUpgrade` for the run.
   Phase 1  Stage one hop. Check whether the target minor is already met. If not,
            stage the next AKS EE update from Microsoft Update via `Invoke-OnlineStage`
            (a Windows Update scan, download, and install that self-extracts into
@@ -182,7 +184,7 @@ function Assert-MicrosoftSignedFile {
 function Install-AzCliIfMissing {
     # The verify gate and the tag write need az. A bootstrapped host already has
     # it, but install (signature-verified) if missing so the worker is
-    # self-contained against an arbitrary Arc host.
+    # self-contained on the Arc host.
     if (Get-Command az -ErrorAction SilentlyContinue) {
         Write-Log 'az CLI already on PATH'
         return
@@ -1052,7 +1054,7 @@ try {
 
     # Terminal-state guard. The at-startup trigger re-runs this worker on every
     # host reboot. If the previous run already reached a terminal state, do not
-    # re-dispatch: a 'failed' state must not silently retry, and 'succeeded' must
+    # re-dispatch: a 'failed' state requires an explicit retry, and 'succeeded' must
     # not re-run Phase 99. A deliberate re-deploy resets state to phase 0.
     $bootState = Get-State
     if ($bootState.status -in @('succeeded', 'failed')) {

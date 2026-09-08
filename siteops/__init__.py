@@ -14,9 +14,10 @@ sites using Bicep/ARM templates with support for:
 - kubectl operations via Arc-connected clusters
 
 Usage:
-    siteops -w <workspace> deploy <manifest>
-    siteops -w <workspace> validate <manifest>
     siteops -w <workspace> sites
+    siteops -w <workspace> validate <manifest>
+    siteops -w <workspace> plan <manifest>
+    siteops -w <workspace> deploy <manifest>
 
 The package automatically configures Azure CLI User-Agent tracking
 (AZURE_HTTP_USER_AGENT) to include "siteops/{version}" for usage

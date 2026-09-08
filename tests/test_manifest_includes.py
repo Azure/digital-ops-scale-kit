@@ -164,9 +164,11 @@ class TestNestedIncludes:
         assert [s.name for s in m.steps] == ["c-1"]
 
     def test_shared_subfragment_not_a_cycle(self, workspace: Path):
-        # A includes B and C; B includes D as "d-from-b"; C includes D as "d-from-c".
+        # A includes B and C. B includes D as "d-from-b", while C includes D
+        # as "d-from-c".
         # D contributes one step but its name varies via a copy file so no collision.
-        # This case proves: visited globally would flag a false cycle; recursion-stack does not.
+        # A global visited set would flag a false cycle. The recursion stack
+        # correctly allows both paths.
         _write_manifest(
             workspace / "manifests" / "d-from-b.yaml",
             {"name": "d", "steps": [_step("d-via-b")]},
@@ -195,7 +197,7 @@ class TestNestedIncludes:
         assert [s.name for s in m.steps] == ["d-via-b", "d-via-c"]
 
     def test_truly_shared_fragment_distinct_steps(self, workspace: Path):
-        # A includes B and C; both B and C include the SAME D file with one step.
+        # A includes B and C. Both B and C include the same D file with one step.
         # Should fail with a step-name collision (NOT a cycle).
         _write_manifest(
             workspace / "manifests" / "d.yaml",
@@ -303,7 +305,7 @@ class TestStepNameCollision:
 
 class TestPathTraversal:
     def test_traversal_outside_workspace_rejected(self, tmp_path: Path):
-        # Workspace is tmp_path/ws; fragment exists at tmp_path/outside.yaml.
+        # The workspace is tmp_path/ws. The fragment is at tmp_path/outside.yaml.
         ws = tmp_path / "ws"
         (ws / "manifests").mkdir(parents=True)
         outside = _write_manifest(
@@ -349,7 +351,8 @@ class TestParameterMerge:
         )
 
         m = Manifest.from_file(parent, workspace_root=workspace)
-        # Parent params first; fragment-only params appended; duplicate dropped.
+        # Parent parameters come first. Fragment-only parameters follow, and
+        # the duplicate is dropped.
         assert m.parameters == ["params/shared.yaml", "params/parent.yaml", "params/frag.yaml"]
 
     def test_path_normalization_dedupes(self, workspace: Path):

@@ -2835,9 +2835,8 @@ class TestMultipleSubscriptionLevelSites:
 
     Subscription-scoped steps run once per subscription and their outputs feed
     every resource-group site under it, so two candidates have no correct
-    resolution. `validate` reports this, but `deploy` does not run `validate`,
-    so silently taking the first would deploy the rest of the fleet against
-    outputs from a site the operator never named.
+    resolution. Shared preparation rejects the ambiguity before planning or
+    deployment can choose a site the operator never named.
     """
 
     def _manifest_with_a_subscription_step(self):

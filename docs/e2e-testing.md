@@ -1,6 +1,11 @@
 # E2E Testing
 
-End-to-end (E2E) tests are the primary live-subscription validation for the scalekit. A single workflow run spins up a fresh k3s cluster, registers it with Azure Arc, deploys the full Azure IoT Operations stack via siteops, runs the integration tests, and tears everything down.
+End-to-end (E2E) tests are the primary live-subscription validation for the
+scalekit. A workflow matrix cell creates a fresh k3s cluster, registers it with
+Azure Arc, deploys Azure IoT Operations through Site Ops, and runs the selected
+integration tests. Ephemeral mode normally deletes its resource group.
+Persistent mode removes resources in the run's snapshot delta, and
+`skip-teardown` preserves them for inspection.
 
 Use E2E tests when:
 
@@ -8,7 +13,9 @@ Use E2E tests when:
 - Qualifying a new AIO release before updating workspace defaults.
 - Reproducing a field issue end-to-end against a real subscription.
 
-Unit tests (`pytest tests/ -m "not integration"`) cover every code path that does not require Azure and should remain the default pre-commit gate. E2E is intentionally opt-in (`workflow_dispatch`).
+Unit tests (`pytest tests/ -m "not integration"`) cover local engine,
+workspace, and workflow behavior and should remain the default pre-commit
+gate. E2E is intentionally opt-in (`workflow_dispatch`).
 
 When one run selects both `dataflow-sample` and `resource-set-samples`, the
 test harness removes the first sample's dataflows, profiles, and endpoints
@@ -40,13 +47,13 @@ pre-teardown inspection hold.
  │                  ├─ render-e2e-site.py at upgrade-to       │
  │                  │    (overwrites same site file)          │
  │                  ├─ pytest tests/integration               │
- │                  │    (SITEOPS_E2E_UPGRADE_PHASE=1;        │
+ │                  │    (SITEOPS_E2E_UPGRADE_PHASE=1,        │
  │                  │     only allowlisted classes run,       │
  │                  │     install fixture short-circuits)     │
  │                  ├─ upload e2e-results-<release>-to-       │
  │                  │           <upgrade-to>.xml              │
  │                  │                                         │
- │                  └─ teardown (ephemeral: delete RG;        │
+ │                  └─ teardown (ephemeral: delete RG,        │
  │                               persistent: delta cleanup)   │
  └────────────────────────────────────────────────────────────┘
 ```
@@ -239,7 +246,7 @@ pytest tests/integration/ -v -m integration
 | AIO deploy fails with `AuthorizationFailed` on role assignment | SP is `Contributor`, not `Owner`. | Escalate to `Owner` on sub (ephemeral) or RG (persistent). |
 | Persistent-mode teardown leaves resources | The snapshot step failed or was skipped. | Inspect the step summary warning and the `Snapshot RG resources` step log. Clean up residual resources manually. |
 | Step summary shows `incomplete in RG ... (N residual resource(s))` | One or more delta deletes did not converge in 5 retry passes. | Inspect the `[delete-failed pass=*]` warnings in the teardown step log. Clean up the named resources manually. For a connectedCluster, use `az connectedk8s delete -n <name> -g <rg> --yes --force`. |
-| connect-arc times out waiting for `Connected` | OIDC issuer service is not reachable or Custom Locations RP object ID is wrong. | Verify prerequisite 2. Re-run with `skip-teardown: true` and inspect `az connectedk8s show`. |
+| connect-arc times out waiting for `Connected` | Arc registration or heartbeat did not reach `Connected`. Authentication, cluster reachability, or custom-locations configuration may be involved. | Verify prerequisite 2. Re-run with `skip-teardown: true` and inspect `az connectedk8s show` from an authorized local session. |
 
 ## Related docs
 

@@ -3,8 +3,9 @@ kind: Manifest
 name: aio-with-opc-ua
 description: |
   End-to-end example: composes the AIO platform install with the OPC UA
-  sample on top, demonstrating an asset producing telemetry that flows from
-  the broker through a dataflow to an Event Hub destination.
+  sample on top, configuring an asset-to-Event Hub telemetry path through the
+  broker and a dataflow. Deployment does not verify data movement. Observe the
+  broker topic and Event Hub separately after the components reconcile.
 
   Post-flatten step sequence (preview with `siteops plan <manifest> --describe`):
     1. global-edge-site         (gated by enableGlobalSite)
@@ -22,7 +23,7 @@ description: |
 # Default selector. Override at the CLI with `-l <key>=<value>`.
 selector: "environment=dev"
 
-# Max concurrent sites. Mirrors the sample manifest. 0 = unlimited, 1 = serial.
+# Max concurrent sites. 0 = unlimited, 1 = serial.
 parallel: 3
 
 parameters:

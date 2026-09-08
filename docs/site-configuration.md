@@ -25,10 +25,12 @@ Sites operate at two levels based on whether they have a `resourceGroup`:
 
 | Site has | Site level | Deploys |
 |----------|-----------|--------|
-| `subscription` + `resourceGroup` | RG-level | Both subscription and RG-scoped steps |
-| `subscription` only | Subscription-level | `scope: subscription` steps only |
+| `subscription` + `resourceGroup` | RG-level | Resource-group steps and target-scoped kubectl or wait steps |
+| `subscription` only | Subscription-level | `scope: subscription` steps and target-scoped kubectl or wait steps |
 
-RG-level sites are the common case. Subscription-level sites deploy shared resources once per subscription (like Azure Edge Sites). RG-level sites in the same subscription pick up those outputs via cross-scope output chaining.
+RG-level sites are the common case. A subscription-level site deploys shared
+resources once for its subscription, such as Azure Edge Sites. RG-level sites
+in that subscription can consume those outputs through cross-scope chaining.
 
 ## Site structure
 
@@ -75,7 +77,7 @@ location: germanywestcentral
 
 labels:
   environment: dev
-  scope: subscription      # Required: lets manifests target with `selector: scope=subscription`
+  scope: subscription      # Workspace convention for selectors
 
 parameters:
   edgeSiteName: germany-edge-site
@@ -217,7 +219,7 @@ when forking the workspace:
 
 | Layer | Owned by | What it cares about |
 |---|---|---|
-| YAML mechanics | siteops engine | Top-level fields (`name`, `subscription`, `resourceGroup`, `location`, `labels`, `inherits`, `parameters`, `properties`), the `parameters:` filter against Bicep template params, the `{{ site.X }}` and `{{ site.properties.<path> }}` substitution surface, and selector parsing on `labels`. |
+| YAML and preparation mechanics | siteops engine | Top-level fields (`name`, `subscription`, `resourceGroup`, `location`, `labels`, `inherits`, `parameters`, `properties`), selector parsing on `labels`, supported site-value substitutions, and executable filtering against an acquired template schema. |
 | Field semantics | The workspace | The names of fields under `properties:` (`aioRelease`, `deployOptions`, the `enable*`/`allow*` toggle prefixes, etc.) and the names of label keys used in selectors (`environment`, `country`, `scope`, etc.). |
 
 Anything in the second row is a convention you can rename for your own
@@ -287,8 +289,8 @@ suite catches it rather than the engine.
 
 ### Templates in a parameter name
 
-`{{ site.X }}` resolves in a parameter **name** as well as a value, so one
-declaration can key data by site:
+Supported site expressions resolve in a parameter **name** as well as a value,
+so one declaration can key data by site:
 
 ```yaml
 parameters:
@@ -297,9 +299,10 @@ parameters:
       role: primary
 ```
 
-Keep the template on a **nested** name, as above. A top-level name is matched
-against the parameters the template declares, and a resolved site value will
-not be one of them, so it is dropped before it reaches the deployment.
+Keep the template on a **nested** name unless the resolved top-level name is
+itself a declared template parameter. Executable preparation filters a
+top-level name that the acquired template does not accept and reports any
+required parameter that remains missing.
 
 Three cases fail rather than resolve. A name that cannot be resolved, a
 template that resolves to a whole object or list, and two names that resolve to
@@ -487,7 +490,11 @@ Inherited values are overridden by child site values. Nested objects (labels, pa
 
 ## Site selection from a manifest
 
-A manifest's target sites resolve from three sources: CLI `-l/--selector` (overrides everything), manifest `sites:` (explicit name list), and manifest `selector:` (label expression). A manifest with none of the three is a library or partial that requires `-l` at deploy time.
+A manifest's target sites resolve from three sources: CLI `-l/--selector`
+(overrides everything), manifest `sites:` (explicit name list), and manifest
+`selector:` (label expression). A manifest with none of the three is a library
+or partial. It can be checked with `validate`, but `plan` and `deploy` require
+`-l` to supply targets.
 
 ```bash
 siteops deploy manifests/aio-install.yaml                           # uses manifest selector

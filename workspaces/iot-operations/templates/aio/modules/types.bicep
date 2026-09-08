@@ -35,7 +35,7 @@ type BrokerConfig = {
 
   @minValue(1)
   @maxValue(5)
-  @description('The AIO Broker backend redundancy factory. The default is 2.')
+  @description('The AIO Broker backend redundancy factor. The default is 2.')
   backendRedundancyFactor: int?
 
   @minValue(1)

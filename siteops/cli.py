@@ -908,10 +908,11 @@ Examples:
     # validate command
     p_validate = subparsers.add_parser(
         "validate",
-        help="Validate manifest and references",
+        help="Validate manifest structure and static references",
         description=(
-            "Validate manifest syntax, files, and references. "
-            "Use --plan to show the deployment plan."
+            "Validate manifest syntax, files, and static references. "
+            "Use `siteops plan <manifest> --describe` for the compile-free "
+            "plan shape."
         ),
     )
     p_validate.add_argument("manifest", type=Path, help="Path to manifest file")
@@ -926,7 +927,10 @@ Examples:
     p_validate.add_argument(
         "--plan",
         action="store_true",
-        help="Show the deployment plan after validation (default: false)",
+        help=(
+            "Compatibility alias for `siteops plan --describe` "
+            "(default: false)"
+        ),
     )
     p_validate.add_argument(
         "--output",

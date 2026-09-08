@@ -25,8 +25,8 @@ Telemetry lags the deploy. The OPC UA connector reconciles the asset,
 establishes its session, and warms up polling before the first message
 reaches the broker, after which the dataflow forwards it to Event Hub.
 
-Release `2608`, which sites inherit by default, and later releases deploy the
-template and create the connector pod on demand. Releases before 2607 deploy
+Release `2608`, which sites inherit by default, deploys the template and
+creates the connector pod on demand. Releases before 2607 deploy
 the connector statically. Release `2607` has the documented missing
 connector-template limitation. See
 [samples/opc-ua-solution/README.md](../opc-ua-solution/README.md#releases-this-data-path-reaches).

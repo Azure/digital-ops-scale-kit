@@ -13,6 +13,7 @@ Standalone manifests and their internal partials for the AIO platform.
 | `secretsync.yaml` | Standalone | yes | Day-2 enable secret sync on an existing AIO install. |
 | `aio-resources.yaml` | Standalone | yes | Config-driven AIO workload resources. Each deployment family runs only when the site selects a resource area it serves. See `docs/resource-catalog.md`. |
 | `_aio-fundamentals.yaml` | Partial | no | Arc extensions, custom location, instance, schema registry, ADR namespace, plus optional global/edge sites. |
+| `_aio-resources.yaml` | Partial | no | Resolves the existing AIO instance and deploys the selected Device Registry and dataflow resource families in order. |
 | `_resolve-aio.yaml` | Partial | no | Reads instance and custom-location names from the existing AIO instance for downstream chaining. |
 | `_secretsync.yaml` | Partial | no | Workload-identity-backed secret sync step. |
 | `_assets.yaml` | Partial | no | Device Registry devices and assets. Carries no manifest-level parameters, so a composing manifest can gate it. |

@@ -19,7 +19,8 @@ Steps:
      at Phase 3 so the worker revalidates Arc connectivity.
   5. Register a Scheduled Task with at-startup + immediate triggers that runs
      `worker.ps1` as NT AUTHORITY\SYSTEM.
-  6. Start the task and return `REGISTERED` so the caller sees success.
+  6. Start the task and return `REGISTERED` so Run Command records launcher
+     completion.
 
 The Scheduled Task survives reboots (at-startup trigger) so Phase 1's
 Hyper-V enablement does not lose state.

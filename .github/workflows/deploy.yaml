@@ -59,7 +59,7 @@ on:
                 type: string
                 default: ""
             dry-run:
-                description: "Dry run (preview only, no deployment)"
+                description: "Prepare the executable plan without deployment"
                 required: false
                 type: boolean
                 default: false

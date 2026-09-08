@@ -95,9 +95,9 @@ Source of truth for every pinned version number is the YAML itself. Cross-refere
 
 ## Upgrading an existing site
 
-Use `aio-upgrade.yaml` to move a site to a newer `aioRelease`. It bumps the Arc extension versions for AIO, secret-store, and (when the site declares `deployOptions.enableCertManager: true`) cert-manager, preserving each extension's existing `configurationSettings`, `releaseTrain`, and identity. After the extension update completes, a separate API-versioned step deploys resources explicitly named by the target release configuration. Upgrades to 2608 and later add the OPC UA connector template.
+Use `aio-upgrade.yaml` to move a site to a newer `aioRelease`. It bumps the Arc extension versions for AIO, secret-store, and (when the site declares `deployOptions.enableCertManager: true`) cert-manager, preserving each extension's existing `configurationSettings`, `releaseTrain`, and identity. After the extension update completes, a separate API-versioned step deploys resources explicitly named by the target release configuration. An upgrade to 2608 adds the OPC UA connector template.
 
-The IoT Operations instance ARM resource has no writable version property and is not mutated by this manifest. Other new instance child resource types, such as broker or dataflow-profile changes, remain out of scope until their release configuration names an explicit upgrade path.
+The IoT Operations instance ARM resource has no writable version property and is not mutated by this manifest. Current release configurations define no upgrade path for other instance child resource types, such as brokers or dataflow profiles.
 
 ```bash
 # 1. Bump aioRelease on the site (or its parent) to the new YAML filename (without extension).

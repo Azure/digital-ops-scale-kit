@@ -102,9 +102,8 @@ Write-Host "Generated $outputPath ($lines lines, parse OK)"
 # minified launcher under the limit where the full source would not. The full
 # launcher remains for operator-direct use.
 #
-# Long-term fix: switch to `scriptUri` (a blob URL) on the runCommands
-# resource. It removes the inline size ceiling but adds a storage account
-# dependency to the deploy chain. Tracked separately.
+# `scriptUri` delivery is an alternative when the inline body no longer fits.
+# It removes the inline size ceiling but adds a hosted-artifact dependency.
 #
 # Minify each source file independently so the comment-strip regex never
 # traverses here-string bodies (a `#` at the start of a here-string line
@@ -125,7 +124,7 @@ function script:Compact-PSSource {
 }
 
 if ($worker -match "(?m)^@['""]") {
-    throw "worker.ps1 contains a here-string opener. The per-file minifier strips leading whitespace and can silently corrupt here-string bodies. Either remove the here-string from worker.ps1 or upgrade Compact-PSSource to skip string tokens via [System.Management.Automation.PSParser]::Tokenize."
+    throw "worker.ps1 contains a here-string opener. The per-file minifier strips leading whitespace and can corrupt here-string bodies without a parse error. Either remove the here-string from worker.ps1 or upgrade Compact-PSSource to skip string tokens via [System.Management.Automation.PSParser]::Tokenize."
 }
 
 $minLauncherWrapper = script:Compact-PSSource $template

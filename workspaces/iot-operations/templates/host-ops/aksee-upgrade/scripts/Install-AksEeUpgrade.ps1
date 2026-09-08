@@ -7,7 +7,7 @@
 # ============================================================================
 <#
 .SYNOPSIS
-Launcher for the AKS Edge Essentials patch-update worker. Writes the worker
+Launcher for the AKS Edge Essentials upgrade worker. Writes the worker
 state-machine to disk, registers a Scheduled Task that drives it, sets the
 in-progress completion tag, and returns once the task is registered. Intended
 for either direct invocation on a Windows VM or delivery via Azure Arc
@@ -23,12 +23,13 @@ Steps:
   2. Write the embedded worker to the config directory.
   3. Write `config.json` and the initial `state.json` (phase=0).
   4. Best-effort: set the Arc machine tag `siteops.aksee.upgrade.state=running`
-     synchronously (via the machine managed identity) so a `type: wait` step
-     never observes a stale `succeeded` from a previous run before the new
-     worker has started.
+     synchronously via the machine managed identity. The shipped wait checks
+     the state tag only, so a failed reset can leave prior terminal state
+     visible until the worker writes again.
   5. Register a Scheduled Task with at-startup + immediate triggers that runs
      `worker.ps1` as NT AUTHORITY\SYSTEM.
-  6. Start the task and return `REGISTERED` so the caller sees success.
+  6. Start the task and return `REGISTERED` so Run Command records launcher
+     completion.
 
 Re-running against an already-upgraded host is safe: the launcher resets state
 and the worker no-ops in Phase 1 when no newer update is available. Only an
@@ -41,8 +42,8 @@ Resource group that holds the Arc-connected server and the connected cluster.
 Subscription ID.
 
 .PARAMETER RunId
-Opaque per-deploy identifier written into the completion tag so the wait step
-and operators can correlate a tag with a specific deploy.
+Opaque per-deploy identifier written into the completion tag for operator
+correlation. The shipped wait does not compare this value.
 
 .PARAMETER ConfigDir
 Directory holding all worker artifacts. Defaults to
@@ -52,7 +53,7 @@ Directory holding all worker artifacts. Defaults to
 Name of the Scheduled Task. Defaults to `SiteOpsAksEeUpgrade`.
 
 .EXAMPLE
-    # Patch-update an AKS EE cluster. The worker authenticates as the Arc
+    # Upgrade an AKS EE cluster. The worker authenticates as the Arc
     # machine's managed identity for verification and the completion tag.
     .\Install-AksEeUpgrade.ps1 `
         -ResourceGroup aksee-rg `
@@ -143,11 +144,9 @@ function Set-StrictAcl {
 }
 
 function Set-RunningTag {
-    # Best-effort: mark the Arc machine tag in-progress synchronously, before
-    # the runCommand returns, so a downstream wait step never sees a stale
-    # `succeeded` from a previous run. Runs in the runCommand context (SYSTEM),
-    # which can reach HIMDS for the machine identity. Skips silently if az is
-    # absent or the login fails, in which case the worker sets the tag instead.
+    # Best-effort: mark the Arc machine tag in progress before Run Command
+    # returns. This runs as SYSTEM and can reach HIMDS for the machine identity.
+    # If Azure CLI or login is unavailable, the worker attempts the update later.
     param([string]$Subscription, [string]$ResourceGroup, [string]$MachineName, [string]$RunId)
     if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
         Write-Log 'Skipping in-progress tag write: az CLI not installed (the worker will set it).'
@@ -180,7 +179,7 @@ function Set-RunningTag {
 $EmbeddedWorker = @'
 <#
 .SYNOPSIS
-Phase-driven worker that applies an in-place AKS Edge Essentials patch update on
+Phase-driven worker that applies an in-place AKS Edge Essentials upgrade on
 a single-node cluster and verifies the result. Runs on the VM, driven by a
 Scheduled Task the launcher registers.
 
@@ -195,8 +194,9 @@ Two modes are supported, controlled by `allowKubernetesMinorUpgrade` in config:
   Kubernetes minor version change.
 - Minor mode (true): sequential multi-hop loop (Phase 1 -> 2 -> 3 -> 1 ...),
   each hop advancing one Kubernetes minor version. `AcceptUpgrade` is set true
-  for this run only and re-pinned false on success. A failed run leaves it set so
-  the staged update-cache survives for a re-deploy to resume. An optional
+  for this run. Successful finalization attempts to re-pin it false. A failed
+  run leaves it set so the staged update-cache survives for a re-deploy to
+  resume. An optional
   `targetKubernetesVersion` config field stops the loop when the target minor is
   reached. Hop progress is tracked in `progress.json`.
 
@@ -205,8 +205,9 @@ Two modes are supported, controlled by `allowKubernetesMinorUpgrade` in config:
            as the Arc machine managed identity, set the shared kubeconfig and
            pin the AKS EE kubectl, detect AIO presence, and capture the
            pre-upgrade snapshot (deployed Kubernetes version, host AKS EE
-           version, node count, Arc + AIO state). Validate the target version
-           if set. Initialize `progress.json`. Set `AcceptUpgrade` for the run.
+           version, node count, Arc state, and AIO namespace presence).
+           Validate the target version if set. Initialize `progress.json`.
+           Set `AcceptUpgrade` for the run.
   Phase 1  Stage one hop. Check whether the target minor is already met. If not,
            stage the next AKS EE update from Microsoft Update via `Invoke-OnlineStage`
            (a Windows Update scan, download, and install that self-extracts into
@@ -362,7 +363,7 @@ function Assert-MicrosoftSignedFile {
 function Install-AzCliIfMissing {
     # The verify gate and the tag write need az. A bootstrapped host already has
     # it, but install (signature-verified) if missing so the worker is
-    # self-contained against an arbitrary Arc host.
+    # self-contained on the Arc host.
     if (Get-Command az -ErrorAction SilentlyContinue) {
         Write-Log 'az CLI already on PATH'
         return
@@ -1232,7 +1233,7 @@ try {
 
     # Terminal-state guard. The at-startup trigger re-runs this worker on every
     # host reboot. If the previous run already reached a terminal state, do not
-    # re-dispatch: a 'failed' state must not silently retry, and 'succeeded' must
+    # re-dispatch: a 'failed' state requires an explicit retry, and 'succeeded' must
     # not re-run Phase 99. A deliberate re-deploy resets state to phase 0.
     $bootState = Get-State
     if ($bootState.status -in @('succeeded', 'failed')) {

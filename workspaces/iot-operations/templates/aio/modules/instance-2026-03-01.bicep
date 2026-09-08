@@ -1,7 +1,7 @@
 // instance-2026-03-01.bicep
 // -------------------------------------------------------------------------------------
 // IoT Operations instance and resources at API version 2026-03-01.
-// Used by AIO releases: 2603+
+// Selected by releases whose aioApiVersion is 2026-03-01.
 //
 // Self-contained module: owns all version-specific logic including extension
 // configuration, broker defaults, trust derivation, and resource declarations.

@@ -1,6 +1,6 @@
 # Integration tests: deploy manifests against real Azure and assert outputs
 # On-demand only via manual trigger
-# Equivalent to .github/workflows/integration-test.yaml
+# Azure Pipelines counterpart to .github/workflows/integration-test.yaml
 
 trigger: none
 
@@ -82,7 +82,7 @@ jobs:
             - script: |
                 # set -o pipefail so a jq failure on malformed
                 # SITE_OVERRIDES surfaces as a step failure instead of
-                # silently leaving values unmasked while pytest runs.
+                # continuing to pytest with values not masked.
                 set -o pipefail
                 if [[ -n "$SITE_OVERRIDES" ]]; then
                   echo "$SITE_OVERRIDES" | jq -r '.. | strings' | while IFS= read -r val; do

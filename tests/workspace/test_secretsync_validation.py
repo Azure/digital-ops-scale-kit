@@ -54,7 +54,7 @@ def _load_secrets_array(yaml_path: Path) -> list[dict] | None:
 
 def _effective_k8s_name(entry: dict) -> str:
     """`kubernetesSecretName`, defaulting to `secretName` per the
-    template's `??` fallback. Only a missing key coalesces; an
+    template's `??` fallback. Only a missing key coalesces. An
     explicit empty string is preserved so `_check_no_empty_overrides`
     can surface it.
     """
@@ -64,7 +64,7 @@ def _effective_k8s_name(entry: dict) -> str:
 
 def _effective_k8s_key(entry: dict) -> str:
     """`kubernetesSecretKey`, defaulting to `secretName` per the
-    template's `??` fallback. Only a missing key coalesces; an
+    template's `??` fallback. Only a missing key coalesces. An
     explicit empty string is preserved.
     """
     value = entry.get("kubernetesSecretKey")
@@ -82,7 +82,7 @@ _NEAR_MATCH_RATIO = 0.92
 
 class TestSyncSecretsInputContract:
     """Committed sync-secrets chaining inputs satisfy the input contract.
-    Customer-authored manifests are not in scope; they follow the
+    Customer-authored manifests are not in scope. They follow the
     Constraints section in `docs/secret-sync.md`.
     """
 

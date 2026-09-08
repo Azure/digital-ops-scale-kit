@@ -28,11 +28,15 @@ A site value resolves at any depth in a declaration. Use one every target site c
 - AIO must be installed on the target cluster. Run `aio-install` first.
 - The site's `aioRelease` must point to a release config under `parameters/aio-releases/`.
 
-No cloud infrastructure and no credentials beyond the deployment identity.
+The deployment creates no supporting cloud service outside the existing AIO
+instance and uses the normal Site Ops deployment identity. Exercising the data
+path separately requires an authenticated in-cluster MQTT client.
 
 ## Seeing data move
 
-The dataflows move what assets publish. A stock AIO install has no assets, so they deploy and report healthy while carrying no traffic. Two ways to give them something to carry:
+A successful deployment provisions the dataflow resources but does not
+establish dataflow health or data movement. A stock AIO install has no assets,
+so use one of these routes to give the dataflows something to carry:
 
 - **Deploy `samples/opc-ua-solution/manifest.yaml` first.** It brings up a simulated OPC UA server, a device, and an oven asset publishing under `azure-iot-operations/data/`, which this dataflow's source subscribes to. Both samples deploy against the same existing AIO install, so running them in sequence is all it takes. On release `2607` the MQTT client below is the quickest route, for the reason [that sample's README](../opc-ua-solution/README.md#releases-this-data-path-reaches) gives.
 - **Publish a message yourself** with an in-cluster MQTT client (see Microsoft's [`mqtt-client.yaml` reference](https://learn.microsoft.com/azure/iot-operations/manage-mqtt-broker/howto-test-connection)), targeting a topic under `azure-iot-operations/data/`, and subscribe to `dataflow-sample/<country>/<site>/output` to watch it arrive.

@@ -3,8 +3,7 @@
 #
 # Usage: wait-connected.sh <cluster-name> <resource-group>
 #
-# Extracted from action.yaml so the post-restart re-wait can reuse the exact
-# same logic (and we avoid duplicating ~20 lines of polling).
+# Shared by the initial and post-restart connectivity checks.
 
 set -euo pipefail
 

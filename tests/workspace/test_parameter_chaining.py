@@ -627,7 +627,7 @@ class TestAioUpgradeChaining:
         """Return the INTERSECTION of keys across all release YAML files.
 
         Required params must be satisfiable regardless of which release file the
-        operator pins; using the intersection guarantees that. A separate test
+        operator pins. Using the intersection guarantees that. A separate test
         (`TestReleaseConfigs.test_release_yaml_keys_consistent_across_files`)
         asserts the key sets match exactly to catch divergence.
         """

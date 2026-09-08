@@ -2,20 +2,17 @@
 #
 # Create a single-node k3s cluster on the runner.
 #
-# Reference (not a verbatim port): Azure/azure-iot-ops-cli-extension
-#   .github/actions/create-k3s-cluster/action.yml
-#
-# Improvements over the reference:
-#   - Uses the official k3s installer (systemd-managed unit) so we get
-#     structured logs (journalctl) and a deterministic restart story.
-#   - `set -euo pipefail` everywhere; no silent partial failures.
+# Current behavior:
+#   - Uses the official k3s installer and its systemd-managed unit for structured
+#     logs and deterministic restarts.
+#   - `set -euo pipefail` makes partial pipeline failures fail the step.
 #   - `kubectl wait --for=condition=Ready` instead of hand-rolled polling.
 #
 # Constraint: assumes a runner with systemd (GHA-hosted ubuntu-latest does).
 #
 # The default version tracks the minimum Kubernetes version Azure IoT Operations
 # validates against, rather than the newest k3s release. Qualifying at the floor
-# is what proves the workspace deploys on the oldest cluster a customer can run.
+# exercises the workspace on the oldest supported cluster version.
 # Raise it when the AIO minimum rises.
 
 name: Create k3s cluster
@@ -55,10 +52,9 @@ runs:
         sudo rm -rf /usr/local/lib/android
         df -h /
 
-        # Advisory, and set at the reference minimum. Running out of disk fails
-        # the AIO install loudly, so there is nothing silent to guard against.
-        # Reported so a run that does hit it can be recognized from its log
-        # rather than diagnosed from unrelated pod failures.
+        # Advisory, and set at the reference minimum. Insufficient disk appears
+        # during AIO installation. Report the available space up front so the
+        # cause is visible in the workflow log.
         free=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
         if [ "$free" -lt 30 ]; then
           echo "::warning::${free} GB free after reclaiming, below the 30 GB reference minimum. If the AIO install fails on image pulls, disk is the first thing to check."
@@ -72,7 +68,7 @@ runs:
         set -euo pipefail
         # Official installer: drops a systemd unit, generates kubeconfig
         # at /etc/rancher/k3s/k3s.yaml, sets up CNI, etc.
-        # INSTALL_K3S_EXEC defines the server args; cluster-init makes this
+        # INSTALL_K3S_EXEC defines the server args. The cluster-init argument makes this
         # the bootstrap node of a (single-node) HA-capable cluster.
         curl -sfL https://get.k3s.io \
           | INSTALL_K3S_VERSION="${K3S_VERSION}" \

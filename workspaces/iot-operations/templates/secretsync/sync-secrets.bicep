@@ -27,11 +27,9 @@
 // participates in the SPC objects list and gets a SecretSync mapping.
 //
 // Usage:
-//   az deployment group create -g <rg> -f sync-secrets.bicep \
-//     -p keyVaultName=<kv> customLocationName=<cl> spcName=<spc> \
-//        managedIdentityClientId=<clientId> instanceLocation=<region> \
-//        secrets='[{"secretName":"foo"},{"secretName":"bar","createInKv":false}]' \
-//        secretValues='{"foo":"foo-value"}'
+//   Compose this template as a Site Ops manifest step and supply secret values
+//   through a same-name sites.local overlay or the CI SITE_OVERRIDES secret.
+//   See docs/secret-sync.md.
 // -------------------------------------------------------------------------------------
 
 import { aioSecretSyncServiceAccountName } from '../common/extension-names.bicep'
@@ -60,7 +58,7 @@ param instanceLocation string
 // Per-deploy parameters
 // =====================================================================================
 
-@description('Per-secret metadata. Each entry: { secretName: string, kubernetesSecretName?: string (defaults to secretName), kubernetesSecretKey?: string (defaults to secretName), createInKv?: bool (default true) }. secretName values must be unique within the array. Entries that share a kubernetesSecretName are grouped into one multi-key Kubernetes Secret. Their (kubernetesSecretName, kubernetesSecretKey) pairs must be globally unique. An empty array leaves the Secret Provider Class without an objects field and creates nothing. The parameter stays required so a caller that omits it fails rather than silently syncing nothing.')
+@description('Per-secret metadata. Each entry: { secretName: string, kubernetesSecretName?: string (defaults to secretName), kubernetesSecretKey?: string (defaults to secretName), createInKv?: bool (default true) }. secretName values and resolved (kubernetesSecretName, kubernetesSecretKey) pairs must be unique. Workspace tests check committed declarations. Other callers must enforce the same contract. Entries sharing a kubernetesSecretName form one multi-key Kubernetes Secret. An empty array writes an empty SPC objects string and creates no Key Vault secret or SecretSync resources. This parameter is required.')
 param secrets array
 
 @secure()
@@ -90,8 +88,8 @@ resource customLocation 'Microsoft.ExtendedLocation/customLocations@2021-08-31-p
 // `az iot ops secretsync secret add` produces: the value is a literal YAML document
 // with an `array:` of literal-block-scalar entries, each carrying objectName and
 // objectType. The SecretSync controller parses this string to know which Key Vault
-// objects to fetch. secretName uniqueness (enforced by the input contract above)
-// keeps this list duplicate-free.
+// objects to fetch. Workspace tests keep committed declarations duplicate-free.
+// Other callers must supply unique secret names and resolved target pairs.
 var spcObjectsYaml = renderSpcObjects(secrets)
 
 // Distinct Kubernetes Secret names referenced by the array. `union(..., [])`
@@ -166,7 +164,7 @@ resource secretSyncs 'Microsoft.SecretSyncController/secretSyncs@2024-08-21-prev
 // Outputs
 // =====================================================================================
 
-@description('Per-secret materialization metadata. One entry per input secret, in the same order. Each carries the resolved Kubernetes Secret name, the key inside that Secret, and the SecretSync ARM resource name. Entries that share a kubernetesSecretName all report the same secretSyncName because they materialize into the same multi-key Kubernetes Secret.')
+@description('Configured mapping metadata. One entry per input secret, in the same order. Each carries the target Kubernetes Secret name, the key inside that Secret, and the SecretSync ARM resource name. Entries that share a kubernetesSecretName report the same secretSyncName. This output does not confirm cluster-side materialization.')
 output materializedSecrets array = [for s in secrets: {
   secretName: s.secretName
   kubernetesSecretName: s.?kubernetesSecretName ?? s.secretName
@@ -177,5 +175,5 @@ output materializedSecrets array = [for s in secrets: {
 @description('Number of secrets configured by this deploy.')
 output secretCount int = length(secrets)
 
-@description('Number of distinct Kubernetes Secret resources materialized on the cluster. Equals secretCount unless entries are grouped by kubernetesSecretName.')
+@description('Number of distinct Kubernetes Secret target names configured by this deploy. Equals secretCount unless entries are grouped by kubernetesSecretName. This output does not confirm cluster-side materialization.')
 output kubernetesSecretCount int = length(k8sSecretNames)

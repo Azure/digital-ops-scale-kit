@@ -84,8 +84,8 @@ Write-Host "Generated $outputPath ($lines lines, parse OK)"
 # Minified variant for Arc Run Command delivery. The runCommands API enforces a
 # size limit on the inline script body, and JSON encoding plus request overhead
 # push the wire size above the raw script size. Strip comments, blank lines, and
-# leading whitespace to stay within the limit. Long-term scalability fix:
-# `scriptUri` (a blob URL), which removes the inline size ceiling.
+# leading whitespace to stay within the limit. `scriptUri` delivery is an
+# alternative when the inline body no longer fits.
 $minPath = Join-Path $ScriptDir 'Install-AksEeUpgrade.min.ps1'
 
 function script:Compact-PSSource {
@@ -157,7 +157,7 @@ function script:Compress-InterTokenWhitespace {
 # (`@"` or `@'`) is always the last token on its line, so match it anywhere on a
 # line, not only at column 0, to catch indented openers too.
 if ($worker -match "(?m)@['""]\s*$") {
-    throw "worker.ps1 contains a here-string opener. The per-file minifier strips leading whitespace and can silently corrupt here-string bodies. Either remove the here-string from worker.ps1 or upgrade Compact-PSSource to skip string tokens."
+    throw "worker.ps1 contains a here-string opener. The per-file minifier strips leading whitespace and can corrupt here-string bodies without a parse error. Either remove the here-string from worker.ps1 or upgrade Compact-PSSource to skip string tokens."
 }
 
 # Strip per-line indentation and blank lines, then collapse the remaining

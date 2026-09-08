@@ -12,10 +12,8 @@ updates:
 
   - package-ecosystem: "github-actions"
     directories:
-      # "/" covers .github/workflows. Composite actions are separate manifests that
-      # are only scanned when their directory is listed, which is why actions used
-      # solely by a composite action did not receive update pull requests. The glob
-      # keeps future composite actions covered without editing this file.
+      # "/" covers .github/workflows. Composite actions are separate manifests,
+      # so their directories are listed explicitly. The glob covers new actions.
       - "/"
       - "/.github/actions/*"
     schedule:

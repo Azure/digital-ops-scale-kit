@@ -29,7 +29,9 @@ selector: "environment=dev"
 steps:
   - include: ../templates/host-bootstrap/aksee/_partial.yaml
 
-  # Run Command returns on acceptance, so gate on the worker's terminal tag.
+  # Run Command completes after the launcher registers the worker task. Poll
+  # the worker's state tag before this manifest completes. This wait does not
+  # compare the run ID.
   - name: wait-for-bootstrap
     type: wait
     condition:

@@ -5,11 +5,10 @@ description: |
   Composes the AKS Edge Essentials host bootstrap with AIO fundamentals as a
   single deploy.
 
-  The bootstrap step returns shortly after the Connected Machine Agent picks up
-  the launcher (~90 seconds), then the cluster comes up on the VM asynchronously
-  for 25 to 40 minutes. The wait step gates AIO fundamentals on the bootstrap's
-  completion tag so the cluster-dependent steps run only once the cluster is
-  ready. One `siteops deploy` runs the whole chain.
+  The bootstrap launcher registers a Scheduled Task, then the cluster comes up
+  asynchronously on the VM. The wait step polls the bootstrap state tag before
+  the AIO fundamentals. The wait is state-only and is not bound to the run ID.
+  One `siteops deploy` runs the whole chain.
 
   Post-flatten step sequence (preview with `siteops plan <manifest> --describe`):
     1. aksee-bootstrap          (Windows VM through K3s + Arc + custom locations)
@@ -31,9 +30,9 @@ parallel: 3
 steps:
   - include: ../../templates/host-bootstrap/aksee/_partial.yaml
 
-  # Gate AIO fundamentals on the bootstrap reaching its terminal state. The
-  # The launcher replaces stale terminal state before this step polls. A
-  # completed bootstrap resumes at Phase 3 to revalidate Arc connectivity.
+  # Gate AIO fundamentals on the bootstrap reaching its terminal state. A
+  # completed bootstrap resumes at Phase 3 and requires its running-tag reset
+  # to succeed before it revalidates Arc connectivity.
   # The worker writes `succeeded` at Phase 99 or `failed-phase-N` on failure.
   - name: wait-for-bootstrap
     type: wait

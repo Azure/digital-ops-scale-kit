@@ -1,6 +1,9 @@
 # CI/CD Setup
 
-This guide covers CI/CD configuration for automated testing and deployments. Site Ops is CI/CD-platform agnostic. It runs anywhere Python and `az` CLI are available. This project provides reference implementations for both GitHub Actions (primary) and Azure DevOps (MVP).
+This guide covers CI/CD configuration for automated testing and deployments.
+Site Ops runs anywhere Python and Azure CLI are available. Deployments that
+contain kubectl operations also require `kubectl`. This project provides a
+primary GitHub Actions implementation and an Azure Pipelines reference.
 
 | Platform | Location | Status |
 |----------|----------|--------|
@@ -242,7 +245,7 @@ Can also be triggered manually from **Actions → CI → Run workflow** (GHA) or
    - **Manifest**: Path to manifest, relative to the workspace root (default: `manifests/aio-install.yaml`)
    - **Environment**: `dev`, `staging`, or `prod`
    - **Selector**: Additional site filter (optional, e.g., `region=eastus`)
-   - **Dry run**: Preview only, no actual deployment
+   - **Dry run**: Prepare the executable plan without deployment
 5. Click **"Run workflow"**
 
 ### Deploy via GitHub CLI
@@ -350,7 +353,7 @@ gh workflow run deploy.yaml -f workspace="iot-operations" -f manifest="samples/a
 │  4. Azure Login (OIDC)                                      │
 │  5. Start OIDC token refresh service (background)           │
 │  6. Prepare and publish the executable plan                 │
-│  7. Run: siteops deploy                                     │
+│  7. Run siteops deploy unless dry run                       │
 │  8. Stop OIDC refresh and Azure Logout                      │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -358,8 +361,9 @@ gh workflow run deploy.yaml -f workspace="iot-operations" -f manifest="samples/a
 Executable planning runs after login because Bicep compiler acquisition and
 module restore may use the network and may need the workflow identity. Planning
 does not submit Azure deployments or contact Kubernetes clusters. The workflow
-publishes only the `publishable` JSON projection. Plan stderr remains in
-runner-local temporary storage and is removed when the step finishes.
+sets private file permissions, publishes only a supported executable
+`publishable` JSON plan, and removes runner-local stdout and stderr files when
+the step finishes. Dry run stops here and publishes no deployment result.
 
 See [ADO architecture](#ado-architecture) for the Azure DevOps equivalent.
 
@@ -369,7 +373,7 @@ See [ADO architecture](#ado-architecture) for the Azure DevOps equivalent.
 |---------|---------------|--------------|
 | **Authentication** | OIDC (no stored credentials, short-lived tokens) | WIF service connection (token managed by `AzureCLI@2`) |
 | **Environment Protection** | Required approvals for staging/prod | Approval checks on ADO environments |
-| **Input Validation** | Prevents path traversal and injection attacks | Same validation logic in pipeline scripts |
+| **Input Validation** | Rejects traversal markers and unsupported selector characters | Same validation logic in pipeline scripts |
 | **Site Name Sanitization** | `SITE_OVERRIDES` keys validated against `^[a-zA-Z0-9_-]+$` | Same |
 | **Override Value Masking** | `::add-mask::` per value | `##vso[task.setvariable issecret=true]` per value |
 | **Concurrency Control** | `concurrency` groups (one deploy or integration-test per env, shared `azure-${env}` group) | Exclusive lock on ADO environments |
@@ -381,10 +385,10 @@ See [ADO architecture](#ado-architecture) for the Azure DevOps equivalent.
 
 ### Output redaction
 
-Workflow logs and artifacts are a public surface, so deployment failure text is scrubbed before it reaches them. Plan summaries request the allowlisted `publishable` JSON projection explicitly and never append process stderr. A resource id is reduced to the resource type that failed. Subscription, tenant, and principal identifiers and bearer tokens are replaced with placeholders, as is the local part of a user principal name. On an Azure service host the tenant-specific label is replaced and the service domain is kept, so `contosostorage.blob.core.windows.net` becomes `<host>.blob.core.windows.net` and still says which service was involved. The error code and message survive, so a failure stays diagnosable:
+Workflow logs and artifacts are a public surface, so deployment failure text is scrubbed before it reaches them. Plan summaries require the allowlisted executable `publishable` JSON projection and never append process stderr. A resource id is reduced to the resource type that failed. Subscription, tenant, and principal identifiers and bearer tokens are replaced with placeholders, as is the local part of a user principal name. On an Azure service host the tenant-specific label is replaced and the service domain is kept, so `contosostorage.blob.core.windows.net` becomes `<host>.blob.core.windows.net` and still says which service was involved. The error code and message survive, so a failure stays diagnosable:
 
 ```text
-[munich-prod] x dataflow-resources: BadRequest: <Microsoft.IoTOperations/instances/dataflowEndpoints> is invalid
+[<site>] x dataflow-resources: BadRequest: <Microsoft.IoTOperations/instances/dataflowEndpoints> is invalid
 ```
 
 Redaction follows the destination rather than the text. A local `siteops deploy` prints the full detail, which is what an operator needs to diagnose their own environment. It turns on automatically under `GITHUB_ACTIONS` and `TF_BUILD`, so a workflow added later is covered, and the shipped workflows set `SITEOPS_REDACT_OUTPUT=1` explicitly as well.
@@ -640,7 +644,7 @@ Same as GitHub Actions, see [Assign Azure roles](#3-assign-azure-roles). The ser
    - **Manifest**: path relative to the workspace root (e.g., `manifests/aio-install.yaml`, `samples/opc-ua-solution/manifest.yaml`, `samples/aio-with-opc-ua/manifest.yaml`)
    - **Target environment**: `dev`, `staging`, or `prod`
    - **Additional site selector**: e.g., `country=US,name=seattle-dev` (optional)
-   - **Dry run**: Check to preview without deploying
+   - **Dry run**: Prepare the executable plan without deploying
 5. Click **"Run"**
 
 #### Deploy via Azure CLI
@@ -681,13 +685,14 @@ az pipelines run \
 │  1. Setup Site Ops (steps template)                         │
 │  2. Validate inputs (path traversal protection)             │
 │  3. Generate sites.local/ from SITE_OVERRIDES               │
-│  4. AzureCLI@2: prepare the publishable plan, then deploy   │
+│  4. AzureCLI@2: prepare plan, deploy unless dry run         │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Key difference from GitHub Actions:** `AzureCLI@2` handles authentication,
-plan-time compiler or module access, deployment, token lifecycle, and cleanup
-in a single task. No separate login, token refresh, or logout steps are needed.
+Dry run stops after the publishable plan. Otherwise, `AzureCLI@2` handles
+authentication, plan-time compiler or module access, deployment, token
+lifecycle, and cleanup in one task. No separate login, token refresh, or
+logout steps are needed.
 
 ### Per-environment migration
 

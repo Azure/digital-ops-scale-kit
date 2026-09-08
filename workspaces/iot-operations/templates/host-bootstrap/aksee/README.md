@@ -8,7 +8,11 @@ Takes a freshly Arc-onboarded Windows VM through:
 
 After this completes, the cluster satisfies the AIO prerequisites and the existing AIO deploy chain runs against it.
 
-Delivered remotely from Azure via Arc Run Command. The launcher writes a worker state machine + supporting files to the VM, registers a Scheduled Task that drives the worker through all phases (including survival of the Hyper-V reboot), and returns once the task is started. The operator never RDPs to the VM.
+Delivered remotely from Azure via Arc Run Command. The launcher writes a worker
+state machine and supporting files to the VM, registers a Scheduled Task that
+drives the worker through all phases, and returns once the task is started. RDP
+is not required to start the bootstrap. The monitoring steps below use an
+administrator session on the VM.
 
 ## How it composes
 
@@ -16,7 +20,7 @@ Three entry shapes:
 
 | Entry | Use |
 |---|---|
-| `manifests/aksee-bootstrap.yaml` | Standalone host bootstrap. Stops at "cluster Arc-connected + AIO-ready". |
+| `manifests/aksee-bootstrap.yaml` | Standalone host bootstrap. Stops after the cluster is Arc-connected and prepared for AIO deployment. |
 | `templates/host-bootstrap/aksee/_partial.yaml` | Internal partial co-located with this implementation. Composed by the standalone above and by compositions like the next row. |
 | `samples/aio-with-aksee-bootstrap/manifest.yaml` | End-to-end bare VM to AIO in one deploy. Composes the partial above plus `_aio-fundamentals.yaml`. |
 
@@ -67,8 +71,8 @@ parameters:
 ```
 
 `inherits: base-site.yaml` supplies the AKS Edge Essentials installer URL and the
-`deployOptions` toggles the bootstrap reads. A site that omits it passes
-`validate` and fails at deploy on the values the parent would have provided.
+`deployOptions` toggles the bootstrap reads. A site that omits required values
+fails executable planning before deployment.
 
 Required fields:
 
@@ -87,14 +91,17 @@ Optional fields:
 ## Run
 
 ```bash
-# Standalone host bootstrap (stops at cluster Arc-connected + AIO-ready)
+# Standalone host bootstrap (stops after Arc connection and AIO prerequisites)
 siteops -w workspaces/iot-operations deploy manifests/aksee-bootstrap.yaml -l environment=dev
 
 # Or bootstrap + AIO install in one deploy
 siteops -w workspaces/iot-operations deploy samples/aio-with-aksee-bootstrap/manifest.yaml -l environment=dev
 ```
 
-The deploy returns the moment the launcher returns `REGISTERED` (typically 30 to 90 seconds after the Arc agent picks up the run command). The actual bootstrap (25 to 40 minutes wall time) runs asynchronously on the VM inside the Scheduled Task. Use the monitor commands below from RDP to track phase progression.
+The Run Command step completes when the launcher returns `REGISTERED`. The
+manifest then waits for the worker's state tag, so the complete `siteops deploy`
+does not return until the bootstrap succeeds, fails, or reaches the wait
+timeout. Use the monitor commands below to track phase progression.
 
 ## Monitor
 
@@ -118,8 +125,8 @@ Phase progression to expect:
 | 0 | running | Pre-flight checks (admin, OS, memory, disk, NuGet provider) |
 | 1 | running | MSI install, Hyper-V enable (may reboot) |
 | 2 | pending-reboot | Hyper-V reboot imminent or in progress |
-| 2 | running | Cluster deployment (10 to 15 minutes) |
-| 3 | running | Azure CLI install, Arc operations, custom locations enablement (5 to 10 minutes) |
+| 2 | running | Cluster deployment |
+| 3 | running | Azure CLI install, Arc operations, custom locations enablement |
 | 99 | succeeded | Done |
 
 Live-follow form for the latest worker log:
@@ -200,7 +207,7 @@ host features, recreate K3s, or reboot Windows.
 Use when a transient failure hit a single phase (network blip, az CLI download timeout) and you want to retry the same phase without re-running the launcher.
 
 ```powershell
-# Reset state to re-attempt a specific phase. Each phase is idempotent.
+# Reset state to re-attempt a specific phase after correcting the failure.
 @{ phase = 2; status = 'running'; lastUpdated = (Get-Date).ToString('o'); error = $null } |
     ConvertTo-Json | Set-Content 'C:\ProgramData\siteops\aksee-bootstrap\state.json'
 Start-ScheduledTask -TaskName SiteOpsAksEeBootstrap
@@ -239,7 +246,10 @@ Remove-AksEdgeDeployment -Confirm:$false -ErrorAction SilentlyContinue
 | 3  | Install Azure CLI if missing, authenticate with the Arc machine managed identity, Arc-connect the cluster, enable `cluster-connect` and `custom-locations`, and (when `enableWorkloadIdentity` is requested) wire the OIDC issuer through the K3s apiserver | No |
 | 99 | Cleanup (unregister the scheduled task, purge the system-profile kubeconfig and az token cache, and remove the rendered config). Write the terminal bootstrap tags on the Arc machine. | No |
 
-Each phase is idempotent so a worker re-run from any state is safe. Phase 1 writes the next phase to `state.json` BEFORE calling `Install-AksEdgeHostFeatures` so the at-startup scheduled-task trigger resumes at Phase 2 after the reboot.
+The worker checks existing state so supported retries can resume without
+repeating completed work. Phase 1 writes the next phase to `state.json` before
+calling `Install-AksEdgeHostFeatures` so the at-startup scheduled-task trigger
+resumes at Phase 2 after the reboot.
 
 Phase 3 layers AIO-specific features on top of the basic Arc-connected cluster. The reason for layering instead of doing everything in Phase 2: the inner `aksedge-config.json` schema does not recognize OIDC issuer, workload identity, or custom-locations fields. Phase 3 handles them explicitly through `az connectedk8s` commands.
 
@@ -250,7 +260,9 @@ The launcher and worker write tags on the configured Arc machine resource:
 - `siteops.bootstrap.state=running` before a new worker run starts when Azure CLI is available.
 - `siteops.bootstrap.state=succeeded` on Phase 99 success.
 - `siteops.bootstrap.state=failed-phase-N` on any phase failure. N is the failing phase number.
-- `siteops.bootstrap.runId=<value>` identifies the manifest deployment that wrote the state.
+- `siteops.bootstrap.runId=<value>` records correlation metadata for the
+  deployment that wrote the state. The shipped wait checks only
+  `siteops.bootstrap.state`.
 
 Downstream automation reads this tag to gate on actual bootstrap completion. A siteops `type: wait` step is the intended primary consumer. A CI script polling via `az tag list` works the same way.
 
@@ -270,7 +282,9 @@ az role assignment create \
   --scope "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.HybridCompute/machines/<vm-name>"
 ```
 
-A failed tag write does not fail the bootstrap. The cluster is still up and Arc-connected. Verify or set the tag manually:
+Terminal tag writes retry and then log a warning without changing the local
+worker result. The manifest wait can time out or observe an older state when a
+terminal write never lands. Verify or set the tag manually:
 
 ```bash
 az tag list --resource-id "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.HybridCompute/machines/<vm-name>" \

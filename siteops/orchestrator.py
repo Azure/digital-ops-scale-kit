@@ -2838,7 +2838,8 @@ class Orchestrator:
         - Governed collections and composition metadata stay at manifest level
         - Template files exist
         - Parameter files exist and are valid YAML (manifest and step level)
-        - Kubectl files exist (for local files) and use HTTPS
+        - Authored kubectl paths stay in the workspace and URLs use HTTPS
+        - Applicable site-resolved kubectl files exist
         - Conditions have valid syntax
         - Required site fields are present
         - Step output references point to valid prior steps (accounting for auto-filtering)

@@ -36,8 +36,8 @@ VALID_SCOPES = {"subscription", "resourceGroup"}
 DEFAULT_API_VERSION = "siteops/v1"
 SUPPORTED_API_VERSIONS = {"siteops/v1"}
 
-# Maximum depth of recursive `include:` resolution. Anything deeper is a smell;
-# the cap exists to surface mistakes early rather than to bound real designs.
+# Maximum depth of recursive `include:` resolution. Anything deeper is a
+# smell. The cap surfaces mistakes early rather than bounding real designs.
 MAX_INCLUDE_DEPTH = 8
 
 # Reserved keys for the `include:` step shape. Any other key on an include step
@@ -582,10 +582,8 @@ class MultipleSubscriptionSitesError(ValueError):
 
     Subscription-scoped steps run once per subscription and their outputs feed
     every resource-group site under it, so two candidates have no correct
-    resolution. `validate()` reports this among its errors. `deploy` raises it,
-    since `deploy` does not run `validate` and choosing one candidate would
-    deploy the rest of the fleet against outputs from a site the operator did
-    not name.
+    resolution. Shared preparation reports the ambiguity before planning or
+    deployment can choose a candidate the operator did not name.
     """
 
 
@@ -759,8 +757,8 @@ def _validate_resource(data: dict[str, Any], expected_kind: str | list[str], pat
 
     Note:
         - apiVersion defaults to 'siteops/v1' if not specified
-        - kind is only validated if present; if omitted, the resource type
-          is determined by the calling context
+        - kind is only validated if present. If omitted, the calling context
+          determines the resource type.
     """
     api_version = data.get("apiVersion", DEFAULT_API_VERSION)
     kind = data.get("kind")
@@ -1382,8 +1380,8 @@ class Manifest:
             workspace_root: Workspace root directory. Required, keyword-only.
                 Used as the anti-traversal boundary when resolving any
                 `include:` step paths and to scope all workspace-relative
-                references. In production this is `Orchestrator.workspace`;
-                in tests, pass the workspace fixture (or `manifest_path.parent`
+                references. In production this is `Orchestrator.workspace`.
+                In tests, pass the workspace fixture (or `manifest_path.parent`
                 for a self-contained synthetic manifest).
 
         Returns:

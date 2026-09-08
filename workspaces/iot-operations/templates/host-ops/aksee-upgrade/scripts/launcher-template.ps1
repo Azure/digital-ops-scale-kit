@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-Launcher for the AKS Edge Essentials patch-update worker. Writes the worker
+Launcher for the AKS Edge Essentials upgrade worker. Writes the worker
 state-machine to disk, registers a Scheduled Task that drives it, sets the
 in-progress completion tag, and returns once the task is registered. Intended
 for either direct invocation on a Windows VM or delivery via Azure Arc
@@ -16,12 +16,13 @@ Steps:
   2. Write the embedded worker to the config directory.
   3. Write `config.json` and the initial `state.json` (phase=0).
   4. Best-effort: set the Arc machine tag `siteops.aksee.upgrade.state=running`
-     synchronously (via the machine managed identity) so a `type: wait` step
-     never observes a stale `succeeded` from a previous run before the new
-     worker has started.
+     synchronously via the machine managed identity. The shipped wait checks
+     the state tag only, so a failed reset can leave prior terminal state
+     visible until the worker writes again.
   5. Register a Scheduled Task with at-startup + immediate triggers that runs
      `worker.ps1` as NT AUTHORITY\SYSTEM.
-  6. Start the task and return `REGISTERED` so the caller sees success.
+  6. Start the task and return `REGISTERED` so Run Command records launcher
+     completion.
 
 Re-running against an already-upgraded host is safe: the launcher resets state
 and the worker no-ops in Phase 1 when no newer update is available. Only an
@@ -34,8 +35,8 @@ Resource group that holds the Arc-connected server and the connected cluster.
 Subscription ID.
 
 .PARAMETER RunId
-Opaque per-deploy identifier written into the completion tag so the wait step
-and operators can correlate a tag with a specific deploy.
+Opaque per-deploy identifier written into the completion tag for operator
+correlation. The shipped wait does not compare this value.
 
 .PARAMETER ConfigDir
 Directory holding all worker artifacts. Defaults to
@@ -45,7 +46,7 @@ Directory holding all worker artifacts. Defaults to
 Name of the Scheduled Task. Defaults to `SiteOpsAksEeUpgrade`.
 
 .EXAMPLE
-    # Patch-update an AKS EE cluster. The worker authenticates as the Arc
+    # Upgrade an AKS EE cluster. The worker authenticates as the Arc
     # machine's managed identity for verification and the completion tag.
     .\Install-AksEeUpgrade.ps1 `
         -ResourceGroup aksee-rg `
@@ -136,11 +137,9 @@ function Set-StrictAcl {
 }
 
 function Set-RunningTag {
-    # Best-effort: mark the Arc machine tag in-progress synchronously, before
-    # the runCommand returns, so a downstream wait step never sees a stale
-    # `succeeded` from a previous run. Runs in the runCommand context (SYSTEM),
-    # which can reach HIMDS for the machine identity. Skips silently if az is
-    # absent or the login fails, in which case the worker sets the tag instead.
+    # Best-effort: mark the Arc machine tag in progress before Run Command
+    # returns. This runs as SYSTEM and can reach HIMDS for the machine identity.
+    # If Azure CLI or login is unavailable, the worker attempts the update later.
     param([string]$Subscription, [string]$ResourceGroup, [string]$MachineName, [string]$RunId)
     if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
         Write-Log 'Skipping in-progress tag write: az CLI not installed (the worker will set it).'

@@ -24,16 +24,16 @@ stays false throughout.
 
 **Minor mode** (`true`): performs sequential multi-hop upgrades, advancing one
 Kubernetes minor version per hop (e.g. k3s 1.31 -> 1.32 -> 1.33). Each hop
-runs the full stage/apply/verify cycle. `AcceptUpgrade` is set true only for
-the duration of the run and is re-pinned false on success. A failed run leaves
+runs the full stage/apply/verify cycle. `AcceptUpgrade` is set true for the
+run. Successful finalization attempts to re-pin it false. A failed run leaves
 it set so the staged update-cache survives for a re-deploy to resume.
 
 Set `site.parameters.aksee.targetKubernetesVersion` (e.g. `"1.33"`) to stop at
 a specific minor version. Leave it empty to upgrade to the latest available
 version (up to the 6-hop maximum).
 
-The worker verifies the cluster after each hop and reports the outcome through
-the completion tag:
+The worker verifies the cluster after each hop and attempts to report the
+outcome through the completion tag:
 
 - The node-VM update can intermittently fail to finalize (the node cannot find
   `/EFI/AZLB/bootx64.efi` after it reboots). The worker surfaces this as the tag
@@ -49,13 +49,13 @@ cluster runs it.
 
 The upgrade is delivered as a `Microsoft.HybridCompute/machines/runCommands`
 resource that inlines the minified launcher. The Connected Machine Agent runs
-the launcher, which registers a Scheduled Task (running as `NT AUTHORITY\SYSTEM`)
-that drives the worker, then returns `REGISTERED` (~90 seconds). The
-worker runs asynchronously:
+the launcher, which registers a Scheduled Task running as
+`NT AUTHORITY\SYSTEM`, then returns `REGISTERED`. The worker runs
+asynchronously:
 
 | Phase | What it does | Inner reboot |
 |---|---|---|
-| 0 | Preflight + snapshot: admin, AKS EE installed, single-node topology, install az if missing (signature-verified), `az login --identity`, set shared kubeconfig + pin AKS EE kubectl, detect AIO, capture the pre-upgrade snapshot (deployed Kubernetes version, host AKS EE version, node count, Arc + AIO state), validate target version if set, initialize `progress.json`, set `AcceptUpgrade` for the run | No |
+| 0 | Preflight + snapshot: admin, AKS EE installed, single-node topology, install az if missing (signature-verified), `az login --identity`, set shared kubeconfig + pin AKS EE kubectl, detect AIO namespace presence, capture the pre-upgrade snapshot (deployed Kubernetes version, host AKS EE version, node count, Arc state, and AIO namespace presence), validate target version if set, initialize `progress.json`, set `AcceptUpgrade` for the run | No |
 | 1 | Stage one hop: check whether the target minor is already met, then stage the next AKS EE update from Microsoft Update (a Windows Update scan, download, and install that self-extracts into the update-cache) and install the cached MSI with `Start-AksEdgeUpdate -Force`. Goes to Phase 2 when staged, Phase 3 to verify and finalize when Microsoft Update offers nothing | No |
 | 2 | Apply: `Import-Module AksEdge -Force` then `Start-AksEdgeControlPlaneUpdate -firstControlPlane $true -Force` | Yes (node VM) |
 | 3 | Verify hop + decide: deployed Kubernetes version, `/readyz`, nodes Ready, `Test-AksEdgeArcConnection`. Decide: target reached -> Phase 99, patch mode -> Phase 99, max hops exceeded -> fail, else loop back to Phase 1 | No |
@@ -66,12 +66,11 @@ the worker normally runs straight through. The at-startup Scheduled Task trigger
 is kept as a safety net for an unrelated host reboot, which the phase state
 machine resumes from.
 
-**Idempotent re-run.** Re-applying the manifest resets state and re-runs the
-worker. When no newer patch is available, Phase 1 records a no-op, the verify
-gate confirms the cluster is healthy at its current version, and Phase 99 tags
-`succeeded`. The launcher sets the tag to `running` synchronously before the
-wait step polls, so a stale `succeeded` from a previous run cannot pass the gate
-early.
+**Idempotent re-run.** Re-applying the manifest resets local state and re-runs
+the worker. When no newer patch is available, Phase 1 records a no-op, the
+verify gate checks the current platform state, and Phase 99 attempts to tag
+`succeeded`. The launcher's pre-run tag reset is best-effort, and the shipped
+wait checks only the state tag rather than the run identifier.
 
 ## Prerequisites
 
@@ -128,11 +127,11 @@ properties:
 siteops -w workspaces/iot-operations deploy manifests/aksee-upgrade.yaml -l name=<site>
 ```
 
-The deploy blocks on the wait step until the worker reaches its terminal state,
-so a green deploy means the upgrade applied and verified, and a failed
-deploy carries the tag value that failed (`failed-phase-N` or
-`failed-needs-remediation`). Minor-mode multi-hop runs take longer, so the
-manifest's wait step allows up to 240 minutes.
+The deploy blocks on the wait step until the state tag reaches a terminal
+value. A green deploy means the worker reported a verified applied upgrade or
+a verified no-op. A failed deploy can carry `failed-phase-N` or
+`failed-needs-remediation`. The state-only wait is not bound to the current
+run identifier. Minor-mode multi-hop runs use a 240-minute wait timeout.
 
 ## Monitor
 
@@ -208,6 +207,10 @@ Start-ScheduledTask -TaskName SiteOpsAksEeUpgrade
 - **The runCommand returns early.** `executionState=Succeeded` means the
   launcher registered the task, not that the upgrade finished. Gate on the
   `wait` step, never on the runCommand result.
+- **State tags are best-effort.** The pre-run reset and terminal writes can
+  warn without failing local worker completion. The shipped wait checks state,
+  not `runId`, so inspect the host state and worker log if the wait result does
+  not match the current operation.
 - **Minor upgrades are sequential.** AKS EE cannot skip a minor version. A
   three-hop upgrade (1.31 -> 1.32 -> 1.33) takes three full stage/apply/verify
   cycles, each with an inner node-VM reboot. Plan for extended downtime.

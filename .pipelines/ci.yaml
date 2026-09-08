@@ -1,5 +1,5 @@
 # CI pipeline: Unit tests and manifest validation
-# Equivalent to .github/workflows/ci.yaml
+# Azure Pipelines counterpart to .github/workflows/ci.yaml
 
 trigger:
   branches:

@@ -11,19 +11,18 @@ description: |
     version. The worker no-ops when no newer patch is available.
   - Minor mode (true): sequential multi-hop loop, each hop advancing one
     Kubernetes minor version. An optional `site.parameters.aksee.targetKubernetesVersion`
-    stops the loop at a specific minor version. `AcceptUpgrade` is set true only
-    for the run and re-pinned false after successful completion. A failed run
+    stops the loop at a specific minor version. `AcceptUpgrade` is set true for
+    the run. Successful finalization attempts to re-pin it false. A failed run
     preserves the staged update cache for retry.
 
-  The upgrade step returns shortly after the Connected Machine Agent picks up
-  the launcher (~90 seconds), then the worker stages, applies, and verifies the
-  update on the VM asynchronously (the inner node VM reboots during each apply,
-  workloads are down for that window). The wait step gates completion on the
-  `siteops.aksee.upgrade.state` tag the worker writes, so one `siteops deploy`
-  blocks until all hops complete or the upgrade fails.
+  The upgrade launcher registers a Scheduled Task, then the worker stages,
+  applies, and verifies the update on the VM asynchronously. The inner node VM
+  reboots during each apply, and   workloads are down for that window. The wait step polls the
+  `siteops.aksee.upgrade.state` tag. This state-only wait is not bound to the
+  current run identifier.
 
-  The worker verifies the cluster after each hop and reports the outcome through
-  the completion tag:
+  The worker verifies the cluster after each hop and attempts to report the
+  outcome through the completion tag:
     - The node-VM update can intermittently fail to finalize, surfaced as the
       tag value `failed-needs-remediation`. The fix is a manual VM-console step.
       See the README.
@@ -49,9 +48,9 @@ steps:
 
   # Gate completion on the worker reaching its terminal state. The worker writes
   # siteops.aksee.upgrade.state=succeeded on the Arc machine resource at the end
-  # of Phase 99 (or failed-phase-N / failed-needs-remediation on failure). The
-  # launcher sets the tag to `running` synchronously before this step polls, so
-  # a stale `succeeded` from a previous run cannot pass the gate early.
+  # of Phase 99 (or failed-phase-N / failed-needs-remediation on failure).
+  # The pre-run `running` tag update is best-effort, and this wait checks only
+  # the state tag rather than the run identifier.
   - name: wait-for-upgrade
     type: wait
     condition:

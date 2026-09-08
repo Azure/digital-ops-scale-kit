@@ -27,7 +27,9 @@ A site value resolves at any depth in a declaration. Use one every target site c
 - AIO must be installed on the target cluster, with an ADR namespace bound to the instance. Run `aio-install` first.
 - The site's `aioRelease` must point to a release config under `parameters/aio-releases/`, which is where `adrApiVersion` comes from.
 
-No cloud infrastructure and no credentials beyond the deployment identity.
+The deployment creates no supporting cloud service outside the existing AIO
+instance and uses the normal Site Ops deployment identity. Exercising telemetry
+separately requires access to an OPC UA server and an authenticated MQTT client.
 
 ## Seeing data move
 

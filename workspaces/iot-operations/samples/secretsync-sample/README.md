@@ -65,6 +65,11 @@ Per-entry fields:
 - **`kubernetesSecretKey`** (optional): override when the consuming workload expects a different key inside the Secret. Must be unique within a group of entries that share a `kubernetesSecretName`.
 - **`createInKv`** (optional, default `true`): set `false` to sync a secret that already exists in the Key Vault. Skip the corresponding entry in `secretValues`.
 
+Workspace tests enforce the name and target-pair uniqueness rules for the
+committed declaration. A `sites.local/` overlay or another caller-provided
+array must preserve them because the template does not reject duplicates at
+deployment time.
+
 Supply `secretValues` via a `sites.local/` overlay or a CI/CD secret store. Do not commit real values to source control.
 
 ### Supplying real values

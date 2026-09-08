@@ -8,7 +8,7 @@
 // would take turns clearing each other's value.
 // =====================================================================================
 
-@description('Renders the Secret Provider Class `objects` YAML for a set of Key Vault secrets. Each entry contributes one `objectName` of type `secret`. An empty set renders an empty string, so a caller can treat the result as nothing to write.')
+@description('Renders the Secret Provider Class `objects` YAML for a set of Key Vault secrets. Each entry contributes one `objectName` of type `secret`. An empty set renders the empty string written by callers when no existing object list is preserved.')
 @export()
 func spcObjectsYaml(secrets array) string =>
   empty(secrets)

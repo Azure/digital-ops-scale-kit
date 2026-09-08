@@ -18,8 +18,8 @@ siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml -l "envir
 
 | Project | Description |
 |---------|-------------|
-| **Site Ops** | A reference implementation of a multi-site IaC orchestration tool. Template-agnostic. Works with any Bicep or ARM templates. |
-| **IoT Operations Workspace** | A starter kit demonstrating Site Ops for deploying Azure IoT Operations at scale. |
+| **Site Ops** | A stateless multi-site infrastructure orchestration engine for Bicep, ARM, kubectl, and wait operations. |
+| **IoT Operations Workspace** | Curated deployment content that applies Site Ops to Azure IoT Operations. |
 
 ---
 
@@ -35,16 +35,21 @@ ARM/Bicep deploys resources. Site Ops orchestrates deployments across your fleet
 | Targeting specific sites or environments | Label-based selection filters your fleet (`-l environment=prod`, `-l country=US`) |
 | Per-site configuration differences | Template variables (`{{ site.name }}`, `{{ site.labels.X }}`) customize each deployment |
 | Multi-step dependencies | Output chaining passes resource IDs between steps automatically |
-| Partial failures stopping everything | Failure isolation. One site's failure doesn't block others |
+| Partial failures stopping everything | Runtime failure isolation keeps unrelated sites running when a deployment fails |
 | Environment-specific values mixed with code | Site overlays separate per-environment config from committed files |
 
 ### Portability
 
-Site Ops runs anywhere Python runs. No agents, no servers, no state to manage.
+Site Ops is a Python 3.10+ CLI with no persistent service, agent, or state
+backend. Selected operations still require their local providers, such as
+Azure CLI, Bicep, or kubectl.
 
-- **Run anywhere**: local machine, GitHub Actions, Azure DevOps, GitLab CI, or any CI/CD platform
-- **Zero infrastructure**: no servers, agents, or state backends to provision
-- **CI/CD agnostic**: included GitHub Actions workflows serve as reference implementations. Adapt to your preferred platform.
+- **Run locally or in CI**: use the same workspace and commands from a local
+  terminal, GitHub Actions, Azure Pipelines, or another compatible runner.
+- **No orchestration service**: Site Ops runs on demand and keeps no
+  reconciliation service or state backend.
+- **Two included delivery surfaces**: GitHub Actions and Azure Pipelines use
+  the same planning and deployment commands.
 
 ### Key capabilities
 
@@ -54,7 +59,7 @@ Site Ops runs anywhere Python runs. No agents, no servers, no state to manage.
 - **Subscription-scoped deployment**: deploy shared resources once per subscription, then deploy per-site resources with automatic output resolution
 - **Output chaining**: reference outputs from previous steps, including cross-scope resolution from subscription to resource group deployments
 - **Parallel execution**: deploy to multiple sites simultaneously with configurable concurrency
-- **Failure isolation**: one site's failure doesn't block others. Subscription failures block only dependent sites.
+- **Runtime failure isolation**: one site's deployment failure does not stop unrelated sites. Unavailable subscription outputs block their consumers.
 - **Executable planning**: compile and preflight the full deployment plan without submitting Azure deployments or contacting clusters. Compiler acquisition and module restore may use the network.
 - **Declarative workload resources**: compose reviewable Azure IoT Operations device, asset, and dataflow definitions in YAML, then apply them across the fleet with each site's own values substituted in
 - **Flexible step orchestration**: conditional execution, parameter auto-filtering, and mixed Bicep, kubectl, and wait steps in a single manifest
@@ -75,8 +80,10 @@ Local tools:
 
 Azure resources (per target cluster):
 
-- An Arc-connected Kubernetes cluster with **OIDC issuer** and **workload identity** enabled. See [Connect an existing Kubernetes cluster](https://learn.microsoft.com/azure/azure-arc/kubernetes/quickstart-connect-cluster).
-- **Cluster Connect** enabled (`az connectedk8s enable-features --features cluster-connect`).
+- An Arc-connected Kubernetes cluster. See [Connect an existing Kubernetes cluster](https://learn.microsoft.com/azure/azure-arc/kubernetes/quickstart-connect-cluster).
+- **OIDC issuer** and **workload identity** when the selected content requires
+  them, such as Secret Sync.
+- **Cluster Connect** for kubectl operations (`az connectedk8s enable-features --features cluster-connect`).
 - Subscription **Owner** principal (or `User Access Administrator` plus `Contributor`). AIO deploys make role assignments.
 
 ## Override for your subscription
@@ -165,14 +172,17 @@ The local path above proves the tool works. To productionize as a CI/CD pipeline
 digital-ops-scale-kit/
 ├── siteops/                      # Site Ops package
 │   ├── cli.py                    # CLI entry point
+│   ├── compilation.py            # Template acquisition, schema, and compilation identity
+│   ├── composition.py            # Parameter composition and reference validation
 │   ├── models.py                 # Site, Manifest, Step dataclasses
-│   ├── orchestrator.py           # Core orchestration logic
+│   ├── orchestrator.py           # Shared validation, planning, and execution coordination
+│   ├── planning.py               # Prepared plan models, rendering, and projections
 │   ├── executor.py               # Azure CLI and kubectl execution
 │   └── __main__.py               # Enables `python -m siteops`
 ├── tests/                        # Test suite
 ├── scripts/                      # Utility scripts (Bicep validation, etc.)
 ├── workspaces/
-│   └── iot-operations/           # Reference implementation
+│   └── iot-operations/           # Curated Azure IoT Operations workspace
 │       ├── sites/                # Site definitions
 │       ├── manifests/            # Deployment orchestration
 │       ├── contracts/            # Parameter composition and reference rules
@@ -301,7 +311,7 @@ auto-filtering, merge order, and cross-scope output chaining.
 | `siteops sites <name>` | Inspect one site (basename, relative path, or internal `name:`) |
 | `siteops sites <name> --show-sources` | Show every value with the source file it came from after inherits and overlays |
 | `siteops sites <name> --render` | Show the resolved YAML after inheritance and overlays |
-| `siteops validate <manifest>` | Validate manifest and all references |
+| `siteops validate <manifest>` | Validate manifest structure, files, and static references |
 | `siteops plan <manifest>` | Validate, compile, preflight, and show the executable deployment plan |
 | `siteops plan <manifest> --describe` | Show the compile-free plan shape |
 | `siteops plan <manifest> --output json` | Emit one structured plan document |
@@ -314,7 +324,7 @@ auto-filtering, merge order, and cross-scope output chaining.
 |--------|-------------|---------|
 | `-w, --workspace` | Workspace directory | auto-discovered: the current dir when it has `sites/` and `manifests/`, otherwise the single workspace under `./workspaces/`, otherwise the current dir |
 | `-l, --selector` | Filter sites by label. Repeatable. `name=` may carry multiple values (OR-combined). | none |
-| `-p, --parallel` | Max concurrent sites for `deploy`. Accepts a positive integer, or `max`/`auto`/`0` for unlimited | manifest setting |
+| `-p, --parallel` | Max concurrent sites for `plan` or `deploy`. Accepts a positive integer, or `max`/`auto`/`0` for unlimited | manifest setting |
 | `--extra-sites-dir` | Additional trusted `sites/` directory. Repeatable. Also accepts `SITEOPS_EXTRA_SITES_DIRS`. CLI wins on conflict | none |
 
 See [docs/targeting.md](docs/targeting.md) for the selector grammar and the no-match diagnostic.
@@ -378,13 +388,16 @@ steps:
 
 ## CI/CD
 
-This repository includes GitHub Actions workflows for automated deployment:
+This repository includes GitHub Actions and Azure Pipelines definitions for
+validation and deployment:
 
-| Workflow | Description |
-|----------|-------------|
-| `deploy.yaml` | Manual deployment via GitHub UI |
-| `ci.yaml` | CI validation (tests + manifest check) |
-| `_siteops-deploy.yaml` | Reusable deployment workflow |
+| Surface | Description |
+|---------|-------------|
+| `.github/workflows/deploy.yaml` | Manual deployment through the GitHub UI |
+| `.github/workflows/ci.yaml` | GitHub test and manifest validation |
+| `.github/workflows/_siteops-deploy.yaml` | Reusable GitHub deployment workflow |
+| `.pipelines/deploy.yaml` | Manual Azure Pipelines deployment |
+| `.pipelines/ci.yaml` | Azure Pipelines test and manifest validation |
 
 ### Required secrets
 

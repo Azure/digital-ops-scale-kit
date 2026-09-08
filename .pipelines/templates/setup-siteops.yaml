@@ -1,5 +1,5 @@
 # Steps template: Install Python and Site Ops
-# Equivalent to .github/actions/setup-siteops/action.yaml
+# Azure Pipelines counterpart to .github/actions/setup-siteops/action.yaml
 
 parameters:
   - name: pythonVersion

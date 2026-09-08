@@ -26,7 +26,7 @@ on:
         type: string
         default: ""
       dry-run:
-        description: "Dry run mode (no actual deployment)"
+        description: "Prepare the executable plan without deployment"
         required: false
         type: boolean
         default: false
@@ -140,9 +140,8 @@ jobs:
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
         run: |
-          # Background service that refreshes OIDC token every 4 minutes.
-          # GitHub OIDC tokens expire after ~5 minutes, so this keeps az cli
-          # authenticated for long-running AIO deployments (which can take 20+ min).
+          # Background service that refreshes OIDC authentication every 4
+          # minutes for long-running deployments.
           # PID is written to disk so the Azure Logout step can kill the
           # loop before clearing credentials. Otherwise the loop could
           # tick once more between logout and runner cleanup, briefly
@@ -278,7 +277,7 @@ jobs:
         run: |
           # Stop the OIDC refresh first so it cannot re-auth post-logout.
           # `kill <subshell-pid>` does not interrupt the loop's blocking
-          # `sleep`; kill the subshell's children too via pkill -P.
+          # `sleep`. Kill the subshell's children too via pkill -P.
           if [[ -f "$RUNNER_TEMP/oidc-refresh.pid" ]]; then
             pid="$(cat "$RUNNER_TEMP/oidc-refresh.pid")"
             pkill -TERM -P "$pid" 2>/dev/null || true

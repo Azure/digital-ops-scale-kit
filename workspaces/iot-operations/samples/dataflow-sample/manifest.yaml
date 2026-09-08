@@ -10,9 +10,10 @@ description: |
   and pool. Destination topics carry the site's country, city, and name, so
   every site publishes under its own.
 
-  Needs no cloud infrastructure and no credentials beyond the deployment
-  identity. Subscribe to `dataflow-sample/<country>/<site>/output` on the broker
-  to watch it work.
+  Creates no supporting cloud service outside the existing AIO instance and
+  uses the normal Site Ops deployment identity. Deployment configures the
+  routes but does not verify their health or data movement. Use an authenticated
+  in-cluster MQTT client to publish and subscribe when verifying the data path.
 
   `dataflows.yaml` attaches directly for this one-off sample. A fleet can place
   the same definition under `parameters/dataflows/`, select it through

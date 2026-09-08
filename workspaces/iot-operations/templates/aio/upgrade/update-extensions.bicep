@@ -14,21 +14,12 @@
 // cert-manager is gated by `enableCertManager`. When false, no cert-manager PUT
 // is emitted and the existing extension is left untouched.
 //
-// API version: `Microsoft.KubernetesConfiguration/extensions@2023-05-01` is fixed
-// across AIO releases and is not driven by the AIO API version dispatcher. If a
-// future AIO release requires a different extensions API, apply the versioned
-// router pattern (see `update-instance.bicep`) rather than mutating this template
-// in place.
+// `Microsoft.KubernetesConfiguration/extensions@2023-05-01` is fixed across the
+// current release configurations and is not driven by the AIO API version dispatcher.
 //
-// IMPORTANT: `union()` is ADDITIVE-ONLY:
-//   `union(existing, overrides)` cannot delete or rename keys in existing. If a
-//   future AIO release renames a `configurationSettings` key (e.g.,
-//   `trustSource` -> `trust.source`), this template will preserve BOTH the old
-//   and new keys on PUT, which the RP may reject. When such a schema migration
-//   actually arrives, choose between (a) adding an `excludeKeys` parameter that
-//   filters keys out of `existing` before the union, or (b) introducing a
-//   versioned `update-extensions-<apiVersion>.bicep` behind a router. Do NOT
-//   pre-build either mechanism for hypothetical migrations.
+// `union(existing, overrides)` is additive only. This template cannot remove or
+// rename an existing configurationSettings key. A release requiring that schema
+// migration is unsupported by this update path.
 //
 // IMPORTANT: `scope.cluster.releaseNamespace` handling is per-extension:
 //   - AIO: install path parameterizes `releaseNamespace: clusterNamespace` (default
@@ -136,7 +127,7 @@ var aioTrustConfigMapKey = aioTrustSource == 'CustomerManaged'
 
 // These values depend on the cluster-derived extension suffix, so they cannot
 // live as static release-YAML overrides. Add only missing keys to preserve
-// operator-customized values on later reapply.
+// operator-customized values on subsequent applies.
 var aioApplicationUriDefault = aioApiVersion == '2025-10-01'
   ? {}
   : contains(aio.configurationSettings, 'connectors.values.securityPki.applicationUri')

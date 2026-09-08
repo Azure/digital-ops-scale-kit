@@ -93,7 +93,7 @@ one deployment template or API version.
 
 ```bash
 siteops -w workspaces/iot-operations \
-  validate samples/resource-set-composition/manifest.yaml --plan
+  plan samples/resource-set-composition/manifest.yaml --describe
 ```
 
 The local plan identifies which site file selected each source, distinguishes
@@ -131,10 +131,12 @@ catalog/catalog-composition/azure-iot-operations/data/catalog-composition/resour
 Use an in-cluster MQTT client to observe those topics. The boiler asset also
 demonstrates OPC UA node identifiers from the simulator's boiler model.
 
-The `resource-set-samples` E2E phase automates this proof on a fresh cluster.
-It waits for the simulator trust job, checks the projected device, asset,
-endpoint, profile, and dataflow resources, waits for dataflow health where the
-API reports it, and subscribes independently to all three routed topics.
+The `resource-set-samples` input in the
+[E2E workflow](../../../../docs/e2e-testing.md) automates this proof on a fresh
+cluster. It waits for the simulator trust job, checks the projected device,
+asset, endpoint, profile, and dataflow resources, waits for dataflow health
+where the API reports it, and subscribes independently to all three routed
+topics.
 
 ## Remove the sample
 

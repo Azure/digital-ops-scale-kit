@@ -5,7 +5,8 @@
 //
 // All resolved infrastructure values (CL name, cluster name, OIDC issuer, namespace,
 // instance properties) are received as parameters, typically via output chaining from
-// the resolve-aio step. This template has no cross-directory module dependencies.
+// the resolve-aio step. Shared workspace modules provide naming, role assignment,
+// object rendering, and versioned instance updates.
 //
 // Resources provisioned/managed:
 //   1. User-Assigned Managed Identity (idempotent PUT)
@@ -24,7 +25,7 @@
 //     -p aioInstanceName=<name> customLocationId=<clId> customLocationName=<cl> \
 //        customLocationNamespace=<ns> connectedClusterName=<cluster> \
 //        oidcIssuerUrl=<issuer> instanceLocation=<location> \
-//        schemaRegistryResourceId=<srId>
+//        schemaRegistryResourceId=<srId> aioApiVersion=<api-version>
 // -------------------------------------------------------------------------------------
 
 // =====================================================================================
@@ -228,7 +229,8 @@ resource federatedCredential 'Microsoft.ManagedIdentity/userAssignedIdentities/f
 //
 // `objects` has two writers, this template and sync-secrets.bicep, and an ARM PUT
 // replaces whatever it omits. Enablement does not own the field, it avoids destroying
-// it: declared secrets win, otherwise keep what the cluster has, otherwise omit.
+// it: declared secrets win, otherwise keep what the bound class has, otherwise write
+// an empty string.
 //
 // The read is a module because a module carrying `condition: false` is never deployed,
 // while an ARM `if()` around a `reference()` evaluates both branches.

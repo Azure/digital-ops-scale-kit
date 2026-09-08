@@ -1,6 +1,6 @@
 # aksee-upgrade scripts
 
-Source and generated artifacts for the AKS EE patch-update launcher + worker.
+Source and generated artifacts for the AKS EE upgrade launcher and worker.
 The operator-facing walkthrough (prereqs, run, monitor, verify, Trident
 remediation) is in [`../README.md`](../README.md).
 
@@ -24,8 +24,8 @@ powershell -File "<abs>\Build-Launcher.ps1" -ScriptDir "<abs>"
 ```
 
 The generator parse-checks both variants and exits non-zero on parse or inline-size failure. The
-minified launcher is what the Bicep inlines. Move to `scriptUri` delivery when the launcher needs
-more capacity.
+minified launcher is what the Bicep inlines. `scriptUri` delivery is an
+alternative when the launcher needs more capacity.
 
 ## Direct worker invocation (local testing)
 

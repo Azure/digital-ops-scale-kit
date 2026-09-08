@@ -28,10 +28,10 @@ Extended documentation for the Digital Operations Scale Kit.
 
 | Term | Meaning |
 |------|---------|
-| **Workspace** | A directory under `workspaces/` containing the standard subdirs (`sites/`, `manifests/`, `parameters/`, `templates/`) plus optional `samples/`, `sites.local/`. |
+| **Workspace** | A directory, often under `workspaces/`, containing `sites/`, `manifests/`, `parameters/`, and `templates/`, plus optional `contracts/`, `samples/`, and `sites.local/`. |
 | **Site** | A deployment target (`kind: Site`). Has subscription, optional resource group, location, labels, parameters, properties. |
 | **SiteTemplate** | A reusable site base (`kind: SiteTemplate`). Cannot be deployed directly. Referenced via `inherits:`. |
-| **Manifest** | A `kind: Manifest` YAML defining ordered steps + parameters + a site selector. The unit of `siteops deploy`. |
+| **Manifest** | A `kind: Manifest` YAML defining ordered steps and parameters. It may name sites, select them by label, or defer targeting to the CLI. |
 | **Selector** | A label expression (`key=value,key=value`) that filters sites. Set on a manifest as `selector:` or via the CLI `--selector` / `-l` flag. See [targeting.md](targeting.md). |
 | **Inheritance** | Single-parent merge for sites. A site `inherits:` from a SiteTemplate. Child overrides parent on conflict. Nested objects merge recursively. |
 | **Overlay** | A same-name site file in `sites.local/` (or an extras dir) that merges into a base site at load time. Cannot introduce `inherits:` or rename the site. |
@@ -48,6 +48,6 @@ Extended documentation for the Digital Operations Scale Kit.
 | **Step** | A unit of work in a manifest's `steps:` list. Shapes: Bicep deploy (`template:`), kubectl op (`type: kubectl`), wait gate (`type: wait`), include (`include:`). |
 | **Scope** | A step's deployment scope: `resourceGroup` or `subscription`. |
 | **AIO release** | A versioned bundle of pinned extension versions and API versions, defined by a YAML in `parameters/aio-releases/` and selected per site via `properties.aioRelease`. |
-| **Auto-filtering** | The engine drops parameter keys that the target Bicep template does not declare. Enables shared parameter files across templates. |
+| **Auto-filtering** | Executable preparation omits parameter keys the template does not declare, then requires declared parameters that have no default. |
 | **Chaining** | Wiring a step's outputs into a downstream step's parameters via `{{ steps.X.outputs.Y }}`. |
 | **Dispatcher** | A Bicep template that switches on an API-version param into per-API-version inner modules under `templates/<area>/modules/`. |

@@ -43,6 +43,10 @@ compilation or resource writes. Structurally invalid inputs produce an
 invalid plan rather than a partial target plan. Python callers receive
 `PlanNotExecutableError` when attempting to deploy that invalid result.
 
+Python integrations use `Orchestrator.build_plan` with
+`intent=PlanIntent.EXECUTABLE` for deployment preparation. The executor-level
+`get_template_parameters` and `filter_parameters` helpers have been removed.
+
 **Known kubectl inputs are checked during shared validation.** After site
 values resolve, local files and directories must exist inside the workspace,
 and URLs must use HTTPS. Per-site inputs are required only when the operation
@@ -165,7 +169,7 @@ manifest reads catalog step outputs, remove references to `endpointNames`,
 `profileNames`, `dataflowNames`, `dataflowProfileRefs`, `deviceNames`,
 `assetNames`, `assetDeviceRefs`, or `apiVersion`.
 
-Use `siteops validate <manifest> --plan` to inspect the effective composition
+Use `siteops plan <manifest> --describe` to inspect the effective composition
 before deployment. Read the deployed resources from Azure or their projected
 custom resources when verifying provider state.
 
@@ -276,7 +280,8 @@ parameter files for `{{` to the left of a colon.
 **A templated parameter name resolves, which changes deployed content.** A nested key such as
 `siteRoles: {"{{ site.name }}": {...}}` reached ARM as the literal text `{{ site.name }}` and now
 arrives as the site name. Templates are supported in a nested name. A top-level name is matched
-against the parameters the template declares, so a resolved site value will not be one of them.
+against the parameters the template declares. It is kept only when the
+resolved name is a declared parameter.
 
 **Two parameter names that resolve to the same string are rejected.** Reachable only now that names
 resolve. Rename one, since keeping either would drop the other.
@@ -296,7 +301,8 @@ later step fail planning.
 load. When the site does not carry the property, or carries a value naming a file that is not
 there, the step deployed without those parameters and reported success. Both cases now fail the
 step. A path with no template in it is unchanged and still warns, so an optional fixed file keeps
-working.
+working when the template can use defaults. Executable preparation still
+reports a required parameter that the missing file would have supplied.
 
 ### Deployment and targeting
 
@@ -317,8 +323,8 @@ first and fix everything it names.
 
 **One subscription holds one subscription-level site.** `deploy` reports a second one rather than
 choosing between them. Subscription-scoped steps run once per subscription and their outputs feed
-every resource group site under it, so two candidates have no correct resolution. `validate`
-already reported this, and `deploy` does not run `validate`, so the check now covers both paths.
+every resource group site under it, so two candidates have no correct resolution.
+Shared preparation reports the ambiguity for both planning and deployment.
 
 ### Secret Sync
 

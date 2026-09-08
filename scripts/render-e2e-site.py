@@ -6,11 +6,12 @@ from the environment, and writes the result to a target directory suitable for
 use with `SITEOPS_EXTRA_SITES_DIRS`.
 
 Required environment variables:
-    E2E_RESOURCE_GROUP   Resource group (operator-supplied in persistent mode; workflow-created in ephemeral)
+    E2E_RESOURCE_GROUP   Resource group. The operator supplies it in persistent
+                         mode, and the workflow creates it in ephemeral mode.
     E2E_CLUSTER_NAME     Arc-connected cluster name
     E2E_AIO_RELEASE      AIO release selector
 
-Auto-computed when unset (local developer convenience; CI sets these explicitly):
+Auto-computed when unset for local development. CI sets these explicitly:
     E2E_SITE_NAME        Defaults to `e2e-local-<unix_epoch>`
     E2E_SUBSCRIPTION     Defaults to `az account show --query id -o tsv`
     E2E_LOCATION         Defaults to `az group show -n $E2E_RESOURCE_GROUP --query location -o tsv`

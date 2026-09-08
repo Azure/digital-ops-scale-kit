@@ -1,13 +1,13 @@
 # tests/
 
-Four layers, split by what each one needs to run. The split matters because
-only two of them run on every change, and a test placed in the wrong layer
-either slows every commit or never runs at all.
+Tests are split by what each layer needs to run. Unit and workspace coverage
+run on every change. A test placed in the wrong layer either slows that lane
+or misses the environment it is meant to exercise.
 
 | Layer | Location | Needs | Runs |
 |---|---|---|---|
-| **Unit** | `tests/*.py` | Nothing | Every change |
-| **Workspace** | `tests/workspace/` | The committed workspace, Azure CLI for Bicep compilation, and Bash for delivery-script checks | Every change |
+| **Unit** | `tests/*.py` | Synthetic temporary files, with external tools injected or forbidden | Every change |
+| **Workspace** | `tests/workspace/` | The committed workspace, Azure CLI and Bicep, kubectl for executable capability preflight, and Bash for delivery-script checks | Every change |
 | **Integration** | `tests/integration/` | A live Azure subscription and an Arc-connected cluster | On request, and inside the E2E workflow |
 | **E2E fixtures** | `tests/e2e/` | Rendered at runtime by the workflow | Not collected by pytest |
 
@@ -23,10 +23,11 @@ Azure authentication.
 
 ## Choosing a layer
 
-**Unit** covers engine behavior with no workspace on disk: parsing, selector
-grammar, the merge order, polling and retry classification, and redaction.
-Build the inputs in the test rather than reading committed content, so the test
-does not change meaning when the workspace does.
+**Unit** covers engine behavior without depending on committed workspace
+content or installed deployment tools: parsing, selector grammar, the merge
+order, polling and retry classification, and redaction. Build inputs under the
+test's temporary directory and inject local-tool behavior so the test does not
+change meaning with the host or workspace.
 
 **Workspace** covers the committed content itself: that manifests validate, that
 chaining references resolve to outputs a producing step emits, that declarations
