@@ -181,15 +181,14 @@ stages:
                         echo "##vso[task.logissue type=error]Site Ops returned an unsupported plan document."
                         exit 1
                       fi
+                      if [[ "$DRY_RUN" == "True" ]]; then
+                        echo "##vso[task.logissue type=warning]Executable plan prepared. No deployment was executed."
+                        exit 0
+                      fi
 
                       START_TIME=$(date +%s)
 
                       CMD_ARGS=(-w "$WORKSPACE" deploy "$MANIFEST")
-
-                      if [[ "$DRY_RUN" == "True" ]]; then
-                        CMD_ARGS+=(--dry-run)
-                        echo "##vso[task.logissue type=warning]Running in DRY-RUN mode - no actual deployment"
-                      fi
 
                       [[ -n "$SELECTOR" ]] && CMD_ARGS+=(-l "$SELECTOR")
 

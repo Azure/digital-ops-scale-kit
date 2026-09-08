@@ -233,12 +233,24 @@ runs:
       run: |
         set -euo pipefail
         export KUBECONFIG="${HOME}/.kube/config"
-        # Fail fast here if the issuer-URL restart silently didn't take;
-        # better to surface it now than let the secret-sync deploy fail
-        # 20 minutes later with a cryptic Workload Identity error.
-        ACTUAL=$(kubectl get --raw /.well-known/openid-configuration | jq -r .issuer)
-        if [ "${ACTUAL}" != "${EXPECTED_ISSUER}" ]; then
-          echo "::error::OIDC issuer mismatch: expected '${EXPECTED_ISSUER}', got '${ACTUAL}'"
+        OIDC_STDOUT=$(mktemp)
+        OIDC_STDERR=$(mktemp)
+        cleanup_oidc_probe() {
+          rm -f "${OIDC_STDOUT}" "${OIDC_STDERR}"
+        }
+        trap cleanup_oidc_probe EXIT
+        if ! kubectl get --raw /.well-known/openid-configuration \
+            >"${OIDC_STDOUT}" 2>"${OIDC_STDERR}"; then
+          echo "::error::OIDC discovery endpoint could not be read."
           exit 1
         fi
-        echo "OIDC discovery verified: issuer=${ACTUAL}"
+        if ! ACTUAL=$(jq -er '.issuer | select(type == "string" and length > 0)' \
+            <"${OIDC_STDOUT}" 2>"${OIDC_STDERR}"); then
+          echo "::error::OIDC discovery endpoint returned an invalid issuer document."
+          exit 1
+        fi
+        if [ "${ACTUAL}" != "${EXPECTED_ISSUER}" ]; then
+          echo "::error::OIDC discovery issuer does not match the configured issuer."
+          exit 1
+        fi
+        echo "OIDC discovery issuer verified."

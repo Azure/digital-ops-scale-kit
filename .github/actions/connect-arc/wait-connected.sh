@@ -14,10 +14,6 @@ RESOURCE_GROUP="${2:?resource group required}"
 MAX_ATTEMPTS=20
 SLEEP_SECONDS=15
 
-# Capture stderr to a tempfile so we can surface the underlying az failure on
-# the final attempt. Silently masking to "Unknown" for 5 minutes on a
-# permanent auth/RBAC/not-found problem wastes runner time and produces a
-# useless error message.
 ERR_FILE=$(mktemp)
 trap 'rm -f "${ERR_FILE}"' EXIT
 
@@ -27,26 +23,30 @@ for attempt in $(seq 1 $MAX_ATTEMPTS); do
       --resource-group "${RESOURCE_GROUP}" \
       --query connectivityStatus \
       --output tsv 2>"${ERR_FILE}"); then
-    :
+    QUERY_FAILED=0
   else
-    STATUS="ERROR"
+    QUERY_FAILED=1
+    STATUS=""
   fi
 
   if [ "${STATUS}" = "Connected" ]; then
-    echo "Cluster '${CLUSTER_NAME}' is Connected (attempt ${attempt})."
+    echo "Arc cluster is Connected (attempt ${attempt})."
     exit 0
   fi
 
   if [ "${attempt}" -eq "${MAX_ATTEMPTS}" ]; then
-    echo "::error::Cluster '${CLUSTER_NAME}' did not reach Connected within $((MAX_ATTEMPTS * SLEEP_SECONDS))s (last status: ${STATUS})"
-    if [ -s "${ERR_FILE}" ]; then
-      echo "::group::Last az connectedk8s show stderr"
-      cat "${ERR_FILE}"
-      echo "::endgroup::"
+    if [ "${QUERY_FAILED}" -eq 1 ]; then
+      echo "::error::Arc connectivity could not be queried after ${MAX_ATTEMPTS} attempts."
+    else
+      echo "::error::Arc cluster did not reach Connected after ${MAX_ATTEMPTS} attempts."
     fi
     exit 1
   fi
 
-  echo "Cluster status='${STATUS}' (attempt ${attempt}/${MAX_ATTEMPTS}); retrying in ${SLEEP_SECONDS}s..."
+  if [ "${QUERY_FAILED}" -eq 1 ]; then
+    echo "Arc connectivity query failed (attempt ${attempt}/${MAX_ATTEMPTS}). Retrying in ${SLEEP_SECONDS}s."
+  else
+    echo "Arc cluster is not Connected (attempt ${attempt}/${MAX_ATTEMPTS}). Retrying in ${SLEEP_SECONDS}s."
+  fi
   sleep "${SLEEP_SECONDS}"
 done

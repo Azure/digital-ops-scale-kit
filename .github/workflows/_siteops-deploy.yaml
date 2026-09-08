@@ -243,16 +243,12 @@ jobs:
 
       - name: Deploy
         id: deploy
+        if: inputs.dry-run != true
         shell: bash
         run: |
           START_TIME=$(date +%s)
 
           CMD_ARGS=(-w "$INPUT_WORKSPACE" deploy "$INPUT_MANIFEST")
-
-          if [[ "$INPUT_DRY_RUN" == "true" ]]; then
-            CMD_ARGS+=(--dry-run)
-            echo "::notice::Running in DRY-RUN mode - no actual deployment"
-          fi
 
           [[ -n "$INPUT_SELECTOR" ]] && CMD_ARGS+=(-l "$INPUT_SELECTOR")
 

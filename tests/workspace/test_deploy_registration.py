@@ -11,11 +11,8 @@ so adding a manifest fails CI until it is registered on both, and removing one
 fails until it is de-registered.
 """
 
-import os
 import re
 import shlex
-import shutil
-import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +20,15 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.shell_helpers import (
+    bash_path as _bash_path,
+)
+from tests.shell_helpers import (
+    required_bash as _required_bash,
+)
+from tests.shell_helpers import (
+    write_executable as _write_executable,
+)
 from tests.workspace.test_manifest_validation import _all_manifest_files
 
 REPO_ROOT = Path(__file__).parent.parent.parent
@@ -43,44 +49,6 @@ def _ado_deployment_steps() -> tuple[dict, list[dict]]:
     stage = data["stages"][0]
     steps = stage["jobs"][0]["strategy"]["runOnce"]["deploy"]["steps"]
     return stage, steps
-
-
-def _required_bash() -> Path:
-    """Resolve native Bash without selecting the Windows WSL launcher."""
-    if sys.platform == "win32":
-        program_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
-        candidates = (
-            program_files / "Git" / "bin" / "bash.exe",
-            Path(r"C:\Program Files\Git\bin\bash.exe"),
-        )
-        for candidate in candidates:
-            if candidate.is_file():
-                return candidate
-        raise AssertionError(
-            "Git Bash is required to validate delivery shell semantics on Windows."
-        )
-
-    resolved = shutil.which("bash")
-    assert resolved, "Bash is required to validate delivery shell semantics."
-    return Path(resolved)
-
-
-def _bash_path(path: Path) -> str:
-    resolved = path.resolve()
-    if sys.platform != "win32":
-        return resolved.as_posix()
-    posix = resolved.as_posix()
-    return f"/{resolved.drive[0].lower()}{posix[2:]}"
-
-
-def _write_executable(path: Path, content: str) -> None:
-    path.write_text(content, encoding="utf-8", newline="\n")
-    path.chmod(
-        path.stat().st_mode
-        | stat.S_IXUSR
-        | stat.S_IXGRP
-        | stat.S_IXOTH
-    )
 
 
 def _install_fake_delivery_tools(tmp_path: Path) -> tuple[Path, Path]:
@@ -174,6 +142,7 @@ def _run_delivery_plan_script(
     plan_exit: int,
     valid_document: bool,
     document_mode: str = "valid",
+    dry_run: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path]:
     script, redaction = _delivery_plan_case(platform)
     bin_dir, invocation_log = _install_fake_delivery_tools(tmp_path)
@@ -194,13 +163,13 @@ def _run_delivery_plan_script(
         "INPUT_WORKSPACE": "workspace",
         "INPUT_MANIFEST": "manifests/install.yaml",
         "INPUT_SELECTOR": "",
-        "INPUT_DRY_RUN": "false",
+        "INPUT_DRY_RUN": "true" if dry_run else "false",
         "RUNNER_TEMP": _bash_path(temp_dir),
         "GITHUB_STEP_SUMMARY": _bash_path(github_summary),
         "WORKSPACE": "workspace",
         "MANIFEST": "manifests/install.yaml",
         "SELECTOR": "",
-        "DRY_RUN": "False",
+        "DRY_RUN": "True" if dry_run else "False",
         "PLAN_TEMP_DIRECTORY": _bash_path(temp_dir),
         "PLAN_SUMMARY_DIRECTORY": _bash_path(summary_dir),
     }
@@ -226,6 +195,7 @@ def _run_delivery_plan_script(
         capture_output=True,
         text=True,
         check=False,
+        timeout=60,
     )
     summary_path = (
         github_summary
@@ -422,6 +392,19 @@ class TestDeployDropdownRegistration:
             "Start OIDC token refresh service"
         ) < names.index("Prepare executable deployment plan")
 
+    def test_github_dry_run_skips_deploy_after_planning(self):
+        data = yaml.safe_load(
+            REUSABLE_GITHUB_DEPLOY.read_text(encoding="utf-8")
+        )
+        deploy = next(
+            step
+            for step in data["jobs"]["deploy"]["steps"]
+            if step.get("name") == "Deploy"
+        )
+
+        assert deploy["if"] == "inputs.dry-run != true"
+        assert "--dry-run" not in deploy["run"]
+
     def test_ado_plans_and_deploys_in_one_authenticated_task(self):
         stage, steps = _ado_deployment_steps()
         azure_tasks = [
@@ -497,5 +480,33 @@ class TestDeployDropdownRegistration:
         else:
             assert len(invocations) == 1
 
+        assert not (temp_dir / "siteops-plan.json").exists()
+        assert not (temp_dir / "siteops-plan.stderr").exists()
+
+    @pytest.mark.parametrize("plan_exit", [0, 23])
+    def test_ado_dry_run_plans_once_and_preserves_plan_exit(
+        self,
+        tmp_path,
+        plan_exit,
+    ):
+        result, summary_path, temp_dir, invocation_log = (
+            _run_delivery_plan_script(
+                "azure-pipelines",
+                tmp_path,
+                plan_exit=plan_exit,
+                valid_document=True,
+                dry_run=True,
+            )
+        )
+
+        assert result.returncode == plan_exit
+        invocations = invocation_log.read_text(encoding="utf-8").splitlines()
+        assert len(invocations) == 1
+        assert " plan " in f" {invocations[0]} "
+        assert " deploy " not in f" {invocations[0]} "
+        assert not (summary_path.parent / "deployment-result.md").exists()
+        assert "Deployment Result" not in summary_path.read_text(
+            encoding="utf-8"
+        )
         assert not (temp_dir / "siteops-plan.json").exists()
         assert not (temp_dir / "siteops-plan.stderr").exists()
