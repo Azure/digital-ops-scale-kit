@@ -152,6 +152,59 @@ class _RecordingToolRunner:
         )
 
 
+class _VersionOnlyToolRunner:
+    """Provide deterministic local version probes without execution."""
+
+    def __call__(
+        self,
+        argv: tuple[str, ...],
+        timeout: int,
+    ) -> subprocess.CompletedProcess[str]:
+        if argv[1:] == ("version", "--output", "json"):
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=json.dumps({"azure-cli": "test"}),
+                stderr="",
+            )
+        if argv[1:] == ("bicep", "version"):
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout="Bicep CLI version test",
+                stderr="",
+            )
+        raise AssertionError(
+            f"Unexpected local tool invocation: {argv}"
+        )
+
+
+@pytest.fixture(autouse=True)
+def _deterministic_local_tool_session(monkeypatch, tmp_path):
+    """Give ordinary plans fresh host-independent local tool sessions."""
+
+    def resolve_tool(name):
+        if name not in {"az", "kubectl"}:
+            raise AssertionError(f"Unexpected local tool resolution: {name}")
+        return str((tmp_path / "tools" / name).resolve())
+
+    def create_session():
+        return TemplateCompilationSession(
+            command_runner=_VersionOnlyToolRunner(),
+            tool_resolver=resolve_tool,
+        )
+
+    monkeypatch.setattr(
+        "siteops.orchestrator.TemplateCompilationSession",
+        create_session,
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "Popen",
+        MagicMock(side_effect=AssertionError("No real process launches")),
+    )
+
+
 def test_shared_bicep_compiles_once_across_targets_and_execution(tmp_path):
     workspace = _workspace(tmp_path)
     (workspace / "sites" / "second-site.yaml").write_text(
@@ -538,6 +591,372 @@ def test_executable_plan_preflights_known_kubectl_inputs_before_tools(
     assert [call[1:] for call in runner.calls] == [
         ("version", "--output", "json")
     ]
+
+
+@pytest.mark.parametrize(
+    "enabled",
+    [None, False],
+    ids=["absent", "false"],
+)
+def test_skipped_kubectl_does_not_require_site_input_or_tools(
+    tmp_path,
+    enabled,
+):
+    workspace = _workspace(tmp_path)
+    site_path = workspace / "sites" / "test-site.yaml"
+    site = yaml.safe_load(site_path.read_text(encoding="utf-8"))
+    if enabled is not None:
+        site["properties"] = {"enableOptional": enabled}
+    site_path.write_text(
+        yaml.safe_dump(site, sort_keys=False),
+        encoding="utf-8",
+    )
+    manifest_path = _write_manifest(
+        workspace,
+        [
+            {"name": "first", "template": "templates/first.json"},
+            {
+                "name": "optional-apply",
+                "type": "kubectl",
+                "operation": "apply",
+                "when": "{{ site.properties.enableOptional }}",
+                "arc": {
+                    "name": "cluster",
+                    "resourceGroup": "rg-cluster",
+                },
+                "files": ["{{ site.parameters.optionalManifest }}"],
+            },
+        ],
+    )
+    resolutions = []
+
+    def resolve_tool(name):
+        resolutions.append(name)
+        return str(tmp_path / "tools" / f"{name}.exe")
+
+    session = TemplateCompilationSession(
+        command_runner=_RecordingToolRunner(),
+        tool_resolver=resolve_tool,
+    )
+    with patch(
+        "siteops.orchestrator.TemplateCompilationSession",
+        return_value=session,
+    ):
+        result = Orchestrator(workspace).build_plan(
+            manifest_path,
+            intent=PlanIntent.EXECUTABLE,
+        )
+
+    assert result.status is PlanStatus.PLANNED
+    assert result.executable
+    assert result.plan is not None
+    first, optional = result.plan.targets[0].operations
+    assert first.disposition is PlanDisposition.EXECUTE
+    assert optional.disposition is PlanDisposition.SKIP
+    assert optional.skip_reason is not None
+    assert optional.skip_reason.code is SkipReasonCode.CONDITION_FALSE
+    assert [capability.kind for capability in result.plan.capabilities] == [
+        CapabilityKind.ARM_CONTROL_PLANE
+    ]
+    assert resolutions == ["az"]
+
+
+def test_skipped_kubectl_still_rejects_authored_http_url(tmp_path):
+    workspace = _workspace(tmp_path)
+    manifest_path = _write_manifest(
+        workspace,
+        [
+            {
+                "name": "optional-apply",
+                "type": "kubectl",
+                "operation": "apply",
+                "when": "{{ site.properties.enableOptional }}",
+                "arc": {
+                    "name": "cluster",
+                    "resourceGroup": "rg-cluster",
+                },
+                "files": [
+                    "HtTp://example.invalid/"
+                    "{{ site.parameters.optionalManifest }}"
+                ],
+            }
+        ],
+    )
+
+    with patch(
+        "siteops.orchestrator.TemplateCompilationSession",
+        side_effect=AssertionError("Invalid inputs must not probe tools"),
+    ):
+        result = Orchestrator(workspace).build_plan(
+            manifest_path,
+            intent=PlanIntent.EXECUTABLE,
+        )
+
+    assert result.status is PlanStatus.INVALID
+    assert not result.executable
+    assert result.plan is None
+    assert "HTTP URLs not allowed" in result.diagnostics[0].detail
+
+
+def test_mixed_fleet_validates_only_applicable_kubectl_site_inputs(
+    tmp_path,
+):
+    workspace = _workspace(tmp_path)
+    enabled_site = {
+        "apiVersion": "siteops/v1",
+        "kind": "Site",
+        "name": "enabled-site",
+        "subscription": "sub",
+        "resourceGroup": "rg-enabled",
+        "location": "eastus",
+        "properties": {"enableOptional": True},
+        "parameters": {"optionalManifest": "missing-enabled.yaml"},
+    }
+    (workspace / "sites" / "enabled-site.yaml").write_text(
+        yaml.safe_dump(enabled_site, sort_keys=False),
+        encoding="utf-8",
+    )
+    manifest_path = _write_manifest(
+        workspace,
+        [
+            {"name": "first", "template": "templates/first.json"},
+            {
+                "name": "optional-apply",
+                "type": "kubectl",
+                "operation": "apply",
+                "when": "{{ site.properties.enableOptional }}",
+                "arc": {
+                    "name": "cluster",
+                    "resourceGroup": "rg-cluster",
+                },
+                "files": ["{{ site.parameters.optionalManifest }}"],
+            },
+        ],
+        sites=["test-site", "enabled-site"],
+    )
+
+    with patch(
+        "siteops.orchestrator.TemplateCompilationSession",
+        side_effect=AssertionError("Invalid inputs must not probe tools"),
+    ):
+        result = Orchestrator(workspace).build_plan(
+            manifest_path,
+            intent=PlanIntent.EXECUTABLE,
+        )
+
+    assert result.status is PlanStatus.INVALID
+    assert not result.executable
+    assert result.plan is None
+    assert len(result.diagnostics) == 1
+    assert "missing-enabled.yaml" in result.diagnostics[0].detail
+    assert "enabled-site" in result.diagnostics[0].detail
+    assert "test-site" not in result.diagnostics[0].detail
+
+
+def test_kubectl_site_input_uses_shared_scope_applicability(tmp_path):
+    workspace = _workspace(tmp_path)
+    manifest_path = _write_manifest(
+        workspace,
+        [
+            {
+                "name": "apply",
+                "type": "kubectl",
+                "operation": "apply",
+                "arc": {
+                    "name": "cluster",
+                    "resourceGroup": "rg-cluster",
+                },
+                "files": ["{{ site.parameters.optionalManifest }}"],
+            }
+        ],
+    )
+    orchestrator = Orchestrator(workspace)
+    session = MagicMock(spec=TemplateCompilationSession)
+    with (
+        patch.object(
+            orchestrator,
+            "_check_step_site_compatibility",
+            return_value="target scope mismatch",
+        ) as compatibility,
+        patch(
+            "siteops.orchestrator.TemplateCompilationSession",
+            return_value=session,
+        ),
+    ):
+        result = orchestrator.build_plan(
+            manifest_path,
+            intent=PlanIntent.EXECUTABLE,
+        )
+
+    assert result.status is PlanStatus.PLANNED
+    assert result.executable
+    assert result.plan is not None
+    operation = result.plan.targets[0].operations[0]
+    assert operation.disposition is PlanDisposition.SKIP
+    assert operation.skip_reason is not None
+    assert operation.skip_reason.code is SkipReasonCode.SCOPE_MISMATCH
+    assert compatibility.call_count == 2
+    assert session.method_calls == []
+
+
+@pytest.mark.parametrize(
+    ("case", "schema", "site_parameters", "executable"),
+    [
+        pytest.param(
+            "missing",
+            {"requiredName": {"type": "string"}},
+            {},
+            False,
+            id="missing",
+        ),
+        pytest.param(
+            "supplied",
+            {"requiredName": {"type": "string"}},
+            {"requiredName": "value", "unused": "filtered"},
+            True,
+            id="supplied",
+        ),
+        pytest.param(
+            "defaulted",
+            {
+                "requiredName": {
+                    "type": "string",
+                    "defaultValue": "default",
+                }
+            },
+            {},
+            True,
+            id="defaulted",
+        ),
+    ],
+)
+def test_executable_plan_enforces_known_required_parameters(
+    tmp_path,
+    case,
+    schema,
+    site_parameters,
+    executable,
+):
+    workspace = _workspace(tmp_path)
+    (workspace / "templates" / "first.json").write_text(
+        json.dumps(_arm_template(schema)),
+        encoding="utf-8",
+    )
+    site_path = workspace / "sites" / "test-site.yaml"
+    site = yaml.safe_load(site_path.read_text(encoding="utf-8"))
+    site["parameters"] = site_parameters
+    site_path.write_text(
+        yaml.safe_dump(site, sort_keys=False),
+        encoding="utf-8",
+    )
+    manifest_path = _write_manifest(
+        workspace,
+        [{"name": "first", "template": "templates/first.json"}],
+    )
+    session = TemplateCompilationSession(
+        command_runner=_RecordingToolRunner(),
+        tool_resolver=lambda name: str(
+            tmp_path / "tools" / f"{name}.exe"
+        ),
+    )
+    with patch(
+        "siteops.orchestrator.TemplateCompilationSession",
+        return_value=session,
+    ):
+        result = Orchestrator(workspace).build_plan(
+            manifest_path,
+            intent=PlanIntent.EXECUTABLE,
+        )
+
+    assert result.executable is executable
+    assert result.plan is not None
+    operation = result.plan.targets[0].operations[0]
+    assert isinstance(operation.details, DeploymentOperation)
+    assert operation.details.template_unit_key is not None
+    assert len(result.plan.template_units) == 1
+    if case == "missing":
+        assert result.status is PlanStatus.INVALID
+        assert operation.disposition is PlanDisposition.BLOCKED
+        assert operation.skip_reason is not None
+        assert (
+            operation.skip_reason.code
+            is SkipReasonCode.TARGET_PREPARATION_FAILED
+        )
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            "operation-preparation.invalid"
+        ]
+        assert "requiredName" in result.diagnostics[0].detail
+    else:
+        assert result.status is PlanStatus.PLANNED
+        assert operation.disposition is PlanDisposition.EXECUTE
+        assert operation.details.parameters is not None
+        parameters = resolve_plan_value(
+            operation.details.parameters,
+            {},
+        )
+        assert "unused" not in parameters
+
+
+def test_missing_required_parameter_blocks_dependent_consumer(tmp_path):
+    workspace = _workspace(tmp_path)
+    (workspace / "templates" / "first.json").write_text(
+        json.dumps(
+            _arm_template({"requiredName": {"type": "string"}})
+        ),
+        encoding="utf-8",
+    )
+    (workspace / "templates" / "second.json").write_text(
+        json.dumps(_arm_template({"input": {"type": "string"}})),
+        encoding="utf-8",
+    )
+    (workspace / "parameters" / "second.yaml").write_text(
+        'input: "{{ steps.first.outputs.value }}"\n',
+        encoding="utf-8",
+    )
+    manifest_path = _write_manifest(
+        workspace,
+        [
+            {"name": "first", "template": "templates/first.json"},
+            {
+                "name": "second",
+                "template": "templates/second.json",
+                "parameters": ["parameters/second.yaml"],
+            },
+        ],
+    )
+    session = TemplateCompilationSession(
+        command_runner=_RecordingToolRunner(),
+        tool_resolver=lambda name: str(
+            tmp_path / "tools" / f"{name}.exe"
+        ),
+    )
+    with patch(
+        "siteops.orchestrator.TemplateCompilationSession",
+        return_value=session,
+    ):
+        result = Orchestrator(workspace).build_plan(
+            manifest_path,
+            intent=PlanIntent.EXECUTABLE,
+        )
+
+    assert result.status is PlanStatus.INVALID
+    assert not result.executable
+    assert result.plan is not None
+    first, second = result.plan.targets[0].operations
+    assert first.disposition is PlanDisposition.BLOCKED
+    assert first.skip_reason is not None
+    assert (
+        first.skip_reason.code
+        is SkipReasonCode.TARGET_PREPARATION_FAILED
+    )
+    assert second.disposition is PlanDisposition.BLOCKED
+    assert second.skip_reason is not None
+    assert second.skip_reason.code is SkipReasonCode.DEPENDENCY_BLOCKED
+    assert isinstance(first.details, DeploymentOperation)
+    assert isinstance(second.details, DeploymentOperation)
+    assert first.details.template_unit_key is not None
+    assert second.details.template_unit_key is not None
+    assert len(result.plan.template_units) == 2
 
 
 @pytest.mark.parametrize(
@@ -1117,12 +1536,43 @@ def test_executable_plan_rejects_later_step_reference(tmp_path):
     assert "runs later" in result.diagnostics[0].detail
 
 
+@pytest.mark.parametrize(
+    ("resolved_name", "execution_succeeds", "redacted"),
+    [
+        pytest.param("known", True, False, id="required-name"),
+        pytest.param("optional", False, False, id="defaulted-name"),
+        pytest.param(
+            "optional",
+            False,
+            True,
+            id="defaulted-name-redacted",
+        ),
+    ],
+)
 def test_executable_plan_preserves_deferred_top_level_parameter_name(
     tmp_path,
+    monkeypatch,
+    resolved_name,
+    execution_succeeds,
+    redacted,
 ):
+    if redacted:
+        monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1")
+    else:
+        monkeypatch.delenv("SITEOPS_REDACT_OUTPUT", raising=False)
     workspace = _workspace(tmp_path)
     (workspace / "templates" / "second.json").write_text(
-        json.dumps(_arm_template({"known": {"type": "string"}})),
+        json.dumps(
+            _arm_template(
+                {
+                    "known": {"type": "string"},
+                    "optional": {
+                        "type": "string",
+                        "defaultValue": "default",
+                    },
+                }
+            )
+        ),
         encoding="utf-8",
     )
     (workspace / "parameters" / "second.yaml").write_text(
@@ -1142,10 +1592,20 @@ def test_executable_plan_preserves_deferred_top_level_parameter_name(
     )
 
     orchestrator = Orchestrator(workspace)
-    result = orchestrator.build_plan(
-        manifest_path,
-        intent=PlanIntent.EXECUTABLE,
+    session = TemplateCompilationSession(
+        command_runner=_RecordingToolRunner(),
+        tool_resolver=lambda name: str(
+            tmp_path / "tools" / f"{name}.exe"
+        ),
     )
+    with patch(
+        "siteops.orchestrator.TemplateCompilationSession",
+        return_value=session,
+    ):
+        result = orchestrator.build_plan(
+            manifest_path,
+            intent=PlanIntent.EXECUTABLE,
+        )
 
     assert result.status is PlanStatus.PLANNED
     assert result.executable
@@ -1155,7 +1615,7 @@ def test_executable_plan_preserves_deferred_top_level_parameter_name(
     assert second.details.template_unit_key is not None
     assert result.plan.template_unit(
         second.details.template_unit_key
-    ).parameter_names == frozenset({"known"})
+    ).parameter_names == frozenset({"known", "optional"})
     assert second.data_references == (
         DataReference(
             source=OperationIdentity(
@@ -1179,7 +1639,7 @@ def test_executable_plan_preserves_deferred_top_level_parameter_name(
                 {
                     "parameterName": {
                         "type": "String",
-                        "value": "known",
+                        "value": resolved_name,
                     }
                 }
                 if kwargs["step_name"] == "first"
@@ -1192,9 +1652,23 @@ def test_executable_plan_preserves_deferred_top_level_parameter_name(
         "deploy_resource_group",
         side_effect=deploy,
     ):
-        orchestrator.execute_plan(result)
+        execution = orchestrator.execute_plan(result)
 
-    assert calls[1]["parameters"] == {"known": "value"}
+    if execution_succeeds:
+        assert execution["summary"]["failed"] == 0
+        assert calls[1]["parameters"] == {"known": "value"}
+    else:
+        assert execution["summary"]["failed"] == 1
+        assert len(calls) == 1
+        second = execution["sites"]["test-site"]["steps"][1]
+        assert second["status"] == "failed"
+        if redacted:
+            assert second["error"] == (
+                "A required deployment parameter is missing."
+            )
+            assert "known" not in second["error"]
+        else:
+            assert "missing required template parameter" in second["error"]
 
 
 def test_executable_plan_converts_filter_failure_to_typed_diagnostic(
@@ -1299,6 +1773,284 @@ def test_executable_plan_prepares_kubectl_and_wait_values(tmp_path):
         ("resourceId",),
         ("runId",),
     }
+
+
+@pytest.mark.parametrize(
+    ("cluster_name", "resource_group", "error"),
+    [
+        pytest.param("cluster", "rg-cluster", None, id="valid"),
+        pytest.param(
+            ["cluster"],
+            "rg-cluster",
+            "must resolve to a scalar value",
+            id="cluster-non-scalar",
+        ),
+        pytest.param(
+            "cluster",
+            "",
+            "must resolve to a non-empty value",
+            id="resource-group-empty",
+        ),
+    ],
+)
+def test_executable_plan_preflights_known_kubectl_scalar_inputs(
+    tmp_path,
+    cluster_name,
+    resource_group,
+    error,
+):
+    workspace = _workspace(tmp_path)
+    site_path = workspace / "sites" / "test-site.yaml"
+    site = yaml.safe_load(site_path.read_text(encoding="utf-8"))
+    site["parameters"] = {
+        "clusterName": cluster_name,
+        "clusterResourceGroup": resource_group,
+    }
+    site_path.write_text(
+        yaml.safe_dump(site, sort_keys=False),
+        encoding="utf-8",
+    )
+    manifest_path = _write_manifest(
+        workspace,
+        [
+            {
+                "name": "apply",
+                "type": "kubectl",
+                "operation": "apply",
+                "arc": {
+                    "name": "{{ site.parameters.clusterName }}",
+                    "resourceGroup": (
+                        "{{ site.parameters.clusterResourceGroup }}"
+                    ),
+                },
+                "files": ["https://example.invalid/manifest.yaml"],
+            }
+        ],
+    )
+    session = TemplateCompilationSession(
+        command_runner=_RecordingToolRunner(),
+        tool_resolver=lambda name: str(
+            tmp_path / "tools" / f"{name}.exe"
+        ),
+    )
+    with patch(
+        "siteops.orchestrator.TemplateCompilationSession",
+        return_value=session,
+    ):
+        result = Orchestrator(workspace).build_plan(
+            manifest_path,
+            intent=PlanIntent.EXECUTABLE,
+        )
+
+    assert result.plan is not None
+    operation = result.plan.targets[0].operations[0]
+    if error is None:
+        assert result.status is PlanStatus.PLANNED
+        assert result.executable
+        assert operation.disposition is PlanDisposition.EXECUTE
+    else:
+        assert result.status is PlanStatus.INVALID
+        assert not result.executable
+        assert operation.disposition is PlanDisposition.BLOCKED
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            "operation-preparation.invalid"
+        ]
+        assert error in result.diagnostics[0].detail
+
+
+@pytest.mark.parametrize(
+    ("expected_value", "error"),
+    [
+        pytest.param("succeeded", None, id="non-overlapping"),
+        pytest.param(
+            "failed-check",
+            "also matches failurePattern",
+            id="overlap",
+        ),
+        pytest.param(
+            ["failed-check"],
+            "must resolve to a scalar value",
+            id="non-scalar",
+        ),
+        pytest.param(
+            "",
+            "must resolve to a non-empty value",
+            id="empty",
+        ),
+    ],
+)
+def test_executable_plan_validates_fully_known_wait_values(
+    tmp_path,
+    expected_value,
+    error,
+):
+    workspace = _workspace(tmp_path)
+    site_path = workspace / "sites" / "test-site.yaml"
+    site = yaml.safe_load(site_path.read_text(encoding="utf-8"))
+    site["parameters"] = {"waitExpected": expected_value}
+    site_path.write_text(
+        yaml.safe_dump(site, sort_keys=False),
+        encoding="utf-8",
+    )
+    manifest_path = _write_manifest(
+        workspace,
+        [
+            {"name": "first", "template": "templates/first.json"},
+            {
+                "name": "wait",
+                "type": "wait",
+                "condition": {
+                    "type": "arm-tag",
+                    "resourceId": (
+                        "/subscriptions/sub/resourceGroups/rg-test/"
+                        "providers/Microsoft.Example/items/example"
+                    ),
+                    "tagKey": "state",
+                    "expectedValue": "{{ site.parameters.waitExpected }}",
+                    "failurePattern": "failed-*",
+                },
+                "timeoutMinutes": 5,
+                "pollIntervalSeconds": 10,
+            },
+        ],
+    )
+    session = TemplateCompilationSession(
+        command_runner=_RecordingToolRunner(),
+        tool_resolver=lambda name: str(
+            tmp_path / "tools" / f"{name}.exe"
+        ),
+    )
+    with patch(
+        "siteops.orchestrator.TemplateCompilationSession",
+        return_value=session,
+    ):
+        result = Orchestrator(workspace).build_plan(
+            manifest_path,
+            intent=PlanIntent.EXECUTABLE,
+        )
+
+    assert result.plan is not None
+    first, wait = result.plan.targets[0].operations
+    assert first.disposition is PlanDisposition.EXECUTE
+    assert isinstance(first.details, DeploymentOperation)
+    assert first.details.template_unit_key is not None
+    assert len(result.plan.template_units) == 1
+    if error is None:
+        assert result.status is PlanStatus.PLANNED
+        assert result.executable
+        assert wait.disposition is PlanDisposition.EXECUTE
+    else:
+        assert result.status is PlanStatus.INVALID
+        assert not result.executable
+        assert wait.disposition is PlanDisposition.BLOCKED
+        assert [diagnostic.code for diagnostic in result.diagnostics] == [
+            "operation-preparation.invalid"
+        ]
+        assert error in result.diagnostics[0].detail
+
+
+@pytest.mark.parametrize(
+    ("resolved_value", "execution_succeeds"),
+    [
+        pytest.param("succeeded", True, id="non-overlapping"),
+        pytest.param("failed-check", False, id="overlap"),
+    ],
+)
+def test_deferred_wait_guard_runs_after_arm_output_resolution(
+    tmp_path,
+    monkeypatch,
+    resolved_value,
+    execution_succeeds,
+):
+    monkeypatch.delenv("SITEOPS_REDACT_OUTPUT", raising=False)
+    workspace = _workspace(tmp_path)
+    manifest_path = _write_manifest(
+        workspace,
+        [
+            {"name": "first", "template": "templates/first.json"},
+            {
+                "name": "wait",
+                "type": "wait",
+                "condition": {
+                    "type": "arm-tag",
+                    "resourceId": (
+                        "/subscriptions/sub/resourceGroups/rg-test/"
+                        "providers/Microsoft.Example/items/example"
+                    ),
+                    "tagKey": "state",
+                    "expectedValue": (
+                        "{{ steps.first.outputs.waitExpected }}"
+                    ),
+                    "failurePattern": "failed-*",
+                },
+                "timeoutMinutes": 5,
+                "pollIntervalSeconds": 10,
+            },
+        ],
+    )
+    orchestrator = Orchestrator(workspace)
+    session = TemplateCompilationSession(
+        command_runner=_RecordingToolRunner(),
+        tool_resolver=lambda name: str(
+            tmp_path / "tools" / f"{name}.exe"
+        ),
+    )
+    with patch(
+        "siteops.orchestrator.TemplateCompilationSession",
+        return_value=session,
+    ):
+        result = orchestrator.build_plan(
+            manifest_path,
+            intent=PlanIntent.EXECUTABLE,
+        )
+
+    assert result.status is PlanStatus.PLANNED
+    assert result.executable
+    waits = []
+
+    def wait_for_condition(condition, **kwargs):
+        waits.append(condition)
+        return WaitResult(
+            success=True,
+            step_name=kwargs["step_name"],
+            site_name=kwargs["site_name"],
+        )
+
+    with (
+        patch.object(
+            orchestrator.executor,
+            "deploy_resource_group",
+            return_value=DeploymentResult(
+                success=True,
+                step_name="first",
+                site_name="test-site",
+                deployment_name="first",
+                outputs={
+                    "waitExpected": {
+                        "type": "String",
+                        "value": resolved_value,
+                    }
+                },
+            ),
+        ),
+        patch.object(
+            orchestrator.executor,
+            "wait_for_condition",
+            side_effect=wait_for_condition,
+        ),
+    ):
+        execution = orchestrator.execute_plan(result)
+
+    if execution_succeeds:
+        assert execution["summary"]["failed"] == 0
+        assert len(waits) == 1
+        assert waits[0].expected_value == "succeeded"
+    else:
+        assert execution["summary"]["failed"] == 1
+        assert waits == []
+        wait = execution["sites"]["test-site"]["steps"][1]
+        assert wait["status"] == "failed"
+        assert "also matches failurePattern" in wait["error"]
 
 
 def test_build_plan_applies_parallel_override(tmp_path):

@@ -56,6 +56,8 @@ jobs:
 
       # Includes bounded executable-plan coverage in tests/workspace/
       # test_executable_plans.py, using real catalog sites and Bicep schemas.
+      # Compiler acquisition and module restore may use the network. The
+      # tests block Azure deployment and cluster commands.
       - script: >
           pytest tests/ -m "not integration" -v
           --cov=siteops

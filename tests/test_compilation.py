@@ -48,6 +48,11 @@ def _arm_template(parameters=None):
     }
 
 
+def _tool_path(tmp_path: Path, name: str) -> str:
+    """Return a platform-native absolute fake executable path."""
+    return str((tmp_path / "tools" / name).resolve())
+
+
 def _user_defined_template():
     template = _arm_template(
         {
@@ -573,7 +578,7 @@ def test_user_defined_parameter_types_are_acquired(tmp_path, suffix):
     compiler.compile_output = template
     session = TemplateCompilationSession(
         command_runner=compiler,
-        tool_resolver=lambda name: "C:/tools/az.exe",
+        tool_resolver=lambda name: _tool_path(tmp_path, name),
     )
 
     result = session.acquire(source)
@@ -606,7 +611,7 @@ def test_invalid_type_reference_is_cached_as_output_failure(tmp_path, suffix):
     compiler.compile_output = template
     session = TemplateCompilationSession(
         command_runner=compiler,
-        tool_resolver=lambda name: "C:/tools/az.exe",
+        tool_resolver=lambda name: _tool_path(tmp_path, name),
     )
 
     result = session.acquire(source)
@@ -623,7 +628,7 @@ def test_bicep_unit_compiles_once_per_session(tmp_path):
     compiler = FakeCompiler()
     session = TemplateCompilationSession(
         command_runner=compiler,
-        tool_resolver=lambda name: "C:/tools/az.exe",
+        tool_resolver=lambda name: _tool_path(tmp_path, name),
     )
 
     first = session.acquire(source)
@@ -660,7 +665,7 @@ def test_cache_hit_does_not_reread_source(tmp_path):
     compiler = FakeCompiler()
     session = TemplateCompilationSession(
         command_runner=compiler,
-        tool_resolver=lambda name: "C:/tools/az.exe",
+        tool_resolver=lambda name: _tool_path(tmp_path, name),
     )
     first = session.acquire(source)
     source.unlink()
@@ -695,7 +700,7 @@ def test_azure_cli_and_bicep_share_one_resolved_tool(tmp_path):
 
     def resolve(name: str) -> str:
         resolutions.append(name)
-        return "C:/tools/az.exe"
+        return _tool_path(tmp_path, name)
 
     session = TemplateCompilationSession(
         command_runner=compiler,
@@ -711,11 +716,11 @@ def test_azure_cli_and_bicep_share_one_resolved_tool(tmp_path):
     assert azure_cli.resolved_path == bicep.resolved_path
 
 
-def test_kubectl_resolution_does_not_run_a_command():
+def test_kubectl_resolution_does_not_run_a_command(tmp_path):
     compiler = FakeCompiler()
     session = TemplateCompilationSession(
         command_runner=compiler,
-        tool_resolver=lambda name: "C:/tools/kubectl.exe",
+        tool_resolver=lambda name: _tool_path(tmp_path, name),
     )
 
     kubectl = session.resolve_kubectl()
@@ -749,14 +754,14 @@ def test_new_session_recompiles_after_source_edit(tmp_path):
     first_compiler = FakeCompiler()
     first_session = TemplateCompilationSession(
         command_runner=first_compiler,
-        tool_resolver=lambda name: "C:/tools/az.exe",
+        tool_resolver=lambda name: _tool_path(tmp_path, name),
     )
     first = first_session.acquire(source)
     source.write_text("param second string\n", encoding="utf-8")
     second_compiler = FakeCompiler()
     second_session = TemplateCompilationSession(
         command_runner=second_compiler,
-        tool_resolver=lambda name: "C:/tools/az.exe",
+        tool_resolver=lambda name: _tool_path(tmp_path, name),
     )
 
     second = second_session.acquire(source)
@@ -774,7 +779,7 @@ def test_new_session_changes_key_after_configuration_edit(tmp_path):
     source.write_text("", encoding="utf-8")
     first_session = TemplateCompilationSession(
         command_runner=FakeCompiler(),
-        tool_resolver=lambda name: "C:/tools/az.exe",
+        tool_resolver=lambda name: _tool_path(tmp_path, name),
     )
     first = first_session.acquire(source)
     config.write_text(
@@ -783,7 +788,7 @@ def test_new_session_changes_key_after_configuration_edit(tmp_path):
     )
     second_session = TemplateCompilationSession(
         command_runner=FakeCompiler(),
-        tool_resolver=lambda name: "C:/tools/az.exe",
+        tool_resolver=lambda name: _tool_path(tmp_path, name),
     )
 
     second = second_session.acquire(source)
@@ -802,14 +807,14 @@ def test_new_session_changes_key_with_compiler_version(tmp_path):
     first_compiler = FakeCompiler()
     first_session = TemplateCompilationSession(
         command_runner=first_compiler,
-        tool_resolver=lambda name: "C:/tools/az.exe",
+        tool_resolver=lambda name: _tool_path(tmp_path, name),
     )
     first = first_session.acquire(source)
     second_compiler = FakeCompiler()
     second_compiler.bicep_version = "0.46.0 (next)"
     second_session = TemplateCompilationSession(
         command_runner=second_compiler,
-        tool_resolver=lambda name: "C:/tools/az.exe",
+        tool_resolver=lambda name: _tool_path(tmp_path, name),
     )
 
     second = second_session.acquire(source)
@@ -900,7 +905,7 @@ def test_failed_azure_cli_probe_is_unavailable(tmp_path):
 
     session = TemplateCompilationSession(
         command_runner=fail_version,
-        tool_resolver=lambda name: "C:/tools/az.exe",
+        tool_resolver=lambda name: _tool_path(tmp_path, name),
     )
 
     result = session.acquire(source)
@@ -964,7 +969,7 @@ def test_unknown_bicep_probe_allows_build(
         }
     session = TemplateCompilationSession(
         command_runner=compiler,
-        tool_resolver=lambda name: "C:/tools/az.exe",
+        tool_resolver=lambda name: _tool_path(tmp_path, name),
     )
 
     observed_compiler = session.resolve_bicep_compiler()
@@ -1027,7 +1032,7 @@ def test_failed_bicep_probe_preserves_cached_build_failure(
     compiler.compile_stderr = build_stderr
     session = TemplateCompilationSession(
         command_runner=compiler,
-        tool_resolver=lambda name: "C:/tools/az.exe",
+        tool_resolver=lambda name: _tool_path(tmp_path, name),
     )
 
     result = session.acquire(source)
@@ -1054,7 +1059,7 @@ def test_compiler_warnings_do_not_block_success(tmp_path):
     )
     session = TemplateCompilationSession(
         command_runner=compiler,
-        tool_resolver=lambda name: "C:/tools/az.exe",
+        tool_resolver=lambda name: _tool_path(tmp_path, name),
     )
 
     result = session.acquire(source)
@@ -1072,7 +1077,7 @@ def test_compiler_failure_is_cached(tmp_path):
     compiler.compile_stderr = "BCP000: invalid source"
     session = TemplateCompilationSession(
         command_runner=compiler,
-        tool_resolver=lambda name: "C:/tools/az.exe",
+        tool_resolver=lambda name: _tool_path(tmp_path, name),
     )
 
     first = session.acquire(source)
@@ -1092,7 +1097,7 @@ def test_module_restore_failure_uses_typed_code(tmp_path):
     compiler.compile_stderr = "BCP192: Unable to restore module."
     session = TemplateCompilationSession(
         command_runner=compiler,
-        tool_resolver=lambda name: "C:/tools/az.exe",
+        tool_resolver=lambda name: _tool_path(tmp_path, name),
     )
 
     result = session.acquire(source)
@@ -1118,7 +1123,7 @@ def test_compiler_timeout_uses_typed_code(tmp_path):
 
     session = TemplateCompilationSession(
         command_runner=timeout,
-        tool_resolver=lambda name: "C:/tools/az.exe",
+        tool_resolver=lambda name: _tool_path(tmp_path, name),
     )
 
     result = session.acquire(source)
@@ -1134,7 +1139,7 @@ def test_invalid_compiler_output_fails_closed(tmp_path):
     compiler.compile_output = []
     session = TemplateCompilationSession(
         command_runner=compiler,
-        tool_resolver=lambda name: "C:/tools/az.exe",
+        tool_resolver=lambda name: _tool_path(tmp_path, name),
     )
 
     result = session.acquire(source)
@@ -1153,13 +1158,16 @@ def test_source_change_during_compile_fails_closed(tmp_path):
     )
     session = TemplateCompilationSession(
         command_runner=compiler,
-        tool_resolver=lambda name: "C:/tools/az.exe",
+        tool_resolver=lambda name: _tool_path(tmp_path, name),
     )
 
     result = session.acquire(source)
 
     assert isinstance(result, CompilationFailure)
     assert result.code is CompilationFailureCode.INPUT_CHANGED
+    assert session.acquire(source) is result
+    assert session.outcomes == (result,)
+    assert compiler.compile_count == 1
 
 
 def test_source_change_during_failed_compile_reports_changed_input(
@@ -1176,13 +1184,88 @@ def test_source_change_during_failed_compile_reports_changed_input(
     )
     session = TemplateCompilationSession(
         command_runner=compiler,
-        tool_resolver=lambda name: "C:/tools/az.exe",
+        tool_resolver=lambda name: _tool_path(tmp_path, name),
     )
 
     result = session.acquire(source)
 
     assert isinstance(result, CompilationFailure)
     assert result.code is CompilationFailureCode.INPUT_CHANGED
+    assert session.acquire(source) is result
+    assert session.outcomes == (result,)
+    assert compiler.compile_count == 1
+
+
+@pytest.mark.parametrize(
+    ("initial_configuration", "mutation", "compile_returncode"),
+    [
+        pytest.param("present", "change", 0, id="change-successful-build"),
+        pytest.param("absent", "add", 0, id="add-successful-build"),
+        pytest.param("present", "remove", 1, id="remove-failed-build"),
+    ],
+)
+def test_configuration_change_during_compile_fails_closed_and_is_cached(
+    tmp_path,
+    initial_configuration,
+    mutation,
+    compile_returncode,
+):
+    source = tmp_path / "main.bicep"
+    source.write_text("param name string\n", encoding="utf-8")
+    configuration = tmp_path / "bicepconfig.json"
+    if initial_configuration == "present":
+        configuration.write_text('{"analyzers": {}}\n', encoding="utf-8")
+
+    def mutate_configuration():
+        if mutation == "change":
+            configuration.write_text(
+                '{"analyzers": {"core": {"enabled": false}}}\n',
+                encoding="utf-8",
+            )
+        elif mutation == "add":
+            configuration.write_text('{"cloud": {}}\n', encoding="utf-8")
+        else:
+            configuration.unlink()
+
+    compiler = FakeCompiler()
+    compiler.compile_returncode = compile_returncode
+    compiler.compile_stderr = (
+        "BCP000: invalid source" if compile_returncode else ""
+    )
+    compiler.on_compile = mutate_configuration
+    session = TemplateCompilationSession(
+        command_runner=compiler,
+        tool_resolver=lambda name: _tool_path(tmp_path, name),
+    )
+
+    result = session.acquire(source)
+
+    assert isinstance(result, CompilationFailure)
+    assert result.code is CompilationFailureCode.INPUT_CHANGED
+    assert session.acquire(source) is result
+    assert session.outcomes == (result,)
+    assert compiler.compile_count == 1
+
+
+def test_unchanged_configuration_allows_compile_and_cache_reuse(tmp_path):
+    configuration = tmp_path / "bicepconfig.json"
+    configuration.write_text('{"analyzers": {}}\n', encoding="utf-8")
+    source = tmp_path / "main.bicep"
+    source.write_text("param name string\n", encoding="utf-8")
+    compiler = FakeCompiler()
+    compiler.on_compile = lambda: None
+    session = TemplateCompilationSession(
+        command_runner=compiler,
+        tool_resolver=lambda name: _tool_path(tmp_path, name),
+    )
+
+    result = session.acquire(source)
+
+    assert isinstance(result, CompiledTemplate)
+    assert session.acquire(source) is result
+    assert result.identity.configuration is not None
+    assert result.identity.configuration.path == configuration.resolve()
+    assert compiler.compile_count == 1
 
 
 def test_compiled_output_version_is_authoritative(tmp_path):
@@ -1197,7 +1280,7 @@ def test_compiled_output_version_is_authoritative(tmp_path):
     }
     session = TemplateCompilationSession(
         command_runner=compiler,
-        tool_resolver=lambda name: "C:/tools/az.exe",
+        tool_resolver=lambda name: _tool_path(tmp_path, name),
     )
 
     result = session.acquire(source)

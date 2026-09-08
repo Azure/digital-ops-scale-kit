@@ -271,6 +271,62 @@ class TestCmdValidate:
         assert "test-site" not in captured.out
         assert "eastus" not in captured.out
 
+    @pytest.mark.parametrize("output", ["plain", "json"])
+    @pytest.mark.parametrize("redacted", [False, True])
+    def test_plan_output_omits_private_authored_values_when_redacted(
+        self,
+        complete_workspace,
+        capsys,
+        monkeypatch,
+        output,
+        redacted,
+    ):
+        from siteops.orchestrator import Orchestrator
+
+        secret = "PRIVATE_MANIFEST_SENTINEL"
+        monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1" if redacted else "0")
+        manifest_path = complete_workspace / "manifests" / "test-manifest.yaml"
+        document = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+        document["name"] = secret
+        document["description"] = secret
+        document["steps"].append(
+            {
+                "name": secret,
+                "type": "kubectl",
+                "operation": "apply",
+                "arc": {"name": secret, "resourceGroup": secret},
+                "files": [f"https://example.invalid/{secret}.yaml"],
+            }
+        )
+        manifest_path.write_text(yaml.safe_dump(document), encoding="utf-8")
+        args = Namespace(
+            manifest=manifest_path,
+            workspace=complete_workspace,
+            selector=None,
+            describe=True,
+            output=output,
+            projection=None,
+            verbose=False,
+        )
+
+        with (
+            patch(
+                "siteops.orchestrator.TemplateCompilationSession",
+                side_effect=AssertionError("Describe must not compile"),
+            ),
+            patch("subprocess.Popen", side_effect=AssertionError("No live process")),
+        ):
+            exit_code = cmd_plan(args, Orchestrator(complete_workspace))
+
+        captured = capsys.readouterr()
+        assert exit_code == 0
+        assert (secret not in captured.out) is redacted
+        assert secret not in captured.err
+        if output == "json":
+            assert json.loads(captured.out)["projection"] == (
+                "publishable" if redacted else "local-private"
+            )
+
     def test_validate_failure_json_uses_typed_envelope(
         self,
         complete_workspace,

@@ -101,37 +101,87 @@ stages:
                     WORKSPACE: ${{ parameters.workspace }}
                     SITE_OVERRIDES: $(SITE_OVERRIDES)
 
-                - script: |
-                    # Preserve planning failures through tee and summary upload.
-                    # Planning prepares local inputs without executing operations.
-                    set -o pipefail
-                    CMD_ARGS=(-w "$WORKSPACE" plan "$MANIFEST")
-                    [[ -n "$SELECTOR" ]] && CMD_ARGS+=(-l "$SELECTOR")
-
-                    SUMMARY_FILE="$(Build.ArtifactStagingDirectory)/deployment-plan.md"
-                    echo "### Deployment Plan" > "$SUMMARY_FILE"
-                    echo '```' >> "$SUMMARY_FILE"
-                    if siteops "${CMD_ARGS[@]}" 2>&1 | tee -a "$SUMMARY_FILE"; then
-                      PLAN_EXIT_CODE=0
-                    else
-                      PLAN_EXIT_CODE=$?
-                    fi
-                    echo '```' >> "$SUMMARY_FILE"
-                    echo "##vso[task.uploadsummary]$SUMMARY_FILE"
-                    exit "$PLAN_EXIT_CODE"
-                  displayName: Prepare executable deployment plan
-                  env:
-                    WORKSPACE: ${{ parameters.workspace }}
-                    MANIFEST: ${{ parameters.manifest }}
-                    SELECTOR: ${{ parameters.selector }}
-
                 - task: AzureCLI@2
-                  displayName: Deploy
+                  displayName: Prepare executable plan and deploy
                   inputs:
                     azureSubscription: ${{ parameters.serviceConnection }}
                     scriptType: bash
                     scriptLocation: inlineScript
                     inlineScript: |
+                      # Bicep compiler acquisition and module restore run inside
+                      # this authenticated AzureCLI task. Only publishable JSON
+                      # reaches the uploaded plan summary.
+                      umask 077
+                      PLAN_ARGS=(
+                        -w "$WORKSPACE"
+                        plan "$MANIFEST"
+                        --output json
+                        --projection publishable
+                      )
+                      [[ -n "$SELECTOR" ]] && PLAN_ARGS+=(-l "$SELECTOR")
+
+                      PLAN_STDOUT="$PLAN_TEMP_DIRECTORY/siteops-plan.json"
+                      PLAN_STDERR="$PLAN_TEMP_DIRECTORY/siteops-plan.stderr"
+                      cleanup_plan_files() {
+                        rm -f "$PLAN_STDOUT" "$PLAN_STDERR"
+                      }
+                      trap cleanup_plan_files EXIT
+
+                      if siteops "${PLAN_ARGS[@]}" >"$PLAN_STDOUT" 2>"$PLAN_STDERR"; then
+                        PLAN_EXIT_CODE=0
+                      else
+                        PLAN_EXIT_CODE=$?
+                      fi
+
+                      PLAN_STATUS=""
+                      if PLAN_STATUS=$(python3 -c '
+                      import json
+                      import sys
+
+                      with open(sys.argv[1], encoding="utf-8") as stream:
+                          document = json.load(stream)
+                      if (
+                          document.get("apiVersion") != "siteops/v1alpha1"
+                          or document.get("kind") != "DeploymentPlan"
+                          or document.get("projection") != "publishable"
+                          or document.get("status") not in {"planned", "invalid"}
+                          or document.get("intent") != "executable"
+                          or document.get("executable") is not (document.get("status") == "planned")
+                      ):
+                          raise SystemExit(1)
+                      print(document["status"])
+                      ' "$PLAN_STDOUT" 2>/dev/null); then
+                        PLAN_DOCUMENT_VALID=1
+                      else
+                        PLAN_DOCUMENT_VALID=0
+                      fi
+
+                      if [[ $PLAN_EXIT_CODE -eq 0 && "$PLAN_STATUS" != "planned" ]]; then
+                        PLAN_DOCUMENT_VALID=0
+                      elif [[ $PLAN_EXIT_CODE -ne 0 && "$PLAN_STATUS" != "invalid" ]]; then
+                        PLAN_DOCUMENT_VALID=0
+                      fi
+
+                      PLAN_SUMMARY="$PLAN_SUMMARY_DIRECTORY/deployment-plan.md"
+                      echo "### Deployment Plan" > "$PLAN_SUMMARY"
+                      if [[ $PLAN_DOCUMENT_VALID -eq 1 ]]; then
+                        echo '```json' >> "$PLAN_SUMMARY"
+                        cat "$PLAN_STDOUT" >> "$PLAN_SUMMARY"
+                        echo '```' >> "$PLAN_SUMMARY"
+                      else
+                        echo "Publishable plan output was unavailable." >> "$PLAN_SUMMARY"
+                      fi
+                      echo "##vso[task.uploadsummary]$PLAN_SUMMARY"
+
+                      if [[ $PLAN_EXIT_CODE -ne 0 ]]; then
+                        echo "##vso[task.logissue type=error]Executable plan preparation failed. Run the plan locally for private diagnostics."
+                        exit "$PLAN_EXIT_CODE"
+                      fi
+                      if [[ $PLAN_DOCUMENT_VALID -ne 1 ]]; then
+                        echo "##vso[task.logissue type=error]Site Ops returned an unsupported plan document."
+                        exit 1
+                      fi
+
                       START_TIME=$(date +%s)
 
                       CMD_ARGS=(-w "$WORKSPACE" deploy "$MANIFEST")
@@ -153,7 +203,7 @@ stages:
                       END_TIME=$(date +%s)
                       DURATION=$((END_TIME - START_TIME))
 
-                      RESULT_FILE="$(Build.ArtifactStagingDirectory)/deployment-result.md"
+                      RESULT_FILE="$PLAN_SUMMARY_DIRECTORY/deployment-result.md"
                       echo "### Deployment Result" > "$RESULT_FILE"
                       if [[ $DEPLOY_EXIT_CODE -eq 0 ]]; then
                         echo "✅ **Success** in ${DURATION}s" >> "$RESULT_FILE"
@@ -168,3 +218,5 @@ stages:
                     MANIFEST: ${{ parameters.manifest }}
                     SELECTOR: ${{ parameters.selector }}
                     DRY_RUN: ${{ parameters.dryRun }}
+                    PLAN_TEMP_DIRECTORY: $(Agent.TempDirectory)
+                    PLAN_SUMMARY_DIRECTORY: $(Build.ArtifactStagingDirectory)

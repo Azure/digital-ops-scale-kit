@@ -11,7 +11,13 @@ so adding a manifest fails CI until it is registered on both, and removing one
 fails until it is de-registered.
 """
 
+import os
 import re
+import shlex
+import shutil
+import stat
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -30,6 +36,203 @@ _RESOURCE_SET_SAMPLES = (
     "samples/resource-set-basic/manifest.yaml",
     "samples/resource-set-composition/manifest.yaml",
 )
+
+
+def _ado_deployment_steps() -> tuple[dict, list[dict]]:
+    data = yaml.safe_load(REUSABLE_ADO_DEPLOY.read_text(encoding="utf-8"))
+    stage = data["stages"][0]
+    steps = stage["jobs"][0]["strategy"]["runOnce"]["deploy"]["steps"]
+    return stage, steps
+
+
+def _required_bash() -> Path:
+    """Resolve native Bash without selecting the Windows WSL launcher."""
+    if sys.platform == "win32":
+        program_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
+        candidates = (
+            program_files / "Git" / "bin" / "bash.exe",
+            Path(r"C:\Program Files\Git\bin\bash.exe"),
+        )
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+        raise AssertionError(
+            "Git Bash is required to validate delivery shell semantics on Windows."
+        )
+
+    resolved = shutil.which("bash")
+    assert resolved, "Bash is required to validate delivery shell semantics."
+    return Path(resolved)
+
+
+def _bash_path(path: Path) -> str:
+    resolved = path.resolve()
+    if sys.platform != "win32":
+        return resolved.as_posix()
+    posix = resolved.as_posix()
+    return f"/{resolved.drive[0].lower()}{posix[2:]}"
+
+
+def _write_executable(path: Path, content: str) -> None:
+    path.write_text(content, encoding="utf-8", newline="\n")
+    path.chmod(
+        path.stat().st_mode
+        | stat.S_IXUSR
+        | stat.S_IXGRP
+        | stat.S_IXOTH
+    )
+
+
+def _install_fake_delivery_tools(tmp_path: Path) -> tuple[Path, Path]:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    invocation_log = tmp_path / "siteops-invocations.log"
+    _write_executable(
+        bin_dir / "siteops",
+        """#!/usr/bin/env bash
+command_name=""
+for argument in "$@"; do
+  case "$argument" in
+    plan|deploy)
+      command_name="$argument"
+      break
+      ;;
+  esac
+done
+printf '%s %s\n' "$command_name" "$*" >> "$FAKE_SITEOPS_LOG"
+
+if [[ "$command_name" == "plan" ]]; then
+  if [[ "${SITEOPS_REDACT_OUTPUT:-}" != "1" ]]; then
+    exit 97
+  fi
+  if [[ "$(umask)" != "0077" ]]; then
+    exit 96
+  fi
+  printf 'PRIVATE PLAN STDERR SENTINEL\n' >&2
+  plan_exit="${FAKE_PLAN_EXIT:-0}"
+  if [[ "${FAKE_PLAN_DOCUMENT_VALID:-1}" == "1" ]]; then
+    status="planned"
+    executable=true
+    [[ "$plan_exit" == "0" ]] || status="invalid"
+    [[ "$plan_exit" == "0" ]] || executable=false
+    projection="publishable"
+    intent="executable"
+    case "${FAKE_PLAN_DOCUMENT_MODE:-valid}" in
+      private) projection="local-private" ;;
+      describe) intent="describe"; executable=false ;;
+      not-executable) executable=false ;;
+    esac
+    printf '{"apiVersion":"siteops/v1alpha1","kind":"DeploymentPlan","projection":"%s","status":"%s","intent":"%s","executable":%s}\n' "$projection" "$status" "$intent" "$executable"
+  else
+    printf 'not-json\n'
+  fi
+  exit "$plan_exit"
+fi
+
+exit "${FAKE_DEPLOY_EXIT:-0}"
+""",
+    )
+    _write_executable(
+        bin_dir / "python3",
+        (
+            "#!/usr/bin/env bash\n"
+            f"exec {shlex.quote(_bash_path(Path(sys.executable)))} \"$@\"\n"
+        ),
+    )
+    return bin_dir, invocation_log
+
+
+def _delivery_plan_case(platform: str) -> tuple[str, str]:
+    if platform == "github":
+        data = yaml.safe_load(
+            REUSABLE_GITHUB_DEPLOY.read_text(encoding="utf-8")
+        )
+        step = next(
+            step
+            for step in data["jobs"]["deploy"]["steps"]
+            if step.get("name") == "Prepare executable deployment plan"
+        )
+        return step["run"], str(data.get("env", {}).get("SITEOPS_REDACT_OUTPUT", ""))
+
+    stage, steps = _ado_deployment_steps()
+    task = next(
+        step
+        for step in steps
+        if step.get("task", "").startswith("AzureCLI@2")
+        and "plan \"$MANIFEST\"" in step["inputs"].get("inlineScript", "")
+    )
+    return (
+        task["inputs"]["inlineScript"],
+        str(stage.get("variables", {}).get("SITEOPS_REDACT_OUTPUT", "")),
+    )
+
+
+def _run_delivery_plan_script(
+    platform: str,
+    tmp_path: Path,
+    *,
+    plan_exit: int,
+    valid_document: bool,
+    document_mode: str = "valid",
+) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path]:
+    script, redaction = _delivery_plan_case(platform)
+    bin_dir, invocation_log = _install_fake_delivery_tools(tmp_path)
+    temp_dir = tmp_path / "runner-temp"
+    summary_dir = tmp_path / "summaries"
+    temp_dir.mkdir()
+    summary_dir.mkdir()
+    github_summary = summary_dir / "github-summary.md"
+
+    exports = {
+        "PATH_PREFIX": _bash_path(bin_dir),
+        "FAKE_SITEOPS_LOG": _bash_path(invocation_log),
+        "FAKE_PLAN_EXIT": str(plan_exit),
+        "FAKE_PLAN_DOCUMENT_VALID": "1" if valid_document else "0",
+        "FAKE_PLAN_DOCUMENT_MODE": document_mode,
+        "FAKE_DEPLOY_EXIT": "0",
+        "SITEOPS_REDACT_OUTPUT": redaction,
+        "INPUT_WORKSPACE": "workspace",
+        "INPUT_MANIFEST": "manifests/install.yaml",
+        "INPUT_SELECTOR": "",
+        "INPUT_DRY_RUN": "false",
+        "RUNNER_TEMP": _bash_path(temp_dir),
+        "GITHUB_STEP_SUMMARY": _bash_path(github_summary),
+        "WORKSPACE": "workspace",
+        "MANIFEST": "manifests/install.yaml",
+        "SELECTOR": "",
+        "DRY_RUN": "False",
+        "PLAN_TEMP_DIRECTORY": _bash_path(temp_dir),
+        "PLAN_SUMMARY_DIRECTORY": _bash_path(summary_dir),
+    }
+    preamble = [
+        f"export PATH={shlex.quote(exports.pop('PATH_PREFIX'))}:\"$PATH\""
+    ]
+    preamble.extend(
+        f"export {name}={shlex.quote(value)}"
+        for name, value in exports.items()
+    )
+    command = "\n".join((*preamble, script))
+
+    result = subprocess.run(
+        [
+            str(_required_bash()),
+            "--noprofile",
+            "--norc",
+            *(("-e", "-o", "pipefail") if platform == "github" else ()),
+            "-c",
+            command,
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    summary_path = (
+        github_summary
+        if platform == "github"
+        else summary_dir / "deployment-plan.md"
+    )
+    return result, summary_path, temp_dir, invocation_log
 
 
 def _github_manifest_options() -> list[str]:
@@ -207,35 +410,92 @@ class TestDeployDropdownRegistration:
             in ado
         )
 
-    @pytest.mark.parametrize(
-        ("path", "plan_command"),
-        [
-            (
-                REUSABLE_GITHUB_DEPLOY,
-                'CMD_ARGS=(-w "$INPUT_WORKSPACE" plan "$INPUT_MANIFEST")',
-            ),
-            (
-                REUSABLE_ADO_DEPLOY,
-                'CMD_ARGS=(-w "$WORKSPACE" plan "$MANIFEST")',
-            ),
-        ],
-        ids=["github", "azure-pipelines"],
-    )
-    def test_executable_plan_delivery_preserves_planning_failure_exit_code(
-        self,
-        path,
-        plan_command,
-    ):
-        text = path.read_text(encoding="utf-8")
-        command_index = text.index(plan_command)
-        script = text[command_index - 500:command_index + 1500]
-
-        pipefail_index = script.index("set -o pipefail")
-        pipeline_index = script.index(
-            'if siteops "${CMD_ARGS[@]}" 2>&1 | tee -a'
+    def test_github_authenticates_and_refreshes_before_planning(self):
+        data = yaml.safe_load(
+            REUSABLE_GITHUB_DEPLOY.read_text(encoding="utf-8")
         )
-        capture_index = script.index("PLAN_EXIT_CODE=$?")
-        exit_index = script.index('exit "$PLAN_EXIT_CODE"')
+        steps = data["jobs"]["deploy"]["steps"]
+        names = [step.get("name") for step in steps]
 
-        assert pipefail_index < pipeline_index
-        assert pipeline_index < capture_index < exit_index
+        assert data["env"]["SITEOPS_REDACT_OUTPUT"] == "1"
+        assert names.index("Azure Login (OIDC)") < names.index(
+            "Start OIDC token refresh service"
+        ) < names.index("Prepare executable deployment plan")
+
+    def test_ado_plans_and_deploys_in_one_authenticated_task(self):
+        stage, steps = _ado_deployment_steps()
+        azure_tasks = [
+            step
+            for step in steps
+            if step.get("task", "").startswith("AzureCLI@2")
+        ]
+
+        assert stage["variables"]["SITEOPS_REDACT_OUTPUT"] == "1"
+        assert len(azure_tasks) == 1
+        task = azure_tasks[0]
+        assert task["inputs"]["azureSubscription"] == (
+            "${{ parameters.serviceConnection }}"
+        )
+        script = task["inputs"]["inlineScript"]
+        assert 'plan "$MANIFEST"' in script
+        assert 'deploy "$MANIFEST"' in script
+
+    @pytest.mark.parametrize("platform", ["github", "azure-pipelines"])
+    @pytest.mark.parametrize(
+        ("plan_exit", "valid_document", "document_mode", "expected_exit"),
+        [
+            pytest.param(0, True, "valid", 0, id="planned"),
+            pytest.param(23, True, "valid", 23, id="invalid-plan"),
+            pytest.param(0, False, "valid", 1, id="unsupported-document"),
+            pytest.param(23, False, "valid", 23, id="failed-without-document"),
+            pytest.param(0, True, "private", 1, id="private-document"),
+            pytest.param(0, True, "describe", 1, id="describe-document"),
+            pytest.param(0, True, "not-executable", 1, id="not-executable"),
+        ],
+    )
+    def test_executable_plan_delivery_executes_real_shell_semantics(
+        self,
+        tmp_path,
+        platform,
+        plan_exit,
+        valid_document,
+        document_mode,
+        expected_exit,
+    ):
+        result, summary_path, temp_dir, invocation_log = (
+            _run_delivery_plan_script(
+                "github" if platform == "github" else "azure-pipelines",
+                tmp_path,
+                plan_exit=plan_exit,
+                valid_document=valid_document,
+                document_mode=document_mode,
+            )
+        )
+
+        assert result.returncode == expected_exit, (
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+        summary = summary_path.read_text(encoding="utf-8")
+        combined_output = f"{result.stdout}\n{result.stderr}\n{summary}"
+        assert "PRIVATE PLAN STDERR SENTINEL" not in combined_output
+        assert "not-json" not in summary
+        publishable = valid_document and document_mode == "valid"
+        if publishable:
+            assert '"projection":"publishable"' in summary
+            expected_status = "planned" if plan_exit == 0 else "invalid"
+            assert f'"status":"{expected_status}"' in summary
+        else:
+            assert "Publishable plan output was unavailable." in summary
+
+        invocations = invocation_log.read_text(encoding="utf-8").splitlines()
+        assert " plan " in f" {invocations[0]} "
+        assert "--output json" in invocations[0]
+        assert "--projection publishable" in invocations[0]
+        if platform == "azure-pipelines" and plan_exit == 0 and publishable:
+            assert len(invocations) == 2
+            assert " deploy " in f" {invocations[1]} "
+        else:
+            assert len(invocations) == 1
+
+        assert not (temp_dir / "siteops-plan.json").exists()
+        assert not (temp_dir / "siteops-plan.stderr").exists()

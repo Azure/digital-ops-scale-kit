@@ -7,7 +7,7 @@ either slows every commit or never runs at all.
 | Layer | Location | Needs | Runs |
 |---|---|---|---|
 | **Unit** | `tests/*.py` | Nothing | Every change |
-| **Workspace** | `tests/workspace/` | The committed workspace on disk, and the Azure CLI for the tests that compile Bicep | Every change |
+| **Workspace** | `tests/workspace/` | The committed workspace, Azure CLI for Bicep compilation, and Bash for delivery-script checks | Every change |
 | **Integration** | `tests/integration/` | A live Azure subscription and an Arc-connected cluster | On request, and inside the E2E workflow |
 | **E2E fixtures** | `tests/e2e/` | Rendered at runtime by the workflow | Not collected by pytest |
 
@@ -15,6 +15,11 @@ either slows every commit or never runs at all.
 pytest tests/ -m "not integration"     # the per-change lane, what CI runs
 pytest tests/workspace -q              # workspace contracts only
 ```
+
+Delivery-script checks use native Bash on Linux and macOS, and Git Bash from
+Git for Windows on Windows. The Windows WSL launcher is not a substitute for
+an installed shell. These checks run fake deployment commands and require no
+Azure authentication.
 
 ## Choosing a layer
 

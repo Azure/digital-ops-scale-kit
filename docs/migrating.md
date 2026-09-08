@@ -45,9 +45,18 @@ invalid plan rather than a partial target plan. Python callers receive
 
 **Known kubectl inputs are checked during shared validation.** After site
 values resolve, local files and directories must exist inside the workspace,
-and URLs must use HTTPS. These checks run before local tool probing. A file
-path that depends on a prior deployment output remains deferred and is
-validated when that output resolves during execution.
+and URLs must use HTTPS. Per-site inputs are required only when the operation
+applies to that site. A conditionally skipped kubectl step does not require
+its site-selected file. A file path that depends on a prior deployment output
+remains deferred and is validated when that output resolves during execution.
+
+**Executable preparation checks required template inputs.** A template
+parameter without a default must have a known supplied name unless a
+top-level parameter name still depends on a prior operation output. Deferred
+names are checked against the same template schema after the output resolves.
+Fully resolved kubectl scalar inputs and wait conditions also use their
+runtime guards during preparation. Output-dependent values keep their runtime
+validation.
 
 Planning requires a target set, including `plan --describe` and its
 `validate --plan` compatibility spelling. To check a library manifest
@@ -63,6 +72,13 @@ inspection.** `-v` controls logging and does not generate simulated Azure or
 kubectl commands. Use `plan --output json --projection local-private` to
 inspect operation and dependency metadata locally. Parameter values and exact
 value-bearing command lines are not exported by that projection.
+
+**Redacted plain plans use the publishable projection.** They show aggregate
+activity and generic diagnostics rather than individual steps, manifest
+descriptions, paths, conditions, or literal target inputs. Local plain output
+keeps its detailed view with redaction disabled. For CI artifacts, capture
+`plan --output json --projection publishable` from stdout separately from
+diagnostic stderr.
 
 ## To v1.0.0b7
 

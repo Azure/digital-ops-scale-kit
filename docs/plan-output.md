@@ -15,6 +15,15 @@ This command runs structural validation, resolves the selected operations,
 compiles executable templates, preflights required capabilities, and prints
 the canonical plan. It performs no Azure or Kubernetes mutation.
 
+Deployment still submits the source Bicep, which Azure CLI may compile again.
+The plan records observed compilation identity, not a guarantee that ARM will
+receive those exact compiled bytes. Planning does not establish Azure
+authorization, cluster connectivity, or workload health.
+
+Executable preparation may acquire the Bicep compiler or restore modules.
+It is not an offline mode. Private module sources need their required
+credentials available during preparation.
+
 The engine validates the same loaded inputs for both `plan` and `deploy`,
 including direct Python API calls. Structural failures stop preparation
 before local tool preflight. Successful template acquisitions remain visible
@@ -93,6 +102,16 @@ The publishable projection omits:
 
 It is constructed from an allowlist rather than by redacting the local-private
 document.
+
+When redaction is enabled, plain plans render the same allowlisted fields as
+the publishable JSON projection. They show status, intent, aggregate activity,
+and generic diagnostics rather than manifest names, descriptions, individual
+steps, paths, conditions, or target details. Authorized local plain output
+retains its detailed view when redaction is disabled.
+
+For CI publication, capture the explicit publishable JSON from stdout.
+Progress and diagnostic logs on stderr are a separate stream, not part of the
+publication projection. Do not combine the two streams into a plan artifact.
 
 ## Parameter values
 

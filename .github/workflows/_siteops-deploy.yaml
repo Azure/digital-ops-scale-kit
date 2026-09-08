@@ -127,26 +127,6 @@ jobs:
             [[ -n "$val" ]] && echo "::add-mask::${val}"
           done
 
-      - name: Prepare executable deployment plan
-        shell: bash
-        run: |
-          # Prepare without executing. Published plans show
-          # aggregate counts and omit site names, locations, resource identity,
-          # parameter values, and source paths.
-          set -o pipefail
-          CMD_ARGS=(-w "$INPUT_WORKSPACE" plan "$INPUT_MANIFEST")
-          [[ -n "$INPUT_SELECTOR" ]] && CMD_ARGS+=(-l "$INPUT_SELECTOR")
-
-          echo "### Deployment Plan" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          if siteops "${CMD_ARGS[@]}" 2>&1 | tee -a $GITHUB_STEP_SUMMARY; then
-            PLAN_EXIT_CODE=0
-          else
-            PLAN_EXIT_CODE=$?
-          fi
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          exit "$PLAN_EXIT_CODE"
-
       - name: Azure Login (OIDC)
         uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
         with:
@@ -186,6 +166,80 @@ jobs:
           ) &
           echo $! > "$RUNNER_TEMP/oidc-refresh.pid"
           echo "OIDC token refresh service started (PID: $!)"
+
+      - name: Prepare executable deployment plan
+        shell: bash
+        run: |
+          # Bicep compiler acquisition and module restore run inside the
+          # authenticated boundary. Only publishable JSON reaches the summary.
+          umask 077
+          CMD_ARGS=(
+            -w "$INPUT_WORKSPACE"
+            plan "$INPUT_MANIFEST"
+            --output json
+            --projection publishable
+          )
+          [[ -n "$INPUT_SELECTOR" ]] && CMD_ARGS+=(-l "$INPUT_SELECTOR")
+
+          PLAN_STDOUT="$RUNNER_TEMP/siteops-plan.json"
+          PLAN_STDERR="$RUNNER_TEMP/siteops-plan.stderr"
+          cleanup_plan_files() {
+            rm -f "$PLAN_STDOUT" "$PLAN_STDERR"
+          }
+          trap cleanup_plan_files EXIT
+
+          if siteops "${CMD_ARGS[@]}" >"$PLAN_STDOUT" 2>"$PLAN_STDERR"; then
+            PLAN_EXIT_CODE=0
+          else
+            PLAN_EXIT_CODE=$?
+          fi
+
+          PLAN_STATUS=""
+          if PLAN_STATUS=$(python3 -c '
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              document = json.load(stream)
+          if (
+              document.get("apiVersion") != "siteops/v1alpha1"
+              or document.get("kind") != "DeploymentPlan"
+              or document.get("projection") != "publishable"
+              or document.get("status") not in {"planned", "invalid"}
+              or document.get("intent") != "executable"
+              or document.get("executable") is not (document.get("status") == "planned")
+          ):
+              raise SystemExit(1)
+          print(document["status"])
+          ' "$PLAN_STDOUT" 2>/dev/null); then
+            PLAN_DOCUMENT_VALID=1
+          else
+            PLAN_DOCUMENT_VALID=0
+          fi
+
+          if [[ $PLAN_EXIT_CODE -eq 0 && "$PLAN_STATUS" != "planned" ]]; then
+            PLAN_DOCUMENT_VALID=0
+          elif [[ $PLAN_EXIT_CODE -ne 0 && "$PLAN_STATUS" != "invalid" ]]; then
+            PLAN_DOCUMENT_VALID=0
+          fi
+
+          echo "### Deployment Plan" >> "$GITHUB_STEP_SUMMARY"
+          if [[ $PLAN_DOCUMENT_VALID -eq 1 ]]; then
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat "$PLAN_STDOUT" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Publishable plan output was unavailable." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [[ $PLAN_EXIT_CODE -ne 0 ]]; then
+            echo "::error::Executable plan preparation failed. Run the plan locally for private diagnostics."
+            exit "$PLAN_EXIT_CODE"
+          fi
+          if [[ $PLAN_DOCUMENT_VALID -ne 1 ]]; then
+            echo "::error::Site Ops returned an unsupported plan document."
+            exit 1
+          fi
 
       - name: Deploy
         id: deploy

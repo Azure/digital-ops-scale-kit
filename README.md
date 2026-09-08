@@ -55,7 +55,7 @@ Site Ops runs anywhere Python runs. No agents, no servers, no state to manage.
 - **Output chaining**: reference outputs from previous steps, including cross-scope resolution from subscription to resource group deployments
 - **Parallel execution**: deploy to multiple sites simultaneously with configurable concurrency
 - **Failure isolation**: one site's failure doesn't block others. Subscription failures block only dependent sites.
-- **Executable planning**: compile and preflight the full deployment plan without making Azure calls
+- **Executable planning**: compile and preflight the full deployment plan without submitting Azure deployments or contacting clusters. Compiler acquisition and module restore may use the network.
 - **Declarative workload resources**: compose reviewable Azure IoT Operations device, asset, and dataflow definitions in YAML, then apply them across the fleet with each site's own values substituted in
 - **Flexible step orchestration**: conditional execution, parameter auto-filtering, and mixed Bicep, kubectl, and wait steps in a single manifest
 

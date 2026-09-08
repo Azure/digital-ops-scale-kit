@@ -982,7 +982,16 @@ class TestUnresolvedParameterPath:
             "resourceGroup: rg-test\nlocation: eastus\n"
         )
         (workspace / "templates" / "test.json").write_text(
-            json.dumps(_arm_template({"selected": {"type": "string"}}))
+            json.dumps(
+                _arm_template(
+                    {
+                        "selected": {
+                            "type": "string",
+                            "defaultValue": "default",
+                        }
+                    }
+                )
+            )
         )
         (workspace / "manifests" / "test.yaml").write_text(
             "apiVersion: siteops/v1\nkind: Manifest\nname: test\n"
@@ -1206,8 +1215,14 @@ class TestManifestParameterSourceExpansion:
             json.dumps(
                 _arm_template(
                     {
-                        "first": {"type": "string"},
-                        "second": {"type": "string"},
+                        "first": {
+                            "type": "string",
+                            "defaultValue": "first-default",
+                        },
+                        "second": {
+                            "type": "string",
+                            "defaultValue": "second-default",
+                        },
                     }
                 )
             )

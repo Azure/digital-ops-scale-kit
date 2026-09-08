@@ -12,6 +12,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping, TypeAlias
 
+from siteops import __version__
 from siteops.compilation import (
     CompilationKey,
     PreparedTemplateUnit,
@@ -1320,24 +1321,25 @@ def render_plain_plan(
     redacted: bool,
 ) -> str:
     """Render the plain deployment plan deterministically."""
+    if redacted:
+        return _render_publishable_plan(
+            _publishable_plan_document(result, __version__)
+        )
+
     plan = result.plan
     if plan is None:
         lines = ["Deployment plan is unavailable."]
         for diagnostic in result.diagnostics:
-            message = (
-                _publishable_diagnostic(diagnostic)["summary"]
-                if redacted
-                else diagnostic.detail or diagnostic.summary
-            )
+            message = diagnostic.detail or diagnostic.summary
             lines.append(f"  {diagnostic.severity.value}: {message}")
         lines.append("")
         return "\n".join(lines) + "\n"
 
     if not plan.targets:
         lines = [f"⚠ No sites matched for manifest '{plan.manifest_name}'"]
-        if plan.cli_selector and not redacted:
+        if plan.cli_selector:
             lines.append(f"  Selector: {plan.cli_selector}")
-        elif plan.manifest_selector and not redacted:
+        elif plan.manifest_selector:
             lines.append(f"  Manifest selector: {plan.manifest_selector}")
         lines.append("")
         return "\n".join(lines) + "\n"
@@ -1347,7 +1349,7 @@ def render_plain_plan(
         border,
         f"  DEPLOYMENT PLAN: {plan.manifest_name}",
     ]
-    if plan.cli_selector and not redacted:
+    if plan.cli_selector:
         lines.append(f"  (filtered by: {plan.cli_selector})")
     lines.append(border)
 
@@ -1383,14 +1385,11 @@ def render_plain_plan(
             )
         )
 
-    if redacted:
-        lines.extend(("", f"  Sites: {len(plan.targets)} selected"))
-    else:
-        lines.extend(("", f"  Sites ({len(plan.targets)}):"))
-        lines.extend(
-            f"    • {target.name} ({target.location})"
-            for target in plan.targets
-        )
+    lines.extend(("", f"  Sites ({len(plan.targets)}):"))
+    lines.extend(
+        f"    • {target.name} ({target.location})"
+        for target in plan.targets
+    )
 
     lines.extend(
         (
@@ -1401,10 +1400,7 @@ def render_plain_plan(
 
     if plan.composition_enabled:
         lines.extend(("", "  Resource composition:"))
-        if redacted:
-            _render_redacted_composition(lines, plan.targets)
-        else:
-            _render_local_composition(lines, plan.targets)
+        _render_local_composition(lines, plan.targets)
 
     lines.extend(("", f"  Steps ({len(plan.steps)}):"))
     for step in plan.steps:
@@ -1413,11 +1409,7 @@ def render_plain_plan(
     if result.diagnostics:
         lines.extend(("", "  Diagnostics:"))
         for diagnostic in result.diagnostics:
-            message = (
-                _publishable_diagnostic(diagnostic)["summary"]
-                if redacted
-                else diagnostic.detail or diagnostic.summary
-            )
+            message = diagnostic.detail or diagnostic.summary
             lines.append(
                 f"    {diagnostic.severity.value}: {message}"
             )
@@ -1470,62 +1462,63 @@ def _format_parallel(max_parallel_sites: int) -> str:
     return f"max {max_parallel_sites}"
 
 
-def _render_redacted_composition(
-    lines: list[str],
-    targets: tuple[PreparedTarget, ...],
-) -> None:
-    compositions = [
-        target.composition
-        for target in targets
-        if target.composition is not None
+def _render_publishable_plan(document: Mapping[str, Any]) -> str:
+    """Render only fields from the allowlisted publication projection."""
+    summary = document["summary"]
+    dispositions = summary["dispositions"]
+    composition = summary["composition"]
+    border = "═" * 60
+    lines = [
+        border,
+        "  DEPLOYMENT PLAN",
+        border,
+        "",
+        f"  Status: {document['status']}",
+        f"  Intent: {document['intent'] or 'unspecified'}",
+        "  Executable: yes" if document["executable"] else "  Executable: no",
     ]
-    source_count = sum(
-        len(composition.sources) for composition in compositions
-    )
-    applied_count = sum(
-        resource.disposition is ResourceDisposition.APPLY
-        for composition in compositions
-        for resource in composition.resources
-    )
-    external_count = sum(
-        resource.disposition is ResourceDisposition.EXTERNAL
-        for composition in compositions
-        for resource in composition.resources
-    )
-    verified_count = sum(
-        reference.unverified_reason is None
-        for composition in compositions
-        for reference in composition.references
-    )
-    unverified_count = sum(
-        reference.unverified_reason is not None
-        for composition in compositions
-        for reference in composition.references
-    )
-    lines.append(
-        f"    Across {len(targets)} site(s): "
-        f"{source_count} selected source(s), "
-        f"{applied_count} applied resource(s), "
-        f"{external_count} external assertion(s)"
-    )
-    lines.append(
-        f"    {verified_count} verified reference(s), "
-        f"{unverified_count} recorded reference(s)"
-    )
-
-    error_counts: dict[str, int] = {}
-    for target in targets:
-        for diagnostic in target.diagnostics:
-            message = _publishable_diagnostic(diagnostic)["summary"]
-            error_counts[message] = (
-                error_counts.get(message, 0) + 1
+    if document["intent"] == PlanIntent.DESCRIBE.value:
+        lines.extend(
+            (
+                "  Preflight: not performed",
+                "  Templates and deployment capabilities were not checked.",
             )
-    for message, count in error_counts.items():
-        lines.append(f"    {count} site(s): {message}")
-    lines.append(
-        "    apply semantics: only listed definitions are applied. "
-        "Deselecting a set does not delete existing resources"
+        )
+    elif not document["executable"]:
+        lines.append("  No operations will be submitted from this plan.")
+    lines.extend(
+        (
+            "",
+            f"  Sites: {summary['targetCount']} selected",
+            f"  Proposed: {dispositions['execute']} execute",
+            f"  Blocked: {dispositions['blocked']}",
+            f"  Skipped: {dispositions['skip']}",
+        )
     )
+    if any(composition.values()):
+        lines.extend(
+            (
+                "",
+                "  Resource composition:",
+                f"    Across {summary['targetCount']} site(s): "
+                f"{composition['selectedSourceCount']} selected source(s), "
+                f"{composition['appliedResourceCount']} applied resource(s), "
+                f"{composition['externalAssertionCount']} external assertion(s)",
+                f"    {composition['verifiedReferenceCount']} verified reference(s), "
+                f"{composition['recordedReferenceCount']} recorded reference(s), "
+                f"{composition['requirementCount']} requirement(s)",
+                "    apply semantics: only listed definitions are applied. "
+                "Deselecting a set does not delete existing resources",
+            )
+        )
+    if document["diagnostics"]:
+        lines.extend(("", "  Diagnostics:"))
+        lines.extend(
+            f"    {diagnostic['severity']}: {diagnostic['summary']}"
+            for diagnostic in document["diagnostics"]
+        )
+    lines.extend(("", border, ""))
+    return "\n".join(lines) + "\n"
 
 
 def _render_local_composition(

@@ -339,7 +339,7 @@ gh workflow run deploy.yaml -f workspace="iot-operations" -f manifest="samples/a
 └───────────┬─────────────┘   ├─────────────────────────────┤
             │                 │  • Unit Tests               │
             │                 │  • Manifest Validation      │
-            │                 │  • Deployment Plan Preview  │
+            │                 │  • Executable-plan Tests    │
             ▼                 └─────────────────────────────┘
 ┌─────────────────────────────────────────────────────────────┐
 │               _siteops-deploy.yaml (reusable)               │
@@ -347,13 +347,19 @@ gh workflow run deploy.yaml -f workspace="iot-operations" -f manifest="samples/a
 │  1. Setup Site Ops                                          │
 │  2. Validate inputs (path traversal protection)             │
 │  3. Generate sites.local/ from SITE_OVERRIDES secret        │
-│  4. Validate and show deployment plan                       │
-│  5. Azure Login (OIDC)                                      │
-│  6. Start OIDC token refresh service (background)           │
+│  4. Azure Login (OIDC)                                      │
+│  5. Start OIDC token refresh service (background)           │
+│  6. Prepare and publish the executable plan                 │
 │  7. Run: siteops deploy                                     │
 │  8. Stop OIDC refresh and Azure Logout                      │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+Executable planning runs after login because Bicep compiler acquisition and
+module restore may use the network and may need the workflow identity. Planning
+does not submit Azure deployments or contact Kubernetes clusters. The workflow
+publishes only the `publishable` JSON projection. Plan stderr remains in
+runner-local temporary storage and is removed when the step finishes.
 
 See [ADO architecture](#ado-architecture) for the Azure DevOps equivalent.
 
@@ -375,7 +381,7 @@ See [ADO architecture](#ado-architecture) for the Azure DevOps equivalent.
 
 ### Output redaction
 
-Workflow logs and artifacts are a public surface, so deployment failure text is scrubbed before it reaches them. A resource id is reduced to the resource type that failed. Subscription, tenant, and principal identifiers and bearer tokens are replaced with placeholders, as is the local part of a user principal name. On an Azure service host the tenant-specific label is replaced and the service domain is kept, so `contosostorage.blob.core.windows.net` becomes `<host>.blob.core.windows.net` and still says which service was involved. The error code and message survive, so a failure stays diagnosable:
+Workflow logs and artifacts are a public surface, so deployment failure text is scrubbed before it reaches them. Plan summaries request the allowlisted `publishable` JSON projection explicitly and never append process stderr. A resource id is reduced to the resource type that failed. Subscription, tenant, and principal identifiers and bearer tokens are replaced with placeholders, as is the local part of a user principal name. On an Azure service host the tenant-specific label is replaced and the service domain is kept, so `contosostorage.blob.core.windows.net` becomes `<host>.blob.core.windows.net` and still says which service was involved. The error code and message survive, so a failure stays diagnosable:
 
 ```text
 [munich-prod] x dataflow-resources: BadRequest: <Microsoft.IoTOperations/instances/dataflowEndpoints> is invalid
@@ -667,7 +673,7 @@ az pipelines run \
 └───────────┬──────────────┘   ├─────────────────────────────┤
             │                  │  • Unit Tests               │
             │                  │  • Manifest Validation      │
-            │                  │  • Deployment Plan Preview  │
+            │                  │  • Executable-plan Tests    │
             ▼                  └─────────────────────────────┘
 ┌─────────────────────────────────────────────────────────────┐
 │            siteops-deploy.yaml (stage template)             │
@@ -675,12 +681,13 @@ az pipelines run \
 │  1. Setup Site Ops (steps template)                         │
 │  2. Validate inputs (path traversal protection)             │
 │  3. Generate sites.local/ from SITE_OVERRIDES               │
-│  4. Validate and show deployment plan                       │
-│  5. AzureCLI@2: siteops deploy (auth scoped to this step)  │
+│  4. AzureCLI@2: prepare the publishable plan, then deploy   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Key difference from GitHub Actions:** `AzureCLI@2` handles authentication, token lifecycle, and cleanup in a single task. No separate login, token refresh, or logout steps needed.
+**Key difference from GitHub Actions:** `AzureCLI@2` handles authentication,
+plan-time compiler or module access, deployment, token lifecycle, and cleanup
+in a single task. No separate login, token refresh, or logout steps are needed.
 
 ### Per-environment migration
 

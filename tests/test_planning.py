@@ -1460,6 +1460,7 @@ def test_publishable_projection_is_a_strict_allowlist():
     redacted_plain = render_plain_plan(result, redacted=True)
 
     assert secret not in encoded
+    assert secret not in redacted_plain
     assert diagnostic_secret not in redacted_plain
     assert set(document) == {
         "apiVersion",
@@ -1479,6 +1480,140 @@ def test_publishable_projection_is_a_strict_allowlist():
             "summary": "Plan processing reported a diagnostic.",
         }
     ]
+
+
+@pytest.mark.parametrize("intent", list(PlanIntent))
+@pytest.mark.parametrize("kind", [OperationKind.KUBECTL, OperationKind.WAIT])
+@pytest.mark.parametrize("invalid", [False, True])
+def test_redacted_plain_omits_authored_operation_values(intent, kind, invalid):
+    secret = "PRIVATE_OPERATION_SENTINEL"
+    input_status = (
+        InputStatus.PREPARED
+        if intent is PlanIntent.EXECUTABLE
+        else InputStatus.DESCRIBED
+    )
+    if kind is OperationKind.KUBECTL:
+        details = KubectlOperation(
+            input_status=input_status,
+            operation="apply",
+            cluster_name=LiteralValue(secret),
+            cluster_resource_group=LiteralValue(secret),
+            files=(LiteralValue(f"https://{secret}/manifest.yaml"),),
+        )
+        kinds = (CapabilityKind.KUBECTL, CapabilityKind.ARC_PROXY)
+    else:
+        details = ArmTagWaitOperation(
+            input_status=input_status,
+            resource_id=LiteralValue(secret),
+            tag_key=LiteralValue(secret),
+            expected_value=LiteralValue(secret),
+            failure_pattern=LiteralValue(secret),
+            timeout_minutes=5,
+            poll_interval_seconds=10,
+        )
+        kinds = (CapabilityKind.ARM_CONTROL_PLANE,)
+    step = PlanStep(
+        name=secret,
+        sequence=1,
+        kind=kind,
+        scope=OperationScope.TARGET,
+        details=details,
+        condition=secret,
+    )
+    operation = PreparedOperation(
+        identity=OperationIdentity(target=secret, step=secret),
+        step=step,
+        disposition=PlanDisposition.EXECUTE,
+        details=details,
+    )
+    diagnostics = (
+        (
+            PlanDiagnostic(
+                code=secret,
+                severity=DiagnosticSeverity.ERROR,
+                summary=secret,
+                detail=secret,
+            ),
+        )
+        if invalid
+        else ()
+    )
+    plan = DeploymentPlan(
+        manifest_name=secret,
+        source_path=Path(secret) / "manifest.yaml",
+        intent=intent,
+        description=secret,
+        max_parallel_sites=1,
+        steps=(step,),
+        targets=(
+            PreparedTarget(
+                name=secret,
+                kind=TargetKind.RESOURCE_GROUP,
+                subscription=secret,
+                resource_group=secret,
+                location=secret,
+                operations=(operation,),
+                diagnostics=diagnostics,
+            ),
+        ),
+        capabilities=(
+            tuple(
+                PlanCapability(
+                    kind=capability,
+                    status=CapabilityStatus.AVAILABLE,
+                    required_by=(operation.identity,),
+                    provider=_tool_identity(provider=secret, version=secret),
+                )
+                for capability in kinds
+            )
+            if intent is PlanIntent.EXECUTABLE
+            else ()
+        ),
+        cli_selector=secret,
+        manifest_selector=secret,
+    )
+    result = PlanBuildResult(
+        status=PlanStatus.INVALID if invalid else PlanStatus.PLANNED,
+        executable=intent is PlanIntent.EXECUTABLE and not invalid,
+        plan=plan,
+        diagnostics=diagnostics,
+    )
+
+    published = render_plain_plan(result, redacted=True)
+    private = render_plain_plan(result, redacted=False)
+    document = serialize_plan(
+        result, PlanProjection.PUBLISHABLE, engine_version="1.0.0b1"
+    )
+
+    assert secret not in published
+    assert secret in private
+    assert f"Status: {document['status']}" in published
+    assert f"Intent: {document['intent']}" in published
+    assert f"Sites: {document['summary']['targetCount']} selected" in published
+    assert f"Proposed: {document['summary']['dispositions']['execute']} execute" in published
+    if invalid:
+        assert "Plan processing reported a diagnostic." in published
+
+
+def test_redacted_empty_plan_omits_manifest_identity():
+    secret = "PRIVATE_EMPTY_MANIFEST_SENTINEL"
+    result = PlanBuildResult(
+        status=PlanStatus.PLANNED,
+        executable=False,
+        plan=DeploymentPlan(
+            manifest_name=secret,
+            source_path=Path(secret),
+            intent=PlanIntent.DESCRIBE,
+            description=secret,
+            max_parallel_sites=1,
+            steps=(),
+            targets=(),
+            cli_selector=secret,
+        ),
+    )
+
+    assert secret not in render_plain_plan(result, redacted=True)
+    assert secret in render_plain_plan(result, redacted=False)
 
 
 def test_preview_json_is_deterministic_and_identifies_projection():

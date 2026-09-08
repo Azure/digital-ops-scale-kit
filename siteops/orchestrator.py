@@ -21,7 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import fields, is_dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 import yaml
 
@@ -1734,6 +1734,27 @@ class Orchestrator:
         workspace: Path,
     ) -> str | None:
         """Validate one known kubectl file path without contacting a cluster."""
+        security_error = Orchestrator._kubectl_file_security_error(
+            file_path,
+            workspace,
+        )
+        if security_error is not None:
+            return security_error
+        if HTTPS_URL_PATTERN.match(file_path):
+            return None
+
+        workspace_root = workspace.resolve()
+        resolved = (workspace_root / file_path).resolve()
+        if not resolved.exists():
+            return f"Kubectl file not found: {file_path}"
+        return None
+
+    @staticmethod
+    def _kubectl_file_security_error(
+        file_path: str,
+        workspace: Path,
+    ) -> str | None:
+        """Validate kubectl URL scheme and workspace confinement."""
         if HTTPS_URL_PATTERN.match(file_path):
             return None
         if file_path.lower().startswith("http://"):
@@ -1748,8 +1769,6 @@ class Orchestrator:
                 "Kubectl file must stay within the workspace: "
                 f"{file_path}"
             )
-        if not resolved.exists():
-            return f"Kubectl file not found: {file_path}"
         return None
 
     def _resolve_property_path_with_presence(
@@ -2258,7 +2277,7 @@ class Orchestrator:
             )
         self._validate_prepared_parameter_names(
             template_unit,
-            parameters,
+            parameters.keys(),
         )
         return parameters
 
@@ -2382,6 +2401,28 @@ class Orchestrator:
         if step.scope == "resourceGroup" and is_sub_level:
             return "resourceGroup-scoped step, site has no resource group"
 
+        return None
+
+    def _static_step_skip_reason(
+        self,
+        step: ManifestStep,
+        site: Site,
+    ) -> PlanSkipReason | None:
+        """Return the shared static reason an operation does not apply."""
+        compatibility = self._check_step_site_compatibility(step, site)
+        if compatibility is not None:
+            return PlanSkipReason(
+                code=SkipReasonCode.SCOPE_MISMATCH,
+                detail=compatibility,
+            )
+        if not self._evaluate_condition(step.when, site):
+            return PlanSkipReason(
+                code=SkipReasonCode.CONDITION_FALSE,
+                detail=(
+                    "Condition not met: "
+                    f"{format_when_condition(step.when)}"
+                ),
+            )
         return None
 
     def _any_subscription_step_would_execute(
@@ -2962,6 +3003,15 @@ class Orchestrator:
 
             if isinstance(step, KubectlStep):
                 for declared_path in step.files:
+                    authored_error = self._kubectl_file_security_error(
+                        declared_path,
+                        self.workspace,
+                    )
+                    if authored_error is not None:
+                        errors.append(
+                            f"{authored_error} (step: {step.name})"
+                        )
+                        continue
                     if "{{" not in declared_path:
                         error = self._kubectl_file_validation_error(
                             declared_path,
@@ -2974,6 +3024,11 @@ class Orchestrator:
                         continue
 
                     for site in sites:
+                        if (
+                            self._static_step_skip_reason(step, site)
+                            is not None
+                        ):
+                            continue
                         resolved_path = self._resolve_template_strings(
                             declared_path,
                             site,
@@ -3561,6 +3616,20 @@ class Orchestrator:
                 raise TypeError(
                     "Prepared deployment parameters must be a mapping."
                 )
+            known_parameter_names = {
+                entry.key.value
+                for entry in classified.entries
+                if isinstance(entry.key, LiteralValue)
+            }
+            has_deferred_parameter_name = any(
+                not isinstance(entry.key, LiteralValue)
+                for entry in classified.entries
+            )
+            self._validate_prepared_parameter_names(
+                template_unit,
+                known_parameter_names,
+                may_include_deferred_names=has_deferred_parameter_name,
+            )
             return (
                 DeploymentOperation(
                     template=template_path,
@@ -3599,6 +3668,19 @@ class Orchestrator:
                 )
                 for index, path in enumerate(step.files)
             )
+            self._known_plan_string(
+                cluster_name,
+                "Kubectl cluster name",
+            )
+            self._known_plan_string(
+                cluster_resource_group,
+                "Kubectl cluster resource group",
+            )
+            for index, file_value in enumerate(files):
+                self._known_plan_string(
+                    file_value,
+                    f"Kubectl file {index + 1}",
+                )
             details = KubectlOperation(
                 input_status=InputStatus.PREPARED,
                 operation=step.operation,
@@ -3656,6 +3738,48 @@ class Orchestrator:
             if condition.failure_pattern is not None
             else None
         )
+        known_resource_id = self._known_plan_string(
+            resource_id,
+            "Wait resource ID",
+        )
+        known_tag_key = self._known_plan_string(
+            tag_key,
+            "Wait tag key",
+        )
+        known_expected_value = self._known_plan_string(
+            expected_value,
+            "Wait expected value",
+        )
+        known_failure_pattern = (
+            self._known_plan_string(
+                failure_pattern,
+                "Wait failure pattern",
+            )
+            if failure_pattern is not None
+            else None
+        )
+        if (
+            known_resource_id is not None
+            and known_tag_key is not None
+            and known_expected_value is not None
+            and (
+                failure_pattern is None
+                or known_failure_pattern is not None
+            )
+        ):
+            try:
+                ArmTagCondition(
+                    type="arm-tag",
+                    resource_id=known_resource_id,
+                    tag_key=known_tag_key,
+                    expected_value=known_expected_value,
+                    failure_pattern=known_failure_pattern,
+                )
+            except ValueError as error:
+                raise ValueError(
+                    f"Wait step '{step.name}' condition is invalid after "
+                    f"site resolution: {error}"
+                ) from error
         details = ArmTagWaitOperation(
             input_status=InputStatus.PREPARED,
             resource_id=resource_id,
@@ -4392,28 +4516,12 @@ class Orchestrator:
                         detail="Target preparation failed.",
                     )
                 else:
-                    compatibility = self._check_step_site_compatibility(
+                    skip_reason = self._static_step_skip_reason(
                         source_step,
                         site,
                     )
-                    if compatibility is not None:
+                    if skip_reason is not None:
                         disposition = PlanDisposition.SKIP
-                        skip_reason = PlanSkipReason(
-                            code=SkipReasonCode.SCOPE_MISMATCH,
-                            detail=compatibility,
-                        )
-                    elif not self._evaluate_condition(
-                        source_step.when,
-                        site,
-                    ):
-                        disposition = PlanDisposition.SKIP
-                        skip_reason = PlanSkipReason(
-                            code=SkipReasonCode.CONDITION_FALSE,
-                            detail=(
-                                "Condition not met: "
-                                f"{format_when_condition(source_step.when)}"
-                            ),
-                        )
                     else:
                         disposition = PlanDisposition.EXECUTE
                 operations.append(
@@ -4609,14 +4717,31 @@ class Orchestrator:
             )
         return resolved
 
+    def _known_plan_string(
+        self,
+        value: Any,
+        label: str,
+    ) -> str | None:
+        """Validate and return a plan string that needs no runtime output."""
+        if collect_data_references(value):
+            return None
+        return self._resolved_plan_string(
+            resolve_plan_value(value, {}),
+            label,
+        )
+
     @staticmethod
     def _validate_prepared_parameter_names(
         template_unit: PreparedTemplateUnit,
-        parameters: dict[Any, Any],
+        parameter_names: Iterable[Any],
+        *,
+        may_include_deferred_names: bool = False,
     ) -> None:
+        provided_names = tuple(parameter_names)
+        provided_name_set = set(provided_names)
         invalid_names = [
             name
-            for name in parameters
+            for name in provided_names
             if not isinstance(name, str)
             or name not in template_unit.parameter_names
         ]
@@ -4629,6 +4754,24 @@ class Orchestrator:
                 public_message=(
                     "A deferred parameter name is not accepted by the "
                     "deployment template."
+                ),
+            )
+        missing_names = sorted(
+            parameter.name
+            for parameter in template_unit.parameters
+            if (
+                not parameter.has_default
+                and parameter.name not in provided_name_set
+            )
+        )
+        if missing_names and not may_include_deferred_names:
+            raise PlanValueResolutionError(
+                detail=(
+                    "The deployment is missing required template parameter "
+                    f"name(s): {missing_names}."
+                ),
+                public_message=(
+                    "A required deployment parameter is missing."
                 ),
             )
 
