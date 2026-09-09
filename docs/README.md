@@ -48,6 +48,6 @@ Extended documentation for the Digital Operations Scale Kit.
 | **Step** | A unit of work in a manifest's `steps:` list. Shapes: Bicep deploy (`template:`), kubectl op (`type: kubectl`), wait gate (`type: wait`), include (`include:`). |
 | **Scope** | A step's deployment scope: `resourceGroup` or `subscription`. |
 | **AIO release** | A versioned bundle of pinned extension versions and API versions, defined by a YAML in `parameters/aio-releases/` and selected per site via `properties.aioRelease`. |
-| **Auto-filtering** | Executable preparation omits parameter keys the template does not declare, then requires declared parameters that have no default. |
+| **Auto-filtering** | Executable preparation omits parameter keys the template does not declare, then requires non-nullable parameters that have no default. |
 | **Chaining** | Wiring a step's outputs into a downstream step's parameters via `{{ steps.X.outputs.Y }}`. |
 | **Dispatcher** | A Bicep template that switches on an API-version param into per-API-version inner modules under `templates/<area>/modules/`. |

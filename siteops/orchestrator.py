@@ -4761,7 +4761,7 @@ class Orchestrator:
             parameter.name
             for parameter in template_unit.parameters
             if (
-                not parameter.has_default
+                parameter.is_required
                 and parameter.name not in provided_name_set
             )
         )

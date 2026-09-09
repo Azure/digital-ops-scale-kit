@@ -1,11 +1,12 @@
-"""Executable plans for committed catalog samples, without Azure or cluster access.
+"""Executable plans for committed workspace entry points without cloud access.
 
-Structural validation deliberately does not acquire schemas. These two entry
-points exercise the real compiler and prepared inputs instead: two Bicep builds
-for the basic sample and four for composition, including their local modules.
-Missing local tools fail rather than silently skipping this coverage.
+Structural validation deliberately does not acquire schemas. These tests
+exercise the real compiler and prepared inputs while allowing only local Azure
+CLI version probes and Bicep builds. Missing local tools fail rather than
+silently skipping this coverage.
 """
 
+import copy
 import re
 import subprocess
 import tempfile
@@ -44,6 +45,67 @@ _TEMPLATES = {
         "samples/resource-set-composition/external-provider.bicep"
     ),
 }
+_AIO_INSTALL_TEMPLATES = {
+    "schema-registry": Path("templates/deps/schema-registry.bicep"),
+    "adr-ns": Path("templates/deps/adr-ns.bicep"),
+    "aio-enablement": Path("templates/aio/enablement.bicep"),
+    "aio-instance": Path("templates/aio/instance.bicep"),
+    "schema-registry-role": Path("templates/deps/schema-registry-role.bicep"),
+    "resolve-aio": Path("templates/aio/resolve-aio.bicep"),
+    "secretsync": Path("templates/secretsync/enable-secretsync.bicep"),
+}
+
+
+def _guard_local_compilation(
+    monkeypatch,
+    tmp_path,
+    expected_templates,
+):
+    """Allow only Azure CLI version probes and local Bicep builds."""
+    azure_cli = Path(az_path()).resolve()
+    builds = []
+    original_popen = subprocess.Popen
+    original_run = subprocess.run
+
+    def local_only_popen(argv, *args, **kwargs):
+        assert not isinstance(argv, (str, bytes)), (
+            "Shell commands are not permitted"
+        )
+        assert not kwargs.get("shell"), "Shell commands are not permitted"
+        assert Path(argv[0]).resolve() == azure_cli, (
+            f"Executable planning must not invoke kubectl or other tools: {argv}"
+        )
+        command = tuple(argv[1:])
+        if command not in {
+            ("version", "--output", "json"),
+            ("bicep", "version"),
+        }:
+            assert len(command) == 6 and command[:3] == (
+                "bicep",
+                "build",
+                "--file",
+            ), f"Only local version probes and Bicep builds are allowed: {argv}"
+            assert command[4] == "--outfile"
+            source = Path(command[3]).resolve()
+            assert source in expected_templates
+            assert Path(command[5]).resolve().is_relative_to(
+                tmp_path.resolve()
+            )
+            builds.append(source)
+        return original_popen(argv, *args, **kwargs)
+
+    def checked_run(argv, *args, **kwargs):
+        result = original_run(argv, *args, **kwargs)
+        if tuple(argv[1:3]) == ("bicep", "build"):
+            output = f"{result.stdout or ''}\n{result.stderr or ''}"
+            assert not _DIAGNOSTIC.search(output), output
+        return result
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(subprocess, "Popen", local_only_popen)
+    monkeypatch.setattr(subprocess, "run", checked_run)
+    monkeypatch.setenv("AZURE_CORE_COLLECT_TELEMETRY", "0")
+    return builds
 
 
 @pytest.mark.parametrize(
@@ -95,42 +157,13 @@ def test_catalog_executable_plan(
         for step in selected_steps
         if step in _TEMPLATES
     }
-    azure_cli = Path(az_path()).resolve()
-    builds = []
-    original_popen = subprocess.Popen
-    original_run = subprocess.run
-
-    def local_only_popen(argv, *args, **kwargs):
-        assert not isinstance(argv, (str, bytes)), "Shell commands are not permitted"
-        assert not kwargs.get("shell"), "Shell commands are not permitted"
-        assert Path(argv[0]).resolve() == azure_cli, (
-            f"Executable planning must not invoke kubectl or other tools: {argv}"
-        )
-        command = tuple(argv[1:])
-        if command not in {("version", "--output", "json"), ("bicep", "version")}:
-            assert len(command) == 6 and command[:3] == (
-                "bicep", "build", "--file"
-            ), f"Only local version probes and Bicep builds are allowed: {argv}"
-            assert command[4] == "--outfile"
-            source = Path(command[3]).resolve()
-            assert source in expected_templates
-            assert Path(command[5]).resolve().is_relative_to(tmp_path.resolve())
-            builds.append(source)
-        return original_popen(argv, *args, **kwargs)
-
-    def checked_run(argv, *args, **kwargs):
-        result = original_run(argv, *args, **kwargs)
-        if tuple(argv[1:3]) == ("bicep", "build"):
-            output = f"{result.stdout or ''}\n{result.stderr or ''}"
-            assert not _DIAGNOSTIC.search(output), output
-        return result
-
     # Keep artifacts out of the workspace content. Guard at Popen as well as
     # run so even a regression to the executor's proxy path cannot start it.
-    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
-    monkeypatch.setattr(subprocess, "Popen", local_only_popen)
-    monkeypatch.setattr(subprocess, "run", checked_run)
-    monkeypatch.setenv("AZURE_CORE_COLLECT_TELEMETRY", "0")
+    builds = _guard_local_compilation(
+        monkeypatch,
+        tmp_path,
+        expected_templates,
+    )
     result = orchestrator.build_plan(
         workspace / "samples" / sample / "manifest.yaml",
         intent=PlanIntent.EXECUTABLE,
@@ -184,7 +217,7 @@ def test_catalog_executable_plan(
         assert parameters.keys() <= unit.parameter_names
         assert {
             parameter.name for parameter in unit.parameters
-            if not parameter.has_default
+            if parameter.is_required
         } <= parameters.keys()
         if operation.identity.step in {"asset-resources", "dataflow-resources"}:
             assert isinstance(parameters["customLocationName"], OutputValue)
@@ -234,3 +267,84 @@ def test_catalog_executable_plan(
         capability.kind: (capability.status, set(capability.required_by))
         for capability in plan.capabilities
     } == expected_capabilities
+
+
+def test_aio_install_executable_plan_omits_nullable_instance_parameters(
+    workspace,
+    orchestrator,
+    monkeypatch,
+    tmp_path,
+):
+    expected_templates = {
+        (workspace / template).resolve()
+        for template in _AIO_INSTALL_TEMPLATES.values()
+    }
+    builds = _guard_local_compilation(
+        monkeypatch,
+        tmp_path,
+        expected_templates,
+    )
+    site = copy.deepcopy(orchestrator.load_site("munich-dev"))
+    site.properties["deployOptions"].update(
+        {
+            "enableSecretSync": True,
+            "enableWorkloadIdentity": True,
+        }
+    )
+
+    result = orchestrator.build_plan(
+        workspace / "manifests" / "aio-install.yaml",
+        intent=PlanIntent.EXECUTABLE,
+        sites=[site],
+    )
+
+    assert not result.diagnostics, result.diagnostics
+    assert result.status is PlanStatus.PLANNED
+    assert result.executable
+    assert result.plan is not None
+    target = result.plan.targets[0]
+    selected = {
+        operation.identity.step: operation
+        for operation in target.operations
+        if operation.disposition is PlanDisposition.EXECUTE
+    }
+    assert list(selected) == list(_AIO_INSTALL_TEMPLATES)
+    skipped = {
+        operation.identity.step: operation
+        for operation in target.operations
+        if operation.disposition is PlanDisposition.SKIP
+    }
+    assert set(skipped) == {"global-edge-site", "edge-site"}
+    assert skipped["global-edge-site"].skip_reason is not None
+    assert (
+        skipped["global-edge-site"].skip_reason.code
+        is SkipReasonCode.SCOPE_MISMATCH
+    )
+    assert skipped["edge-site"].skip_reason is not None
+    assert (
+        skipped["edge-site"].skip_reason.code
+        is SkipReasonCode.CONDITION_FALSE
+    )
+    assert Counter(builds) == Counter(expected_templates)
+
+    details = selected["aio-instance"].details
+    assert isinstance(details, DeploymentOperation)
+    assert details.template_unit_key is not None
+    assert details.parameters is not None
+    unit = result.plan.template_unit(details.template_unit_key)
+    schema = {parameter.name: parameter for parameter in unit.parameters}
+    parameters = {
+        entry.key.value: entry.value
+        for entry in details.parameters.entries
+        if isinstance(entry.key, LiteralValue)
+    }
+    assert {
+        parameter.name
+        for parameter in unit.parameters
+        if parameter.is_required
+    } <= parameters.keys()
+    for name in ("features", "userAssignedIdentity"):
+        assert schema[name].nullable
+        assert not schema[name].has_default
+        assert not schema[name].is_required
+        assert name not in parameters

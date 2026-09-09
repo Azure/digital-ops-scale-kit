@@ -821,12 +821,49 @@ def test_kubectl_site_input_uses_shared_scope_applicability(tmp_path):
             {
                 "requiredName": {
                     "type": "string",
-                    "defaultValue": "default",
+                    "nullable": True,
+                    "defaultValue": None,
                 }
             },
             {},
             True,
-            id="defaulted",
+            id="default-null",
+        ),
+        pytest.param(
+            "defaulted",
+            {
+                "requiredName": {
+                    "type": "bool",
+                    "defaultValue": False,
+                }
+            },
+            {},
+            True,
+            id="default-false",
+        ),
+        pytest.param(
+            "defaulted",
+            {
+                "requiredName": {
+                    "type": "int",
+                    "defaultValue": 0,
+                }
+            },
+            {},
+            True,
+            id="default-zero",
+        ),
+        pytest.param(
+            "nullable",
+            {
+                "requiredName": {
+                    "type": "string",
+                    "nullable": True,
+                }
+            },
+            {},
+            True,
+            id="nullable-without-default",
         ),
     ],
 )
@@ -1540,9 +1577,10 @@ def test_executable_plan_rejects_later_step_reference(tmp_path):
     ("resolved_name", "execution_succeeds", "redacted"),
     [
         pytest.param("known", True, False, id="required-name"),
-        pytest.param("optional", False, False, id="defaulted-name"),
+        pytest.param("defaulted", False, False, id="defaulted-name"),
+        pytest.param("nullable", False, False, id="nullable-name"),
         pytest.param(
-            "optional",
+            "defaulted",
             False,
             True,
             id="defaulted-name-redacted",
@@ -1566,9 +1604,13 @@ def test_executable_plan_preserves_deferred_top_level_parameter_name(
             _arm_template(
                 {
                     "known": {"type": "string"},
-                    "optional": {
+                    "defaulted": {
                         "type": "string",
                         "defaultValue": "default",
+                    },
+                    "nullable": {
+                        "type": "string",
+                        "nullable": True,
                     },
                 }
             )
@@ -1615,7 +1657,16 @@ def test_executable_plan_preserves_deferred_top_level_parameter_name(
     assert second.details.template_unit_key is not None
     assert result.plan.template_unit(
         second.details.template_unit_key
-    ).parameter_names == frozenset({"known", "optional"})
+    ).parameter_names == frozenset(
+        {"known", "defaulted", "nullable"}
+    )
+    assert {
+        parameter.name
+        for parameter in result.plan.template_unit(
+            second.details.template_unit_key
+        ).parameters
+        if parameter.is_required
+    } == {"known"}
     assert second.data_references == (
         DataReference(
             source=OperationIdentity(

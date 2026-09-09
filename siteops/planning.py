@@ -2212,6 +2212,16 @@ def _parameter_descriptors(
                     if name is not None and name in schema
                     else None
                 ),
+                "nullable": (
+                    schema[name].nullable
+                    if name is not None and name in schema
+                    else None
+                ),
+                "required": (
+                    schema[name].is_required
+                    if name is not None and name in schema
+                    else None
+                ),
                 "resolution": "deferred" if references else "known",
                 "dataReferences": [
                     _data_reference_document(reference)
@@ -2334,6 +2344,8 @@ def _template_parameter_document(
         "type": parameter.type,
         "secure": parameter.secure,
         "hasDefault": parameter.has_default,
+        "nullable": parameter.nullable,
+        "required": parameter.is_required,
     }
 
 

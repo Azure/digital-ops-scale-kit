@@ -72,6 +72,7 @@ from siteops.planning import (
 def _template_unit(
     *,
     parameter: str = "connection",
+    nullable: bool = False,
 ) -> PreparedTemplateUnit:
     source = SourceIdentity(
         path=Path("templates/main.json"),
@@ -104,6 +105,7 @@ def _template_unit(
                 type="string",
                 secure=False,
                 has_default=False,
+                nullable=nullable,
             ),
         ),
     )
@@ -979,7 +981,7 @@ def test_executable_result_rejects_error_diagnostics():
 
 def test_local_private_projection_omits_parameter_values():
     secret = "SECRET_VALUE_SENTINEL"
-    unit = _template_unit()
+    unit = _template_unit(nullable=True)
     details = DeploymentOperation(
         template=unit.identity.source.path,
         input_status=InputStatus.PREPARED,
@@ -1064,10 +1066,22 @@ def test_local_private_projection_omits_parameter_values():
         "expectedType": "string",
         "secure": False,
         "hasDefault": False,
+        "nullable": True,
+        "required": False,
         "resolution": "known",
         "dataReferences": [],
         "serialized": False,
     }
+    assert document["plan"]["templateUnits"][0]["parameters"] == [
+        {
+            "name": "connection",
+            "type": "string",
+            "secure": False,
+            "hasDefault": False,
+            "nullable": True,
+            "required": False,
+        }
+    ]
     assert secret not in encoded
     assert document["projection"] == "local-private"
     assert document["intent"] == "executable"

@@ -120,8 +120,9 @@ also reports any required template parameter that remains absent.
 ## Auto-filtering
 
 Parameters are automatically filtered to include only values accepted by each
-template. Executable preparation then requires every declared parameter that
-has no default. A top-level name derived from a prior operation stays deferred
+template. Executable preparation then requires every non-nullable parameter
+that has no default. Nullable parameters and parameters with explicit defaults
+may be omitted. A top-level name derived from a prior operation stays deferred
 until the output resolves, when the same schema check runs again. This enables
 shared parameter files without postponing known missing inputs:
 

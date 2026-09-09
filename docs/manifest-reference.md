@@ -105,9 +105,10 @@ external assertions, and provenance.
 ```
 
 Executable preparation acquires the template schema, removes supplied
-parameters the template does not declare, and requires every parameter that
-has no default. A top-level parameter name derived from a prior operation
-remains deferred until that output resolves.
+parameters the template does not declare, and requires every non-nullable
+parameter that has no default. Nullable parameters may be omitted even when
+they declare no default. A top-level parameter name derived from a prior
+operation remains deferred until that output resolves.
 
 ### Kubectl steps
 

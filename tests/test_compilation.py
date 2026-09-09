@@ -178,8 +178,11 @@ def test_template_parameter_schema_is_sorted_and_typed():
     assert [parameter.name for parameter in schema] == ["count", "secret"]
     assert schema[0].type == "int"
     assert schema[0].has_default
+    assert not schema[0].nullable
+    assert not schema[0].is_required
     assert not schema[0].secure
     assert schema[1].secure
+    assert schema[1].is_required
 
 
 @pytest.mark.parametrize(
@@ -217,11 +220,152 @@ def test_template_parameter_schema_resolves_type_aliases(
     assert schema[0].type == parameter_type
     assert schema[0].secure is secure
     assert schema[0].has_default is has_default
+    assert schema[0].nullable
+    assert not schema[0].is_required
     assert parameter == (
         {"$ref": "#/definitions/alias", "defaultValue": None}
         if has_default
         else {"$ref": "#/definitions/alias"}
     )
+
+
+@pytest.mark.parametrize(
+    ("parameter", "definitions", "nullable"),
+    [
+        pytest.param(
+            {"type": "string", "nullable": True},
+            {},
+            True,
+            id="direct",
+        ),
+        pytest.param(
+            {
+                "$ref": "#/definitions/valueType",
+                "nullable": True,
+            },
+            {"valueType": {"type": "string"}},
+            True,
+            id="parameter-wrapper",
+        ),
+        pytest.param(
+            {"$ref": "#/definitions/valueType"},
+            {"valueType": {"type": "string", "nullable": True}},
+            True,
+            id="definition",
+        ),
+        pytest.param(
+            {"$ref": "#/definitions/alias"},
+            {
+                "alias": {
+                    "$ref": "#/definitions/valueType",
+                    "nullable": False,
+                },
+                "valueType": {"type": "string", "nullable": True},
+            },
+            False,
+            id="nearer-false-overrides-terminal-true",
+        ),
+        pytest.param(
+            {
+                "$ref": "#/definitions/alias",
+                "nullable": True,
+            },
+            {
+                "alias": {
+                    "$ref": "#/definitions/valueType",
+                    "nullable": False,
+                },
+                "valueType": {"type": "string"},
+            },
+            True,
+            id="parameter-true-overrides-alias-false",
+        ),
+    ],
+)
+def test_template_parameter_schema_resolves_effective_nullability(
+    parameter,
+    definitions,
+    nullable,
+):
+    template = _arm_template({"value": parameter})
+    template["languageVersion"] = "2.0"
+    template["definitions"] = definitions
+
+    schema = extract_template_parameters(template)
+
+    assert schema[0].nullable is nullable
+    assert schema[0].is_required is not nullable
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"type": "string", "nullable": True, "defaultValue": None},
+        {"type": "bool", "defaultValue": False},
+        {"type": "int", "defaultValue": 0},
+    ],
+)
+def test_template_parameter_schema_preserves_explicit_default_presence(
+    body,
+):
+    schema = extract_template_parameters(
+        _arm_template({"value": body})
+    )
+
+    assert schema[0].has_default
+    assert not schema[0].is_required
+
+
+@pytest.mark.parametrize(
+    ("parameter", "definitions"),
+    [
+        pytest.param(
+            {"type": "string", "nullable": None},
+            {},
+            id="null",
+        ),
+        pytest.param(
+            {"type": "string", "nullable": 0},
+            {},
+            id="zero",
+        ),
+        pytest.param(
+            {"type": "string", "nullable": 1},
+            {},
+            id="one",
+        ),
+        pytest.param(
+            {"type": "string", "nullable": "true"},
+            {},
+            id="string",
+        ),
+        pytest.param(
+            {"type": "string", "nullable": {}},
+            {},
+            id="object",
+        ),
+        pytest.param(
+            {"type": "string", "nullable": []},
+            {},
+            id="array",
+        ),
+        pytest.param(
+            {"$ref": "#/definitions/valueType"},
+            {"valueType": {"type": "string", "nullable": "false"}},
+            id="referenced-definition",
+        ),
+    ],
+)
+def test_template_parameter_schema_rejects_invalid_nullable_constraint(
+    parameter,
+    definitions,
+):
+    template = _arm_template({"value": parameter})
+    template["languageVersion"] = "2.0"
+    template["definitions"] = definitions
+
+    with pytest.raises(TemplateOutputError, match="nullable constraint"):
+        extract_template_parameters(template)
 
 
 def test_template_parameter_schema_allows_recursive_object_properties():
@@ -241,6 +385,8 @@ def test_template_parameter_schema_allows_recursive_object_properties():
     assert schema[0].type == "object"
     assert not schema[0].secure
     assert not schema[0].has_default
+    assert not schema[0].nullable
+    assert schema[0].is_required
 
 
 @pytest.mark.parametrize(
@@ -586,12 +732,19 @@ def test_user_defined_parameter_types_are_acquired(tmp_path, suffix):
     assert isinstance(result, CompiledTemplate)
     assert session.acquire(source) is result
     assert [
-        (parameter.name, parameter.type, parameter.secure, parameter.has_default)
+        (
+            parameter.name,
+            parameter.type,
+            parameter.secure,
+            parameter.has_default,
+            parameter.nullable,
+            parameter.is_required,
+        )
         for parameter in result.parameters
     ] == [
-        ("configuration", "object", False, True),
-        ("credentialValue", "securestring", True, False),
-        ("credentials", "secureObject", True, False),
+        ("configuration", "object", False, True, False, False),
+        ("credentialValue", "securestring", True, False, False, True),
+        ("credentials", "secureObject", True, False, False, True),
     ]
     assert compiler.compile_count == (1 if suffix == ".bicep" else 0)
     if suffix == ".json":

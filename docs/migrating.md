@@ -54,10 +54,13 @@ applies to that site. A conditionally skipped kubectl step does not require
 its site-selected file. A file path that depends on a prior deployment output
 remains deferred and is validated when that output resolves during execution.
 
-**Executable preparation checks required template inputs.** A template
-parameter without a default must have a known supplied name unless a
-top-level parameter name still depends on a prior operation output. Deferred
-names are checked against the same template schema after the output resolves.
+**Executable preparation checks required template inputs.** A non-nullable
+template parameter without a default must have a known supplied name unless
+a top-level parameter name still depends on a prior operation output.
+Nullable parameters may be omitted, including nullable types referenced
+through local ARM definitions. Explicit defaults, including `null`, also
+permit omission. Deferred names are checked against the same template schema
+after the output resolves.
 Fully resolved kubectl scalar inputs and wait conditions also use their
 runtime guards during preparation. Output-dependent values keep their runtime
 validation.

@@ -260,11 +260,19 @@ class TemplateParameter:
     type: str | None
     secure: bool
     has_default: bool
+    nullable: bool = False
 
     def __post_init__(self) -> None:
         _require_text(self.name, "Template parameter name")
         if self.type is not None:
             _require_text(self.type, "Template parameter type")
+        if type(self.nullable) is not bool:
+            raise TypeError("Template parameter nullable must be a boolean.")
+
+    @property
+    def is_required(self) -> bool:
+        """Return whether deployment must supply this parameter."""
+        return not self.has_default and not self.nullable
 
 
 @dataclass(frozen=True)
@@ -500,10 +508,24 @@ def _resolve_parameter_type_definition(
     body: dict[str, Any],
     definitions: Any,
     parameter_name: str,
-) -> dict[str, Any]:
-    """Resolve local type aliases, not nested object or array constraints."""
+) -> tuple[dict[str, Any], bool]:
+    """Resolve local type aliases and their effective nullable modifier."""
     visited: set[str] = set()
-    while "$ref" in body:
+    effective_nullable: bool | None = None
+    while True:
+        if "nullable" in body:
+            nullable = body["nullable"]
+            if type(nullable) is not bool:
+                raise TemplateOutputError(
+                    f"Compiled ARM parameter '{parameter_name}' has an "
+                    "invalid nullable constraint. Expected a boolean."
+                )
+            # ARM/Bicep type modifiers on the closest $ref wrapper override
+            # modifiers inherited from the referenced definition.
+            if effective_nullable is None:
+                effective_nullable = nullable
+        if "$ref" not in body:
+            return body, effective_nullable is True
         if "type" in body:
             raise TemplateOutputError(
                 f"Compiled ARM parameter '{parameter_name}' cannot specify "
@@ -539,7 +561,6 @@ def _resolve_parameter_type_definition(
                 "missing or invalid type definition."
             )
         body = definition
-    return body
 
 
 def extract_template_parameters(
@@ -571,7 +592,7 @@ def extract_template_parameters(
             raise TemplateOutputError(
                 f"Compiled ARM parameter '{name}' must be a JSON object."
             )
-        type_definition = _resolve_parameter_type_definition(
+        type_definition, nullable = _resolve_parameter_type_definition(
             body,
             arm_json.get("definitions"),
             name,
@@ -593,6 +614,7 @@ def extract_template_parameters(
                 type=parameter_type,
                 secure=normalized_type in {"securestring", "secureobject"},
                 has_default="defaultValue" in body,
+                nullable=nullable,
             )
         )
     return tuple(parameters)
