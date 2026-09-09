@@ -1573,6 +1573,7 @@ def test_executable_plan_rejects_later_step_reference(tmp_path):
     assert "runs later" in result.diagnostics[0].detail
 
 
+@pytest.mark.parametrize("ci_marker", ["GITHUB_ACTIONS", "TF_BUILD"])
 @pytest.mark.parametrize(
     ("resolved_name", "execution_succeeds", "redacted"),
     [
@@ -1593,11 +1594,10 @@ def test_executable_plan_preserves_deferred_top_level_parameter_name(
     resolved_name,
     execution_succeeds,
     redacted,
+    ci_marker,
 ):
-    if redacted:
-        monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1")
-    else:
-        monkeypatch.delenv("SITEOPS_REDACT_OUTPUT", raising=False)
+    monkeypatch.setenv(ci_marker, "true")
+    monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1" if redacted else "0")
     workspace = _workspace(tmp_path)
     (workspace / "templates" / "second.json").write_text(
         json.dumps(
@@ -2000,6 +2000,7 @@ def test_executable_plan_validates_fully_known_wait_values(
         assert error in result.diagnostics[0].detail
 
 
+@pytest.mark.parametrize("ci_marker", ["GITHUB_ACTIONS", "TF_BUILD"])
 @pytest.mark.parametrize(
     ("resolved_value", "execution_succeeds"),
     [
@@ -2012,8 +2013,10 @@ def test_deferred_wait_guard_runs_after_arm_output_resolution(
     monkeypatch,
     resolved_value,
     execution_succeeds,
+    ci_marker,
 ):
-    monkeypatch.delenv("SITEOPS_REDACT_OUTPUT", raising=False)
+    monkeypatch.setenv(ci_marker, "true")
+    monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "0")
     workspace = _workspace(tmp_path)
     manifest_path = _write_manifest(
         workspace,
