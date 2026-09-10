@@ -202,7 +202,9 @@ digital-ops-scale-kit/
 │   ├── manifest-reference.md     # Manifest syntax, step types
 │   ├── migrating.md              # What to change when moving to a newer Scale Kit release
 │   ├── parameter-resolution.md   # Variables, output chaining
+│   ├── plan-output.md            # Deployment plan formats and projections
 │   ├── resource-catalog.md       # Declaring AIO workload resources in YAML
+│   ├── run-output.md             # Run outcomes, output, and interruption
 │   ├── secret-sync.md            # Secret sync enablement and usage
 │   ├── site-configuration.md     # Sites, inheritance, overlays
 │   ├── targeting.md              # Selector grammar, site identity, no-match diagnostic
@@ -314,7 +316,7 @@ auto-filtering, merge order, and cross-scope output chaining.
 | `siteops sites <name>` | Inspect one site (basename, relative path, or internal `name:`) |
 | `siteops sites <name> --show-sources` | Show every value with the source file it came from after inherits and overlays |
 | `siteops sites <name> --output yaml` | Show the resolved YAML after inheritance and overlays |
-| `siteops sites --output json` | Inspect resolved sites as a JSON array for private automation |
+| `siteops sites --output json` | [Inspect private resolved sites as a JSON array](docs/site-configuration.md#inspection-output-details) |
 | `siteops validate <manifest>` | Validate manifest structure, files, and static references |
 | `siteops plan <manifest>` | Validate, compile, preflight, and show the executable deployment plan |
 | `siteops plan <manifest> --describe` | Show the compile-free plan shape |

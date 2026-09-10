@@ -22,6 +22,7 @@ The workspace is one tenant of the engine. The engine itself is workspace-agnost
 # explicit.
 siteops -w workspaces/iot-operations sites
 siteops -w workspaces/iot-operations validate manifests/aio-install.yaml
+siteops -w workspaces/iot-operations plan manifests/aio-install.yaml -l environment=dev
 siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml -l environment=dev
 ```
 

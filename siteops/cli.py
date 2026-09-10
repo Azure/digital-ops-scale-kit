@@ -4,10 +4,10 @@
 """Command-line interface for Azure Site Ops.
 
 Commands:
-    deploy   - Deploy a manifest to target sites
-    plan     - Prepare and preflight a deployment plan
+    sites    - Inspect sites as plain text, YAML, or JSON
     validate - Validate manifest structure and references
-    sites    - List available sites
+    plan     - Prepare and preflight a deployment plan
+    deploy   - Deploy a manifest to target sites
 
 Global flags:
     -v/--verbose controls log verbosity only. Use `plan` to prepare a

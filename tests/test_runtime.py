@@ -33,7 +33,7 @@ from siteops.runtime import (
 
 posix_only = pytest.mark.skipif(
     os.name != "posix",
-    reason="POSIX file mode; Windows access is ACL-based",
+    reason="POSIX file mode, Windows access is ACL-based",
 )
 
 

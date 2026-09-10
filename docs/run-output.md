@@ -91,10 +91,10 @@ says so explicitly rather than implying that work was performed.
 
 ## Emit JSON
 
-Choose JSON output:
+Choose a compact JSON result suitable for publication:
 
 ```bash
-siteops -w <workspace> deploy <manifest> --output json
+siteops -w <workspace> deploy <manifest> --output json --projection publishable
 ```
 
 For execution results and expected preparation failures, JSON mode writes
@@ -105,21 +105,23 @@ manifest, are reported on stderr without a result document.
 ```json
 {
   "apiVersion": "siteops/v1alpha1",
+  "diagnostics": [],
+  "engine": {"name": "siteops", "version": "1.0.0b1"},
+  "exitCode": 0,
   "kind": "DeploymentRun",
   "projection": "publishable",
   "status": "succeeded",
-  "exitCode": 0,
   "summary": {
     "interrupted": false,
-    "operations": {"total": 4, "counts": {"succeeded": 3, "skipped": 1}},
-    "sites": {"total": 2, "counts": {"succeeded": 2}}
-  },
-  "diagnostics": []
+    "operations": {"counts": {"skipped": 1, "succeeded": 3}, "total": 4},
+    "sites": {"counts": {"succeeded": 2}, "total": 2}
+  }
 }
 ```
 
 The counts above are abbreviated. Each `counts` object carries every status
-value, including the zero entries.
+value, including the zero entries. `engine.version` identifies the installed
+Site Ops build.
 
 The `siteops/v1alpha1` wire contract is preview. Consumers should reject an
 unsupported `apiVersion`, `kind`, or `projection`, and should treat
@@ -141,7 +143,7 @@ Two projections are available, matching the plan surface:
 
 ```bash
 siteops -w <workspace> deploy <manifest> --output json \
-  --projection publishable
+  --projection local-private
 ```
 
 `SITEOPS_REDACT_OUTPUT` controls redaction explicitly. Otherwise
@@ -165,39 +167,29 @@ text and unconfirmed deployment names.
 
 ## Interrupt a run
 
-Ctrl-C asks the run to stop. Site Ops records the request, stops starting new
-work, and prints one line saying what to expect.
+Ctrl-C records a stop request and prints what to expect.
 
-The request reaches waiting code immediately: polling loops and backoff sleeps
-wake as soon as it is set. A call already running in a child process is not
-interrupted. It returns on its own or reaches its existing timeout first, so
-the process keeps running until the longest call in flight finishes. The
-current bounds are 60 seconds for one deployment state read, 5 minutes for a
-deployment submission, and 10 minutes for a kubectl operation.
+During preparation, the request lets preparation finish, including any
+remaining template compilations. If preparation succeeds, no deployment
+operation starts. If preparation fails, the command reports that failure.
+
+During execution, the request stops new work and wakes polling loops and
+backoff sleeps. A call already running in a child process is not interrupted.
+It returns on its own or reaches its existing timeout first. The current
+bounds are 60 seconds for one deployment state read, 5 minutes for a
+deployment submission, and 10 minutes for a kubectl operation. These are
+per-call bounds, not a time limit for the whole command.
 
 Pressing Ctrl-C again repeats that expectation. It does not force an exit,
 because workers still hold temporary files and outcomes already observed would
 be lost.
 
-Stopping locally does not cancel a deployment Azure already accepted. Site Ops
-never claims otherwise. Work whose outcome was not observed is reported as
+Stopping locally does not cancel a deployment Azure already accepted.
+Work whose outcome was not observed is reported as
 `unknown`, with the deployment name in local output.
 
-An interrupted run still prints its final result and exits `130`, with
+An interrupted execution prints its final result and exits `130`, with
 `summary.interrupted` set to `true`.
-
-## Temporary files
-
-A run writes resolved parameter files and other transient inputs outside the
-workspace, under the operating system temporary directory. Directories and
-files are created with owner only permissions on POSIX and are removed when the
-run finishes. Workspace content is never used as scratch space.
-On Windows, protection follows the selected parent's inherited ACLs. Choose
-a parent whose access is restricted to the intended account.
-
-Set `SITEOPS_TEMP_DIR` to an absolute path to select a different parent, for
-example a runner local disk. An unset variable uses the platform default. A
-value that is empty or relative is an error rather than a silent fallback.
 
 ## Preparation failures
 
@@ -210,6 +202,24 @@ prints the same failure as the equivalent `plan` command.
 An unexpected error outside execution produces no synthetic result document.
 If a target fails unexpectedly during execution, the result retains earlier
 observations, identifies the incomplete work, and exits nonzero.
+
+## Temporary files
+
+A run writes resolved parameter files and other transient inputs outside the
+workspace, under the operating system temporary directory. Directories and
+files are created with owner only permissions on POSIX. On Windows, protection
+follows the selected parent's inherited ACLs. Choose a parent whose access is
+restricted to the intended account. Workspace content is never used as
+scratch space.
+
+Site Ops attempts to remove parameter files when they are no longer needed
+and the remaining deployment scratch after workers finish. A removal failure
+is logged as a warning and may leave files behind, without replacing the
+deployment outcome.
+
+Set `SITEOPS_TEMP_DIR` to an absolute path to select a different parent, for
+example a runner local disk. An unset variable uses the platform default. A
+value that is empty or relative is an error rather than a silent fallback.
 
 ## Publish from CI
 

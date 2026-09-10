@@ -103,12 +103,13 @@ alternative, which keeps the decision in Azure rather than on the cluster.
 
 **Solution**:
 
-1. Check Azure portal for deployment error details
-2. Fix the issue
-3. Re-run. Bicep deployments are idempotent.
+1. Inspect the failure details and affected resources.
+2. Correct the issue and review a fresh `siteops plan`.
+3. Decide whether to deploy again based on the resources' current state.
 
 The final summary reports every prepared operation, so the steps that never
-started after the failure are listed as `not-run` rather than dropped.
+started after the failure are listed as `not-run`. A new run executes a
+fresh plan rather than resuming only unfinished operations.
 
 ### Ctrl-C does not return the prompt right away
 
@@ -119,18 +120,31 @@ than abandoning scratch files and observed outcomes.
 **Solution**: Wait for the call in flight. The bounds are 60 seconds for one
 deployment state read, 5 minutes for a deployment submission, and 10 minutes
 for a kubectl operation. Pressing Ctrl-C again repeats the same expectation.
-The run then prints its final result and exits `130`. Anything Azure already
-accepted keeps running, so check the unconfirmed deployment before re-running.
+An interrupted execution prints its final result and exits `130`. Stopping
+locally does not cancel accepted Azure work, so inspect unconfirmed effects
+before deciding to deploy again.
+
+A request during preparation lets preparation finish, including any
+remaining template compilations. If preparation succeeds, no deployment
+operation starts. Preparation failures are still reported normally.
+The per-call timeouts above do not bound the whole preparation phase.
 
 ### An operation reports "unknown"
 
-**Cause**: Site Ops stopped observing before the provider reported a final
-state, such as after an interrupt or an observation timeout. The deployment
-may still be running or may already have finished in Azure.
+**Cause**: The provider's final result could not be confirmed, for example
+after lost observation or an incomplete kubectl apply.
 
-**Solution**: Local output names the unconfirmed deployment. Check that
-deployment in the Azure portal or with `az deployment group show` before
-re-running. See [run-output.md](run-output.md).
+**Solution**: Inspect the affected resources before deciding to deploy
+again. For an ARM operation, local output names the unconfirmed deployment.
+Check it in the Azure portal or use the command for its scope:
+
+```bash
+az deployment group show --name <deployment> --resource-group <resource-group> --subscription <subscription>
+az deployment sub show --name <deployment> --subscription <subscription>
+```
+
+For a kubectl or wait operation, inspect its resources or condition at the
+target. See [run-output.md](run-output.md).
 
 ## Arc proxy issues
 

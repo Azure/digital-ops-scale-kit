@@ -55,15 +55,9 @@ Use `siteops plan <manifest> --describe` for the faster compile-free shape.
 and no longer reports simulated deployment success.
 
 **Preparation uses one validation boundary.** `plan` and `deploy` validate
-the loaded manifest and targets before
-compilation or resource writes. Structurally invalid inputs produce an
+the loaded manifest and targets before compilation or resource writes.
+Structurally invalid inputs produce an
 invalid plan rather than a partial target plan.
-
-Repository tooling that calls the engine directly uses `Orchestrator.build_plan`
-with `intent=PlanIntent.EXECUTABLE`. An invalid result raises
-`PlanNotExecutableError` on execution. The executor-level `get_template_parameters`
-and `filter_parameters` helpers have been removed. These internal interfaces
-are not a separately supported Python SDK.
 
 **Known kubectl inputs are checked during shared validation.** After site
 values resolve, local files and directories must exist inside the workspace,
@@ -115,23 +109,37 @@ with `summary.interrupted` set. A run where every operation was skipped stays
 a success and says that no work ran. See
 [run-output.md](run-output.md).
 
-Ctrl-C now asks a run to stop rather than abandoning it. Waiting loops wake at
-once, but a call already running in a child process returns or reaches its own
-timeout first, so the process exits only after the longest call in flight
-finishes. The final result is still printed, and work Azure already accepted
-is not cancelled.
+During execution, Ctrl-C stops new work and wakes waiting loops. A call
+already running in a child process returns or reaches its own timeout first.
+The final result is still printed, and work Azure already accepted is not
+cancelled. A stop request during preparation lets preparation finish,
+including remaining compilations, before preventing execution.
+Preparation failures are still reported as failures.
 
 **Transient deployment files live outside the workspace.** Resolved parameter
-files no longer land in a workspace directory. They are created under the
-operating system temporary directory and removed when the run finishes.
+files are created under the operating system temporary directory.
 Files have owner only permissions on POSIX and inherit the selected parent's
 ACLs on Windows. Set `SITEOPS_TEMP_DIR` to an absolute path to choose a
-different parent.
+different parent. Deployment scratch cleanup is best effort. If removal
+fails, a warning is logged and files may remain.
 
-Repository tooling calls `Orchestrator.deploy` or `Orchestrator.execute_plan`,
-both of which return a `RunResult`. The previous dictionary summaries are
-gone. Pass `stop_requested` when an embedding caller needs cooperative
-stopping, since signal handling belongs to the CLI.
+Earlier versions may have left parameter files in `<workspace>/.siteops/tmp`.
+Site Ops no longer writes there or automatically removes those files.
+Inspect remaining content before deleting anything, since it may contain
+sensitive resolved inputs or files you want to retain.
+
+### Internal Python callers
+
+If you call the engine from Python, `Orchestrator.deploy` and
+`Orchestrator.execute_plan` return a `RunResult` instead of a dictionary
+summary. Use `Orchestrator.build_plan` with `intent=PlanIntent.EXECUTABLE`
+for deployment preparation. Executing an invalid result raises
+`PlanNotExecutableError`. The executor-level `get_template_parameters` and
+`filter_parameters` helpers have been removed.
+
+Pass `stop_requested` when an embedding caller needs cooperative stopping,
+since signal handling belongs to the CLI. These are internal interfaces,
+not a separately supported Python SDK.
 
 ## To v1.0.0b7
 

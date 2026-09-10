@@ -2620,7 +2620,7 @@ class TestEngineScratchAllocation:
         finally:
             executor.close()
 
-    @pytest.mark.skipif(os.name != "posix", reason="POSIX mode; Windows uses ACLs")
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX mode, Windows uses ACLs")
     def test_scratch_is_owner_only_from_creation(self, tmp_workspace):
         executor = AzCliExecutor(workspace=tmp_workspace)
         try:
@@ -2628,7 +2628,7 @@ class TestEngineScratchAllocation:
         finally:
             executor.close()
 
-    @pytest.mark.skipif(os.name != "posix", reason="POSIX mode; Windows uses ACLs")
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX mode, Windows uses ACLs")
     def test_a_parameter_file_is_owner_only_from_creation(self, tmp_workspace):
         """Resolved parameters can carry a secret, so there is no readable
         window between creation and a later chmod."""
@@ -2812,7 +2812,7 @@ class TestEngineScratchRelease:
         assert str(scratch.parent) not in caplog.text, (
             "a private path is reported bounded, not with its account-bearing prefix"
         )
-        # The real directory is still there; remove it so the test leaves none.
+        # The real directory is still there. Remove it so the test leaves none.
         executor._scratch_dir = scratch
         executor.close()
         assert not scratch.exists()

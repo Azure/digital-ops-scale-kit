@@ -131,8 +131,7 @@ _ARC_PROXY_PORT_IN_USE_PATTERN = re.compile(
     r"port\s+\d+\s+is\s+already\s+in\s+use", re.IGNORECASE
 )
 
-# Default timeout for Azure CLI deployments (60 minutes)
-# Azure deployments can take significant time for complex resources
+# Default deployment observation deadline (60 minutes).
 DEFAULT_AZ_TIMEOUT_SECONDS = 3600
 
 # Default timeout for kubectl operations (10 minutes)
@@ -147,21 +146,17 @@ DEFAULT_WAIT_POLL_AZ_TIMEOUT_SECONDS = 60
 # A single successful observation resets the counter.
 WAIT_MAX_CONSECUTIVE_ERRORS = int(os.environ.get("SITEOPS_WAIT_MAX_CONSECUTIVE_ERRORS", "10"))
 
-# Async deployment submit + poll. A single blocking `az deployment ... create` is one
-# long process that captures the OIDC federated client assertion in memory at start. If
-# it crosses the access-token refresh boundary mid-call it re-uses the now-expired
-# assertion and fails (AADSTS700024) even though ARM completed the deployment. Submitting
-# with `--no-wait` and observing with short-lived `deployment ... show` calls keeps every
-# `az` process well under the ~5-minute assertion lifetime and lets the CI credential
-# refresh take effect. See plans/siteops-arm-sdk-migration.md for the long-term SDK move.
+# Submit with `--no-wait`, then observe with fresh `deployment ... show` processes.
+# A blocking create can retain an expired federated assertion (AADSTS700024)
+# while ARM continues the deployment. Short-lived observation calls let CI
+# credential refresh take effect between requests.
 DEFAULT_DEPLOYMENT_SUBMIT_TIMEOUT_SECONDS = 300
 DEFAULT_DEPLOYMENT_POLL_INTERVAL_SECONDS = 20
 DEFAULT_DEPLOYMENT_SUBMIT_MAX_RETRIES = 3
 
-# A returncode-0 `--no-wait` submit means ARM accepted and created the deployment
-# resource, so `show` should find it within seconds. Bound the read-after-write window so
-# a deployment that never registered (for example create and show targeting different
-# scopes) fails quickly instead of polling to the overall deadline.
+# Bound visibility checks after an accepted submission. If `show` never finds
+# the deployment, stop observing and report unknown completion rather than
+# inferring that Azure rejected the request.
 DEPLOYMENT_NOTFOUND_GRACE_SECONDS = 120
 
 # Maximum continuous wall-clock time the poller tolerates being unable to OBSERVE the

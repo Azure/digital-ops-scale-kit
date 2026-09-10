@@ -162,7 +162,7 @@ class TestParamsFilePermissions:
         assert data["parameters"]["spPassword"]["value"] == SECRET
         assert data["parameters"]["clusterName"]["value"] == "c"
 
-    @pytest.mark.skipif(os.name != "posix", reason="POSIX file mode; Windows uses ACLs")
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX file mode, Windows uses ACLs")
     def test_owner_only_permissions(self, executor):
         path = executor._write_params_file({"k": "v"}, "step", "site")
         assert (path.stat().st_mode & 0o777) == 0o600

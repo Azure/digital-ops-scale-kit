@@ -37,30 +37,15 @@ the same resolved sites and sorts them by name.
 | `yaml` | One `Site` document per match, separated by `---` for multiple sites |
 | `json` | One array of `Site` objects, including when only one site matches |
 
-A bare listing of an empty workspace succeeds. YAML emits no documents and
-JSON emits `[]`. An explicit name or selector with no matches fails. Invalid
-or incomplete selections also fail without emitting a partial document.
-Diagnostics use stderr rather than the structured stdout stream.
-
-Use the existing `--show-sources` option to see where each value came from:
+Use `--show-sources` with the default plain output to see where each value
+came from:
 
 ```bash
 siteops -w workspaces/iot-operations sites munich-dev --show-sources
 ```
 
-Source annotations are part of the plain display. Combining them with YAML
-or JSON reports `--show-sources requires --output plain`.
-
-These are private inspection views. Sensitive-looking keys in parameters and
-properties are masked, but site identities and ordinary configuration values
-remain. They are not publishable projections or lossless configuration
-exports. Site details are unavailable when `SITEOPS_REDACT_OUTPUT` or a CI
-environment marker enables redaction. For an authorized private destination,
-explicitly set `SITEOPS_REDACT_OUTPUT=0` and keep the output private.
-
-JSON requires string mapping keys and representable values. YAML values
-such as timestamps and non-finite numbers produce a clear JSON error rather
-than being silently converted. Use `--output yaml` to inspect those values.
+These commands show private configuration. For automation, see
+[inspection output details](#inspection-output-details).
 
 ## Site levels
 
@@ -449,6 +434,27 @@ Every trusted directory (`sites/`, each extras dir, `sites.local/`) is scanned r
 | `sites/shared/usa-west.yaml` | `SiteTemplate` | `inherits: shared/usa-west.yaml` only |
 
 See [targeting.md](targeting.md) for the full identity model and CLI grammar.
+
+## Inspection output details
+
+A bare listing of an empty workspace succeeds. YAML emits no documents and
+JSON emits `[]`. An explicit name or selector with no matches fails. Invalid
+or incomplete selections also fail without emitting a partial document.
+Diagnostics use stderr rather than the structured stdout stream.
+
+Source annotations are part of the plain display. Combining `--show-sources`
+with YAML or JSON reports `--show-sources requires --output plain`.
+
+Site inspection is private. Sensitive-looking keys in parameters and
+properties are masked, but site identities and ordinary configuration values
+remain. These views are not publishable projections or lossless configuration
+exports. Site details are unavailable when `SITEOPS_REDACT_OUTPUT` or a CI
+environment marker enables redaction. For an authorized private destination,
+explicitly set `SITEOPS_REDACT_OUTPUT=0` and keep the output private.
+
+JSON requires string mapping keys and representable values. YAML values
+such as timestamps and non-finite numbers produce a clear JSON error rather
+than being silently converted. Use `--output yaml` to inspect those values.
 
 ## Site inheritance
 
