@@ -1,16 +1,17 @@
 # Migrating between Scale Kit releases
 
-What to change in a workspace when you move to a newer Scale Kit release, newest first. Read every
-section between the release you are on and the one you are moving to, oldest of those first.
+Use this guide when upgrading the Scale Kit you run. Sections are newest
+first. Apply the sections between your current and target releases,
+starting with the oldest applicable release.
 
-This is about the version of Scale Kit you run. For upgrading what Scale Kit deploys, meaning Azure
-IoT Operations and the Kubernetes platform under it, see [aio-releases.md](aio-releases.md) and the
-`aio-upgrade.yaml` and `aksee-upgrade.yaml` manifests.
+To upgrade deployed Azure IoT Operations or Kubernetes instead, see
+[aio-releases.md](aio-releases.md) and the `aio-upgrade.yaml` and
+`aksee-upgrade.yaml` manifests.
 
-For what each release added, see the
-[release notes](https://github.com/Azure/digital-ops-scale-kit/releases). For what the rules are
-today rather than what changed, see [site-configuration.md](site-configuration.md) and
-[manifest-reference.md](manifest-reference.md).
+For release summaries, see the
+[release notes](https://github.com/Azure/digital-ops-scale-kit/releases).
+The [site](site-configuration.md) and [manifest](manifest-reference.md)
+references describe the current configuration rules.
 
 ## Before you migrate
 
@@ -20,8 +21,7 @@ Run the listing against your workspace before changing anything:
 siteops -w <workspace> sites
 ```
 
-Any site missing from that listing no longer loads, and the error names it. Fix those first, since
-a site that does not load is not a site that deploys. Then plan each manifest you deploy:
+Resolve any reported site-loading errors, then plan each manifest you deploy:
 
 ```bash
 siteops -w <workspace> plan <manifest> -l <selector>
@@ -29,117 +29,128 @@ siteops -w <workspace> plan <manifest> -l <selector>
 
 ## Current preview
 
-**Site inspection uses explicit output formats.** Use
-`siteops sites <name> --output yaml` for the resolved Site document or
-`siteops sites --output json` for a JSON array. The default plain display
-and `--show-sources` annotations retain their existing local behavior.
-Source annotations require plain output.
+Start with the changes that affect your workflow:
 
-An old command reports `unrecognized arguments: --render`. Replace
-`--render` with `--output yaml`. YAML keeps one document per matched site,
-while JSON always uses an array.
+| If you... | What to change |
+|---|---|
+| Use `sites --render` | Replace it with [`--output yaml`](#inspect-sites). |
+| Preview a deployment | Use [`siteops plan`](#plan-and-validate). |
+| Author manifests or parameters | Review the [preparation checks](#preparation-checks). |
+| Capture output in scripts or CI | Use [structured results and explicit projections](#results-and-ci-output). |
+| Manage temporary files | Review the [new location and cleanup behavior](#temporary-files). |
+| Call the engine from Python | Update the [internal result consumers](#internal-python-callers). |
 
-Site inspection contains private configuration and has no publishable
-projection. With output redaction enabled, it now reports
-`Site inspection output is private` instead of printing site details.
-For an authorized private destination, set `SITEOPS_REDACT_OUTPUT=0`.
-Sensitive-key masking remains in place and is not a publication guarantee.
-See [site-configuration.md](site-configuration.md#inspect-resolved-sites).
+### Inspect sites
 
-**Executable planning has its own command.** Use `siteops plan <manifest>` to
-validate, compile, preflight, and inspect a deployment without executing it.
-Use `siteops plan <manifest> --describe` for the faster compile-free shape.
+Replace `--render`, which now reports `unrecognized arguments: --render`:
 
-`validate --plan` remains a compatibility spelling for the describe form.
-`deploy --dry-run` remains a compatibility spelling for executable planning
-and no longer reports simulated deployment success.
+```bash
+siteops -w <workspace> sites <name> --output yaml
+siteops -w <workspace> sites --output json
+```
 
-**Preparation uses one validation boundary.** `plan` and `deploy` validate
-the loaded manifest and targets before compilation or resource writes.
-Structurally invalid inputs produce an
-invalid plan rather than a partial target plan.
+YAML keeps one document per site. JSON always uses an array. The default
+plain display and `--show-sources` retain their local behavior. Source
+annotations require plain output.
 
-**Known kubectl inputs are checked during shared validation.** After site
-values resolve, local files and directories must exist inside the workspace,
-and URLs must use HTTPS. Per-site inputs are required only when the operation
-applies to that site. A conditionally skipped kubectl step does not require
-its site-selected file. A file path that depends on a prior deployment output
-remains deferred and is validated when that output resolves during execution.
+Site inspection is private and has no publishable projection. If you see
+`Site inspection output is private`, use `SITEOPS_REDACT_OUTPUT=0` only for
+an authorized private destination. Sensitive-key masking is not a publication
+guarantee. See [inspection output details](site-configuration.md#inspection-output-details).
 
-**Executable preparation checks required template inputs.** A non-nullable
-template parameter without a default must have a known supplied name unless
-a top-level parameter name still depends on a prior operation output.
-Nullable parameters may be omitted, including nullable types referenced
-through local ARM definitions. Explicit defaults, including `null`, also
-permit omission. Deferred names are checked against the same template schema
-after the output resolves.
-Fully resolved kubectl scalar inputs and wait conditions also use their
-runtime guards during preparation. Output-dependent values keep their runtime
-validation.
+### Plan and validate
 
-Planning requires a target set, including `plan --describe` and its
-`validate --plan` compatibility spelling. To check a reusable manifest
-without targeting, use `validate` without `--plan`. A manifest or CLI
-selector matching no sites returns a nonzero exit code.
+`siteops plan <manifest>` validates, compiles, preflights, and previews a
+deployment without executing it. For a faster compile-free description, use
+`plan --describe`.
 
-Parameter files must contain a mapping. An empty document remains an empty
-parameter mapping. Scalar values and arrays report `must contain a mapping`
-before compilation or execution.
+The compatibility spellings still work:
 
-**Verbose dry-run command previews are replaced by prepared-plan
-inspection.** `-v` controls logging and does not generate simulated Azure or
-kubectl commands. Use `plan --output json --projection local-private` to
-inspect operation and dependency metadata locally. Parameter values and exact
-value-bearing command lines are not exported by that projection.
+- `validate --plan` means `plan --describe`.
+- `deploy --dry-run` means executable `plan`, not simulated deployment.
 
-**Redacted plain plans use the publishable projection.** They show aggregate
-activity and generic diagnostics rather than individual steps, manifest
-descriptions, paths, conditions, or literal target inputs. Local plain output
-keeps its detailed view with redaction disabled. For CI artifacts, capture
-`plan --output json --projection publishable` from stdout separately from
-diagnostic stderr.
+`-v` controls logging only. To inspect operation and dependency metadata
+locally, use `plan --output json --projection local-private` with redaction
+disabled. This projection omits parameter values and full value-bearing
+command lines.
 
-**Deployment reports a typed outcome.** `siteops deploy` prints a final
-summary that accounts for every prepared operation, including work that was
-skipped, never started, or left unconfirmed. `deploy --output json` emits one
-`DeploymentRun` document on stdout with the same projections as a plan, while
-progress and logs stay on stderr. A run that succeeded exits `0`, an
-incomplete or unconfirmed run exits `1`, and an interrupted run exits `130`
-with `summary.interrupted` set. A run where every operation was skipped stays
-a success and says that no work ran. See
-[run-output.md](run-output.md).
+### Preparation checks
 
-During execution, Ctrl-C stops new work and wakes waiting loops. A call
-already running in a child process returns or reaches its own timeout first.
-The final result is still printed, and work Azure already accepted is not
-cancelled. A stop request during preparation lets preparation finish,
-including remaining compilations, before preventing execution.
-Preparation failures are still reported as failures.
+`plan` and `deploy` share validation before compilation or resource writes.
+Structurally invalid inputs produce an invalid plan, not a partial target plan.
+Check these areas when existing content is rejected:
 
-**Transient deployment files live outside the workspace.** Resolved parameter
-files are created under the operating system temporary directory.
-Files have owner only permissions on POSIX and inherit the selected parent's
-ACLs on Windows. Set `SITEOPS_TEMP_DIR` to an absolute path to choose a
-different parent. Deployment scratch cleanup is best effort. If removal
-fails, a warning is logged and files may remain.
+- **Targets:** every plan form requires targets, including describe mode
+  and `validate --plan`. Use bare `validate` for a reusable manifest without
+  targets. A selector matching no sites exits nonzero.
+- **Parameter files:** use a mapping. Empty documents remain empty mappings.
+  Scalars and arrays report `must contain a mapping`.
+- **Template inputs:** non-nullable parameters without defaults are required.
+  Nullable parameters, including ARM type references, and parameters with
+  explicit defaults (including `null`) may be omitted.
+- **Kubectl inputs:** resolved local files and directories must exist inside
+  the workspace and URLs must use HTTPS. Site-specific inputs are required
+  only for applicable operations, not conditionally skipped steps.
+- **Deferred inputs:** output-dependent top-level parameter names are checked
+  against the template schema after resolution. Paths and values derived
+  from outputs retain runtime validation. Known kubectl scalar inputs and
+  wait conditions are checked during preparation.
 
-Earlier versions may have left parameter files in `<workspace>/.siteops/tmp`.
-Site Ops no longer writes there or automatically removes those files.
-Inspect remaining content before deleting anything, since it may contain
-sensitive resolved inputs or files you want to retain.
+### Results and CI output
+
+`siteops deploy` prints a plain summary by default. `deploy --output json`
+writes one `DeploymentRun` document to stdout. Progress and logs use stderr.
+The final result accounts for every prepared operation, including skipped,
+unstarted, and unconfirmed work.
+
+| Exit | Deployment result |
+|---|---|
+| `0` | Succeeded, or every operation was skipped. A skipped run explicitly reports no work. |
+| `1` | Failed, invalid, incomplete, or unconfirmed. |
+| `130` | Interrupted, with `summary.interrupted` set, regardless of observed successes. |
+
+For CI artifacts, use `--output json --projection publishable` with
+`plan` or `deploy`. Capture stdout separately and keep diagnostic stderr
+private. Redacted plain plans use the same allowlisted fields: aggregate
+activity and generic diagnostics, not private identities or prepared values.
+
+See [plan output](plan-output.md), [run output](run-output.md), and the
+[CI capture contract](ci-cd-setup.md).
+
+### Stopping a run
+
+- **During execution:** Ctrl-C stops new work and wakes waiting loops.
+  Active child processes return or reach their own timeout before the
+  final result is printed.
+- **During preparation:** preparation finishes, including remaining
+  compilations, before execution is prevented. Preparation failures still
+  report failure.
+
+Stopping locally does not cancel work Azure already accepted.
+
+### Temporary files
+
+Resolved parameter files now use the operating system temporary directory.
+Set `SITEOPS_TEMP_DIR` to an absolute path to choose another parent.
+POSIX files have owner only permissions. Windows files inherit the parent's
+ACLs. Cleanup is best effort: a removal failure warns and may leave files.
+
+**Existing files:** Site Ops no longer writes to `<workspace>/.siteops/tmp`
+and does not automatically clean it. Inspect remaining content before
+deleting it, since it may contain sensitive resolved inputs or files you
+want to retain.
 
 ### Internal Python callers
 
-If you call the engine from Python, `Orchestrator.deploy` and
-`Orchestrator.execute_plan` return a `RunResult` instead of a dictionary
-summary. Use `Orchestrator.build_plan` with `intent=PlanIntent.EXECUTABLE`
-for deployment preparation. Executing an invalid result raises
-`PlanNotExecutableError`. The executor-level `get_template_parameters` and
-`filter_parameters` helpers have been removed.
+These are internal interfaces, not a separately supported Python SDK.
 
-Pass `stop_requested` when an embedding caller needs cooperative stopping,
-since signal handling belongs to the CLI. These are internal interfaces,
-not a separately supported Python SDK.
+| Call or usage | Update |
+|---|---|
+| `Orchestrator.deploy` / `execute_plan` | Consume `RunResult` instead of a dictionary summary. |
+| `Orchestrator.build_plan` | Use `intent=PlanIntent.EXECUTABLE` for deployment preparation. |
+| Executing invalid preparation | Handle `PlanNotExecutableError`. |
+| `get_template_parameters` / `filter_parameters` | These executor helpers are removed. Use shared plan preparation. |
+| Cooperative stopping | Pass `stop_requested`. Signal handling belongs to the CLI. |
 
 ## To v1.0.0b7
 
