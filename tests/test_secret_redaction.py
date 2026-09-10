@@ -3,7 +3,7 @@
 
 """Tests for secret handling in the display layer and the params file.
 
-- `siteops sites` and `siteops sites --render` redact secret-keyed values so a
+- All `siteops sites` formats redact secret-keyed values so a
   secret supplied via sites.local / SITE_OVERRIDES does not print.
 - The deploy params file is created with owner-only permissions.
 """
@@ -126,12 +126,13 @@ class TestSitesRedaction:
         assert SECRET not in out
         assert "spPassword: ***" in out
 
-    def test_render_redacts_secret(self, tmp_path, capsys):
+    @pytest.mark.parametrize("output", ["yaml", "json"])
+    def test_structured_output_redacts_secret(self, tmp_path, capsys, output):
         ws = tmp_path / "workspace"
         ws.mkdir()
         _write_site_with_secret(ws)
         cmd_sites(
-            Namespace(selector=None, show_sources=False, render=True, name=None),
+            Namespace(selector=None, show_sources=False, output=output, name=None),
             Orchestrator(ws),
         )
         out = capsys.readouterr().out

@@ -100,7 +100,8 @@ Two behaviors are worth knowing when you override:
 - `secretValues` is a map, so an overlay merges key by key. Supply only the values you want to replace and the rest of the declared defaults stay in place.
 - `secrets` is a list, so an overlay replaces it wholesale. Restate the entries you want when you override it.
 
-`siteops sites <name> --render` redacts the whole `secretValues` map, so you can preview a fully resolved site without printing any of them.
+`siteops sites <name> --output yaml` masks the whole `secretValues` map.
+The remaining configuration is still private inspection output.
 
 ## Deploy
 

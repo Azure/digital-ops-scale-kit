@@ -380,7 +380,7 @@ class _ProgressOwner:
                 self._failure = error
                 self._callback = None
                 logger.error(
-                    "Progress reporting failed; deployment execution "
+                    "Progress reporting failed. Deployment execution "
                     "continues without further progress output."
                 )
 

@@ -29,6 +29,23 @@ siteops -w <workspace> plan <manifest> -l <selector>
 
 ## Current preview
 
+**Site inspection uses explicit output formats.** Use
+`siteops sites <name> --output yaml` for the resolved Site document or
+`siteops sites --output json` for a JSON array. The default plain display
+and `--show-sources` annotations retain their existing local behavior.
+Source annotations require plain output.
+
+An old command reports `unrecognized arguments: --render`. Replace
+`--render` with `--output yaml`. YAML keeps one document per matched site,
+while JSON always uses an array.
+
+Site inspection contains private configuration and has no publishable
+projection. With output redaction enabled, it now reports
+`Site inspection output is private` instead of printing site details.
+For an authorized private destination, set `SITEOPS_REDACT_OUTPUT=0`.
+Sensitive-key masking remains in place and is not a publication guarantee.
+See [site-configuration.md](site-configuration.md#inspect-resolved-sites).
+
 **Executable planning has its own command.** Use `siteops plan <manifest>` to
 validate, compile, preflight, and inspect a deployment without executing it.
 Use `siteops plan <manifest> --describe` for the faster compile-free shape.
@@ -280,7 +297,7 @@ name: "2607"
 using the `metadata`/`spec` envelope can inherit as long as `inherits:` sits alongside `apiVersion`
 and `kind` rather than inside `spec`. A site that wrote `inherits:` inside `spec:` has been
 deploying without its parent's `properties` and `parameters`. Move the one line to the top level,
-then confirm what the site resolves to with `siteops -w <workspace> sites <name> --render`. Expect
+then confirm what the site resolves to with `siteops -w <workspace> sites <name> --output yaml`. Expect
 values the site did not have before, and review them before you deploy.
 
 **Keep one shape across an `inherits` chain.** A flat site inheriting a `metadata`/`spec` template,

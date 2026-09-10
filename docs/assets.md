@@ -122,7 +122,7 @@ Interpolate into string-valued properties such as topics, display names, attribu
 Preview the site values a declaration reads before deploying:
 
 ```bash
-siteops -w workspaces/iot-operations sites munich-dev --render
+siteops -w workspaces/iot-operations sites munich-dev --output yaml
 ```
 
 ## Step order

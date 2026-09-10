@@ -14,10 +14,53 @@ Sites define **where** to deploy: the Azure subscription, resource group, locati
 | Target multiple specific sites at the CLI | `siteops deploy <manifest> -l name=<a>,name=<b>` |
 | Pin the manifest to a labeled cohort | Set `selector:` in the manifest |
 | Hard-code the target list for a manifest | Set `sites:` in the manifest |
-| Preview a fully-resolved site (post inherit + overlay) | `siteops -w <workspace> sites <name> --render` |
+| Preview a fully-resolved site (post inherit + overlay) | `siteops -w <workspace> sites <name> --output yaml` |
+| Inspect resolved sites in private automation | `siteops -w <workspace> sites --output json` |
 | See where every value in a resolved site came from | `siteops -w <workspace> sites <name> --show-sources` |
 
 The reference material below covers the model in depth. See [targeting.md](targeting.md) for the selector grammar and the no-match diagnostic.
+
+## Inspect resolved sites
+
+Check what a site resolves to after inheritance and overlays:
+
+```bash
+siteops -w workspaces/iot-operations sites munich-dev --output yaml
+```
+
+The default `--output plain` is a human-readable display. Every format uses
+the same resolved sites and sorts them by name.
+
+| Format | Output shape |
+|---|---|
+| `plain` | Human-readable site details |
+| `yaml` | One `Site` document per match, separated by `---` for multiple sites |
+| `json` | One array of `Site` objects, including when only one site matches |
+
+A bare listing of an empty workspace succeeds. YAML emits no documents and
+JSON emits `[]`. An explicit name or selector with no matches fails. Invalid
+or incomplete selections also fail without emitting a partial document.
+Diagnostics use stderr rather than the structured stdout stream.
+
+Use the existing `--show-sources` option to see where each value came from:
+
+```bash
+siteops -w workspaces/iot-operations sites munich-dev --show-sources
+```
+
+Source annotations are part of the plain display. Combining them with YAML
+or JSON reports `--show-sources requires --output plain`.
+
+These are private inspection views. Sensitive-looking keys in parameters and
+properties are masked, but site identities and ordinary configuration values
+remain. They are not publishable projections or lossless configuration
+exports. Site details are unavailable when `SITEOPS_REDACT_OUTPUT` or a CI
+environment marker enables redaction. For an authorized private destination,
+explicitly set `SITEOPS_REDACT_OUTPUT=0` and keep the output private.
+
+JSON requires string mapping keys and representable values. YAML values
+such as timestamps and non-finite numbers produce a clear JSON error rather
+than being silently converted. Use `--output yaml` to inspect those values.
 
 ## Site levels
 
@@ -524,4 +567,4 @@ sites/
 
 Each concrete site declares a single `inherits:` parent. The intermediate `SiteTemplate` files capture the cross-cutting axes so that adding a new region or environment is a one-file change instead of N edits across N regions.
 
-> Validate the resolved shape with `siteops -w <workspace> sites <name> --render` before committing the new template chain.
+> Validate the resolved shape with `siteops -w <workspace> sites <name> --output yaml` before committing the new template chain.

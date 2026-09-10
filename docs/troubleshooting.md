@@ -50,10 +50,13 @@ Error: Step 'aio-instance' references unknown step 'schema-reg' in parameters/p.
 When a site's resolved values disagree with what you expect (wrong location, missing label, an overlay in `sites.local/` or an extras dir not taking effect), preview the fully-resolved shape:
 
 ```
-siteops -w <workspace> sites <name> --render
+siteops -w <workspace> sites <name> --output yaml
 ```
 
-The output is the post-inherit + post-overlay site as a single YAML doc, with empty `resourceGroup:` omitted for subscription-scoped sites. Use it to verify which file contributed which field before re-running a deploy.
+The output is the resolved site as a single YAML document, with
+`resourceGroup` omitted for subscription-scoped sites. To see which file
+contributed each value, use `siteops -w <workspace> sites <name> --show-sources`
+with the default plain output.
 
 ## Deployment errors
 
@@ -169,7 +172,7 @@ siteops -w workspaces/iot-operations plan manifests/aio-install.yaml --describe
 siteops -w workspaces/iot-operations sites <name> --show-sources
 
 # Print the fully-resolved site as YAML
-siteops -w workspaces/iot-operations sites <name> --render
+siteops -w workspaces/iot-operations sites <name> --output yaml
 
 # Check Azure CLI authentication
 az account show

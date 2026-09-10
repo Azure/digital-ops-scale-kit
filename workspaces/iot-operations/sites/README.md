@@ -20,5 +20,5 @@ Per-deployment-target YAML files (`kind: Site` and `kind: SiteTemplate`).
 
 ## Authoring tips
 
-- Preview the fully-resolved site (after inheritance + overlays) with `siteops -w workspaces/iot-operations sites <name> --render`.
+- Preview the fully-resolved site (after inheritance + overlays) with `siteops -w workspaces/iot-operations sites <name> --output yaml`.
 - Keep environment- or region-specific values in intermediate `SiteTemplate` files under `shared/` to avoid duplicating env config across `<region>-dev.yaml` and `<region>-prod.yaml` pairs.

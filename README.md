@@ -102,7 +102,7 @@ subscription: "<your-subscription-id>"
 `sites.local/` is gitignored. The overlay merges into `sites/munich-dev.yaml` at load time. The base `munich-dev.yaml` already has working `resourceGroup` and `parameters.clusterName` values. Override them here only if you want different values. Verify the resolved shape before deploying:
 
 ```bash
-siteops -w workspaces/iot-operations sites munich-dev --render
+siteops -w workspaces/iot-operations sites munich-dev --output yaml
 ```
 
 For CI, see [docs/ci-cd-setup.md](docs/ci-cd-setup.md) for the `SITE_OVERRIDES` JSON shape that replaces the local overlay.
@@ -313,7 +313,8 @@ auto-filtering, merge order, and cross-scope output chaining.
 | `siteops sites` | List sites in the workspace |
 | `siteops sites <name>` | Inspect one site (basename, relative path, or internal `name:`) |
 | `siteops sites <name> --show-sources` | Show every value with the source file it came from after inherits and overlays |
-| `siteops sites <name> --render` | Show the resolved YAML after inheritance and overlays |
+| `siteops sites <name> --output yaml` | Show the resolved YAML after inheritance and overlays |
+| `siteops sites --output json` | Inspect resolved sites as a JSON array for private automation |
 | `siteops validate <manifest>` | Validate manifest structure, files, and static references |
 | `siteops plan <manifest>` | Validate, compile, preflight, and show the executable deployment plan |
 | `siteops plan <manifest> --describe` | Show the compile-free plan shape |

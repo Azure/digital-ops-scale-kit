@@ -685,7 +685,7 @@ class TestCmdSites:
         args.name = "regions/eu/munich-dev"
         args.workspace = tmp_path
         args.selector = None
-        args.render = False
+        args.output = "plain"
         args.show_sources = False
 
         exit_code = cmd_sites(args, orchestrator)
@@ -778,7 +778,7 @@ class TestCmdSites:
         args.workspace = multi_site_workspace
         args.name = "dev-eastus"
         args.selector = None
-        args.render = False
+        args.output = "plain"
 
         exit_code = cmd_sites(args, orchestrator)
 
@@ -799,7 +799,7 @@ class TestCmdSites:
         args.workspace = multi_site_workspace
         args.name = "dev-eastus"
         args.selector = "name=prod-eastus"
-        args.render = False
+        args.output = "plain"
 
         exit_code = cmd_sites(args, orchestrator)
 
@@ -2015,7 +2015,7 @@ labels:
         from siteops.orchestrator import Orchestrator
 
         orchestrator = Orchestrator(workspace)
-        args = Namespace(name=None, selector="name=munich", show_sources=True, render=False)
+        args = Namespace(name=None, selector="name=munich", show_sources=True, output="plain")
 
         cmd_sites(args, orchestrator)
 
@@ -2052,7 +2052,7 @@ location: eastus
         from siteops.orchestrator import Orchestrator
 
         orchestrator = Orchestrator(workspace)
-        args = Namespace(name=None, selector=None, show_sources=False, render=False)
+        args = Namespace(name=None, selector=None, show_sources=False, output="plain")
 
         cmd_sites(args, orchestrator)
 

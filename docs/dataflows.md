@@ -81,7 +81,7 @@ Interpolate into string-valued properties such as topic paths, host names, and c
 Preview the site values a declaration reads before deploying:
 
 ```bash
-siteops -w workspaces/iot-operations sites munich-dev --render
+siteops -w workspaces/iot-operations sites munich-dev --output yaml
 ```
 
 ## Step order

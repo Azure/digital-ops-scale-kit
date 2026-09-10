@@ -15,6 +15,7 @@ Global flags:
 """
 
 import argparse
+import json
 import logging
 import os
 import signal
@@ -33,6 +34,7 @@ from siteops.models import (
     MultipleSubscriptionSitesError,
     NoTargetingError,
     ParameterSelectionError,
+    Site,
     _merge_selector_strings,
 )
 from siteops.orchestrator import Orchestrator
@@ -489,10 +491,10 @@ def _is_sensitive_key(key: str) -> bool:
     return any(token in lowered for token in _SENSITIVE_KEY_SUBSTRINGS)
 
 
-def _redact_sensitive(value: Any, key: str | None = None) -> Any:
+def _redact_sensitive(value: Any, key: Any = None) -> Any:
     """Return a copy of `value` with secret-keyed entries replaced by `***`.
 
-    Display-only redaction for `siteops sites` and `siteops sites --render`.
+    Display-only redaction for all `siteops sites` output formats.
     A value is redacted when its own key matches `_is_sensitive_key`, except
     booleans: a sensitive-looking key with a bool value is a toggle, not a
     secret (e.g. `enableSecretSync: false`), so it is left as-is. The whole
@@ -506,7 +508,7 @@ def _redact_sensitive(value: Any, key: str | None = None) -> Any:
     Returns:
         A redacted deep copy.
     """
-    if key is not None and _is_sensitive_key(key) and not isinstance(value, bool):
+    if isinstance(key, str) and _is_sensitive_key(key) and not isinstance(value, bool):
         return _REDACTED
     if isinstance(value, dict):
         return {k: _redact_sensitive(v, k) for k, v in value.items()}
@@ -569,16 +571,55 @@ def _print_value(
         print(f"{prefix}{value}")
 
 
+def _site_document(site: Site) -> dict[str, Any]:
+    """Build the private inspection document without exporting hidden model fields."""
+    resolved: dict[str, Any] = {
+        "apiVersion": "siteops/v1",
+        "kind": "Site",
+        "name": site.name,
+        "subscription": site.subscription,
+    }
+    if site.resource_group:
+        resolved["resourceGroup"] = site.resource_group
+    resolved["location"] = site.location
+    if site.labels:
+        resolved["labels"] = site.labels
+    if site.parameters:
+        resolved["parameters"] = _redact_sensitive(site.parameters)
+    if site.properties:
+        resolved["properties"] = _redact_sensitive(site.properties)
+    return resolved
+
+
+def _require_json_mapping_keys(value: Any) -> None:
+    """Reject YAML keys that JSON would silently coerce to different identities."""
+    if isinstance(value, dict):
+        if any(not isinstance(key, str) for key in value):
+            raise ValueError("JSON object keys must be strings.")
+        for item in value.values():
+            _require_json_mapping_keys(item)
+    elif isinstance(value, list):
+        for item in value:
+            _require_json_mapping_keys(item)
+
+
 def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     """List available sites in the workspace.
 
     A bare `siteops sites` lists every site. Pass a positional `name`
     (filename without extension, or the internal `name:` field) to
-    scope to one site, equivalent to `-l name=<NAME>`. With `--render`,
-    emits the merged YAML for each matched site instead of the
-    human-readable summary, useful for confirming what an overlay or
-    extras-dir file actually changed.
+    scope to one site, equivalent to `-l name=<NAME>`. Every format uses the
+    same inheritance and overlay resolution. YAML emits one Site document
+    per match, while JSON emits one array regardless of the match count.
+    These are private inspection views with sensitive-key masking, not
+    publication projections or lossless exports.
     """
+    output_format = getattr(args, "output", "plain")
+    show_sources = getattr(args, "show_sources", False)
+    if show_sources and output_format != "plain":
+        print("Error: --show-sources requires --output plain.", file=sys.stderr)
+        return 1
+
     # Positional `name` is sugar for `-l name=<NAME>`. Combining the two
     # forms is rejected so a confusing override path cannot exist.
     name_arg = getattr(args, "name", None)
@@ -649,8 +690,9 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
             )
             print(f"\n{message}\n", file=sys.stderr)
             return 1
-        print("\nNo sites found in workspace\n")
-        return 0
+        if output_format == "plain":
+            print("\nNo sites found in workspace\n")
+            return 0
 
     if orchestrator.skipped_sites:
         # A site that does not load is one the operator expected to be here.
@@ -663,33 +705,35 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         )
         return 1
 
-    if getattr(args, "render", False) is True:
-        import yaml
+    if sites and is_redaction_enabled():
+        print(
+            "Error: Site inspection output is private and unavailable while output "
+            "redaction is enabled. For an authorized private destination, set "
+            "SITEOPS_REDACT_OUTPUT=0.",
+            file=sys.stderr,
+        )
+        return 1
 
-        for i, site in enumerate(sorted(sites, key=lambda s: s.name)):
-            resolved = {
-                "apiVersion": "siteops/v1",
-                "kind": "Site",
-                "name": site.name,
-                "subscription": site.subscription,
-            }
-            # Subscription-scoped sites have no resourceGroup. Emitting ""
-            # would falsely imply RG-scoped behavior on a round-trip.
-            if site.resource_group:
-                resolved["resourceGroup"] = site.resource_group
-            resolved["location"] = site.location
-            if site.labels:
-                resolved["labels"] = site.labels
-            if site.parameters:
-                resolved["parameters"] = _redact_sensitive(site.parameters)
-            if site.properties:
-                resolved["properties"] = _redact_sensitive(site.properties)
-            if i > 0:
-                print("---")
-            print(yaml.safe_dump(resolved, sort_keys=False, default_flow_style=False), end="")
+    if output_format in {"yaml", "json"}:
+        documents = [_site_document(site) for site in sorted(sites, key=lambda s: s.name)]
+        if output_format == "json":
+            try:
+                _require_json_mapping_keys(documents)
+                serialized = json.dumps(documents, indent=2, allow_nan=False) + "\n"
+            except (TypeError, ValueError):
+                print(
+                    "Error: Resolved site values cannot be represented as JSON. "
+                    "Use --output yaml to inspect YAML values.",
+                    file=sys.stderr,
+                )
+                return 1
+        else:
+            serialized = yaml.safe_dump_all(
+                documents, sort_keys=False, default_flow_style=False,
+            )
+        print(serialized, end="")
         return 0
 
-    show_sources = getattr(args, "show_sources", False)
     _note_superseded_verbose(
         args, show_sources, "sites", "--show-sources", "the source file of each value"
     )
@@ -859,7 +903,7 @@ def main() -> None:
         epilog="""
 Examples:
   siteops -w workspaces/iot-operations sites
-  siteops -w workspaces/iot-operations sites munich-dev --render
+  siteops -w workspaces/iot-operations sites munich-dev --output yaml
   siteops -w workspaces/iot-operations validate manifests/aio-install.yaml
   siteops -w workspaces/iot-operations plan manifests/aio-install.yaml
   siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml
@@ -1088,16 +1132,17 @@ Examples:
         action="store_true",
         help=(
             "Annotate every leaf with the source file the value came from "
-            "after inherits + overlay merge (default: false)."
+            "after inheritance and overlays. Plain output only (default: false)."
         ),
     )
     p_sites.add_argument(
-        "--render",
-        action="store_true",
+        "--output",
+        choices=("plain", "yaml", "json"),
+        default="plain",
         help=(
-            "Emit the merged YAML for each matched site instead of the summary. "
-            "Useful with a single-site scope to inspect resolved config "
-            "(default: false)."
+            "Private inspection format: plain display, YAML Site documents, or "
+            "a JSON array. Sensitive-key masking is not publication safety "
+            "(default: plain)."
         ),
     )
 

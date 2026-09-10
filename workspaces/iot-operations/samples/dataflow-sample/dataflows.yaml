@@ -25,7 +25,7 @@
 # a tier, so moving a value up a tier changes only where it is maintained. Interpolate
 # into string-valued properties, and state numbers directly. Preview a site's resolved
 # values with:
-#   siteops -w workspaces/iot-operations sites munich-dev --render
+#   siteops -w workspaces/iot-operations sites munich-dev --output yaml
 
 # Endpoints a dataflow can read from or write to. AIO creates a `default` MQTT
 # endpoint alongside the instance, so declare an endpoint here only when a solution
