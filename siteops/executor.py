@@ -20,21 +20,26 @@ import shutil
 import signal
 import socket
 import subprocess
-import tempfile
 import threading
 import time
-import uuid
 from collections import deque
 from collections.abc import Generator
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from enum import Enum
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, TextIO
 
 from siteops import __version__
+from siteops.runtime import (
+    RuntimePathError,
+    RuntimePaths,
+    bounded_runtime_path,
+    create_private_directory,
+    create_private_file,
+    describe_os_error,
+)
 from siteops.sanitize import (
     scrub_command_for_output,
     scrub_for_output,
@@ -88,9 +93,6 @@ _configure_user_agent()
 # ---------------------------------------------------------------------------
 # Thread Safety Locks
 # ---------------------------------------------------------------------------
-
-# Lock for thread-safe tmp_dir initialization
-_tmp_dir_lock = threading.Lock()
 
 # Lock for allocating unique Arc proxy ports
 _arc_port_lock = threading.Lock()
@@ -494,12 +496,24 @@ class _ProxyOutputDrainer:
         return "".join(self._buffers.get("stderr", ()))
 
 
+def _stopping(stop_requested: threading.Event | None) -> bool:
+    return stop_requested is not None and stop_requested.is_set()
+
+
+def _wait_or_stop(seconds: float, stop_requested: threading.Event | None) -> bool:
+    if stop_requested is None:
+        time.sleep(seconds)
+        return False
+    return stop_requested.wait(seconds)
+
+
 def _probe_arc_proxy_ready(
     proxy_process: subprocess.Popen,
     port: int,
     timeout_s: int | None = None,
     kubectl_path: str | None = None,
     kubeconfig_path: str | None = None,
+    stop_requested: threading.Event | None = None,
 ) -> bool:
     """Active readiness probe for the Arc proxy.
 
@@ -548,14 +562,15 @@ def _probe_arc_proxy_ready(
     # Phase 1: TCP bind detection.
     bound = False
     while time.monotonic() < tcp_deadline:
-        if proxy_process.poll() is not None:
+        if _stopping(stop_requested) or proxy_process.poll() is not None:
             return False
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=0.5):
                 bound = True
                 break
         except (ConnectionRefusedError, OSError):
-            time.sleep(_ARC_PROXY_PROBE_TCP_INTERVAL_S)
+            if _wait_or_stop(_ARC_PROXY_PROBE_TCP_INTERVAL_S, stop_requested):
+                return False
     if not bound:
         logger.debug(f"Arc proxy TCP bind probe timed out on port {port}")
         return False
@@ -580,7 +595,7 @@ def _probe_arc_proxy_ready(
 
     last_observation = "no kubectl invocation yet"
     while time.monotonic() < deadline:
-        if proxy_process.poll() is not None:
+        if _stopping(stop_requested) or proxy_process.poll() is not None:
             return False
         # Clamp the subprocess timeout to the remaining budget so a single
         # hung kubectl call cannot overrun the readiness deadline by 10s.
@@ -599,7 +614,8 @@ def _probe_arc_proxy_ready(
             )
         except subprocess.TimeoutExpired:
             last_observation = f"kubectl invocation timed out at {run_timeout:.1f}s"
-            time.sleep(_ARC_PROXY_PROBE_READINESS_INTERVAL_S)
+            if _wait_or_stop(_ARC_PROXY_PROBE_READINESS_INTERVAL_S, stop_requested):
+                return False
             continue
         if result.returncode == 0:
             return True
@@ -611,13 +627,40 @@ def _probe_arc_proxy_ready(
             f"argv={scrub_command_for_output(cmd)!r} exit={result.returncode} "
             f"detail={scrub_for_output(first_line)[:200]!r}"
         )
-        time.sleep(_ARC_PROXY_PROBE_READINESS_INTERVAL_S)
+        if _wait_or_stop(_ARC_PROXY_PROBE_READINESS_INTERVAL_S, stop_requested):
+            return False
 
     logger.error(
         f"Arc proxy kubectl readiness probe timed out on port {port}. "
         f"Last observation: {last_observation}"
     )
     return False
+
+
+class UnconfirmedCompletion(str, Enum):
+    """Why a provider's final outcome could not be established."""
+
+    SUBMIT_UNCLASSIFIED = "submit-unclassified"
+    NEVER_VISIBLE = "never-visible"
+    OBSERVATION_LOST = "observation-lost"
+    DEADLINE_EXCEEDED = "deadline-exceeded"
+    APPLY_INCOMPLETE = "apply-incomplete"
+    STOPPED_OBSERVING = "stopped-observing"
+
+
+def _validate_completion(
+    success: bool,
+    unconfirmed: UnconfirmedCompletion | None,
+    stopped_before_start: bool,
+) -> None:
+    if type(success) is not bool or type(stopped_before_start) is not bool:
+        raise TypeError("Execution result flags must be booleans.")
+    if unconfirmed is not None and not isinstance(unconfirmed, UnconfirmedCompletion):
+        raise TypeError("Unconfirmed completion requires a typed reason.")
+    if success and (unconfirmed is not None or stopped_before_start):
+        raise ValueError("Observed success cannot be unconfirmed or unstarted.")
+    if stopped_before_start and unconfirmed is not None:
+        raise ValueError("Work stopped before starting cannot have an unconfirmed effect.")
 
 
 @dataclass
@@ -639,6 +682,11 @@ class DeploymentResult:
     deployment_name: str
     outputs: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
+    unconfirmed: UnconfirmedCompletion | None = None
+    stopped_before_start: bool = False
+
+    def __post_init__(self) -> None:
+        _validate_completion(self.success, self.unconfirmed, self.stopped_before_start)
 
 
 @dataclass
@@ -656,6 +704,11 @@ class KubectlResult:
     step_name: str
     site_name: str
     error: str | None = None
+    unconfirmed: UnconfirmedCompletion | None = None
+    stopped_before_start: bool = False
+
+    def __post_init__(self) -> None:
+        _validate_completion(self.success, self.unconfirmed, self.stopped_before_start)
 
 
 @dataclass
@@ -677,6 +730,11 @@ class WaitResult:
     step_name: str
     site_name: str
     error: str | None = None
+    unconfirmed: UnconfirmedCompletion | None = None
+    stopped_before_start: bool = False
+
+    def __post_init__(self) -> None:
+        _validate_completion(self.success, self.unconfirmed, self.stopped_before_start)
 
 
 class AzCliExecutor:
@@ -686,15 +744,39 @@ class AzCliExecutor:
     - Resource group and subscription-scoped ARM/Bicep deployments
     - kubectl apply via Arc-connected cluster proxy
 
+    Transient files (ARM parameter files, per-proxy kubeconfigs) are written to
+    a private directory this executor allocates under the engine temp root, not
+    into the workspace. The workspace holds authored deployment inputs and is
+    read-only to the engine. Call `close()` to release that directory.
+
     Attributes:
         workspace: Path to the Site Ops workspace directory
         dry_run: If True, commands are logged but not executed
     """
 
-    def __init__(self, workspace: Path, dry_run: bool = False):
+    def __init__(
+        self,
+        workspace: Path,
+        dry_run: bool = False,
+        *,
+        runtime_paths: RuntimePaths | None = None,
+    ):
+        """Construct an executor.
+
+        Args:
+            workspace: Workspace directory. Read-only to the executor.
+            dry_run: Log commands instead of running them.
+            runtime_paths: Internal seam for injecting engine-owned roots.
+                When omitted the roots are resolved from the environment on
+                first scratch allocation, so constructing an executor neither
+                reads a misconfigured variable nor creates a directory.
+        """
         self.workspace = workspace
         self.dry_run = dry_run
-        self._tmp_dir: Path | None = None
+        self._runtime_paths = runtime_paths
+        self._runtime_paths_lock = threading.Lock()
+        self._scratch_dir: Path | None = None
+        self._scratch_lock = threading.Lock()
         self._az_path: str | None = None
         self._kubectl_path: str | None = None
         self._tool_paths_bound = False
@@ -733,17 +815,78 @@ class AzCliExecutor:
         return self._kubectl_path
 
     @property
-    def tmp_dir(self) -> Path:
-        """Get or create the temp directory for parameter files.
+    def runtime_paths(self) -> RuntimePaths:
+        """Engine-owned roots, resolved from the environment on first use.
 
-        Uses double-checked locking for thread-safe initialization.
+        Resolution is deferred so that describing, validating, or planning a
+        deployment never depends on the environment being configured, and an
+        unusable `SITEOPS_TEMP_DIR` fails at the point something is actually
+        allocated rather than at construction.
         """
-        if self._tmp_dir is None:
-            with _tmp_dir_lock:
-                if self._tmp_dir is None:
-                    self._tmp_dir = self.workspace / ".siteops" / "tmp"
-                    self._tmp_dir.mkdir(parents=True, exist_ok=True)
-        return self._tmp_dir
+        if self._runtime_paths is None:
+            with self._runtime_paths_lock:
+                if self._runtime_paths is None:
+                    self._runtime_paths = RuntimePaths.resolve()
+        return self._runtime_paths
+
+    @property
+    def tmp_dir(self) -> Path:
+        """Private scratch directory owned by this executor.
+
+        Allocated on first use under the engine temp root, unique per
+        executor, and owner-only from creation. Nothing is created until a
+        transient file is actually needed, so a dry run, a describe, or a
+        deployment with no parameters allocates nothing.
+
+        After `close()` the next access allocates a fresh directory, so an
+        executor that is reused across invocations keeps working.
+        """
+        scratch = self._scratch_dir
+        if scratch is not None:
+            return scratch
+
+        # Resolved outside the scratch lock: the two locks are never held at
+        # the same time, and resolution touches no file system state.
+        temp_root = self.runtime_paths.temp_root
+        with self._scratch_lock:
+            if self._scratch_dir is None:
+                self._scratch_dir = create_private_directory(
+                    temp_root, prefix="siteops-run-"
+                )
+                logger.debug(
+                    "Allocated engine scratch %s",
+                    bounded_runtime_path(self._scratch_dir),
+                )
+            return self._scratch_dir
+
+    def close(self) -> None:
+        """Release the scratch directory this executor created.
+
+        Removes only what this executor allocated. The temp root itself, and
+        anything an operator put there, is left alone. Safe to call more than
+        once and safe to call on an executor that never allocated anything.
+
+        A cleanup failure is reported rather than swallowed, and never raised:
+        `close()` runs in a `finally` around real work, so raising here would
+        replace the deployment's own error with a cleanup error.
+        """
+        with self._scratch_lock:
+            scratch = self._scratch_dir
+            self._scratch_dir = None
+
+        if scratch is None:
+            return
+
+        try:
+            shutil.rmtree(scratch)
+        except FileNotFoundError:
+            return
+        except OSError as error:
+            logger.warning(
+                "Failed to remove engine scratch directory %s: %s",
+                bounded_runtime_path(scratch),
+                describe_os_error(error),
+            )
 
     def _run_az(
         self,
@@ -795,7 +938,7 @@ class AzCliExecutor:
             return result.returncode == 0, result.stdout or "", result.stderr or ""
         except subprocess.TimeoutExpired:
             return False, "", ENGINE_TIMEOUT_SENTINEL.format(timeout=timeout)
-        except Exception as e:
+        except OSError as e:
             return False, "", f"Failed to execute az command: {e}"
 
     def _run_kubectl(
@@ -845,7 +988,7 @@ class AzCliExecutor:
             return result.returncode == 0, result.stdout or "", result.stderr or ""
         except subprocess.TimeoutExpired:
             return False, "", ENGINE_TIMEOUT_SENTINEL.format(timeout=timeout)
-        except Exception as e:
+        except OSError as e:
             return False, "", f"Failed to execute kubectl command: {e}"
 
     @contextmanager
@@ -854,6 +997,8 @@ class AzCliExecutor:
         cluster_name: str,
         resource_group: str,
         subscription: str,
+        *,
+        stop_requested: threading.Event | None = None,
     ) -> Generator[str | None, None, None]:
         """Context manager for Arc-connected cluster proxy.
 
@@ -880,6 +1025,9 @@ class AzCliExecutor:
                 if kubeconfig is not None:
                     self._run_kubectl(["apply", "-f", "config.yaml"], kubeconfig=kubeconfig)
         """
+        if _stopping(stop_requested):
+            yield None
+            return
         if self.dry_run:
             logger.info(
                 scrub_for_output(
@@ -903,16 +1051,31 @@ class AzCliExecutor:
         held_ports: list[int] = []
         started = False
         # Per-proxy kubeconfig so parallel proxies do not race the
-        # ambient current-context in `~/.kube/config`. Created with
-        # `mkstemp` for an atomic, unique file. The fd is closed
-        # immediately. az populates the file when the proxy starts.
-        kubeconfig_fd, kubeconfig_path = tempfile.mkstemp(
-            prefix="siteops-arc-proxy-", suffix=".kubeconfig"
-        )
+        # ambient current-context in `~/.kube/config`. Created in this
+        # executor's private scratch under the engine temp root, with an
+        # atomic, unique, owner-only name. The fd is closed immediately.
+        # az populates the file when the proxy starts.
+        try:
+            kubeconfig_fd, kubeconfig_file = create_private_file(
+                self.tmp_dir, prefix="arc-proxy-", suffix=".kubeconfig"
+            )
+        except (RuntimePathError, OSError) as error:
+            # Same contract as any other startup failure: report and yield
+            # None so the caller returns a step failure.
+            logger.error(
+                "Failed to allocate a private kubeconfig for the Arc proxy: "
+                f"{describe_os_error(error) if isinstance(error, OSError) else error}"
+            )
+            yield None
+            return
         os.close(kubeconfig_fd)
+        # az, kubectl, and the yielded value all take the path as text.
+        kubeconfig_path = str(kubeconfig_file)
 
         try:
             for attempt in range(ARC_PROXY_MAX_PORT_RETRIES):
+                if _stopping(stop_requested):
+                    break
                 # Allocate a unique port slot for this proxy instance
                 allocated_port = _allocate_arc_port_slot()
                 held_ports.append(allocated_port)
@@ -973,10 +1136,14 @@ class AzCliExecutor:
                     allocated_port,
                     kubectl_path=self.kubectl_path,
                     kubeconfig_path=kubeconfig_path,
+                    stop_requested=stop_requested,
                 )
                 if ready:
                     started = True
                     break  # proxy responsive
+
+                if _stopping(stop_requested):
+                    break
 
                 # Probe did not become ready. Determine cause.
                 if proxy_process.poll() is None:
@@ -1084,22 +1251,37 @@ class AzCliExecutor:
 
             # Best-effort remove the per-proxy kubeconfig. The file may
             # already be gone (test teardown, manual cleanup), so swallow
-            # FileNotFoundError. Other errors are logged at debug because
-            # the file is in the OS temp dir and a stale copy is harmless.
+            # FileNotFoundError. Other errors are logged at debug because the
+            # file is inside this executor's private scratch, so `close()`
+            # sweeps whatever survives here.
             try:
                 os.unlink(kubeconfig_path)
             except FileNotFoundError:
                 pass
             except OSError as e:
-                logger.debug(f"Failed to remove per-proxy kubeconfig {kubeconfig_path}: {e}")
+                logger.debug(
+                    "Failed to remove per-proxy kubeconfig "
+                    f"{bounded_runtime_path(kubeconfig_path)}: {describe_os_error(e)}"
+                )
 
     def _write_params_file(self, parameters: dict[str, Any], step_name: str, site_name: str) -> Path:
-        """Write parameters to a temp file in ARM parameter format.
+        """Write parameters to a private temp file in ARM parameter format.
+
+        The file is created in this executor's scratch directory with
+        `mkstemp`, which allocates a unique name atomically and creates the
+        file 0o600 so the resolved parameters (which can include secrets, e.g.
+        an SP password) are never briefly readable by another account. POSIX
+        mode is advisory on Windows, where access is ACL-based.
+
+        The name is engine-generated. Neither the site nor the step name goes
+        into a path, so authored text can never traverse or collide. The
+        correlation lives in the debug record instead, and in the deployment
+        the file is passed to.
 
         Args:
             parameters: Parameter key-value pairs
-            step_name: Step name (for filename)
-            site_name: Site name (for filename)
+            step_name: Step name (for correlation)
+            site_name: Site name (for correlation)
 
         Returns:
             Path to the created parameter file
@@ -1110,27 +1292,45 @@ class AzCliExecutor:
             "parameters": {k: {"value": v} for k, v in parameters.items()},
         }
 
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-        # Add a short uuid suffix to avoid collisions when the same step
-        # writes multiple param files within a single second (parallel sites
-        # or rapid successive deploys on the same site).
-        unique = uuid.uuid4().hex[:8]
-        filename = f"{site_name}-{step_name}-{timestamp}-{unique}.json"
+        descriptor, params_path = create_private_file(
+            self.tmp_dir, prefix="params-", suffix=".json"
+        )
+        try:
+            handle = os.fdopen(descriptor, "w", encoding="utf-8")
+        except BaseException:
+            # The descriptor is still ours only until fdopen adopts it.
+            os.close(descriptor)
+            self._discard_scratch_file(params_path)
+            raise
 
-        tmp_dir = self.tmp_dir
-        tmp_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            with handle:
+                json.dump(arm_params, handle, indent=2)
+        except BaseException:
+            # A parameter value that will not serialize, a full disk, or a
+            # cancellation must not leave a half-written secret behind.
+            self._discard_scratch_file(params_path)
+            raise
 
-        params_path = tmp_dir / filename
-
-        # Create 0o600: the file holds resolved parameters, which can include
-        # secrets (e.g. an SP password). os.open applies the mode at creation so
-        # there is no world-readable window. POSIX mode is advisory on Windows
-        # (ACL-based) but harmless. Deleted in the deploy's finally.
-        fd = os.open(params_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(arm_params, f, indent=2)
-
+        logger.debug(
+            scrub_site_for_output(
+                f"Wrote deployment parameters for step '{step_name}' "
+                f"to {bounded_runtime_path(params_path)}",
+                site_name,
+            )
+        )
         return params_path
+
+    def _discard_scratch_file(self, path: Path) -> None:
+        """Remove one engine-owned transient file, reporting a real failure."""
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as error:
+            logger.warning(
+                "Failed to remove engine scratch file %s: %s",
+                bounded_runtime_path(path),
+                describe_os_error(error),
+            )
 
     def _deploy(
         self,
@@ -1141,6 +1341,7 @@ class AzCliExecutor:
         deployment_name: str,
         step_name: str,
         site_name: str,
+        stop_requested: threading.Event | None = None,
     ) -> DeploymentResult:
         """Submit an Azure deployment asynchronously and poll it to a terminal state.
 
@@ -1161,6 +1362,11 @@ class AzCliExecutor:
         Returns:
             DeploymentResult with success status and outputs.
         """
+        if _stopping(stop_requested):
+            return DeploymentResult(
+                False, step_name, site_name, deployment_name,
+                stopped_before_start=True,
+            )
         if not self.dry_run and not self.az_path:
             return DeploymentResult(
                 success=False,
@@ -1171,7 +1377,22 @@ class AzCliExecutor:
             )
 
         if parameters:
-            params_path = self._write_params_file(parameters, step_name, site_name)
+            try:
+                params_path = self._write_params_file(parameters, step_name, site_name)
+            except (RuntimePathError, OSError) as error:
+                # A misconfigured temp root or an unwritable one is a step
+                # failure with a clear cause, not a traceback out of the
+                # engine. Nothing was submitted.
+                return DeploymentResult(
+                    success=False,
+                    step_name=step_name,
+                    site_name=site_name,
+                    deployment_name=deployment_name,
+                    error=(
+                        "Deployment parameters could not be staged: "
+                        f"{describe_os_error(error) if isinstance(error, OSError) else error}"
+                    ),
+                )
             create_args = create_args + ["--parameters", f"@{params_path}"]
 
         try:
@@ -1192,31 +1413,28 @@ class AzCliExecutor:
                 )
 
             proceed, early_result = self._submit_deployment(
-                submit_args, deployment_name, step_name, site_name
+                submit_args, deployment_name, step_name, site_name, stop_requested
             )
             # ARM holds the parameters inline in the submit PUT now, and the
             # poll uses `show` (no params file), so delete it here rather than
             # holding it for the full poll deadline. The finally is a backstop.
             if parameters:
-                try:
-                    params_path.unlink(missing_ok=True)
-                except OSError as e:
-                    logger.debug(f"Failed to remove params file {params_path}: {e}")
+                self._discard_scratch_file(params_path)
             if not proceed:
+                if early_result is None:
+                    raise RuntimeError("Submission stopped without a result.")
                 return early_result
 
             return self._poll_deployment(
-                show_args, ops_args, deployment_name, step_name, site_name
+                show_args, ops_args, deployment_name, step_name, site_name, stop_requested
             )
         finally:
             # Clean up the per-deploy params file. ARM has the parameters inline in the
-            # submit PUT by the time we poll, so `show` never needs the file. Best-effort:
-            # don't mask the deploy result on cleanup errors.
+            # submit PUT by the time we poll, so `show` never needs the file. Runs on a
+            # failure, a timeout, and a cancellation. Best-effort: report a cleanup
+            # error rather than masking the deploy result with it.
             if parameters:
-                try:
-                    params_path.unlink(missing_ok=True)
-                except OSError as e:
-                    logger.debug(f"Failed to remove params file {params_path}: {e}")
+                self._discard_scratch_file(params_path)
 
     def _submit_deployment(
         self,
@@ -1224,6 +1442,7 @@ class AzCliExecutor:
         deployment_name: str,
         step_name: str,
         site_name: str,
+        stop_requested: threading.Event | None = None,
     ) -> tuple[bool, DeploymentResult | None]:
         """Submit the deployment with `--no-wait`, retrying transient submit failures.
 
@@ -1247,6 +1466,19 @@ class AzCliExecutor:
         """
         last_error = ""
         for attempt in range(1, DEFAULT_DEPLOYMENT_SUBMIT_MAX_RETRIES + 1):
+            if _stopping(stop_requested):
+                return False, DeploymentResult(
+                    False, step_name, site_name, deployment_name,
+                    error=(
+                        "Stopped before deployment submission."
+                        if attempt == 1
+                        else "Stopped locally. An earlier submission may still be running."
+                    ),
+                    unconfirmed=(
+                        UnconfirmedCompletion.STOPPED_OBSERVING if attempt > 1 else None
+                    ),
+                    stopped_before_start=attempt == 1,
+                )
             ok, _stdout, stderr = self._run_az(
                 submit_args,
                 timeout=DEFAULT_DEPLOYMENT_SUBMIT_TIMEOUT_SECONDS,
@@ -1254,8 +1486,18 @@ class AzCliExecutor:
             )
             if ok:
                 return True, None
-
             last_error = stderr
+            category = _classify_az_error(stderr)
+            # Stopping must preserve a definitive response already received.
+            if _stopping(stop_requested) and category not in {
+                "permanent", "resource_not_found",
+            }:
+                return False, DeploymentResult(
+                    False, step_name, site_name, deployment_name,
+                    error="Stopped observing submission. Azure was not cancelled.",
+                    unconfirmed=UnconfirmedCompletion.STOPPED_OBSERVING,
+                )
+
             if stderr == ENGINE_TIMEOUT_SENTINEL.format(
                 timeout=DEFAULT_DEPLOYMENT_SUBMIT_TIMEOUT_SECONDS
             ):
@@ -1270,24 +1512,28 @@ class AzCliExecutor:
                 )
                 return True, None
 
-            category = _classify_az_error(stderr)
             if category == "transient":
                 if attempt < DEFAULT_DEPLOYMENT_SUBMIT_MAX_RETRIES:
-                    time.sleep(min(DEFAULT_DEPLOYMENT_POLL_INTERVAL_SECONDS, 5 * attempt))
+                    _wait_or_stop(
+                        min(DEFAULT_DEPLOYMENT_POLL_INTERVAL_SECONDS, 5 * attempt),
+                        stop_requested,
+                    )
                     continue
                 # Exhausted retries on a transient submit error. The PUT may still have
                 # reached ARM, so poll and let the not-found grace decide.
                 return True, None
 
-            # Permanent or unrecognized submit failure (bad template, bad parameters,
-            # auth, or an unclassified deterministic rejection). Nothing was created, so
-            # fail fast with the real error rather than polling for a phantom deployment.
+            # Unclassified transport/tool errors cannot prove the PUT was rejected.
             return False, DeploymentResult(
                 success=False,
                 step_name=step_name,
                 site_name=site_name,
                 deployment_name=deployment_name,
                 error=last_error,
+                unconfirmed=(
+                    UnconfirmedCompletion.SUBMIT_UNCLASSIFIED
+                    if category == "unknown" else None
+                ),
             )
 
         return True, None
@@ -1299,11 +1545,13 @@ class AzCliExecutor:
         deployment_name: str,
         step_name: str,
         site_name: str,
+        stop_requested: threading.Event | None = None,
     ) -> DeploymentResult:
         """Poll a submitted deployment to a terminal state with short `show` calls.
 
-        The only authoritative outcomes are the deployment's own `provisioningState`
-        (Succeeded, or Failed/Canceled) and the overall deadline. Any failure to OBSERVE
+        The authoritative outcome is the deployment's own `provisioningState`
+        (Succeeded, or Failed/Canceled). A local deadline leaves completion
+        unconfirmed. Any failure to OBSERVE
         the deployment (auth blip, throttling, 5xx, a torn credential-cache read, or a
         transient not-found right after submit) never fails the deployment. It only
         retries under a grace window, because the deployment is owned by ARM and its fate
@@ -1328,6 +1576,12 @@ class AzCliExecutor:
         poll_count = 0
 
         while True:
+            if _stopping(stop_requested):
+                return DeploymentResult(
+                    False, step_name, site_name, deployment_name,
+                    error="Stopped local observation. Azure was not cancelled.",
+                    unconfirmed=UnconfirmedCompletion.STOPPED_OBSERVING,
+                )
             poll_count += 1
             ok, stdout, stderr = self._run_az(
                 show_args,
@@ -1371,10 +1625,12 @@ class AzCliExecutor:
                     )
 
                 if observed_state in _DEPLOYMENT_TERMINAL_FAILURE:
-                    detail = self._format_deployment_failure(
-                        deployment_obj,
-                        ops_args,
-                        site_name,
+                    detail = (
+                        _format_arm_error(deployment_obj.get("properties", {}).get("error"))
+                        if _stopping(stop_requested)
+                        else self._format_deployment_failure(
+                            deployment_obj, ops_args, site_name,
+                        )
                     )
                     return DeploymentResult(
                         success=False,
@@ -1403,6 +1659,7 @@ class AzCliExecutor:
                             step_name=step_name,
                             site_name=site_name,
                             deployment_name=deployment_name,
+                            unconfirmed=UnconfirmedCompletion.NEVER_VISIBLE,
                             error=(
                                 f"Deployment '{deployment_name}' never became visible within "
                                 f"{DEPLOYMENT_NOTFOUND_GRACE_SECONDS}s of submit. Verify the "
@@ -1417,6 +1674,7 @@ class AzCliExecutor:
                         step_name=step_name,
                         site_name=site_name,
                         deployment_name=deployment_name,
+                        unconfirmed=UnconfirmedCompletion.OBSERVATION_LOST,
                         error=(
                             f"Lost the ability to observe deployment '{deployment_name}' for "
                             f"over {DEPLOYMENT_OBSERVATION_GRACE_SECONDS}s (last observed state: "
@@ -1432,6 +1690,7 @@ class AzCliExecutor:
                     step_name=step_name,
                     site_name=site_name,
                     deployment_name=deployment_name,
+                    unconfirmed=UnconfirmedCompletion.DEADLINE_EXCEEDED,
                     error=(
                         f"Deployment '{deployment_name}' did not reach a terminal state within "
                         f"{DEFAULT_AZ_TIMEOUT_SECONDS // 60}m (last observed state: "
@@ -1439,7 +1698,10 @@ class AzCliExecutor:
                         f"progress."
                     ),
                 )
-            time.sleep(min(DEFAULT_DEPLOYMENT_POLL_INTERVAL_SECONDS, remaining))
+            _wait_or_stop(
+                min(DEFAULT_DEPLOYMENT_POLL_INTERVAL_SECONDS, remaining),
+                stop_requested,
+            )
 
     def _format_deployment_failure(
         self,
@@ -1519,6 +1781,8 @@ class AzCliExecutor:
         deployment_name: str,
         step_name: str,
         site_name: str,
+        *,
+        stop_requested: threading.Event | None = None,
     ) -> DeploymentResult:
         """Deploy a Bicep/ARM template to a resource group.
 
@@ -1577,7 +1841,8 @@ class AzCliExecutor:
             "json",
         ]
         return self._deploy(
-            create_args, show_args, ops_args, parameters, deployment_name, step_name, site_name
+            create_args, show_args, ops_args, parameters, deployment_name, step_name, site_name,
+            stop_requested,
         )
 
     def deploy_subscription(
@@ -1589,6 +1854,8 @@ class AzCliExecutor:
         deployment_name: str,
         step_name: str,
         site_name: str,
+        *,
+        stop_requested: threading.Event | None = None,
     ) -> DeploymentResult:
         """Deploy a Bicep/ARM template at subscription scope.
 
@@ -1643,7 +1910,8 @@ class AzCliExecutor:
             "json",
         ]
         return self._deploy(
-            create_args, show_args, ops_args, parameters, deployment_name, step_name, site_name
+            create_args, show_args, ops_args, parameters, deployment_name, step_name, site_name,
+            stop_requested,
         )
 
     def _validate_kubectl_file(self, file_path: str) -> tuple[bool, str | None]:
@@ -1684,6 +1952,8 @@ class AzCliExecutor:
         files: list[str],
         step_name: str,
         site_name: str,
+        *,
+        stop_requested: threading.Event | None = None,
     ) -> KubectlResult:
         """Apply Kubernetes manifests to an Arc-connected cluster.
 
@@ -1704,6 +1974,8 @@ class AzCliExecutor:
         Returns:
             KubectlResult with success status
         """
+        if _stopping(stop_requested):
+            return KubectlResult(False, step_name, site_name, stopped_before_start=True)
         # Validate all files first
         resolved_files: list[str] = []
         for file_path in files:
@@ -1738,7 +2010,11 @@ class AzCliExecutor:
                 error="kubectl not found in PATH",
             )
 
-        with self._arc_proxy(cluster_name, resource_group, subscription) as arc_kubeconfig:
+        with self._arc_proxy(
+            cluster_name, resource_group, subscription, stop_requested=stop_requested,
+        ) as arc_kubeconfig:
+            if _stopping(stop_requested):
+                return KubectlResult(False, step_name, site_name, stopped_before_start=True)
             if arc_kubeconfig is None:
                 return KubectlResult(
                     success=False,
@@ -1761,6 +2037,7 @@ class AzCliExecutor:
                 step_name=step_name,
                 site_name=site_name,
                 error=stderr if not success else None,
+                unconfirmed=UnconfirmedCompletion.APPLY_INCOMPLETE if not success else None,
             )
 
     @contextmanager
@@ -1860,6 +2137,8 @@ class AzCliExecutor:
         subscription: str,
         step_name: str,
         site_name: str,
+        *,
+        stop_requested: threading.Event | None = None,
     ) -> WaitResult:
         """Poll `condition` until satisfied, failed, or the timeout elapses.
 
@@ -1880,6 +2159,8 @@ class AzCliExecutor:
         Returns:
             WaitResult. On failure, `error` carries the full diagnostic.
         """
+        if _stopping(stop_requested):
+            return WaitResult(False, step_name, site_name, stopped_before_start=True)
         description = _describe_condition(condition)
 
         if self.dry_run:
@@ -1900,6 +2181,12 @@ class AzCliExecutor:
 
         with self._condition_session(condition):
             while True:
+                if _stopping(stop_requested):
+                    return WaitResult(
+                        False, step_name, site_name,
+                        error="Stopped observing the wait condition.",
+                        unconfirmed=UnconfirmedCompletion.STOPPED_OBSERVING,
+                    )
                 poll_count += 1
                 state, observed, error = self._evaluate_condition(condition, subscription)
                 if observed is not None:
@@ -1936,6 +2223,7 @@ class AzCliExecutor:
                             success=False,
                             step_name=step_name,
                             site_name=site_name,
+                            unconfirmed=UnconfirmedCompletion.OBSERVATION_LOST,
                             error=_wait_failure_message(
                                 condition,
                                 reason=f"{consecutive_errors} consecutive polling errors",
@@ -1963,4 +2251,4 @@ class AzCliExecutor:
                             elapsed_seconds=time.monotonic() - start,
                         ),
                     )
-                time.sleep(min(poll_interval_seconds, remaining))
+                _wait_or_stop(min(poll_interval_seconds, remaining), stop_requested)

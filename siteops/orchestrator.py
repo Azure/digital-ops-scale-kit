@@ -18,7 +18,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import fields, is_dataclass, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
@@ -120,6 +120,22 @@ from siteops.planning import (
     required_capability_kinds,
     resolve_plan_value,
 )
+from siteops.results import (
+    OperationResult,
+    OperationStatus,
+    OutcomeReason,
+    OutcomeReasonCode,
+    ProgressCallback,
+    ProgressEvent,
+    ProgressEventKind,
+    ProgressPhase,
+    RunDiagnostic,
+    RunDiagnosticSeverity,
+    RunResult,
+    SiteResult,
+    SiteStatus,
+    operation_result_for_plan_disposition,
+)
 from siteops.sanitize import (
     is_redaction_enabled,
     report_parameter_selection_error,
@@ -201,6 +217,12 @@ FOR_EACH_SITE_PROPERTY_PATTERN = re.compile(
 
 # Result type that can be a deployment, kubectl, or wait result
 StepResult = DeploymentResult | KubectlResult | WaitResult
+
+
+def _provider_completion_unknown(result: StepResult) -> bool:
+    """Use the provider's typed observation result, not diagnostic text."""
+    return result.unconfirmed is not None
+
 
 def _normalize_null_site_mappings(data: dict[str, Any]) -> dict[str, Any]:
     """Treat an explicitly empty site mapping as an empty mapping before merge."""
@@ -304,16 +326,6 @@ def _reportable_subscription(sub_id: str) -> str:
     return scrub_for_output(f"{sub_id[:8]}...") or ""
 
 
-# Lock for thread-safe console output
-_print_lock = threading.Lock()
-
-
-def _thread_safe_print(*args: Any, **kwargs: Any) -> None:
-    """Print with lock to avoid interleaved output from multiple threads."""
-    with _print_lock:
-        print(*args, **kwargs)
-
-
 def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     """Build a dict from JSON pairs, refusing a key written twice.
 
@@ -334,6 +346,339 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             )
         seen[key] = value
     return seen
+
+
+@dataclass(frozen=True)
+class _TargetExecution:
+    site: SiteResult
+    outputs: dict[OperationIdentity, dict[str, Any]]
+    interrupted: bool = False
+
+
+def _exception_detail(error: Exception) -> str:
+    detail = str(error)
+    return detail if detail.strip() else type(error).__name__
+
+
+class _ProgressOwner:
+    """Serialize all worker progress through one callback owner."""
+
+    def __init__(self, callback: ProgressCallback | None):
+        self._callback = callback
+        self._lock = threading.Lock()
+        self._failure: Exception | None = None
+
+    def emit(self, event: ProgressEvent) -> None:
+        if self._callback is None:
+            return
+        with self._lock:
+            if self._callback is None:
+                return
+            try:
+                self._callback(event)
+            except Exception as error:
+                self._failure = error
+                self._callback = None
+                logger.error(
+                    "Progress reporting failed; deployment execution "
+                    "continues without further progress output."
+                )
+
+    @property
+    def failure(self) -> Exception | None:
+        """Return the first observer failure without changing run outcomes."""
+        with self._lock:
+            return self._failure
+
+
+def _non_executable_operation_result(
+    operation: PreparedOperation,
+) -> OperationResult:
+    if operation.skip_reason is None:
+        raise ValueError(
+            f"Non-executable step '{operation.identity.step}' on target "
+            f"'{operation.identity.target}' has no typed reason."
+        )
+    return operation_result_for_plan_disposition(
+        identity=operation.identity,
+        kind=operation.kind,
+        disposition=operation.disposition,
+        skip_code=operation.skip_reason.code,
+        skip_detail=operation.skip_reason.detail,
+    )
+
+
+def _unreached_operation_result(
+    operation: PreparedOperation,
+    reason_code: OutcomeReasonCode,
+) -> OperationResult:
+    if operation.disposition is not PlanDisposition.EXECUTE:
+        return _non_executable_operation_result(operation)
+    return OperationResult(
+        identity=operation.identity,
+        kind=operation.kind,
+        status=OperationStatus.NOT_RUN,
+        elapsed=0.0,
+        reason=OutcomeReason(reason_code),
+    )
+
+
+def _cancelled_operation_result(
+    operation: PreparedOperation,
+) -> OperationResult:
+    if operation.disposition is not PlanDisposition.EXECUTE:
+        return _non_executable_operation_result(operation)
+    return OperationResult(
+        identity=operation.identity,
+        kind=operation.kind,
+        status=OperationStatus.CANCELLED,
+        elapsed=0.0,
+        reason=OutcomeReason(OutcomeReasonCode.CANCELLED_BEFORE_START),
+    )
+
+
+def _site_reason(operations: tuple[OperationResult, ...]) -> OutcomeReason | None:
+    for operation in operations:
+        if operation.status not in {
+            OperationStatus.SUCCEEDED,
+            OperationStatus.SKIPPED,
+        }:
+            return operation.reason
+    return None
+
+
+def _cancelled_target_result(target: PreparedTarget) -> SiteResult:
+    operations = tuple(
+        _cancelled_operation_result(operation)
+        for operation in target.operations
+    )
+    return SiteResult.from_operations(
+        target=target.name,
+        kind=target.kind,
+        operations=operations,
+        elapsed=0.0,
+        reason=_site_reason(operations),
+    )
+
+
+def _dependency_blocked_target_result(
+    target: PreparedTarget,
+) -> SiteResult:
+    operations = tuple(
+        (
+            _non_executable_operation_result(operation)
+            if operation.disposition is not PlanDisposition.EXECUTE
+            else OperationResult(
+                identity=operation.identity,
+                kind=operation.kind,
+                status=OperationStatus.NOT_RUN,
+                elapsed=0.0,
+                reason=OutcomeReason(
+                    OutcomeReasonCode.DEPENDENCY_UNAVAILABLE
+                ),
+            )
+        )
+        for operation in target.operations
+    )
+    reason = OutcomeReason(OutcomeReasonCode.DEPENDENCY_UNAVAILABLE)
+    return SiteResult.from_operations(
+        target=target.name,
+        kind=target.kind,
+        operations=operations,
+        elapsed=0.0,
+        reason=reason,
+    )
+
+
+class _TargetExecutionState:
+    """Thread-safe snapshot boundary for interrupted target execution."""
+
+    def __init__(self, target: PreparedTarget):
+        self.target = target
+        self._lock = threading.Lock()
+        self._started_at: float | None = None
+        self._active: OperationIdentity | None = None
+        self._active_deployment_name: str | None = None
+        self._records: dict[OperationIdentity, OperationResult] = {}
+        self._outputs: dict[OperationIdentity, dict[str, Any]] = {}
+        self._finished: _TargetExecution | None = None
+        self._abandoned = False
+
+    def start(self) -> None:
+        with self._lock:
+            if self._started_at is None:
+                self._started_at = time.monotonic()
+
+    def begin(
+        self, operation: PreparedOperation, deployment_name: str | None = None,
+    ) -> bool:
+        with self._lock:
+            if self._abandoned:
+                return False
+            self._active = operation.identity
+            self._active_deployment_name = deployment_name
+            return True
+
+    def record(
+        self,
+        result: OperationResult,
+        outputs: dict[str, Any] | None = None,
+    ) -> bool:
+        with self._lock:
+            if self._abandoned:
+                return False
+            self._records[result.identity] = result
+            if outputs:
+                self._outputs[result.identity] = copy.deepcopy(outputs)
+            if self._active == result.identity:
+                self._active = None
+            return True
+
+    def finish(self, execution: _TargetExecution) -> _TargetExecution:
+        with self._lock:
+            if self._finished is None and not self._abandoned:
+                self._finished = execution
+            return self._finished or execution
+
+    def is_abandoned(self) -> bool:
+        with self._lock:
+            return self._abandoned
+
+    def snapshot_interrupted(self) -> _TargetExecution:
+        with self._lock:
+            if self._finished is not None:
+                return self._finished
+            self._abandoned = True
+            records = dict(self._records)
+            active = self._active
+            operation_results: list[OperationResult] = []
+            for operation in self.target.operations:
+                completed = records.get(operation.identity)
+                if completed is not None:
+                    operation_results.append(completed)
+                elif operation.disposition is not PlanDisposition.EXECUTE:
+                    operation_results.append(
+                        _non_executable_operation_result(operation)
+                    )
+                elif operation.identity == active:
+                    operation_results.append(
+                        OperationResult(
+                            identity=operation.identity,
+                            kind=operation.kind,
+                            status=OperationStatus.UNKNOWN,
+                            elapsed=0.0,
+                            reason=OutcomeReason(
+                                OutcomeReasonCode.COMPLETION_UNKNOWN
+                            ),
+                            _deployment_name=self._active_deployment_name,
+                        )
+                    )
+                else:
+                    operation_results.append(
+                        _unreached_operation_result(
+                            operation,
+                            OutcomeReasonCode.RUN_INTERRUPTED,
+                        )
+                    )
+            elapsed = (
+                time.monotonic() - self._started_at
+                if self._started_at is not None
+                else 0.0
+            )
+            operations = tuple(operation_results)
+            site = SiteResult.from_operations(
+                target=self.target.name,
+                kind=self.target.kind,
+                operations=operations,
+                elapsed=elapsed,
+                reason=_site_reason(operations),
+            )
+            self._finished = _TargetExecution(
+                site=site,
+                outputs=copy.deepcopy(self._outputs),
+                interrupted=True,
+            )
+            return self._finished
+
+    def snapshot_cancelled(self) -> _TargetExecution:
+        """Stop before another provider call while retaining known outcomes."""
+        with self._lock:
+            if self._finished is not None:
+                return self._finished
+            self._abandoned = True
+            records = dict(self._records)
+            operation_results: list[OperationResult] = []
+            for operation in self.target.operations:
+                completed = records.get(operation.identity)
+                if completed is not None:
+                    operation_results.append(completed)
+                else:
+                    operation_results.append(
+                        _cancelled_operation_result(operation)
+                    )
+            elapsed = (
+                time.monotonic() - self._started_at
+                if self._started_at is not None
+                else 0.0
+            )
+            operations = tuple(operation_results)
+            site = SiteResult.from_operations(
+                target=self.target.name,
+                kind=self.target.kind,
+                operations=operations,
+                elapsed=elapsed,
+                reason=_site_reason(operations),
+            )
+            self._finished = _TargetExecution(
+                site=site,
+                outputs=copy.deepcopy(self._outputs),
+                interrupted=True,
+            )
+            return self._finished
+
+    def snapshot_failed(self, error: Exception) -> _TargetExecution:
+        """Retain observations when unexpected execution code fails."""
+        with self._lock:
+            if self._finished is not None:
+                return self._finished
+            reason = OutcomeReason(
+                OutcomeReasonCode.OPERATION_FAILED,
+                private_detail=f"Execution stopped unexpectedly: {error}",
+            )
+            records = []
+            for operation in self.target.operations:
+                if operation.identity in self._records:
+                    records.append(self._records[operation.identity])
+                elif operation.identity == self._active:
+                    records.append(OperationResult(
+                        identity=operation.identity,
+                        kind=operation.kind,
+                        status=OperationStatus.UNKNOWN,
+                        elapsed=0.0,
+                        reason=OutcomeReason(
+                            OutcomeReasonCode.COMPLETION_UNKNOWN,
+                            private_detail=_exception_detail(error),
+                        ),
+                        _deployment_name=self._active_deployment_name,
+                    ))
+                else:
+                    records.append(_unreached_operation_result(
+                        operation, OutcomeReasonCode.EARLIER_OPERATION_FAILED,
+                    ))
+            self._finished = _TargetExecution(
+                SiteResult.from_operations(
+                    target=self.target.name,
+                    kind=self.target.kind,
+                    operations=tuple(records),
+                    elapsed=(
+                        time.monotonic() - self._started_at
+                        if self._started_at is not None else 0.0
+                    ),
+                    reason=reason,
+                ),
+                copy.deepcopy(self._outputs),
+            )
+            return self._finished
 
 
 class Orchestrator:
@@ -2497,104 +2842,6 @@ class Orchestrator:
                 rg_sites.append(site)
 
         return groups
-
-    def _print_deployment_summary(
-        self,
-        results: list[dict[str, Any]],
-        total_elapsed: float,
-    ) -> None:
-        """Print deployment summary.
-
-        Args:
-            results: List of deployment results per site
-            total_elapsed: Total elapsed time in seconds
-        """
-        succeeded = sum(1 for r in results if r["status"] == "success")
-        failed = sum(1 for r in results if r["status"] == "failed")
-        blocked = sum(1 for r in results if r["status"] == "blocked")
-        total = len(results)
-
-        print()
-        print("=" * 60)
-        print("  Deployment Summary")
-        print("=" * 60)
-        print()
-
-        if is_redaction_enabled():
-            summary_parts = [f"{succeeded} succeeded", f"{failed} failed"]
-            if blocked:
-                summary_parts.append(f"{blocked} blocked")
-            print(f"  Total: {', '.join(summary_parts)} ({total} sites)")
-            print(f"  Duration: {total_elapsed:.1f}s")
-
-            reportable_errors: dict[str, int] = {}
-            for result in results:
-                if result["status"] == "success":
-                    continue
-                error = str(result.get("error", "Unknown error"))
-                site = str(result.get("site", ""))
-                reportable = (
-                    scrub_site_for_output(error, site)
-                    if site
-                    else scrub_for_output(error)
-                ) or "Unknown error"
-                reportable_errors[reportable] = (
-                    reportable_errors.get(reportable, 0) + 1
-                )
-            if reportable_errors:
-                print()
-                print("  Failures:")
-                for error, count in reportable_errors.items():
-                    print(f"    {count} site(s): {error}")
-            print()
-            return
-
-        # Results table header
-        print(f"  {'SITE':<25} {'STATUS':<10} {'STEPS':<15} {'DURATION':<10}")
-        print(f"  {'-'*25} {'-'*10} {'-'*15} {'-'*10}")
-
-        # Sort by site name for consistent output
-        for result in sorted(results, key=lambda r: r["site"]):
-            site = result["site"]
-            result_status = result["status"]
-            if result_status == "success":
-                status = "+ Success"
-            elif result_status == "blocked":
-                status = "- Blocked"
-            else:
-                status = "x Failed"
-            steps = f"{result['steps_completed']}/{result['steps_total']}"
-            if result.get("steps_skipped"):
-                steps += f" ({result['steps_skipped']} skip)"
-            duration = f"{result['elapsed']:.1f}s"
-
-            print(f"  {site:<25} {status:<10} {steps:<15} {duration:<10}")
-
-        print()
-        summary_parts = [f"{succeeded} succeeded", f"{failed} failed"]
-        if blocked:
-            summary_parts.append(f"{blocked} blocked")
-        print(f"  Total: {', '.join(summary_parts)} ({total} sites)")
-        print(f"  Duration: {total_elapsed:.1f}s")
-        print()
-
-        # Show errors for failed sites
-        failed_results = [r for r in results if r["status"] == "failed"]
-        if failed_results:
-            print("  Failed Sites:")
-            for result in failed_results:
-                error = result.get("error", "Unknown error")
-                print(f"    [{result['site']}] {scrub_for_output(error)}")
-            print()
-
-        # Show blocked sites
-        blocked_results = [r for r in results if r["status"] == "blocked"]
-        if blocked_results:
-            print("  Blocked Sites:")
-            for result in blocked_results:
-                error = result.get("error", "Blocked due to subscription failure")
-                print(f"    [{result['site']}] {scrub_for_output(error)}")
-            print()
 
     def filter_sites(self, selector: dict[str, list[str]]) -> list[Site]:
         """Apply a parsed selector to the workspace's sites.
@@ -4784,6 +5031,7 @@ class Orchestrator:
         timestamp: str,
         outputs: dict[OperationIdentity, dict[str, Any]],
         execution_mode: PlanExecutionMode,
+        stop_requested: threading.Event | None = None,
     ) -> StepResult:
         details = operation.details
         if isinstance(details, DeploymentOperation):
@@ -4836,6 +5084,7 @@ class Orchestrator:
                     deployment_name=deployment_name,
                     step_name=operation.identity.step,
                     site_name=target.name,
+                    stop_requested=stop_requested,
                 )
             return self.executor.deploy_resource_group(
                 subscription=target.subscription,
@@ -4845,6 +5094,7 @@ class Orchestrator:
                 deployment_name=deployment_name,
                 step_name=operation.identity.step,
                 site_name=target.name,
+                stop_requested=stop_requested,
             )
 
         if isinstance(details, KubectlOperation):
@@ -4897,6 +5147,7 @@ class Orchestrator:
                     files=files,
                     step_name=operation.identity.step,
                     site_name=target.name,
+                    stop_requested=stop_requested,
                 )
             return KubectlResult(
                 success=False,
@@ -4986,6 +5237,7 @@ class Orchestrator:
             subscription=target.subscription,
             step_name=operation.identity.step,
             site_name=target.name,
+            stop_requested=stop_requested,
         )
 
     def _execute_prepared_target(
@@ -4995,69 +5247,96 @@ class Orchestrator:
         timestamp: str,
         inherited_outputs: dict[OperationIdentity, dict[str, Any]],
         *,
-        parallel_mode: bool,
         execution_mode: PlanExecutionMode,
-    ) -> tuple[dict[str, Any], dict[OperationIdentity, dict[str, Any]]]:
-        target_start = time.time()
+        progress: _ProgressOwner,
+        state: _TargetExecutionState | None = None,
+        stop_requested: threading.Event | None = None,
+    ) -> _TargetExecution:
+        target_start = time.monotonic()
+        state = state or _TargetExecutionState(target)
+        state.start()
         outputs = dict(inherited_outputs)
         produced_outputs: dict[
             OperationIdentity,
             dict[str, Any],
         ] = {}
-        log = _thread_safe_print if parallel_mode else print
-        target_label = site_name_for_output(target.name)
+        operation_results: list[OperationResult] = []
+        progress.emit(
+            ProgressEvent(
+                kind=ProgressEventKind.TARGET_STARTED,
+                target=target.name,
+            )
+        )
 
-        steps_completed = 0
-        steps_skipped = 0
-        status = "success"
-        error_message: str | None = None
-        step_results: list[dict[str, Any]] = []
-
-        for operation in target.operations:
-            if operation.disposition is PlanDisposition.SKIP:
-                if operation.skip_reason is None:
-                    raise ValueError(
-                        f"Skipped step '{operation.identity.step}' on site "
-                        f"'{operation.identity.target}' has no reason."
+        for index, operation in enumerate(target.operations):
+            if stop_requested is not None and stop_requested.is_set():
+                execution = state.snapshot_cancelled()
+                progress.emit(
+                    ProgressEvent(
+                        kind=ProgressEventKind.TARGET_FINISHED,
+                        target=target.name,
+                        site_status=execution.site.status,
+                        elapsed=execution.site.elapsed,
                     )
-                reason = operation.skip_reason.detail
-                shown_reason = (
-                    "condition not met"
-                    if operation.skip_reason.code
-                    is SkipReasonCode.CONDITION_FALSE
-                    else reason
                 )
-                log(
-                    f"[{target_label}] - {operation.identity.step} "
-                    f"(skipped: {shown_reason})"
+                return execution
+            if state.is_abandoned():
+                break
+            if operation.disposition is PlanDisposition.SKIP:
+                operation_result = _non_executable_operation_result(
+                    operation
                 )
-                steps_skipped += 1
-                step_results.append(
-                    {
-                        "step": operation.identity.step,
-                        "status": "skipped",
-                        "reason": reason,
-                    }
+                operation_results.append(operation_result)
+                state.record(operation_result)
+                progress.emit(
+                    ProgressEvent(
+                        kind=ProgressEventKind.OPERATION_FINISHED,
+                        target=target.name,
+                        operation=operation.identity,
+                        operation_kind=operation.kind,
+                        operation_status=operation_result.status,
+                        reason=operation_result.reason,
+                    )
                 )
                 continue
             if operation.disposition is PlanDisposition.BLOCKED:
-                raise ValueError(
-                    f"Step '{operation.identity.step}' on site "
-                    f"'{operation.identity.target}' is blocked."
+                operation_result = _non_executable_operation_result(
+                    operation
                 )
+                operation_results.append(operation_result)
+                state.record(operation_result)
+                progress.emit(
+                    ProgressEvent(
+                        kind=ProgressEventKind.OPERATION_FINISHED,
+                        target=target.name,
+                        operation=operation.identity,
+                        operation_kind=operation.kind,
+                        operation_status=operation_result.status,
+                        reason=operation_result.reason,
+                    )
+                )
+                continue
 
-            details = operation.details
-            if isinstance(details, KubectlOperation):
-                step_type = f"kubectl:{details.operation}"
-            elif isinstance(details, ArmTagWaitOperation):
-                step_type = "wait"
-            else:
-                step_type = operation.scope.value
-            log(
-                f"[{target_label}] > {operation.identity.step} "
-                f"({step_type})..."
+            deployment_name = (
+                self._prepared_deployment_name(
+                    plan.manifest_name, target.name, operation.identity.step, timestamp,
+                )
+                if operation.kind is OperationKind.DEPLOYMENT else None
             )
+            progress.emit(
+                ProgressEvent(
+                    kind=ProgressEventKind.OPERATION_STARTED,
+                    target=target.name,
+                    operation=operation.identity,
+                    operation_kind=operation.kind,
+                )
+            )
+            if stop_requested is not None and stop_requested.is_set():
+                return state.snapshot_cancelled()
+            if not state.begin(operation, deployment_name):
+                break
 
+            operation_start = time.monotonic()
             try:
                 result = self._execute_prepared_operation(
                     plan,
@@ -5066,16 +5345,14 @@ class Orchestrator:
                     timestamp,
                     outputs,
                     execution_mode,
+                    stop_requested,
                 )
             except (
                 PlanValueResolutionError,
                 TypeError,
                 ValueError,
             ) as error:
-                reportable = self._reportable_deploy_error(
-                    error,
-                    target.name,
-                )
+                private_error = str(error)
                 if operation.kind is OperationKind.DEPLOYMENT:
                     result = DeploymentResult(
                         success=False,
@@ -5087,124 +5364,147 @@ class Orchestrator:
                             operation.identity.step,
                             timestamp,
                         ),
-                        error=reportable,
+                        error=private_error,
                     )
                 elif operation.kind is OperationKind.KUBECTL:
                     result = KubectlResult(
                         success=False,
                         step_name=operation.identity.step,
                         site_name=target.name,
-                        error=reportable,
+                        error=private_error,
                     )
                 else:
                     result = WaitResult(
                         success=False,
                         step_name=operation.identity.step,
                         site_name=target.name,
-                        error=reportable,
+                        error=private_error,
                     )
+            operation_elapsed = time.monotonic() - operation_start
             if result.success:
                 step_outputs = (
                     result.outputs or {}
                     if isinstance(result, DeploymentResult)
                     else {}
                 )
+                operation_result = OperationResult(
+                    identity=operation.identity,
+                    kind=operation.kind,
+                    status=OperationStatus.SUCCEEDED,
+                    elapsed=operation_elapsed,
+                    _private_outputs=step_outputs,
+                    _deployment_name=(
+                        result.deployment_name
+                        if isinstance(result, DeploymentResult)
+                        else None
+                    ),
+                )
+                if not state.record(operation_result, step_outputs):
+                    break
+                operation_results.append(operation_result)
                 if step_outputs:
                     outputs[operation.identity] = step_outputs
                     produced_outputs[operation.identity] = step_outputs
-                log(f"[{target_label}] + {operation.identity.step}")
-                steps_completed += 1
-                step_results.append(
-                    {
-                        "step": operation.identity.step,
-                        "status": "success",
-                        "outputs": step_outputs,
-                    }
+                progress.emit(
+                    ProgressEvent(
+                        kind=ProgressEventKind.OPERATION_FINISHED,
+                        target=target.name,
+                        operation=operation.identity,
+                        operation_kind=operation.kind,
+                        operation_status=operation_result.status,
+                    )
                 )
                 continue
 
-            reportable_error = scrub_site_for_output(
-                result.error,
-                target.name,
+            private_error = result.error
+            completion_unknown = _provider_completion_unknown(result)
+            reason = OutcomeReason(
+                (
+                    OutcomeReasonCode.CANCELLED_BEFORE_START
+                    if result.stopped_before_start
+                    else OutcomeReasonCode.COMPLETION_UNKNOWN
+                    if completion_unknown
+                    else OutcomeReasonCode.OPERATION_FAILED
+                ),
+                private_detail=(
+                    private_error if private_error and private_error.strip() else None
+                ),
             )
-            log(
-                f"[{target_label}] x {operation.identity.step}: "
-                f"{reportable_error}"
+            operation_result = OperationResult(
+                identity=operation.identity,
+                kind=operation.kind,
+                status=(
+                    OperationStatus.CANCELLED
+                    if result.stopped_before_start
+                    else OperationStatus.UNKNOWN
+                    if completion_unknown
+                    else OperationStatus.FAILED
+                ),
+                elapsed=operation_elapsed,
+                reason=reason,
+                _deployment_name=(
+                    result.deployment_name
+                    if isinstance(result, DeploymentResult)
+                    else None
+                ),
             )
-            status = "failed"
-            error_message = reportable_error
-            step_results.append(
-                {
-                    "step": operation.identity.step,
-                    "status": "failed",
-                    "error": reportable_error,
-                }
+            if not state.record(operation_result):
+                break
+            operation_results.append(operation_result)
+            progress.emit(
+                ProgressEvent(
+                    kind=ProgressEventKind.OPERATION_FINISHED,
+                    target=target.name,
+                    operation=operation.identity,
+                    operation_kind=operation.kind,
+                    operation_status=operation_result.status,
+                    reason=reason,
+                )
             )
+            for remaining in target.operations[index + 1 :]:
+                not_run = (
+                    _cancelled_operation_result(remaining)
+                    if result.stopped_before_start
+                    else _unreached_operation_result(
+                        remaining,
+                        (
+                            OutcomeReasonCode.EARLIER_OPERATION_UNKNOWN
+                            if completion_unknown
+                            else OutcomeReasonCode.EARLIER_OPERATION_FAILED
+                        ),
+                    )
+                )
+                operation_results.append(not_run)
+                state.record(not_run)
             break
 
-        elapsed = time.time() - target_start
-        total_steps = len(plan.steps)
-        skip_info = (
-            f", {steps_skipped} skipped"
-            if steps_skipped > 0
-            else ""
-        )
-        status_symbol = "+" if status == "success" else "x"
-        log(
-            f"[{target_label}] {status_symbol} completed in {elapsed:.1f}s "
-            f"({steps_completed}/{total_steps - steps_skipped} steps"
-            f"{skip_info})"
-        )
+        if state.is_abandoned():
+            return state.snapshot_interrupted()
 
-        if (
-            steps_completed == 0
-            and steps_skipped == total_steps
-            and total_steps > 0
-        ):
-            reasons = sorted(
-                {
-                    step_result["reason"]
-                    for step_result in step_results
-                    if step_result.get("status") == "skipped"
-                    and step_result.get("reason")
-                }
+        elapsed = time.monotonic() - target_start
+        operations = tuple(operation_results)
+        site = SiteResult.from_operations(
+            target=target.name,
+            kind=target.kind,
+            operations=operations,
+            elapsed=elapsed,
+            reason=_site_reason(operations),
+        )
+        execution = state.finish(
+            _TargetExecution(
+                site=site,
+                outputs=produced_outputs,
             )
-            detail = f" ({' | '.join(reasons)})" if reasons else ""
-            log(
-                f"[{target_label}] ! nothing deployed: every step was "
-                f"skipped{detail}."
-            )
-
-        return (
-            {
-                "site": target.name,
-                "status": status,
-                "error": error_message,
-                "steps_completed": steps_completed,
-                "steps_skipped": steps_skipped,
-                "steps_total": total_steps,
-                "elapsed": elapsed,
-                "steps": step_results,
-            },
-            produced_outputs,
         )
-
-    @staticmethod
-    def _prepared_target_failure_result(
-        target: PreparedTarget,
-        plan: DeploymentPlan,
-        error: str,
-    ) -> dict[str, Any]:
-        return {
-            "site": target.name,
-            "status": "failed",
-            "error": scrub_site_for_output(error, target.name),
-            "steps_completed": 0,
-            "steps_skipped": 0,
-            "steps_total": len(plan.steps),
-            "elapsed": 0.0,
-            "steps": [],
-        }
+        progress.emit(
+            ProgressEvent(
+                kind=ProgressEventKind.TARGET_FINISHED,
+                target=target.name,
+                site_status=execution.site.status,
+                elapsed=execution.site.elapsed,
+            )
+        )
+        return execution
 
     def _run_prepared_targets(
         self,
@@ -5213,27 +5513,53 @@ class Orchestrator:
         timestamp: str,
         inherited_outputs: dict[OperationIdentity, dict[str, Any]],
         execution_mode: PlanExecutionMode,
+        *,
+        progress: _ProgressOwner,
+        stop_requested: threading.Event | None = None,
     ) -> tuple[
-        list[dict[str, Any]],
+        list[SiteResult],
         dict[OperationIdentity, dict[str, Any]],
+        bool,
     ]:
         if not targets:
-            return [], {}
+            return [], {}, False
+        stop_requested = stop_requested if stop_requested is not None else threading.Event()
 
         parallel = ParallelConfig(sites=plan.max_parallel_sites)
         if parallel.is_sequential or len(targets) == 1:
-            results: list[dict[str, Any]] = []
+            results: list[SiteResult] = []
             produced: dict[OperationIdentity, dict[str, Any]] = {}
-            for target in targets:
+            for index, target in enumerate(targets):
+                if stop_requested.is_set():
+                    results.extend(_cancelled_target_result(t) for t in targets[index:])
+                    return results, produced, True
+                state = _TargetExecutionState(target)
                 try:
-                    result, target_outputs = self._execute_prepared_target(
+                    execution = self._execute_prepared_target(
                         plan,
                         target,
                         timestamp,
                         inherited_outputs,
-                        parallel_mode=False,
                         execution_mode=execution_mode,
+                        progress=progress,
+                        state=state,
+                        stop_requested=stop_requested,
                     )
+                except KeyboardInterrupt:
+                    stop_requested.set()
+                    snapshot = state.snapshot_interrupted()
+                    results.append(snapshot.site)
+                    produced.update(snapshot.outputs)
+                    results.extend(
+                        _cancelled_target_result(remaining)
+                        for remaining in targets[index + 1 :]
+                    )
+                    progress.emit(
+                        ProgressEvent(
+                            kind=ProgressEventKind.RUN_INTERRUPTED,
+                        )
+                    )
+                    return results, produced, True
                 except Exception as error:
                     reportable = self._reportable_deploy_error(
                         error,
@@ -5243,15 +5569,10 @@ class Orchestrator:
                         "Unexpected error deploying to "
                         f"{site_name_for_output(target.name)}: {reportable}"
                     )
-                    result = self._prepared_target_failure_result(
-                        target,
-                        plan,
-                        f"Unexpected error: {reportable}",
-                    )
-                    target_outputs = {}
-                results.append(result)
-                produced.update(target_outputs)
-            return results, produced
+                    execution = state.snapshot_failed(error)
+                results.append(execution.site)
+                produced.update(execution.outputs)
+            return results, produced, stop_requested.is_set()
 
         max_workers = parallel.max_workers
         worker_count = (
@@ -5259,31 +5580,50 @@ class Orchestrator:
             if max_workers is None
             else min(len(targets), max_workers)
         )
-        print(
-            f"\n  [Parallel] Deploying to {len(targets)} sites "
-            f"({worker_count} concurrent)"
+        progress.emit(
+            ProgressEvent(
+                kind=ProgressEventKind.BATCH_STARTED,
+                target_count=len(targets),
+                worker_count=worker_count,
+            )
         )
-        results = []
-        produced = {}
-        result_lock = threading.Lock()
+        results_by_target: dict[str, SiteResult] = {}
+        outputs_by_target: dict[
+            str,
+            dict[OperationIdentity, dict[str, Any]],
+        ] = {}
+        states = {
+            target.name: _TargetExecutionState(target)
+            for target in targets
+        }
         future_to_target = {}
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        executor = ThreadPoolExecutor(max_workers=worker_count)
+        interrupted = False
+        try:
+            for target in targets:
+                future = executor.submit(
+                    self._execute_prepared_target,
+                    plan,
+                    target,
+                    timestamp,
+                    inherited_outputs,
+                    execution_mode=execution_mode,
+                    progress=progress,
+                    state=states[target.name],
+                    stop_requested=stop_requested,
+                )
+                future_to_target[future] = target
             try:
-                for target in targets:
-                    future = executor.submit(
-                        self._execute_prepared_target,
-                        plan,
-                        target,
-                        timestamp,
-                        inherited_outputs,
-                        parallel_mode=True,
-                        execution_mode=execution_mode,
-                    )
-                    future_to_target[future] = target
                 for future in as_completed(future_to_target):
                     target = future_to_target[future]
                     try:
-                        result, target_outputs = future.result()
+                        execution = future.result()
+                    except KeyboardInterrupt:
+                        interrupted = True
+                        stop_requested.set()
+                        execution = states[
+                            target.name
+                        ].snapshot_interrupted()
                     except Exception as error:
                         reportable = self._reportable_deploy_error(
                             error,
@@ -5294,27 +5634,68 @@ class Orchestrator:
                             f"{site_name_for_output(target.name)}: "
                             f"{reportable}"
                         )
-                        result = self._prepared_target_failure_result(
-                            target,
-                            plan,
-                            f"Unexpected error: {reportable}",
-                        )
-                        target_outputs = {}
-                    with result_lock:
-                        results.append(result)
-                        produced.update(target_outputs)
-            except BaseException:
-                cancelled = sum(
-                    1
-                    for pending in future_to_target
-                    if pending.cancel()
+                        execution = states[target.name].snapshot_failed(error)
+                    results_by_target[target.name] = execution.site
+                    outputs_by_target[target.name] = execution.outputs
+                    if interrupted or stop_requested.is_set():
+                        interrupted = True
+                        break
+            except KeyboardInterrupt:
+                interrupted = True
+                stop_requested.set()
+        finally:
+            if interrupted:
+                for future in future_to_target:
+                    future.cancel()
+            # Never release provider scratch while a worker still owns a call.
+            while True:
+                try:
+                    executor.shutdown(wait=True, cancel_futures=interrupted)
+                    break
+                except KeyboardInterrupt:
+                    interrupted = True
+                    stop_requested.set()
+
+        if interrupted:
+            for future, target in future_to_target.items():
+                if target.name in results_by_target:
+                    continue
+                if future.cancelled():
+                    execution = _TargetExecution(
+                        site=_cancelled_target_result(target),
+                        outputs={},
+                        interrupted=True,
+                    )
+                else:
+                    try:
+                        execution = future.result()
+                    except KeyboardInterrupt:
+                        execution = states[
+                            target.name
+                        ].snapshot_interrupted()
+                    except Exception as error:
+                        execution = states[target.name].snapshot_failed(error)
+                results_by_target[target.name] = execution.site
+                outputs_by_target[target.name] = execution.outputs
+            progress.emit(
+                ProgressEvent(
+                    kind=ProgressEventKind.RUN_INTERRUPTED,
                 )
-                logger.error(
-                    f"Deployment stopped. {len(results)} site(s) reported, "
-                    f"{cancelled} not started."
-                )
-                raise
-        return results, produced
+            )
+
+        ordered_results = [
+            results_by_target[target.name]
+            for target in targets
+        ]
+        produced = {
+            identity: output
+            for target in targets
+            for identity, output in outputs_by_target.get(
+                target.name,
+                {},
+            ).items()
+        }
+        return ordered_results, produced, interrupted
 
     @staticmethod
     def _target_has_unavailable_source_reference(
@@ -5373,161 +5754,210 @@ class Orchestrator:
         result: PlanBuildResult,
         *,
         mode: PlanExecutionMode = PlanExecutionMode.APPLY,
-    ) -> dict[str, Any]:
-        """Execute one previously prepared plan without replanning."""
+        progress: ProgressCallback | None = None,
+        stop_requested: threading.Event | None = None,
+    ) -> RunResult:
+        """Execute one previously prepared plan and return typed outcomes."""
         if not result.executable or result.plan is None:
             raise PlanNotExecutableError(result)
         plan = result.plan
-        self._bind_plan_capabilities(plan)
-        if not plan.targets:
-            logger.warning("No sites to deploy to")
-            return {
-                "sites": {},
-                "summary": {
-                    "total": 0,
-                    "succeeded": 0,
-                    "failed": 0,
-                    "elapsed": 0.0,
-                },
-            }
+        progress_owner = _ProgressOwner(progress)
+        stop_requested = stop_requested if stop_requested is not None else threading.Event()
+        try:
+            self._bind_plan_capabilities(plan)
+            if not plan.targets:
+                return RunResult.from_sites((), elapsed=0.0)
 
-        logger.info(
-            f"Deploying '{plan.manifest_name}' to "
-            f"{len(plan.targets)} site(s) "
-            f"(parallel: {ParallelConfig(plan.max_parallel_sites)})"
-        )
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-        start_time = time.time()
-        results: list[dict[str, Any]] = []
-        operation_outputs: dict[
-            OperationIdentity,
-            dict[str, Any],
-        ] = {}
+            logger.info(
+                f"Deploying '{plan.manifest_name}' to "
+                f"{len(plan.targets)} site(s) "
+                f"(parallel: {ParallelConfig(plan.max_parallel_sites)})"
+            )
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+            start_time = time.monotonic()
+            results_by_target: dict[str, SiteResult] = {}
+            operation_outputs: dict[
+                OperationIdentity,
+                dict[str, Any],
+            ] = {}
+            interrupted = False
 
-        subscription_targets: dict[str, PreparedTarget] = {}
-        resource_group_targets: list[PreparedTarget] = []
-        for target in plan.targets:
-            if target.kind is TargetKind.SUBSCRIPTION:
-                existing = subscription_targets.get(target.subscription)
-                if existing is not None:
-                    names = f"{existing.name}, {target.name}"
-                    raise MultipleSubscriptionSitesError(
-                        f"Subscription "
-                        f"'{_reportable_subscription(target.subscription)}' "
-                        f"has multiple subscription-level sites: {names}. "
-                        "Only one subscription-level site per subscription "
-                        "is allowed."
+            subscription_targets: dict[str, PreparedTarget] = {}
+            resource_group_targets: list[PreparedTarget] = []
+            for target in plan.targets:
+                if target.kind is TargetKind.SUBSCRIPTION:
+                    existing = subscription_targets.get(target.subscription)
+                    if existing is not None:
+                        names = f"{existing.name}, {target.name}"
+                        raise MultipleSubscriptionSitesError(
+                            f"Subscription "
+                            f"'{_reportable_subscription(target.subscription)}' "
+                            f"has multiple subscription-level sites: {names}. "
+                            "Only one subscription-level site per subscription "
+                            "is allowed."
+                        )
+                    subscription_targets[target.subscription] = target
+                else:
+                    resource_group_targets.append(target)
+
+            has_subscription_steps = any(
+                step.scope is OperationScope.SUBSCRIPTION
+                for step in plan.steps
+            )
+            if has_subscription_steps:
+                if subscription_targets:
+                    progress_owner.emit(
+                        ProgressEvent(
+                            kind=ProgressEventKind.PHASE_STARTED,
+                            phase=ProgressPhase.SUBSCRIPTION,
+                            target_count=len(subscription_targets),
+                        )
                     )
-                subscription_targets[target.subscription] = target
-            else:
-                resource_group_targets.append(target)
-
-        has_subscription_steps = any(
-            step.scope is OperationScope.SUBSCRIPTION
-            for step in plan.steps
-        )
-        if has_subscription_steps:
-            if subscription_targets:
-                print(
-                    "\n  [Phase 1] Subscription-scoped steps: "
-                    f"{len(subscription_targets)} subscription(s)"
-                )
-            subscription_results, subscription_outputs = (
-                self._run_prepared_targets(
+                (
+                    subscription_results,
+                    subscription_outputs,
+                    subscription_interrupted,
+                ) = self._run_prepared_targets(
                     plan,
                     list(subscription_targets.values()),
                     timestamp,
                     operation_outputs,
                     mode,
+                    progress=progress_owner,
+                    stop_requested=stop_requested,
                 )
-            )
-            results.extend(subscription_results)
-            operation_outputs.update(subscription_outputs)
-            failed_subscription_targets = {
-                row["site"]
-                for row in subscription_results
-                if row["status"] == "failed"
-            }
+                for site in subscription_results:
+                    results_by_target[site.target] = site
+                operation_outputs.update(subscription_outputs)
+                interrupted = subscription_interrupted
 
-            proceeding_targets: list[PreparedTarget] = []
-            for target in resource_group_targets:
-                subscription_target = subscription_targets.get(
-                    target.subscription
-                )
-                if (
-                    subscription_target is not None
-                    and subscription_target.name
-                    in failed_subscription_targets
-                    and self._target_has_unavailable_source_reference(
-                        target,
-                        subscription_target.name,
-                        operation_outputs,
-                    )
-                ):
-                    _thread_safe_print(
-                        f"[{site_name_for_output(target.name)}] - blocked "
-                        "(subscription deployment failed, site depends on "
-                        "its outputs)"
-                    )
-                    results.append(
-                        {
-                            "site": target.name,
-                            "status": "blocked",
-                            "error": (
-                                "Subscription deployment failed and site "
-                                "depends on its outputs"
-                            ),
-                            "steps_completed": 0,
-                            "steps_skipped": len(plan.steps),
-                            "steps_total": len(plan.steps),
-                            "elapsed": 0.0,
-                            "steps": [],
-                        }
-                    )
+                if interrupted:
+                    for target in resource_group_targets:
+                        results_by_target[target.name] = (
+                            _cancelled_target_result(target)
+                        )
                 else:
-                    proceeding_targets.append(target)
+                    unsuccessful_subscription_targets = {
+                        site.target
+                        for site in subscription_results
+                        if site.status
+                        not in {
+                            SiteStatus.SUCCEEDED,
+                            SiteStatus.SKIPPED,
+                        }
+                    }
+                    proceeding_targets: list[PreparedTarget] = []
+                    for target in resource_group_targets:
+                        subscription_target = subscription_targets.get(
+                            target.subscription
+                        )
+                        if (
+                            subscription_target is not None
+                            and subscription_target.name
+                            in unsuccessful_subscription_targets
+                            and self._target_has_unavailable_source_reference(
+                                target,
+                                subscription_target.name,
+                                operation_outputs,
+                            )
+                        ):
+                            blocked = _dependency_blocked_target_result(
+                                target
+                            )
+                            results_by_target[target.name] = blocked
+                            progress_owner.emit(
+                                ProgressEvent(
+                                    kind=ProgressEventKind.TARGET_BLOCKED,
+                                    target=target.name,
+                                    site_status=blocked.status,
+                                    reason=blocked.reason,
+                                )
+                            )
+                        else:
+                            proceeding_targets.append(target)
 
-            if proceeding_targets:
-                print(
-                    "\n  [Phase 2] Resource group-scoped steps: "
-                    f"{len(proceeding_targets)} site(s)"
+                    if proceeding_targets:
+                        progress_owner.emit(
+                            ProgressEvent(
+                                kind=ProgressEventKind.PHASE_STARTED,
+                                phase=ProgressPhase.RESOURCE_GROUP,
+                                target_count=len(proceeding_targets),
+                            )
+                        )
+                        (
+                            resource_results,
+                            _,
+                            resource_interrupted,
+                        ) = self._run_prepared_targets(
+                            plan,
+                            proceeding_targets,
+                            timestamp,
+                            operation_outputs,
+                            mode,
+                            progress=progress_owner,
+                            stop_requested=stop_requested,
+                        )
+                        for site in resource_results:
+                            results_by_target[site.target] = site
+                        interrupted = resource_interrupted
+            else:
+                progress_owner.emit(
+                    ProgressEvent(
+                        kind=ProgressEventKind.PHASE_STARTED,
+                        phase=ProgressPhase.TARGETS,
+                        target_count=len(plan.targets),
+                    )
                 )
-                resource_results, _ = self._run_prepared_targets(
+                all_results, _, interrupted = self._run_prepared_targets(
                     plan,
-                    proceeding_targets,
+                    list(plan.targets),
                     timestamp,
                     operation_outputs,
                     mode,
+                    progress=progress_owner,
+                    stop_requested=stop_requested,
                 )
-                results.extend(resource_results)
-        else:
-            all_results, _ = self._run_prepared_targets(
-                plan,
-                list(plan.targets),
-                timestamp,
-                operation_outputs,
-                mode,
-            )
-            results.extend(all_results)
+                for site in all_results:
+                    results_by_target[site.target] = site
 
-        total_elapsed = time.time() - start_time
-        summary = {
-            "total": len(results),
-            "succeeded": sum(
-                row["status"] == "success"
-                for row in results
-            ),
-            "failed": sum(
-                row["status"] == "failed"
-                for row in results
-            ),
-            "elapsed": total_elapsed,
-        }
-        self._print_deployment_summary(results, total_elapsed)
-        return {
-            "sites": {row["site"]: row for row in results},
-            "summary": summary,
-        }
+            interrupted = interrupted or stop_requested.is_set()
+            ordered_sites = tuple(
+                results_by_target[target.name]
+                for target in plan.targets
+            )
+            diagnostics: list[RunDiagnostic] = []
+            if interrupted:
+                diagnostics.append(
+                    RunDiagnostic(
+                        code="run-interrupted",
+                        severity=RunDiagnosticSeverity.WARNING,
+                        summary=(
+                            "Execution was interrupted. Unfinished outcomes "
+                            "were retained."
+                        ),
+                    )
+                )
+            progress_failure = progress_owner.failure
+            if progress_failure is not None:
+                diagnostics.append(
+                    RunDiagnostic(
+                        code="progress-reporting-failed",
+                        severity=RunDiagnosticSeverity.WARNING,
+                        summary=(
+                            "Progress reporting stopped before execution "
+                            "completed."
+                        ),
+                        private_detail=_exception_detail(progress_failure),
+                    )
+                )
+            return RunResult.from_sites(
+                ordered_sites,
+                elapsed=time.monotonic() - start_time,
+                interrupted=interrupted,
+                diagnostics=tuple(diagnostics),
+            )
+        finally:
+            self.executor.close()
 
     def deploy(
         self,
@@ -5537,8 +5967,11 @@ class Orchestrator:
         manifest: Manifest | None = None,
         sites: list[Site] | None = None,
         plan_result: PlanBuildResult | None = None,
-    ) -> dict[str, Any]:
-        """Prepare one deployment plan and execute it."""
+        *,
+        progress: ProgressCallback | None = None,
+        stop_requested: threading.Event | None = None,
+    ) -> RunResult:
+        """Prepare once and return typed outcomes without owning output."""
         result = plan_result or self.build_plan(
             manifest_path,
             selector,
@@ -5554,4 +5987,6 @@ class Orchestrator:
                 if self.dry_run
                 else PlanExecutionMode.APPLY
             ),
+            progress=progress,
+            stop_requested=stop_requested,
         )

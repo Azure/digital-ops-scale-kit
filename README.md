@@ -177,6 +177,9 @@ digital-ops-scale-kit/
 │   ├── models.py                 # Site, Manifest, Step dataclasses
 │   ├── orchestrator.py           # Shared validation, planning, and execution coordination
 │   ├── planning.py               # Prepared plan models, rendering, and projections
+│   ├── results.py                # Run, site, and operation outcome models
+│   ├── reporting.py              # Progress and final result rendering and projections
+│   ├── runtime.py                # Private temporary allocations outside the workspace
 │   ├── executor.py               # Azure CLI and kubectl execution
 │   └── __main__.py               # Enables `python -m siteops`
 ├── tests/                        # Test suite
@@ -316,6 +319,7 @@ auto-filtering, merge order, and cross-scope output chaining.
 | `siteops plan <manifest> --describe` | Show the compile-free plan shape |
 | `siteops plan <manifest> --output json` | Emit one structured plan document |
 | `siteops deploy <manifest>` | Execute deployment |
+| `siteops deploy <manifest> --output json` | Emit one structured run result |
 | `siteops deploy <manifest> --dry-run` | Compatibility alias for executable planning |
 
 ### Common options
@@ -329,6 +333,7 @@ auto-filtering, merge order, and cross-scope output chaining.
 
 See [docs/targeting.md](docs/targeting.md) for the selector grammar and the no-match diagnostic.
 See [docs/plan-output.md](docs/plan-output.md) for JSON projections and publication boundaries.
+See [docs/run-output.md](docs/run-output.md) for run outcomes, exit codes, and interruption behavior.
 
 ---
 

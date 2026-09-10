@@ -40,7 +40,13 @@ import yaml
 
 from siteops.models import Manifest
 from siteops.orchestrator import Orchestrator
-from siteops.sanitize import scrub_site_for_output, site_name_for_output
+from siteops.results import (
+    OperationStatus,
+    RunResult,
+    SiteStatus,
+)
+from siteops.sanitize import site_name_for_output
+from tests.integration.helpers.assertions import outcome_reason_for_output
 
 WORKSPACE_PATH = Path(__file__).parent.parent.parent / "workspaces" / "iot-operations"
 SCRIPT_PATH = Path(__file__).parent.parent.parent / "scripts" / "generate-site-overrides.py"
@@ -281,8 +287,8 @@ def _resolve_or_fail(
     """Resolve sites for a manifest, raising a diagnostic error on zero matches.
 
     The historical failure mode was a silent vacuous pass: selector resolved
-    to an empty list, `deploy()` short-circuited with `sites={}`, and every
-    test body's `for name in result["sites"]:` loop became a no-op. This
+    to an empty list, `deploy()` returned no site outcomes, and every test
+    body's result loop became a no-op. This
     helper makes that impossible at the fixture boundary.
     """
     manifest = Manifest.from_file(manifest_path, workspace_root=WORKSPACE_PATH)
@@ -302,32 +308,53 @@ def _resolve_or_fail(
     return manifest, sites
 
 
-def _assert_deployed(result: dict, label: str) -> dict:
-    """Fail with the scrubbed diagnostic fields rather than the whole result.
+def _assert_deployed(result: RunResult, label: str) -> RunResult:
+    """Require real successful work and report incomplete outcomes safely.
 
-    A result carries fully-qualified resource ids on every site row, and a
-    failing assertion in CI writes its message to a published job log and to the
-    JUnit artifact. The engine already scrubs each site's `error` when the
-    destination is published, so reporting those fields keeps the failure
-    actionable without republishing what the scrub removed.
+    Typed reasons retain private local diagnostics. A failing assertion in CI
+    writes its message to a published job log and JUnit artifact, so publish
+    fixed reason text there and retain detailed reasons for local output.
     """
-    summary = result.get("summary", {})
-    if summary.get("failed"):
+    if not result.sites:
+        raise AssertionError(
+            f"{label} deployment returned no target results."
+        )
+    incomplete = [
+        site
+        for site in result.sites
+        if site.status
+        not in {SiteStatus.SUCCEEDED, SiteStatus.SKIPPED}
+    ]
+    if result.exit_code != 0:
         errors = [
             "  "
-            f"{site_name_for_output(name)}: "
-            f"{scrub_site_for_output(site.get('error', 'no error reported'), name)}"
-            for name, site in (result.get("sites") or {}).items()
-            if site.get("error")
+            f"{site_name_for_output(site.target)}: "
+            f"{outcome_reason_for_output(reason)}"
+            for site in incomplete
+            if (reason := site.failure_reason()) is not None
         ]
         raise AssertionError(
-            f"{label} deployment failed. Summary: {summary}\n" + "\n".join(errors)
+            f"{label} deployment did not complete: "
+            f"status={result.status.value}, interrupted={result.interrupted}\n"
+            + "\n".join(errors)
+        )
+    succeeded = sum(
+        operation.status is OperationStatus.SUCCEEDED
+        for site in result.sites
+        for operation in site.operations
+    )
+    if succeeded == 0:
+        raise AssertionError(
+            f"{label} deployment reported no executed successes."
         )
     return result
 
 
 @pytest.fixture(scope="session")
-def aio_install_result(orchestrator: Orchestrator, selector: str | None) -> dict:
+def aio_install_result(
+    orchestrator: Orchestrator,
+    selector: str | None,
+) -> RunResult | object:
     """Deploy aio-install.yaml once, shared by all dependent tests.
 
     Upgrade phase short-circuits to a sentinel: aio-install is desired-state,
@@ -348,37 +375,43 @@ def aio_install_result(orchestrator: Orchestrator, selector: str | None) -> dict
 
 @pytest.fixture(scope="session")
 def secretsync_result(
-    orchestrator: Orchestrator, selector: str | None, aio_install_result: dict
-) -> dict:
+    orchestrator: Orchestrator,
+    selector: str | None,
+    aio_install_result: RunResult | object,
+) -> RunResult:
     """Deploy secretsync.yaml after AIO is installed."""
     manifest_path = WORKSPACE_PATH / "manifests" / "secretsync.yaml"
     manifest, sites = _resolve_or_fail(orchestrator, manifest_path, selector)
-    return orchestrator.deploy(
+    result = orchestrator.deploy(
         manifest_path=manifest_path,
         manifest=manifest,
         sites=sites,
     )
+    return _assert_deployed(result, "secretsync")
 
 
 @pytest.fixture(scope="session")
 def opc_ua_solution_result(
-    orchestrator: Orchestrator, selector: str | None, aio_install_result: dict
-) -> dict:
+    orchestrator: Orchestrator,
+    selector: str | None,
+    aio_install_result: RunResult | object,
+) -> RunResult:
     """Deploy samples/opc-ua-solution/manifest.yaml after AIO is installed."""
     manifest_path = WORKSPACE_PATH / "samples" / "opc-ua-solution" / "manifest.yaml"
     manifest, sites = _resolve_or_fail(orchestrator, manifest_path, selector)
-    return orchestrator.deploy(
+    result = orchestrator.deploy(
         manifest_path=manifest_path,
         manifest=manifest,
         sites=sites,
     )
+    return _assert_deployed(result, "opc-ua-solution")
 
 
 @pytest.fixture(scope="module")
 def dataflow_sample_result(
     orchestrator: Orchestrator,
     selector: str | None,
-    aio_install_result: dict,
+    aio_install_result: RunResult | object,
     aio_namespace: str,
 ):
     """Deploy samples/dataflow-sample/manifest.yaml after AIO is installed.
@@ -408,6 +441,10 @@ def dataflow_sample_result(
         yield _assert_deployed(result, "dataflow-sample")
     finally:
         if phase_isolation_enabled():
+            if not isinstance(aio_install_result, RunResult):
+                raise AssertionError(
+                    "Dataflow phase cleanup requires the typed install result."
+                )
             for site in sites:
                 install_step = find_step(
                     aio_install_result,
@@ -456,8 +493,10 @@ def dataflow_sample_result(
 
 @pytest.fixture(scope="session")
 def aio_resources_result(
-    orchestrator: Orchestrator, selector: str | None, aio_install_result: dict
-) -> dict:
+    orchestrator: Orchestrator,
+    selector: str | None,
+    aio_install_result: RunResult | object,
+) -> RunResult:
     """Deploy `aio-resources.yaml` with one set selected per resource area.
 
     This is the fleet route: a site names a committed set through
@@ -503,8 +542,10 @@ def aio_resources_result(
 
 @pytest.fixture(scope="session")
 def aio_upgrade_result(
-    orchestrator: Orchestrator, selector: str | None, aio_install_result: dict
-) -> dict:
+    orchestrator: Orchestrator,
+    selector: str | None,
+    aio_install_result: RunResult | object,
+) -> RunResult:
     """Deploy aio-upgrade.yaml after AIO is installed.
 
     Without an aioRelease bump, the upgrade is a no-op same-version re-PUT
@@ -537,9 +578,9 @@ TEST_OVERRIDE_CERT_MANAGER_VALUE = "siteops-test-certmanager-value"
 def aio_upgrade_with_overrides_result(
     orchestrator: Orchestrator,
     selector: str | None,
-    aio_install_result: dict,
+    aio_install_result: RunResult | object,
     tmp_path_factory: pytest.TempPathFactory,
-) -> dict:
+) -> RunResult:
     """Deploy aio-upgrade.yaml with non-empty `configurationOverrides` on every
     extension. Exercises the `union(existing, overrides)` additive path in
     update-extensions.bicep so tests can assert pre-PUT keys are preserved
@@ -601,8 +642,10 @@ def aio_upgrade_with_overrides_result(
 
 @pytest.fixture(scope="session")
 def sync_secret_result(
-    orchestrator: Orchestrator, selector: str | None, aio_install_result: dict
-) -> dict:
+    orchestrator: Orchestrator,
+    selector: str | None,
+    aio_install_result: RunResult | object,
+) -> RunResult:
     """Deploy samples/secretsync-sample/manifest.yaml after AIO is installed.
 
     The sample composes resolve-aio + enable-secretsync + sync-secrets,
@@ -613,11 +656,12 @@ def sync_secret_result(
     """
     manifest_path = WORKSPACE_PATH / "samples" / "secretsync-sample" / "manifest.yaml"
     manifest, sites = _resolve_or_fail(orchestrator, manifest_path, selector)
-    return orchestrator.deploy(
+    result = orchestrator.deploy(
         manifest_path=manifest_path,
         manifest=manifest,
         sites=sites,
     )
+    return _assert_deployed(result, "sync-secrets")
 
 
 @pytest.fixture(scope="session")
@@ -644,7 +688,7 @@ def kubectl_available() -> None:
 
 
 @pytest.fixture(scope="session")
-def aio_namespace(aio_install_result: dict) -> str:
+def aio_namespace(aio_install_result: RunResult | object) -> str:
     """The namespace where AIO operators and SecretSync targets live.
 
     Extracted from the resolve-aio step's customLocationNamespace output
@@ -656,15 +700,14 @@ def aio_namespace(aio_install_result: dict) -> str:
     from tests.integration.helpers.assertions import find_step
 
     DEFAULT = "azure-iot-operations"
-    sites = aio_install_result.get("sites", {})
-    if not sites:
+    if not isinstance(aio_install_result, RunResult):
         return DEFAULT
-    site_name = next(iter(sites))
+    site_name = aio_install_result.sites[0].target
     try:
         resolve_step = find_step(aio_install_result, site_name, "resolve-aio")
     except (ValueError, KeyError):
         return DEFAULT
-    outputs = resolve_step.get("outputs", {})
+    outputs = resolve_step.copy_outputs()
     ns = outputs.get("customLocationNamespace")
     if isinstance(ns, dict):
         ns = ns.get("value")

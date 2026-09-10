@@ -17,6 +17,7 @@ import yaml
 
 from siteops.compilation import TemplateCompilationSession
 from siteops.composition import CompositionError
+from siteops.executor import DeploymentResult
 from siteops.models import (
     AnyCondition,
     DeploymentStep,
@@ -35,6 +36,7 @@ from siteops.planning import (
     PlanStatus,
     SkipReasonCode,
 )
+from siteops.results import RunStatus
 
 
 def _arm_template(parameters=None):
@@ -2918,21 +2920,26 @@ class TestMultipleSubscriptionLevelSites:
             )
             step.template = step.template.replace(".bicep", ".json")
 
-        target_result = {
-            "site": "x",
-            "status": "success",
-            "error": None,
-            "steps_completed": 2,
-            "steps_skipped": 0,
-            "steps_total": 2,
-            "elapsed": 0.0,
-            "steps": [],
-        }
         with (
             patch.object(
-                orchestrator,
-                "_execute_prepared_target",
-                return_value=(target_result, {}),
+                orchestrator.executor,
+                "deploy_subscription",
+                side_effect=lambda **kwargs: DeploymentResult(
+                    success=True,
+                    step_name=kwargs["step_name"],
+                    site_name=kwargs["site_name"],
+                    deployment_name=kwargs["deployment_name"],
+                ),
+            ),
+            patch.object(
+                orchestrator.executor,
+                "deploy_resource_group",
+                side_effect=lambda **kwargs: DeploymentResult(
+                    success=True,
+                    step_name=kwargs["step_name"],
+                    site_name=kwargs["site_name"],
+                    deployment_name=kwargs["deployment_name"],
+                ),
             ),
         ):
             result = orchestrator.deploy(
@@ -2941,7 +2948,7 @@ class TestMultipleSubscriptionLevelSites:
                 sites=self._sites(1),
             )
 
-        assert result["summary"]["failed"] == 0
+        assert result.status is RunStatus.SUCCEEDED
 
 
 class TestGroupSitesBySubscription:

@@ -7,7 +7,9 @@ patching the kernel calls in its cleanup path.
 
 from __future__ import annotations
 
+import sys
 import threading
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -24,7 +26,11 @@ from siteops.compilation import (
     VersionProvenance,
 )
 from siteops.models import DeploymentStep, Manifest, Site
-from siteops.orchestrator import Orchestrator
+from siteops.orchestrator import (
+    Orchestrator,
+    _ProgressOwner,
+    _TargetExecution,
+)
 from siteops.planning import (
     CapabilityKind,
     CapabilityProviderIdentity,
@@ -49,6 +55,15 @@ from siteops.planning import (
     PreparedTarget,
     SkipReasonCode,
     TargetKind,
+)
+from siteops.reporting import TextProgressReporter
+from siteops.results import (
+    OperationResult,
+    OperationStatus,
+    OutcomeReason,
+    OutcomeReasonCode,
+    SiteResult,
+    SiteStatus,
 )
 
 TIMESTAMP = "20260728T000000"
@@ -125,18 +140,6 @@ def _make_sites(count: int, *, subscription: str = "sub-a") -> list[Site]:
     ]
 
 
-def _ok_result(site: Site, manifest: Manifest) -> dict:
-    return {
-        "site": site.name,
-        "status": "success",
-        "steps_completed": len(manifest.steps),
-        "steps_skipped": 0,
-        "steps_total": len(manifest.steps),
-        "elapsed": 0.0,
-        "steps": [],
-    }
-
-
 def _prepared_plan(
     sites: list[Site],
     *,
@@ -198,20 +201,90 @@ def _prepared_plan(
     )
 
 
-def _prepared_ok_result(
-    target: PreparedTarget,
-    plan: DeploymentPlan,
-) -> dict:
-    return {
-        "site": target.name,
-        "status": "success",
-        "error": None,
-        "steps_completed": len(plan.steps),
-        "steps_skipped": 0,
-        "steps_total": len(plan.steps),
-        "elapsed": 0.0,
-        "steps": [],
-    }
+def _prepared_ok_result(target: PreparedTarget) -> SiteResult:
+    operations = tuple(
+        OperationResult(
+            identity=operation.identity,
+            kind=operation.kind,
+            status=(
+                OperationStatus.SUCCEEDED
+                if operation.disposition is PlanDisposition.EXECUTE
+                else OperationStatus.SKIPPED
+            ),
+            elapsed=0.0,
+            reason=(
+                None
+                if operation.disposition is PlanDisposition.EXECUTE
+                else OutcomeReason(
+                    OutcomeReasonCode.SCOPE_MISMATCH,
+                    private_detail=operation.skip_reason.detail,
+                )
+            ),
+        )
+        for operation in target.operations
+    )
+    return SiteResult.from_operations(
+        target=target.name,
+        kind=target.kind,
+        operations=operations,
+        elapsed=0.0,
+    )
+
+
+def _failed_result(target: PreparedTarget) -> SiteResult:
+    reason = OutcomeReason(
+        OutcomeReasonCode.OPERATION_FAILED,
+        private_detail="subscription step failed",
+    )
+    operations = []
+    failed = False
+    for operation in target.operations:
+        if (
+            not failed
+            and operation.disposition is PlanDisposition.EXECUTE
+        ):
+            operations.append(
+                OperationResult(
+                    identity=operation.identity,
+                    kind=operation.kind,
+                    status=OperationStatus.FAILED,
+                    elapsed=0.0,
+                    reason=reason,
+                )
+            )
+            failed = True
+        elif operation.disposition is PlanDisposition.EXECUTE:
+            operations.append(
+                OperationResult(
+                    identity=operation.identity,
+                    kind=operation.kind,
+                    status=OperationStatus.NOT_RUN,
+                    elapsed=0.0,
+                    reason=OutcomeReason(
+                        OutcomeReasonCode.EARLIER_OPERATION_FAILED
+                    ),
+                )
+            )
+        else:
+            operations.append(
+                OperationResult(
+                    identity=operation.identity,
+                    kind=operation.kind,
+                    status=OperationStatus.SKIPPED,
+                    elapsed=0.0,
+                    reason=OutcomeReason(
+                        OutcomeReasonCode.SCOPE_MISMATCH,
+                        private_detail=operation.skip_reason.detail,
+                    ),
+                )
+            )
+    return SiteResult.from_operations(
+        target=target.name,
+        kind=target.kind,
+        operations=tuple(operations),
+        elapsed=0.0,
+        reason=reason,
+    )
 
 
 class TestPreparedTargetFanOut:
@@ -225,23 +298,25 @@ class TestPreparedTargetFanOut:
         with patch.object(
             orchestrator,
             "_execute_prepared_target",
-            side_effect=lambda plan, target, *args, **kwargs: (
-                _prepared_ok_result(target, plan),
-                {},
+            side_effect=lambda plan, target, *args, **kwargs: _TargetExecution(
+                site=_prepared_ok_result(target),
+                outputs={},
             ),
         ):
-            results, _ = orchestrator._run_prepared_targets(
+            results, _, interrupted = orchestrator._run_prepared_targets(
                 plan,
                 list(plan.targets),
                 TIMESTAMP,
                 {},
                 PlanExecutionMode.APPLY,
+                progress=_ProgressOwner(None),
             )
 
+        assert interrupted is False
         assert len(results) == len(sites)
-        assert {result["site"] for result in results} == {
+        assert [result.target for result in results] == [
             site.name for site in sites
-        }
+        ]
 
     @pytest.mark.parametrize(
         ("site_count", "parallel_sites", "expected_workers"),
@@ -275,9 +350,9 @@ class TestPreparedTargetFanOut:
             patch.object(
                 orchestrator,
                 "_execute_prepared_target",
-                side_effect=lambda plan, target, *args, **kwargs: (
-                    _prepared_ok_result(target, plan),
-                    {},
+                side_effect=lambda plan, target, *args, **kwargs: _TargetExecution(
+                    site=_prepared_ok_result(target),
+                    outputs={},
                 ),
             ),
             patch(
@@ -291,6 +366,7 @@ class TestPreparedTargetFanOut:
                 TIMESTAMP,
                 {},
                 PlanExecutionMode.APPLY,
+                progress=_ProgressOwner(None),
             )
 
         assert observed["max_workers"] == expected_workers
@@ -315,27 +391,32 @@ class TestPreparedTargetFanOut:
         def execute(plan, target, *args, **kwargs):
             if target.name == "site-2":
                 raise RuntimeError("boom")
-            return _prepared_ok_result(target, plan), {}
+            return _TargetExecution(
+                site=_prepared_ok_result(target),
+                outputs={},
+            )
 
         with patch.object(
             orchestrator,
             "_execute_prepared_target",
             side_effect=execute,
         ):
-            results, _ = orchestrator._run_prepared_targets(
+            results, _, interrupted = orchestrator._run_prepared_targets(
                 plan,
                 list(plan.targets),
                 TIMESTAMP,
                 {},
                 PlanExecutionMode.APPLY,
+                progress=_ProgressOwner(None),
             )
 
+        assert interrupted is False
         assert len(results) == len(sites)
-        by_site = {result["site"]: result for result in results}
-        assert by_site["site-2"]["status"] == "failed"
-        assert "boom" in by_site["site-2"]["error"]
+        by_site = {result.target: result for result in results}
+        assert by_site["site-2"].status is SiteStatus.FAILED
+        assert "boom" in by_site["site-2"].reason.private_detail
         assert all(
-            by_site[name]["status"] == "success"
+            by_site[name].status is SiteStatus.SUCCEEDED
             for name in ("site-0", "site-1", "site-3")
         )
 
@@ -351,31 +432,35 @@ class TestPreparedTargetFanOut:
 
         def execute(plan, target, *args, **kwargs):
             barrier.wait()
-            return _prepared_ok_result(target, plan), {}
+            return _TargetExecution(
+                site=_prepared_ok_result(target),
+                outputs={},
+            )
 
         with patch.object(
             orchestrator,
             "_execute_prepared_target",
             side_effect=execute,
         ):
-            results, _ = orchestrator._run_prepared_targets(
+            results, _, interrupted = orchestrator._run_prepared_targets(
                 plan,
                 list(plan.targets),
                 TIMESTAMP,
                 {},
                 PlanExecutionMode.APPLY,
+                progress=_ProgressOwner(None),
             )
 
+        assert interrupted is False
         assert len(results) == site_count
-        assert {result["site"] for result in results} == {
+        assert [result.target for result in results] == [
             site.name for site in sites
-        }
+        ]
 
-    def test_parallel_mode_reaches_each_target(self, tmp_workspace):
+    def test_parallel_completion_keeps_plan_order(self, tmp_workspace):
         sites = _make_sites(3)
         plan = _prepared_plan(sites, parallel_sites=3)
         orchestrator = Orchestrator(tmp_workspace)
-        seen = []
 
         def execute(
             plan,
@@ -383,26 +468,35 @@ class TestPreparedTargetFanOut:
             timestamp,
             inherited_outputs,
             *,
-            parallel_mode,
             execution_mode,
+            progress,
+            state,
         ):
-            seen.append(parallel_mode)
-            return _prepared_ok_result(target, plan), {}
+            time.sleep((2 - int(target.name[-1])) * 0.01)
+            return _TargetExecution(
+                site=_prepared_ok_result(target),
+                outputs={},
+            )
 
         with patch.object(
             orchestrator,
             "_execute_prepared_target",
             side_effect=execute,
         ):
-            orchestrator._run_prepared_targets(
+            results, _, _ = orchestrator._run_prepared_targets(
                 plan,
                 list(plan.targets),
                 TIMESTAMP,
                 {},
                 PlanExecutionMode.APPLY,
+                progress=_ProgressOwner(None),
             )
 
-        assert seen == [True, True, True]
+        assert [result.target for result in results] == [
+            "site-0",
+            "site-1",
+            "site-2",
+        ]
 
 
 class TestSubscriptionFailureBlastRadius:
@@ -428,7 +522,14 @@ class TestSubscriptionFailureBlastRadius:
             ],
         )
 
-    def _run_deploy(self, tmp_workspace, sites, *, depends: bool):
+    def _run_deploy(
+        self,
+        tmp_workspace,
+        sites,
+        *,
+        depends: bool,
+        progress=None,
+    ):
         manifest = self._manifest_with_subscription_step()
         orchestrator = Orchestrator(tmp_workspace)
         sub_site = next(s for s in sites if s.is_subscription_level)
@@ -563,31 +664,25 @@ class TestSubscriptionFailureBlastRadius:
             executable=True,
             plan=plan,
         )
-        failed_phase_one = [
-            {
-                "site": sub_site.name,
-                "status": "failed",
-                "error": "subscription step failed",
-                "steps_completed": 0,
-                "steps_skipped": 0,
-                "steps_total": len(manifest.steps),
-                "elapsed": 0.0,
-                "steps": [],
-            }
-        ]
+        subscription_target = next(
+            target
+            for target in plan.targets
+            if target.name == sub_site.name
+        )
+        failed_phase_one = [_failed_result(subscription_target)]
         deployed: list[list[str]] = []
 
         def _run_targets(plan, phase_targets, *args, **kwargs):
             if phase_targets[0].kind is TargetKind.SUBSCRIPTION:
-                return failed_phase_one, {}
+                return failed_phase_one, {}, False
             deployed.append([target.name for target in phase_targets])
-            site_lookup = {site.name: site for site in sites}
             return (
                 [
-                    _ok_result(site_lookup[target.name], manifest)
+                    _prepared_ok_result(target)
                     for target in phase_targets
                 ],
                 {},
+                False,
             )
 
         with patch.object(
@@ -595,7 +690,10 @@ class TestSubscriptionFailureBlastRadius:
             "_run_prepared_targets",
             side_effect=_run_targets,
         ):
-            summary = orchestrator.execute_plan(plan_result)
+            summary = orchestrator.execute_plan(
+                plan_result,
+                progress=progress,
+            )
 
         phase_two = deployed[0] if deployed else []
         return summary, phase_two
@@ -615,10 +713,18 @@ class TestSubscriptionFailureBlastRadius:
         summary, phase_two = self._run_deploy(tmp_workspace, sites, depends=True)
 
         assert "edge-a" not in phase_two
-        blocked = summary["sites"]["edge-a"]
-        assert blocked["status"] == "blocked"
-        assert blocked["steps_completed"] == 0
-        assert blocked["steps_skipped"] == 2
+        blocked = next(
+            site for site in summary.sites if site.target == "edge-a"
+        )
+        assert blocked.status is SiteStatus.NOT_RUN
+        assert [operation.status for operation in blocked.operations] == [
+            OperationStatus.SKIPPED,
+            OperationStatus.NOT_RUN,
+        ]
+        assert blocked.failure_reason() is not None
+        assert blocked.failure_reason().code is (
+            OutcomeReasonCode.DEPENDENCY_UNAVAILABLE
+        )
 
     def test_redacted_block_notice_omits_the_site(
         self,
@@ -644,12 +750,22 @@ class TestSubscriptionFailureBlastRadius:
             ),
         ]
 
-        summary, _ = self._run_deploy(tmp_workspace, sites, depends=True)
+        summary, _ = self._run_deploy(
+            tmp_workspace,
+            sites,
+            depends=True,
+            progress=TextProgressReporter(sys.stdout, redacted=True),
+        )
 
         output = capsys.readouterr().out
         assert "private-edge" not in output
         assert "[<site>] - blocked" in output
-        assert summary["sites"]["private-edge"]["status"] == "blocked"
+        blocked = next(
+            site
+            for site in summary.sites
+            if site.target == "private-edge"
+        )
+        assert blocked.status is SiteStatus.NOT_RUN
 
     def test_independent_site_in_failed_subscription_proceeds(self, tmp_workspace):
         sites = [
@@ -666,7 +782,10 @@ class TestSubscriptionFailureBlastRadius:
         summary, phase_two = self._run_deploy(tmp_workspace, sites, depends=False)
 
         assert phase_two == ["edge-a"]
-        assert summary["sites"]["edge-a"]["status"] == "success"
+        edge = next(
+            site for site in summary.sites if site.target == "edge-a"
+        )
+        assert edge.status is SiteStatus.SUCCEEDED
 
     def test_site_in_healthy_subscription_is_unaffected(self, tmp_workspace):
         sites = [
@@ -685,7 +804,10 @@ class TestSubscriptionFailureBlastRadius:
         summary, phase_two = self._run_deploy(tmp_workspace, sites, depends=True)
 
         assert phase_two == ["edge-b"]
-        assert summary["sites"]["edge-b"]["status"] == "success"
+        edge = next(
+            site for site in summary.sites if site.target == "edge-b"
+        )
+        assert edge.status is SiteStatus.SUCCEEDED
 
 
 class TestAnInterruptedFleetStops:
@@ -719,6 +841,9 @@ class TestAnInterruptedFleetStops:
             *args,
             **kwargs,
         ):
+            state = kwargs["state"]
+            state.start()
+            assert state.begin(target.operations[0])
             started.append(target.name)
             if len(started) == 2:
                 gate.set()
@@ -727,28 +852,38 @@ class TestAnInterruptedFleetStops:
             gate.wait(timeout=5)
             if len(started) <= 2:
                 raise KeyboardInterrupt("operator stopped the rollout")
-            return _prepared_ok_result(target, plan), {}
+            return _TargetExecution(
+                site=_prepared_ok_result(target),
+                outputs={},
+            )
 
         orchestrator = Orchestrator(tmp_workspace)
         sites = self._sites(8)
         plan = _prepared_plan(sites, parallel_sites=2)
 
-        with (
-            patch.object(
-                Orchestrator,
-                "_execute_prepared_target",
-                execute_target,
-            ),
-            pytest.raises(KeyboardInterrupt),
+        with patch.object(
+            Orchestrator,
+            "_execute_prepared_target",
+            execute_target,
         ):
-            orchestrator._run_prepared_targets(
+            results, _, interrupted = orchestrator._run_prepared_targets(
                 plan,
                 list(plan.targets),
                 TIMESTAMP,
                 {},
                 PlanExecutionMode.APPLY,
+                progress=_ProgressOwner(None),
             )
 
+        assert interrupted is True
         assert len(started) < len(sites), (
             f"every site deployed despite the interrupt: {started}"
         )
+        assert len(results) == len(sites)
+        statuses = {
+            operation.status
+            for result in results
+            for operation in result.operations
+        }
+        assert OperationStatus.UNKNOWN in statuses
+        assert OperationStatus.CANCELLED in statuses

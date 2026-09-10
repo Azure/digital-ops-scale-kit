@@ -17,16 +17,39 @@ Templates are ARM JSON so these tests do not depend on a Bicep compiler.
 """
 
 import json
+import subprocess
 from argparse import Namespace
 
 import pytest
 import yaml
 
 from siteops.cli import cmd_deploy
+from siteops.compilation import TemplateCompilationSession
 from siteops.executor import DeploymentResult
 from siteops.orchestrator import Orchestrator
+from siteops.planning import PlanProjection
+from siteops.reporting import serialize_run_json
+from siteops.results import RunStatus, SiteStatus
 
 SUBSCRIPTION = "00000000-0000-0000-0000-000000000000"
+
+
+@pytest.fixture(autouse=True)
+def deterministic_tools(tmp_path, monkeypatch):
+    def run(argv, timeout):
+        assert argv[1:] == ("version", "--output", "json")
+        return subprocess.CompletedProcess(argv, 0, '{"azure-cli":"test"}', "")
+
+    monkeypatch.setattr(
+        "siteops.orchestrator.TemplateCompilationSession",
+        lambda: TemplateCompilationSession(
+            command_runner=run, tool_resolver=lambda name: str(tmp_path / name),
+        ),
+    )
+    monkeypatch.setattr(
+        subprocess, "Popen",
+        lambda *a, **k: pytest.fail("Result integrity tests must not launch processes"),
+    )
 
 
 def _write_arm_template(path, parameters):
@@ -146,11 +169,15 @@ class TestAFailedFleetIsReportedAsFailed:
 
         result = orchestrator.deploy(manifest_path)
 
-        assert result["summary"]["total"] == 2
-        assert result["summary"]["succeeded"] == 1
-        assert result["summary"]["failed"] == 1
-        assert result["sites"]["plant-west"]["status"] == "failed"
-        assert result["sites"]["plant-east"]["status"] == "success"
+        document = json.loads(serialize_run_json(
+            result, PlanProjection.PUBLISHABLE, engine_version="test",
+        ))
+        assert document["summary"]["sites"]["total"] == 2
+        assert document["summary"]["sites"]["counts"]["succeeded"] == 1
+        assert document["summary"]["sites"]["counts"]["failed"] == 1
+        sites = {site.target: site for site in result.sites}
+        assert sites["plant-west"].status is SiteStatus.FAILED
+        assert sites["plant-east"].status is SiteStatus.SUCCEEDED
 
     def test_a_healthy_fleet_exits_zero(self, fleet, monkeypatch):
         """A clean run exits 0, which is what gives the non-zero cases meaning."""
@@ -226,5 +253,5 @@ class TestAStepOutputReachesTheNextStep:
 
         result = orchestrator.deploy(manifest_path)
 
-        assert result["summary"]["failed"] == 0
+        assert result.status is RunStatus.SUCCEEDED
         assert seen["consume"]["chainedId"] == "storage-from-produce"

@@ -4,6 +4,15 @@ from types import SimpleNamespace
 
 import pytest
 
+from siteops.planning import OperationIdentity, OperationKind, TargetKind
+from siteops.results import (
+    OperationResult,
+    OperationStatus,
+    OutcomeReason,
+    OutcomeReasonCode,
+    RunResult,
+    SiteResult,
+)
 from tests.integration import conftest
 from tests.integration.helpers import dataflow_sample as sample
 
@@ -116,21 +125,34 @@ def test_fixture_cleans_partial_deployment_before_setup_failure_escapes(
         subscription="subscription",
         resource_group="resource-group",
     )
-    orchestrator = SimpleNamespace(
-        deploy=lambda **_kwargs: {"summary": {"failed": 1}},
-    )
+    def run_result(step, status, outputs=None):
+        operation = OperationResult(
+            identity=OperationIdentity("site", step),
+            kind=OperationKind.DEPLOYMENT,
+            status=status,
+            elapsed=0.0,
+            reason=(
+                OutcomeReason(OutcomeReasonCode.OPERATION_FAILED)
+                if status is OperationStatus.FAILED else None
+            ),
+            _private_outputs=outputs or {},
+        )
+        return RunResult.from_sites(
+            (SiteResult.from_operations(
+                target="site", kind=TargetKind.RESOURCE_GROUP,
+                operations=(operation,), elapsed=0.0,
+            ),),
+            elapsed=0.0,
+        )
+
+    orchestrator = SimpleNamespace(deploy=lambda **kwargs: run_result(
+        "dataflow-resources", OperationStatus.FAILED,
+    ))
     cleanup_calls = []
     monkeypatch.setattr(
         conftest,
         "_resolve_or_fail",
         lambda *_args: (SimpleNamespace(), [site]),
-    )
-    monkeypatch.setattr(
-        conftest,
-        "_assert_deployed",
-        lambda *_args: (_ for _ in ()).throw(
-            AssertionError("deployment failed")
-        ),
     )
     monkeypatch.setattr(
         "tests.integration.helpers.dataflow_sample.phase_isolation_enabled",
@@ -142,14 +164,6 @@ def test_fixture_cleans_partial_deployment_before_setup_failure_escapes(
         lambda *args, **kwargs: cleanup_calls.append((args, kwargs)),
     )
     monkeypatch.setattr(
-        "tests.integration.helpers.assertions.find_step",
-        lambda *_args: {},
-    )
-    monkeypatch.setattr(
-        "tests.integration.helpers.assertions.assert_output_exists",
-        lambda *_args: {"name": "aio-instance"},
-    )
-    monkeypatch.setattr(
         "tests.integration.helpers.releases.load_aio_release",
         lambda *_args: ("2608", {"aioApiVersion": "2026-07-01"}),
     )
@@ -157,11 +171,14 @@ def test_fixture_cleans_partial_deployment_before_setup_failure_escapes(
     fixture = conftest.dataflow_sample_result.__wrapped__(
         orchestrator,
         "name=site",
-        {"sites": {"site": {}}},
+        run_result(
+            "aio-instance", OperationStatus.SUCCEEDED,
+            {"aio": {"type": "Object", "value": {"name": "aio-instance"}}},
+        ),
         "namespace",
     )
 
-    with pytest.raises(AssertionError, match="deployment failed"):
+    with pytest.raises(AssertionError, match="deployment did not complete"):
         next(fixture)
 
     assert len(cleanup_calls) == 1

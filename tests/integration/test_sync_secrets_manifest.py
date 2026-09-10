@@ -20,10 +20,13 @@ import uuid
 import pytest
 
 from siteops.models import Manifest
+from siteops.results import OperationStatus, RunStatus, SiteStatus
 from tests.integration.conftest import WORKSPACE_PATH
 from tests.integration.helpers.assertions import (
     assert_output_exists,
     assert_step_succeeded,
+    site_names,
+    site_results,
 )
 from tests.integration.helpers.azure import run_az
 from tests.integration.helpers.kube import (
@@ -110,34 +113,37 @@ class TestSyncSecretsDeployment:
     """Validate that the secretsync-sample manifest deploys successfully."""
 
     def test_no_failures(self, sync_secret_result):
-        assert sync_secret_result["summary"]["failed"] == 0
+        assert sync_secret_result.status is RunStatus.SUCCEEDED
 
     def test_all_sites_succeeded(self, sync_secret_result):
-        for name in sync_secret_result["sites"]:
-            site = sync_secret_result["sites"][name]
-            assert site["status"] == "success", (
-                f"Site '{name}' failed: {site.get('error')}"
+        for site in site_results(sync_secret_result):
+            assert site.status is SiteStatus.SUCCEEDED, (
+                f"Site '{site.target}' did not succeed: "
+                f"{site.failure_reason()}"
             )
             # Manifest composes resolve-aio + secretsync + sync-secrets.
-            assert site["steps_completed"] == 3
+            assert sum(
+                operation.status is OperationStatus.SUCCEEDED
+                for operation in site.operations
+            ) == 3
 
 
 class TestSyncSecretsArmOutputs:
     """Validate the ARM-side outputs of the sync-secrets step."""
 
     def test_sync_secrets_step_succeeds(self, sync_secret_result):
-        for name in sync_secret_result["sites"]:
+        for name in site_names(sync_secret_result):
             assert_step_succeeded(sync_secret_result, name, "sync-secrets")
 
     def test_outputs_present(self, sync_secret_result):
-        for name in sync_secret_result["sites"]:
+        for name in site_names(sync_secret_result):
             step = assert_step_succeeded(sync_secret_result, name, "sync-secrets")
             assert_output_exists(step, "materializedSecrets")
             assert_output_exists(step, "secretCount")
             assert_output_exists(step, "kubernetesSecretCount")
 
     def test_secret_count_matches_sample(self, sync_secret_result):
-        for name in sync_secret_result["sites"]:
+        for name in site_names(sync_secret_result):
             step = assert_step_succeeded(sync_secret_result, name, "sync-secrets")
             count = assert_output_exists(step, "secretCount")
             assert count == len(SAMPLE_SECRETS), (
@@ -148,7 +154,7 @@ class TestSyncSecretsArmOutputs:
         """`kubernetesSecretCount` equals the number of distinct K8s Secret
         names across all entries, not the entry count. Detects a regression
         in the grouping logic that would emit one SecretSync per entry."""
-        for name in sync_secret_result["sites"]:
+        for name in site_names(sync_secret_result):
             step = assert_step_succeeded(sync_secret_result, name, "sync-secrets")
             count = assert_output_exists(step, "kubernetesSecretCount")
             assert count == len(SAMPLE_K8S_SECRET_NAMES), (
@@ -159,7 +165,7 @@ class TestSyncSecretsArmOutputs:
     def test_materialized_secrets_match_sample(self, sync_secret_result):
         """Per-entry output metadata matches what the chaining file asks for."""
         expected_by_name = {s["secretName"]: s for s in SAMPLE_SECRETS}
-        for name in sync_secret_result["sites"]:
+        for name in site_names(sync_secret_result):
             step = assert_step_succeeded(sync_secret_result, name, "sync-secrets")
             materialized = assert_output_exists(step, "materializedSecrets")
             actual_names = {entry["secretName"] for entry in materialized}
@@ -188,7 +194,7 @@ class TestSyncSecretsCustomResources:
     def test_secret_sync_crs_present(
         self, sync_secret_result, aio_namespace, kubectl_available
     ):
-        for name in sync_secret_result["sites"]:
+        for name in site_names(sync_secret_result):
             step = assert_step_succeeded(sync_secret_result, name, "sync-secrets")
             materialized = assert_output_exists(step, "materializedSecrets")
             for entry in materialized:
@@ -211,7 +217,7 @@ class TestSyncSecretsCustomResources:
         `Microsoft.SecretSyncController/azureKeyVaultSecretProviderClasses`
         resource to a stock upstream `SecretProviderClass` CR in the
         `secrets-store.csi.x-k8s.io` group on the cluster."""
-        for name in sync_secret_result["sites"]:
+        for name in site_names(sync_secret_result):
             step = assert_step_succeeded(sync_secret_result, name, "secretsync")
             spc_name = assert_output_exists(step, "spcResourceName")
             try:
@@ -250,7 +256,7 @@ class TestSyncSecretsMaterialize:
         that read real customer values from a real Key Vault.
         """
         expected_by_name = {s["secretName"]: s for s in SAMPLE_SECRETS}
-        for site_name in sync_secret_result["sites"]:
+        for site_name in site_names(sync_secret_result):
             step = assert_step_succeeded(
                 sync_secret_result, site_name, "sync-secrets"
             )
@@ -308,7 +314,7 @@ class TestMultiKeySecrets:
         Kubernetes Secret resource exists with all the expected keys
         present and each carrying the correct value."""
         expected_by_name = {s["secretName"]: s for s in SAMPLE_SECRETS}
-        for site_name in sync_secret_result["sites"]:
+        for site_name in site_names(sync_secret_result):
             assert_step_succeeded(sync_secret_result, site_name, "sync-secrets")
             secretsync_step = assert_step_succeeded(
                 sync_secret_result, site_name, "secretsync"
@@ -370,7 +376,7 @@ class TestMultiKeySecrets:
         for every entry that targets a shared `kubernetesSecretName`. The
         downstream contract is that one SecretSync ARM resource backs the
         whole multi-key Secret."""
-        for site_name in sync_secret_result["sites"]:
+        for site_name in site_names(sync_secret_result):
             step = assert_step_succeeded(
                 sync_secret_result, site_name, "sync-secrets"
             )
@@ -413,9 +419,9 @@ class TestSyncSecretsIdempotency:
             manifest_path=manifest_path,
             selector=selector,
         )
-        assert result2["summary"]["failed"] == 0
+        assert result2.status is RunStatus.SUCCEEDED
         expected_by_name = {s["secretName"]: s for s in SAMPLE_SECRETS}
-        for site_name in sync_secret_result["sites"]:
+        for site_name in site_names(sync_secret_result):
             step = assert_step_succeeded(result2, site_name, "sync-secrets")
             materialized = assert_output_exists(step, "materializedSecrets")
             actual_names = {entry["secretName"] for entry in materialized}
@@ -473,7 +479,7 @@ class TestEnablementPreservesSyncedObjects:
         expected_names = {s["secretName"] for s in SAMPLE_SECRETS}
 
         spc_ids: dict[str, str] = {}
-        for site_name in sync_secret_result["sites"]:
+        for site_name in site_names(sync_secret_result):
             step = assert_step_succeeded(sync_secret_result, site_name, "secretsync")
             spc_ids[site_name] = assert_output_exists(step, "spcResourceId")
 
@@ -490,8 +496,8 @@ class TestEnablementPreservesSyncedObjects:
         # Day-2 enablement, the standalone path that declares no secrets.
         manifest_path = WORKSPACE_PATH / "manifests" / "secretsync.yaml"
         result = orchestrator.deploy(manifest_path=manifest_path, selector=selector)
-        assert result["summary"]["failed"] == 0, (
-            f"Day-2 enablement failed: {result['summary']}"
+        assert result.status is RunStatus.SUCCEEDED, (
+            f"Day-2 enablement failed: status={result.status.value}"
         )
 
         for site_name, spc_id in spc_ids.items():
@@ -507,7 +513,7 @@ class TestEnablementPreservesSyncedObjects:
 
         # The object list is the mechanism. These are the Secrets an operator
         # would notice, so assert them too rather than trusting the projection.
-        for site_name in sync_secret_result["sites"]:
+        for site_name in site_names(sync_secret_result):
             step = assert_step_succeeded(sync_secret_result, site_name, "sync-secrets")
             for entry in assert_output_exists(step, "materializedSecrets"):
                 k8s_name = entry["kubernetesSecretName"]
@@ -643,7 +649,7 @@ class TestSyncSecretsExistingKvSecret:
         # First site only. Multi-site materialization is already covered by
         # TestSyncSecretsMaterialize. A per-site loop would double the
         # deploy cost without adding coverage of the createInKv branch.
-        site_name = next(iter(sync_secret_result["sites"]))
+        site_name = site_names(sync_secret_result)[0]
         site = site_by_name[site_name]
 
         resolve_aio_step = assert_step_succeeded(

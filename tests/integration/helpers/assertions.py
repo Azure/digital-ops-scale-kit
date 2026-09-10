@@ -2,8 +2,37 @@
 
 from typing import Any
 
+from siteops.results import (
+    OperationResult,
+    OperationStatus,
+    OutcomeReason,
+    RunResult,
+    SiteResult,
+)
+from siteops.sanitize import is_redaction_enabled, site_name_for_output
 
-def find_step(result: dict[str, Any], site_name: str, step_name: str) -> dict[str, Any]:
+
+def outcome_reason_for_output(reason: OutcomeReason) -> str:
+    """Publish fixed reason text in CI and retain authorized local detail."""
+    return reason.summary if is_redaction_enabled() else reason.local_message()
+
+
+def site_results(result: RunResult) -> tuple[SiteResult, ...]:
+    """Return nonempty typed site results."""
+    assert result.sites, "Deployment returned no target results."
+    return result.sites
+
+
+def site_names(result: RunResult) -> tuple[str, ...]:
+    """Return target names while preserving canonical result order."""
+    return tuple(site.target for site in site_results(result))
+
+
+def find_step(
+    result: RunResult,
+    site_name: str,
+    step_name: str,
+) -> OperationResult:
     """Find a step result by site and step name.
 
     Args:
@@ -12,47 +41,87 @@ def find_step(result: dict[str, Any], site_name: str, step_name: str) -> dict[st
         step_name: Name of the step
 
     Returns:
-        Step result dict with keys: step, status, outputs, error, reason
+        Typed operation result.
 
     Raises:
         KeyError: If site not found in results
         ValueError: If step not found for the site
     """
-    site_result = result["sites"][site_name]
-    for step in site_result["steps"]:
-        if step["step"] == step_name:
-            return step
-    available = [s["step"] for s in site_result["steps"]]
-    raise ValueError(f"Step '{step_name}' not found for site '{site_name}'. Available: {available}")
+    try:
+        site_result = next(
+            site
+            for site in site_results(result)
+            if site.target == site_name
+        )
+    except StopIteration as exc:
+        available_sites = [
+            site_name_for_output(site.target)
+            for site in result.sites
+        ]
+        raise KeyError(
+            f"Site '{site_name_for_output(site_name)}' not found. "
+            f"Available: {available_sites}"
+        ) from exc
+    for operation in site_result.operations:
+        if operation.identity.step == step_name:
+            return operation
+    available = [
+        operation.identity.step
+        for operation in site_result.operations
+    ]
+    raise ValueError(
+        f"Step '{step_name}' not found for site "
+        f"'{site_name_for_output(site_name)}'. Available: {available}"
+    )
 
 
-def assert_step_succeeded(result: dict[str, Any], site_name: str, step_name: str) -> dict[str, Any]:
+def assert_step_succeeded(
+    result: RunResult,
+    site_name: str,
+    step_name: str,
+) -> OperationResult:
     """Assert a step succeeded and return its result for further assertions."""
     step = find_step(result, site_name, step_name)
-    assert step["status"] == "success", (
-        f"Step '{step_name}' did not succeed for site '{site_name}': "
-        f"status={step['status']}, error={step.get('error')}"
+    reason = (
+        outcome_reason_for_output(step.reason)
+        if step.reason is not None
+        else None
     )
+    if step.status is not OperationStatus.SUCCEEDED:
+        raise AssertionError(
+            f"Step '{step_name}' did not succeed for site "
+            f"'{site_name_for_output(site_name)}': "
+            f"status={step.status.value}, reason={reason}"
+        )
     return step
 
 
-def assert_step_skipped(result: dict[str, Any], site_name: str, step_name: str) -> dict[str, Any]:
+def assert_step_skipped(
+    result: RunResult,
+    site_name: str,
+    step_name: str,
+) -> OperationResult:
     """Assert a step was skipped and return its result."""
     step = find_step(result, site_name, step_name)
-    assert step["status"] == "skipped", (
-        f"Step '{step_name}' was not skipped for site '{site_name}': status={step['status']}"
+    assert step.status is OperationStatus.SKIPPED, (
+        f"Step '{step_name}' was not skipped for site "
+        f"'{site_name_for_output(site_name)}': status={step.status.value}"
     )
     return step
 
 
-def assert_output_exists(step_result: dict[str, Any], output_name: str) -> Any:
+def assert_output_exists(
+    step_result: OperationResult,
+    output_name: str,
+) -> Any:
     """Assert an output exists in a step result and return its value.
 
     Handles both raw values and Azure ARM wrapped format {"value": X, "type": "..."}.
     """
-    outputs = step_result.get("outputs", {})
+    outputs = step_result.copy_outputs()
     assert output_name in outputs, (
-        f"Output '{output_name}' not found in step '{step_result['step']}'. "
+        f"Output '{output_name}' not found in step "
+        f"'{step_result.identity.step}'. "
         f"Available: {sorted(outputs.keys())}"
     )
     output = outputs[output_name]
@@ -94,7 +163,9 @@ def skip_unless_health_is_reported(api_version: str) -> str:
 
 
 def assert_output_starts_with(
-    step_result: dict[str, Any], output_name: str, prefix: str
+    step_result: OperationResult,
+    output_name: str,
+    prefix: str,
 ) -> str:
     """Assert an output value starts with the given prefix."""
     value = assert_output_exists(step_result, output_name)

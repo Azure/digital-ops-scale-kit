@@ -104,6 +104,31 @@ alternative, which keeps the decision in Azure rather than on the cluster.
 2. Fix the issue
 3. Re-run. Bicep deployments are idempotent.
 
+The final summary reports every prepared operation, so the steps that never
+started after the failure are listed as `not-run` rather than dropped.
+
+### Ctrl-C does not return the prompt right away
+
+**Cause**: A stop request reaches waiting code immediately, but a call already
+running in a child process is not interrupted. Site Ops waits for it rather
+than abandoning scratch files and observed outcomes.
+
+**Solution**: Wait for the call in flight. The bounds are 60 seconds for one
+deployment state read, 5 minutes for a deployment submission, and 10 minutes
+for a kubectl operation. Pressing Ctrl-C again repeats the same expectation.
+The run then prints its final result and exits `130`. Anything Azure already
+accepted keeps running, so check the unconfirmed deployment before re-running.
+
+### An operation reports "unknown"
+
+**Cause**: Site Ops stopped observing before the provider reported a final
+state, such as after an interrupt or an observation timeout. The deployment
+may still be running or may already have finished in Azure.
+
+**Solution**: Local output names the unconfirmed deployment. Check that
+deployment in the Azure portal or with `az deployment group show` before
+re-running. See [run-output.md](run-output.md).
+
 ## Arc proxy issues
 
 ### "Failed to establish Arc proxy"
@@ -133,6 +158,9 @@ siteops -w workspaces/iot-operations plan manifests/aio-install.yaml
 
 # Emit one publishable JSON plan document
 siteops -w workspaces/iot-operations plan manifests/aio-install.yaml --output json --projection publishable
+
+# Emit one publishable JSON run result
+siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml --output json --projection publishable
 
 # Show the faster compile-free plan shape
 siteops -w workspaces/iot-operations plan manifests/aio-install.yaml --describe

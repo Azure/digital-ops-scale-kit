@@ -10,7 +10,9 @@ Tests cover:
 import json
 import os
 import re
+import signal
 import sys
+import threading
 from argparse import Namespace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -27,7 +29,23 @@ from siteops.cli import (
     resolve_manifest_path,
     setup_logging,
 )
-from siteops.planning import PlanIntent, PlanStatus
+from siteops.planning import (
+    DiagnosticSeverity,
+    OperationIdentity,
+    OperationKind,
+    PlanBuildResult,
+    PlanDiagnostic,
+    PlanIntent,
+    PlanNotExecutableError,
+    PlanStatus,
+    TargetKind,
+)
+from siteops.results import (
+    OperationResult,
+    OperationStatus,
+    RunResult,
+    SiteResult,
+)
 
 
 class TestResolveManifestPath:
@@ -805,11 +823,11 @@ class TestCmdDeploy:
         args.selector = None
         args.parallel = None
 
-        with patch.object(orchestrator, "deploy") as mock_deploy:
-            mock_deploy.return_value = {
-                "sites": {"test-site": {"status": "success"}},
-                "summary": {"total": 1, "succeeded": 1, "failed": 0, "elapsed": 1.0},
-            }
+        with (
+            patch.object(orchestrator, "deploy") as mock_deploy,
+            patch("siteops.cli._write_run_result"),
+        ):
+            mock_deploy.return_value = MagicMock(spec=RunResult, exit_code=0)
 
             exit_code = cmd_deploy(args, orchestrator)
 
@@ -1139,11 +1157,11 @@ class TestCmdDeploy:
         args.selector = None
         args.parallel = None
 
-        with patch.object(orchestrator, "deploy") as mock_deploy:
-            mock_deploy.return_value = {
-                "sites": {"test-site": {"status": "failed", "error": "Deployment error"}},
-                "summary": {"total": 1, "succeeded": 0, "failed": 1, "elapsed": 1.0},
-            }
+        with (
+            patch.object(orchestrator, "deploy") as mock_deploy,
+            patch("siteops.cli._write_run_result"),
+        ):
+            mock_deploy.return_value = MagicMock(spec=RunResult, exit_code=1)
 
             exit_code = cmd_deploy(args, orchestrator)
 
@@ -1162,11 +1180,11 @@ class TestCmdDeploy:
         args.selector = None
         args.parallel = 3
 
-        with patch.object(orchestrator, "deploy") as mock_deploy:
-            mock_deploy.return_value = {
-                "sites": {},
-                "summary": {"total": 1, "succeeded": 1, "failed": 0, "elapsed": 1.0},
-            }
+        with (
+            patch.object(orchestrator, "deploy") as mock_deploy,
+            patch("siteops.cli._write_run_result"),
+        ):
+            mock_deploy.return_value = MagicMock(spec=RunResult, exit_code=0)
 
             cmd_deploy(args, orchestrator)
 
@@ -1248,11 +1266,11 @@ class TestCmdDeploy:
         args.selector = "environment=dev"
         args.parallel = None
 
-        with patch.object(orchestrator, "deploy") as mock_deploy:
-            mock_deploy.return_value = {
-                "sites": {},
-                "summary": {"total": 1, "succeeded": 1, "failed": 0, "elapsed": 1.0},
-            }
+        with (
+            patch.object(orchestrator, "deploy") as mock_deploy,
+            patch("siteops.cli._write_run_result"),
+        ):
+            mock_deploy.return_value = MagicMock(spec=RunResult, exit_code=0)
 
             cmd_deploy(args, orchestrator)
 
@@ -2101,7 +2119,7 @@ class TestPlanOutputIsSeparateFromLogVerbosity:
         manifest = complete_workspace / "manifests" / "test-manifest.yaml"
         args = self._args(complete_workspace, manifest, dry_run=dry_run, parallel=None)
 
-        summary = {"summary": {"failed": 0, "succeeded": 1}, "sites": {}}
+        completed_run = MagicMock(spec=RunResult, exit_code=0)
         prepared = MagicMock()
         prepared.executable = True
         prepared.status = PlanStatus.PLANNED
@@ -2118,20 +2136,24 @@ class TestPlanOutputIsSeparateFromLogVerbosity:
             patch.object(
                 orchestrator,
                 "deploy",
-                return_value=summary,
+                return_value=completed_run,
             ) as deploy,
+            patch("siteops.cli._write_run_result") as write_result,
         ):
             exit_code = cmd_deploy(args, orchestrator)
 
         assert exit_code == 0
         assert build_plan.called is dry_run
         assert render_plan.called is dry_run
+        assert write_result.called is not dry_run
         if dry_run:
             deploy.assert_not_called()
         else:
-            deploy.assert_called_once_with(
-                manifest, selector=None, parallel_override=None
-            )
+            deploy.assert_called_once()
+            assert deploy.call_args.args == (manifest,)
+            assert deploy.call_args.kwargs["selector"] is None
+            assert deploy.call_args.kwargs["parallel_override"] is None
+            assert callable(deploy.call_args.kwargs["progress"])
 
     @pytest.mark.parametrize(
         ("describe", "intent"),
@@ -2598,3 +2620,548 @@ class TestAWorkspaceWhoseSitesAllFailIsDiagnosedAsSuch:
         assert "base-site.yaml" in captured.out, (
             "the inherited value must name the file it came from"
         )
+
+
+class TestDeployResultOutput:
+    """The final result an operator or a pipeline actually consumes.
+
+    These exercise the production call site rather than routing alone, so a
+    document that reaches stdout is the one the reporting allowlist built.
+    """
+
+    def _args(self, workspace, manifest, **overrides):
+        values = {
+            "manifest": manifest,
+            "workspace": workspace,
+            "selector": None,
+            "parallel": None,
+            "dry_run": False,
+            "verbose": False,
+            "output": "json",
+            "projection": None,
+        }
+        values.update(overrides)
+        return Namespace(**values)
+
+    def _run(self, *, interrupted=False, status=OperationStatus.SUCCEEDED):
+        operation = OperationResult(
+            identity=OperationIdentity(
+                target="private-site",
+                step="private-step",
+            ),
+            kind=OperationKind.DEPLOYMENT,
+            status=status,
+            elapsed=1.0,
+            _deployment_name="private-deployment",
+        )
+        site = SiteResult.from_operations(
+            target="private-site",
+            kind=TargetKind.RESOURCE_GROUP,
+            operations=(operation,),
+            elapsed=1.0,
+        )
+        return RunResult.from_sites(
+            (site,),
+            elapsed=1.0,
+            interrupted=interrupted,
+        )
+
+    def test_json_writes_one_publishable_run_document_to_stdout(
+        self, complete_workspace, capsys
+    ):
+        from siteops.orchestrator import Orchestrator
+
+        orchestrator = Orchestrator(complete_workspace)
+        manifest = complete_workspace / "manifests" / "test-manifest.yaml"
+        args = self._args(
+            complete_workspace,
+            manifest,
+            projection="publishable",
+        )
+
+        with patch.object(
+            orchestrator,
+            "deploy",
+            return_value=self._run(),
+        ) as deploy:
+            exit_code = cmd_deploy(args, orchestrator)
+
+        captured = capsys.readouterr()
+        document = json.loads(captured.out)
+        assert exit_code == 0
+        assert document["kind"] == "DeploymentRun"
+        assert document["projection"] == "publishable"
+        assert document["status"] == "succeeded"
+        assert document["exitCode"] == 0
+        assert document["summary"]["interrupted"] is False
+        assert "private-site" not in captured.out
+        assert "private-deployment" not in captured.out
+        assert "Preparing executable deployment plan" in captured.err
+        assert isinstance(
+            deploy.call_args.kwargs["stop_requested"],
+            threading.Event,
+        )
+
+    def test_progress_and_logging_stay_on_stderr(
+        self, complete_workspace, capsys
+    ):
+        from siteops.orchestrator import Orchestrator
+        from siteops.results import ProgressEvent, ProgressEventKind
+
+        orchestrator = Orchestrator(complete_workspace)
+        manifest = complete_workspace / "manifests" / "test-manifest.yaml"
+        args = self._args(complete_workspace, manifest)
+
+        def emit_progress(*_, **kwargs):
+            kwargs["progress"](
+                ProgressEvent(
+                    kind=ProgressEventKind.TARGET_STARTED,
+                    target="private-site",
+                )
+            )
+            return self._run()
+
+        with patch.object(orchestrator, "deploy", side_effect=emit_progress):
+            exit_code = cmd_deploy(args, orchestrator)
+
+        captured = capsys.readouterr()
+        assert exit_code == 0
+        assert "[private-site] starting" in captured.err
+        assert json.loads(captured.out)["kind"] == "DeploymentRun"
+
+    @pytest.mark.parametrize("marker", ["GITHUB_ACTIONS", "TF_BUILD"])
+    def test_a_ci_marker_defaults_json_to_the_publishable_projection(
+        self, complete_workspace, capsys, monkeypatch, marker
+    ):
+        from siteops.orchestrator import Orchestrator
+        from siteops.sanitize import REDACT_ENV
+
+        monkeypatch.setenv(REDACT_ENV, "")
+        monkeypatch.setenv(marker, "1")
+        orchestrator = Orchestrator(complete_workspace)
+        manifest = complete_workspace / "manifests" / "test-manifest.yaml"
+        args = self._args(complete_workspace, manifest)
+
+        with patch.object(orchestrator, "deploy", return_value=self._run()):
+            exit_code = cmd_deploy(args, orchestrator)
+
+        captured = capsys.readouterr()
+        assert exit_code == 0
+        assert json.loads(captured.out)["projection"] == "publishable"
+        assert "private-site" not in captured.out
+
+    def test_an_explicit_private_projection_is_rejected_while_redacted(
+        self, complete_workspace, capsys, monkeypatch
+    ):
+        from siteops.orchestrator import Orchestrator
+        from siteops.sanitize import REDACT_ENV
+
+        monkeypatch.setenv(REDACT_ENV, "1")
+        orchestrator = Orchestrator(complete_workspace)
+        manifest = complete_workspace / "manifests" / "test-manifest.yaml"
+        args = self._args(
+            complete_workspace,
+            manifest,
+            projection="local-private",
+        )
+
+        with patch.object(orchestrator, "deploy") as deploy:
+            exit_code = cmd_deploy(args, orchestrator)
+
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert captured.out == ""
+        assert "local-private output is unavailable" in captured.err
+        deploy.assert_not_called()
+
+    def _preparation_failure(self):
+        return PlanNotExecutableError(
+            PlanBuildResult(
+                status=PlanStatus.INVALID,
+                executable=False,
+                plan=None,
+                diagnostics=(
+                    PlanDiagnostic(
+                        code="validation.failed",
+                        severity=DiagnosticSeverity.ERROR,
+                        summary="Manifest validation failed.",
+                        detail="private-site is missing private/path",
+                    ),
+                ),
+                intent=PlanIntent.EXECUTABLE,
+            )
+        )
+
+    def test_expected_preparation_failure_emits_a_typed_run_document(
+        self, complete_workspace, capsys
+    ):
+        from siteops.orchestrator import Orchestrator
+
+        orchestrator = Orchestrator(complete_workspace)
+        manifest = complete_workspace / "manifests" / "test-manifest.yaml"
+        args = self._args(
+            complete_workspace,
+            manifest,
+            projection="publishable",
+        )
+
+        with patch.object(
+            orchestrator,
+            "deploy",
+            side_effect=self._preparation_failure(),
+        ):
+            exit_code = cmd_deploy(args, orchestrator)
+
+        captured = capsys.readouterr()
+        document = json.loads(captured.out)
+        assert exit_code == 1
+        assert document["kind"] == "DeploymentRun"
+        assert document["status"] == "invalid"
+        assert document["exitCode"] == 1
+        assert document["diagnostics"] == [
+            {
+                "code": "run.validation-failed",
+                "severity": "error",
+                "summary": "Manifest validation failed.",
+            }
+        ]
+        assert "private-site" not in captured.out
+        assert "private/path" not in captured.out
+
+    def test_real_preparation_failure_emits_invalid_json_before_compilation(
+        self, complete_workspace, capsys
+    ):
+        from siteops.orchestrator import Orchestrator
+
+        manifest = complete_workspace / "manifests" / "test-manifest.yaml"
+        document = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+        document["steps"].append({
+            "name": "apply",
+            "type": "kubectl",
+            "operation": "apply",
+            "arc": {"name": "cluster", "resourceGroup": "rg"},
+            "files": ["missing.yaml"],
+        })
+        manifest.write_text(yaml.safe_dump(document), encoding="utf-8")
+        orchestrator = Orchestrator(complete_workspace)
+        args = self._args(complete_workspace, manifest, projection="publishable")
+
+        with patch(
+            "siteops.orchestrator.TemplateCompilationSession",
+            side_effect=AssertionError("Invalid preparation must not acquire tools"),
+        ):
+            exit_code = cmd_deploy(args, orchestrator)
+
+        captured = capsys.readouterr()
+        result = json.loads(captured.out)
+        assert exit_code == result["exitCode"] == 1
+        assert result["kind"] == "DeploymentRun"
+        assert result["status"] == "invalid"
+        assert result["summary"]["operations"]["total"] == 0
+        assert "missing.yaml" not in captured.out
+
+    def test_missing_manifest_in_json_mode_emits_no_run_document(
+        self, complete_workspace, capsys
+    ):
+        from siteops.orchestrator import Orchestrator
+
+        orchestrator = Orchestrator(complete_workspace)
+        args = self._args(
+            complete_workspace,
+            complete_workspace / "manifests" / "missing.yaml",
+        )
+        with patch.object(orchestrator, "deploy") as deploy:
+            exit_code = cmd_deploy(args, orchestrator)
+
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert captured.out == ""
+        assert "Manifest not found" in captured.err
+        deploy.assert_not_called()
+
+    def test_plain_preparation_failure_keeps_its_local_message(
+        self, complete_workspace, capsys
+    ):
+        from siteops.orchestrator import Orchestrator
+
+        orchestrator = Orchestrator(complete_workspace)
+        manifest = complete_workspace / "manifests" / "test-manifest.yaml"
+        args = self._args(complete_workspace, manifest, output="plain")
+
+        with patch.object(
+            orchestrator,
+            "deploy",
+            side_effect=self._preparation_failure(),
+        ):
+            exit_code = cmd_deploy(args, orchestrator)
+
+        captured = capsys.readouterr()
+        assert exit_code == 1
+        assert captured.out == ""
+        assert "private-site is missing private/path" in captured.err
+
+    def test_an_unexpected_internal_failure_writes_no_run_document(
+        self, complete_workspace, capsys
+    ):
+        from siteops.orchestrator import Orchestrator
+
+        orchestrator = Orchestrator(complete_workspace)
+        manifest = complete_workspace / "manifests" / "test-manifest.yaml"
+        args = self._args(complete_workspace, manifest)
+
+        with patch.object(
+            orchestrator,
+            "deploy",
+            side_effect=RuntimeError("internal invariant"),
+        ):
+            with pytest.raises(RuntimeError):
+                cmd_deploy(args, orchestrator)
+
+        assert capsys.readouterr().out == ""
+
+    def test_a_dry_run_emits_a_plan_document_and_never_executes(
+        self, complete_workspace, capsys
+    ):
+        from siteops.orchestrator import Orchestrator
+
+        manifest = complete_workspace / "manifests" / "test-manifest.yaml"
+        document = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+        document["steps"].append(
+            {
+                "name": "apply",
+                "type": "kubectl",
+                "operation": "apply",
+                "arc": {"name": "cluster", "resourceGroup": "rg"},
+                "files": ["missing.yaml"],
+            }
+        )
+        manifest.write_text(yaml.safe_dump(document), encoding="utf-8")
+        orchestrator = Orchestrator(complete_workspace, dry_run=True)
+        args = self._args(
+            complete_workspace,
+            manifest,
+            dry_run=True,
+            projection="publishable",
+        )
+
+        with (
+            patch(
+                "siteops.orchestrator.TemplateCompilationSession",
+                side_effect=AssertionError("A dry run must not compile"),
+            ),
+            patch.object(orchestrator, "execute_plan") as execute,
+        ):
+            exit_code = cmd_deploy(args, orchestrator)
+
+        captured = capsys.readouterr()
+        plan_document = json.loads(captured.out)
+        assert exit_code == 1
+        assert plan_document["kind"] == "DeploymentPlan"
+        execute.assert_not_called()
+
+    def test_plain_output_reports_the_final_summary(
+        self, complete_workspace, capsys
+    ):
+        from siteops.orchestrator import Orchestrator
+
+        orchestrator = Orchestrator(complete_workspace)
+        manifest = complete_workspace / "manifests" / "test-manifest.yaml"
+        args = self._args(complete_workspace, manifest, output="plain")
+
+        with patch.object(orchestrator, "deploy", return_value=self._run()):
+            exit_code = cmd_deploy(args, orchestrator)
+
+        captured = capsys.readouterr()
+        assert exit_code == 0
+        assert "Deployment summary" in captured.out
+        assert "private-site" in captured.out
+
+
+class TestCooperativeInterruption:
+    """Ctrl-C asks a run to stop. It does not abandon it or cancel Azure work.
+
+    No signal is delivered to the test process. Each case invokes the
+    installed handler directly, which is the same callable the runtime would
+    run, without racing pytest's own interpreter state.
+    """
+
+    def _args(self, workspace, manifest):
+        return Namespace(
+            manifest=manifest,
+            workspace=workspace,
+            selector=None,
+            parallel=None,
+            dry_run=False,
+            verbose=False,
+            output="plain",
+            projection=None,
+        )
+
+    def _interrupted_run(self):
+        operation = OperationResult(
+            identity=OperationIdentity(target="site-a", step="deploy"),
+            kind=OperationKind.DEPLOYMENT,
+            status=OperationStatus.SUCCEEDED,
+            elapsed=1.0,
+        )
+        site = SiteResult.from_operations(
+            target="site-a",
+            kind=TargetKind.RESOURCE_GROUP,
+            operations=(operation,),
+            elapsed=1.0,
+        )
+        return RunResult.from_sites((site,), elapsed=1.0, interrupted=True)
+
+    def test_an_interrupt_sets_the_stop_event_and_keeps_the_final_result(
+        self, complete_workspace, capsys
+    ):
+        from siteops.orchestrator import Orchestrator
+
+        orchestrator = Orchestrator(complete_workspace)
+        manifest = complete_workspace / "manifests" / "test-manifest.yaml"
+        args = self._args(complete_workspace, manifest)
+        previous = signal.getsignal(signal.SIGINT)
+        observed = {}
+
+        def interrupt_during_run(*_, **kwargs):
+            stop_requested = kwargs["stop_requested"]
+            observed["installed"] = signal.getsignal(signal.SIGINT)
+            observed["set_before"] = stop_requested.is_set()
+            observed["installed"](signal.SIGINT, None)
+            observed["set_after"] = stop_requested.is_set()
+            return self._interrupted_run()
+
+        with patch.object(
+            orchestrator,
+            "deploy",
+            side_effect=interrupt_during_run,
+        ):
+            exit_code = cmd_deploy(args, orchestrator)
+
+        captured = capsys.readouterr()
+        assert observed["installed"] is not previous
+        assert observed["set_before"] is False
+        assert observed["set_after"] is True
+        assert exit_code == 130
+        assert signal.getsignal(signal.SIGINT) is previous
+        assert "Stopping after the operations already in progress finish" in (
+            captured.err
+        )
+        assert "waits for its own timeout" in captured.err
+        assert "not cancelled" in captured.err
+        assert "Deployment summary" in captured.out
+
+    def test_a_repeated_interrupt_repeats_the_bounded_expectation(
+        self, complete_workspace, capsys
+    ):
+        from siteops.orchestrator import Orchestrator
+
+        orchestrator = Orchestrator(complete_workspace)
+        manifest = complete_workspace / "manifests" / "test-manifest.yaml"
+        args = self._args(complete_workspace, manifest)
+
+        def interrupt_twice(*_, **kwargs):
+            handler = signal.getsignal(signal.SIGINT)
+            handler(signal.SIGINT, None)
+            handler(signal.SIGINT, None)
+            assert kwargs["stop_requested"].is_set()
+            return self._interrupted_run()
+
+        with patch.object(
+            orchestrator,
+            "deploy",
+            side_effect=interrupt_twice,
+        ):
+            exit_code = cmd_deploy(args, orchestrator)
+
+        captured = capsys.readouterr()
+        assert exit_code == 130
+        assert captured.err.count("Stopping after the operations") == 2
+
+    def test_the_handler_is_restored_when_a_run_raises(
+        self, complete_workspace
+    ):
+        from siteops.orchestrator import Orchestrator
+
+        orchestrator = Orchestrator(complete_workspace)
+        manifest = complete_workspace / "manifests" / "test-manifest.yaml"
+        args = self._args(complete_workspace, manifest)
+        previous = signal.getsignal(signal.SIGINT)
+
+        with patch.object(
+            orchestrator,
+            "deploy",
+            side_effect=RuntimeError("internal invariant"),
+        ):
+            with pytest.raises(RuntimeError):
+                cmd_deploy(args, orchestrator)
+
+        assert signal.getsignal(signal.SIGINT) is previous
+
+    def test_no_handler_is_installed_off_the_main_thread(
+        self, complete_workspace
+    ):
+        from siteops.orchestrator import Orchestrator
+
+        orchestrator = Orchestrator(complete_workspace)
+        manifest = complete_workspace / "manifests" / "test-manifest.yaml"
+        args = self._args(complete_workspace, manifest)
+        previous = signal.getsignal(signal.SIGINT)
+        observed = {}
+
+        def record_disposition(*_, **kwargs):
+            observed["installed"] = signal.getsignal(signal.SIGINT)
+            observed["event"] = kwargs["stop_requested"]
+            return self._interrupted_run()
+
+        def run_off_main_thread():
+            with patch.object(
+                orchestrator,
+                "deploy",
+                side_effect=record_disposition,
+            ):
+                observed["exit_code"] = cmd_deploy(args, orchestrator)
+
+        worker = threading.Thread(target=run_off_main_thread)
+        worker.start()
+        worker.join()
+
+        assert observed["installed"] is previous
+        assert isinstance(observed["event"], threading.Event)
+        assert observed["exit_code"] == 130
+        assert signal.getsignal(signal.SIGINT) is previous
+
+
+class TestDocumentedInterruptBounds:
+    """The published wait bounds are the ones the executor actually enforces.
+
+    An interrupt cannot stop a call already running in a child process, so the
+    documented bounds are the honest part of that promise. They are copied
+    prose, which is what goes stale first.
+    """
+
+    def test_run_output_names_the_current_call_timeouts(self):
+        from siteops.executor import (
+            DEFAULT_DEPLOYMENT_SUBMIT_TIMEOUT_SECONDS,
+            DEFAULT_KUBECTL_TIMEOUT_SECONDS,
+            DEFAULT_WAIT_POLL_AZ_TIMEOUT_SECONDS,
+        )
+
+        document = " ".join(
+            (
+                Path(__file__).parent.parent / "docs" / "run-output.md"
+            ).read_text(encoding="utf-8").split()
+        )
+
+        assert (
+            f"{DEFAULT_WAIT_POLL_AZ_TIMEOUT_SECONDS} seconds for one "
+            "deployment state read"
+        ) in document
+        assert (
+            f"{DEFAULT_DEPLOYMENT_SUBMIT_TIMEOUT_SECONDS // 60} minutes for a "
+            "deployment submission"
+        ) in document
+        assert (
+            f"{DEFAULT_KUBECTL_TIMEOUT_SECONDS // 60} minutes for a kubectl "
+            "operation"
+        ) in document

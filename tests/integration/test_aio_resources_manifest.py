@@ -16,9 +16,12 @@ internally ordered step, followed by the independently gated dataflow step.
 
 import pytest
 
+from siteops.results import RunStatus, SiteStatus
 from tests.integration.conftest import WORKSPACE_PATH
 from tests.integration.helpers.assertions import (
     assert_step_succeeded,
+    site_names,
+    site_results,
     skip_unless_health_is_reported,
 )
 from tests.integration.helpers.kube import KubectlError, wait_for_cr, wait_for_cr_health
@@ -71,15 +74,16 @@ class TestCatalogSelection:
 
     def test_all_sites_succeeded(self, aio_resources_result):
         """Covers the summary's failure count, which counts these same sites."""
-        assert aio_resources_result["summary"]["failed"] == 0
-        for name, site in aio_resources_result["sites"].items():
-            assert site["status"] == "success", (
-                f"Site '{name}' failed: {site.get('error')}"
+        assert aio_resources_result.status is RunStatus.SUCCEEDED
+        for site in site_results(aio_resources_result):
+            assert site.status is SiteStatus.SUCCEEDED, (
+                f"Site '{site.target}' did not succeed: "
+                f"{site.failure_reason()}"
             )
 
     def test_selected_family_steps_ran(self, aio_resources_result):
         """Both deployment families ran for the selected resource areas."""
-        for name in aio_resources_result["sites"]:
+        for name in site_names(aio_resources_result):
             assert_step_succeeded(aio_resources_result, name, CATALOG_STEP)
             assert_step_succeeded(
                 aio_resources_result,
@@ -105,7 +109,7 @@ class TestPerSiteValuesResolve:
     def test_destination_topic_carries_a_deployed_site_name(
         self, aio_resources_result, aio_namespace, kubectl_available
     ):
-        deployed = set(aio_resources_result["sites"])
+        deployed = set(site_names(aio_resources_result))
         try:
             dataflow = wait_for_cr(
                 "dataflows.connectivity.iotoperations.azure.com",
@@ -148,7 +152,7 @@ class TestPerSiteValuesResolve:
         The runtime rejects an unresolved template. This assertion proves the
         resolved label reached the provider.
         """
-        deployed = set(aio_resources_result["sites"])
+        deployed = set(site_names(aio_resources_result))
         asset = _projected(ASSET_CR_TYPE, SET_ASSET_NAME, aio_namespace)
 
         display_name = asset.get("spec", {}).get("displayName")
@@ -174,7 +178,7 @@ class TestPerSiteValuesResolve:
         This is the fan-out the asset family is sold on: one committed
         declaration, and each site publishing its oven data under its own topic.
         """
-        deployed = set(aio_resources_result["sites"])
+        deployed = set(site_names(aio_resources_result))
         asset = _projected(ASSET_CR_TYPE, SET_ASSET_NAME, aio_namespace)
 
         topics = [
@@ -297,7 +301,7 @@ class TestCatalogDataflowHealth:
         kubectl_available,
         orchestrator,
     ):
-        for name in aio_resources_result["sites"]:
+        for name in site_names(aio_resources_result):
             assert_step_succeeded(aio_resources_result, name, CATALOG_STEP)
             _, release = load_aio_release(orchestrator, name, WORKSPACE_PATH)
             skip_unless_health_is_reported(release.get("aioApiVersion"))

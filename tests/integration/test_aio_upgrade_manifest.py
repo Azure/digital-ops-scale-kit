@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from siteops.models import Manifest
+from siteops.results import OperationStatus, RunStatus, SiteStatus
 from tests.integration.conftest import (
     TEST_OVERRIDE_AIO_KEY,
     TEST_OVERRIDE_AIO_VALUE,
@@ -26,6 +27,8 @@ from tests.integration.helpers.assertions import (
     assert_output_starts_with,
     assert_step_succeeded,
     find_step,
+    site_names,
+    site_results,
 )
 from tests.integration.helpers.kube import KubectlError, kubectl_json
 from tests.integration.helpers.releases import load_aio_release
@@ -100,14 +103,18 @@ class TestAioUpgradeDeployment:
     """Validate that aio-upgrade.yaml deploys successfully end-to-end."""
 
     def test_no_failures(self, aio_upgrade_result):
-        assert aio_upgrade_result["summary"]["failed"] == 0
+        assert aio_upgrade_result.status is RunStatus.SUCCEEDED
 
     def test_all_sites_succeeded(self, aio_upgrade_result):
-        for name, site in aio_upgrade_result["sites"].items():
-            assert site["status"] == "success", (
-                f"Site '{name}' failed: {site.get('error')}"
+        for site in site_results(aio_upgrade_result):
+            assert site.status is SiteStatus.SUCCEEDED, (
+                f"Site '{site.target}' did not succeed: "
+                f"{site.failure_reason()}"
             )
-            assert site["steps_completed"] == 4
+            assert sum(
+                operation.status is OperationStatus.SUCCEEDED
+                for operation in site.operations
+            ) == 4
 
     def test_all_phases_run(self, aio_upgrade_result):
         expected = (
@@ -116,7 +123,7 @@ class TestAioUpgradeDeployment:
             "update-extensions",
             "deploy-release-resources",
         )
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             for step_name in expected:
                 assert_step_succeeded(aio_upgrade_result, name, step_name)
 
@@ -126,7 +133,7 @@ class TestAioUpgradeOidcOptionality:
 
     def test_missing_oidc_profile_returns_empty_issuer(self, aio_upgrade_result):
         sites_without_oidc = 0
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             step = assert_step_succeeded(aio_upgrade_result, name, "resolve-aio")
             issuer = assert_output_exists(step, "oidcIssuerUrl")
             if issuer:
@@ -139,7 +146,7 @@ class TestAioUpgradeOidcOptionality:
 
     def test_existing_oidc_profile_preserves_issuer(self, aio_upgrade_result):
         sites_with_oidc = 0
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             step = assert_step_succeeded(aio_upgrade_result, name, "resolve-aio")
             issuer = assert_output_exists(step, "oidcIssuerUrl")
             if not issuer:
@@ -157,7 +164,7 @@ class TestAioUpgradeResolveExtensions:
     """Validate the snapshot outputs from resolve-extensions."""
 
     def test_aio_snapshot_fields(self, aio_upgrade_result):
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             step = assert_step_succeeded(aio_upgrade_result, name, "resolve-extensions")
             aio = assert_output_exists(step, "aio")
             for key in ("id", "name", "extensionType", "version", "releaseTrain",
@@ -173,7 +180,7 @@ class TestAioUpgradeResolveExtensions:
 
     def test_aio_release_namespace_non_empty(self, aio_upgrade_result):
         """Snapshot must populate releaseNamespace. Empty risks destructive PUT."""
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             step = assert_step_succeeded(aio_upgrade_result, name, "resolve-extensions")
             aio = assert_output_exists(step, "aio")
             assert aio["releaseNamespace"], (
@@ -182,7 +189,7 @@ class TestAioUpgradeResolveExtensions:
             )
 
     def test_secret_store_snapshot_fields(self, aio_upgrade_result):
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             step = assert_step_succeeded(aio_upgrade_result, name, "resolve-extensions")
             secret_store = assert_output_exists(step, "secretStore")
             for key in ("id", "name", "extensionType", "version", "releaseTrain",
@@ -199,7 +206,7 @@ class TestAioUpgradeResolveExtensions:
         """resolve-extensions returns a uniform certManager snapshot whether
         the extension is installed or not. When `enableCertManager` is true
         the snapshot is populated. When false it is the zero-valued shape."""
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             step = assert_step_succeeded(aio_upgrade_result, name, "resolve-extensions")
             cert_manager = assert_output_exists(step, "certManager")
             for key in ("id", "name", "extensionType", "version", "releaseTrain",
@@ -214,7 +221,7 @@ class TestAioUpgradePreservation:
 
     def test_aio_extension_id_preserved(self, aio_install_result, aio_upgrade_result):
         """A full-replace would mint a new resource id. Same id = in-place PUT."""
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             install_step = assert_step_succeeded(aio_install_result, name, "aio-instance")
             install_aio = assert_output_exists(install_step, "aioExtension")
             install_id = install_aio["id"]
@@ -228,7 +235,7 @@ class TestAioUpgradePreservation:
             )
 
     def test_secret_store_extension_id_preserved(self, aio_install_result, aio_upgrade_result):
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             install_step = assert_step_succeeded(aio_install_result, name, "aio-enablement")
             install_extensions = assert_output_exists(install_step, "extensions")
             install_id = install_extensions["secretStore"]["id"]
@@ -244,7 +251,7 @@ class TestAioUpgradePreservation:
     def test_aio_version_preserved_when_no_release_bump(self, aio_install_result, aio_upgrade_result):
         """Same aioRelease across install and upgrade means the applied
         version equals the resolved snapshot version."""
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             resolve_step = assert_step_succeeded(aio_upgrade_result, name, "resolve-extensions")
             resolved_version = assert_output_exists(resolve_step, "aio")["version"]
 
@@ -257,7 +264,7 @@ class TestAioUpgradePreservation:
             )
 
     def test_update_extensions_outputs(self, aio_upgrade_result):
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             step = assert_step_succeeded(aio_upgrade_result, name, "update-extensions")
             assert_output_starts_with(step, "aioExtensionId", "/subscriptions/")
             assert_output_starts_with(step, "secretStoreExtensionId", "/subscriptions/")
@@ -278,7 +285,7 @@ class TestAioUpgradeSelfConsistency:
         """update-extensions writes back the AIO extension id it patched.
         It must equal the id resolve-extensions discovered in the same run.
         """
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             resolve_step = assert_step_succeeded(aio_upgrade_result, name, "resolve-extensions")
             resolved_id = assert_output_exists(resolve_step, "aio")["id"]
 
@@ -292,7 +299,7 @@ class TestAioUpgradeSelfConsistency:
             )
 
     def test_update_extensions_secret_store_id_matches_resolve(self, aio_upgrade_result):
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             resolve_step = assert_step_succeeded(aio_upgrade_result, name, "resolve-extensions")
             resolved_id = assert_output_exists(resolve_step, "secretStore")["id"]
 
@@ -308,7 +315,7 @@ class TestAioUpgradeSelfConsistency:
         """Snapshots feed `union(snapshot, overrides)` in update-extensions.
         Empty snapshots would silently wipe operator config on the PUT.
         """
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             step = assert_step_succeeded(aio_upgrade_result, name, "resolve-extensions")
             aio = assert_output_exists(step, "aio")
             secret_store = assert_output_exists(step, "secretStore")
@@ -335,9 +342,9 @@ class TestAioUpgradeIdempotency:
             manifest=manifest,
             sites=sites,
         )
-        assert result2["summary"]["failed"] == 0
+        assert result2.status is RunStatus.SUCCEEDED
 
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             step1 = find_step(aio_upgrade_result, name, "update-extensions")
             step2 = find_step(result2, name, "update-extensions")
             for output_name in (
@@ -393,7 +400,7 @@ class TestAioUpgradeTargetVersion:
         return release_key, expected
 
     def test_applied_version_matches_target_release(self, orchestrator, aio_upgrade_result):
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             step = assert_step_succeeded(aio_upgrade_result, name, "update-extensions")
             applied = assert_output_exists(step, "aioVersionApplied")
             release_key, expected = self._target_release_version(orchestrator, name)
@@ -416,7 +423,7 @@ class TestAioUpgradeTargetVersion:
         if not release_from or not release_to or release_from == release_to:
             pytest.skip("Not a cross-release upgrade, so the version is expected to hold")
 
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             resolve_step = assert_step_succeeded(aio_upgrade_result, name, "resolve-extensions")
             resolved = assert_output_exists(resolve_step, "aio")["version"]
 
@@ -449,7 +456,7 @@ class TestAioExtensionInvariants:
 
     def test_aio_extension_id_preserved(self, aio_upgrade_result):
         """Different id post-PUT means full-replace, not in-place patch."""
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             resolve = assert_step_succeeded(aio_upgrade_result, name, "resolve-extensions")
             pre = assert_output_exists(resolve, "aio")
             update = assert_step_succeeded(aio_upgrade_result, name, "update-extensions")
@@ -460,7 +467,7 @@ class TestAioExtensionInvariants:
             )
 
     def test_aio_extension_name_and_type_preserved(self, aio_upgrade_result):
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             resolve = assert_step_succeeded(aio_upgrade_result, name, "resolve-extensions")
             pre = assert_output_exists(resolve, "aio")
             update = assert_step_succeeded(aio_upgrade_result, name, "update-extensions")
@@ -476,7 +483,7 @@ class TestAioExtensionInvariants:
 
     def test_aio_release_namespace_preserved(self, aio_upgrade_result):
         """releaseNamespace change relocates the AIO workload on the cluster."""
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             resolve = assert_step_succeeded(aio_upgrade_result, name, "resolve-extensions")
             pre = assert_output_exists(resolve, "aio")
             update = assert_step_succeeded(aio_upgrade_result, name, "update-extensions")
@@ -489,7 +496,7 @@ class TestAioExtensionInvariants:
 
     def test_aio_identity_preserved(self, aio_upgrade_result):
         """Identity change orphans the extension's role assignments."""
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             resolve = assert_step_succeeded(aio_upgrade_result, name, "resolve-extensions")
             pre = assert_output_exists(resolve, "aio")
             update = assert_step_succeeded(aio_upgrade_result, name, "update-extensions")
@@ -505,7 +512,7 @@ class TestAioExtensionInvariants:
         """configurationSettings carries operator-applied AIO config. Update
         preserves every existing key and may add only release-required defaults.
         """
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             resolve = assert_step_succeeded(aio_upgrade_result, name, "resolve-extensions")
             pre = assert_output_exists(resolve, "aio")
             update = assert_step_succeeded(aio_upgrade_result, name, "update-extensions")
@@ -552,7 +559,7 @@ class TestAioExtensionInvariants:
         so a mismatch here means the RP defaulted the train unexpectedly OR
         the release config was bumped (intentional, update the test).
         """
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             resolve = assert_step_succeeded(aio_upgrade_result, name, "resolve-extensions")
             pre = assert_output_exists(resolve, "aio")
             update = assert_step_succeeded(aio_upgrade_result, name, "update-extensions")
@@ -574,7 +581,7 @@ class TestOpcUaConnectorTemplateUpgrade:
         kubectl_available,
     ):
         checked = 0
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             release_configuration = _release_configuration(orchestrator, name)
             connector_configuration = (
                 release_configuration.get("resources", {})
@@ -631,7 +638,7 @@ class TestSecretStoreExtensionInvariants:
     """
 
     def test_secret_store_extension_id_preserved(self, aio_upgrade_result):
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             resolve = assert_step_succeeded(aio_upgrade_result, name, "resolve-extensions")
             pre = assert_output_exists(resolve, "secretStore")
             update = assert_step_succeeded(aio_upgrade_result, name, "update-extensions")
@@ -642,7 +649,7 @@ class TestSecretStoreExtensionInvariants:
             )
 
     def test_secret_store_name_and_type_preserved(self, aio_upgrade_result):
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             resolve = assert_step_succeeded(aio_upgrade_result, name, "resolve-extensions")
             pre = assert_output_exists(resolve, "secretStore")
             update = assert_step_succeeded(aio_upgrade_result, name, "update-extensions")
@@ -658,7 +665,7 @@ class TestSecretStoreExtensionInvariants:
 
     def test_secret_store_identity_preserved(self, aio_upgrade_result):
         """Identity change orphans the extension's Key Vault role assignments."""
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             resolve = assert_step_succeeded(aio_upgrade_result, name, "resolve-extensions")
             pre = assert_output_exists(resolve, "secretStore")
             update = assert_step_succeeded(aio_upgrade_result, name, "update-extensions")
@@ -669,7 +676,7 @@ class TestSecretStoreExtensionInvariants:
             )
 
     def test_secret_store_configuration_settings_preserved(self, aio_upgrade_result):
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             resolve = assert_step_succeeded(aio_upgrade_result, name, "resolve-extensions")
             pre = assert_output_exists(resolve, "secretStore")
             update = assert_step_succeeded(aio_upgrade_result, name, "update-extensions")
@@ -681,7 +688,7 @@ class TestSecretStoreExtensionInvariants:
             )
 
     def test_secret_store_release_train_preserved(self, aio_upgrade_result):
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             resolve = assert_step_succeeded(aio_upgrade_result, name, "resolve-extensions")
             pre = assert_output_exists(resolve, "secretStore")
             update = assert_step_succeeded(aio_upgrade_result, name, "update-extensions")
@@ -703,7 +710,7 @@ class TestCertManagerExtensionInvariants:
     """
 
     def test_cert_manager_extension_id_preserved(self, aio_upgrade_result):
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             resolve = assert_step_succeeded(aio_upgrade_result, name, "resolve-extensions")
             pre = assert_output_exists(resolve, "certManager")
             if not pre["id"]:
@@ -716,7 +723,7 @@ class TestCertManagerExtensionInvariants:
             )
 
     def test_cert_manager_name_and_type_preserved(self, aio_upgrade_result):
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             resolve = assert_step_succeeded(aio_upgrade_result, name, "resolve-extensions")
             pre = assert_output_exists(resolve, "certManager")
             if not pre["id"]:
@@ -733,7 +740,7 @@ class TestCertManagerExtensionInvariants:
             )
 
     def test_cert_manager_release_namespace_preserved(self, aio_upgrade_result):
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             resolve = assert_step_succeeded(aio_upgrade_result, name, "resolve-extensions")
             pre = assert_output_exists(resolve, "certManager")
             if not pre["id"]:
@@ -748,7 +755,7 @@ class TestCertManagerExtensionInvariants:
             )
 
     def test_cert_manager_identity_preserved(self, aio_upgrade_result):
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             resolve = assert_step_succeeded(aio_upgrade_result, name, "resolve-extensions")
             pre = assert_output_exists(resolve, "certManager")
             if not pre["id"]:
@@ -761,7 +768,7 @@ class TestCertManagerExtensionInvariants:
             )
 
     def test_cert_manager_configuration_settings_preserved(self, aio_upgrade_result):
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             resolve = assert_step_succeeded(aio_upgrade_result, name, "resolve-extensions")
             pre = assert_output_exists(resolve, "certManager")
             if not pre["id"]:
@@ -786,7 +793,7 @@ class TestCertManagerExtensionInvariants:
             )
 
     def test_cert_manager_release_train_preserved(self, aio_upgrade_result):
-        for name in aio_upgrade_result["sites"]:
+        for name in site_names(aio_upgrade_result):
             resolve = assert_step_succeeded(aio_upgrade_result, name, "resolve-extensions")
             pre = assert_output_exists(resolve, "certManager")
             if not pre["id"]:
@@ -817,7 +824,7 @@ class TestExtensionAdditiveOverrides:
     """
 
     def test_aio_override_added_and_existing_preserved(self, aio_upgrade_with_overrides_result):
-        for name in aio_upgrade_with_overrides_result["sites"]:
+        for name in site_names(aio_upgrade_with_overrides_result):
             resolve = assert_step_succeeded(
                 aio_upgrade_with_overrides_result, name, "resolve-extensions"
             )
@@ -853,7 +860,7 @@ class TestExtensionAdditiveOverrides:
     def test_secret_store_override_added_and_existing_preserved(
         self, aio_upgrade_with_overrides_result
     ):
-        for name in aio_upgrade_with_overrides_result["sites"]:
+        for name in site_names(aio_upgrade_with_overrides_result):
             resolve = assert_step_succeeded(
                 aio_upgrade_with_overrides_result, name, "resolve-extensions"
             )
@@ -880,7 +887,7 @@ class TestExtensionAdditiveOverrides:
     def test_cert_manager_override_added_and_existing_preserved(
         self, aio_upgrade_with_overrides_result
     ):
-        for name in aio_upgrade_with_overrides_result["sites"]:
+        for name in site_names(aio_upgrade_with_overrides_result):
             resolve = assert_step_succeeded(
                 aio_upgrade_with_overrides_result, name, "resolve-extensions"
             )

@@ -9,12 +9,30 @@ itself runs under `GITHUB_ACTIONS` in CI, which turns redaction on, so a test
 asserting the local default would otherwise pass locally and fail in CI.
 """
 
+import io
 import logging
 from pathlib import Path
 
 import pytest
 
-from siteops.orchestrator import Orchestrator
+from siteops.orchestrator import Orchestrator, _ProgressOwner
+from siteops.planning import (
+    OperationIdentity,
+    OperationKind,
+    PlanBuildResult,
+    PlanStatus,
+    TargetKind,
+)
+from siteops.reporting import TextProgressReporter
+from siteops.results import (
+    OperationResult,
+    OperationStatus,
+    OutcomeReason,
+    OutcomeReasonCode,
+    RunResult,
+    SiteResult,
+    SiteStatus,
+)
 from siteops.sanitize import (
     REDACT_ENV,
     is_redaction_enabled,
@@ -386,79 +404,88 @@ class TestOrchestratorAppliesRedaction:
         )
         return plan, target
 
-    def test_site_failure_result_is_scrubbed(self, clean_env):
-        clean_env.setenv(REDACT_ENV, "1")
-        plan, target = self._prepared_plan_target()
+    def _execute_unexpected_failure(
+        self,
+        tmp_workspace,
+        monkeypatch,
+        message: str,
+    ) -> RunResult:
+        plan, _ = self._prepared_plan_target()
+        orchestrator = Orchestrator(tmp_workspace)
 
-        result = Orchestrator._prepared_target_failure_result(
-            target,
-            plan,
-            (
-                "Unexpected error in deployment "
-                "'manifest-munich-prod-step-20260902000000': "
-                f"could not read {RESOURCE_ID}"
-            ),
+        def fail_target(_plan, target, *args, state, **kwargs):
+            state.start()
+            assert state.begin(
+                target.operations[0],
+                "m-munich-prod-aio-instance-ts",
+            )
+            raise RuntimeError(message)
+
+        monkeypatch.setattr(
+            orchestrator,
+            "_execute_prepared_target",
+            fail_target,
+        )
+        return orchestrator.execute_plan(
+            PlanBuildResult(
+                status=PlanStatus.PLANNED,
+                executable=True,
+                plan=plan,
+            )
         )
 
-        assert SUBSCRIPTION not in result["error"]
-        assert "contoso-munich-rg" not in result["error"]
-        assert "munich-prod" not in result["error"]
-        assert "manifest-<site>-step" in result["error"]
-        assert "Unexpected error" in result["error"]
-
-    def test_site_failure_result_keeps_detail_for_a_local_run(self, clean_env):
-        plan, target = self._prepared_plan_target()
-
-        result = Orchestrator._prepared_target_failure_result(
-            target,
-            plan,
-            RESOURCE_ID,
+    def test_site_failure_reporting_is_scrubbed(
+        self,
+        clean_env,
+        tmp_workspace,
+        monkeypatch,
+        caplog,
+    ):
+        clean_env.setenv(REDACT_ENV, "1")
+        message = (
+            "Unexpected error in deployment "
+            "'manifest-munich-prod-step-20260902000000': "
+            f"could not read {RESOURCE_ID}"
         )
 
-        assert result["error"] == RESOURCE_ID
+        with caplog.at_level(logging.ERROR):
+            result = self._execute_unexpected_failure(
+                tmp_workspace,
+                monkeypatch,
+                message,
+            )
 
-    def test_failed_site_summary_is_scrubbed(self, clean_env, capsys):
-        clean_env.setenv(REDACT_ENV, "1")
-        results = [
-            {
-                "site": "munich-prod",
-                "status": "failed",
-                "error": f"BadRequest: {RESOURCE_ID} is invalid",
-                "steps_completed": 0,
-                "steps_skipped": 0,
-                "steps_total": 1,
-                "elapsed": 1.0,
-                "steps": [],
-            }
-        ]
+        site = result.sites[0]
+        reason = site.failure_reason()
+        assert reason is not None
+        assert SUBSCRIPTION in reason.local_message()
+        assert site.operations[0].status is OperationStatus.UNKNOWN
+        assert SUBSCRIPTION not in caplog.text
+        assert "contoso-munich-rg" not in caplog.text
+        assert "munich-prod" not in caplog.text
+        assert "manifest-<site>-step" in caplog.text
+        assert "Unexpected error" in caplog.text
 
-        self._orchestrator()._print_deployment_summary(results, 1.0)
+    def test_site_failure_reporting_keeps_detail_for_a_local_run(
+        self,
+        clean_env,
+        tmp_workspace,
+        monkeypatch,
+        caplog,
+    ):
+        with caplog.at_level(logging.ERROR):
+            result = self._execute_unexpected_failure(
+                tmp_workspace,
+                monkeypatch,
+                RESOURCE_ID,
+            )
 
-        printed = capsys.readouterr().out
-        assert SUBSCRIPTION not in printed
-        assert "contoso-munich-rg" not in printed
-        assert "BadRequest" in printed
-
-    def test_blocked_site_summary_is_scrubbed(self, clean_env, capsys):
-        clean_env.setenv(REDACT_ENV, "1")
-        results = [
-            {
-                "site": "munich-prod",
-                "status": "blocked",
-                "error": f"upstream failed at {RESOURCE_ID}",
-                "steps_completed": 0,
-                "steps_skipped": 0,
-                "steps_total": 1,
-                "elapsed": 0.0,
-                "steps": [],
-            }
-        ]
-
-        self._orchestrator()._print_deployment_summary(results, 1.0)
-
-        printed = capsys.readouterr().out
-        assert SUBSCRIPTION not in printed
-        assert "contoso-munich-rg" not in printed
+        site = result.sites[0]
+        reason = site.failure_reason()
+        assert reason is not None
+        assert RESOURCE_ID in reason.local_message()
+        assert site.operations[0].status is OperationStatus.UNKNOWN
+        assert RESOURCE_ID in caplog.text
 
     def test_a_failed_step_is_scrubbed_in_the_log_and_the_step_result(
         self, clean_env, capsys, tmp_path, monkeypatch
@@ -466,7 +493,7 @@ class TestOrchestratorAppliesRedaction:
         """The deploy path itself, not just the pre-step failure builder.
 
         This is the call site that produces the live failure log and the
-        `steps[].error` entry a run artifact carries, and it is why the E2E
+        operation reason a run carries, and it is why the E2E
         workflow sets redaction on for the whole job.
         """
         clean_env.setenv(REDACT_ENV, "1")
@@ -492,25 +519,30 @@ class TestOrchestratorAppliesRedaction:
             ),
         )
 
-        result, _ = orch._execute_prepared_target(
+        output = io.StringIO()
+        result = orch._execute_prepared_target(
             plan,
             target,
             "ts",
             {},
-            parallel_mode=False,
             execution_mode=PlanExecutionMode.APPLY,
+            progress=_ProgressOwner(
+                TextProgressReporter(output, redacted=True)
+            ),
         )
 
-        step_error = result["steps"][0]["error"]
-        assert SUBSCRIPTION not in step_error
-        assert "contoso-munich-rg" not in step_error
-        assert "munich-prod" not in step_error
-        assert "m-<site>-aio-instance-ts" in step_error
+        reason = result.site.operations[0].reason
+        assert reason is not None
+        step_error = reason.local_message()
+        assert SUBSCRIPTION in step_error
+        assert "contoso-munich-rg" in step_error
+        assert "munich-prod" in step_error
+        assert "m-munich-prod-aio-instance-ts" in step_error
         assert "BadRequest" in step_error
-        output = capsys.readouterr().out
-        assert SUBSCRIPTION not in output
-        assert "munich-prod" not in output
-        assert "[<site>]" in output
+        printed = output.getvalue()
+        assert SUBSCRIPTION not in printed
+        assert "munich-prod" not in printed
+        assert "[<site>]" in printed
 
     def test_a_local_step_log_keeps_the_site_name(
         self, clean_env, capsys, monkeypatch
@@ -533,16 +565,19 @@ class TestOrchestratorAppliesRedaction:
             ),
         )
 
+        output = io.StringIO()
         orch._execute_prepared_target(
             plan,
             target,
             "ts",
             {},
-            parallel_mode=False,
             execution_mode=PlanExecutionMode.APPLY,
+            progress=_ProgressOwner(
+                TextProgressReporter(output, redacted=False)
+            ),
         )
 
-        assert "[munich-prod]" in capsys.readouterr().out
+        assert "[munich-prod]" in output.getvalue()
 
     def test_unexpected_prepared_target_failure_redacts_log_identity(
         self,
@@ -568,17 +603,23 @@ class TestOrchestratorAppliesRedaction:
         )
 
         with caplog.at_level(logging.ERROR):
-            results, _ = orchestrator._run_prepared_targets(
+            results, _, interrupted = orchestrator._run_prepared_targets(
                 plan,
                 [target],
                 "ts",
                 {},
                 PlanExecutionMode.APPLY,
+                progress=_ProgressOwner(None),
             )
 
-        assert results[0]["site"] == "munich-prod"
-        assert "munich-prod" not in results[0]["error"]
-        assert "m-<site>-step-ts" in results[0]["error"]
+        assert interrupted is False
+        assert results[0].target == "munich-prod"
+        assert results[0].status is SiteStatus.FAILED
+        reason = results[0].failure_reason()
+        assert reason is not None
+        detail = reason.local_message()
+        assert "munich-prod" in detail
+        assert "m-munich-prod-step-ts" in detail
         assert "munich-prod" not in caplog.text
 
     def test_a_redacted_empty_plan_omits_the_selector(
@@ -722,21 +763,42 @@ location: eastus
         from tests.integration.conftest import _assert_deployed
 
         clean_env.setenv(REDACT_ENV, "1")
-        result = {
-            "summary": {"failed": 1},
-            "sites": {
-                "private-site": {
-                    "error": "Deployment 'm-private-site-step-ts' failed"
-                }
-            },
-        }
+        reason = OutcomeReason(
+            OutcomeReasonCode.OPERATION_FAILED,
+            private_detail=(
+                "Deployment 'm-private-site-step-ts' failed"
+            ),
+        )
+        operation = OperationResult(
+            identity=OperationIdentity(
+                target="private-site",
+                step="step",
+            ),
+            kind=OperationKind.DEPLOYMENT,
+            status=OperationStatus.FAILED,
+            elapsed=0.0,
+            reason=reason,
+        )
+        site = SiteResult.from_operations(
+            target="private-site",
+            kind=TargetKind.RESOURCE_GROUP,
+            operations=(operation,),
+            elapsed=0.0,
+            reason=reason,
+        )
+        result = RunResult.from_sites(
+            (site,),
+            elapsed=0.0,
+            run_id="run",
+        )
 
         with pytest.raises(AssertionError) as excinfo:
             _assert_deployed(result, "sample")
 
         message = str(excinfo.value)
         assert "private-site" not in message
-        assert "m-<site>-step-ts" in message
+        assert "m-<site>-step-ts" not in message
+        assert "The operation failed." in message
 
     def test_validation_error_omits_the_selected_site_name(
         self,

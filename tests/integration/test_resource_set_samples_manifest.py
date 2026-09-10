@@ -7,6 +7,7 @@ import uuid
 
 import pytest
 
+from siteops.results import RunResult
 from tests.integration.conftest import (
     WORKSPACE_PATH,
     _assert_deployed,
@@ -14,6 +15,7 @@ from tests.integration.conftest import (
 )
 from tests.integration.helpers.assertions import (
     assert_step_succeeded,
+    site_names,
     skip_unless_health_is_reported,
 )
 from tests.integration.helpers.kube import (
@@ -145,8 +147,8 @@ def resource_set_composition_result(
     )
 
 
-def _single_site_name(result: dict) -> str:
-    names = list(result["sites"])
+def _single_site_name(result: RunResult) -> str:
+    names = site_names(result)
     assert len(names) == 1, (
         "Resource-set live qualification reads one cluster and therefore "
         "requires exactly one selected site."

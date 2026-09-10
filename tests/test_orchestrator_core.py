@@ -16,7 +16,14 @@ import pytest
 import yaml
 
 from siteops.models import DeploymentStep, Manifest, ParallelConfig, Site
-from siteops.orchestrator import Orchestrator
+from siteops.orchestrator import Orchestrator, _TargetExecution
+from siteops.planning import PlanIntent
+from siteops.results import (
+    OperationResult,
+    OperationStatus,
+    SiteResult,
+    SiteStatus,
+)
 
 
 def _arm_template():
@@ -550,11 +557,29 @@ steps:
             encoding="utf-8",
         )
 
+        def run_targets(plan, targets, *args, **kwargs):
+            target = targets[0]
+            operation = target.operations[0]
+            site = SiteResult.from_operations(
+                target=target.name,
+                kind=target.kind,
+                operations=(
+                    OperationResult(
+                        identity=operation.identity,
+                        kind=operation.kind,
+                        status=OperationStatus.SUCCEEDED,
+                        elapsed=0.0,
+                    ),
+                ),
+                elapsed=0.0,
+            )
+            return [site], {}, False
+
         with (
             patch.object(
                 orchestrator,
                 "_run_prepared_targets",
-                return_value=([], {}),
+                side_effect=run_targets,
             ) as run_targets,
         ):
             orchestrator.deploy(
@@ -582,30 +607,49 @@ steps:
             encoding="utf-8",
         )
 
-        target_result = {
-            "site": "test-site",
-            "status": "success",
-            "error": None,
-            "steps_completed": 1,
-            "steps_skipped": 0,
-            "steps_total": 1,
-            "elapsed": 0.0,
-            "steps": [],
-        }
+        prepared = orchestrator.build_plan(
+            complete_workspace / "manifests" / "test-manifest.yaml",
+            intent=PlanIntent.EXECUTABLE,
+            manifest=manifest,
+            sites=[orchestrator.load_site("test-site")],
+        )
+        target = prepared.plan.targets[0]
+        operation = target.operations[0]
+        target_result = SiteResult.from_operations(
+            target=target.name,
+            kind=target.kind,
+            operations=(
+                OperationResult(
+                    identity=operation.identity,
+                    kind=operation.kind,
+                    status=OperationStatus.SUCCEEDED,
+                    elapsed=0.0,
+                ),
+            ),
+            elapsed=0.0,
+        )
         with (
             patch.object(
                 orchestrator,
                 "_execute_prepared_target",
-                return_value=(target_result, {}),
+                return_value=_TargetExecution(
+                    site=target_result,
+                    outputs={},
+                ),
             ) as execute_target,
+            patch(
+                "siteops.orchestrator.ThreadPoolExecutor",
+                side_effect=AssertionError(
+                    "single-site execution must stay sequential"
+                ),
+            ),
         ):
             orchestrator.deploy(
                 complete_workspace / "manifests" / "test-manifest.yaml",
-                manifest=manifest,
-                sites=[orchestrator.load_site("test-site")],
+                plan_result=prepared,
             )
 
-        assert execute_target.call_args.kwargs["parallel_mode"] is False
+        execute_target.assert_called_once()
 
 
 class TestPlanParallelDisplay:
@@ -803,163 +847,6 @@ class TestStepSiteCompatibility:
         sub_step = DeploymentStep(name="sub-step", template="test.bicep", scope="subscription")
         sub_site = Site(name="sub-site", subscription="sub", resource_group="", location="eastus")
         assert orchestrator._check_step_site_compatibility(sub_step, sub_site) is None
-
-
-class TestPrintSummary:
-    """Tests for _print_deployment_summary method."""
-
-    def test_summary_with_success_only(self, tmp_workspace, capsys):
-        """Test summary output with only successful deployments."""
-        orchestrator = Orchestrator(tmp_workspace)
-        results = [
-            {
-                "site": "site-a",
-                "status": "success",
-                "steps_completed": 3,
-                "steps_total": 3,
-                "steps_skipped": 0,
-                "elapsed": 10.5,
-            },
-            {
-                "site": "site-b",
-                "status": "success",
-                "steps_completed": 3,
-                "steps_total": 3,
-                "steps_skipped": 0,
-                "elapsed": 12.3,
-            },
-        ]
-
-        orchestrator._print_deployment_summary(results, 15.0)
-
-        captured = capsys.readouterr()
-        assert "+ Success" in captured.out
-        assert "2 succeeded" in captured.out
-        assert "0 failed" in captured.out
-        assert "site-a" in captured.out
-        assert "site-b" in captured.out
-
-    def test_summary_with_failed_sites(self, tmp_workspace, capsys):
-        """Test summary output shows failed sites section."""
-        orchestrator = Orchestrator(tmp_workspace)
-        results = [
-            {
-                "site": "good-site",
-                "status": "success",
-                "steps_completed": 3,
-                "steps_total": 3,
-                "steps_skipped": 0,
-                "elapsed": 10.0,
-            },
-            {
-                "site": "bad-site",
-                "status": "failed",
-                "error": "Deployment failed: resource conflict",
-                "steps_completed": 1,
-                "steps_total": 3,
-                "steps_skipped": 0,
-                "elapsed": 5.0,
-            },
-        ]
-
-        orchestrator._print_deployment_summary(results, 15.0)
-
-        captured = capsys.readouterr()
-        assert "x Failed" in captured.out
-        assert "1 succeeded" in captured.out
-        assert "1 failed" in captured.out
-        assert "Failed Sites:" in captured.out
-        assert "[bad-site]" in captured.out
-        assert "resource conflict" in captured.out
-
-    def test_redacted_summary_omits_site_identities(
-        self,
-        tmp_workspace,
-        capsys,
-        monkeypatch,
-    ):
-        monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1")
-        orchestrator = Orchestrator(tmp_workspace)
-        results = [
-            {
-                "site": "private-good-site",
-                "status": "success",
-                "steps_completed": 3,
-                "steps_total": 3,
-                "steps_skipped": 0,
-                "elapsed": 10.0,
-            },
-            {
-                "site": "private-bad-site",
-                "status": "failed",
-                "error": "private-bad-site failed on a private resource",
-                "steps_completed": 1,
-                "steps_total": 3,
-                "steps_skipped": 0,
-                "elapsed": 5.0,
-            },
-        ]
-
-        orchestrator._print_deployment_summary(results, 15.0)
-
-        output = capsys.readouterr().out
-        assert "private-good-site" not in output
-        assert "private-bad-site" not in output
-        assert "1 succeeded" in output
-        assert "1 failed" in output
-        assert "<site> failed" in output
-
-    def test_summary_with_blocked_sites(self, tmp_workspace, capsys):
-        """Test summary output shows blocked sites section."""
-        orchestrator = Orchestrator(tmp_workspace)
-        results = [
-            {
-                "site": "sub-site",
-                "status": "failed",
-                "error": "Subscription deployment failed",
-                "steps_completed": 0,
-                "steps_total": 5,
-                "steps_skipped": 0,
-                "elapsed": 2.0,
-            },
-            {
-                "site": "blocked-site",
-                "status": "blocked",
-                "error": "Subscription deployment failed and site depends on its outputs",
-                "steps_completed": 0,
-                "steps_total": 5,
-                "steps_skipped": 5,
-                "elapsed": 0.0,
-            },
-        ]
-
-        orchestrator._print_deployment_summary(results, 5.0)
-
-        captured = capsys.readouterr()
-        assert "- Blocked" in captured.out
-        assert "1 blocked" in captured.out
-        assert "Blocked Sites:" in captured.out
-        assert "[blocked-site]" in captured.out
-
-    def test_summary_with_skipped_steps(self, tmp_workspace, capsys):
-        """Test summary output shows skipped step count."""
-        orchestrator = Orchestrator(tmp_workspace)
-        results = [
-            {
-                "site": "partial-site",
-                "status": "success",
-                "steps_completed": 5,
-                "steps_total": 8,
-                "steps_skipped": 3,
-                "elapsed": 20.0,
-            },
-        ]
-
-        orchestrator._print_deployment_summary(results, 20.0)
-
-        captured = capsys.readouterr()
-        assert "5/8" in captured.out
-        assert "(3 skip)" in captured.out
 
 
 class TestLoadParameters:
@@ -1442,8 +1329,10 @@ class TestAllStepsSkipped:
             mock_deploy.assert_not_called()
 
         # Deployment should succeed
-        site_result = result["sites"]["test-site"]
-        assert site_result["status"] == "success"
-        assert site_result["steps_completed"] == 0
-        assert site_result["steps_skipped"] == 2
-        assert all(s["status"] == "skipped" for s in site_result["steps"])
+        site_result = result.sites[0]
+        assert site_result.target == "test-site"
+        assert site_result.status is SiteStatus.SKIPPED
+        assert all(
+            operation.status is OperationStatus.SKIPPED
+            for operation in site_result.operations
+        )

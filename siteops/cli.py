@@ -17,9 +17,12 @@ Global flags:
 import argparse
 import logging
 import os
+import signal
 import sys
+import threading
 from pathlib import Path
-from typing import Any
+from types import FrameType
+from typing import Any, Callable
 
 import yaml
 
@@ -44,6 +47,12 @@ from siteops.planning import (
     render_plain_plan,
     serialize_plan_json,
 )
+from siteops.reporting import (
+    TextProgressReporter,
+    render_plain_run,
+    serialize_run_json,
+)
+from siteops.results import RunResult, preparation_failure_result
 from siteops.sanitize import (
     is_redaction_enabled,
     report_parameter_selection_error,
@@ -69,7 +78,7 @@ def resolve_manifest_path(manifest: Path, workspace: Path) -> Path:
     return workspace / manifest
 
 
-def _plan_output_settings(
+def _output_settings(
     args: argparse.Namespace,
     *,
     require_plan_flag: bool = False,
@@ -100,7 +109,7 @@ def _plan_output_settings(
         and is_redaction_enabled()
     ):
         raise ValueError(
-            "local-private plan output is unavailable while output "
+            "local-private output is unavailable while output "
             "redaction is enabled. Use --projection publishable."
         )
     return json_output, projection
@@ -170,7 +179,7 @@ def cmd_plan(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         return 1
 
     try:
-        json_output, projection = _plan_output_settings(args)
+        json_output, projection = _output_settings(args)
     except ValueError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
@@ -236,6 +245,51 @@ def cmd_plan(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     return 0 if result.status is PlanStatus.PLANNED else 1
 
 
+_STOP_GUIDANCE = (
+    "Stopping after the operations already in progress finish. A call already "
+    "running waits for its own timeout, and work already accepted by Azure is "
+    "not cancelled."
+)
+
+
+def _install_stop_handler(
+    stop_requested: threading.Event,
+) -> Callable[[], None]:
+    """Ask a running deployment to stop when the terminal sends SIGINT.
+
+    The handler records the request and says what will happen. It does not
+    raise, because a raised `KeyboardInterrupt` would unwind through workers
+    that are still using scratch files and would abandon outcomes already
+    observed. A repeated interrupt repeats the same bounded expectation
+    rather than forcing an unsafe exit.
+
+    `signal.signal` only works on the main thread, so an embedded caller on
+    another thread keeps its own signal disposition and passes an explicit
+    `stop_requested` event instead. Returns the callable that restores the
+    previous disposition.
+
+    The guidance is written straight to stderr rather than through the
+    progress reporter, because taking that reporter's lock inside a signal
+    handler could deadlock the thread the signal interrupted.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        return lambda: None
+
+    def request_stop(signum: int, frame: FrameType | None) -> None:
+        stop_requested.set()
+        print(_STOP_GUIDANCE, file=sys.stderr, flush=True)
+
+    try:
+        previous = signal.signal(signal.SIGINT, request_stop)
+    except (OSError, ValueError):  # pragma: no cover - host restriction
+        return lambda: None
+
+    def restore() -> None:
+        signal.signal(signal.SIGINT, previous)
+
+    return restore
+
+
 def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     """Execute deployment."""
     manifest_path = resolve_manifest_path(args.manifest, args.workspace)
@@ -247,6 +301,14 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         return cmd_plan(args, orchestrator)
 
     try:
+        json_output, projection = _output_settings(args)
+    except ValueError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        return 1
+
+    stop_requested = threading.Event()
+    restore_signal_handler = _install_stop_handler(stop_requested)
+    try:
         print(
             "Preparing executable deployment plan...",
             file=sys.stderr,
@@ -255,6 +317,11 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
             manifest_path,
             selector=getattr(args, "selector", None),
             parallel_override=getattr(args, "parallel", None),
+            progress=TextProgressReporter(
+                sys.stderr,
+                redacted=is_redaction_enabled(),
+            ),
+            stop_requested=stop_requested,
         )
     except (CompositionError, ParameterSelectionError) as e:
         detail = (
@@ -265,6 +332,10 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         print(f"\nError: {detail}\n", file=sys.stderr)
         return 1
     except PlanNotExecutableError as e:
+        if json_output:
+            result = preparation_failure_result(e.result)
+            _write_run_result(result, json_output=True, projection=projection)
+            return result.exit_code
         print(
             f"\nError: "
             f"{e.message(redacted=is_redaction_enabled())}\n",
@@ -279,11 +350,29 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         )
         print(f"\nError: {detail}\n", file=sys.stderr)
         return 1
+    finally:
+        restore_signal_handler()
 
-    # Return exit code based on results
-    if result["summary"]["failed"] > 0:
-        return 1
-    return 0
+    _write_run_result(result, json_output=json_output, projection=projection)
+    return result.exit_code
+
+
+def _write_run_result(
+    result: RunResult,
+    *,
+    json_output: bool,
+    projection: PlanProjection,
+) -> None:
+    if json_output:
+        print(
+            serialize_run_json(result, projection, engine_version=__version__),
+            end="",
+        )
+    else:
+        print(
+            render_plain_run(result, redacted=is_redaction_enabled()),
+            end="",
+        )
 
 
 def _note_superseded_verbose(
@@ -316,7 +405,7 @@ def cmd_validate(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     selector = getattr(args, "selector", None)
     show_plan = getattr(args, "plan", False)
     try:
-        json_output, projection = _plan_output_settings(
+        json_output, projection = _output_settings(
             args,
             require_plan_flag=True,
         )
@@ -819,7 +908,11 @@ Examples:
     p_deploy = subparsers.add_parser(
         "deploy",
         help="Deploy manifest to target sites",
-        description="Execute deployment of a manifest to one or more sites.",
+        description=(
+            "Execute deployment of a manifest to one or more sites. "
+            "Ctrl-C asks the run to stop and waits for the calls already in "
+            "progress to return or reach their own timeout."
+        ),
     )
     p_deploy.add_argument("manifest", type=Path, help="Path to manifest file")
     p_deploy.add_argument(
@@ -847,6 +940,21 @@ Examples:
         help=(
             "Max concurrent sites. Accepts a positive integer, or 'max' / "
             "'auto' / '0' for unlimited. Overrides the manifest setting."
+        ),
+    )
+    p_deploy.add_argument(
+        "--output",
+        choices=("plain", "json"),
+        default="plain",
+        help="Final result format. A dry run emits a plan instead (default: plain).",
+    )
+    p_deploy.add_argument(
+        "--projection",
+        choices=("local-private", "publishable"),
+        default=None,
+        help=(
+            "JSON projection, valid with --output json. Defaults to publishable "
+            "when output redaction is enabled, otherwise local-private."
         ),
     )
 

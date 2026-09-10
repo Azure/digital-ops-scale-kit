@@ -39,6 +39,7 @@ from siteops.planning import (
     SkipReasonCode,
     resolve_plan_value,
 )
+from siteops.results import OperationStatus, RunStatus, SiteStatus
 
 
 def _arm_template(parameters=None):
@@ -287,7 +288,7 @@ def test_shared_bicep_compiles_once_across_targets_and_execution(tmp_path):
     ):
         execution = orchestrator.execute_plan(result)
 
-    assert execution["summary"]["failed"] == 0
+    assert execution.status is RunStatus.SUCCEEDED
     assert runner.compile_count == 1
 
 
@@ -1331,7 +1332,7 @@ def test_execution_binds_preflight_tool_paths(tmp_path):
     assert orchestrator.executor.kubectl_path == str(
         kubectl_path.resolve()
     )
-    assert execution["summary"]["failed"] == 0
+    assert execution.status is RunStatus.SUCCEEDED
     assert tuple(runner.calls) == preflight_calls
 
 
@@ -1706,20 +1707,23 @@ def test_executable_plan_preserves_deferred_top_level_parameter_name(
         execution = orchestrator.execute_plan(result)
 
     if execution_succeeds:
-        assert execution["summary"]["failed"] == 0
+        assert execution.status is RunStatus.SUCCEEDED
         assert calls[1]["parameters"] == {"known": "value"}
     else:
-        assert execution["summary"]["failed"] == 1
+        assert execution.status is RunStatus.FAILED
         assert len(calls) == 1
-        second = execution["sites"]["test-site"]["steps"][1]
-        assert second["status"] == "failed"
+        second = execution.sites[0].operations[1]
+        assert second.status is OperationStatus.FAILED
+        assert second.reason is not None
         if redacted:
-            assert second["error"] == (
-                "A required deployment parameter is missing."
-            )
-            assert "known" not in second["error"]
+            assert second.reason.summary == "The operation failed."
+            assert "known" not in second.reason.summary
+            assert "known" in second.reason.local_message()
         else:
-            assert "missing required template parameter" in second["error"]
+            assert (
+                "missing required template parameter"
+                in second.reason.local_message()
+            )
 
 
 def test_executable_plan_converts_filter_failure_to_typed_diagnostic(
@@ -2096,15 +2100,16 @@ def test_deferred_wait_guard_runs_after_arm_output_resolution(
         execution = orchestrator.execute_plan(result)
 
     if execution_succeeds:
-        assert execution["summary"]["failed"] == 0
+        assert execution.status is RunStatus.SUCCEEDED
         assert len(waits) == 1
         assert waits[0].expected_value == "succeeded"
     else:
-        assert execution["summary"]["failed"] == 1
+        assert execution.status is RunStatus.FAILED
         assert waits == []
-        wait = execution["sites"]["test-site"]["steps"][1]
-        assert wait["status"] == "failed"
-        assert "also matches failurePattern" in wait["error"]
+        wait = execution.sites[0].operations[1]
+        assert wait.status is OperationStatus.FAILED
+        assert wait.reason is not None
+        assert "also matches failurePattern" in wait.reason.local_message()
 
 
 def test_build_plan_applies_parallel_override(tmp_path):
@@ -2203,7 +2208,7 @@ def test_deploy_uses_supplied_plan_without_rebuilding(tmp_path):
             plan_result=prepared,
         )
 
-    assert result["summary"]["failed"] == 0
+    assert result.status is RunStatus.SUCCEEDED
 
 
 def test_cross_scope_execution_resolves_prepared_subscription_output(
@@ -2419,8 +2424,18 @@ def test_later_subscription_failure_keeps_available_prior_output(
     ):
         execution = orchestrator.execute_plan(result)
 
-    assert execution["sites"]["global"]["status"] == "failed"
-    assert execution["sites"]["edge"]["status"] == "success"
+    by_site = {site.target: site for site in execution.sites}
+    assert by_site["global"].status is SiteStatus.FAILED
+    assert by_site["edge"].status is SiteStatus.SUCCEEDED
+    assert by_site["global"].operations[0].status is (
+        OperationStatus.SUCCEEDED
+    )
+    assert (
+        by_site["global"].operations[0].copy_outputs()["value"][
+            "value"
+        ]
+        == "available"
+    )
     assert deploy_local.call_args.kwargs["parameters"] == {
         "input": "available"
     }
@@ -2471,14 +2486,18 @@ def test_runtime_wait_resolution_failure_is_reported_on_the_step(tmp_path):
     ):
         execution = orchestrator.execute_plan(result)
 
-    target = execution["sites"]["test-site"]
-    assert target["status"] == "failed"
-    assert target["steps_completed"] == 1
-    assert [step["status"] for step in target["steps"]] == [
-        "success",
-        "failed",
+    target = execution.sites[0]
+    assert target.target == "test-site"
+    assert target.status is SiteStatus.FAILED
+    assert [operation.status for operation in target.operations] == [
+        OperationStatus.SUCCEEDED,
+        OperationStatus.FAILED,
     ]
-    assert "has no available outputs" in target["steps"][1]["error"]
+    assert target.operations[1].reason is not None
+    assert (
+        "has no available outputs"
+        in target.operations[1].reason.local_message()
+    )
 
 
 def test_wait_execution_resolves_site_and_arm_output_values(tmp_path):
@@ -2547,7 +2566,7 @@ def test_wait_execution_resolves_site_and_arm_output_values(tmp_path):
     ):
         execution = orchestrator.execute_plan(result)
 
-    assert execution["sites"]["test-site"]["status"] == "success"
+    assert execution.sites[0].status is SiteStatus.SUCCEEDED
     assert captured["condition"].resource_id == (
         "/subscriptions/sub/resourceGroups/rg-test/machines/arc-machine"
     )
@@ -2579,7 +2598,7 @@ def test_false_subscription_step_without_target_omits_phase_one(
 
     execution = orchestrator.execute_plan(result)
 
-    assert execution["summary"]["failed"] == 0
+    assert execution.status is RunStatus.SKIPPED
     assert "[Phase 1]" not in capsys.readouterr().out
 
 
@@ -2631,9 +2650,11 @@ def test_prepared_kubectl_operation_fails_closed_on_unknown_action(
     ):
         execution = orchestrator.execute_plan(changed_result)
 
-    assert execution["sites"]["test-site"]["status"] == "failed"
+    operation = execution.sites[0].operations[0]
+    assert execution.sites[0].status is SiteStatus.FAILED
+    assert operation.reason is not None
     assert (
-        execution["sites"]["test-site"]["steps"][0]["error"]
+        operation.reason.local_message()
         == "Unsupported kubectl operation: delete"
     )
 
@@ -2715,7 +2736,7 @@ def test_dry_run_preserves_chained_outputs_for_command_preview(tmp_path):
     ):
         result = orchestrator.deploy(manifest_path)
 
-    assert result["summary"]["failed"] == 0
+    assert result.status is RunStatus.SUCCEEDED
     assert calls[1]["parameters"] == {
         "input": "{{ steps.first.outputs.value }}"
     }
@@ -2771,7 +2792,7 @@ def test_dry_run_preserves_chained_wait_for_no_poll_preview(tmp_path):
     ):
         execution = orchestrator.deploy(manifest_path)
 
-    assert execution["sites"]["test-site"]["status"] == "success"
+    assert execution.sites[0].status is SiteStatus.SUCCEEDED
     assert captured["resource_id"] == (
         "{{ steps.first.outputs.resourceId }}"
     )
@@ -2834,11 +2855,14 @@ def test_redacted_wait_validation_omits_resolved_output_values(
     ):
         execution = orchestrator.execute_plan(result)
 
-    target = execution["sites"]["test-site"]
+    target = execution.sites[0]
     output = capsys.readouterr().out
-    assert target["status"] == "failed"
-    assert target["steps"][1]["error"] == (
-        "The resolved wait condition is invalid."
+    assert target.status is SiteStatus.FAILED
+    assert target.operations[1].reason is not None
+    assert (
+        "private-secret-state"
+        in target.operations[1].reason.local_message()
     )
+    assert "private-secret-state" not in target.operations[1].reason.summary
     assert "private-secret-state" not in output
-    assert "private-secret-state" not in str(target["steps"][1])
+    assert "private-secret-state" not in repr(target.operations[1])

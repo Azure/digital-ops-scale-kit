@@ -245,31 +245,98 @@ jobs:
         if: inputs.dry-run != true
         shell: bash
         run: |
-          START_TIME=$(date +%s)
-
-          CMD_ARGS=(-w "$INPUT_WORKSPACE" deploy "$INPUT_MANIFEST")
-
+          umask 077
+          CMD_ARGS=(
+            -w "$INPUT_WORKSPACE"
+            deploy "$INPUT_MANIFEST"
+            --output json
+            --projection publishable
+          )
           [[ -n "$INPUT_SELECTOR" ]] && CMD_ARGS+=(-l "$INPUT_SELECTOR")
 
+          RUN_STDOUT="$RUNNER_TEMP/siteops-run.json"
+          RUN_STDERR="$RUNNER_TEMP/siteops-run.stderr"
+          cleanup_run_files() {
+            rm -f "$RUN_STDOUT" "$RUN_STDERR"
+          }
+          trap cleanup_run_files EXIT
+
           echo "Executing Site Ops deployment"
-          if siteops "${CMD_ARGS[@]}" 2>&1; then
+          if siteops "${CMD_ARGS[@]}" >"$RUN_STDOUT" 2>"$RUN_STDERR"; then
             DEPLOY_EXIT_CODE=0
           else
             DEPLOY_EXIT_CODE=$?
           fi
 
-          END_TIME=$(date +%s)
-          DURATION=$((END_TIME - START_TIME))
+          RUN_DOCUMENT_VALID=0
+          RUN_SUMMARY=""
+          if RUN_SUMMARY=$(python3 -c '
+          import json
+          import sys
 
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Deployment Result" >> $GITHUB_STEP_SUMMARY
-          if [[ $DEPLOY_EXIT_CODE -eq 0 ]]; then
-            echo "✅ **Success** in ${DURATION}s" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ **Failed** after ${DURATION}s" >> $GITHUB_STEP_SUMMARY
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              document = json.load(stream)
+          code = int(sys.argv[2])
+          summary = document.get("summary")
+          summary = summary if isinstance(summary, dict) else {}
+          sites = summary.get("sites")
+          sites = sites if isinstance(sites, dict) else {}
+          operations = summary.get("operations")
+          operations = operations if isinstance(operations, dict) else {}
+          interrupted = summary.get("interrupted")
+          status = document.get("status")
+          site_total = sites.get("total")
+          operation_total = operations.get("total")
+          if (
+              document.get("apiVersion") != "siteops/v1alpha1"
+              or document.get("kind") != "DeploymentRun"
+              or document.get("projection") != "publishable"
+              or status not in {
+                  "succeeded", "failed", "skipped", "not-run",
+                  "cancelled", "unknown", "invalid",
+              }
+              or type(document.get("exitCode")) is not int
+              or document["exitCode"] != code
+              or type(interrupted) is not bool
+              or type(site_total) is not int
+              or type(operation_total) is not int
+              or (code == 130) != interrupted
+              or (not interrupted
+                  and (code == 0) != (status in {"succeeded", "skipped"}))
+          ):
+              raise SystemExit(1)
+          flag = "yes" if interrupted else "no"
+          print(
+              f"Status {status}. Sites {site_total}. "
+              f"Operations {operation_total}. Interrupted {flag}."
+          )
+          ' "$RUN_STDOUT" "$DEPLOY_EXIT_CODE" 2>/dev/null); then
+            RUN_DOCUMENT_VALID=1
           fi
 
-          exit $DEPLOY_EXIT_CODE
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Deployment Result" >> "$GITHUB_STEP_SUMMARY"
+          if [[ $RUN_DOCUMENT_VALID -eq 1 ]]; then
+            echo "$RUN_SUMMARY" >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat "$RUN_STDOUT" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Publishable deployment result was unavailable." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          if [[ $DEPLOY_EXIT_CODE -eq 130 ]]; then
+            echo "::error::Deployment stopped before every operation finished. Work already accepted by Azure was not cancelled."
+            exit "$DEPLOY_EXIT_CODE"
+          fi
+          if [[ $DEPLOY_EXIT_CODE -ne 0 ]]; then
+            echo "::error::Deployment did not complete successfully. Review the result summary."
+            exit "$DEPLOY_EXIT_CODE"
+          fi
+          if [[ $RUN_DOCUMENT_VALID -ne 1 ]]; then
+            echo "::error::Site Ops returned an unsupported deployment result."
+            exit 1
+          fi
 
       - name: Azure Logout
         if: always()

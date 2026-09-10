@@ -3,6 +3,8 @@
 Site Ops can render a deployment plan for a person or emit one structured JSON
 document for automation.
 
+See [run-output.md](run-output.md) for what a completed deployment reports.
+
 ## Prepare an executable plan
 
 Plain output is the default:

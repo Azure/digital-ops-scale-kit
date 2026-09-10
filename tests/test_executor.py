@@ -14,8 +14,10 @@ import logging
 import os
 import re
 import socket
+import stat
 import subprocess
 import sys
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -46,6 +48,28 @@ from siteops.executor import (
     _ProxyOutputDrainer,
     _release_arc_port_slot,
 )
+from siteops.runtime import TEMP_DIR_ENV, RuntimePathError, RuntimePaths
+
+
+@pytest.fixture(autouse=True)
+def engine_temp_root(tmp_path_factory, monkeypatch):
+    """Keep engine scratch inside the pytest temp tree.
+
+    The executor allocates its scratch under the engine temp root, which
+    defaults to the system temp directory. A test that does not call `close()`
+    would leave a directory there, so every test in this module gets its own
+    root that pytest removes. Tests that assert on the default resolution use
+    `RuntimePaths` directly instead (see `tests/test_runtime.py`).
+    """
+    root = tmp_path_factory.mktemp("engine-temp")
+    monkeypatch.setenv(TEMP_DIR_ENV, str(root))
+    return root
+
+
+def relative_tree(root: Path) -> set[str]:
+    """Every path under `root`, relative and sorted, for before/after diffs."""
+    return {str(entry.relative_to(root)) for entry in root.rglob("*")}
+
 
 
 class TestDeploymentResult:
@@ -147,20 +171,28 @@ class TestAzCliExecutor:
         executor = AzCliExecutor(workspace=tmp_workspace, dry_run=True)
         assert executor.dry_run is True
 
-    def test_tmp_dir_creation(self, tmp_workspace):
+    def test_scratch_dir_is_private_and_outside_the_workspace(
+        self, tmp_workspace, engine_temp_root
+    ):
         executor = AzCliExecutor(workspace=tmp_workspace)
-        tmp_dir = executor.tmp_dir
+        try:
+            scratch = executor.tmp_dir
 
-        assert tmp_dir.exists()
-        assert tmp_dir == tmp_workspace / ".siteops" / "tmp"
+            assert scratch.exists()
+            assert scratch.parent == engine_temp_root
+            assert not (tmp_workspace / ".siteops").exists()
+        finally:
+            executor.close()
 
-    def test_tmp_dir_cached(self, tmp_workspace):
+    def test_scratch_dir_cached(self, tmp_workspace):
         executor = AzCliExecutor(workspace=tmp_workspace)
+        try:
+            first = executor.tmp_dir
+            second = executor.tmp_dir
 
-        tmp_dir1 = executor.tmp_dir
-        tmp_dir2 = executor.tmp_dir
-
-        assert tmp_dir1 is tmp_dir2
+            assert first is second
+        finally:
+            executor.close()
 
     def test_kubectl_path_cached(self, tmp_workspace):
         """Test that kubectl_path property lazy-caches shutil.which result."""
@@ -394,20 +426,18 @@ class TestWriteParamsFile:
         assert content["parameters"]["tags"]["value"]["env"] == "dev"
         assert content["parameters"]["config"]["value"]["nested"]["deep"] == "value"
 
-    def test_write_params_file_creates_tmp_dir(self, tmp_workspace):
-        # Remove the .siteops directory if it exists
-        siteops_dir = tmp_workspace / ".siteops"
-        if siteops_dir.exists():
-            import shutil
-
-            shutil.rmtree(siteops_dir)
-
+    def test_write_params_file_allocates_engine_scratch(
+        self, tmp_workspace, engine_temp_root
+    ):
         executor = AzCliExecutor(workspace=tmp_workspace)
-        executor._tmp_dir = None  # Reset cached value
+        try:
+            params_path = executor._write_params_file({"key": "value"}, "step", "site")
 
-        params_path = executor._write_params_file({"key": "value"}, "step", "site")
-
-        assert params_path.parent.exists()
+            assert params_path.parent == executor.tmp_dir
+            assert params_path.parent.parent == engine_temp_root
+            assert not (tmp_workspace / ".siteops").exists()
+        finally:
+            executor.close()
 
 
 class TestValidateKubectlFile:
@@ -1520,7 +1550,10 @@ class TestArcProxyPortInUseRetry:
         popen = self._make_popen_factory([{"poll": None}])
         captured: dict = {}
 
-        def recording_probe(proxy_process, port, *, kubectl_path=None, kubeconfig_path=None):
+        def recording_probe(
+            proxy_process, port, *, kubectl_path=None, kubeconfig_path=None,
+            stop_requested=None,
+        ):
             captured["kubeconfig_path"] = kubeconfig_path
             return True
 
@@ -2469,3 +2502,606 @@ class TestTheReadinessProbeReportsSafely:
         assert "jane.operator" not in caplog.text
         assert "3f2504e0-4f89-11d3-9a0c-0305e82c3301" not in caplog.text
         assert "forbidden" in caplog.text, "the diagnostic itself has to survive"
+
+
+class TestTheWorkspaceStaysReadOnly:
+    """The engine writes no transient file into the deployment workspace.
+
+    The workspace holds authored inputs. An engine that writes into it makes
+    the deployment source mutable, which is what blocks acquiring an immutable
+    copy of it.
+    """
+
+    def test_constructing_an_executor_creates_nothing(
+        self, tmp_workspace, engine_temp_root
+    ):
+        before = relative_tree(tmp_workspace)
+
+        executor = AzCliExecutor(workspace=tmp_workspace)
+
+        assert relative_tree(tmp_workspace) == before
+        assert relative_tree(engine_temp_root) == set()
+        assert executor._scratch_dir is None
+
+    def test_reading_executor_properties_creates_nothing(
+        self, tmp_workspace, engine_temp_root
+    ):
+        """Describing a deployment resolves tools and roots but allocates no
+        scratch. Only an operation that stages a file may allocate."""
+        before = relative_tree(tmp_workspace)
+        executor = AzCliExecutor(workspace=tmp_workspace)
+
+        with patch("siteops.executor.shutil.which", return_value=None):
+            assert executor.az_path is None
+            assert executor.kubectl_path is None
+        paths = executor.runtime_paths
+
+        assert paths.temp_root == engine_temp_root
+        assert relative_tree(tmp_workspace) == before
+        assert relative_tree(engine_temp_root) == set()
+
+    def test_a_dry_run_kubectl_apply_creates_nothing(
+        self, tmp_workspace, engine_temp_root
+    ):
+        before = relative_tree(tmp_workspace)
+        executor = AzCliExecutor(workspace=tmp_workspace, dry_run=True)
+
+        result = executor.kubectl_apply(
+            cluster_name="cluster",
+            resource_group="rg",
+            subscription="sub",
+            files=["https://example.com/config.yaml"],
+            step_name="step-1",
+            site_name="site-1",
+        )
+
+        assert result.success is True
+        assert relative_tree(tmp_workspace) == before
+        assert relative_tree(engine_temp_root) == set()
+
+    def test_a_deployment_writes_its_parameters_outside_the_workspace(
+        self, tmp_workspace, sample_bicep_template, engine_temp_root, monkeypatch
+    ):
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        monkeypatch.setattr(executor, "_az_path", "/usr/bin/az")
+        before = relative_tree(tmp_workspace)
+
+        responses = [_SUBMIT_OK, _show_result("Succeeded", outputs={})]
+        try:
+            with patch.object(executor, "_run_az", side_effect=responses):
+                result = executor.deploy_resource_group(
+                    subscription="sub-123",
+                    resource_group="rg-test",
+                    template_path=sample_bicep_template,
+                    parameters={"location": "eastus"},
+                    deployment_name="test-deploy",
+                    step_name="step-1",
+                    site_name="site-1",
+                )
+
+            assert result.success is True
+            assert relative_tree(tmp_workspace) == before
+            assert not (tmp_workspace / ".siteops").exists()
+            assert executor.tmp_dir.parent == engine_temp_root
+        finally:
+            executor.close()
+
+
+class TestEngineScratchAllocation:
+    """Allocation is lazy, private, unique, and owned by one executor."""
+
+    def test_an_explicit_temp_root_is_honored(self, tmp_workspace, tmp_path, monkeypatch):
+        selected = tmp_path / "selected" / "temp"
+        monkeypatch.setenv(TEMP_DIR_ENV, str(selected))
+        executor = AzCliExecutor(workspace=tmp_workspace)
+
+        try:
+            scratch = executor.tmp_dir
+
+            assert scratch.parent == selected, (
+                "a temp root that does not exist yet is created, not ignored"
+            )
+        finally:
+            executor.close()
+
+    def test_injected_runtime_paths_win_over_the_environment(
+        self, tmp_workspace, tmp_path, engine_temp_root
+    ):
+        injected = RuntimePaths(
+            temp_root=tmp_path / "injected-temp",
+        )
+        executor = AzCliExecutor(workspace=tmp_workspace, runtime_paths=injected)
+
+        try:
+            scratch = executor.tmp_dir
+
+            assert scratch.parent == injected.temp_root
+            assert relative_tree(engine_temp_root) == set()
+        finally:
+            executor.close()
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX mode; Windows uses ACLs")
+    def test_scratch_is_owner_only_from_creation(self, tmp_workspace):
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        try:
+            assert stat.S_IMODE(executor.tmp_dir.stat().st_mode) == 0o700
+        finally:
+            executor.close()
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX mode; Windows uses ACLs")
+    def test_a_parameter_file_is_owner_only_from_creation(self, tmp_workspace):
+        """Resolved parameters can carry a secret, so there is no readable
+        window between creation and a later chmod."""
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        try:
+            params_path = executor._write_params_file({"k": "v"}, "step", "site")
+
+            assert stat.S_IMODE(params_path.stat().st_mode) == 0o600
+        finally:
+            executor.close()
+
+    def test_a_supplied_temp_root_keeps_its_own_permissions(
+        self, tmp_workspace, engine_temp_root
+    ):
+        before = engine_temp_root.stat().st_mode
+        executor = AzCliExecutor(workspace=tmp_workspace)
+
+        try:
+            executor._write_params_file({"k": "v"}, "step", "site")
+
+            assert engine_temp_root.stat().st_mode == before
+        finally:
+            executor.close()
+
+    def test_a_parameter_file_is_not_named_after_authored_text(self, tmp_workspace):
+        """A site or step name is authored input. Using it as a file name lets
+        it traverse, collide, or carry a character the platform rejects."""
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        try:
+            params_path = executor._write_params_file(
+                {"k": "v"},
+                "../../escaped-step",
+                "../../escaped-site",
+            )
+
+            assert params_path.parent == executor.tmp_dir
+            assert "escaped" not in params_path.name
+            assert params_path.name.startswith("params-")
+            assert params_path.name.endswith(".json")
+        finally:
+            executor.close()
+
+    def test_two_writes_never_collide(self, tmp_workspace):
+        """Same site, same step, same second: the names still differ."""
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        try:
+            first = executor._write_params_file({"k": "1"}, "step", "site")
+            second = executor._write_params_file({"k": "2"}, "step", "site")
+
+            assert first != second
+            assert first.exists() and second.exists()
+        finally:
+            executor.close()
+
+    def test_concurrent_executors_allocate_distinct_scratch(
+        self, tmp_workspace, engine_temp_root
+    ):
+        executors = [AzCliExecutor(workspace=tmp_workspace) for _ in range(8)]
+        allocated: list[Path] = []
+        errors: list[BaseException] = []
+        barrier = threading.Barrier(len(executors))
+
+        def allocate(executor):
+            try:
+                barrier.wait(timeout=10)
+                allocated.append(executor.tmp_dir)
+            except BaseException as error:  # surfaced below
+                errors.append(error)
+
+        threads = [
+            threading.Thread(target=allocate, args=(executor,)) for executor in executors
+        ]
+        try:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=30)
+
+            assert errors == []
+            assert len(allocated) == len(executors)
+            assert len(set(allocated)) == len(executors)
+            assert all(path.parent == engine_temp_root for path in allocated)
+        finally:
+            for executor in executors:
+                executor.close()
+
+    def test_one_executor_allocates_once_under_concurrency(self, tmp_workspace):
+        """Double-checked lazy allocation: parallel first uses share one
+        directory rather than orphaning the loser's."""
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        seen: list[Path] = []
+        barrier = threading.Barrier(8)
+
+        def allocate():
+            barrier.wait(timeout=10)
+            seen.append(executor.tmp_dir)
+
+        threads = [threading.Thread(target=allocate) for _ in range(8)]
+        try:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=30)
+
+            assert len(seen) == 8
+            assert len(set(seen)) == 1
+            assert len(list(executor.runtime_paths.temp_root.iterdir())) == 1
+        finally:
+            executor.close()
+
+
+class TestEngineScratchRelease:
+    """`close()` releases what this executor created, and nothing else."""
+
+    def test_close_removes_only_engine_owned_scratch(
+        self, tmp_workspace, engine_temp_root
+    ):
+        operator_file = engine_temp_root / "operator-owned.txt"
+        operator_file.write_text("keep me", encoding="utf-8")
+        root_mode_before = engine_temp_root.stat().st_mode
+
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        scratch = executor.tmp_dir
+        executor._write_params_file({"k": "v"}, "step", "site")
+
+        executor.close()
+
+        assert not scratch.exists()
+        assert engine_temp_root.exists(), "the caller's root is not the engine's to delete"
+        assert operator_file.read_text(encoding="utf-8") == "keep me"
+        assert engine_temp_root.stat().st_mode == root_mode_before
+
+    def test_close_without_an_allocation_is_a_no_op(self, tmp_workspace, engine_temp_root):
+        executor = AzCliExecutor(workspace=tmp_workspace)
+
+        executor.close()
+
+        assert engine_temp_root.exists()
+        assert relative_tree(engine_temp_root) == set()
+
+    def test_close_is_repeatable(self, tmp_workspace):
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        scratch = executor.tmp_dir
+
+        executor.close()
+        executor.close()
+
+        assert not scratch.exists()
+
+    def test_the_executor_still_works_after_close(self, tmp_workspace):
+        """A reused executor allocates a fresh directory rather than writing
+        into a released one."""
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        try:
+            first = executor.tmp_dir
+            executor.close()
+
+            second = executor.tmp_dir
+            params_path = executor._write_params_file({"k": "v"}, "step", "site")
+
+            assert second != first
+            assert second.exists()
+            assert params_path.parent == second
+        finally:
+            executor.close()
+
+    def test_a_cleanup_failure_is_reported_and_not_raised(self, tmp_workspace, caplog):
+        """`close()` runs in a `finally` around real work, so raising here
+        would replace the deployment's own error."""
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        scratch = executor.tmp_dir
+
+        with patch(
+            "siteops.executor.shutil.rmtree",
+            side_effect=OSError(39, "Directory not empty", str(scratch)),
+        ), caplog.at_level(logging.WARNING, logger="siteops.executor"):
+            executor.close()
+
+        assert "Directory not empty" in caplog.text
+        assert scratch.name in caplog.text
+        assert str(scratch.parent) not in caplog.text, (
+            "a private path is reported bounded, not with its account-bearing prefix"
+        )
+        # The real directory is still there; remove it so the test leaves none.
+        executor._scratch_dir = scratch
+        executor.close()
+        assert not scratch.exists()
+
+
+class TestTransientDeploymentFilesAreReleased:
+    """A parameter file holds resolved secrets. No path may leak one."""
+
+    def _executor(self, workspace, monkeypatch):
+        executor = AzCliExecutor(workspace=workspace)
+        monkeypatch.setattr(executor, "_az_path", "/usr/bin/az")
+        return executor
+
+    def test_no_parameter_file_survives_a_successful_deployment(
+        self, tmp_workspace, sample_bicep_template, monkeypatch
+    ):
+        executor = self._executor(tmp_workspace, monkeypatch)
+        try:
+            responses = [_SUBMIT_OK, _show_result("Succeeded", outputs={})]
+            with patch.object(executor, "_run_az", side_effect=responses):
+                result = executor.deploy_resource_group(
+                    subscription="sub-123",
+                    resource_group="rg-test",
+                    template_path=sample_bicep_template,
+                    parameters={"location": "eastus"},
+                    deployment_name="test-deploy",
+                    step_name="step-1",
+                    site_name="site-1",
+                )
+
+            assert result.success is True
+            assert list(executor.tmp_dir.iterdir()) == []
+        finally:
+            executor.close()
+
+    def test_the_parameter_file_is_gone_before_the_poll(
+        self, tmp_workspace, sample_bicep_template, monkeypatch
+    ):
+        """Eager deletion: ARM holds the parameters inline after the submit, so
+        the file must not survive for the whole poll deadline."""
+        executor = self._executor(tmp_workspace, monkeypatch)
+        observed: list[list[str]] = []
+        responses = [_SUBMIT_OK, _show_result("Succeeded", outputs={})]
+
+        def record(args, **kwargs):
+            observed.append(sorted(p.name for p in executor.tmp_dir.iterdir()))
+            return responses[len(observed) - 1]
+
+        try:
+            with patch.object(executor, "_run_az", side_effect=record):
+                executor.deploy_resource_group(
+                    subscription="sub-123",
+                    resource_group="rg-test",
+                    template_path=sample_bicep_template,
+                    parameters={"location": "eastus"},
+                    deployment_name="test-deploy",
+                    step_name="step-1",
+                    site_name="site-1",
+                )
+
+            assert len(observed[0]) == 1, "the submit needs the parameter file"
+            assert observed[1] == [], "the poll must not hold the parameter file"
+        finally:
+            executor.close()
+
+    def test_no_parameter_file_survives_a_failed_deployment(
+        self, tmp_workspace, sample_bicep_template, monkeypatch
+    ):
+        executor = self._executor(tmp_workspace, monkeypatch)
+        try:
+            failure = (False, "", "ERROR: Deployment template validation failed.")
+            with patch.object(executor, "_run_az", side_effect=[failure]):
+                result = executor.deploy_resource_group(
+                    subscription="sub-123",
+                    resource_group="rg-test",
+                    template_path=sample_bicep_template,
+                    parameters={"location": "eastus"},
+                    deployment_name="test-deploy",
+                    step_name="step-1",
+                    site_name="site-1",
+                )
+
+            assert result.success is False
+            assert list(executor.tmp_dir.iterdir()) == []
+        finally:
+            executor.close()
+
+    def test_no_parameter_file_survives_a_submit_timeout(
+        self, tmp_workspace, sample_bicep_template, monkeypatch
+    ):
+        executor = self._executor(tmp_workspace, monkeypatch)
+        sentinel = ENGINE_TIMEOUT_SENTINEL.format(
+            timeout=DEFAULT_DEPLOYMENT_SUBMIT_TIMEOUT_SECONDS
+        )
+        try:
+            responses = [(False, "", sentinel), _show_result("Succeeded", outputs={})]
+            with patch.object(executor, "_run_az", side_effect=responses):
+                result = executor.deploy_resource_group(
+                    subscription="sub-123",
+                    resource_group="rg-test",
+                    template_path=sample_bicep_template,
+                    parameters={"location": "eastus"},
+                    deployment_name="test-deploy",
+                    step_name="step-1",
+                    site_name="site-1",
+                )
+
+            assert result.success is True
+            assert list(executor.tmp_dir.iterdir()) == []
+        finally:
+            executor.close()
+
+    def test_no_parameter_file_survives_a_cancelled_run(
+        self, tmp_workspace, sample_bicep_template, monkeypatch
+    ):
+        """Ctrl-C during a deployment still runs the release path."""
+        executor = self._executor(tmp_workspace, monkeypatch)
+        try:
+            with patch.object(executor, "_run_az", side_effect=KeyboardInterrupt()):
+                with pytest.raises(KeyboardInterrupt):
+                    executor.deploy_resource_group(
+                        subscription="sub-123",
+                        resource_group="rg-test",
+                        template_path=sample_bicep_template,
+                        parameters={"location": "eastus"},
+                        deployment_name="test-deploy",
+                        step_name="step-1",
+                        site_name="site-1",
+                    )
+
+            assert list(executor.tmp_dir.iterdir()) == []
+        finally:
+            executor.close()
+
+    def test_a_write_failure_leaves_no_half_written_file(self, tmp_workspace):
+        """A value that will not serialize fails after the file exists."""
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        try:
+            with pytest.raises(TypeError):
+                executor._write_params_file({"k": object()}, "step", "site")
+
+            assert list(executor.tmp_dir.iterdir()) == []
+        finally:
+            executor.close()
+
+    def test_a_deployment_without_parameters_allocates_nothing(
+        self, tmp_workspace, sample_bicep_template, engine_temp_root, monkeypatch
+    ):
+        executor = self._executor(tmp_workspace, monkeypatch)
+        try:
+            responses = [_SUBMIT_OK, _show_result("Succeeded", outputs={})]
+            with patch.object(executor, "_run_az", side_effect=responses):
+                result = executor.deploy_resource_group(
+                    subscription="sub-123",
+                    resource_group="rg-test",
+                    template_path=sample_bicep_template,
+                    parameters={},
+                    deployment_name="test-deploy",
+                    step_name="step-1",
+                    site_name="site-1",
+                )
+
+            assert result.success is True
+            assert executor._scratch_dir is None
+            assert relative_tree(engine_temp_root) == set()
+        finally:
+            executor.close()
+
+
+class TestAnUnusableTempRootFailsClearly:
+    """An explicitly selected root is an instruction, not a suggestion."""
+
+    @pytest.mark.parametrize(
+        "value",
+        ["", "   ", "relative/path", "./also-relative"],
+    )
+    def test_an_unsupported_temp_dir_value_is_rejected(
+        self, tmp_workspace, monkeypatch, value
+    ):
+        monkeypatch.setenv(TEMP_DIR_ENV, value)
+        executor = AzCliExecutor(workspace=tmp_workspace)
+
+        with pytest.raises(RuntimePathError) as error:
+            executor.tmp_dir
+
+        assert TEMP_DIR_ENV in str(error.value)
+
+    def test_an_unusable_temp_dir_fails_the_deployment_rather_than_the_engine(
+        self, tmp_workspace, sample_bicep_template, monkeypatch
+    ):
+        monkeypatch.setenv(TEMP_DIR_ENV, "relative/path")
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        monkeypatch.setattr(executor, "_az_path", "/usr/bin/az")
+
+        with patch.object(executor, "_run_az") as mock_az:
+            result = executor.deploy_resource_group(
+                subscription="sub-123",
+                resource_group="rg-test",
+                template_path=sample_bicep_template,
+                parameters={"location": "eastus"},
+                deployment_name="test-deploy",
+                step_name="step-1",
+                site_name="site-1",
+            )
+
+        assert result.success is False
+        assert TEMP_DIR_ENV in result.error
+        assert not mock_az.called, "nothing may be submitted without its parameters"
+
+    def test_an_unusable_temp_dir_fails_the_arc_proxy_cleanly(
+        self, tmp_workspace, monkeypatch
+    ):
+        monkeypatch.setenv(TEMP_DIR_ENV, "relative/path")
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        monkeypatch.setattr(executor, "_az_path", "/usr/bin/az")
+
+        with patch("siteops.executor.subprocess.Popen") as popen:
+            with executor._arc_proxy("cluster", "rg", "sub") as kubeconfig:
+                assert kubeconfig is None
+
+        popen.assert_not_called()
+
+
+class TestTheArcProxyKubeconfigIsEngineOwned:
+    """The per-proxy kubeconfig holds a bearer token and is transient."""
+
+    @pytest.fixture(autouse=True)
+    def _block_real_signal_to_runner(self):
+        """A MagicMock `pid` coerces to 1, so an unpatched `killpg` would
+        signal the runner's own process group. Mirrors the guard in
+        `TestArcProxyPortInUseRetry`."""
+        with patch("siteops.executor.os.killpg", create=True), \
+             patch("siteops.executor.os.getpgid", create=True):
+            yield
+
+    def _running_proxy(self):
+        process = MagicMock()
+        process.poll.return_value = None
+        process.stdout = io.StringIO("")
+        process.stderr = io.StringIO("")
+        return MagicMock(return_value=process)
+
+    def test_the_kubeconfig_lives_in_engine_scratch_and_is_released(
+        self, tmp_workspace, engine_temp_root
+    ):
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        executor._az_path = "/usr/bin/az"
+
+        try:
+            with patch("siteops.executor.subprocess.Popen", self._running_proxy()), \
+                 patch("siteops.executor.time.sleep"), \
+                 patch("siteops.executor.ARC_PROXY_STARTUP_WAIT", 0), \
+                 patch("siteops.executor._probe_arc_proxy_ready", return_value=True):
+                with executor._arc_proxy("cluster", "rg", "sub") as kubeconfig:
+                    assert kubeconfig is not None
+                    kubeconfig_path = Path(kubeconfig)
+
+                    assert kubeconfig_path.parent == executor.tmp_dir
+                    assert kubeconfig_path.parent.parent == engine_temp_root
+                    assert not (tmp_workspace / ".siteops").exists()
+
+            assert not kubeconfig_path.exists(), (
+                "a token-bearing file must not outlive the proxy"
+            )
+        finally:
+            executor.close()
+
+        assert not kubeconfig_path.parent.exists()
+        assert engine_temp_root.exists()
+
+    def test_the_kubeconfig_is_released_when_the_proxy_never_starts(
+        self, tmp_workspace, engine_temp_root
+    ):
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        executor._az_path = "/usr/bin/az"
+        failed = MagicMock()
+        failed.poll.return_value = 1
+        failed.stdout = io.StringIO("")
+        failed.stderr = io.StringIO("ERROR: Authentication failed.")
+
+        try:
+            with patch(
+                "siteops.executor.subprocess.Popen", MagicMock(return_value=failed)
+            ), patch("siteops.executor.time.sleep"), \
+                 patch("siteops.executor.ARC_PROXY_STARTUP_WAIT", 0), \
+                 patch("siteops.executor._probe_arc_proxy_ready", return_value=False):
+                with executor._arc_proxy("cluster", "rg", "sub") as kubeconfig:
+                    assert kubeconfig is None
+
+            assert list(executor.tmp_dir.iterdir()) == []
+        finally:
+            executor.close()

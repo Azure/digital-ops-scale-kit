@@ -16,6 +16,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, TypeAlias
 
+from siteops.runtime import RuntimePathError, RuntimePaths, prepare_root
+
 DEFAULT_COMPILATION_TIMEOUT_SECONDS = 300
 _NO_CONFIGURATION_DIGEST = "none"
 _ARM_JSON_COMPILER_FINGERPRINT = "arm-json"
@@ -757,12 +759,17 @@ class TemplateCompilationSession:
         command_runner: CommandRunner = _run_command,
         tool_resolver: ToolResolver = _resolve_tool_from_path,
         timeout_seconds: int = DEFAULT_COMPILATION_TIMEOUT_SECONDS,
+        runtime_paths: RuntimePaths | None = None,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("Compilation timeout must be positive.")
         self._command_runner = command_runner
         self._tool_resolver = tool_resolver
         self._timeout_seconds = timeout_seconds
+        # Engine-owned roots. Resolved on the first compiler allocation, so
+        # constructing a session, resolving a tool, or acquiring an ARM JSON
+        # template creates no directory and reads no environment.
+        self._runtime_paths = runtime_paths
         self._sources: dict[Path, SourceSnapshot] = {}
         self._configurations: dict[Path, ConfigurationSnapshot] = {}
         self._path_failures: dict[Path, CompilationFailure] = {}
@@ -1109,6 +1116,17 @@ class TemplateCompilationSession:
             arm_json_bytes=source.content,
         )
 
+    def _temporary_parent(self) -> Path:
+        """Resolve, and prepare, the parent for compiler output.
+
+        Called only when a template is actually compiled. A session that
+        resolves tools, reads ARM JSON, or reports a cached outcome never
+        creates a directory and never reads the environment.
+        """
+        if self._runtime_paths is None:
+            self._runtime_paths = RuntimePaths.resolve()
+        return prepare_root(self._runtime_paths.temp_root)
+
     def _compile_bicep(
         self,
         source: SourceSnapshot,
@@ -1117,7 +1135,27 @@ class TemplateCompilationSession:
         azure_cli: ToolIdentity,
         compiler: ToolIdentity,
     ) -> CompilationOutcome:
-        with tempfile.TemporaryDirectory() as temporary_directory:
+        try:
+            temporary_parent = self._temporary_parent()
+        except RuntimePathError as error:
+            return CompilationFailure(
+                code=CompilationFailureCode.FAILED,
+                summary="Compiler scratch location is unusable.",
+                detail=(
+                    f"Template '{source.identity.path}' could not be "
+                    f"compiled: {error}"
+                ),
+                key=key,
+            )
+
+        # Compiler output is engine-owned and transient, so it goes under the
+        # engine temp root rather than beside the authored template. The
+        # directory is unique and owner-only from creation, and is removed on
+        # every exit from this block, including a failure or a timeout.
+        with tempfile.TemporaryDirectory(
+            prefix="siteops-bicep-",
+            dir=temporary_parent,
+        ) as temporary_directory:
             output_path = Path(temporary_directory) / "template.json"
             argv = (
                 str(azure_cli.resolved_path),

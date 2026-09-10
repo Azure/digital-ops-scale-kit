@@ -5,11 +5,14 @@ import time
 
 import pytest
 
+from siteops.results import RunStatus, SiteStatus
 from tests.integration.conftest import WORKSPACE_PATH
 from tests.integration.helpers.assertions import (
     assert_output_exists,
     assert_step_succeeded,
     find_step,
+    site_names,
+    site_results,
 )
 from tests.integration.helpers.kube import (
     KubectlError,
@@ -89,15 +92,17 @@ class TestOpcUaSolutionDeployment:
     """Validate that samples/opc-ua-solution/manifest.yaml deploys successfully."""
 
     def test_no_failures(self, opc_ua_solution_result):
-        assert opc_ua_solution_result["summary"]["failed"] == 0
+        assert opc_ua_solution_result.status is RunStatus.SUCCEEDED
 
     def test_all_sites_succeeded(self, opc_ua_solution_result):
-        for name in opc_ua_solution_result["sites"]:
-            site = opc_ua_solution_result["sites"][name]
-            assert site["status"] == "success", f"Site '{name}' failed: {site.get('error')}"
+        for site in site_results(opc_ua_solution_result):
+            assert site.status is SiteStatus.SUCCEEDED, (
+                f"Site '{site.target}' did not succeed: "
+                f"{site.failure_reason()}"
+            )
 
     def test_opc_ua_solution_step_succeeds(self, opc_ua_solution_result):
-        for name in opc_ua_solution_result["sites"]:
+        for name in site_names(opc_ua_solution_result):
             assert_step_succeeded(opc_ua_solution_result, name, "opc-ua-solution")
 
     def test_event_hub_outputs(self, opc_ua_solution_result):
@@ -105,7 +110,7 @@ class TestOpcUaSolutionDeployment:
         name/namespace that downstream consumers (e.g., tests, dashboards)
         key off. Catches template regressions where the output object
         shape changes silently."""
-        for name in opc_ua_solution_result["sites"]:
+        for name in site_names(opc_ua_solution_result):
             step = assert_step_succeeded(opc_ua_solution_result, name, "opc-ua-solution")
             event_hub = assert_output_exists(step, "eventHub")
             assert isinstance(event_hub, dict), (
@@ -118,7 +123,7 @@ class TestOpcUaSolutionDeployment:
                 )
 
     def test_resolved_extension_name_output(self, opc_ua_solution_result):
-        for name in opc_ua_solution_result["sites"]:
+        for name in site_names(opc_ua_solution_result):
             step = assert_step_succeeded(opc_ua_solution_result, name, "opc-ua-solution")
             assert_output_exists(step, "resolvedExtensionName")
 
@@ -131,10 +136,11 @@ class TestOpcUaSolutionSimulator:
     """
 
     def test_simulator_succeeds(self, opc_ua_solution_result):
-        for name in opc_ua_solution_result["sites"]:
-            step = find_step(opc_ua_solution_result, name, "opc-plc-simulator")
-            assert step["status"] == "success", (
-                f"Site '{name}': opc-plc-simulator status was {step['status']}"
+        for name in site_names(opc_ua_solution_result):
+            assert_step_succeeded(
+                opc_ua_solution_result,
+                name,
+                "opc-plc-simulator",
             )
 
 
@@ -154,9 +160,9 @@ class TestOpcUaSolutionIdempotency:
             manifest_path=OPC_UA_SOLUTION_MANIFEST,
             selector=selector,
         )
-        assert result2["summary"]["failed"] == 0
+        assert result2.status is RunStatus.SUCCEEDED
 
-        for name in opc_ua_solution_result["sites"]:
+        for name in site_names(opc_ua_solution_result):
             step1 = find_step(opc_ua_solution_result, name, "opc-ua-solution")
             step2 = find_step(result2, name, "opc-ua-solution")
             eh1 = assert_output_exists(step1, "eventHub")
@@ -191,7 +197,7 @@ class TestOpcUaSolutionIdempotency:
             manifest_path=OPC_UA_SOLUTION_MANIFEST,
             selector=selector,
         )
-        assert result2["summary"]["failed"] == 0
+        assert result2.status is RunStatus.SUCCEEDED
 
         after = cr_identity(
             "dataflows.connectivity.iotoperations.azure.com",
@@ -218,7 +224,7 @@ class TestOpcUaSolutionCrossManifestJoin:
         name the install just produced. A mismatch means the sample
         resolved to a different AIO instance and any subsequent
         assertions about deployment correctness are off-target."""
-        for name in opc_ua_solution_result["sites"]:
+        for name in site_names(opc_ua_solution_result):
             sample_step = find_step(opc_ua_solution_result, name, "opc-ua-solution")
             install_step = find_step(aio_install_result, name, "aio-instance")
 
@@ -254,7 +260,7 @@ class TestOpcUaSolutionSimulatorRuntime:
         self, opc_ua_solution_result, aio_namespace, kubectl_available
     ):
         """The opc-plc-000000 Deployment must reach `readyReplicas` >= 1."""
-        for name in opc_ua_solution_result["sites"]:
+        for name in site_names(opc_ua_solution_result):
             try:
                 wait_for_deployment_ready(
                     SIMULATOR_DEPLOYMENT_NAME,
@@ -280,7 +286,7 @@ class TestOpcUaSolutionSimulatorRuntime:
         Short poll absorbs the EndpointSlice controller's propagation
         lag after the deployment becomes Ready.
         """
-        for name in opc_ua_solution_result["sites"]:
+        for name in site_names(opc_ua_solution_result):
             try:
                 wait_for_service_endpoints(
                     SIMULATOR_SERVICE_NAME,
@@ -311,7 +317,7 @@ class TestOpcUaSolutionDataflowRuntime:
     def test_dataflow_cr_present_on_cluster(
         self, opc_ua_solution_result, aio_namespace, kubectl_available
     ):
-        for name in opc_ua_solution_result["sites"]:
+        for name in site_names(opc_ua_solution_result):
             try:
                 dataflow = kubectl_json(
                     [
@@ -341,7 +347,7 @@ class TestOpcUaConnectorTemplate:
         self, opc_ua_solution_result, aio_namespace, kubectl_available, orchestrator
     ):
         checked = 0
-        for name in opc_ua_solution_result["sites"]:
+        for name in site_names(opc_ua_solution_result):
             if not _opcua_connector_version(orchestrator, name):
                 continue
             try:
@@ -413,7 +419,7 @@ class TestOpcUaSolutionDataFlowing:
         self, opc_ua_solution_result, aio_namespace, kubectl_available, orchestrator
     ):
         checked = 0
-        for name in opc_ua_solution_result["sites"]:
+        for name in site_names(opc_ua_solution_result):
             api_version = _aio_api_version(orchestrator, name)
             connector_version = _opcua_connector_version(orchestrator, name)
             if api_version >= TEMPLATE_MANAGED_API_VERSION and not connector_version:

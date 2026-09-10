@@ -37,15 +37,16 @@ Use `siteops plan <manifest> --describe` for the faster compile-free shape.
 `deploy --dry-run` remains a compatibility spelling for executable planning
 and no longer reports simulated deployment success.
 
-**Preparation uses the same validation boundary from the CLI and Python
-API.** `plan` and `deploy` validate the loaded manifest and targets before
+**Preparation uses one validation boundary.** `plan` and `deploy` validate
+the loaded manifest and targets before
 compilation or resource writes. Structurally invalid inputs produce an
-invalid plan rather than a partial target plan. Python callers receive
-`PlanNotExecutableError` when attempting to deploy that invalid result.
+invalid plan rather than a partial target plan.
 
-Python integrations use `Orchestrator.build_plan` with
-`intent=PlanIntent.EXECUTABLE` for deployment preparation. The executor-level
-`get_template_parameters` and `filter_parameters` helpers have been removed.
+Repository tooling that calls the engine directly uses `Orchestrator.build_plan`
+with `intent=PlanIntent.EXECUTABLE`. An invalid result raises
+`PlanNotExecutableError` on execution. The executor-level `get_template_parameters`
+and `filter_parameters` helpers have been removed. These internal interfaces
+are not a separately supported Python SDK.
 
 **Known kubectl inputs are checked during shared validation.** After site
 values resolve, local files and directories must exist inside the workspace,
@@ -66,7 +67,7 @@ runtime guards during preparation. Output-dependent values keep their runtime
 validation.
 
 Planning requires a target set, including `plan --describe` and its
-`validate --plan` compatibility spelling. To check a library manifest
+`validate --plan` compatibility spelling. To check a reusable manifest
 without targeting, use `validate` without `--plan`. A manifest or CLI
 selector matching no sites returns a nonzero exit code.
 
@@ -86,6 +87,34 @@ descriptions, paths, conditions, or literal target inputs. Local plain output
 keeps its detailed view with redaction disabled. For CI artifacts, capture
 `plan --output json --projection publishable` from stdout separately from
 diagnostic stderr.
+
+**Deployment reports a typed outcome.** `siteops deploy` prints a final
+summary that accounts for every prepared operation, including work that was
+skipped, never started, or left unconfirmed. `deploy --output json` emits one
+`DeploymentRun` document on stdout with the same projections as a plan, while
+progress and logs stay on stderr. A run that succeeded exits `0`, an
+incomplete or unconfirmed run exits `1`, and an interrupted run exits `130`
+with `summary.interrupted` set. A run where every operation was skipped stays
+a success and says that no work ran. See
+[run-output.md](run-output.md).
+
+Ctrl-C now asks a run to stop rather than abandoning it. Waiting loops wake at
+once, but a call already running in a child process returns or reaches its own
+timeout first, so the process exits only after the longest call in flight
+finishes. The final result is still printed, and work Azure already accepted
+is not cancelled.
+
+**Transient deployment files live outside the workspace.** Resolved parameter
+files no longer land in a workspace directory. They are created under the
+operating system temporary directory and removed when the run finishes.
+Files have owner only permissions on POSIX and inherit the selected parent's
+ACLs on Windows. Set `SITEOPS_TEMP_DIR` to an absolute path to choose a
+different parent.
+
+Repository tooling calls `Orchestrator.deploy` or `Orchestrator.execute_plan`,
+both of which return a `RunResult`. The previous dictionary summaries are
+gone. Pass `stop_requested` when an embedding caller needs cooperative
+stopping, since signal handling belongs to the CLI.
 
 ## To v1.0.0b7
 

@@ -6,12 +6,15 @@ import time
 import pytest
 import yaml
 
+from siteops.results import RunStatus, SiteStatus
 from tests.integration.conftest import WORKSPACE_PATH
 from tests.integration.helpers.assertions import (
     assert_output_exists,
     assert_step_skipped,
     assert_step_succeeded,
     find_step,
+    site_names,
+    site_results,
 )
 from tests.integration.helpers.azure import run_az
 from tests.integration.helpers.kube import is_pod_ready, list_pods
@@ -59,37 +62,39 @@ class TestAioInstallDeployment:
     """Validate that aio-install.yaml deploys successfully."""
 
     def test_no_failures(self, aio_install_result):
-        assert aio_install_result["summary"]["failed"] == 0
+        assert aio_install_result.status is RunStatus.SUCCEEDED
 
     def test_all_sites_succeeded(self, aio_install_result):
-        for name in aio_install_result["sites"]:
-            site = aio_install_result["sites"][name]
-            assert site["status"] == "success", f"Site '{name}' failed: {site.get('error')}"
+        for site in site_results(aio_install_result):
+            assert site.status is SiteStatus.SUCCEEDED, (
+                f"Site '{site.target}' did not succeed: "
+                f"{site.failure_reason()}"
+            )
 
     def test_schema_registry_outputs(self, aio_install_result):
-        for name in aio_install_result["sites"]:
+        for name in site_names(aio_install_result):
             step = assert_step_succeeded(aio_install_result, name, "schema-registry")
             assert_output_exists(step, "schemaRegistry")
 
     def test_adr_ns_outputs(self, aio_install_result):
-        for name in aio_install_result["sites"]:
+        for name in site_names(aio_install_result):
             step = assert_step_succeeded(aio_install_result, name, "adr-ns")
             assert_output_exists(step, "adrNamespace")
 
     def test_aio_enablement_outputs(self, aio_install_result):
-        for name in aio_install_result["sites"]:
+        for name in site_names(aio_install_result):
             step = assert_step_succeeded(aio_install_result, name, "aio-enablement")
             assert_output_exists(step, "clExtensionIds")
 
     def test_aio_instance_outputs(self, aio_install_result):
-        for name in aio_install_result["sites"]:
+        for name in site_names(aio_install_result):
             step = assert_step_succeeded(aio_install_result, name, "aio-instance")
             assert_output_exists(step, "aio")
             assert_output_exists(step, "customLocation")
             assert_output_exists(step, "aioExtension")
 
     def test_schema_registry_role_succeeds(self, aio_install_result):
-        for name in aio_install_result["sites"]:
+        for name in site_names(aio_install_result):
             assert_step_succeeded(aio_install_result, name, "schema-registry-role")
 
 
@@ -98,10 +103,11 @@ class TestAioInstallConditionalSteps:
 
     def test_global_edge_site_skipped_for_rg_sites(self, aio_install_result):
         """RG-level sites should skip the subscription-scoped edge site step."""
-        for name in aio_install_result["sites"]:
-            step = find_step(aio_install_result, name, "global-edge-site")
-            assert step["status"] == "skipped", (
-                f"Site '{name}': global-edge-site should be skipped for RG-level sites"
+        for name in site_names(aio_install_result):
+            assert_step_skipped(
+                aio_install_result,
+                name,
+                "global-edge-site",
             )
 
     def test_secretsync_steps_skipped_when_disabled(
@@ -110,7 +116,7 @@ class TestAioInstallConditionalSteps:
         """Sites with deployOptions.enableSecretSync=false should skip both
         secretsync steps embedded in aio-install.yaml (a regression guard for
         the E2E site template and anyone reusing the same deployOptions)."""
-        for name in aio_install_result["sites"]:
+        for name in site_names(aio_install_result):
             site = orchestrator.load_site(name)
             enabled = site.properties.get("deployOptions", {}).get("enableSecretSync", True)
             if enabled:
@@ -135,7 +141,7 @@ class TestAioInstallVersioning:
         A drift here means the wrong template dispatched, even if everything
         else looks green.
         """
-        for name in aio_install_result["sites"]:
+        for name in site_names(aio_install_result):
             step = assert_step_succeeded(aio_install_result, name, "aio-instance")
             aio_extension = assert_output_exists(step, "aioExtension")
             assert isinstance(aio_extension, dict), (
@@ -168,7 +174,7 @@ class TestAioInstallVersioning:
     def test_security_pki_settings_match_release_contract(
         self, aio_install_result, orchestrator
     ):
-        for name in aio_install_result["sites"]:
+        for name in site_names(aio_install_result):
             step = assert_step_succeeded(aio_install_result, name, "aio-instance")
             aio_extension = assert_output_exists(step, "aioExtension")
             assert isinstance(aio_extension, dict), (
@@ -222,9 +228,9 @@ class TestAioInstallIdempotency:
             manifest_path=WORKSPACE_PATH / "manifests" / "aio-install.yaml",
             selector=selector,
         )
-        assert result2["summary"]["failed"] == 0
+        assert result2.status is RunStatus.SUCCEEDED
 
-        for name in aio_install_result["sites"]:
+        for name in site_names(aio_install_result):
             step1 = find_step(aio_install_result, name, "aio-instance")
             step2 = find_step(result2, name, "aio-instance")
             for output_name in ("aio", "customLocation", "aioExtension"):
@@ -252,9 +258,9 @@ class TestAioInstallIdempotency:
             manifest_path=WORKSPACE_PATH / "manifests" / "aio-install.yaml",
             selector=selector,
         )
-        assert result2["summary"]["failed"] == 0
+        assert result2.status is RunStatus.SUCCEEDED
 
-        for name in aio_install_result["sites"]:
+        for name in site_names(aio_install_result):
             before = assert_output_exists(
                 find_step(aio_install_result, name, "aio-instance"), "aioExtension"
             ).get("identityPrincipalId")

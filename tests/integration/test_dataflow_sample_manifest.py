@@ -13,9 +13,12 @@ success, and never moves data. The CR checks below are what catch that.
 
 import pytest
 
+from siteops.results import RunStatus, SiteStatus
 from tests.integration.conftest import WORKSPACE_PATH
 from tests.integration.helpers.assertions import (
     assert_step_succeeded,
+    site_names,
+    site_results,
     skip_unless_health_is_reported,
 )
 from tests.integration.helpers.dataflow_sample import (
@@ -79,16 +82,17 @@ class TestDataflowSampleDeployment:
     """The catalog steps deploy successfully from a declaration."""
 
     def test_no_failures(self, dataflow_sample_result):
-        assert dataflow_sample_result["summary"]["failed"] == 0
+        assert dataflow_sample_result.status is RunStatus.SUCCEEDED
 
     def test_all_sites_succeeded(self, dataflow_sample_result):
-        for name, site in dataflow_sample_result["sites"].items():
-            assert site["status"] == "success", (
-                f"Site '{name}' failed: {site.get('error')}"
+        for site in site_results(dataflow_sample_result):
+            assert site.status is SiteStatus.SUCCEEDED, (
+                f"Site '{site.target}' did not succeed: "
+                f"{site.failure_reason()}"
             )
 
     def test_every_catalog_step_succeeds(self, dataflow_sample_result):
-        for name in dataflow_sample_result["sites"]:
+        for name in site_names(dataflow_sample_result):
             assert_step_succeeded(dataflow_sample_result, name, CATALOG_STEP)
 
     def test_family_deploys_as_one_step(self, dataflow_sample_result):
@@ -99,9 +103,12 @@ class TestDataflowSampleDeployment:
         kind. Ordering moved into the template's `dependsOn`, and the cluster
         assertions below are what prove it held.
         """
-        for name, site in dataflow_sample_result["sites"].items():
+        for site in site_results(dataflow_sample_result):
+            name = site.target
             catalog_steps = [
-                s["step"] for s in site["steps"] if s["step"].startswith("dataflow-")
+                operation.identity.step
+                for operation in site.operations
+                if operation.identity.step.startswith("dataflow-")
             ]
             assert catalog_steps == [CATALOG_STEP], (
                 f"Site '{name}': catalog contributed {catalog_steps}, expected "
@@ -136,7 +143,7 @@ class TestDataflowSampleIdempotency:
         second = orchestrator.deploy(
             manifest_path=DATAFLOW_SAMPLE_MANIFEST, manifest=manifest, sites=sites
         )
-        assert second["summary"]["failed"] == 0
+        assert second.status is RunStatus.SUCCEEDED
 
         for resource_type, name in _SAMPLE_CLUSTER_RESOURCES:
             after = cr_identity(resource_type, name, aio_namespace)
@@ -157,7 +164,7 @@ class TestDataflowSampleClusterProjection:
     def test_endpoint_cr_present(
         self, dataflow_sample_result, aio_namespace, kubectl_available
     ):
-        for name in dataflow_sample_result["sites"]:
+        for name in site_names(dataflow_sample_result):
             try:
                 wait_for_cr(_ENDPOINT_TYPE, SAMPLE_ENDPOINT_NAME, aio_namespace)
             except KubectlError as e:
@@ -171,7 +178,7 @@ class TestDataflowSampleClusterProjection:
     def test_profile_cr_present(
         self, dataflow_sample_result, aio_namespace, kubectl_available
     ):
-        for name in dataflow_sample_result["sites"]:
+        for name in site_names(dataflow_sample_result):
             try:
                 wait_for_cr(_PROFILE_TYPE, SAMPLE_PROFILE_NAME, aio_namespace)
             except KubectlError as e:
@@ -183,7 +190,7 @@ class TestDataflowSampleClusterProjection:
     def test_dataflow_cr_is_enabled(
         self, dataflow_sample_result, aio_namespace, kubectl_available
     ):
-        for name in dataflow_sample_result["sites"]:
+        for name in site_names(dataflow_sample_result):
             try:
                 dataflow = wait_for_cr(_DATAFLOW_TYPE, SAMPLE_DATAFLOW_NAME, aio_namespace)
             except KubectlError as e:
@@ -207,7 +214,7 @@ class TestDataflowSampleClusterProjection:
         the projected refs against the declared names is the assertion that
         makes the reference contract real rather than documented.
         """
-        for name in dataflow_sample_result["sites"]:
+        for name in site_names(dataflow_sample_result):
             dataflow = wait_for_cr(_DATAFLOW_TYPE, SAMPLE_DATAFLOW_NAME, aio_namespace)
             operations = dataflow.get("spec", {}).get("operations", [])
             refs = {
@@ -241,7 +248,7 @@ class TestDataflowSampleInstanceOwnedEndpointIntact:
     def test_default_endpoint_still_mqtt(
         self, dataflow_sample_result, aio_namespace, kubectl_available
     ):
-        for name in dataflow_sample_result["sites"]:
+        for name in site_names(dataflow_sample_result):
             try:
                 endpoint = wait_for_cr(_ENDPOINT_TYPE, INSTANCE_OWNED_ENDPOINT, aio_namespace)
             except KubectlError as e:
@@ -289,8 +296,16 @@ class TestDataflowSampleHealth:
         dataflow_name,
         orchestrator,
     ):
-        for site in dataflow_sample_result["sites"]:
-            assert_step_succeeded(dataflow_sample_result, site, CATALOG_STEP)
-            _, release = load_aio_release(orchestrator, site, WORKSPACE_PATH)
+        for site_name in site_names(dataflow_sample_result):
+            assert_step_succeeded(
+                dataflow_sample_result,
+                site_name,
+                CATALOG_STEP,
+            )
+            _, release = load_aio_release(
+                orchestrator,
+                site_name,
+                WORKSPACE_PATH,
+            )
             skip_unless_health_is_reported(release.get("aioApiVersion"))
         wait_for_cr_health(_DATAFLOW_TYPE, dataflow_name, aio_namespace)

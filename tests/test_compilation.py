@@ -34,6 +34,7 @@ from siteops.compilation import (
     read_source_snapshot,
     validate_arm_template,
 )
+from siteops.runtime import TEMP_DIR_ENV, RuntimePaths
 
 
 def _arm_template(parameters=None):
@@ -1445,3 +1446,184 @@ def test_compiled_output_version_is_authoritative(tmp_path):
         result.identity.compiler.version_provenance
         is VersionProvenance.KNOWN
     )
+
+
+class RecordingCompiler(FakeCompiler):
+    """A fake compiler that records where its output was asked to land."""
+
+    def __init__(self):
+        super().__init__()
+        self.output_directories: list[Path] = []
+
+    def __call__(self, argv, timeout):
+        if "--outfile" in argv:
+            output = Path(argv[argv.index("--outfile") + 1])
+            self.output_directories.append(output.parent)
+        return super().__call__(argv, timeout)
+
+
+def _bicep_source(tmp_path: Path) -> Path:
+    source = tmp_path / "sources" / "main.bicep"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text("param name string\n", encoding="utf-8")
+    return source
+
+
+def _session(tmp_path: Path, compiler, temp_root: Path | None = None):
+    return TemplateCompilationSession(
+        command_runner=compiler,
+        tool_resolver=lambda name: _tool_path(tmp_path, name),
+        runtime_paths=(
+            None
+            if temp_root is None
+            else RuntimePaths(temp_root=temp_root)
+        ),
+    )
+
+
+def test_compiler_output_lands_under_the_selected_temp_root(tmp_path):
+    """Compiler output is engine-owned and transient, so it does not go beside
+    the authored template."""
+    source = _bicep_source(tmp_path)
+    temp_root = tmp_path / "engine-temp"
+    compiler = RecordingCompiler()
+
+    result = _session(tmp_path, compiler, temp_root).acquire(source)
+
+    assert isinstance(result, CompiledTemplate)
+    assert len(compiler.output_directories) == 1
+    output_directory = compiler.output_directories[0]
+    assert output_directory.parent == temp_root
+    assert output_directory.name.startswith("siteops-bicep-")
+    assert sorted(p.name for p in source.parent.iterdir()) == ["main.bicep"]
+
+
+def test_the_environment_selects_the_compiler_temp_root(tmp_path, monkeypatch):
+    source = _bicep_source(tmp_path)
+    temp_root = tmp_path / "from-environment"
+    monkeypatch.setenv(TEMP_DIR_ENV, str(temp_root))
+    compiler = RecordingCompiler()
+
+    result = _session(tmp_path, compiler).acquire(source)
+
+    assert isinstance(result, CompiledTemplate)
+    assert compiler.output_directories[0].parent == temp_root
+
+
+def test_a_missing_temp_root_is_created_at_compile_time(tmp_path):
+    source = _bicep_source(tmp_path)
+    temp_root = tmp_path / "not-yet" / "engine-temp"
+    compiler = RecordingCompiler()
+    session = _session(tmp_path, compiler, temp_root)
+
+    assert not temp_root.exists(), "constructing a session creates no directory"
+
+    session.acquire(source)
+
+    assert temp_root.is_dir()
+
+
+def test_compiler_output_is_removed_after_a_successful_compile(tmp_path):
+    source = _bicep_source(tmp_path)
+    temp_root = tmp_path / "engine-temp"
+    compiler = RecordingCompiler()
+
+    result = _session(tmp_path, compiler, temp_root).acquire(source)
+
+    assert isinstance(result, CompiledTemplate)
+    assert not compiler.output_directories[0].exists()
+    assert list(temp_root.iterdir()) == []
+
+
+def test_compiler_output_is_removed_after_a_failed_compile(tmp_path):
+    source = _bicep_source(tmp_path)
+    temp_root = tmp_path / "engine-temp"
+    compiler = RecordingCompiler()
+    compiler.compile_returncode = 1
+    compiler.compile_stderr = "BCP000: invalid source"
+
+    result = _session(tmp_path, compiler, temp_root).acquire(source)
+
+    assert isinstance(result, CompilationFailure)
+    assert result.code is CompilationFailureCode.FAILED
+    assert list(temp_root.iterdir()) == []
+
+
+def test_compiler_output_is_removed_after_a_timeout(tmp_path):
+    source = _bicep_source(tmp_path)
+    temp_root = tmp_path / "engine-temp"
+    compiler = RecordingCompiler()
+
+    def time_out():
+        raise subprocess.TimeoutExpired(cmd=("az", "bicep", "build"), timeout=1)
+
+    compiler.on_compile = time_out
+
+    result = _session(tmp_path, compiler, temp_root).acquire(source)
+
+    assert isinstance(result, CompilationFailure)
+    assert result.code is CompilationFailureCode.TIMEOUT
+    assert list(temp_root.iterdir()) == []
+
+
+def test_compiler_output_is_removed_after_invalid_output(tmp_path):
+    source = _bicep_source(tmp_path)
+    temp_root = tmp_path / "engine-temp"
+    compiler = RecordingCompiler()
+    compiler.compile_output = {"contentVersion": "1.0.0.0"}
+
+    result = _session(tmp_path, compiler, temp_root).acquire(source)
+
+    assert isinstance(result, CompilationFailure)
+    assert result.code is CompilationFailureCode.OUTPUT_INVALID
+    assert list(temp_root.iterdir()) == []
+
+
+def test_a_session_that_never_compiles_creates_no_directory(tmp_path):
+    """Constructing a session, resolving tools, and acquiring ARM JSON are all
+    preflight. None of them may allocate."""
+    temp_root = tmp_path / "engine-temp"
+    source = tmp_path / "sources" / "main.json"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        json.dumps(_arm_template({"name": {"type": "string"}})),
+        encoding="utf-8",
+    )
+    compiler = RecordingCompiler()
+    session = _session(tmp_path, compiler, temp_root)
+
+    result = session.acquire(source)
+    resolved = session.resolve_azure_cli()
+
+    assert isinstance(result, CompiledTemplate)
+    assert isinstance(resolved, ToolIdentity)
+    assert not temp_root.exists()
+
+
+def test_an_unusable_temp_root_is_a_typed_failure(tmp_path, monkeypatch):
+    """A misconfigured redirect fails the template with a stable code rather
+    than raising out of planning."""
+    source = _bicep_source(tmp_path)
+    monkeypatch.setenv(TEMP_DIR_ENV, "relative/path")
+    compiler = RecordingCompiler()
+
+    result = _session(tmp_path, compiler).acquire(source)
+
+    assert isinstance(result, CompilationFailure)
+    assert result.code is CompilationFailureCode.FAILED
+    assert TEMP_DIR_ENV in result.detail
+    assert compiler.compile_count == 0, "no compiler runs without a place to write"
+
+
+def test_a_cached_outcome_is_reused_without_reallocating(tmp_path):
+    source = _bicep_source(tmp_path)
+    temp_root = tmp_path / "engine-temp"
+    compiler = RecordingCompiler()
+    session = _session(tmp_path, compiler, temp_root)
+
+    first = session.acquire(source)
+    second = session.acquire(source)
+
+    assert second is first
+    assert len(compiler.output_directories) == 1
+    assert list(temp_root.iterdir()) == []

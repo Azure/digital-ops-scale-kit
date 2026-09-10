@@ -97,7 +97,49 @@ if [[ "$command_name" == "plan" ]]; then
   exit "$plan_exit"
 fi
 
-exit "${FAKE_DEPLOY_EXIT:-0}"
+if [[ "$command_name" == "deploy" ]]; then
+  [[ "${SITEOPS_REDACT_OUTPUT:-}" == "1" ]] || exit 97
+  [[ "$(umask)" == "0077" ]] || exit 96
+  printf 'PRIVATE RUN STDERR SENTINEL\n' >&2
+  run_exit="${FAKE_DEPLOY_EXIT:-0}"
+  api_version="siteops/v1alpha1"
+  kind="DeploymentRun"
+  projection="publishable"
+  document_exit="$run_exit"
+  site_total=1
+  operation_total=2
+  interrupted=false
+  status="succeeded"
+  [[ "$run_exit" == "0" ]] || status="failed"
+  if [[ "$run_exit" == "130" ]]; then
+    status="cancelled"
+    interrupted=true
+  fi
+  case "${FAKE_RUN_DOCUMENT_MODE:-valid}" in
+    invalid-json) printf 'PRIVATE INVALID RUN SENTINEL\n'; exit "$run_exit" ;;
+    private) projection="local-private" ;;
+    plan-kind) kind="DeploymentPlan" ;;
+    skipped) status="skipped"; operation_total=0 ;;
+    unknown) status="unknown" ;;
+    bad-status) status="partly-succeeded" ;;
+    interrupted-success) status="succeeded" ;;
+    interrupted-unknown) status="unknown" ;;
+    interrupted-without-stop) interrupted=true ;;
+    text-interrupted) interrupted='"true"' ;;
+    text-counts) site_total='"1"'; operation_total='"2"' ;;
+    false-success) status="succeeded"; interrupted=false ;;
+    false-failure) status="failed" ;;
+    mismatched-exit) document_exit=99 ;;
+  esac
+  summary_json=""
+  if [[ "${FAKE_RUN_DOCUMENT_MODE:-valid}" != "no-summary" ]]; then
+    summary_json=$(printf '"summary":{"interrupted":%s,"operations":{"total":%s},"sites":{"total":%s}},' "$interrupted" "$operation_total" "$site_total")
+  fi
+  printf '{"apiVersion":"%s","kind":"%s","projection":"%s","status":"%s","exitCode":%s,%s"diagnostics":[]}\n' "$api_version" "$kind" "$projection" "$status" "$document_exit" "$summary_json"
+  exit "$run_exit"
+fi
+
+exit 98
 """,
     )
     _write_executable(
@@ -110,7 +152,7 @@ exit "${FAKE_DEPLOY_EXIT:-0}"
     return bin_dir, invocation_log
 
 
-def _delivery_plan_case(platform: str) -> tuple[str, str]:
+def _delivery_plan_case(platform: str, *, run_step: bool = False) -> tuple[str, str]:
     if platform == "github":
         data = yaml.safe_load(
             REUSABLE_GITHUB_DEPLOY.read_text(encoding="utf-8")
@@ -118,7 +160,9 @@ def _delivery_plan_case(platform: str) -> tuple[str, str]:
         step = next(
             step
             for step in data["jobs"]["deploy"]["steps"]
-            if step.get("name") == "Prepare executable deployment plan"
+            if step.get("name") == (
+                "Deploy" if run_step else "Prepare executable deployment plan"
+            )
         )
         return step["run"], str(data.get("env", {}).get("SITEOPS_REDACT_OUTPUT", ""))
 
@@ -143,8 +187,11 @@ def _run_delivery_plan_script(
     valid_document: bool,
     document_mode: str = "valid",
     dry_run: bool = False,
+    run_step: bool = False,
+    deploy_exit: int = 0,
+    run_document_mode: str = "valid",
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path]:
-    script, redaction = _delivery_plan_case(platform)
+    script, redaction = _delivery_plan_case(platform, run_step=run_step)
     bin_dir, invocation_log = _install_fake_delivery_tools(tmp_path)
     temp_dir = tmp_path / "runner-temp"
     summary_dir = tmp_path / "summaries"
@@ -158,7 +205,8 @@ def _run_delivery_plan_script(
         "FAKE_PLAN_EXIT": str(plan_exit),
         "FAKE_PLAN_DOCUMENT_VALID": "1" if valid_document else "0",
         "FAKE_PLAN_DOCUMENT_MODE": document_mode,
-        "FAKE_DEPLOY_EXIT": "0",
+        "FAKE_DEPLOY_EXIT": str(deploy_exit),
+        "FAKE_RUN_DOCUMENT_MODE": run_document_mode,
         "SITEOPS_REDACT_OUTPUT": redaction,
         "INPUT_WORKSPACE": "workspace",
         "INPUT_MANIFEST": "manifests/install.yaml",
@@ -200,7 +248,9 @@ def _run_delivery_plan_script(
     summary_path = (
         github_summary
         if platform == "github"
-        else summary_dir / "deployment-plan.md"
+        else summary_dir / (
+            "deployment-result.md" if run_step else "deployment-plan.md"
+        )
     )
     return result, summary_path, temp_dir, invocation_log
 
@@ -510,3 +560,67 @@ class TestDeployDropdownRegistration:
         )
         assert not (temp_dir / "siteops-plan.json").exists()
         assert not (temp_dir / "siteops-plan.stderr").exists()
+
+    @pytest.mark.parametrize("platform", ["github", "azure-pipelines"])
+    @pytest.mark.parametrize(
+        ("deploy_exit", "mode", "expected_exit", "published"),
+        [
+            (0, "valid", 0, True),
+            (0, "skipped", 0, True),
+            (1, "valid", 1, True),
+            (1, "unknown", 1, True),
+            (130, "valid", 130, True),
+            (130, "interrupted-success", 130, True),
+            (130, "interrupted-unknown", 130, True),
+            (0, "invalid-json", 1, False),
+            (23, "invalid-json", 23, False),
+            (0, "private", 1, False),
+            (0, "plan-kind", 1, False),
+            (0, "bad-status", 1, False),
+            (0, "no-summary", 1, False),
+            (0, "text-interrupted", 1, False),
+            (0, "text-counts", 1, False),
+            (0, "interrupted-without-stop", 1, False),
+            (130, "false-success", 130, False),
+            (0, "mismatched-exit", 1, False),
+            (0, "false-failure", 1, False),
+            (1, "false-success", 1, False),
+        ],
+    )
+    def test_deployment_result_publication_preserves_outcome_and_privacy(
+        self, tmp_path, platform, deploy_exit, mode, expected_exit, published
+    ):
+        result, summary_path, temp_dir, invocation_log = _run_delivery_plan_script(
+            platform,
+            tmp_path,
+            plan_exit=0,
+            valid_document=True,
+            run_step=True,
+            deploy_exit=deploy_exit,
+            run_document_mode=mode,
+        )
+
+        assert result.returncode == expected_exit, (result.stdout, result.stderr)
+        summary = summary_path.read_text(encoding="utf-8")
+        assert "PRIVATE" not in result.stdout + result.stderr + summary
+        if published:
+            assert '"kind":"DeploymentRun"' in summary
+            assert '"projection":"publishable"' in summary
+            assert "Sites 1. Operations" in summary
+            assert (
+                "Interrupted yes." if deploy_exit == 130 else "Interrupted no."
+            ) in summary
+            if mode == "skipped":
+                assert '"status":"skipped"' in summary
+                assert "Operations 0." in summary
+                assert "Success" not in summary
+        else:
+            assert "Publishable deployment result was unavailable." in summary
+            assert "```json" not in summary
+        invocations = invocation_log.read_text(encoding="utf-8").splitlines()
+        assert len(invocations) == (1 if platform == "github" else 2)
+        assert " deploy " in f" {invocations[-1]} "
+        assert "--output json" in invocations[-1]
+        assert "--projection publishable" in invocations[-1]
+        assert not (temp_dir / "siteops-run.json").exists()
+        assert not (temp_dir / "siteops-run.stderr").exists()

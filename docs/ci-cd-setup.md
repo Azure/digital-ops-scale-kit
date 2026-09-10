@@ -365,6 +365,16 @@ sets private file permissions, publishes only a supported executable
 `publishable` JSON plan, and removes runner-local stdout and stderr files when
 the step finishes. Dry run stops here and publishes no deployment result.
 
+The deploy step requests `--output json --projection publishable` and captures
+stdout separately from stderr. It validates the `DeploymentRun` envelope before
+publishing anything, including that the reported exit code matches the process
+exit code and that exit code `130` appears only with `summary.interrupted`. An
+unsupported document is reported as unavailable rather than published, and the
+process exit code is always preserved. The published summary carries a short
+status line and the allowlisted JSON document. Run stdout and stderr files are
+removed when the step finishes. See [run-output.md](run-output.md) for the
+result contract.
+
 See [ADO architecture](#ado-architecture) for the Azure DevOps equivalent.
 
 ## Security
@@ -385,15 +395,24 @@ See [ADO architecture](#ado-architecture) for the Azure DevOps equivalent.
 
 ### Output redaction
 
-Workflow logs and artifacts are a public surface, so deployment failure text is scrubbed before it reaches them. Plan summaries require the allowlisted executable `publishable` JSON projection and never append process stderr. A resource id is reduced to the resource type that failed. Subscription, tenant, and principal identifiers and bearer tokens are replaced with placeholders, as is the local part of a user principal name. On an Azure service host the tenant-specific label is replaced and the service domain is kept, so `contosostorage.blob.core.windows.net` becomes `<host>.blob.core.windows.net` and still says which service was involved. The error code and message survive, so a failure stays diagnosable:
+Plan and run summaries publish only the supported `publishable` JSON
+projection. Deployment diagnostics in that document use fixed categories
+and summaries. The workflows capture progress and diagnostic stderr
+separately, then remove it without publishing it. Integration result
+assertions likewise use fixed outcome reasons when redaction is enabled.
 
-```text
-[<site>] x dataflow-resources: BadRequest: <Microsoft.IoTOperations/instances/dataflowEndpoints> is invalid
-```
+Redaction follows the destination. Local plain output retains detailed
+reasons, while redacted plain output renders the allowed run fields.
+`GITHUB_ACTIONS` and `TF_BUILD` enable redaction automatically, and the
+shipped workflows also set `SITEOPS_REDACT_OUTPUT=1` explicitly.
 
-Redaction follows the destination rather than the text. A local `siteops deploy` prints the full detail, which is what an operator needs to diagnose their own environment. It turns on automatically under `GITHUB_ACTIONS` and `TF_BUILD`, so a workflow added later is covered, and the shipped workflows set `SITEOPS_REDACT_OUTPUT=1` explicitly as well.
+Diagnostic logging also scrubs recognized identifiers and credential
+patterns. That heuristic is separate from the publication allowlist and
+does not make arbitrary stderr suitable for an artifact.
 
-Set `SITEOPS_REDACT_OUTPUT=0` to keep full detail while debugging a self-hosted runner, and treat the resulting log as operator-local.
+For a private local diagnostic session, set `SITEOPS_REDACT_OUTPUT=0` and
+keep the resulting terminal output or captured stderr operator-local.
+See [run-output.md](run-output.md) for projections and recovery guidance.
 
 ### Security model
 
@@ -692,7 +711,8 @@ az pipelines run \
 Dry run stops after the publishable plan. Otherwise, `AzureCLI@2` handles
 authentication, plan-time compiler or module access, deployment, token
 lifecycle, and cleanup in one task. No separate login, token refresh, or
-logout steps are needed.
+logout steps are needed. The deployment result is validated and uploaded as a
+second summary using the same envelope rules as the GitHub workflow.
 
 ### Per-environment migration
 
