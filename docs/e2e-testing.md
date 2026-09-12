@@ -1,11 +1,16 @@
 # E2E Testing
 
-End-to-end (E2E) tests are the primary live-subscription validation for the
-scalekit. A workflow matrix cell creates a fresh k3s cluster, registers it with
-Azure Arc, deploys Azure IoT Operations through Site Ops, and runs the selected
-integration tests. Ephemeral mode normally deletes its resource group.
-Persistent mode removes resources in the run's snapshot delta, and
+End-to-end (E2E) tests exercise selected Scale Kit scenarios in a live Azure
+subscription. A workflow matrix cell creates a fresh k3s cluster, registers it
+with Azure Arc, deploys Azure IoT Operations through Site Ops, and runs the
+selected integration tests. Ephemeral mode normally deletes its resource
+group. Persistent mode removes resources in the run's snapshot delta, and
 `skip-teardown` preserves them for inspection.
+
+A passing cell establishes only the assertions selected for that release,
+mode, and test allowlist. It does not certify an arbitrary cluster, AIO
+installation, or workload as ready for production. These runs create Azure
+resources and can incur charges until teardown completes.
 
 Use E2E tests when:
 

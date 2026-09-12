@@ -1,6 +1,6 @@
 # AIO Releases
 
-Azure IoT Operations (AIO) ships on a release cadence. Each release pins specific versions of the AIO extension, cert-manager, secret store, and a matching control-plane API version. The scalekit represents every supported release as a release config file under `workspaces/iot-operations/parameters/aio-releases/` and selects one per site via `site.properties.aioRelease`.
+Azure IoT Operations (AIO) ships on a release cadence. Each release pins specific versions of the AIO extension, cert-manager, secret store, and a matching control-plane API version. Scale Kit represents every supported release as a release config file under `workspaces/iot-operations/parameters/aio-releases/` and selects one per site via `site.properties.aioRelease`.
 
 ## How release selection works
 
@@ -123,7 +123,10 @@ This applies to every resource area a site selects through `properties.resourceS
 
 Azure IoT Operations supports upgrade to any patch of the same minor version, or to the next minor version. Other transitions (downgrades, multi-minor jumps, preview/GA crossings) require uninstall and reinstall. See [Upgrade Azure IoT Operations](https://learn.microsoft.com/en-us/azure/iot-operations/deploy-iot-ops/howto-upgrade) for the authoritative rules.
 
-The scalekit exercises adjacent-release upgrades (for example `2607` to `2608`) in CI per E2E dispatch.
+The optional E2E workflow can exercise selected adjacent-release upgrades,
+such as `2607` to `2608`. A passing dispatch establishes its selected
+integration assertions. It is not a general readiness or support
+certification for another cluster or upgrade path.
 
 ### Sample template API-version policy
 

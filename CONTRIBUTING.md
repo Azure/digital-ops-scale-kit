@@ -2,126 +2,126 @@
 
 This project welcomes contributions and suggestions.
 
-## Development Setup
+## Development setup
+
+Use Python 3.10 or newer. Clone the repository and create a virtual environment:
 
 ```bash
-# Clone the repository
 git clone https://github.com/Azure/digital-ops-scale-kit.git
 cd digital-ops-scale-kit
-
-# Install with dev dependencies
-pip install -e ".[dev]"
-
-# Run tests
-pytest -m "not integration"
-
-# Run tests with coverage
-pytest -m "not integration" --cov=siteops --cov-report=term-missing
+python -m venv .venv
 ```
 
-## Code Style
+Activate it with `source .venv/bin/activate` on Linux or
+`.\.venv\Scripts\Activate.ps1` in PowerShell, then install the development
+dependencies:
 
-- Type hints required for all functions
-- Docstrings for public methods
-- Follow existing patterns in the codebase
+```bash
+python -m pip install -e ".[dev]"
+```
 
-## Testing
+Run the local validation used for ordinary changes:
 
-- Add tests for new functionality
-- Inject command runners for planning and executor tests. Guard
-  `subprocess.Popen` when a real process would violate the test boundary.
-- Use fixtures from `conftest.py` for workspace setup
-- Install the development dependencies before running packaging tests. They
-  build a wheel in a temporary directory with package-index access disabled.
-- Native installation tests use pipx in isolated temporary directories. On
-  Windows, select a short owned `pytest --basetemp` path so generated executable
-  paths remain within the platform limit. For offline tests, set
-  `SITEOPS_TEST_BACKEND_WHEELHOUSE` to a directory holding the pip wheel pinned
-  in `scripts/siteops-build-requirements.txt`.
+```bash
+pytest -m "not integration"
+ruff check .
+```
 
-## Pull Request Process
+The editable install is a contributor workflow. Operators installing an
+identified build should use the [Site Ops installation guide](docs/install-siteops.md).
 
-1. Run `pytest -m "not integration"` and `ruff check .`
-2. Update documentation if adding new features
-3. Follow the existing code style
+## Choose the right layer
+
+Site Ops is the generic orchestration engine under `siteops/`. Azure IoT
+Operations behavior belongs under `workspaces/iot-operations/`.
+
+- Put reusable workspace loading, targeting, preparation, execution, and
+  result behavior in the engine.
+- Put AIO release policy, templates, manifests, parameters, sites, and samples
+  in the IoT Operations workspace.
+- Keep GitHub Actions and Azure Pipelines behavior aligned when a feature is
+  shared by both delivery surfaces.
+
+See the [repository and workspace guide](docs/repository-guide.md) for the
+architecture and directory responsibilities.
+
+## Code and tests
+
+- Add type hints to functions and docstrings to public methods.
+- Follow the patterns already used in the surrounding code.
+- Add focused tests for changed behavior.
+- Use fixtures from `conftest.py` for workspace setup.
+- Inject command runners in planning and executor tests. Guard
+  `subprocess.Popen` when a real process would cross the test boundary.
+- Keep live Azure tests opt-in. See [end-to-end testing](docs/e2e-testing.md)
+  before running an integration scenario.
+
+Packaging tests require the development dependencies because they build a
+wheel with package-index access disabled.
+
+Native installation tests use pipx in isolated temporary directories. On
+Windows, select a short owned `pytest --basetemp` path so generated executable
+paths remain within the platform limit. For offline tests, set
+`SITEOPS_TEST_BACKEND_WHEELHOUSE` to a directory containing the pip wheel
+pinned in `scripts/siteops-build-requirements.txt`.
+
+## Documentation
+
+Update the nearest operator guide when a command, field, output, prerequisite,
+or side effect changes. Examples should state what must be edited before they
+run and distinguish:
+
+- compile-free validation
+- executable planning without Azure or Kubernetes mutation
+- deployment that creates or updates provider resources
+- readiness or functional verification after deployment
+
+Keep workspace trust, permissions, cost, private output, and cleanup
+boundaries visible where they affect an operator decision.
+
+## Pull requests
+
+Before opening a pull request:
+
+1. Run the smallest focused tests for the change.
+2. Run `pytest -m "not integration"` and `ruff check .` when the change affects
+   the engine or shared workspace behavior.
+3. Update documentation and samples that exercise the changed contract.
+4. Describe any live validation separately from local or hosted test results.
 
 ## Versioning
 
-This repository uses two independent version streams with [semantic versioning](https://semver.org/):
+The repository has independent version streams:
 
-### Scale Kit (content)
+| Stream | Tags | Covers |
+|---|---|---|
+| Scale Kit content | `v*` | Workspace content, delivery workflows, and documentation |
+| Site Ops engine | `siteops/v*` | The `siteops` Python package and CLI |
 
-Git tags: `v1.0.0b1`, `v1.1.0`, `v2.0.0`
+Content release declarations select an exact published Site Ops version or
+request an identified engine build during preview. A content release can move
+without an engine release, and an engine fix can move without a content
+release. The Scale Kit version cannot be more stable than the Site Ops version
+it requires.
 
-Covers workspace content: Bicep templates, manifests, parameter files, site examples, GitHub
-workflows, and documentation. Unscoped `v*` tags are the primary release. GitHub Releases attach
-to these tags and note the minimum required siteops version.
+Use conventional commit scopes that identify the changed layer:
 
-### Site Ops (tool)
+- `feat(workspace):` for new content
+- `feat(siteops):` for engine features
+- `fix(siteops):` for engine fixes
+- `docs:` for documentation
 
-Git tags: `siteops/v1.0.0b1`, `siteops/v1.1.0`
+Follow [Prepare and publish a release](docs/releasing.md) for version updates,
+candidate review, and publication. Use
+[Install Site Ops from a release](docs/install-siteops.md) to verify the
+operator-facing installation path.
 
-Covers the `siteops/` Python package: CLI, orchestrator, executor, models. The `siteops/v*` tag
-stays in sync with the version in `siteops/__init__.py` (read dynamically by pyproject.toml).
+## Build local distribution artifacts
 
-### Guidelines
-
-- The scale kit version cannot be more stable than siteops. If siteops is beta, the scale kit
-  is beta.
-- Keep the checked-in `siteops.__version__` at `1.0.0b1` throughout the
-  `v1.0.0b*` Scale Kit content beta series. Generated experimental artifacts
-  may add a PEP 440 local version identifying the build, attempt, and source
-  commit. The installed package and CLI report that full version.
-  Do not create another `siteops/v*` beta tag unless the release policy changes.
-- When content requires a new Site Ops version, release that engine version
-  first and reference it from the content declaration. Independent releases
-  need not share a commit.
-- Content-only changes (new templates, manifest updates, doc fixes) bump only the `v*` tag.
-- Tool-only changes (CLI features, orchestrator fixes) bump only the `siteops/v*` tag.
-- Use conventional commits to distinguish change types:
-  - `feat(workspace):` for new content
-  - `feat(siteops):` for new tool features
-  - `fix(siteops):` for tool bugfixes
-  - `docs:` for documentation
-
-### Example version streams
-
-These examples illustrate the version policy, not a release schedule:
-
-```text
-v1.0.0b1 + siteops/v1.0.0b1    first public beta
-v1.0.0b2                      another content beta, retaining siteops 1.0.0b1
-v1.0.0 + siteops/v1.0.0        stable release
-v1.1.0                        content-only feature
-siteops/v1.0.1                tool-only fix
-v1.2.0 + siteops/v1.1.0        content requiring a newer tool version
-```
-
-## Site Ops release artifacts
-
-Use the [installation guide](docs/install-siteops.md) to install a release wheel
-or verified bundle through pipx, and the [release guide](docs/releasing.md) to
-prepare and publish them.
-Release declarations and notes are reviewed in Git. The release workflow
-prepares an exact candidate, shows an approval preview, and creates its tag and
-GitHub Release only after approval.
-
-Site Ops releases use the source package version. Content releases reference
-an already published engine or explicitly include an identified engine build
-during preview. Neither stream forces a version increment in the other.
-
-There are two operator entry points: **CI** for checks and previews, and
-**Release (approval required)** for real publication. They share the read-only
-candidate workflow and `_siteops-distribution.yaml` build/signing machinery.
-CI offers `run-mode: ci-only`, `installer-check`, or `release-preview`. The
-latter two use `expected-source-sha`. The release preview also accepts
-`release-file`, defaulting to a committed example. No CI mode publishes.
-
-### Produce local artifacts
-
-Use a clean checkout and an isolated Python 3.11 or newer build environment. Install
-`scripts/siteops-build-requirements.txt` with pip's `--require-hashes` and
-`--only-binary=:all:` options through your approved package feed.
+Use a clean checkout and an isolated Python 3.11 or newer build environment.
+Install `scripts/siteops-build-requirements.txt` with pip's
+`--require-hashes` and `--only-binary=:all:` options through your approved
+package feed.
 
 ```text
 python scripts/build-siteops-bundle.py
@@ -134,32 +134,31 @@ python scripts/build-siteops-bundle.py
   --download-dependencies
 ```
 
-Join the lines for your shell. `--download-dependencies` explicitly allows
-hash-pinned runtime wheel downloads from the configured feed. Alternatively,
-use `--wheelhouse <directory>` with the complete locked wheel set. Exactly
-one of these options is required. The output directory receives
-`siteops-install.zip` and the standalone Site Ops wheel. Both contain identical
-application wheel bytes. Neither existing artifact is overwritten.
-`--version-mode build` is the default and adds the build identity suffix.
-`--version-mode source` retains the source package version for an independently
-versioned engine release.
+Join the lines for your shell. `--download-dependencies` permits hash-pinned
+runtime wheel downloads from the configured feed. Use
+`--wheelhouse <directory>` instead when you already have the complete locked
+wheel set. Exactly one of these options is required.
 
-The producer exports tracked source and derives the artifact version and
-dependency pins only in staging. The ZIP contains that wheel, runtime wheels,
-their relative paths and hashes in `pylock.toml`, the bundle inventory, and
-license notices. Native pipx manages installation and removal. The lock reader
-requires the supported pipx backend described in the installation guide.
-Local generation creates neither GitHub attestations nor an official release.
+The output directory receives `siteops-install.zip` and the standalone Site
+Ops wheel. Both contain identical application wheel bytes, and existing
+artifacts are not overwritten. `--version-mode build` is the default and adds
+the build identity suffix. `--version-mode source` retains the source package
+version for an independently versioned engine release.
 
-When changing runtime dependencies, update the runtime lock, target wheel
-coverage, and notices together. Every declared target must have one compatible
-wheel per locked package, and each runtime wheel's dependencies must be
-satisfied by unconditional entries in that lock. Conditional runtime
-dependencies, extras, and direct URLs require a separately defined policy.
-Build tooling is pinned separately and is not redistributed in the archive.
+Local generation creates no GitHub attestations and is not an official
+release. When runtime dependencies change, update the runtime lock, target
+wheel coverage, and notices together. Build tooling is pinned separately and
+is not redistributed in the archive. The runtime lock accepts unconditional
+exact dependencies with a compatible wheel for every declared target.
 
 ## Microsoft Open Source
 
-Most contributions require you to agree to a Contributor License Agreement (CLA) declaring that you have the right to, and actually do, grant us the rights to use your contribution. For details, visit <https://cla.opensource.microsoft.com>.
+Most contributions require a Contributor License Agreement (CLA) confirming
+that you have the right to grant us permission to use your contribution. See
+<https://cla.opensource.microsoft.com>.
 
-This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/). For more information see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/).
+This project follows the
+[Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/).
+See the
+[Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/)
+for more information.

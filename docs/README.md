@@ -1,56 +1,98 @@
 # Documentation
 
-Extended documentation for the Digital Operations Scale Kit.
+Use this page to choose the shortest route for the task in front of you. New
+operators should begin with the repository [quick start](../README.md#quick-start),
+which installs the CLI, obtains workspace content, prepares one target, and
+separates validation, planning, deployment, and health verification.
 
-**New to siteops?** Start with [site-configuration.md](site-configuration.md), then [targeting.md](targeting.md), then [manifest-reference.md](manifest-reference.md). Operating in CI/CD? Jump to [ci-cd-setup.md](ci-cd-setup.md).
+## Begin locally
 
-## Contents
+| Task | Guide |
+|---|---|
+| Install an identified Site Ops release | [Install Site Ops](install-siteops.md) |
+| Configure and inspect a deployment target | [Site configuration](site-configuration.md) |
+| Understand the included AIO content | [IoT Operations workspace](../workspaces/iot-operations/README.md) |
+| Diagnose a failed command or provider operation | [Troubleshooting](troubleshooting.md) |
 
-| Document | Description |
-|----------|-------------|
-| [install-siteops.md](install-siteops.md) | Release wheels, verified bundles, pipx prerequisites, and installation lifecycle |
-| [releasing.md](releasing.md) | CI previews, reviewed release files, independent versions, and approved publication |
-| [migrating.md](migrating.md) | What to change in a workspace when moving to a newer Scale Kit release |
-| [site-configuration.md](site-configuration.md) | Site definitions, inheritance, overlays |
-| [targeting.md](targeting.md) | Selector grammar, site identity, no-match diagnostic |
-| [manifest-reference.md](manifest-reference.md) | Manifest syntax, step types, conditions |
-| [manifest-includes.md](manifest-includes.md) | Splicing one manifest into another via `include:` |
-| [parameter-resolution.md](parameter-resolution.md) | Template variables, output chaining, auto-filtering |
-| [plan-output.md](plan-output.md) | Plain and JSON deployment plans, projections, and publication boundaries |
-| [run-output.md](run-output.md) | Deployment run outcomes, exit codes, JSON results, interruption, temporary files |
-| [aio-releases.md](aio-releases.md) | Pinning an AIO release per site, in-place upgrades, adding a new release |
-| [resource-catalog.md](resource-catalog.md) | Declaring AIO workload resources in YAML, attachment routes, when to use Bicep |
-| [assets.md](assets.md) | Device Registry devices and assets |
-| [dataflows.md](dataflows.md) | Dataflow endpoints, profiles, and dataflows |
-| [secret-sync.md](secret-sync.md) | Secret sync enablement and usage |
-| [ci-cd-setup.md](ci-cd-setup.md) | GitHub Actions, OIDC, secrets configuration |
-| [e2e-testing.md](e2e-testing.md) | End-to-end live-subscription test workflow |
-| [troubleshooting.md](troubleshooting.md) | Common issues and solutions |
+Installing the CLI does not acquire a workspace. The included IoT Operations
+workspace is currently obtained from this repository. Review both the CLI
+release and the content checkout before deploying.
 
-## Glossary
+## Prepare and run deployments
+
+Follow the command progression from read-only inspection to provider writes:
+
+1. Use [site configuration](site-configuration.md) to inspect inheritance and
+   overlays.
+2. Use [site targeting](targeting.md) to select one site or a fleet.
+3. Use the [manifest reference](manifest-reference.md) to understand the
+   ordered operations.
+4. Use [deployment plan output](plan-output.md) to review executable
+   preparation without Azure or Kubernetes mutation.
+5. Use [deployment run output](run-output.md) to interpret results,
+   interruption, temporary files, and publication-safe output.
+
+For advanced authoring:
+
+- [Manifest includes](manifest-includes.md) covers reusable partials and
+  composition.
+- [Parameter resolution](parameter-resolution.md) covers merge order,
+  template variables, and output chaining.
+
+`validate` is compile-free structural checking. `plan` adds compilation and
+local capability preflight. `deploy` performs provider operations. Neither a
+valid plan nor a successful resource deployment establishes workload
+readiness.
+
+## Build Azure IoT Operations content
+
+| Task | Guide |
+|---|---|
+| Select or upgrade an AIO release | [AIO releases](aio-releases.md) |
+| Compose reusable workload definitions | [Resource catalog](resource-catalog.md) |
+| Declare Device Registry devices and assets | [Assets](assets.md) |
+| Declare endpoints, profiles, and dataflows | [Dataflows](dataflows.md) |
+| Enable and operate Secret Sync | [Secret Sync](secret-sync.md) |
+| Start from a deployable example | [Workspace samples](../workspaces/iot-operations/samples/README.md) |
+
+These pages describe workspace content. The Site Ops engine remains
+content-agnostic.
+
+## Automate and qualify
+
+| Task | Guide |
+|---|---|
+| Configure OIDC, protected environments, overrides, and deployment workflows | [CI/CD setup](ci-cd-setup.md) |
+| Run selected live-subscription scenarios | [End-to-end testing](e2e-testing.md) |
+| Publish private and public plan or run output safely | [Plan output](plan-output.md) and [run output](run-output.md) |
+
+Hosted tests establish only the assertions selected by that workflow run.
+They do not certify an arbitrary target, deployment, or AIO workload as ready
+for production.
+
+## Upgrade, release, or contribute
+
+| Task | Guide |
+|---|---|
+| Update an existing workspace to the current preview contract | [Migration guide](migrating.md) |
+| Prepare and publish a Scale Kit or Site Ops release | [Release guide](releasing.md) |
+| Understand repository and workspace boundaries | [Repository and workspace guide](repository-guide.md) |
+| Set up a development environment and submit changes | [Contributing](../CONTRIBUTING.md) |
+
+## Core terms
 
 | Term | Meaning |
-|------|---------|
-| **Workspace** | A directory, often under `workspaces/`, containing `sites/`, `manifests/`, `parameters/`, and `templates/`, plus optional `contracts/`, `samples/`, and `sites.local/`. |
-| **Site** | A deployment target (`kind: Site`). Has subscription, optional resource group, location, labels, parameters, properties. |
-| **SiteTemplate** | A reusable site base (`kind: SiteTemplate`). Cannot be deployed directly. Referenced via `inherits:`. |
-| **Manifest** | A `kind: Manifest` YAML defining ordered steps and parameters. It may name sites, select them by label, or defer targeting to the CLI. |
-| **Selector** | A label expression (`key=value,key=value`) that filters sites. Set on a manifest as `selector:` or via the CLI `--selector` / `-l` flag. See [targeting.md](targeting.md). |
-| **Inheritance** | Single-parent merge for sites. A site `inherits:` from a SiteTemplate. Child overrides parent on conflict. Nested objects merge recursively. |
-| **Overlay** | A same-name site file in `sites.local/` (or an extras dir) that merges into a base site at load time. Cannot introduce `inherits:` or rename the site. |
-| **Include** | A step shape that splices another manifest's steps into the parent's step list at the include's position. Optionally gated by `when:`. |
-| **Standalone manifest** | A manifest meant to be deployed directly. The default. |
-| **Partial** | A manifest authored to be `include:`-d, not deployed standalone. Filename prefixed `_` by convention. |
-| **Sample** | A deployable example in `samples/<name>/`. Two shapes are supported, split by whether other samples can compose it: bundles (carry a `_partial.yaml`, so other samples can compose them) and compositions (`include:` other partials instead). |
-| **Composition** | A sample that carries no `_partial.yaml`, so it is an endpoint rather than a building block. Its `manifest.yaml` is built from `include:` steps pulling in `_partial.yaml`s from `manifests/` and other samples, plus any glue step they need and any declaration files it attaches. |
-| **Declaration** | An operator-authored parameter file describing values or resources to apply, such as a `secrets` array or the asset catalog's `devices` and `assets`. It attaches at manifest level. Ordinary values remain overridable through `site.parameters`. Composed resource collections change by selecting different resource sets. |
-| **Resource catalog** | The workspace library of reusable AIO resource definitions. `manifests/aio-resources.yaml` composes the sets each site selects. See [resource-catalog.md](resource-catalog.md). |
-| **Resource area** | A public selection axis under `properties.resourceSets`, such as `devices`, `assets`, or `dataflows`. Several areas may share one internal deployment step. |
-| **Deployment family** | An internal group of related resource kinds deployed as one step, such as Device Registry devices and assets, or dataflow endpoints, profiles, and dataflows. |
-| **Resource set** | A named YAML source containing resource definitions or advanced composition metadata. Sites compose ordered sets through `properties.resourceSets.<area>`. Deselecting a set does not delete resources. |
-| **Step** | A unit of work in a manifest's `steps:` list. Shapes: Bicep deploy (`template:`), kubectl op (`type: kubectl`), wait gate (`type: wait`), include (`include:`). |
-| **Scope** | A step's deployment scope: `resourceGroup` or `subscription`. |
-| **AIO release** | A versioned bundle of pinned extension versions and API versions, defined by a YAML in `parameters/aio-releases/` and selected per site via `properties.aioRelease`. |
-| **Auto-filtering** | Executable preparation omits parameter keys the template does not declare, then requires non-nullable parameters that have no default. |
-| **Chaining** | Wiring a step's outputs into a downstream step's parameters via `{{ steps.X.outputs.Y }}`. |
-| **Dispatcher** | A Bicep template that switches on an API-version param into per-API-version inner modules under `templates/<area>/modules/`. |
+|---|---|
+| **Site Ops** | The generic CLI and orchestration engine under `siteops/` |
+| **Workspace** | A directory containing sites, manifests, parameters, and templates, with optional contracts, samples, and local overlays |
+| **Site** | A deployable target with subscription, optional resource group, location, labels, parameters, and properties |
+| **SiteTemplate** | A reusable site base referenced through `inherits:` and not deployed directly |
+| **Manifest** | An ordered set of operations with site targeting and parameter sources |
+| **Partial** | A manifest intended for `include:` composition, conventionally named with a leading underscore |
+| **Plan** | The prepared operation set produced without Azure or Kubernetes mutation |
+| **Run result** | The final account of attempted, skipped, incomplete, and unconfirmed operations |
+| **Resource set** | An ordered workspace selection of reusable AIO resource definitions |
+
+For the directory responsibilities and the boundary between generic engine
+behavior and AIO content, see the
+[repository and workspace guide](repository-guide.md).

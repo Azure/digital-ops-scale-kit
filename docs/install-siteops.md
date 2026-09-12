@@ -15,9 +15,15 @@ install from the authenticated bundle. Both paths install with stock
 [pipx](https://pipx.pypa.io/). Site Ops ships no installer program, no bootstrap
 script, and no private package store.
 
+A Site Ops release installs the engine only. Workspace content has its own
+source and version. The included IoT Operations workspace is currently
+obtained from a matching Scale Kit repository checkout. This release does not
+provide verified remote workspace packages or guided workspace discovery.
+
 A release without these assets uses the
 [linked Site Ops release](releasing.md#release-content-against-an-existing-engine)
-or the [source installation](../README.md#quick-start) path.
+or the [contributor source installation](../CONTRIBUTING.md#development-setup)
+path.
 
 ## Before you start
 
@@ -42,9 +48,10 @@ They are maintained separately from Site Ops, and some Linux distributions
 package Python's `venv` support separately. Prepare them first: the Site Ops
 installation commands below add no tooling of their own.
 
-Installing the CLI does not authenticate to Azure, acquire a workspace, or
-deploy resources. Azure CLI, Bicep, and kubectl requirements depend on the
-operations you later select.
+Installing the CLI does not authenticate to Azure or deploy resources. Obtain
+and review workspace content separately, then pass its path with `-w`. Azure
+CLI, Bicep, and kubectl requirements depend on the operations you later
+select.
 
 ## Install the release wheel
 

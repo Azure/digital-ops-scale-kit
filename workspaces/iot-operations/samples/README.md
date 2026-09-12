@@ -1,24 +1,25 @@
 # Samples
 
-Deployable examples for Azure IoT Operations. Each sample teaches one thing,
-so start with the one closest to what you are building:
-`resource-set-basic` for the simplest site-selected resource set,
-`resource-set-composition` for inherited multi-set composition,
-`aio-with-opc-ua` for a full solution on a fresh install,
-`dataflow-sample` for declaring workload resources in YAML, `asset-sample` for
-declaring devices and assets the same way, `secretsync-sample` for Key Vault
-secrets on the cluster, and `aio-with-aksee-bootstrap` when the host does not
-exist yet.
+Deployable examples for Azure IoT Operations. Each sample teaches one
+composition or workload pattern.
+
+Samples perform real provider operations. They can create billable resources,
+need target-specific permissions, and may assume an existing AIO installation.
+Choose a sample from [the workspace table](#samples-in-this-workspace), read
+its prerequisites, and prepare one explicit site before running it.
 
 Two shapes are supported, and the line between them is whether other samples can compose the directory.
 
 - **Self-contained workload bundle.** The directory carries a `_partial.yaml` defining its own steps, so other samples can compose it. It may also carry a Bicep template, chaining inputs, and declaration files. Examples: `opc-ua-solution` (with its own template), `secretsync-sample`.
 - **Composition.** The directory carries no `_partial.yaml`, so it is an endpoint rather than a building block. Its manifest `include:`s leaf partials from `manifests/` and other samples into one deploy, adds any glue step those partials need such as a `wait` gate, and may attach declaration files supplying what they deploy. Examples: `aio-with-opc-ua`, `aio-with-aksee-bootstrap`, `dataflow-sample` (a declaration over the shared `templates/aio/dataflows/`), `asset-sample` (committed device and asset sets over the shared `templates/aio/assets/`), and the resource-set samples that include the catalog partial and take their declarations from site selections.
 
-Both shapes are deployable from the same path convention:
+Both shapes use the same command progression. Replace `<name>` and `<site>`
+after preparing the target described by that sample:
 
 ```bash
-siteops -w workspaces/iot-operations deploy samples/<name>/manifest.yaml -l environment=dev
+siteops -w workspaces/iot-operations validate samples/<name>/manifest.yaml -l name=<site>
+siteops -w workspaces/iot-operations plan samples/<name>/manifest.yaml -l name=<site>
+siteops -w workspaces/iot-operations deploy samples/<name>/manifest.yaml -l name=<site>
 ```
 
 ## Bundle layout (self-contained shape)
