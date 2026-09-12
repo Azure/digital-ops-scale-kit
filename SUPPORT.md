@@ -8,7 +8,8 @@ opening a new one.
 
 ## Documentation
 
-- [README.md](README.md) - Installation, quick start, and usage
+- [README.md](README.md) - Product overview and starting points
+- [First-site quickstart](docs/getting-started.md) - Install, configure, plan, and deploy
 - [docs/](docs/) - Extended documentation
 - [docs/ci-cd-setup.md](docs/ci-cd-setup.md) - CI/CD setup guide
 

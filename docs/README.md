@@ -1,7 +1,7 @@
 # Documentation
 
 Use this page to choose the shortest route for the task in front of you. New
-operators should begin with the repository [quick start](../README.md#quick-start),
+operators should begin with the [one-site quickstart](getting-started.md),
 which installs the CLI, obtains workspace content, prepares one target, and
 separates validation, planning, deployment, and health verification.
 
@@ -9,6 +9,7 @@ separates validation, planning, deployment, and health verification.
 
 | Task | Guide |
 |---|---|
+| Deploy AIO to one prepared target | [First-site quickstart](getting-started.md) |
 | Install an identified Site Ops release | [Install Site Ops](install-siteops.md) |
 | Configure and inspect a deployment target | [Site configuration](site-configuration.md) |
 | Understand the included AIO content | [IoT Operations workspace](../workspaces/iot-operations/README.md) |

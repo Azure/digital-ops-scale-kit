@@ -11,7 +11,7 @@ currently obtained from a Scale Kit repository checkout and selected with
 
 ## Start with one target
 
-Follow the repository [quick start](../../README.md#quick-start). It prepares
+Follow the [one-site quickstart](../../docs/getting-started.md). It prepares
 a `sites.local/` overlay for one existing Arc-connected cluster, inspects the
 resolved target, validates the manifest, reviews an executable plan, and only
 then deploys.
@@ -26,7 +26,7 @@ health.
 
 | Goal | Entry point | Read first |
 |---|---|---|
-| Install AIO on a prepared cluster | `manifests/aio-install.yaml` | [Quick start](../../README.md#quick-start) |
+| Install AIO on a prepared cluster | `manifests/aio-install.yaml` | [Quickstart](../../docs/getting-started.md) |
 | Upgrade an existing AIO installation | `manifests/aio-upgrade.yaml` | [AIO releases](../../docs/aio-releases.md) |
 | Apply selected devices, assets, and dataflows | `manifests/aio-resources.yaml` | [Resource catalog](../../docs/resource-catalog.md) |
 | Enable Secret Sync on an existing instance | `manifests/secretsync.yaml` | [Secret Sync](../../docs/secret-sync.md) |
