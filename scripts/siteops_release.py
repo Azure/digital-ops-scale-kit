@@ -241,9 +241,13 @@ def discover_release_intent(root: Path, before_sha: str, source_sha: str) -> str
     directories: set[str] = set()
     for path in changed_paths:
         parts = path.split("/")
-        if len(parts) != 3 or parts[0] != "releases":
+        if parts[0] != "releases" or parts[-1] not in {"release.json", "notes.md"}:
             continue
-        if parts[2] not in {"release.json", "notes.md"}:
+        if len(parts) != 3:
+            if _tree_entry(repository_root, source_sha, path) is not None:
+                raise ReleaseIntentError(
+                    "Release records must use releases/<name>/release.json and sibling notes.md."
+                )
             continue
         candidate_path = _validate_intent_path(
             f"releases/{parts[1]}/release.json"
@@ -272,6 +276,8 @@ def inactive_release_plan(
     source_sha: str,
     repository: str,
     source_ref: str,
+    *,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     """Return the inactive plan after validating the selected source identity."""
     repository_root = _repository_root(root)
@@ -282,7 +288,7 @@ def inactive_release_plan(
         "apiVersion": _API_VERSION,
         "kind": _KIND,
         "active": False,
-        "dryRun": False,
+        "dryRun": dry_run,
         "source": {
             "repository": repository,
             "commit": source_sha,

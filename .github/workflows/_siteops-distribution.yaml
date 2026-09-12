@@ -726,6 +726,16 @@ jobs:
           fi
           expect_working_command "installation"
 
+          if ! pipx runpip siteops --version > "$logs/backend-version.log" 2>&1; then
+            echo "::error::The installed application's pip backend could not be inspected."
+            exit 1
+          fi
+          backend_version="$(cat "$logs/backend-version.log")"
+          if [[ "${backend_version%% from *}" != "pip ${SHARED_PIP_SPEC#pip==}" ]]; then
+            echo "::error::The installed application is not using the qualified pip backend."
+            exit 1
+          fi
+
           if ! install_locked repeat "$extract/pylock.toml"; then
             echo "::error::Repeating the same verified installation request failed."
             exit 1

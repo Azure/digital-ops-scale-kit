@@ -674,7 +674,8 @@ def test_cli_writes_bound_active_plan_from_selected_commit(repository: Path, tmp
     assert (output / "release-notes.md").read_bytes() == notes
 
 
-def test_cli_discovery_writes_inactive_plan_without_notes(repository: Path, tmp_path: Path):
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_cli_discovery_writes_inactive_plan_without_notes(repository: Path, tmp_path: Path, dry_run):
     (repository / "README.md").write_text("before\n", encoding="utf-8")
     before = _commit(repository, "before")
     (repository / "README.md").write_text("after\n", encoding="utf-8")
@@ -693,13 +694,34 @@ def test_cli_discovery_writes_inactive_plan_without_notes(repository: Path, tmp_
         str(output),
         "--before-sha",
         before,
+        *(["--dry-run"] if dry_run else []),
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout == "No changed release intent.\n"
     assert result.stderr == ""
     assert json.loads((output / "plan.json").read_text(encoding="utf-8"))["active"] is False
+    assert json.loads((output / "plan.json").read_text(encoding="utf-8"))["dryRun"] is dry_run
     assert not (output / "release-notes.md").exists()
+
+
+@pytest.mark.parametrize("deleted", [False, True])
+def test_discovery_rejects_surviving_misnested_records_but_allows_their_removal(repository, deleted):
+    (repository / "README.md").write_text("before\n", encoding="utf-8")
+    before = _commit(repository, "before")
+    _write_record(
+        repository, {"tag": "v1.0.0b8", "siteops": {"build": True}}, name="group/nested",
+    )
+    source_sha = _commit(repository, "misnested record")
+    if deleted:
+        before = source_sha
+        for name in ("release.json", "notes.md"):
+            (repository / "releases" / "group" / "nested" / name).unlink()
+        source_sha = _commit(repository, "remove misnested record")
+        assert discover_release_intent(repository, before, source_sha) is None
+    else:
+        with pytest.raises(ReleaseIntentError, match="releases/<name>/release.json"):
+            discover_release_intent(repository, before, source_sha)
 
 
 def test_cli_refuses_to_overwrite_an_existing_output_directory(

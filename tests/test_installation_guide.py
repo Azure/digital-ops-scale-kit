@@ -1,14 +1,19 @@
 """Exercise the native installation guide's command and path contracts."""
 
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
+import sys
+import zipfile
 from pathlib import Path
 
 import pytest
 from packaging.requirements import Requirement
+
+from tests.shell_helpers import bash_path, run_script
 
 try:
     import tomllib
@@ -43,6 +48,56 @@ def test_online_transition_selects_a_release_wheel_instead_of_an_index_package()
     assert "lock" not in manifest["tool"]["pipx"]["tools"]["siteops"]
     assert "PIP_ONLY_BINARY=:all:" in section
     assert "PIPX_FETCH_PYTHON=never" in section
+
+
+@pytest.mark.parametrize("shell", ["powershell", "bash"])
+@pytest.mark.parametrize("state", ["verified", "rejected", "existing"])
+def test_guide_authenticates_before_creating_retained_files(tmp_path, shell, state):
+    if shell == "powershell" and (sys.platform != "win32" or not shutil.which("pwsh")):
+        pytest.skip("The PowerShell retention example uses Windows identity and ACL tools.")
+    download = tmp_path / "download with spaces"
+    download.mkdir()
+    archive = download / "siteops-install.zip"
+    with zipfile.ZipFile(archive, "w") as stream:
+        stream.writestr("payload.txt", "authenticated test payload")
+    identity = hashlib.sha256(archive.read_bytes()).hexdigest()
+    destination = tmp_path / "data" / "siteops" / "bundles" / identity
+    if state == "existing":
+        destination.mkdir(parents=True)
+        (destination / "operator.txt").write_text("preserve")
+    body = _block(_section("### Authenticate and retain the bundle"), shell)
+    body = body.replace(
+        "<download directory>", str(download) if shell == "powershell" else bash_path(download),
+    ).replace("<full source commit from the selected official release>", "a" * 40)
+    code = 9 if state == "rejected" else 0
+    if shell == "powershell":
+        script = tmp_path / "retain.ps1"
+        script.write_text(
+            f"function gh {{ $global:LASTEXITCODE = {code} }}\n" + body, encoding="utf-8",
+        )
+        result = subprocess.run(
+            [shutil.which("pwsh"), "-NoProfile", "-File", str(script)], cwd=tmp_path,
+            env={**os.environ, "LOCALAPPDATA": str(tmp_path / "data")},
+            capture_output=True, text=True, timeout=30,
+        )
+    else:
+        result = run_script(
+            f'gh() {{ return {code}; }}\npython3() {{ "$TEST_PYTHON" "$@"; }}\n' + body,
+            tmp_path, {
+                "TEST_PYTHON": Path(sys.executable).as_posix(),
+                "XDG_DATA_HOME": bash_path(tmp_path / "data"),
+            },
+        )
+    if state == "verified":
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (destination / "payload.txt").read_text() == "authenticated test payload"
+    else:
+        assert result.returncode != 0
+        assert not (destination / "payload.txt").exists()
+        if state == "rejected":
+            assert not destination.exists()
+        else:
+            assert (destination / "operator.txt").read_text() == "preserve"
 
 
 @pytest.mark.parametrize("language", ["powershell", "bash"])

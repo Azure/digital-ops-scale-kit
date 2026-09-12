@@ -91,6 +91,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Setup Site Ops
         uses: ./.github/actions/setup-siteops
@@ -99,6 +100,20 @@ jobs:
 
       - name: Run ruff
         run: ruff check siteops tests scripts
+
+      - name: Check changed release declarations
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          BEFORE_SHA: ${{ github.event.pull_request.base.sha }}
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python -B scripts/prepare-siteops-release.py \
+            --repository "$SOURCE_REPOSITORY" --source-sha "$SOURCE_SHA" \
+            --source-ref refs/heads/main --before-sha "$BEFORE_SHA" \
+            --dry-run --output-dir "$RUNNER_TEMP/release-file-check"
 
   test:
     name: Unit Tests

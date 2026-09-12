@@ -63,9 +63,6 @@ def main() -> int:
             raise ReleaseIntentError("--output-dir must be an absolute path.")
         if os.path.lexists(output_dir):
             raise ReleaseIntentError("The output directory already exists.")
-        if args.dry_run and not args.intent:
-            raise ReleaseIntentError("A dry run requires an explicit --intent.")
-
         intent_path = args.intent
         if intent_path is None:
             intent_path = discover_release_intent(root, args.before_sha, args.source_sha)
@@ -76,6 +73,7 @@ def main() -> int:
                 args.source_sha,
                 args.repository,
                 args.source_ref,
+                dry_run=args.dry_run,
             )
             notes = None
             status = _NO_INTENT

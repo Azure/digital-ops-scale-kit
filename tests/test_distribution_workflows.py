@@ -470,9 +470,13 @@ def test_qualification_isolates_tooling_state_under_the_runner_temporary_path():
         assert '> "$logs/' in script
         checked = [line for line in script.splitlines() if "siteops --version" in line]
         assert checked, name
+        assert any('observed="$(siteops --version' in line for line in checked), name
         for line in checked:
-            assert 'observed="$(siteops --version' in line, line
-            assert '2> "$logs/' in line, line
+            if "pipx runpip siteops --version" in line:
+                assert '> "$logs/backend-version.log" 2>&1' in line, line
+            else:
+                assert 'observed="$(siteops --version' in line, line
+                assert '2> "$logs/' in line, line
 
 
 def test_qualification_installs_both_supported_paths_with_stock_pipx():
@@ -1257,6 +1261,7 @@ def _native_exports(temp: Path, version: str) -> dict[str, str]:
         "PYTHON": str(Path(sys._base_executable)),
         "WHEEL_NAME": "",
         "PACKAGE_VERSION": version,
+        "SHARED_PIP_SPEC": REUSABLE["env"]["SHARED_PIP_SPEC"],
         "PYTHONPATH": str(REPO_ROOT),
         "PYTHONDONTWRITEBYTECODE": "1",
         **NETWORK_BLOCK,
@@ -1382,7 +1387,7 @@ def test_native_online_installation_step_installs_the_standalone_wheel(
 
 
 @native_only
-@pytest.mark.parametrize("fault", ["version", "execution"])
+@pytest.mark.parametrize("fault", ["version", "execution", "backend"])
 def test_native_installation_steps_reject_an_unexpected_exposed_version(
     tmp_path,
     bundle_factory,
@@ -1390,7 +1395,10 @@ def test_native_installation_steps_reject_an_unexpected_exposed_version(
     fault,
 ):
     _, manifest, temp, exports = _native_step_run(tmp_path, bundle_factory, backend_wheelhouse, 84)
-    exports["PACKAGE_VERSION"] = manifest.version + ".unexpected"
+    if fault == "backend":
+        exports["SHARED_PIP_SPEC"] = "pip==0"
+    else:
+        exports["PACKAGE_VERSION"] = manifest.version + ".unexpected"
 
     script = _script(REUSABLE["jobs"]["qualify"], "Install Site Ops from the verified lock")
     if fault == "execution":
@@ -1402,7 +1410,11 @@ def test_native_installation_steps_reject_an_unexpected_exposed_version(
     )
 
     assert result.returncode != 0
-    expected = "reported an unexpected version" if fault == "version" else "could not be executed"
+    expected = {
+        "version": "reported an unexpected version",
+        "execution": "could not be executed",
+        "backend": "not using the qualified pip backend",
+    }[fault]
     assert expected in result.stdout + result.stderr
     assert "private command diagnostic" not in result.stdout + result.stderr
     if fault == "execution":

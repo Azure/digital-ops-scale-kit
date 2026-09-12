@@ -78,6 +78,7 @@ class RuntimeWheel:
     sha256: str
     tags: frozenset[Any]
     requires_python: str
+    dependencies: tuple[str, ...]
 
 
 def _normalized_name(name: str) -> str:
@@ -275,7 +276,7 @@ def _write_utf8(path: Path, value: str, label: str) -> None:
 
 def _validate_source_dependencies(
     project_text: str, runtime_requirements: tuple[LockedRequirement, ...],
-) -> None:
+) -> frozenset[str]:
     try:
         import tomllib
         from packaging.requirements import Requirement
@@ -290,6 +291,7 @@ def _validate_source_dependencies(
         ):
             raise BuildError("Source dependencies must be an array of requirement strings.")
         locked = {item.name: item for item in runtime_requirements}
+        roots = set()
         for value in declarations:
             requirement = Requirement(value)
             selected = locked.get(_normalized_name(requirement.name))
@@ -302,6 +304,8 @@ def _validate_source_dependencies(
                     "The runtime lock must satisfy every declared source dependency. "
                     "Direct URLs, extras, and conditional source dependencies need an explicit policy."
                 )
+            roots.add(selected.name)
+        return frozenset(roots)
     except (ValueError, KeyError, TypeError) as error:
         raise BuildError("The source project dependency metadata is invalid.") from error
 
@@ -314,12 +318,12 @@ def _derive_staged_source(
     source_sha: str,
     runtime_requirements: tuple[LockedRequirement, ...],
     version_mode: str = "build",
-) -> tuple[str, str]:
+) -> tuple[str, str, frozenset[str]]:
     if version_mode not in {"build", "source"}:
         raise BuildError("The version mode must be build or source.")
     pyproject_path = source / "pyproject.toml"
     pyproject = _read_utf8(pyproject_path, "project metadata")
-    _validate_source_dependencies(pyproject, runtime_requirements)
+    source_dependencies = _validate_source_dependencies(pyproject, runtime_requirements)
     init_path = source / "siteops" / "__init__.py"
     init_text = _read_utf8(init_path, "package version")
     matches = list(_VERSION_LITERAL.finditer(init_text))
@@ -359,7 +363,7 @@ def _derive_staged_source(
     if replacements != 1:
         raise BuildError("The staged project must contain one direct dependency declaration.")
     _write_utf8(pyproject_path, updated_project, "project metadata")
-    return base_version, version
+    return base_version, version, source_dependencies
 
 
 def _build_environment() -> dict[str, str]:
@@ -634,6 +638,10 @@ def _runtime_wheel(path: Path, locks: tuple[LockedRequirement, ...]) -> RuntimeW
             if len(metadata_names) != 1:
                 raise BuildError("A runtime wheel must contain one package metadata record.")
             prefix = metadata_names[0].removesuffix("METADATA")
+            if archive.namelist().count(prefix + "RECORD") != 1:
+                raise BuildError("A runtime wheel must contain one matching RECORD file.")
+            if archive.testzip() is not None:
+                raise BuildError("A runtime wheel contains corrupt archive members.")
             metadata = email.parser.BytesParser().parsebytes(archive.read(metadata_names[0]))
             wheel_metadata = email.parser.BytesParser().parsebytes(archive.read(prefix + "WHEEL"))
             if (
@@ -649,6 +657,7 @@ def _runtime_wheel(path: Path, locks: tuple[LockedRequirement, ...]) -> RuntimeW
             requires_python = metadata["Requires-Python"] or ""
             SpecifierSet(requires_python)
             locked = {item.name: item for item in locks}
+            dependencies = []
             for value in metadata.get_all("Requires-Dist", []):
                 dependency = Requirement(value)
                 selected = locked.get(canonicalize_name(dependency.name))
@@ -661,6 +670,7 @@ def _runtime_wheel(path: Path, locks: tuple[LockedRequirement, ...]) -> RuntimeW
                         "Runtime wheel dependencies must be satisfied by unconditional "
                         "entries in the runtime lock."
                     )
+                dependencies.append(selected.name)
     except (KeyError, ValueError, zipfile.BadZipFile) as error:
         raise BuildError("A runtime wheel metadata record could not be inspected.") from error
     return RuntimeWheel(
@@ -670,6 +680,7 @@ def _runtime_wheel(path: Path, locks: tuple[LockedRequirement, ...]) -> RuntimeW
         sha256=digest,
         tags=frozenset(tags),
         requires_python=requires_python,
+        dependencies=tuple(dependencies),
     )
 
 
@@ -734,6 +745,29 @@ def _collect_runtime_wheels(
     if {wheel.name for wheel in wheels} != expected_names:
         raise BuildError("The runtime wheelhouse does not cover every locked dependency.")
     return selected
+
+
+def _validate_runtime_closure(
+    source_dependencies: frozenset[str],
+    targets: dict[tuple[str, str], tuple[RuntimeWheel, ...]],
+) -> None:
+    for wheels in targets.values():
+        dependencies = {wheel.name: wheel.dependencies for wheel in wheels}
+        pending = list(source_dependencies)
+        reachable: set[str] = set()
+        while pending:
+            name = pending.pop()
+            if name in reachable:
+                continue
+            if name not in dependencies:
+                raise BuildError("A source dependency is missing from the target wheel set.")
+            reachable.add(name)
+            pending.extend(dependencies[name])
+        if reachable != set(dependencies):
+            unused = ", ".join(sorted(set(dependencies) - reachable))
+            raise BuildError(
+                "The runtime lock contains packages outside the source dependency closure: " + unused + "."
+            )
 
 
 def _copy_regular(
@@ -1008,7 +1042,7 @@ def produce_bundle(
         runtime_requirements = _read_locked_requirements(runtime_lock_path)
         build_requirements = _read_locked_requirements(build_lock_path)
         _validate_build_environment(build_requirements)
-        base_version, version = _derive_staged_source(
+        base_version, version, source_dependencies = _derive_staged_source(
             source,
             build_number=build_number,
             build_attempt=build_attempt,
@@ -1022,6 +1056,7 @@ def produce_bundle(
         if download_dependencies:
             _download_runtime_wheels(runtime_lock_path, dependency_source)
         runtime_wheels = _collect_runtime_wheels(dependency_source, runtime_requirements)
+        _validate_runtime_closure(source_dependencies, runtime_wheels)
         application_wheel = _build_application_wheel(source, staging / "application-wheel")
         application_sha256 = _inspect_application_wheel(
             application_wheel,

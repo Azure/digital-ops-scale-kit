@@ -82,6 +82,7 @@ jobs:
       tag: ${{ steps.plan.outputs.tag }}
       bundle: ${{ steps.plan.outputs.bundle }}
       version-mode: ${{ steps.plan.outputs.version-mode }}
+      tag-exists: ${{ steps.target.outputs.tag-exists }}
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
     steps:
       - name: Confirm the source request
@@ -90,6 +91,10 @@ jobs:
           EXPECTED_SHA: ${{ inputs.expected-source-sha }}
         run: |
           set -euo pipefail
+          if [[ ! "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Enter the full 40-character lowercase commit SHA of the selected branch in expected-source-sha."
+            exit 1
+          fi
           if [[ "$DRY_RUN" != "true" && "$SOURCE_REF" != "refs/heads/main" ]]; then
             echo "::error::Release candidates must be prepared from main."
             exit 1
@@ -149,7 +154,7 @@ jobs:
             --source-ref "$SOURCE_REF" --output-dir "$RUNNER_TEMP/release-plan" \
             "${arguments[@]}"
           python -c '
-          import json, sys
+          import json, os, sys
           with open(sys.argv[1], encoding="utf-8") as stream:
               plan = json.load(stream)
           print("active=" + str(plan["active"]).lower())
@@ -157,6 +162,11 @@ jobs:
               print("tag=" + plan["release"]["tag"])
               print("bundle=" + str(plan["siteops"]["bundle"]).lower())
               print("version-mode=" + (plan["siteops"]["versionMode"] or "build"))
+          else:
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as output:
+                  output.write("## No release candidate\n\n")
+                  output.write("No changed release declaration remains in this commit. Nothing will be published.\n\n")
+                  output.write("A release uses releases/<name>/release.json and a sibling notes.md.\n")
           ' "$RUNNER_TEMP/release-plan/plan.json" >> "$GITHUB_OUTPUT"
 
       - name: Require configured publication reviewers
@@ -180,6 +190,51 @@ jobs:
           ):
               raise SystemExit("::error::In Settings > Environments, configure required reviewers for siteops-release.")
           ' "$RUNNER_TEMP/release-environment.json"
+
+      - name: Check the publication target
+        id: target
+        if: steps.plan.outputs.active == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          python3 -c '
+          import json, os, re, subprocess, sys, urllib.parse
+
+          def request(path):
+              result = subprocess.run(["gh", "api", path, "--include"], capture_output=True, text=True)
+              header, separator, body = result.stdout.partition("\n\n")
+              first = header.splitlines()[0] if header else ""
+              if re.fullmatch(r"HTTP/\S+ 404(?: .*)?", first):
+                  return None
+              if result.returncode or not separator:
+                  raise SystemExit("::error::GitHub could not confirm the publication target.")
+              return json.loads(body)
+
+          prefix = "repos/" + os.environ["GITHUB_REPOSITORY"]
+          tag = urllib.parse.quote(os.environ["TAG"], safe="")
+          if request(prefix + "/releases/tags/" + tag) is not None:
+              raise SystemExit("::error::This release already exists. Existing releases are not overwritten.")
+          ref = request(prefix + "/git/ref/tags/" + tag)
+          if ref is None:
+              print("tag-exists=false")
+              raise SystemExit(0)
+          target = ref["object"]
+          for _ in range(8):
+              if target["type"] == "commit":
+                  break
+              if target["type"] != "tag" or not re.fullmatch("[0-9a-f]{40}", target["sha"]):
+                  raise SystemExit("::error::The existing tag has an unsupported target.")
+              obj = request(prefix + "/git/tags/" + target["sha"])
+              if obj is None:
+                  raise SystemExit("::error::The existing tag object is unavailable.")
+              target = obj["object"]
+          if target["type"] != "commit" or target["sha"] != os.environ["SOURCE_SHA"]:
+              raise SystemExit("::error::The tag points to another commit. Tags are never moved.")
+          print("tag-exists=true")
+          ' >> "$GITHUB_OUTPUT"
 
       - name: Retain the declaration and notes
         id: upload
@@ -245,7 +300,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -c '
-          import json, os, subprocess, time
+          import json, os, subprocess, sys, time
 
           prefix = "repos/" + os.environ["GITHUB_REPOSITORY"]
           if os.environ.get("DRY_RUN") == "true":
@@ -264,6 +319,7 @@ jobs:
               raise SystemExit(0)
           endpoint = "repos/" + os.environ["GITHUB_REPOSITORY"] + "/actions/workflows/ci.yaml/runs"
           deadline = time.monotonic() + 1800
+          last_status = None
           while True:
               result = subprocess.run([
                   "gh", "api", "--method", "GET", endpoint,
@@ -279,6 +335,16 @@ jobs:
                   and (run.get("repository") or {}).get("full_name") == os.environ["GITHUB_REPOSITORY"]
               ]
               run = max(runs, key=lambda item: item["id"]) if runs else None
+              status = (run.get("id"), run.get("status")) if run else (None, None)
+              if status != last_status:
+                  if not run:
+                      message = "Waiting for CI to start for this commit. If no run appears, dispatch CI for this exact source."
+                  elif run.get("status") == "completed":
+                      message = "CI completed for this source commit."
+                  else:
+                      message = "Waiting for CI to finish."
+                  print(message, file=sys.stderr, flush=True)
+                  last_status = status
               if run and run.get("status") == "completed":
                   if run.get("conclusion") != "success":
                       raise SystemExit("::error::The latest CI run for this commit did not succeed.")
@@ -613,49 +679,6 @@ jobs:
           python3 -B release-tools/scripts/render-siteops-release.py notes \
             --root "$RUNNER_TEMP" >> "$GITHUB_OUTPUT"
 
-      - name: Check the publication target
-        id: target
-        shell: bash
-        env:
-          TAG: ${{ steps.candidate.outputs.tag }}
-        run: |
-          set -euo pipefail
-          python3 -c '
-          import json, os, re, subprocess, sys, urllib.parse
-
-          def request(path):
-              result = subprocess.run(["gh", "api", path, "--include"], capture_output=True, text=True)
-              header, separator, body = result.stdout.partition("\n\n")
-              first = header.splitlines()[0] if header else ""
-              if re.fullmatch(r"HTTP/\S+ 404(?: .*)?", first):
-                  return None
-              if result.returncode or not separator:
-                  raise SystemExit("::error::GitHub could not confirm the publication target.")
-              return json.loads(body)
-
-          prefix = "repos/" + os.environ["GITHUB_REPOSITORY"]
-          tag = urllib.parse.quote(os.environ["TAG"], safe="")
-          if request(prefix + "/releases/tags/" + tag) is not None:
-              raise SystemExit("::error::This release already exists. Existing releases are not overwritten.")
-          ref = request(prefix + "/git/ref/tags/" + tag)
-          if ref is None:
-              print("tag-exists=false")
-              raise SystemExit(0)
-          target = ref["object"]
-          for _ in range(8):
-              if target["type"] == "commit":
-                  break
-              if target["type"] != "tag" or not re.fullmatch("[0-9a-f]{40}", target["sha"]):
-                  raise SystemExit("::error::The existing tag has an unsupported target.")
-              obj = request(prefix + "/git/tags/" + target["sha"])
-              if obj is None:
-                  raise SystemExit("::error::The existing tag object is unavailable.")
-              target = obj["object"]
-          if target["type"] != "commit" or target["sha"] != os.environ["SOURCE_SHA"]:
-              raise SystemExit("::error::The tag points to another commit. Tags are never moved.")
-          print("tag-exists=true")
-          ' >> "$GITHUB_OUTPUT"
-
       - name: Retain the final release notes
         id: notes-upload
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -683,7 +706,7 @@ jobs:
           WHEEL_NAME: ${{ steps.candidate.outputs.wheel-name }}
           WHEEL_SHA: ${{ steps.candidate.outputs.wheel-sha }}
           ASSET_LIST_SHA: ${{ steps.candidate.outputs.asset-list-sha }}
-          TAG_EXISTS: ${{ steps.target.outputs.tag-exists }}
+          TAG_EXISTS: ${{ needs.prepare.outputs.tag-exists }}
           ENGINE_VERSION: ${{ steps.candidate.outputs.engine-version }}
           CI_URL: ${{ steps.ci.outputs.url }}
           MATRIX: ${{ needs.distribution.outputs.qualification-matrix }}

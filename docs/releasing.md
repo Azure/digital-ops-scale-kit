@@ -103,6 +103,9 @@ authored notes.
 
 Merging examples does not start the publishing workflow. Create a new folder
 under `releases/` for a real release, with its intended tag and notes.
+CI validates changed release declarations on pull requests.
+Invalid fields, version choices, headlines, or record paths fail before the
+publication workflow needs to build installation assets.
 
 Choose the release-file shape that matches the release. These examples illustrate
 formats, not scheduled releases.
@@ -277,9 +280,14 @@ This is a GitHub approval gate, not an Azure environment. It needs no
 environment secrets for the current workflow.
 
 The workflow checks this after reading an active release file and before
-building its native release assets. Choose self-review and
+building its native release assets. It also checks for an existing release or
+conflicting tag before building. The publisher independently rechecks the
+destination after approval. Choose self-review and
 administrator-bypass settings according to repository policy. Previews do not
 need this environment.
+
+`siteops-release` is the shared publication gate for both version streams,
+including Scale Kit content releases that reference an existing engine.
 
 After reviewing the generated summary, an authorized reviewer uses **Review
 deployments**, selects `siteops-release`, then selects **Approve and deploy**.
@@ -323,6 +331,8 @@ Rebuilding creates a new candidate with its own evidence and approval.
 
 For a transient preparation failure, rerun all jobs in the original workflow
 run. After changing source or notes, prepare a new candidate instead.
+If an older candidate is still waiting for approval, cancel that superseded
+run rather than approving it.
 Publication consumes the exact reviewed artifact IDs and hashes, rather than
 choosing a different successful build later. A failed publishing operation can
 have partial effects, so inspect its result before retrying.

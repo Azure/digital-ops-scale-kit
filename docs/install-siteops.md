@@ -47,6 +47,8 @@ official instructions:
 They are maintained separately from Site Ops, and some Linux distributions
 package Python's `venv` support separately. Prepare them first: the Site Ops
 installation commands below add no tooling of their own.
+Use a maintained patch release of your selected Python minor version. The
+installed wheels also enforce their own Python-version requirements.
 
 Installing the CLI does not authenticate to Azure or deploy resources. Obtain
 and review workspace content separately, then pass its path with `-w`. Azure
@@ -146,13 +148,18 @@ The parentheses and the `& { ... }` block keep `set -euo pipefail` and
 `$ErrorActionPreference` scoped to the download, so your interactive shell keeps
 its own settings.
 
-### Authenticate the archive
+### Authenticate and retain the bundle
 
 Confirm the release tag and its full source commit in the official repository
 first, and keep that commit as the expected identity. The repository, signing
 workflow, and expected commit are trust decisions: take them from the official
 repository and this guidance, never from a downloaded manifest or a command
 supplied inside the archive.
+
+Run the block for your shell to verify the archive and then extract it.
+Verification failure stops the block before extraction. The destination is
+a new private directory named for the archive digest. Keep that directory:
+pipx records the lock and wheel paths for later repair and replacement.
 
 ```powershell
 & {
@@ -172,12 +179,23 @@ supplied inside the archive.
       --predicate-type "https://slsa.dev/provenance/v1" `
       --deny-self-hosted-runners
     if ($LASTEXITCODE -ne 0) { throw "Verification failed. Do not extract this archive." }
+    $bundleId = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+    $bundle = Join-Path $env:LOCALAPPDATA "siteops\bundles\$bundleId"
+    if (Test-Path -LiteralPath $bundle) { throw "That bundle directory already exists. Use the retained bundle or choose a new private location." }
+    New-Item -ItemType Directory -Path (Split-Path $bundle) -Force | Out-Null
+    New-Item -ItemType Directory -Path $bundle | Out-Null
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    icacls $bundle /inheritance:r /grant:r "*${sid}:(OI)(CI)F" | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "The bundle directory could not be protected." }
+    Expand-Archive -LiteralPath $archive -DestinationPath $bundle
+    $bundle
 }
 ```
 
 ```bash
 (
   set -euo pipefail
+  umask 077
   download="<download directory>"
   source_sha="<full source commit from the selected official release>"
   archive="$download/siteops-install.zip"
@@ -192,6 +210,12 @@ supplied inside the archive.
     --cert-oidc-issuer "https://token.actions.githubusercontent.com" \
     --predicate-type "https://slsa.dev/provenance/v1" \
     --deny-self-hosted-runners
+  bundle_id="$(sha256sum "$archive" | cut -d ' ' -f 1)"
+  bundle="${XDG_DATA_HOME:-$HOME/.local/share}/siteops/bundles/$bundle_id"
+  mkdir -p "$(dirname "$bundle")"
+  mkdir "$bundle"
+  python3 -B -m zipfile -e "$archive" "$bundle"
+  printf '%s\n' "$bundle"
 )
 ```
 
@@ -209,43 +233,6 @@ trusted-root refresh can still use the network. Verification establishes origin
 and integrity. It does not promise that the selected build is free of defects,
 and fully offline verification requires independently provisioned trusted
 signing roots.
-
-### Keep the verified files in a stable private directory
-
-pipx records where it installed from, so the extracted lock and wheels must stay
-in a durable location that you own. After verification succeeds, use one
-directory per archive digest.
-
-```powershell
-& {
-    $ErrorActionPreference = "Stop"
-    $download = "<download directory>"
-    $bundleId = (Get-FileHash -LiteralPath (Join-Path $download "siteops-install.zip") -Algorithm SHA256).Hash.ToLowerInvariant()
-    $bundle = Join-Path $env:LOCALAPPDATA "siteops\bundles\$bundleId"
-    if (Test-Path $bundle) { throw "That bundle directory already exists." }
-
-    New-Item -ItemType Directory -Path $bundle -Force | Out-Null
-    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    icacls $bundle /inheritance:r /grant:r "*${sid}:(OI)(CI)F" | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "The bundle directory could not be protected." }
-    Expand-Archive -LiteralPath (Join-Path $download "siteops-install.zip") -DestinationPath $bundle
-    $bundle
-}
-```
-
-```bash
-(
-  set -euo pipefail
-  umask 077
-  download="<download directory>"
-  bundle_id="$(sha256sum "$download/siteops-install.zip" | cut -d ' ' -f 1)"
-  bundle="${XDG_DATA_HOME:-$HOME/.local/share}/siteops/bundles/$bundle_id"
-  mkdir -p "$(dirname "$bundle")"
-  mkdir "$bundle"
-  python3 -B -m zipfile -e "$download/siteops-install.zip" "$bundle"
-  printf '%s\n' "$bundle"
-)
-```
 
 `icacls` and `umask` keep the extracted files private without any Site Ops cache
 manager. Windows inherits ACLs, so choose a location protected for your account.
@@ -292,8 +279,8 @@ feed. It happens before index-free Site Ops installation.
 ```
 
 `--force-reinstall` selects the downloaded backend even if another version is
-already installed. Download the wheel with `--require-hashes` and a hash-pinned requirements file
-when your policy demands hash-pinned tooling. `pipx upgrade-shared` is the
+already installed. Download the wheel with `--require-hashes` and a hash-pinned
+requirements file when your policy demands hash-pinned tooling. `pipx upgrade-shared` is the
 supported way to change that backend. Never edit pipx's shared libraries or its
 metadata by hand.
 
@@ -313,13 +300,16 @@ pipx install siteops --lock "$bundle/pylock.toml" \
   --pip-args "--isolated --require-hashes --no-index --only-binary=:all: --no-cache-dir"
 ```
 
-Every flag is load-bearing. `--lock` selects the producer's recorded dependency
+`--lock` selects the producer's recorded dependency
 set, `--backend pip` and `--fetch-python never` keep pipx from selecting another
 backend or downloading an interpreter, `--skip-maintenance` leaves the backend
 you provisioned in place, and `--app siteops` states the expected command. The
 pip policy ignores pip environment variables and user configuration, requires
 a recorded hash for every file, forbids any index, accepts only built wheels,
 and writes no cache.
+
+Once installed, `pipx runpip siteops --version` reports the pip backend used
+by that application. This is distinct from the pip in your calling shell.
 
 ## Use the installed CLI
 

@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import re
+import shutil
 import subprocess
 import sys
 import urllib.parse
@@ -21,6 +22,7 @@ from tests.test_release_intent import repository as repository
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = yaml.safe_load((ROOT / ".github" / "workflows" / "release.yaml").read_text())
 CANDIDATE_WORKFLOW = yaml.safe_load((ROOT / ".github" / "workflows" / "_release-candidate.yaml").read_text())
+CI_WORKFLOW = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yaml").read_text())
 JOBS = {**CANDIDATE_WORKFLOW["jobs"], **WORKFLOW["jobs"]}
 SHA = "c" * 40
 REPO = "example/publisher"
@@ -310,7 +312,10 @@ def test_shared_verification_runs_again_before_any_publication_write():
     assert names.index("Verify the approved candidate") < names.index("Create only the approved missing tag")
     assert names.index("Verify the approved release assets") < names.index("Create only the approved missing tag")
     assert names.index("Check the publication target") < names.index("Create only the approved missing tag")
-    assert step("review", "Check the publication target")["run"] == step("publish", "Check the publication target")["run"]
+    assert step("prepare", "Check the publication target")["run"] == step("publish", "Check the publication target")["run"]
+    assert JOBS["distribution"]["needs"] == "prepare"
+    assert step("prepare", "Check the publication target")["if"] == "steps.plan.outputs.active == 'true'"
+    assert step("review", "Show the release approval preview")["env"]["TAG_EXISTS"] == "${{ needs.prepare.outputs.tag-exists }}"
     assert step("review", "Download the pinned declaration")["with"]["artifact-ids"] == "${{ needs.prepare.outputs.artifact-id }}"
     assert step("publish", "Download the qualified release assets")["with"]["artifact-ids"] == (
         "${{ needs.candidate.outputs.bundle-artifact-id }}"
@@ -363,10 +368,77 @@ def test_operator_guide_matches_the_visible_workflow_controls():
     assert "releases/<name>/release.json" in guide
 
 
+def _source_check_fixture(repository, tmp_path):
+    scripts = repository / "scripts"
+    scripts.mkdir()
+    for name in ("prepare-siteops-release.py", "siteops_release.py"):
+        shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+    _write_source_version(repository, '__version__ = "1.0.0b1"\n')
+    before = _commit(repository, "source before release")
+    (repository / "bin").mkdir()
+    write_executable(
+        repository / "bin" / "python",
+        '#!/usr/bin/env bash\nexec "$TEST_PYTHON" "$@"\n',
+    )
+    temporary = tmp_path / "runner"
+    temporary.mkdir()
+    exports = {
+        "TEST_PYTHON": Path(sys.executable).as_posix(),
+        "BEFORE_SHA": before, "SOURCE_REPOSITORY": REPO, "GITHUB_REPOSITORY": REPO,
+        "SOURCE_REF": "refs/heads/main", "DRY_RUN": "true", "INTENT_PATH": "",
+        "RUNNER_TEMP": temporary.as_posix(), "PYTHONDONTWRITEBYTECODE": "1",
+        "GITHUB_OUTPUT": (tmp_path / "outputs.txt").as_posix(),
+        "GITHUB_STEP_SUMMARY": (tmp_path / "summary.md").as_posix(),
+    }
+    return temporary, exports
+
+
+@pytest.mark.parametrize("valid", [False, True])
+def test_ci_validates_changed_release_files_without_publishing(repository, tmp_path, valid):
+    temporary, exports = _source_check_fixture(repository, tmp_path)
+    _write_record(repository, {
+        "tag": "v1.0.0b8" if valid else "v1.0.0", "siteops": {"build": True},
+    })
+    exports["SOURCE_SHA"] = _commit(repository, "release declaration")
+    job = CI_WORKFLOW["jobs"]["lint"]
+    check = next(item for item in job["steps"] if item["name"] == "Check changed release declarations")
+    assert check["if"] == "github.event_name == 'pull_request'"
+    assert check["env"]["BEFORE_SHA"] == "${{ github.event.pull_request.base.sha }}"
+    checkout = next(item for item in job["steps"] if item.get("uses", "").startswith("actions/checkout@"))
+    assert checkout["with"]["fetch-depth"] == 0
+    assert job["permissions"] == {"contents": "read"}
+    result = _run_script(check["run"], repository, exports)
+    if valid:
+        assert result.returncode == 0, result.stdout + result.stderr
+        plan = json.loads((temporary / "release-file-check" / "plan.json").read_text())
+        assert plan["dryRun"] is True and plan["active"] is True
+        assert plan["source"]["commit"] == exports["SOURCE_SHA"]
+    else:
+        assert result.returncode != 0
+        assert "only for a prerelease Scale Kit version" in result.stderr
+        assert not (temporary / "release-file-check").exists()
+
+
+def test_inactive_release_preparation_explains_why_nothing_will_publish(repository, tmp_path):
+    temporary, exports = _source_check_fixture(repository, tmp_path)
+    (repository / "README.md").write_text("Unrelated source change\n", encoding="utf-8")
+    exports["SOURCE_SHA"] = _commit(repository, "no release")
+    result = _run_script(step("prepare", "Prepare the immutable declaration")["run"], repository, exports)
+    assert result.returncode == 0, result.stdout + result.stderr
+    plan = json.loads((temporary / "release-plan" / "plan.json").read_text())
+    assert plan["active"] is False
+    summary = (tmp_path / "summary.md").read_text(encoding="utf-8")
+    assert "Nothing will be published" in summary
+    assert "releases/<name>/release.json" in summary
+
+
 @pytest.mark.parametrize("expected", [SHA, "", "abc", "a" * 40])
 def test_manual_source_request_requires_the_exact_commit(runner, expected):
     result, _, _ = runner("prepare", "Confirm the source request", extra={"EXPECTED_SHA": expected})
     assert result.returncode == (0 if expected == SHA else 1), result.stdout + result.stderr
+    if len(expected) != 40:
+        assert "Enter the full 40-character" in result.stdout
+        assert "no longer points" not in result.stdout
 
 
 @pytest.mark.parametrize("outcome", ["success", "failure", "missing", "other-sha", "other-workflow"])
@@ -390,6 +462,8 @@ def test_exact_source_ci_readiness_is_a_required_gate(candidate, runner, outcome
     assert result.returncode == (0 if outcome == "success" else 1), result.stdout + result.stderr
     if outcome == "success":
         assert outputs["url"] == run["html_url"]
+    if outcome in {"missing", "other-sha", "other-workflow"}:
+        assert "Waiting for CI to start for this commit" in result.stderr
     assert all("--method" not in call or call[call.index("--method") + 1] == "GET" for call in calls)
 
 
@@ -736,7 +810,7 @@ def test_tag_and_release_target_conditions(candidate, runner, state):
         "status": 404 if state == "missing" else 403 if state == "unavailable" else 200,
         "body": {"object": {"type": "commit", "sha": "d" * 40 if state == "conflicting" else SHA}},
     }
-    result, outputs, calls = runner("review", "Check the publication target")
+    result, outputs, calls = runner("prepare", "Check the publication target")
     assert result.returncode == (0 if state in {"missing", "matching"} else 1), result.stdout + result.stderr
     if result.returncode == 0:
         assert outputs["tag-exists"] == str(state == "matching").lower()
@@ -792,6 +866,7 @@ def test_release_rehearsal_cannot_reach_publishing_permissions():
     names = [item["name"] for item in JOBS["prepare"]["steps"]]
     assert names.index("Prepare the immutable declaration") < names.index("Require configured publication reviewers")
     assert names.index("Require configured publication reviewers") < names.index("Retain the declaration and notes")
+    assert names.index("Check the publication target") < names.index("Retain the declaration and notes")
     assert JOBS["distribution"]["with"]["report-summary"] is False
     text = yaml.safe_dump(CANDIDATE_WORKFLOW)
     assert "release create" not in text and "--method POST" not in text
@@ -837,9 +912,13 @@ def test_example_branch_candidate_is_allowed_only_as_a_dry_run(candidate, runner
 
 
 def test_dry_run_uses_completed_ci_jobs_without_waiting_for_its_own_run(candidate, runner):
+    required_names = [
+        CI_WORKFLOW["jobs"][job]["name"]
+        for job in CI_WORKFLOW["jobs"]["release-preview"]["needs"]
+    ]
     candidate["responses"][f"repos/{REPO}/actions/runs/42/attempts/1/jobs?per_page=100"] = {
         "status": 200, "body": {"jobs": [
-            {"name": name, "conclusion": "success"} for name in ("Lint", "Unit Tests", "Validate Manifests")
+            {"name": name, "conclusion": "success"} for name in required_names
         ]},
     }
     result, output, _ = runner("review", "Require successful CI for the candidate", extra={"DRY_RUN": "true"})

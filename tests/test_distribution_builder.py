@@ -1,8 +1,11 @@
 """Exercise the Site Ops installation bundle producer."""
 
+import base64
+import csv
 import email
 import hashlib
 import importlib.util
+import io
 import json
 import shutil
 import subprocess
@@ -57,13 +60,14 @@ def built_application(builder, tmp_path_factory):
     source = _copy_build_source(root / "source")
     checkout_version = (ROOT / "siteops" / "__init__.py").read_bytes()
     runtime = builder._read_locked_requirements(SCRIPTS / "siteops-runtime-requirements.txt")
-    base_version, version = builder._derive_staged_source(
+    base_version, version, roots = builder._derive_staged_source(
         source,
         build_number=12345,
         build_attempt=1,
         source_sha="abcdef1234567890abcdef1234567890abcdef12",
         runtime_requirements=runtime,
     )
+    assert roots == frozenset({"pyyaml"})
     wheel = builder._build_application_wheel(source, root / "wheels")
     builder._inspect_application_wheel(
         wheel,
@@ -94,9 +98,22 @@ def _runtime_filenames():
         )
 
 
+def _write_wheel_record(archive, prefix):
+    rows = []
+    for name in archive.namelist():
+        content = archive.read(name)
+        digest = base64.urlsafe_b64encode(hashlib.sha256(content).digest()).rstrip(b"=").decode()
+        rows.append((name, "sha256=" + digest, str(len(content))))
+    rows.append((prefix + "/RECORD", "", ""))
+    output = io.StringIO(newline="")
+    csv.writer(output).writerows(rows)
+    archive.writestr(prefix + "/RECORD", output.getvalue())
+
+
 def _synthetic_wheelhouse(
     builder, root: Path, *, extra: str | None = None,
     requires_python: str = ">=3.8", dependencies: tuple[str, ...] = (),
+    include_record: bool = True,
 ):
     wheelhouse = root / "wheelhouse"
     wheelhouse.mkdir(parents=True)
@@ -119,6 +136,9 @@ def _synthetic_wheelhouse(
                 "Wheel-Version: 1.0\nRoot-Is-Purelib: false\n"
                 + "".join(f"Tag: {tag}\n" for tag in sorted(tags, key=str)),
             )
+            archive.writestr("fixture.txt", "runtime fixture payload")
+            if include_record:
+                _write_wheel_record(archive, "pyyaml-6.0.3.dist-info")
         hashes.append(hashlib.sha256(path.read_bytes()).hexdigest())
     lock = root / "runtime.txt"
     hash_lines = []
@@ -211,7 +231,7 @@ def test_staged_version_and_dependency_pins_do_not_mutate_checkout(builder, tmp_
     checkout_project = (ROOT / "pyproject.toml").read_bytes()
     runtime = builder._read_locked_requirements(SCRIPTS / "siteops-runtime-requirements.txt")
 
-    _, version = builder._derive_staged_source(
+    _, version, roots = builder._derive_staged_source(
         source,
         build_number=7,
         build_attempt=3,
@@ -220,6 +240,7 @@ def test_staged_version_and_dependency_pins_do_not_mutate_checkout(builder, tmp_
     )
 
     assert version == "1.0.0b1+build.7.3.g111111111111"
+    assert roots == frozenset({"pyyaml"})
     assert b'__version__ = "1.0.0b1"' in checkout_init
     assert (ROOT / "siteops" / "__init__.py").read_bytes() == checkout_init
     assert (ROOT / "pyproject.toml").read_bytes() == checkout_project
@@ -241,7 +262,7 @@ def test_versioned_engine_release_preserves_the_source_version(builder, tmp_path
     assert builder._derive_staged_source(
         source, build_number=9, build_attempt=2, source_sha="a" * 40,
         runtime_requirements=runtime, version_mode="source",
-    ) == (base, base)
+    ) == (base, base, frozenset({"pyyaml"}))
     wheel = builder._build_application_wheel(source, tmp_path / "wheels")
     builder._inspect_application_wheel(
         wheel, source=source, version=base, runtime_requirements=runtime,
@@ -447,7 +468,7 @@ def test_wheel_python_requirement_must_cover_every_declared_target(builder, tmp_
         encoding="utf-8",
     )
     runtime = builder._read_locked_requirements(SCRIPTS / "siteops-runtime-requirements.txt")
-    _, version = builder._derive_staged_source(
+    _, version, _ = builder._derive_staged_source(
         source, build_number=1, build_attempt=1, source_sha="a" * 40,
         runtime_requirements=runtime,
     )
@@ -612,6 +633,7 @@ def test_runtime_closure_can_include_a_shared_pure_wheel(builder, tmp_path):
             "support-1.0.dist-info/WHEEL",
             "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
         )
+        _write_wheel_record(archive, "support-1.0.dist-info")
     support = builder.LockedRequirement(
         name="support", version="1.0",
         hashes=frozenset({hashlib.sha256(path.read_bytes()).hexdigest()}),
@@ -620,6 +642,30 @@ def test_runtime_closure_can_include_a_shared_pure_wheel(builder, tmp_path):
     assert len(selected) == 10
     assert all({wheel.name for wheel in wheels} == {"pyyaml", "support"} for wheels in selected.values())
     assert {wheels[1].path for wheels in selected.values()} == {path}
+    builder._validate_runtime_closure(frozenset({"pyyaml"}), selected)
+    with pytest.raises(builder.BuildError, match="outside the source dependency closure"):
+        builder._validate_runtime_closure(frozenset({"support"}), selected)
+
+
+def test_runtime_wheel_requires_record_before_bundling(builder, tmp_path):
+    wheelhouse, requirements = _synthetic_wheelhouse(builder, tmp_path, include_record=False)
+    with pytest.raises(builder.BuildError, match="matching RECORD"):
+        builder._collect_runtime_wheels(wheelhouse, requirements)
+
+
+def test_runtime_wheel_reads_nonmetadata_members_before_bundling(builder, tmp_path):
+    wheelhouse, requirements = _synthetic_wheelhouse(builder, tmp_path)
+    path = next(wheelhouse.glob("*.whl"))
+    changed = path.read_bytes().replace(b"runtime fixture payload", b"damaged fixture payload")
+    assert changed != path.read_bytes()
+    path.write_bytes(changed)
+    requirement = requirements[0]
+    locks = (builder.LockedRequirement(
+        requirement.name, requirement.version,
+        requirement.hashes | {hashlib.sha256(changed).hexdigest()},
+    ),)
+    with pytest.raises(builder.BuildError, match="corrupt archive"):
+        builder._collect_runtime_wheels(wheelhouse, locks)
 
 
 def _assemble_test_bundle(builder, built_application, tmp_path):
@@ -756,8 +802,16 @@ def test_artifact_copy_failure_removes_only_its_incomplete_outputs(builder, tmp_
     assert sentinel.read_bytes() == b"preserve"
 
 
-def test_production_builds_once_and_emits_the_same_wheel(builder, tmp_path, monkeypatch):
+@pytest.mark.parametrize("source_has_dependencies", [True, False])
+def test_production_builds_once_and_emits_the_same_wheel(
+    builder, tmp_path, monkeypatch, source_has_dependencies,
+):
     source = _copy_build_source(tmp_path / "source")
+    if not source_has_dependencies:
+        project = source / "pyproject.toml"
+        text = project.read_text(encoding="utf-8")
+        assert 'dependencies = ["pyyaml>=6.0"]' in text
+        project.write_text(text.replace('dependencies = ["pyyaml>=6.0"]', "dependencies = []"), encoding="utf-8")
     wheelhouse, runtime = _synthetic_wheelhouse(builder, tmp_path / "dependencies")
     shutil.copyfile(tmp_path / "dependencies" / "runtime.txt", source / "scripts" / builder._RUNTIME_LOCK)
     shutil.copyfile(SCRIPTS / builder._BUILD_LOCK, source / "scripts" / builder._BUILD_LOCK)
@@ -779,12 +833,19 @@ def test_production_builds_once_and_emits_the_same_wheel(builder, tmp_path, monk
     monkeypatch.setattr(builder, "_build_application_wheel", record_build)
     output = tmp_path / "output"
     output.mkdir()
-    builder.produce_bundle(
+    arguments = dict(
         root=source, repository="example/siteops", source_ref="refs/heads/main",
         expected_source_sha=sha, build_number=42, build_attempt=1,
         output=output / "siteops-install.zip", wheelhouse=wheelhouse,
         download_dependencies=False,
     )
+    if not source_has_dependencies:
+        with pytest.raises(builder.BuildError, match="outside the source dependency closure"):
+            builder.produce_bundle(**arguments)
+        assert not builds
+        assert not list(output.iterdir())
+        return
+    builder.produce_bundle(**arguments)
     assert len(builds) == 1
     name, content = builds[0]
     assert {path.name for path in output.iterdir()} == {"siteops-install.zip", name}
