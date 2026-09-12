@@ -1,6 +1,7 @@
 """Exercise the declaration-driven publisher through its actual workflow steps."""
 
 import hashlib
+import importlib.util
 import json
 import re
 import subprocess
@@ -13,7 +14,7 @@ import pytest
 import yaml
 
 from tests.shell_helpers import bash_path, write_executable
-from tests.test_distribution_workflows import _run_script
+from tests.shell_helpers import run_script as _run_script
 from tests.test_release_intent import CLI, _commit, _write_record, _write_source_version
 from tests.test_release_intent import repository as repository
 
@@ -27,6 +28,7 @@ ARCHIVE = "siteops-install.zip"
 PROOF = ARCHIVE + ".attestation.jsonl"
 WHEEL = "siteops-1.0.0b1+build.42.1.gcccccccccccc-py3-none-any.whl"
 WHEEL_PROOF = WHEEL + ".attestation.jsonl"
+RENDERER = ROOT / "scripts" / "render-siteops-release.py"
 
 
 def step(job, name):
@@ -37,6 +39,29 @@ def digest(value):
     return hashlib.sha256(value).hexdigest()
 
 
+@pytest.fixture(scope="module")
+def renderer():
+    spec = importlib.util.spec_from_file_location("siteops_release_renderer", RENDERER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def summary_values(**overrides):
+    return {
+        "DRY_RUN": "false", "ENGINE_VERSION": "1.0.0b1+build.42",
+        "CI_URL": f"https://github.com/{REPO}/actions/runs/42",
+        "BUNDLE_SHA": "a" * 64, "WHEEL_NAME": WHEEL, "WHEEL_SHA": "b" * 64,
+        "ASSET_LIST_SHA": "d" * 64, "ARCHIVE_NAME": ARCHIVE, "TAG_EXISTS": "false",
+        "MATRIX": json.dumps([
+            {"python": version, "linux": "passed", "windows": "passed"}
+            for version in ("3.10", "3.11", "3.12", "3.13", "3.14")
+        ]),
+        "ARTIFACT_URL": f"https://github.com/{REPO}/actions/runs/42/artifacts/99",
+        **overrides,
+    }
+
+
 @pytest.fixture
 def candidate(tmp_path):
     directory = tmp_path / "temp"
@@ -44,7 +69,7 @@ def candidate(tmp_path):
     plan_dir.mkdir(parents=True)
     bundle_dir = directory / "release-bundle"
     bundle_dir.mkdir()
-    declaration = {"tag": "v1.0.0b8", "siteops": {"build": True}}
+    declaration = {"tag": "v1.0.0b8", "headline": "Release highlights", "siteops": {"build": True}}
     raw = json.dumps(declaration).encode()
     notes = b"## Changes\n\nReviewed release notes.\n"
     plan = {
@@ -56,7 +81,7 @@ def candidate(tmp_path):
         },
         "release": {
             "stream": "scalekit", "tag": "v1.0.0b8", "version": "1.0.0b8",
-            "title": "Digital Operations Scale Kit 1.0.0b8", "prerelease": True, "latest": False,
+            "title": "v1.0.0b8: Release highlights", "prerelease": True, "latest": False,
         },
         "siteops": {
             "bundle": True, "versionMode": "build", "baseVersion": "1.0.0b1", "releaseTag": None,
@@ -107,6 +132,9 @@ def candidate(tmp_path):
 
 @pytest.fixture
 def runner(tmp_path, candidate):
+    rendering_source = tmp_path / "release-tools" / "scripts"
+    rendering_source.mkdir(parents=True)
+    (rendering_source / RENDERER.name).write_bytes(RENDERER.read_bytes())
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     fake = tmp_path / "fake-gh.py"
@@ -147,7 +175,7 @@ raise SystemExit(0 if 200 <= status < 300 else 1)
     )
     shim = tmp_path / "python-shim.py"
     shim.write_text(
-        """import os, subprocess, sys, time
+        """import os, runpy, subprocess, sys, time
 native = subprocess.run
 def isolated_run(command, *args, **kwargs):
     if command[0] != "gh":
@@ -158,10 +186,15 @@ if os.environ.get("FAST_CI_CLOCK"):
     ticks = iter([0, 2000, 4000])
     time.monotonic = lambda: next(ticks)
     time.sleep = lambda _: None
-assert sys.argv[1] == "-c"
-code = sys.argv[2]
-sys.argv = ["-c", *sys.argv[3:]]
-exec(compile(code, "<workflow>", "exec"), {"__name__": "__main__"})
+if sys.argv[1] == "-B":
+    del sys.argv[1]
+if sys.argv[1] == "-c":
+    code = sys.argv[2]
+    sys.argv = ["-c", *sys.argv[3:]]
+    exec(compile(code, "<workflow>", "exec"), {"__name__": "__main__"})
+else:
+    sys.argv = sys.argv[1:]
+    runpy.run_path(sys.argv[0], run_name="__main__")
 """,
         encoding="utf-8",
     )
@@ -206,6 +239,7 @@ exec(compile(code, "<workflow>", "exec"), {"__name__": "__main__"})
             "SOURCE_REF": "refs/heads/main",
             "DRY_RUN": "false",
             "GITHUB_RUN_ID": "42", "GITHUB_RUN_ATTEMPT": "1",
+            "PYTHONIOENCODING": WORKFLOW["env"]["PYTHONIOENCODING"],
             "RUNNER_TEMP": candidate["root"].as_posix(),
             "ARCHIVE_NAME": ARCHIVE, "ATTESTATION_SUFFIX": ".attestation.jsonl",
             "SIGNER_IDENTITY": f"https://github.com/{REPO}/.github/workflows/_siteops-distribution.yaml@refs/heads/main",
@@ -234,7 +268,7 @@ exec(compile(code, "<workflow>", "exec"), {"__name__": "__main__"})
         environment.update(extra or {})
         result = _run_script(step(job, name)["run"], tmp_path, environment)
         values = dict(
-            line.split("=", 1) for line in output.read_text().splitlines()
+            line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines()
         ) if output.exists() else {}
         recorded = [
             json.loads(line) for line in calls.read_text().splitlines()
@@ -282,7 +316,23 @@ def test_shared_verification_runs_again_before_any_publication_write():
         "${{ needs.candidate.outputs.bundle-artifact-id }}"
     )
     assert step("publish", "Download the frozen asset list")["with"]["artifact-ids"] == "${{ needs.candidate.outputs.assets-artifact-id }}"
-    assert not any("checkout@" in item.get("uses", "") for name in ("review", "publish") for item in JOBS[name]["steps"])
+    assert not any("checkout@" in item.get("uses", "") for item in JOBS["publish"]["steps"])
+
+
+def test_rendering_source_is_pinned_and_only_executed_in_read_only_preparation():
+    assert WORKFLOW["env"]["PYTHONIOENCODING"] == CANDIDATE_WORKFLOW["env"]["PYTHONIOENCODING"] == "utf-8"
+    checkout = step("review", "Checkout the exact rendering source")
+    assert checkout["with"] == {
+        "ref": "${{ github.sha }}", "path": "release-tools", "persist-credentials": False,
+        "sparse-checkout": "scripts/render-siteops-release.py", "sparse-checkout-cone-mode": False,
+    }
+    assert JOBS["review"]["permissions"] == {"contents": "read", "actions": "read"}
+    names = [item["name"] for item in JOBS["review"]["steps"]]
+    assert names.index("Verify the pinned candidate") < names.index(checkout["name"])
+    assert names.index(checkout["name"]) < names.index("Render the final release notes")
+    for name, mode in (("Render the final release notes", "notes"), ("Show the release approval preview", "summary")):
+        assert f"python3 -B release-tools/scripts/render-siteops-release.py {mode}" in step("review", name)["run"]
+    assert RENDERER.name not in yaml.safe_dump(JOBS["publish"])
     assert not any("scripts/" in item.get("run", "") for item in JOBS["publish"]["steps"])
 
 
@@ -347,20 +397,13 @@ def test_approval_preview_discloses_tag_authorization_notes_and_evidence(candida
     runner("review", "Render the final release notes", extra={"ENGINE_VERSION": "1.0.0b1+build.42"})
     result, _, _ = runner(
         "review", "Show the release approval preview",
-        extra={
-            "ENGINE_VERSION": "1.0.0b1+build.42", "CI_URL": "https://github.com/example/publisher/actions/runs/10",
-            "BUNDLE_SHA": "a" * 64, "TAG_EXISTS": "false",
-            "MATRIX": json.dumps([
-                {"python": version, "linux": "passed", "windows": "passed"}
-                for version in ("3.10", "3.11", "3.12", "3.13", "3.14")
-            ]),
-            "ARTIFACT_URL": "https://github.com/example/publisher/actions/runs/42/artifacts/99",
-        },
+        extra=summary_values(),
     )
     assert result.returncode == 0, result.stdout + result.stderr
     summary = (candidate["root"].parent / "summary.md").read_text()
     for value in (SHA, "Create the missing tag", "Reviewed release notes", "Content", "Approval authorizes"):
         assert value.lower() in summary.lower()
+    assert "- Title: `v1.0.0b8: Release highlights`" in summary
 
 
 def test_every_embedded_python_program_compiles_without_shell_indentation():
@@ -501,6 +544,7 @@ def test_real_git_declaration_and_cli_feed_the_candidate_controller(
     result, outputs, _ = runner("review", "Verify the pinned candidate", extra=candidate_extra)
     assert result.returncode == 0, result.stdout + result.stderr
     assert outputs["tag"] == declaration["tag"]
+    assert outputs["title"] == declaration["tag"] + ": Release highlights"
     assert outputs["bundle"] == str(kind != "content").lower()
     result, _, _ = runner(
         "review", "Render the final release notes",
@@ -510,7 +554,7 @@ def test_real_git_declaration_and_cli_feed_the_candidate_controller(
     assert "\u03b1" in (candidate["root"] / "publish-notes.md").read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize("fault", ["source", "notes", "latest", "version", "mode", "current-intent"])
+@pytest.mark.parametrize("fault", ["source", "notes", "latest", "version", "mode", "title", "current-intent"])
 def test_invalid_or_superseded_candidate_cannot_reach_tag_creation(candidate, runner, fault):
     plan = candidate["plan"]
     if fault == "source":
@@ -523,6 +567,8 @@ def test_invalid_or_superseded_candidate_cannot_reach_tag_creation(candidate, ru
         plan["release"]["version"] = "1.0.0"
     elif fault == "mode":
         plan["siteops"]["versionMode"] = "source"
+    elif fault == "title":
+        plan["release"]["title"] = "v1.0.0b8: Unreviewed title"
     else:
         candidate["responses"][f"repos/{REPO}/contents/releases/candidate/notes.md?ref=refs/heads/main"]["raw"] = "new intent"
     result, _, calls = runner("review", "Verify the pinned candidate")
@@ -562,6 +608,47 @@ def test_publisher_reauthenticates_both_approved_subjects(runner):
         assert call[call.index("--signer-digest") + 1] == SHA
 
 
+def test_publisher_rejects_a_title_that_disagrees_with_reviewed_source(candidate, runner):
+    candidate["plan"]["release"]["title"] = "v1.0.0b8: A different headline"
+    result, _, calls = runner("publish", "Verify the approved candidate")
+    assert result.returncode != 0
+    assert "title differs from the reviewed declaration" in result.stdout + result.stderr
+    assert all("--method" not in call for call in calls)
+
+
+def test_reviewed_headline_flows_through_preparation_and_publication(candidate, runner):
+    headline = 'Native "pipx" installation and d\u00e9ploiement'
+    candidate["declaration"]["headline"] = headline
+    title = candidate["declaration"]["tag"] + ": " + headline
+    raw = json.dumps(candidate["declaration"]).encode("utf-8")
+    candidate["plan"]["intent"]["sha256"] = digest(raw)
+    candidate["plan"]["release"]["title"] = title
+    for revision in (SHA, "refs/heads/main"):
+        candidate["responses"][f"repos/{REPO}/contents/releases/candidate/release.json?ref={revision}"]["raw"] = raw.decode()
+    prepared, values, _ = runner("review", "Verify the pinned candidate")
+    assert prepared.returncode == 0, prepared.stdout + prepared.stderr
+    assert values["title"] == title
+    approved, values, _ = runner("publish", "Verify the approved candidate")
+    assert approved.returncode == 0, approved.stdout + approved.stderr
+    assert values["title"] == title
+    published, _, calls = runner(
+        "publish", "Publish the approved release",
+        extra={"TITLE": values["title"], "PRERELEASE": "true", "LATEST": "false", "BUNDLE": "true"},
+    )
+    assert published.returncode == 0, published.stdout + published.stderr
+    command = calls[-1]
+    assert command[command.index("--title") + 1] == title
+
+
+def test_changed_headline_requires_a_fresh_release_candidate(candidate, runner):
+    declaration = {**candidate["declaration"], "headline": "New release headline"}
+    candidate["responses"][f"repos/{REPO}/contents/releases/candidate/release.json?ref=refs/heads/main"]["raw"] = json.dumps(declaration)
+    result, _, calls = runner("review", "Verify the pinned candidate")
+    assert result.returncode != 0
+    assert "Prepare and review a new candidate" in result.stdout + result.stderr
+    assert all("--method" not in call for call in calls)
+
+
 def test_publisher_rejects_changed_approved_proof(candidate, runner):
     (candidate["root"] / "release-bundle" / WHEEL_PROOF).write_text("changed proof")
     result, _, calls = runner("publish", "Verify the approved release assets")
@@ -591,8 +678,8 @@ def test_publisher_rejects_approved_wheel_that_differs_from_the_bundle(candidate
 def test_independent_content_uses_released_engine_without_bundle_verification(candidate, runner):
     plan = candidate["plan"]
     tag = "siteops/v1.0.0"
-    raw = json.dumps({"tag": "v2.0.0", "siteops": {"release": tag}}).encode()
-    plan["release"].update(tag="v2.0.0", version="2.0.0", prerelease=False, title="Content 2.0.0")
+    raw = json.dumps({"tag": "v2.0.0", "headline": "Content highlights", "siteops": {"release": tag}}).encode()
+    plan["release"].update(tag="v2.0.0", version="2.0.0", prerelease=False, title="v2.0.0: Content highlights")
     plan["siteops"] = {"bundle": False, "versionMode": None, "baseVersion": None, "releaseTag": tag}
     plan["intent"]["sha256"] = digest(raw)
     for revision in (SHA, "refs/heads/main"):
@@ -768,16 +855,7 @@ def test_dry_run_summary_stops_at_preview_without_approval_instructions(candidat
     runner("review", "Render the final release notes", extra={"ENGINE_VERSION": "1.0.0b1+build.42"})
     result, _, _ = runner(
         "review", "Show the release approval preview",
-        extra={
-            "DRY_RUN": "true", "ENGINE_VERSION": "1.0.0b1+build.42",
-            "CI_URL": "https://github.com/example/publisher/actions/runs/42",
-            "BUNDLE_SHA": "a" * 64, "TAG_EXISTS": "false",
-            "MATRIX": json.dumps([
-                {"python": version, "linux": "passed", "windows": "passed"}
-                for version in ("3.10", "3.11", "3.12", "3.13", "3.14")
-            ]),
-            "ARTIFACT_URL": "https://github.com/example/publisher/actions/runs/42/artifacts/99",
-        },
+        extra=summary_values(DRY_RUN="true"),
     )
     assert result.returncode == 0, result.stdout + result.stderr
     summary = (candidate["root"].parent / "summary.md").read_text()
@@ -908,23 +986,11 @@ pipx() {
         ("# Title\n\n---\n---\n\n    # Indented example\n", ["### Title"]),
     ],
 )
-def test_summary_nests_markdown_headings_without_changing_published_notes(candidate, runner, authored, expected):
-    (candidate["root"] / "release-plan" / "release-notes.md").write_text(authored, encoding="utf-8")
-    published = _render_install_notes(candidate, runner)
-    assert published.startswith(authored)
-    before = (candidate["root"] / "publish-notes.md").read_bytes()
-    result, _, _ = runner("review", "Show the release approval preview", extra={
-        "DRY_RUN": "true", "ENGINE_VERSION": "1.0.0b1+build.42",
-        "CI_URL": f"https://github.com/{REPO}/actions/runs/42",
-        "BUNDLE_SHA": "a" * 64, "TAG_EXISTS": "false",
-        "MATRIX": json.dumps([
-            {"python": version, "linux": "passed", "windows": "passed"}
-            for version in ("3.10", "3.11", "3.12", "3.13", "3.14")
-        ]),
-        "ARTIFACT_URL": f"https://github.com/{REPO}/actions/runs/42/artifacts/99",
-    })
-    assert result.returncode == 0, result.stdout + result.stderr
-    summary = (candidate["root"].parent / "summary.md").read_text()
+def test_summary_nests_markdown_headings_without_changing_published_notes(
+    candidate, renderer, authored, expected,
+):
+    before = authored.encode()
+    summary = renderer.render_summary(candidate["plan"], authored, summary_values(DRY_RUN="true"))
     assert summary.startswith("# Release preview")
     assert "\n## Release notes\n" in summary
     for heading in expected:
@@ -932,7 +998,21 @@ def test_summary_nests_markdown_headings_without_changing_published_notes(candid
     for literal in ("# Leave this comment alone", "# Also literal", "    # Indented example", "---\n---"):
         if literal in authored:
             assert literal in summary
-    assert (candidate["root"] / "publish-notes.md").read_bytes() == before
+    assert authored.encode() == before
+
+
+@pytest.mark.parametrize("matrix", ["[]", "{}", '[null]', '[{"python":"3.10"}]'])
+def test_invalid_rendering_inputs_leave_existing_summary_unchanged(candidate, runner, matrix):
+    _render_install_notes(candidate, runner)
+    summary = candidate["root"].parent / "summary.md"
+    original = "Earlier job summary\n"
+    summary.write_text(original, encoding="utf-8")
+    result, _, _ = runner(
+        "review", "Show the release approval preview", extra=summary_values(MATRIX=matrix),
+    )
+    assert result.returncode != 0
+    assert "Incomplete installation qualification summary" in result.stdout + result.stderr
+    assert summary.read_text(encoding="utf-8") == original
 
 
 @pytest.mark.parametrize("bundle", [False, True])

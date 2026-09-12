@@ -25,6 +25,7 @@ CLI = SCRIPTS / "prepare-siteops-release.py"
 ZERO_SHA = "0" * 40
 REPOSITORY = "example/releases"
 SOURCE_REF = "refs/heads/main"
+HEADLINE = "Release highlights"
 
 
 def _git(
@@ -79,7 +80,7 @@ def _write_record(
     raw = (
         declaration
         if isinstance(declaration, bytes)
-        else json.dumps(declaration, separators=(",", ":")).encode("utf-8")
+        else json.dumps({"headline": HEADLINE, **declaration}, separators=(",", ":")).encode("utf-8")
     )
     (directory / "release.json").write_bytes(raw)
     if notes is not None:
@@ -150,7 +151,7 @@ def test_engine_release_matches_literal_source_without_importing(repository: Pat
             "stream": "siteops",
             "tag": "siteops/v1.2.3",
             "version": "1.2.3",
-            "title": "Site Ops 1.2.3",
+            "title": "siteops/v1.2.3: " + HEADLINE,
             "prerelease": False,
             "latest": False,
         },
@@ -196,7 +197,9 @@ def test_committed_example_requires_dry_run_and_is_never_publishable(repository:
     _write_source_version(repository, '__version__ = "1.0.0b1"\n')
     example = repository / ".github" / "release-examples" / "preview"
     example.mkdir(parents=True)
-    (example / "release.json").write_text('{"tag":"v0.0.0.dev0","siteops":{"build":true}}')
+    (example / "release.json").write_text(
+        json.dumps({"tag": "v0.0.0.dev0", "headline": HEADLINE, "siteops": {"build": True}}),
+    )
     (example / "notes.md").write_text("Example rehearsal.\n")
     sha = _commit(repository, "example")
     path = ".github/release-examples/preview/release.json"
@@ -265,7 +268,7 @@ def test_combined_preview_uses_selected_source_as_build_base(repository: Path):
         "stream": "scalekit",
         "tag": "v2.0.0.dev4",
         "version": "2.0.0.dev4",
-        "title": "Digital Operations Scale Kit 2.0.0.dev4",
+        "title": "v2.0.0.dev4: " + HEADLINE,
         "prerelease": True,
         "latest": False,
     }
@@ -333,24 +336,24 @@ def test_maturity_latest_and_stream_rules_are_enforced(
         ),
         (b'["v1.0.0"]', "JSON object"),
         (
-            b'{"tag":"v1.0.0","siteops":{"release":"siteops/v1.0.0"},"latest":"yes"}',
+            b'{"tag":"v1.0.0","headline":"Example","siteops":{"release":"siteops/v1.0.0"},"latest":"yes"}',
             "must be a boolean",
         ),
-        (b'{"tag":"v1.0.0","siteops":[]}', "must be an object"),
+        (b'{"tag":"v1.0.0","headline":"Example","siteops":[]}', "must be an object"),
         (
-            b'{"tag":"v1.0.0+local","siteops":{"release":"siteops/v1.0.0"}}',
+            b'{"tag":"v1.0.0+local","headline":"Example","siteops":{"release":"siteops/v1.0.0"}}',
             "must not contain a local",
         ),
         (
-            b'{"tag":"v1.0.0-RC1","siteops":{"release":"siteops/v1.0.0"}}',
+            b'{"tag":"v1.0.0-RC1","headline":"Example","siteops":{"release":"siteops/v1.0.0"}}',
             "canonical PEP 440",
         ),
         (
-            b'{"tag":"v1.0.0rc1","siteops":{"build":false}}',
+            b'{"tag":"v1.0.0rc1","headline":"Example","siteops":{"build":false}}',
             "must be exactly",
         ),
         (
-            b'{"tag":"v1.0.0rc1","siteops":{"release":"siteops/v1.0.0","extra":true}}',
+            b'{"tag":"v1.0.0rc1","headline":"Example","siteops":{"release":"siteops/v1.0.0","extra":true}}',
             "must be exactly",
         ),
     ],
@@ -365,6 +368,34 @@ def test_malformed_duplicate_unknown_and_typed_declarations_are_rejected(
 
     with pytest.raises(ReleaseIntentError, match=message):
         _load(repository, source_sha)
+
+
+@pytest.mark.parametrize("headline", [None, "", " leading", "trailing ", "line\nbreak", "tab\there", "\u202eTitle", "x" * 121, 42])
+def test_release_headline_must_be_bounded_printable_text(repository, headline):
+    _write_source_version(repository, '__version__ = "1.0.0"\n')
+    _write_record(repository, {"tag": "siteops/v1.0.0", "headline": headline})
+    source_sha = _commit(repository, "invalid headline")
+    with pytest.raises(ReleaseIntentError, match="headline"):
+        _load(repository, source_sha)
+
+
+def test_release_headline_is_required_in_the_reviewed_declaration(repository):
+    _write_source_version(repository, '__version__ = "1.0.0"\n')
+    _write_record(repository, b'{"tag":"siteops/v1.0.0"}')
+    with pytest.raises(ReleaseIntentError, match="headline"):
+        _load(repository, _commit(repository, "missing headline"))
+
+
+@pytest.mark.parametrize("headline", ["AIO resources and workspace validation", "x" * 120, "D\u00e9ploiement multi-site"])
+def test_release_title_uses_only_the_selected_tag_and_headline(repository, headline):
+    _write_source_version(repository, '__version__ = "1.0.0"\n')
+    _write_record(repository, {"tag": "siteops/v1.0.0", "headline": headline})
+    selected = _commit(repository, "original headline")
+    _write_record(repository, {"tag": "siteops/v1.0.0", "headline": "New headline"})
+    _commit(repository, "changed headline")
+    intent = _load(repository, selected)
+    assert intent.title == "siteops/v1.0.0: " + headline
+    assert intent.version == "1.0.0"
 
 
 @pytest.mark.parametrize(

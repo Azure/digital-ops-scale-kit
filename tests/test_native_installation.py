@@ -15,8 +15,6 @@ from tests import native_bundle
 from tests.native_bundle import (
     DEPENDENCY_NAME,
     DEPENDENCY_VERSION,
-    ROOT,
-    SCRIPTS,
     native_only,
 )
 from tests.native_bundle import (
@@ -254,14 +252,6 @@ def test_the_online_path_installs_one_wheel_from_a_configured_feed(pipx_state, b
 
     pipx_state.run("uninstall", "siteops", label="uninstall")
     assert not pipx_state.command.exists()
-
-
-def test_the_repository_ships_no_installation_program():
-    assert not (SCRIPTS / "install-siteops.py").exists()
-    assert not list(SCRIPTS.glob("install*.py"))
-    guide = (ROOT / "docs" / "install-siteops.md").read_text(encoding="utf-8")
-    assert "install.py" not in guide
-    assert "pipx install" in guide
 
 
 def test_verified_lock_enforces_dependency_hashes_despite_ambient_pip_options(

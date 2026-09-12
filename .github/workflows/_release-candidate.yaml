@@ -67,6 +67,7 @@ env:
   PREDICATE_TYPE: https://slsa.dev/provenance/v1
   SIGNER_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/_siteops-distribution.yaml@${{ github.ref }}
   PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONIOENCODING: utf-8
   DRY_RUN: ${{ inputs.dry-run }}
 
 jobs:
@@ -343,7 +344,7 @@ jobs:
           if not isinstance(tag, str) or not re.fullmatch(r"(?:siteops/)?v[0-9][A-Za-z0-9.!_-]*", tag) or ".." in tag:
               raise SystemExit("::error::The release tag is invalid.")
           for value in (release["title"], release["version"]):
-              if not isinstance(value, str) or not value or any(ord(c) < 32 or ord(c) == 127 for c in value):
+              if not isinstance(value, str) or not 1 <= len(value) <= 282 or not value.isprintable():
                   raise SystemExit("::error::Release labels must be bounded single-line text.")
           if any(type(value) is not bool for value in (release["prerelease"], release["latest"], engine["bundle"])):
               raise SystemExit("::error::The candidate boolean fields are invalid.")
@@ -396,7 +397,14 @@ jobs:
                   raise SystemExit("::error::The release file or notes changed. Prepare and review a new candidate.")
           declaration = json.loads(Path(sys.argv[2]).read_text())
           release, engine = plan["release"], plan["siteops"]
-          if declaration["tag"] != release["tag"] or declaration.get("latest", False) != release["latest"]:
+          headline = declaration.get("headline")
+          if (
+              not isinstance(headline, str) or not 1 <= len(headline) <= 120
+              or headline != headline.strip() or not headline.isprintable()
+              or release["title"] != declaration["tag"] + ": " + headline
+              or declaration["tag"] != release["tag"]
+              or declaration.get("latest", False) != release["latest"]
+          ):
               raise SystemExit("::error::The plan disagrees with the reviewed declaration.")
           if release["stream"] == "siteops":
               valid = (
@@ -586,6 +594,15 @@ jobs:
           print("asset-list-sha=" + hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())
           ' "$assets/release-assets.json" >> "$GITHUB_OUTPUT"
 
+      - name: Checkout the exact rendering source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: release-tools
+          persist-credentials: false
+          sparse-checkout: scripts/render-siteops-release.py
+          sparse-checkout-cone-mode: false
+
       - name: Render the final release notes
         id: notes
         shell: bash
@@ -593,70 +610,8 @@ jobs:
           ENGINE_VERSION: ${{ steps.candidate.outputs.engine-version }}
         run: |
           set -euo pipefail
-          python3 -c '
-          import hashlib, json, os, sys, urllib.parse
-          from pathlib import Path
-          root = Path(sys.argv[1])
-          plan = json.loads((root / "release-plan/plan.json").read_text())
-          notes = (root / "release-plan/release-notes.md").read_text(encoding="utf-8").rstrip() + "\n"
-          source, engine = plan["source"], plan["siteops"]
-          repository = source["repository"]
-          home = "https://github.com/" + repository
-          notes += "\n## Install Site Ops\n\n"
-          if not engine["bundle"]:
-              tag = engine["releaseTag"]
-              url = home + "/releases/tag/" + urllib.parse.quote(tag, safe="")
-              notes += "Use [" + tag + "](" + url + ") and its installation instructions. "
-              notes += "The referenced engine release has its own source commit and native installation assets.\n"
-          else:
-              version = os.environ["ENGINE_VERSION"]
-              archive = os.environ["ARCHIVE_NAME"]
-              archive_proof = archive + os.environ["ATTESTATION_SUFFIX"]
-              asset_list = json.loads((root / "release-assets/release-assets.json").read_text(encoding="utf-8"))
-              wheels = [item["name"] for item in asset_list["assets"] if item["name"].endswith(".whl")]
-              if asset_list.get("mode") != "publish" or len(wheels) != 1:
-                  raise SystemExit("::error::The release asset list cannot render installation guidance.")
-              wheel = wheels[0]
-              wheel_proof = wheel + os.environ["ATTESTATION_SUFFIX"]
-              downloads = home + "/releases/download/" + urllib.parse.quote(plan["release"]["tag"], safe="") + "/"
-              guide = home + "/blob/" + source["commit"] + "/docs/install-siteops.md#install-the-verified-bundle"
-              notes += "Package version: `" + version + "`.\n\n"
-              notes += "**Prerequisites:** standard 64-bit CPython 3.10-3.14 and pipx 1.17.2. "
-              notes += "Use Windows x64 or Linux x64 with glibc 2.17 or newer. "
-              notes += "Configure an approved package index that serves the runtime dependencies as wheels.\n\n"
-              wheel_url = downloads + wheel
-              command = (
-                  "pipx install \"" + wheel_url + "\" --backend pip --fetch-python never "
-                  "--skip-maintenance --app siteops "
-                  "--pip-args \"--only-binary=:all: --no-cache-dir\""
-              )
-              notes += "Install the versioned wheel from this release. Runtime dependencies come from your configured package index as wheels. "
-              notes += "To name it explicitly, add `--index-url <your approved index>` inside `--pip-args`.\n\n"
-              notes += "```console\n" + command + "\n```\n\n"
-              notes += "To replace an existing online installation, review any pipx pin and rerun the command with `--force`. "
-              notes += "Confirm the result with `siteops --version` and `siteops --help`.\n\n"
-              notes += "pipx does not automatically verify GitHub attestations for the online command. "
-              notes += "For external verification before extraction and a hash-locked native install from stable private storage, "
-              notes += "follow the [verified installation guide](" + guide + "). "
-              notes += "That path downloads only the ZIP and its detached proof, authenticates the ZIP before extraction, "
-              notes += "then installs from the authenticated `pylock.toml` with stock pipx.\n\n"
-              notes += "Expected publisher: `" + repository + "`. Source commit: `" + source["commit"] + "`. "
-              notes += "Source ref: `" + source["ref"] + "`. "
-              notes += "Use these values with the guide verification policy. "
-              notes += "The guide also describes switching between online and locked installations.\n\n"
-              notes += "The locked path is qualified with pipx 1.17.2 and its shared pip 26.2.1. "
-              notes += "pip support for `pylock.toml` remains experimental.\n\n"
-              notes += "Release assets: [" + wheel + "](" + wheel_url + "), "
-              notes += "[" + wheel_proof + "](" + downloads + wheel_proof + "), "
-              notes += "[" + archive + "](" + downloads + archive + "), and "
-              notes += "[" + archive_proof + "](" + downloads + archive_proof + "). "
-              notes += "Use these assets instead of the generated source archives.\n\n"
-              notes += "Installing the CLI does not authenticate to Azure or deploy resources.\n"
-          raw = notes.encode("utf-8")
-          digest = hashlib.sha256(raw).hexdigest()
-          (root / "publish-notes.md").write_bytes(raw)
-          print("sha256=" + digest)
-          ' "$RUNNER_TEMP" >> "$GITHUB_OUTPUT"
+          python3 -B release-tools/scripts/render-siteops-release.py notes \
+            --root "$RUNNER_TEMP" >> "$GITHUB_OUTPUT"
 
       - name: Check the publication target
         id: target
@@ -735,87 +690,4 @@ jobs:
           ARTIFACT_URL: ${{ needs.distribution.outputs.staging-artifact-url }}
         run: |
           set -euo pipefail
-          python3 -c '
-          import json, os, re, sys
-          from pathlib import Path
-
-          def embedded_notes(text):
-              lines = text.splitlines()
-              headings = {}
-              omitted = set()
-              fence = None
-              previous_text = False
-              for index, line in enumerate(lines):
-                  marker = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
-                  if fence:
-                      if marker and marker[1][0] == fence[0] and len(marker[1]) >= fence[1] and not marker[2].strip():
-                          fence = None
-                      previous_text = False
-                      continue
-                  if marker:
-                      fence = (marker[1][0], len(marker[1]))
-                      previous_text = False
-                      continue
-                  heading = re.match(r"^( {0,3})(#{1,6})(?=[ \t]|$)(.*)$", line)
-                  if heading:
-                      headings[index] = (len(heading[2]), heading[1], heading[3])
-                  elif previous_text and re.fullmatch(r" {0,3}(=+|-+)[ \t]*", line):
-                      headings[index - 1] = (1 if line.lstrip().startswith("=") else 2, "", " " + lines[index - 1].strip())
-                      omitted.add(index)
-                  previous_text = bool(
-                      line.strip() and not heading
-                      and not re.match(r"^( {4}|\t| {0,3}(?:>|<|[-+*] |[0-9]+[.)] ))", line)
-                      and not re.fullmatch(r" {0,3}(?:=+|-+|(?:[-*_][ \t]*){3,})[ \t]*", line)
-                      and index not in omitted
-                  )
-              shift = max(0, 3 - min((value[0] for value in headings.values()), default=3))
-              for index, (level, indent, content) in headings.items():
-                  lines[index] = indent + "#" * min(6, level + shift) + content
-              return "\n".join(line for index, line in enumerate(lines) if index not in omitted)
-
-          root = Path(sys.argv[1])
-          plan = json.loads((root / "plan.json").read_text())
-          release, engine = plan["release"], plan["siteops"]
-          dry_run = os.environ.get("DRY_RUN") == "true"
-          action = "Reuse the matching tag" if os.environ["TAG_EXISTS"] == "true" else "Create the missing tag"
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as output:
-              output.write("# Release preview (no publication)\n\n" if dry_run else "# Ready for release approval\n\n")
-              if dry_run:
-                  output.write("Preview only. No tag, GitHub Release, or approval request was created.\n\n")
-              for label, value in (
-                  ("Release", release["tag"]), ("Source commit", plan["source"]["commit"]),
-                  ("Release file", plan["intent"]["path"]),
-                  ("Stream", release["stream"]), ("Prerelease", release["prerelease"]),
-                  ("Latest", release["latest"]), ("Proposed tag action" if dry_run else "Tag action", action),
-                  ("Site Ops", engine["releaseTag"] or os.environ["ENGINE_VERSION"]),
-              ):
-                  output.write(f"- {label}: `{value}`\n")
-              if engine["bundle"]:
-                  matrix = json.loads(os.environ["MATRIX"])
-                  expected = ["3.10", "3.11", "3.12", "3.13", "3.14"]
-                  if not isinstance(matrix, list) or [row.get("python") for row in matrix] != expected:
-                      raise SystemExit("::error::Incomplete installation qualification summary.")
-                  output.write("\n## Installation checks\n\n| Python | Linux | Windows |\n|---|---|---|\n")
-                  allowed = {"passed", "failed", "cancelled", "skipped", "not-run", "unknown"}
-                  for row in matrix:
-                      if row["python"] not in ("3.10", "3.11", "3.12", "3.13", "3.14") or row["linux"] not in allowed or row["windows"] not in allowed:
-                          raise SystemExit("::error::Invalid qualification summary.")
-                      output.write("| " + row["python"] + " | " + row["linux"] + " | " + row["windows"] + " |\n")
-                  output.write("\n[Download the attested release assets](" + os.environ["ARTIFACT_URL"] + ")\n")
-                  output.write("\nThe Actions download contains the installation ZIP, standalone wheel, and a detached proof for each. For a verified installation, use the ZIP and its proof.\n")
-                  output.write("\n<details><summary>Artifact identity</summary>\n\n")
-                  output.write("- `" + os.environ["ARCHIVE_NAME"] + "` SHA-256: `" + os.environ["BUNDLE_SHA"] + "`\n")
-                  output.write("- `" + os.environ["WHEEL_NAME"] + "` SHA-256: `" + os.environ["WHEEL_SHA"] + "`\n")
-                  output.write("- Frozen asset list SHA-256: `" + os.environ["ASSET_LIST_SHA"] + "`\n\n</details>\n")
-              output.write("\nCI passed for this candidate. Installation qualification passed when a bundle is included.\n")
-              output.write("CI evidence: " + os.environ["CI_URL"] + "\n")
-              output.write("For content releases, confirm the applicable content/AIO evidence before approving.\n")
-              if dry_run:
-                  output.write("Next: review this preview. A declaration merged under releases/ starts the real approval flow.\n")
-              else:
-                  output.write("Next: select Review deployments, then siteops-release, then Approve and deploy.\n")
-                  output.write("Approval authorizes the listed tag action at this commit and publication of these release assets.\n")
-              if engine["bundle"]:
-                  output.write("\nThe installation guidance below is for the published release. To try a candidate before publication, use the Actions download above and the installation guide for manually downloaded files.\n")
-              output.write("\n## Release notes\n\n" + embedded_notes((root.parent / "publish-notes.md").read_text(encoding="utf-8")) + "\n")
-          ' "$RUNNER_TEMP/release-plan"
+          python3 -B release-tools/scripts/render-siteops-release.py summary --root "$RUNNER_TEMP"

@@ -340,6 +340,19 @@ def pipx_environment(root: Path, shared: Path) -> dict[str, str]:
     return environment
 
 
+def _owned_state(program: Path, root: Path, shared: Path) -> PipxState:
+    """Create the directories one isolated pipx area needs and return its state."""
+    logs = root / "logs"
+    for directory in (logs, root / "unrelated", root / "home"):
+        directory.mkdir(parents=True, exist_ok=True)
+    return PipxState(
+        root=root,
+        program=program,
+        environment=pipx_environment(root, shared),
+        logs=logs,
+    )
+
+
 @pytest.fixture(scope="session")
 def backend_wheelhouse(tmp_path_factory) -> Path:
     """Return a directory holding only the pinned, hash-checked backend wheel."""
@@ -348,16 +361,7 @@ def backend_wheelhouse(tmp_path_factory) -> Path:
 
 def provision_shared_backend(program: Path, root: Path, shared: Path, wheelhouse: Path) -> PipxState:
     """Install the pinned backend into one pipx shared library location."""
-    logs = root / "logs"
-    logs.mkdir(parents=True, exist_ok=True)
-    (root / "unrelated").mkdir(parents=True, exist_ok=True)
-    (root / "home").mkdir(parents=True, exist_ok=True)
-    state = PipxState(
-        root=root,
-        program=program,
-        environment=pipx_environment(root, shared),
-        logs=logs,
-    )
+    state = _owned_state(program, root, shared)
     state.run(
         "upgrade-shared",
         "--pip-args",
@@ -379,17 +383,7 @@ def shared_backend(tmp_path_factory, backend_wheelhouse) -> Path:
 @pytest.fixture
 def pipx_state(tmp_path, shared_backend) -> PipxState:
     """Return an owned pipx area that reuses the provisioned shared backend."""
-    root = tmp_path / "installation area"
-    logs = root / "logs"
-    logs.mkdir(parents=True)
-    (root / "unrelated").mkdir()
-    (root / "home").mkdir()
-    return PipxState(
-        root=root,
-        program=pipx_program(),
-        environment=pipx_environment(root, shared_backend),
-        logs=logs,
-    )
+    return _owned_state(pipx_program(), tmp_path / "installation area", shared_backend)
 
 
 def publish_assets(root: Path, manifest, destination: Path) -> tuple[Path, Path]:

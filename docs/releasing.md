@@ -1,8 +1,8 @@
 # Prepare and publish a release
 
-Prepare the release tag and notes in a pull request. After merge, review the
-prepared candidate and approve publication. A candidate is the exact source
-commit, notes, and release asset bytes proposed for that release.
+Prepare the release tag, headline, and notes in a pull request. After merge,
+review the candidate and approve publication. A candidate is the exact source
+commit, release declaration, notes, and asset bytes proposed for that release.
 
 Site Ops and Scale Kit have independent version streams in the same repository.
 A content release can reference an existing engine release without rebuilding
@@ -71,9 +71,22 @@ releases/<name>/release.json
 releases/<name>/notes.md
 ```
 
-`release.json` specifies the tag and engine selection. `notes.md` contains the
-Markdown release notes. The tag defines the release version. The folder name
-identifies the record, rather than providing another version setting.
+`release.json` specifies the tag, headline, and engine selection. `notes.md`
+contains the Markdown release notes. The tag defines the release version.
+The folder name identifies the record, rather than providing another version
+setting.
+
+The release title is `<tag>: <headline>`. For example, a declaration with
+`"tag": "v1.0.0b8"` and `"headline": "Native Site Ops installation"` produces
+`v1.0.0b8: Native Site Ops installation`. Use 1-120 printable characters for
+the headline, with no line breaks or surrounding whitespace. Describe the main
+operator benefit rather than repeating the product name or version.
+
+Start the notes with `## Highlights` and explain what operators can do with
+this release. Include `## Upgrading` when existing users must take action,
+linking to the applicable migration instructions. The GitHub release title
+already identifies the release, so the notes do not need another top-level
+title.
 
 Write the changes and release-specific guidance in `notes.md`. The workflow
 adds **Install Site Ops** automatically. It includes the exact versioned wheel
@@ -98,7 +111,8 @@ formats, not scheduled releases.
 
 ```json
 {
-  "tag": "siteops/v1.1.0"
+  "tag": "siteops/v1.1.0",
+  "headline": "Native installation and deployment outcomes"
 }
 ```
 
@@ -117,6 +131,7 @@ change.
 ```json
 {
   "tag": "v1.2.0",
+  "headline": "Fleet workload configuration",
   "siteops": {
     "release": "siteops/v1.1.0"
   }
@@ -143,6 +158,7 @@ generated source archives are verified workspace packages.
 ```json
 {
   "tag": "v1.0.0b8",
+  "headline": "Native Site Ops installation",
   "siteops": {
     "build": true
   }
@@ -159,12 +175,30 @@ subject has its own detached attestation. It does not create another Site Ops
 tag. This option requires a prerelease content version. Stable content
 references a separately released engine instead.
 
-## Release-file defaults
+## Release fields and defaults
 
-The workflow derives the release title and prerelease status from the tag.
-`latest` defaults to false. A stable Scale Kit declaration may explicitly set
-`"latest": true`. Site Ops releases use explicit tags rather than taking over
-the repository's single Latest marker.
+| Field | Meaning |
+|---|---|
+| `tag` | Required version identity. `v...` releases Scale Kit content, while `siteops/v...` releases the engine independently. |
+| `headline` | Required short description used with the tag to form the release title. |
+| `siteops` | Required for a content release. Choose `{"build": true}` or `{"release": "siteops/v<version>"}`. Omit it for an independent engine release. |
+| `latest` | Optional, defaults to `false`. Set `true` only to designate a stable Scale Kit release as GitHub's Latest release. |
+
+`siteops.build` is a selection, not an on/off switch. `true` includes a fresh
+engine build in a content prerelease. `false` is not supported: name an existing
+engine release instead. Independent engine releases always build their own
+assets from the matching source package version.
+
+Prerelease status comes from the tag, with no separate `prerelease` field.
+Versions containing a development, alpha, beta, or release-candidate suffix,
+such as `v0.0.2.dev20260912`, `v1.0.0b8`, or `v1.0.0rc1`, are prereleases.
+`v1.0.0` is stable. Stable content must reference a stable engine release.
+
+`latest` controls GitHub's repository-wide Latest badge and
+`releases/latest` destination. It does not update installed applications.
+Use `true` when publishing the stable content release you want that destination
+to recommend. Prereleases and independent Site Ops releases cannot take over
+that designation. A stable release may still use `latest: false`.
 
 Do not commit source hashes, run IDs, artifact IDs, artifact digests, or a
 `published` flag into the release file. These are generated evidence or GitHub
@@ -206,7 +240,8 @@ automatic selection stops instead of choosing one silently.
 
 Normally, no manual dispatch or SHA entry is needed after merging the release
 files. Open the automatically started **Release (approval required)** run to
-review its candidate.
+review its candidate. Automatic preparation still waits for human approval
+before publication.
 
 The workflow reads metadata and notes from the selected Git commit. It does
 not depend on a mutable checkout or select the newest successful build later.
@@ -215,8 +250,8 @@ An unrelated advance of `main` does not change the candidate. Changing its
 release file or notes requires a fresh candidate and approval.
 
 The approval summary shows the tag, source commit, version stream, engine
-selection, ZIP and wheel digests when applicable, tag action, and final release
-notes.
+selection, title, ZIP and wheel digests when applicable, tag action, and final
+release notes.
 The summary nests the note headings beneath **Release notes**. Published notes
 retain their authored Markdown heading levels. Installation commands are
 included in the final notes before approval and remain bound to that approval.
@@ -293,7 +328,17 @@ choosing a different successful build later. A failed publishing operation can
 have partial effects, so inspect its result before retrying.
 
 To prepare a new candidate manually, open **Actions > Release (approval
-required) > Run workflow**, select `main`, and provide `release-file` and
-`expected-source-sha`. Use a committed `releases/<name>/release.json`, not an
-example. If `main` no longer matches the supplied SHA, preparation stops.
-This is the real release path and will request publication approval.
+required) > Run workflow** and enter:
+
+| Input | Value |
+|---|---|
+| Branch | `main` |
+| `release-file` | A repository-relative path such as `releases/my-release/release.json`, already committed on `main` |
+| `expected-source-sha` | The full current commit SHA of `main` |
+
+`release-file` is a path, not an upload or branch selector. This starts the same
+real release workflow as the automatic trigger and requests the same approval.
+Use it to prepare a new candidate from an existing declaration, for example
+after correcting a workflow problem. There is no need to start it manually
+when the merge already triggered preparation. If `main` no longer matches the
+supplied SHA, preparation stops rather than selecting an older commit.

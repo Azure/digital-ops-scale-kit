@@ -22,6 +22,7 @@ permissions:
   contents: read
 
 env:
+  PYTHONIOENCODING: utf-8
   SOURCE_SHA: ${{ github.sha }}
   SOURCE_REF: ${{ github.ref }}
   ARCHIVE_NAME: siteops-install.zip
@@ -203,6 +204,16 @@ jobs:
               ], capture_output=True, timeout=60)
               if result.returncode or hashlib.sha256(result.stdout).hexdigest() != plan["intent"][hash_key]:
                   raise SystemExit("::error::The release file or notes changed. Prepare and review a new candidate.")
+              if path_key == "path":
+                  declaration = json.loads(result.stdout)
+                  headline = declaration.get("headline")
+                  if (
+                      not isinstance(headline, str) or not 1 <= len(headline) <= 120
+                      or headline != headline.strip() or not headline.isprintable()
+                      or declaration["tag"] != plan["release"]["tag"]
+                      or plan["release"]["title"] != declaration["tag"] + ": " + headline
+                  ):
+                      raise SystemExit("::error::The release title differs from the reviewed declaration.")
           release, engine = plan["release"], plan["siteops"]
           if engine["bundle"]:
               if (
