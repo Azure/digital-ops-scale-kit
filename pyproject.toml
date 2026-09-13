@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,6 +8,7 @@ dynamic = ["version"]
 description = "Azure Site Ops - Multi-site orchestration for Azure IaC"
 readme = "README.md"
 license = "MIT"
+license-files = ["LICENSE", "ThirdPartyNotices.txt"]
 requires-python = ">=3.10"
 authors = [
     {name = "Microsoft Corporation"},
@@ -27,6 +28,8 @@ dependencies = ["pyyaml>=6.0"]
 
 [project.optional-dependencies]
 dev = [
+    "setuptools>=77.0.3",
+    "pipx==1.17.2",
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "ruff==0.15.20",

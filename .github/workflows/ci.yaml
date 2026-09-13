@@ -11,8 +11,11 @@ on:
       - "tests/**"
       - "scripts/**"
       - "pyproject.toml"
+      - "releases/**/release.json"
+      - "releases/**/notes.md"
       - ".github/workflows/**"
       - ".github/actions/**"
+      - ".github/release-examples/**"
   pull_request:
     branches: [main]
     paths:
@@ -21,14 +24,61 @@ on:
       - "tests/**"
       - "scripts/**"
       - "pyproject.toml"
+      - "releases/**/release.json"
+      - "releases/**/notes.md"
       - ".github/workflows/**"
       - ".github/actions/**"
+      - ".github/release-examples/**"
   workflow_dispatch:
+    inputs:
+      run-mode:
+        description: "CI always runs. Optional installer checks and release previews never publish."
+        type: choice
+        required: false
+        options: [ci-only, installer-check, release-preview]
+        default: ci-only
+      expected-source-sha:
+        description: "For installer-check or release-preview: full commit SHA of the selected branch."
+        type: string
+        required: false
+        default: ""
+      release-file:
+        description: "Release preview only. Keep the example or choose a committed releases/<name>/release.json."
+        type: string
+        required: false
+        default: .github/release-examples/combined-preview/release.json
 
 permissions:
   contents: read
 
 jobs:
+  installer-check:
+    name: Check installer (no publication)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run-mode == 'installer-check' }}
+    uses: ./.github/workflows/_siteops-distribution.yaml
+    with:
+      expected-source-sha: ${{ inputs.expected-source-sha }}
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+
+  release-preview:
+    name: Preview release (no publication)
+    needs: [lint, test, validate]
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run-mode == 'release-preview' }}
+    uses: ./.github/workflows/_release-candidate.yaml
+    with:
+      expected-source-sha: ${{ inputs.expected-source-sha }}
+      intent: ${{ inputs.release-file }}
+      dry-run: true
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -41,6 +91,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Setup Site Ops
         uses: ./.github/actions/setup-siteops
@@ -49,6 +100,20 @@ jobs:
 
       - name: Run ruff
         run: ruff check siteops tests scripts
+
+      - name: Check changed release declarations
+        if: github.event_name == 'pull_request'
+        shell: bash
+        env:
+          BEFORE_SHA: ${{ github.event.pull_request.base.sha }}
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python -B scripts/prepare-siteops-release.py \
+            --repository "$SOURCE_REPOSITORY" --source-sha "$SOURCE_SHA" \
+            --source-ref refs/heads/main --before-sha "$BEFORE_SHA" \
+            --dry-run --output-dir "$RUNNER_TEMP/release-file-check"
 
   test:
     name: Unit Tests
@@ -83,7 +148,7 @@ jobs:
           import os
 
           if not os.path.exists("test-results.xml"):
-              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
                   f.write("## \u274c Test Results\n\nNo test results found.\n")
               raise SystemExit(0)
 
@@ -115,10 +180,11 @@ jobs:
                       if failure is not None or error is not None:
                           name = case.attrib.get("name", "unknown")
                           classname = case.attrib.get("classname", "")
-                          msg = (failure or error).attrib.get("message", "")
+                          diagnostic = failure if failure is not None else error
+                          msg = diagnostic.attrib.get("message", "")
                           summary += f"- `{classname}::{name}`: {msg}\n"
 
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
               f.write(summary + "\n")
 
       - name: Upload coverage report

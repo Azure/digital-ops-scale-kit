@@ -1,0 +1,468 @@
+# Publication consumes the frozen candidate after required environment approval.
+name: Release (approval required)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "releases/**/release.json"
+      - "releases/**/notes.md"
+  workflow_dispatch:
+    inputs:
+      release-file:
+        description: "Reviewed releases/<name>/release.json on main. This starts a real release candidate."
+        required: true
+        type: string
+      expected-source-sha:
+        description: "Full expected commit of main for this new candidate"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  PYTHONIOENCODING: utf-8
+  SOURCE_SHA: ${{ github.sha }}
+  SOURCE_REF: ${{ github.ref }}
+  ARCHIVE_NAME: siteops-install.zip
+  ATTESTATION_SUFFIX: .attestation.jsonl
+  OIDC_ISSUER: https://token.actions.githubusercontent.com
+  PREDICATE_TYPE: https://slsa.dev/provenance/v1
+  SIGNER_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/_siteops-distribution.yaml@${{ github.ref }}
+
+jobs:
+  candidate:
+    name: Prepare release candidate
+    uses: ./.github/workflows/_release-candidate.yaml
+    with:
+      expected-source-sha: ${{ github.event_name != 'workflow_dispatch' && github.sha || inputs.expected-source-sha }}
+      intent: ${{ inputs.release-file || '' }}
+      before-sha: ${{ github.event.before || '' }}
+      dry-run: false
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+
+  publish:
+    name: Approve tag creation and publication
+    needs: candidate
+    if: needs.candidate.result == 'success' && needs.candidate.outputs.active == 'true'
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: release-${{ needs.candidate.outputs.tag }}
+      cancel-in-progress: false
+    environment: siteops-release
+    permissions:
+      contents: write
+      actions: read
+      attestations: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      APPROVED_PLAN_SHA: ${{ needs.candidate.outputs.plan-sha }}
+      APPROVED_NOTES_SHA: ${{ needs.candidate.outputs.notes-sha }}
+      APPROVED_BUNDLE_SHA: ${{ needs.candidate.outputs.bundle-sha }}
+      APPROVED_WHEEL_NAME: ${{ needs.candidate.outputs.wheel-name }}
+      APPROVED_WHEEL_SHA: ${{ needs.candidate.outputs.wheel-sha }}
+      APPROVED_ASSET_LIST_SHA: ${{ needs.candidate.outputs.asset-list-sha }}
+      APPROVED_ENGINE_ID: ${{ needs.candidate.outputs.engine-id }}
+      APPROVED_ENGINE_REF: ${{ needs.candidate.outputs.engine-ref }}
+    steps:
+      - name: Download the pinned declaration
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.candidate.outputs.plan-artifact-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/release-plan
+          merge-multiple: true
+          digest-mismatch: error
+
+      - name: Download the reviewed release notes
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.candidate.outputs.notes-artifact-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/release-notes
+          merge-multiple: true
+          digest-mismatch: error
+
+      - name: Download the frozen asset list
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.candidate.outputs.assets-artifact-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/release-assets
+          merge-multiple: true
+          digest-mismatch: error
+
+      - name: Download the qualified release assets
+        if: needs.candidate.outputs.bundle == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.candidate.outputs.bundle-artifact-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/release-bundle
+          merge-multiple: true
+          digest-mismatch: error
+
+      - name: Verify the approved candidate
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -c '
+          import hashlib, json, os, re, subprocess, sys, urllib.parse
+          from pathlib import Path
+          root = Path(os.environ["RUNNER_TEMP"])
+          raw = (root / "release-plan/plan.json").read_bytes()
+          notes = (root / "release-notes/publish-notes.md").read_bytes()
+          asset_raw = (root / "release-assets/release-assets.json").read_bytes()
+          if (
+              hashlib.sha256(raw).hexdigest() != os.environ["APPROVED_PLAN_SHA"]
+              or hashlib.sha256(notes).hexdigest() != os.environ["APPROVED_NOTES_SHA"]
+              or hashlib.sha256(asset_raw).hexdigest() != os.environ["APPROVED_ASSET_LIST_SHA"]
+          ):
+              raise SystemExit("::error::The candidate, notes, or asset list differs from the approved preview.")
+          plan = json.loads(raw)
+          asset_list = json.loads(asset_raw)
+          if (
+              plan.get("dryRun") is not False or plan.get("active") is not True
+              or plan.get("apiVersion") != "siteops.release/v1"
+              or plan.get("kind") != "ReleaseCandidate"
+              or plan.get("source") != {
+                  "repository": os.environ["GITHUB_REPOSITORY"],
+                  "commit": os.environ["SOURCE_SHA"], "ref": "refs/heads/main"}
+              or os.environ["SOURCE_REF"] != "refs/heads/main"
+          ):
+              raise SystemExit("::error::Only the approved main-branch candidate can be published.")
+
+          def read(path):
+              result = subprocess.run(["gh", "api", path], capture_output=True, timeout=60)
+              if result.returncode:
+                  raise SystemExit("::error::GitHub could not recheck the approved source.")
+              return json.loads(result.stdout)
+
+          def validate_assets(values):
+              if not isinstance(values, list) or len(values) != 4:
+                  raise SystemExit("::error::The approved release asset inventory is invalid.")
+              by_name = {}
+              for asset in values:
+                  if not isinstance(asset, dict) or set(asset) != {"name", "sha256"}:
+                      raise SystemExit("::error::The approved release asset record is invalid.")
+                  name, digest = asset["name"], asset["sha256"]
+                  if (
+                      not isinstance(name, str) or len(name) > 255
+                      or not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z.!+_~-]*", name)
+                      or ".." in name
+                      or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                      or name in by_name
+                  ):
+                      raise SystemExit("::error::The approved release asset identity is invalid.")
+                  by_name[name] = digest
+              archive = os.environ["ARCHIVE_NAME"]
+              suffix = os.environ["ATTESTATION_SUFFIX"]
+              wheels = [
+                  name for name in by_name
+                  if re.fullmatch(r"siteops-[0-9A-Za-z][0-9A-Za-z.!+_~-]*-py3-none-any\.whl", name)
+              ]
+              if len(wheels) != 1:
+                  raise SystemExit("::error::The approved release wheel inventory is invalid.")
+              wheel = wheels[0]
+              if set(by_name) != {archive, archive + suffix, wheel, wheel + suffix}:
+                  raise SystemExit("::error::The approved release asset inventory is invalid.")
+              return by_name, wheel
+
+          if (
+              not isinstance(asset_list, dict)
+              or asset_list.get("apiVersion") != "siteops.release.assets/v1"
+              or asset_list.get("kind") != "SiteOpsReleaseAssets"
+          ):
+              raise SystemExit("::error::The approved release asset list is invalid.")
+          approved_assets, approved_wheel = validate_assets(asset_list.get("assets"))
+          if (
+              approved_wheel != os.environ["APPROVED_WHEEL_NAME"]
+              or approved_assets[approved_wheel] != os.environ["APPROVED_WHEEL_SHA"]
+          ):
+              raise SystemExit("::error::The approved wheel identity is inconsistent.")
+
+          prefix = "repos/" + os.environ["GITHUB_REPOSITORY"]
+          for path_key, hash_key in (("path", "sha256"), ("notesPath", "notesSha256")):
+              path = urllib.parse.quote(plan["intent"][path_key], safe="/")
+              result = subprocess.run([
+                  "gh", "api", "-H", "Accept: application/vnd.github.raw+json",
+                  prefix + "/contents/" + path + "?ref=refs/heads/main",
+              ], capture_output=True, timeout=60)
+              if result.returncode or hashlib.sha256(result.stdout).hexdigest() != plan["intent"][hash_key]:
+                  raise SystemExit("::error::The release file or notes changed. Prepare and review a new candidate.")
+              if path_key == "path":
+                  declaration = json.loads(result.stdout)
+                  headline = declaration.get("headline")
+                  if (
+                      not isinstance(headline, str) or not 1 <= len(headline) <= 120
+                      or headline != headline.strip() or not headline.isprintable()
+                      or declaration["tag"] != plan["release"]["tag"]
+                      or plan["release"]["title"] != declaration["tag"] + ": " + headline
+                  ):
+                      raise SystemExit("::error::The release title differs from the reviewed declaration.")
+          release, engine = plan["release"], plan["siteops"]
+          if engine["bundle"]:
+              if (
+                  set(asset_list) != {"apiVersion", "kind", "mode", "source", "assets"}
+                  or asset_list.get("mode") != "publish"
+                  or asset_list.get("source") != plan["source"]
+                  or approved_assets[os.environ["ARCHIVE_NAME"]] != os.environ["APPROVED_BUNDLE_SHA"]
+              ):
+                  raise SystemExit("::error::The approved publish asset list is inconsistent.")
+          else:
+              tag = urllib.parse.quote(engine["releaseTag"], safe="")
+              linked = read(prefix + "/releases/tags/" + tag)
+              ref = read(prefix + "/git/ref/tags/" + tag)
+              if (
+                  set(asset_list) != {"apiVersion", "kind", "mode", "engine", "assets"}
+                  or asset_list.get("mode") != "reference"
+                  or asset_list.get("engine") != {
+                      "releaseId": os.environ["APPROVED_ENGINE_ID"],
+                      "tag": engine["releaseTag"],
+                      "target": os.environ["APPROVED_ENGINE_REF"],
+                  }
+              ):
+                  raise SystemExit("::error::The approved engine reference is inconsistent.")
+              linked_assets = linked.get("assets", [])
+              current = {}
+              for asset in linked_assets if isinstance(linked_assets, list) else []:
+                  digest = asset.get("digest") if isinstance(asset, dict) else None
+                  if (
+                      isinstance(asset, dict) and asset.get("state") == "uploaded"
+                      and isinstance(digest, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
+                  ):
+                      current[asset.get("name")] = digest.removeprefix("sha256:")
+              if (
+                  str(linked.get("id")) != os.environ["APPROVED_ENGINE_ID"]
+                  or linked.get("draft") is not False or linked.get("tag_name") != engine["releaseTag"]
+                  or ref.get("object", {}).get("sha") != os.environ["APPROVED_ENGINE_REF"]
+                  or not isinstance(linked_assets, list) or len(linked_assets) != 4
+                  or current != approved_assets
+              ):
+                  raise SystemExit("::error::The referenced engine release changed after approval.")
+          for key, value in {
+              "tag": release["tag"], "title": release["title"],
+              "prerelease": str(release["prerelease"]).lower(),
+              "latest": str(release["latest"]).lower(), "bundle": str(engine["bundle"]).lower(),
+              "wheel-name": approved_wheel,
+          }.items():
+              print(key + "=" + value)
+          ' >> "$GITHUB_OUTPUT"
+
+      - name: Verify the approved release assets
+        if: needs.candidate.outputs.bundle == 'true'
+        shell: bash
+        env:
+          WHEEL_NAME: ${{ steps.candidate.outputs.wheel-name }}
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/release-bundle/$ARCHIVE_NAME"
+          archive_proof="${archive}${ATTESTATION_SUFFIX}"
+          wheel="$RUNNER_TEMP/release-bundle/$WHEEL_NAME"
+          wheel_proof="${wheel}${ATTESTATION_SUFFIX}"
+          python3 -c '
+          import hashlib, json, os, sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          asset_list = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+          values = asset_list["assets"]
+          expected = {item["name"]: item["sha256"] for item in values}
+          entries = list(root.iterdir())
+          if (
+              sorted(entry.name for entry in entries) != sorted(expected)
+              or any(entry.is_symlink() or not entry.is_file() for entry in entries)
+              or len(entries) != 4
+          ):
+              raise SystemExit("::error::The downloaded release asset inventory is invalid.")
+          for name, digest in expected.items():
+              actual = hashlib.sha256((root / name).read_bytes()).hexdigest()
+              if actual != digest:
+                  raise SystemExit("::error::A release asset differs from the approved bytes.")
+          if (
+              expected[os.environ["ARCHIVE_NAME"]] != os.environ["APPROVED_BUNDLE_SHA"]
+              or expected[os.environ["WHEEL_NAME"]] != os.environ["APPROVED_WHEEL_SHA"]
+          ):
+              raise SystemExit("::error::The approved release asset digests are inconsistent.")
+          ' "$RUNNER_TEMP/release-bundle" "$RUNNER_TEMP/release-assets/release-assets.json"
+          gh attestation verify "$archive" --bundle "$archive_proof" \
+            --repo "$GITHUB_REPOSITORY" --cert-identity "$SIGNER_IDENTITY" \
+            --signer-digest "$SOURCE_SHA" --source-digest "$SOURCE_SHA" --source-ref "$SOURCE_REF" \
+            --cert-oidc-issuer "$OIDC_ISSUER" --predicate-type "$PREDICATE_TYPE" --deny-self-hosted-runners
+          gh attestation verify "$wheel" --bundle "$wheel_proof" \
+            --repo "$GITHUB_REPOSITORY" --cert-identity "$SIGNER_IDENTITY" \
+            --signer-digest "$SOURCE_SHA" --source-digest "$SOURCE_SHA" --source-ref "$SOURCE_REF" \
+            --cert-oidc-issuer "$OIDC_ISSUER" --predicate-type "$PREDICATE_TYPE" --deny-self-hosted-runners
+          python3 -c '
+          import json, os, sys, zipfile
+          from pathlib import Path
+
+          archive_path, wheel_path = map(Path, sys.argv[1:])
+          with zipfile.ZipFile(archive_path) as archive:
+              manifest = json.loads(archive.read("bundle.json"))
+              embedded = manifest.get("package", {}).get("wheel")
+              if embedded != "wheels/" + os.environ["WHEEL_NAME"]:
+                  raise SystemExit("::error::The approved bundle names a different application wheel.")
+              if archive.read(embedded) != wheel_path.read_bytes():
+                  raise SystemExit("::error::The approved standalone wheel differs from the wheel in the bundle.")
+          ' "$archive" "$wheel"
+
+      - name: Check the publication target
+        id: target
+        shell: bash
+        env:
+          TAG: ${{ steps.candidate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          python3 -c '
+          import json, os, re, subprocess, sys, urllib.parse
+
+          def request(path):
+              result = subprocess.run(["gh", "api", path, "--include"], capture_output=True, text=True)
+              header, separator, body = result.stdout.partition("\n\n")
+              first = header.splitlines()[0] if header else ""
+              if re.fullmatch(r"HTTP/\S+ 404(?: .*)?", first):
+                  return None
+              if result.returncode or not separator:
+                  raise SystemExit("::error::GitHub could not confirm the publication target.")
+              return json.loads(body)
+
+          prefix = "repos/" + os.environ["GITHUB_REPOSITORY"]
+          tag = urllib.parse.quote(os.environ["TAG"], safe="")
+          if request(prefix + "/releases/tags/" + tag) is not None:
+              raise SystemExit("::error::This release already exists. Existing releases are not overwritten.")
+          ref = request(prefix + "/git/ref/tags/" + tag)
+          if ref is None:
+              print("tag-exists=false")
+              raise SystemExit(0)
+          target = ref["object"]
+          for _ in range(8):
+              if target["type"] == "commit":
+                  break
+              if target["type"] != "tag" or not re.fullmatch("[0-9a-f]{40}", target["sha"]):
+                  raise SystemExit("::error::The existing tag has an unsupported target.")
+              obj = request(prefix + "/git/tags/" + target["sha"])
+              if obj is None:
+                  raise SystemExit("::error::The existing tag object is unavailable.")
+              target = obj["object"]
+          if target["type"] != "commit" or target["sha"] != os.environ["SOURCE_SHA"]:
+              raise SystemExit("::error::The tag points to another commit. Tags are never moved.")
+          print("tag-exists=true")
+          ' >> "$GITHUB_OUTPUT"
+
+      - name: Create only the approved missing tag
+        if: steps.target.outputs.tag-exists == 'false'
+        shell: bash
+        env:
+          TAG: ${{ steps.candidate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          umask 077
+          if ! gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f "ref=refs/tags/$TAG" -f "sha=$SOURCE_SHA" \
+            > "$RUNNER_TEMP/created-tag.json" 2> "$RUNNER_TEMP/create-tag.err"; then
+            echo "::error::The tag could not be created. Inspect the target before retrying."
+            exit 1
+          fi
+          python3 -c '
+          import json, os, sys
+          ref = json.load(open(sys.argv[1]))
+          if ref.get("ref") != "refs/tags/" + os.environ["TAG"] or ref.get("object", {}).get("sha") != os.environ["SOURCE_SHA"]:
+              raise SystemExit("::error::GitHub did not confirm the requested tag.")
+          ' "$RUNNER_TEMP/created-tag.json"
+
+      - name: Publish the approved release
+        shell: bash
+        env:
+          TAG: ${{ steps.candidate.outputs.tag }}
+          TITLE: ${{ steps.candidate.outputs.title }}
+          PRERELEASE: ${{ steps.candidate.outputs.prerelease }}
+          LATEST: ${{ steps.candidate.outputs.latest }}
+          BUNDLE: ${{ steps.candidate.outputs.bundle }}
+          WHEEL_NAME: ${{ steps.candidate.outputs.wheel-name }}
+        run: |
+          set -euo pipefail
+          assets=()
+          if [[ "$BUNDLE" == "true" ]]; then
+            assets=(
+              "$RUNNER_TEMP/release-bundle/$ARCHIVE_NAME"
+              "$RUNNER_TEMP/release-bundle/${ARCHIVE_NAME}${ATTESTATION_SUFFIX}"
+              "$RUNNER_TEMP/release-bundle/$WHEEL_NAME"
+              "$RUNNER_TEMP/release-bundle/${WHEEL_NAME}${ATTESTATION_SUFFIX}"
+            )
+          fi
+          gh release create "$TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --title "$TITLE" --notes-file "$RUNNER_TEMP/release-notes/publish-notes.md" \
+            "--prerelease=$PRERELEASE" "--latest=$LATEST"
+
+      - name: Confirm published assets and immutability
+        shell: bash
+        env:
+          TAG: ${{ steps.candidate.outputs.tag }}
+          PRERELEASE: ${{ steps.candidate.outputs.prerelease }}
+          BUNDLE: ${{ steps.candidate.outputs.bundle }}
+          WHEEL_NAME: ${{ steps.candidate.outputs.wheel-name }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > "$RUNNER_TEMP/published-release.json"
+          immutable="$(python3 -c '
+          import hashlib, json, os, sys
+          from pathlib import Path
+          release = json.load(open(sys.argv[1]))
+          expected = {}
+          if os.environ["BUNDLE"] == "true":
+              for name in (
+                  os.environ["ARCHIVE_NAME"],
+                  os.environ["ARCHIVE_NAME"] + os.environ["ATTESTATION_SUFFIX"],
+                  os.environ["WHEEL_NAME"],
+                  os.environ["WHEEL_NAME"] + os.environ["ATTESTATION_SUFFIX"],
+              ):
+                  path = Path(os.environ["RUNNER_TEMP"]) / "release-bundle" / name
+                  expected[name] = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+          assets = release.get("assets", [])
+          actual = {
+              asset.get("name"): asset.get("digest")
+              for asset in assets
+              if isinstance(asset, dict)
+          } if isinstance(assets, list) else {}
+          if (
+              release.get("tag_name") != os.environ["TAG"] or release.get("draft") is not False
+              or release.get("prerelease") != (os.environ["PRERELEASE"] == "true")
+              or not isinstance(assets, list) or len(assets) != len(expected)
+              or len(actual) != len(assets) or actual != expected
+              or any(not isinstance(asset, dict) or asset.get("state") != "uploaded" for asset in assets)
+              or type(release.get("immutable")) is not bool
+          ):
+              raise SystemExit("::error::The published release does not match the approved request.")
+          print(str(release["immutable"]).lower())
+          ' "$RUNNER_TEMP/published-release.json")"
+          if [[ "$immutable" == "true" ]]; then
+            gh release verify "$TAG" --repo "$GITHUB_REPOSITORY"
+            if [[ "$BUNDLE" == "true" ]]; then
+              gh release verify-asset "$TAG" "$RUNNER_TEMP/release-bundle/$ARCHIVE_NAME" --repo "$GITHUB_REPOSITORY"
+              gh release verify-asset "$TAG" "$RUNNER_TEMP/release-bundle/${ARCHIVE_NAME}${ATTESTATION_SUFFIX}" --repo "$GITHUB_REPOSITORY"
+              gh release verify-asset "$TAG" "$RUNNER_TEMP/release-bundle/$WHEEL_NAME" --repo "$GITHUB_REPOSITORY"
+              gh release verify-asset "$TAG" "$RUNNER_TEMP/release-bundle/${WHEEL_NAME}${ATTESTATION_SUFFIX}" --repo "$GITHUB_REPOSITORY"
+            fi
+          fi
+          {
+            echo "## Published release"
+            echo ""
+            echo "- [Open release $TAG](https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG)"
+            echo "- Source: \`$SOURCE_SHA\`"
+            echo "- Immutable: \`$immutable\`"
+          } >> "$GITHUB_STEP_SUMMARY"

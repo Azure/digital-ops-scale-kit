@@ -160,7 +160,7 @@ Go to **Settings → Environments** and create:
 - Deployment branches: `main` only
 - Wait timer: 5 minutes (optional)
 
-## SITE_OVERRIDES
+## Site overrides
 
 Use `SITE_OVERRIDES` when you prefer not to commit configuration values (subscriptions, resource groups, credentials) to the repository. Both GHA and ADO pipelines generate `sites.local/*.yaml` files at runtime from this value using identical logic.
 
@@ -624,7 +624,7 @@ In ADO → **Pipelines → Library → + Variable group**:
 
 | Variable group | Variable | Type | Description |
 |----------------|----------|------|-------------|
-| `siteops-secrets` | `SITE_OVERRIDES` | Secret | JSON object, same format as the GitHub secret (see [SITE_OVERRIDES](#site_overrides)) |
+| `siteops-secrets` | `SITE_OVERRIDES` | Secret | JSON object, same format as the GitHub secret (see [site overrides](#site-overrides)) |
 
 #### 3. Create environments
 
