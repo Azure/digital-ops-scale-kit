@@ -45,4 +45,4 @@ steps:
     timeoutMinutes: 60
     pollIntervalSeconds: 30
 
-  - include: ../../manifests/_aio-fundamentals.yaml
+  - include: ../../manifests/_partials/_aio-fundamentals.yaml

@@ -86,9 +86,9 @@ name: aio-with-opc-ua
 description: AIO platform + OPC UA sample.
 selector: "environment=dev"
 steps:
-  - include: ../../manifests/_aio-fundamentals.yaml
-  - include: ../../manifests/_resolve-aio.yaml
-  - include: ../../manifests/_secretsync.yaml
+  - include: ../../manifests/_partials/_aio-fundamentals.yaml
+  - include: ../../manifests/_partials/_resolve-aio.yaml
+  - include: ../../manifests/_partials/_secretsync.yaml
     when: "{{ site.properties.deployOptions.enableSecretSync }}"
   - include: ../opc-ua-solution/_partial.yaml
 ```
@@ -97,7 +97,7 @@ Omit `_resolve-aio.yaml` when the composition has no downstream consumer of the 
 
 ### Composition rules
 
-1. **Compose partials, not standalone manifests.** `manifests/aio-install.yaml` and `samples/<name>/manifest.yaml` are standalone entry points that re-include `_resolve-aio.yaml` so they can be deployed on their own. Composing two of them in one parent will collide on the `resolve-aio` step name. Compose the underlying `_partial.yaml` files instead.
+1. **Compose partials, not standalone manifests.** `manifests/aio-install/manifest.yaml` and `samples/<name>/manifest.yaml` are standalone entry points that re-include `_resolve-aio.yaml` so they can be deployed on their own. Composing two of them in one parent will collide on the `resolve-aio` step name. Compose the underlying `_partial.yaml` files instead.
 2. **Step names must be unique** across the post-include flat step list. Collision is a parse-time error.
 3. **Site selectors and parallel settings** declared on the composing manifest apply at the composition level. The same fields on included partials are silently ignored.
 
@@ -108,9 +108,9 @@ Omit `_resolve-aio.yaml` when the composition has no downstream consumer of the 
 | `secretsync-sample/` | Bundle | Synchronizing Key Vault secrets to the cluster | inputs + declaration + partial, over `templates/secretsync/` |
 | `opc-ua-solution/` | Bundle | A full solution in Bicep: device, asset, dataflow, and cloud egress | template + inputs + partial |
 | `dataflow-sample/` | Composition | Declaring dataflows in YAML | declaration + `_resolve-aio` + `manifests/_dataflows`, over `templates/aio/dataflows/` |
-| `asset-sample/` | Composition | Declaring Device Registry devices and assets in YAML | `parameters/devices/site-devices.yaml` + `parameters/assets/site-assets.yaml` + `_resolve-aio` + `manifests/_assets`, over `templates/aio/assets/` |
-| `resource-set-basic/` | Composition | Selecting one reusable set from a site | `sites/catalog-basic.yaml` + `manifests/_aio-resources.yaml` |
-| `resource-set-composition/` | Composition | Inheritance, shared and external providers, independent assets, and cross-set dataflow references | `sites/shared/catalog-composition.yaml` + `sites/catalog-composition.yaml` + `manifests/_aio-resources.yaml` |
+| `asset-sample/` | Composition | Declaring Device Registry devices and assets in YAML | `resource-sets/devices/site-devices.yaml` + `resource-sets/assets/site-assets.yaml` + `_resolve-aio` + `manifests/_assets`, over `templates/aio/assets/` |
+| `resource-set-basic/` | Composition | Selecting one reusable set from a site | `sites/catalog-basic.yaml` + `manifests/_partials/_aio-resources.yaml` |
+| `resource-set-composition/` | Composition | Inheritance, shared and external providers, independent assets, and cross-set dataflow references | `sites/shared/catalog-composition.yaml` + `sites/catalog-composition.yaml` + `manifests/_partials/_aio-resources.yaml` |
 | `aio-with-opc-ua/` | Composition | Installing the platform and a full solution in one deploy | `_aio-fundamentals` + `_resolve-aio` + `_secretsync` (gated) + `opc-ua-solution/_partial` |
 | `aio-with-aksee-bootstrap/` | Composition | Bringing up a host before installing AIO | `host-bootstrap/aksee/_partial` + a wait on the bootstrap tag + `_aio-fundamentals` |
 
@@ -120,5 +120,5 @@ See each sample's own `README.md` for what it deploys, prerequisites, and how to
 manifests, which suits a one-off deployment. The resource-set samples use the
 fleet route: committed sites compose ordered sets under
 `properties.resourceSets`, and each sample includes the same catalog partial
-as `manifests/aio-resources.yaml`. See
+as `manifests/aio-resources/manifest.yaml`. See
 [resource-catalog.md](../../../docs/resource-catalog.md).

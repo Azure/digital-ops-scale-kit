@@ -26,11 +26,11 @@ selector: "environment=dev"
 parameters:
   - parameters/common/common.yaml
   - "parameters/aio-releases/{{ site.properties.aioRelease }}.yaml"
-  - path: parameters/devices/site-devices.yaml
+  - path: resource-sets/devices/site-devices.yaml
     collections: [devices]
-  - path: parameters/assets/site-assets.yaml
+  - path: resource-sets/assets/site-assets.yaml
     collections: [assets]
 
 steps:
-  - include: ../../manifests/_resolve-aio.yaml
-  - include: ../../manifests/_assets.yaml
+  - include: ../../manifests/_partials/_resolve-aio.yaml
+  - include: ../../manifests/_partials/_assets.yaml

@@ -83,7 +83,7 @@ def test_connector_template_module_is_shared_by_install_and_upgrade(workspace):
 
 def test_upgrade_manifest_separates_extensions_from_release_resources(workspace):
     manifest = yaml.safe_load(
-        _read(workspace, "manifests/aio-upgrade.yaml")
+        _read(workspace, "manifests/aio-upgrade/manifest.yaml")
     )
     steps = manifest["steps"]
     names = [step.get("name") for step in steps if "name" in step]

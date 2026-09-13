@@ -175,10 +175,10 @@ class TestIntegrationConstantsMatchTheWorkspace:
             for key in spec.resource_set_keys
         }
         for area, selected in selections:
-            set_file = workspace / "parameters" / area / f"{selected}.yaml"
+            set_file = workspace / "resource-sets" / area / f"{selected}.yaml"
             assert set_file.is_file(), (
                 f"The integration fixture selects set '{selected}' for resource "
-                f"area '{area}', but parameters/{area}/{selected}.yaml does not "
+                f"area '{area}', but resource-sets/{area}/{selected}.yaml does not "
                 f"exist. A live run would deploy nothing and report success."
             )
 

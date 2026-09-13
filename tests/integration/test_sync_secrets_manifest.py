@@ -494,7 +494,7 @@ class TestEnablementPreservesSyncedObjects:
             )
 
         # Day-2 enablement, the standalone path that declares no secrets.
-        manifest_path = WORKSPACE_PATH / "manifests" / "secretsync.yaml"
+        manifest_path = WORKSPACE_PATH / "manifests" / "secretsync" / "manifest.yaml"
         result = orchestrator.deploy(manifest_path=manifest_path, selector=selector)
         assert result.status is RunStatus.SUCCEEDED, (
             f"Day-2 enablement failed: status={result.status.value}"

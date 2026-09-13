@@ -68,7 +68,7 @@ Use the object form when one site property selects an ordered list of files:
 
 ```yaml
 parameters:
-  - path: "parameters/devices/{{ item }}.yaml"
+  - path: "resource-sets/devices/{{ item }}.yaml"
     forEach: "{{ site.properties.resourceSets.devices }}"
     collections: [devices]
 ```

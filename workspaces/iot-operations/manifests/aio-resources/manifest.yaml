@@ -7,7 +7,7 @@ description: |
   so one entry point serves every combination.
 
   A site composes ordered sets through `properties.resourceSets.<area>`, which
-  resolves to `parameters/<area>/<set>.yaml`. An omitted area in the effective
+  resolves to `resource-sets/<area>/<set>.yaml`. An omitted area in the effective
   site applies nothing. A child site uses an empty list to clear an inherited
   selection. Devices and assets share one internally ordered Device Registry
   step. That step runs before dataflows so a dataflow naming an asset finds it
@@ -24,4 +24,4 @@ parallel: 3
 selector: "environment=dev"
 
 steps:
-  - include: _aio-resources.yaml
+  - include: ../_partials/_aio-resources.yaml

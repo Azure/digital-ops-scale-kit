@@ -18,9 +18,9 @@ def _all_manifest_files(workspace: Path) -> list[Path]:
     found: list[Path] = []
     manifests = workspace / "manifests"
     if manifests.is_dir():
-        found.extend(
-            sorted(manifests.glob("*.yaml")) + sorted(manifests.glob("*.yml"))
-        )
+        for ext in ("yaml", "yml"):
+            found.extend(sorted(manifests.glob(f"*/manifest.{ext}")))
+            found.extend(sorted(manifests.glob(f"_partials/_*.{ext}")))
     samples = workspace / "samples"
     if samples.is_dir():
         for sample_dir in sorted(samples.iterdir()):
@@ -56,8 +56,14 @@ class TestManifestValidation:
         root = workspace.resolve()
         discovered = {p.resolve() for p in _all_manifest_files(workspace)}
 
-        expected = {p.resolve() for p in (workspace / "manifests").glob("*.yaml")}
-        expected |= {p.resolve() for p in (workspace / "samples").glob("*/manifest.yaml")}
+        expected = set()
+        for directory in ("manifests", "samples", "templates"):
+            for path in (workspace / directory).rglob("*"):
+                if path.suffix not in {".yaml", ".yml"} or not path.is_file():
+                    continue
+                document = yaml.safe_load(path.read_text(encoding="utf-8"))
+                if isinstance(document, dict) and document.get("kind") == "Manifest":
+                    expected.add(path.resolve())
         assert expected, "No manifests on disk, so this check covers nothing."
 
         missing = sorted(str(p.relative_to(root)) for p in expected - discovered)
@@ -66,6 +72,7 @@ class TestManifestValidation:
             "keyed on it is checking less than it appears to:\n  "
             + "\n  ".join(missing)
         )
+        assert discovered <= expected, "Discovery included a non-Manifest document."
 
     def test_every_manifest_validates(self, workspace, orchestrator):
         """Every deployable manifest validates.

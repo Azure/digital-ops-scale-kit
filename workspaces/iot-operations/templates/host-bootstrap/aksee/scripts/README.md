@@ -2,7 +2,7 @@
 
 The PowerShell scripts the bootstrap delivers to the target Windows VM. The Bicep template at `../template.bicep` inlines the minified launcher via `loadTextContent`. The launcher embeds the worker and the AKS Edge config template as here-strings and registers a Scheduled Task that drives the worker through all phases.
 
-For operator usage (configure a site, deploy via siteops, monitor, verify, troubleshoot) see [`../README.md`](../README.md). This README covers the build workflow.
+For operator usage, see the [bootstrap guide](../../../../manifests/aksee-bootstrap/README.md). This README covers the build workflow.
 
 ## Files in this folder
 
@@ -68,7 +68,7 @@ Phase 3 authenticates with the Arc machine's managed identity (`az login --ident
 
 ## Phase numbers
 
-Phase numbering is structural to the worker (state machine, reboot-survival anchor points, `state.json` field, log message prefixes, function names like `Invoke-Phase2`). For phase semantics see [`../README.md`](../README.md) under "Phases reference".
+Phase numbering is structural to the worker (state machine, reboot-survival anchor points, `state.json` field, log message prefixes, function names like `Invoke-Phase2`). For phase semantics see the [phases reference](../../../../manifests/aksee-bootstrap/README.md#phases-reference).
 
 ## Generation conventions
 

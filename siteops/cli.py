@@ -904,10 +904,10 @@ def main() -> None:
 Examples:
   siteops -w workspaces/iot-operations sites
   siteops -w workspaces/iot-operations sites munich-dev --output yaml
-  siteops -w workspaces/iot-operations validate manifests/aio-install.yaml
-  siteops -w workspaces/iot-operations plan manifests/aio-install.yaml
-  siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml
-  siteops -w workspaces/iot-operations plan manifests/aio-install.yaml -l environment=prod
+  siteops -w workspaces/iot-operations validate manifests/aio-install/manifest.yaml
+  siteops -w workspaces/iot-operations plan manifests/aio-install/manifest.yaml
+  siteops -w workspaces/iot-operations deploy manifests/aio-install/manifest.yaml
+  siteops -w workspaces/iot-operations plan manifests/aio-install/manifest.yaml -l environment=prod
 """,
     )
     parser.add_argument("--version", action="version", version=f"siteops {__version__}")

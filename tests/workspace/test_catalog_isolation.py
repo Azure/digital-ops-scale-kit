@@ -30,7 +30,7 @@ from tests.workspace.catalog_harness import CATALOG_FAMILIES
 _PARAM_DECL = re.compile(r"^\s*param\s+(\w+)\s+", re.MULTILINE)
 
 # The catalog's own entry point. Every other manifest is a base path.
-_CATALOG_ENTRY_POINT = "aio-resources.yaml"
+_CATALOG_ENTRY_POINT = "aio-resources/manifest.yaml"
 
 
 def _catalog_template_dirs(workspace: Path) -> set[Path]:
@@ -96,7 +96,7 @@ def _catalog_sibling_parameter_files(workspace: Path) -> list[Path]:
 def _base_path_manifests(workspace: Path) -> list[Path]:
     """Entry-point manifests that are not the catalog.
 
-    Scoped to `manifests/*.yaml` with the partials excluded, which is the set an
+    Scoped to `manifests/*/manifest.yaml`, which is the set an
     operator deploys directly. Discovered rather than listed, so a new entry
     point is covered the moment it lands and would have to be excluded here
     deliberately rather than by omission.
@@ -107,8 +107,8 @@ def _base_path_manifests(workspace: Path) -> list[Path]:
     """
     return sorted(
         p
-        for p in (workspace / "manifests").glob("*.yaml")
-        if not p.name.startswith("_") and p.name != _CATALOG_ENTRY_POINT
+        for p in (workspace / "manifests").glob("*/manifest.yaml")
+        if p != workspace / "manifests" / _CATALOG_ENTRY_POINT
     )
 
 

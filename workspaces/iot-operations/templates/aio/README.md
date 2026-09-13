@@ -8,7 +8,7 @@ Knowing which kind you are in tells you how to add to it.
 |---|---|---|
 | **Platform lifecycle** | `enablement.bicep`, `instance.bicep`, `resolve-aio.bicep` | Top-level templates a manifest step points at directly. `instance.bicep` and `resolve-aio.bicep` are dispatchers that switch on the AIO API version. |
 | **Per-API-version modules** | `modules/` | Inner modules a dispatcher routes to, one per API version. Added only where an API version genuinely diverges. |
-| **Resource catalog families** | `assets/`, `dataflows/` | A `main.bicep` routing on its provider's API version to one module per API version under the family's own `modules/`. Deployed through `manifests/aio-resources.yaml`, gated per site. |
+| **Resource catalog families** | `assets/`, `dataflows/` | A `main.bicep` routing on its provider's API version to one module per API version under the family's own `modules/`. Deployed through `manifests/aio-resources/manifest.yaml`, gated per site. |
 | **Lifecycle phases** | `upgrade/` | Templates for one operation that spans several steps, kept together rather than at the top level. |
 
 ## Platform lifecycle and dispatchers

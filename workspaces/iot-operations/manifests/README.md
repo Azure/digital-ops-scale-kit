@@ -1,35 +1,35 @@
 # manifests/
 
-Standalone manifests and their internal partials for the AIO platform.
+Core operations for the AIO workspace. Each named directory contains its
+`manifest.yaml` and operator guide. Examples use the same entry shape under
+[`samples`](../samples/README.md).
 
 ## Files
 
-| File | Kind | Deployable | Purpose |
-|------|------|------------|---------|
-| `aio-install.yaml` | Standalone | yes | Day-1 AIO platform install. Composes `_aio-fundamentals.yaml` and conditionally adds secret sync. |
-| `aio-upgrade.yaml` | Standalone | yes | In-place AIO upgrade to the site's current `aioRelease`. |
-| `aksee-bootstrap.yaml` | Standalone | yes | AKS Edge Essentials host bootstrap, gated on the completion tag the host worker writes. |
-| `aksee-upgrade.yaml` | Standalone | yes | Day-2 in-place AKS Edge Essentials cluster upgrade. |
-| `secretsync.yaml` | Standalone | yes | Day-2 enable secret sync on an existing AIO install. |
-| `aio-resources.yaml` | Standalone | yes | Config-driven AIO workload resources. Each deployment family runs only when the site selects a resource area it serves. See `docs/resource-catalog.md`. |
-| `_aio-fundamentals.yaml` | Partial | no | Arc extensions, custom location, instance, schema registry, ADR namespace, plus optional global/edge sites. |
-| `_aio-resources.yaml` | Partial | no | Resolves the existing AIO instance and deploys the selected Device Registry and dataflow resource families in order. |
-| `_resolve-aio.yaml` | Partial | no | Reads instance and custom-location names from the existing AIO instance for downstream chaining. |
-| `_secretsync.yaml` | Partial | no | Workload-identity-backed secret sync step. |
-| `_assets.yaml` | Partial | no | Device Registry devices and assets. Carries no manifest-level parameters, so a composing manifest can gate it. |
-| `_dataflows.yaml` | Partial | no | Dataflow endpoints, profiles, and dataflows. Carries no manifest-level parameters, so a composing manifest can gate it. |
+| Operation | Purpose |
+|---|---|
+| [aio-install](aio-install/README.md) | Install AIO on an existing Arc-connected cluster |
+| [aio-upgrade](aio-upgrade/README.md) | Upgrade an existing installation to its selected AIO release |
+| [aio-resources](aio-resources/README.md) | Apply Site-selected devices, assets and dataflows |
+| [secretsync](secretsync/README.md) | Enable Secret Sync on an existing instance |
+| [aksee-bootstrap](aksee-bootstrap/README.md) | Bootstrap an AKS Edge Essentials host and wait for completion |
+| [aksee-upgrade](aksee-upgrade/README.md) | Upgrade an existing AKS Edge Essentials cluster |
+
+Shared orchestration fragments live under `_partials/`. They are composed by
+entries, rather than presented as standalone operator choices. Sample-local
+and host-implementation partials stay beside the material they compose.
 
 ## Conventions
 
 - **`_` prefix** marks an internal partial. Not deployed directly. Composed via `include:`. The `test_partial_manifests_use_underscore_prefix` workspace test enforces this (a manifest authored to be included must start with `_`).
-- **Standalone manifests** are convenience entry points for `siteops deploy`. They re-include the partials they depend on.
+- **Standalone manifests** live at `<name>/manifest.yaml`. Give each one an explicit `name`, its own operator guide, and references to shared implementation.
 - **Composed manifests live in `samples/<name>/manifest.yaml`**, next to the partials they compose. A composition that pulls in two standalone manifests will collide on shared step names (e.g. `resolve-aio`). Compose the underlying `_partial.yaml` files instead. See `samples/README.md` for the full composition rules.
 
 ## Authoring a new partial
 
-1. Name the file `_<topic>.yaml` (leading underscore).
+1. Put a shared fragment at `_partials/_<topic>.yaml`. Keep implementation-local fragments with their owner.
 2. Set `kind: Manifest`. The engine has no separate Partial kind.
 3. Include only the steps that ARE the topic. Do not pull prerequisites. The parent decides ordering.
 4. If the partial needs values from upstream steps, reference them as `{{ steps.<name>.outputs.<key> }}` and document the expected upstream step in the description.
 
-See `docs/manifest-includes.md` for the full include contract.
+See [manifest includes](../../../docs/manifest-includes.md) for the full contract.

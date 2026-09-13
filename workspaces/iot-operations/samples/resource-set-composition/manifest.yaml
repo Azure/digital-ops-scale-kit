@@ -11,4 +11,4 @@ selector: "environment=sample,sample=resource-set-composition"
 
 steps:
   - include: _external-provider.yaml
-  - include: ../../manifests/_aio-resources.yaml
+  - include: ../../manifests/_partials/_aio-resources.yaml

@@ -2,7 +2,7 @@
 
 Source and generated artifacts for the AKS EE upgrade launcher and worker.
 The operator-facing walkthrough (prereqs, run, monitor, verify, Trident
-remediation) is in [`../README.md`](../README.md).
+remediation) is in the [upgrade guide](../../../../manifests/aksee-upgrade/README.md).
 
 | File | Role | Edit? |
 |---|---|---|

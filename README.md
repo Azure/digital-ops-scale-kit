@@ -9,7 +9,7 @@ Deploy Azure IoT Operations, or any Azure infrastructure, across dozens of sites
 
 ```bash
 # Deploy to all production sites
-siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml -l "environment=prod"
+siteops -w workspaces/iot-operations deploy manifests/aio-install/manifest.yaml -l "environment=prod"
 ```
 
 ---

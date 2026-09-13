@@ -44,8 +44,9 @@ readiness and functional verification.
 |---|---|---|
 | `sites/` | Where to deploy | Committed sites and reusable `SiteTemplate` defaults |
 | `sites.local/` | Local target overrides | Gitignored overlays that cannot introduce inheritance |
-| `manifests/` | What to run and in what order | Standalone entry points and reusable partials |
-| `parameters/` | Values and reusable resource definitions | Shared inputs, output chaining, release pins, and resource sets |
+| `manifests/` | Core operations | Named entry directories with a manifest and operator guide, plus shared `_partials/` |
+| `parameters/` | Defaults and step bindings | Shared inputs, output chaining and release pins |
+| `resource-sets/` | Reusable workload intent | Site-selected device, asset and dataflow definitions |
 | `contracts/` | How governed collections compose | Resource identity, reference, and provider-seed rules |
 | `templates/` | How provider resources or operations work | Bicep entry points, modules, and host-delivered content |
 | `samples/` | Worked deployments | Self-contained bundles and compositions with their own prerequisites |

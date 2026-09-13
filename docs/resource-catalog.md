@@ -81,7 +81,7 @@ A family deploys as one step, named for the family: `asset-resources`, `dataflow
 
 One step per family rather than one per resource kind keeps a fleet deploy to one round trip per family per site, and keeps the step namespace small. Step names are a flat global namespace after include flattening, and a collision is a parse error.
 
-Families run in the order `manifests/aio-resources.yaml` lists them, which is how a reference that crosses families is satisfied. Assets deploy before dataflows, so a dataflow naming an asset as its source finds it already there.
+Families run in the order `manifests/aio-resources/manifest.yaml` lists them, which is how a reference that crosses families is satisfied. Assets deploy before dataflows, so a dataflow naming an asset as its source finds it already there.
 
 ## Select resource sets per site
 
@@ -102,9 +102,9 @@ properties:
 The site above loads:
 
 ```text
-parameters/devices/site-devices.yaml
-parameters/assets/site-assets.yaml
-parameters/dataflows/site-telemetry.yaml
+resource-sets/devices/site-devices.yaml
+resource-sets/assets/site-assets.yaml
+resource-sets/dataflows/site-telemetry.yaml
 ```
 
 Omit an area for no selection. Use `[]` when a child site must clear a list
@@ -115,7 +115,7 @@ by identity.
 Deploy the fleet entry point:
 
 ```bash
-siteops -w workspaces/iot-operations deploy manifests/aio-resources.yaml -l environment=dev
+siteops -w workspaces/iot-operations deploy manifests/aio-resources/manifest.yaml -l environment=dev
 ```
 
 Site values resolve inside each definition at any depth.
@@ -156,7 +156,7 @@ relationship or ordering inside one deployment.
 An externally supplied resource is selected on its own resource area:
 
 ```yaml
-# parameters/devices/external-plant-opc.yaml
+# resource-sets/devices/external-plant-opc.yaml
 _siteops:
   external:
     devices:
@@ -230,7 +230,7 @@ and step.
 1. Add the resource collection and its identity to
    `contracts/aio-catalog.yaml`, plus any provider reference rules.
 2. Add `parameters/<area>/` for reusable sets.
-3. Add a typed parameter source to `manifests/aio-resources.yaml`, naming the
+3. Add a typed parameter source to `manifests/aio-resources/manifest.yaml`, naming the
    collections that area may contribute.
 4. Add or update the gated family partial and its versioned Bicep entry point.
    Keep `parameters/inputs/catalog.yaml` attached at step level so resolved
@@ -248,7 +248,7 @@ and step.
 2. Add its name to the matching ordered list under
    `properties.resourceSets.<area>`.
 3. Prepare the deployment with
-   `siteops plan manifests/aio-resources.yaml -l <selector>`.
+   `siteops plan manifests/aio-resources/manifest.yaml -l <selector>`.
 4. Run the workspace tests with `pytest tests/workspace/ -q`, which check name uniqueness, reference resolution, required fields, and validity at every supported API version.
 
 ## See also

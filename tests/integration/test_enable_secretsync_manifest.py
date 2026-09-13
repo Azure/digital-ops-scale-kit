@@ -107,7 +107,7 @@ class TestSecretSyncIdempotency:
         identity silently stops working.
         """
         result2 = orchestrator.deploy(
-            manifest_path=WORKSPACE_PATH / "manifests" / "secretsync.yaml",
+            manifest_path=WORKSPACE_PATH / "manifests" / "secretsync" / "manifest.yaml",
             selector=selector,
         )
         assert result2.status is RunStatus.SUCCEEDED

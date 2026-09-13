@@ -34,13 +34,17 @@ kind: Site
 name: catalog-basic
 subscription: "<subscription-id>"
 resourceGroup: "<resource-group>"
+location: "<target-location>"
 parameters:
   clusterName: "<arc-cluster-name>"
 ```
 
-Run `aio-install` against this site first, or set the resolved AIO instance
-name in the overlay when using an existing installation with another naming
-convention.
+For a new installation, use the [install guide](../../manifests/aio-install/README.md)
+with this same Site and assess AIO readiness before adding the workload.
+For an existing installation, set `parameters.aioInstanceName` in the overlay
+when its name differs from the Site-derived default. The instance name is a
+lookup input, not a value discovered by this sample. Confirm that
+`properties.aioRelease` matches the existing installation.
 
 The committed site uses `environment=sample`, which keeps it out of ordinary
 development fleet deployments. In the GitHub Actions or Azure Pipelines
@@ -51,10 +55,10 @@ for credentials and approvals and adds the sample selector automatically.
 
 ```bash
 siteops -w workspaces/iot-operations \
-  plan samples/resource-set-basic/manifest.yaml --describe
+  plan samples/resource-set-basic/manifest.yaml -l name=catalog-basic
 
 siteops -w workspaces/iot-operations \
-  deploy samples/resource-set-basic/manifest.yaml
+  deploy samples/resource-set-basic/manifest.yaml -l name=catalog-basic
 ```
 
 Publish a JSON message under

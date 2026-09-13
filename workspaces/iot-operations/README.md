@@ -26,15 +26,15 @@ health.
 
 | Goal | Entry point | Read first |
 |---|---|---|
-| Install AIO on a prepared cluster | `manifests/aio-install.yaml` | [Quickstart](../../docs/getting-started.md) |
-| Upgrade an existing AIO installation | `manifests/aio-upgrade.yaml` | [AIO releases](../../docs/aio-releases.md) |
-| Apply selected devices, assets, and dataflows | `manifests/aio-resources.yaml` | [Resource catalog](../../docs/resource-catalog.md) |
-| Enable Secret Sync on an existing instance | `manifests/secretsync.yaml` | [Secret Sync](../../docs/secret-sync.md) |
-| Bootstrap or upgrade an AKS Edge Essentials host | `manifests/aksee-bootstrap.yaml` or `manifests/aksee-upgrade.yaml` | [Host bootstrap](templates/host-bootstrap/README.md) or [host operations](templates/host-ops/README.md) |
+| Install AIO on a prepared cluster | `manifests/aio-install/manifest.yaml` | [Install guide](manifests/aio-install/README.md) |
+| Upgrade an existing AIO installation | `manifests/aio-upgrade/manifest.yaml` | [Upgrade guide](manifests/aio-upgrade/README.md) |
+| Apply selected devices, assets, and dataflows | `manifests/aio-resources/manifest.yaml` | [Resource-set guide](manifests/aio-resources/README.md) |
+| Enable Secret Sync on an existing instance | `manifests/secretsync/manifest.yaml` | [Enablement guide](manifests/secretsync/README.md) |
+| Bootstrap or upgrade an AKS Edge Essentials host | `manifests/aksee-bootstrap/manifest.yaml` or `manifests/aksee-upgrade/manifest.yaml` | [Host bootstrap](manifests/aksee-bootstrap/README.md) or [host upgrade](manifests/aksee-upgrade/README.md) |
 | Explore a worked deployment | `samples/<name>/manifest.yaml` | [Sample guide](samples/README.md) |
 
-Use `aio-upgrade.yaml` for in-place AIO version changes. Reapplying
-`aio-install.yaml` to an existing instance can overwrite operator-managed
+Use `aio-upgrade` for in-place AIO version changes. Reapplying
+`aio-install` to an existing instance can overwrite operator-managed
 instance settings and child resources.
 
 ## Inspect, prepare, and deploy
@@ -43,9 +43,9 @@ Run commands from the repository root:
 
 ```bash
 siteops -w workspaces/iot-operations sites <site> --output yaml
-siteops -w workspaces/iot-operations validate manifests/aio-install.yaml -l name=<site>
-siteops -w workspaces/iot-operations plan manifests/aio-install.yaml -l name=<site>
-siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml -l name=<site>
+siteops -w workspaces/iot-operations validate manifests/aio-install/manifest.yaml -l name=<site>
+siteops -w workspaces/iot-operations plan manifests/aio-install/manifest.yaml -l name=<site>
+siteops -w workspaces/iot-operations deploy manifests/aio-install/manifest.yaml -l name=<site>
 ```
 
 Replace `<site>` before running the commands. `sites` and `validate` read
@@ -60,9 +60,10 @@ mutation. `deploy` creates or updates provider resources. See
 |---|---|
 | `sites/` | Committed deployment targets and inherited defaults |
 | `sites.local/` | Gitignored local overlays |
-| `manifests/` | Standalone operations and reusable partials |
+| `manifests/` | Core entry directories and shared `_partials/` |
 | `contracts/` | Composition identities and reference rules |
-| `parameters/` | Shared inputs, release pins, chaining, and resource sets |
+| `parameters/` | Shared defaults, release pins and step wiring |
+| `resource-sets/` | Reusable Site-selected workload definitions |
 | `templates/` | Bicep and target-delivered implementation content |
 | `samples/` | Deployable examples with their own prerequisites |
 

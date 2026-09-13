@@ -10,8 +10,8 @@ name: aio-with-opc-ua
 description: Compose AIO fundamentals with the OPC UA sample.
 
 steps:
-  - include: ../../manifests/_aio-fundamentals.yaml
-  - include: ../../manifests/_resolve-aio.yaml
+  - include: ../../manifests/_partials/_aio-fundamentals.yaml
+  - include: ../../manifests/_partials/_resolve-aio.yaml
   - include: ../opc-ua-solution/_partial.yaml
 ```
 
@@ -91,7 +91,7 @@ Any manifest can be included. When it is, top-level fields that only make sense 
 - Only `steps:`, manifest-level `parameters:`, and
   `parameterCompositions:` are spliced into the parent.
 
-The convention for files authored primarily to be included is the `_` filename prefix (e.g., `_aio-fundamentals.yaml`, `_partial.yaml`). Standalone manifests such as `manifests/aio-install.yaml` exist as convenience entry points for `siteops deploy`. **Compositions should include the `_` partials, not the standalone manifests**, so that two siblings can share a common preamble without colliding on step names.
+The convention for files authored primarily to be included is the `_` filename prefix (e.g., `_aio-fundamentals.yaml`, `_partial.yaml`). Standalone manifests such as `manifests/aio-install/manifest.yaml` exist as convenience entry points for `siteops deploy`. **Compositions should include the `_` partials, not the standalone manifests**, so that two siblings can share a common preamble without colliding on step names.
 
 ## Empty includes
 

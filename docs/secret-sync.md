@@ -99,7 +99,7 @@ properties:
 Then deploy with `aio-install.yaml` as usual. The resolve-aio and secretsync steps run automatically after the AIO instance is configured:
 
 ```bash
-siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml -l "name=my-site"
+siteops -w workspaces/iot-operations deploy manifests/aio-install/manifest.yaml -l "name=my-site"
 ```
 
 Both steps are gated by a `when` condition and only run for sites that have `enableSecretSync: true`.
@@ -109,7 +109,7 @@ Both steps are gated by a `when` condition and only run for sites that have `ena
 Use the standalone manifest to enable secret sync on instances that are already deployed:
 
 ```bash
-siteops -w workspaces/iot-operations deploy manifests/secretsync.yaml -l "name=my-site"
+siteops -w workspaces/iot-operations deploy manifests/secretsync/manifest.yaml -l "name=my-site"
 ```
 
 The standalone `secretsync.yaml` manifest runs the same two steps (resolve-aio → enable-secretsync) without the full AIO installation pipeline.

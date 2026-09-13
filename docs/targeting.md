@@ -14,13 +14,13 @@ A manifest with all three sources empty is allowed as a library or partial.
 Ordinary validation needs no target. Planning and deployment require `-l`.
 
 ```yaml
-# manifests/aio-install.yaml
+# manifests/aio-install/manifest.yaml
 selector: "environment=prod"   # default scope
 ```
 
 ```bash
-siteops deploy manifests/aio-install.yaml                    # all env=prod sites
-siteops deploy manifests/aio-install.yaml -l name=munich-dev # only munich-dev
+siteops deploy manifests/aio-install/manifest.yaml                    # all env=prod sites
+siteops deploy manifests/aio-install/manifest.yaml -l name=munich-dev # only munich-dev
 ```
 
 ## Selector grammar
@@ -28,14 +28,14 @@ siteops deploy manifests/aio-install.yaml -l name=munich-dev # only munich-dev
 A selector is one or more `key=value` pairs joined by commas. Pairs AND-combine across distinct keys.
 
 ```bash
-siteops deploy manifests/aio-install.yaml -l environment=prod,region=eu
+siteops deploy manifests/aio-install/manifest.yaml -l environment=prod,region=eu
 # Selects sites where labels.environment == "prod" AND labels.region == "eu".
 ```
 
 `-l` is repeatable. Each invocation contributes `key=value` pairs that AND-combine with the others.
 
 ```bash
-siteops deploy manifests/aio-install.yaml -l environment=prod -l region=eu
+siteops deploy manifests/aio-install/manifest.yaml -l environment=prod -l region=eu
 # Equivalent to the comma-joined form above.
 ```
 
@@ -44,14 +44,14 @@ siteops deploy manifests/aio-install.yaml -l environment=prod -l region=eu
 `name=` is the one selector key whose duplicate values OR-combine. Multi-site selection happens through repeated `name=` values.
 
 ```bash
-siteops deploy manifests/aio-install.yaml -l name=munich-dev,name=seattle-dev
+siteops deploy manifests/aio-install/manifest.yaml -l name=munich-dev,name=seattle-dev
 # Targets exactly munich-dev OR seattle-dev.
 ```
 
 Duplicate values for any other key raise an error pointing at the conflict, since this is almost always a typo:
 
 ```bash
-siteops deploy manifests/aio-install.yaml -l env=dev -l env=prod
+siteops deploy manifests/aio-install/manifest.yaml -l env=dev -l env=prod
 # Error: Selector key `env` may only appear once. Selectors AND across
 # keys, so duplicating a key would always match zero sites. Only `name=`
 # supports multiple values (OR-combined).
@@ -62,8 +62,8 @@ siteops deploy manifests/aio-install.yaml -l env=dev -l env=prod
 For sites under nested `sites/` subdirectories, `name=` accepts both the basename (filename without extension) and the relative path under the trusted dir. Both forms resolve to the same site.
 
 ```bash
-siteops deploy manifests/aio-install.yaml -l name=munich-dev
-siteops deploy manifests/aio-install.yaml -l name=regions/eu/munich-dev
+siteops deploy manifests/aio-install/manifest.yaml -l name=munich-dev
+siteops deploy manifests/aio-install/manifest.yaml -l name=regions/eu/munich-dev
 # Both target the file at `sites/regions/eu/munich-dev.yaml`.
 ```
 
@@ -114,13 +114,13 @@ Partials (filename prefixed `_`) compose into other manifests via `include:`. Th
 When a CLI selector matches zero sites, `deploy` exits non-zero with a diagnostic that lists what the workspace actually contains for each requested key. The diagnostic catches typos at the moment the operator runs the command.
 
 ```bash
-siteops deploy manifests/aio-install.yaml -l environment=prdo
+siteops deploy manifests/aio-install/manifest.yaml -l environment=prdo
 # Error: CLI selector `-l environment=prdo` matched no sites.
 # `environment=prdo` requested. Workspace `environment` values: 'dev', 'prod', 'staging'.
 ```
 
 ```bash
-siteops deploy manifests/aio-install.yaml -l name=does-not-exist
+siteops deploy manifests/aio-install/manifest.yaml -l name=does-not-exist
 # Error: CLI selector `-l name=does-not-exist` matched no sites.
 # `name=does-not-exist` not found. Workspace site names:
 # <available-site-1>, <available-site-2>.
@@ -129,7 +129,7 @@ siteops deploy manifests/aio-install.yaml -l name=does-not-exist
 When the site name matches but another selector key knocks it out, the diagnostic says so:
 
 ```bash
-siteops deploy manifests/aio-install.yaml -l name=munich-dev,environment=prod
+siteops deploy manifests/aio-install/manifest.yaml -l name=munich-dev,environment=prod
 # `name=munich-dev` matched a workspace site but another selector key
 # filtered it out.
 ```

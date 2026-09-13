@@ -31,9 +31,9 @@ parameters:
   - "parameters/aio-releases/{{ site.properties.aioRelease }}.yaml"
 
 steps:
-  - include: ../../manifests/_aio-fundamentals.yaml
-  - include: ../../manifests/_resolve-aio.yaml
+  - include: ../../manifests/_partials/_aio-fundamentals.yaml
+  - include: ../../manifests/_partials/_resolve-aio.yaml
   # Matches aio-install.yaml, so the site toggle means the same thing here.
-  - include: ../../manifests/_secretsync.yaml
+  - include: ../../manifests/_partials/_secretsync.yaml
     when: "{{ site.properties.deployOptions.enableSecretSync }}"
   - include: ../opc-ua-solution/_partial.yaml

@@ -1,6 +1,6 @@
 """Integration tests for the config-driven catalog entry point.
 
-`manifests/aio-resources.yaml` is the fleet route: a site composes ordered sets
+`manifests/aio-resources/manifest.yaml` is the fleet route: a site composes ordered sets
 through `properties.resourceSets.<area>`, the catalog resolves each set to a
 definition file under `parameters/<area>/`, and the deployment gate opens.
 
@@ -29,16 +29,16 @@ from tests.integration.helpers.releases import load_aio_release
 
 pytestmark = [pytest.mark.integration]
 
-AIO_RESOURCES_MANIFEST = WORKSPACE_PATH / "manifests" / "aio-resources.yaml"
+AIO_RESOURCES_MANIFEST = WORKSPACE_PATH / "manifests" / "aio-resources" / "manifest.yaml"
 
 CATALOG_STEP = "dataflow-resources"
 ASSET_CATALOG_STEP = "asset-resources"
 
-# Declared by parameters/dataflows/site-telemetry.yaml.
+# Declared by resource-sets/dataflows/site-telemetry.yaml.
 SET_ENDPOINT_NAME = "site-telemetry-out"
 SET_DATAFLOW_NAME = "site-telemetry"
 
-# Declared by parameters/assets/site-assets.yaml.
+# Declared by resource-sets/assets/site-assets.yaml.
 SET_DEVICE_NAME = "site-opc-ua"
 SET_ASSET_NAME = "site-oven"
 SET_DEVICE_ENDPOINT_NAME = "opc-ua-connector-0"

@@ -65,7 +65,7 @@ Deploy AIO on this site first:
 
 ```bash
 siteops -w workspaces/iot-operations \
-  deploy manifests/aio-install.yaml -l name=catalog-composition
+  deploy manifests/aio-install/manifest.yaml -l name=catalog-composition
 ```
 
 The committed site uses `environment=sample`, which keeps it out of ordinary

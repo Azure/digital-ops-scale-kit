@@ -26,8 +26,8 @@ from tests.workspace.catalog_harness import ASSETS
 # The declaration the documentation points at for per-site values. Named rather
 # than counted, since another declaration carrying a site value would keep a
 # count above zero while this one quietly stopped using one.
-_WORKED_EXAMPLE = "parameters/assets/site-assets.yaml"
-_WORKED_DEVICE_EXAMPLE = "parameters/devices/site-devices.yaml"
+_WORKED_EXAMPLE = "resource-sets/assets/site-assets.yaml"
+_WORKED_DEVICE_EXAMPLE = "resource-sets/devices/site-devices.yaml"
 
 # The keys `properties.deviceRef` carries. A device is reached through one named
 # inbound endpoint, so neither half identifies the binding on its own.

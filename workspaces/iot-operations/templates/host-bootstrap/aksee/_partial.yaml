@@ -9,7 +9,7 @@ description: |
   K3s cluster create, Arc-connect with custom locations, and cleanup.
 
   Internal partial (filename prefixed `_`). Not deployed directly. Composed
-  by the standalone `manifests/aksee-bootstrap.yaml` and by compositions
+  by the standalone `manifests/aksee-bootstrap/manifest.yaml` and by compositions
   that add a host bootstrap step before AIO install (e.g.,
   `samples/aio-with-aksee-bootstrap/manifest.yaml`).
 

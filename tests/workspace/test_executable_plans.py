@@ -293,7 +293,7 @@ def test_aio_install_executable_plan_omits_nullable_instance_parameters(
     )
 
     result = orchestrator.build_plan(
-        workspace / "manifests" / "aio-install.yaml",
+        workspace / "manifests" / "aio-install" / "manifest.yaml",
         intent=PlanIntent.EXECUTABLE,
         sites=[site],
     )

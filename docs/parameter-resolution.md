@@ -85,9 +85,9 @@ The directory groups files by the role they play in the parameter merge:
 | `parameters/inputs/` | Consumer fan-in (a step pulls outputs from upstream producers) | `inputs/aio-instance.yaml` pulls from `schema-registry`, `adr-ns`, `aio-enablement` |
 | `parameters/outputs/` | Producer fan-out (a single step's outputs feed multiple downstream consumers) | `outputs/aio-instance.yaml` feeds `schema-registry-role` |
 | `parameters/aio-releases/` | Per-release version pin files (selected via `site.properties.aioRelease`) | `aio-releases/2607.yaml` |
-| `parameters/devices/` | Device definition sets selected through `site.properties.resourceSets.devices` | `devices/site-devices.yaml` |
-| `parameters/assets/` | Asset definition sets selected through `site.properties.resourceSets.assets` | `assets/site-assets.yaml` |
-| `parameters/dataflows/` | Dataflow definition sets selected through `site.properties.resourceSets.dataflows` | `dataflows/site-telemetry.yaml` |
+| `resource-sets/devices/` | Device definition sets selected through `site.properties.resourceSets.devices` | `devices/site-devices.yaml` |
+| `resource-sets/assets/` | Asset definition sets selected through `site.properties.resourceSets.assets` | `assets/site-assets.yaml` |
+| `resource-sets/dataflows/` | Dataflow definition sets selected through `site.properties.resourceSets.dataflows` | `dataflows/site-telemetry.yaml` |
 
 A step that has both fan-in inputs and fan-out outputs gets two files: one under `inputs/`, one under `outputs/`, named after the step (e.g. `inputs/aio-instance.yaml` and `outputs/aio-instance.yaml`).
 
@@ -106,7 +106,7 @@ RG-level sites can reference outputs from subscription-scoped steps. Subscriptio
 edgeSiteId: "{{ steps.global-edge-site.outputs.site.id }}"
 ```
 
-`global-edge-site` is a subscription-scoped step in `manifests/_aio-fundamentals.yaml`, deployed once per subscription. `munich-dev` and `munich-prod` are RG-level sites in that same subscription, so both resolve this reference from the one set of outputs that step produced.
+`global-edge-site` is a subscription-scoped step in `manifests/_partials/_aio-fundamentals.yaml`, deployed once per subscription. `munich-dev` and `munich-prod` are RG-level sites in that same subscription, so both resolve this reference from the one set of outputs that step produced.
 
 The consuming template has to declare the parameter. Auto-filtering removes a
 chained value whose name the template does not accept. Executable preparation

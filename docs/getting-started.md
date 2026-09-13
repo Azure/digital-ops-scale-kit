@@ -89,8 +89,8 @@ inherited settings.
 Check the configuration and prepare a plan:
 
 ```bash
-siteops -w workspaces/iot-operations validate manifests/aio-install.yaml -l name=munich-dev
-siteops -w workspaces/iot-operations plan manifests/aio-install.yaml -l name=munich-dev
+siteops -w workspaces/iot-operations validate manifests/aio-install/manifest.yaml -l name=munich-dev
+siteops -w workspaces/iot-operations plan manifests/aio-install/manifest.yaml -l name=munich-dev
 ```
 
 `validate` checks structure without compilation. `plan` also compiles templates
@@ -106,7 +106,7 @@ deploy only this site:
 
 ```bash
 az login
-siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml -l name=munich-dev
+siteops -w workspaces/iot-operations deploy manifests/aio-install/manifest.yaml -l name=munich-dev
 ```
 
 Deployment applies the selected operations. Failure or interruption can leave
@@ -132,7 +132,7 @@ target them. You can keep the same manifest and select the fleet with
 Review the wider selection first:
 
 ```bash
-siteops -w workspaces/iot-operations plan manifests/aio-install.yaml -l "environment=prod"
+siteops -w workspaces/iot-operations plan manifests/aio-install/manifest.yaml -l "environment=prod"
 ```
 
 After review, use `deploy` with the same manifest and selector. See
