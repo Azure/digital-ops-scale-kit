@@ -4,6 +4,7 @@
 """Command-line interface for Azure Site Ops.
 
 Commands:
+    browse   - Discover and inspect deployment content
     sites    - Inspect sites as plain text, YAML, or JSON
     validate - Validate manifest structure and references
     plan     - Prepare and preflight a deployment plan
@@ -28,6 +29,8 @@ from typing import Any, Callable
 import yaml
 
 from siteops import __version__
+from siteops.browse import BrowseError, BrowseResult, inspect_content
+from siteops.browse_output import render_browse_plain, serialize_browse_json
 from siteops.composition import CompositionError, report_composition_error
 from siteops.models import (
     Manifest,
@@ -78,6 +81,35 @@ def resolve_manifest_path(manifest: Path, workspace: Path) -> Path:
     if manifest.is_absolute():
         return manifest
     return workspace / manifest
+
+
+def cmd_browse(args: argparse.Namespace) -> int:
+    """Inspect content before any Site configuration or Orchestrator is loaded."""
+    if is_redaction_enabled():
+        print(
+            "Content inspection output is private. Use SITEOPS_REDACT_OUTPUT=0 "
+            "only for an authorized private destination.",
+            file=sys.stderr,
+        )
+        return 1
+    workspace = args.workspace
+    if workspace is None:
+        workspace = _auto_discover_workspace(Path.cwd()) or Path.cwd()
+    try:
+        result = inspect_content(
+            workspace, args.name, search=args.search, tags=tuple(args.tag),
+            category=args.category, include_partials=args.include_partials, limit=args.limit,
+        )
+    except BrowseError as error:
+        result = BrowseResult(str(workspace), diagnostics=(error.diagnostic,))
+    except ValueError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        return 1
+    if args.output == "json":
+        print(serialize_browse_json(result))
+    else:
+        print(render_browse_plain(result), end="")
+    return 1 if result.diagnostics else 0
 
 
 def _output_settings(
@@ -902,6 +934,8 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  siteops -w workspaces/iot-operations browse
+  siteops -w workspaces/iot-operations browse aio-install
   siteops -w workspaces/iot-operations sites
   siteops -w workspaces/iot-operations sites munich-dev --output yaml
   siteops -w workspaces/iot-operations validate manifests/aio-install/manifest.yaml
@@ -947,6 +981,28 @@ Examples:
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    p_browse = subparsers.add_parser(
+        "browse",
+        help="Discover and inspect deployment content",
+        description=(
+            "Inspect local manifest headers and optional authored guidance without "
+            "loading Sites, compiling templates or contacting deployment services."
+        ),
+    )
+    p_browse.add_argument(
+        "name", nargs="?", help="Exact entry name or explicit workspace-relative manifest path"
+    )
+    p_browse.add_argument("--search", help="Case-insensitive text filter")
+    p_browse.add_argument("--tag", action="append", default=[], help="Required tag (repeatable)")
+    p_browse.add_argument("--category", help="Exact authored category")
+    p_browse.add_argument(
+        "--include-partials", action="store_true", help="Include declared reusable fragments"
+    )
+    p_browse.add_argument("--limit", type=int, help="Maximum inventory rows (positive integer)")
+    p_browse.add_argument(
+        "--output", choices=("plain", "json"), default="plain", help="Private output format"
+    )
 
     # deploy command
     p_deploy = subparsers.add_parser(
@@ -1158,6 +1214,9 @@ Examples:
     # Setup logging - use verbose from subcommand if available, otherwise False
     verbose = getattr(args, "verbose", False)
     setup_logging(verbose)
+
+    if args.command == "browse":
+        sys.exit(cmd_browse(args))
 
     # Workspace resolution. Explicit -w wins. Otherwise auto-discover
     # from cwd. If discovery is ambiguous or finds nothing, fall back to cwd

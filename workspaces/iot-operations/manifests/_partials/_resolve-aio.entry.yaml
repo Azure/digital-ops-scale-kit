@@ -1,0 +1,6 @@
+apiVersion: siteops/v1alpha1
+kind: DeploymentEntry
+role: partial
+tags: [aio, lookup]
+documentation: [../README.md]
+coverage: The parent supplies the instance name and release configuration. Associated infrastructure is read during deployment.

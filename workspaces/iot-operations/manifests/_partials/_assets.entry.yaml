@@ -1,0 +1,6 @@
+apiVersion: siteops/v1alpha1
+kind: DeploymentEntry
+role: partial
+tags: [aio, devices, assets]
+documentation: [../README.md]
+coverage: Requires the composing entry's prior instance lookup and selected declarations.

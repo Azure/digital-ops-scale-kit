@@ -1,0 +1,16 @@
+apiVersion: siteops/v1alpha1
+kind: DeploymentEntry
+role: standalone
+category: sample
+tags: [aio, dataflows, mqtt, yaml]
+documentation: [README.md]
+outcome: Apply sample-local YAML endpoints, profiles and dataflows to an existing AIO instance.
+prerequisites:
+  - An existing instance, configured Site and permission for the selected resource deployments.
+  - An authenticated MQTT client or actual telemetry source for functional observation.
+effects:
+  - Applies the local declaration through shared templates, with Site-specific topics and client identity.
+  - Provisions routing resources without establishing their health or message movement.
+removal:
+  - Delete the owned routes, endpoints and profiles explicitly. Declaration removal is not pruning.
+coverage: Local-declaration example. Review namespace assumptions and routing behavior in the guide before applying it.

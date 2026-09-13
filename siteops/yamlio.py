@@ -77,3 +77,38 @@ def load(stream):
         yaml.YAMLError: The document is not well-formed.
     """
     return yaml.load(stream, Loader=_StrictLoader)
+
+
+def load_bounded(text: str, *, max_nodes: int = 10000, max_depth: int = 40):
+    """Use the engine loader with bounded nesting and expanded alias structure."""
+    depth = 0
+    events = 0
+    for event in yaml.parse(text):
+        events += 1
+        if isinstance(event, yaml.events.CollectionStartEvent):
+            depth += 1
+        elif isinstance(event, yaml.events.CollectionEndEvent):
+            depth -= 1
+        if events > max_nodes * 3 or depth > max_depth:
+            raise yaml.YAMLError("YAML structure exceeds the inspection limit.")
+
+    loader = _StrictLoader(text)
+    try:
+        root = loader.get_single_node()
+        if root is None:
+            return None
+        pending = [(root, 0)]
+        expanded = 0
+        while pending:
+            node, depth = pending.pop()
+            expanded += 1
+            if expanded > max_nodes or depth > max_depth:
+                raise yaml.YAMLError("Expanded YAML exceeds the inspection limit.")
+            if isinstance(node, yaml.MappingNode):
+                for key, value in node.value:
+                    pending.extend(((key, depth + 1), (value, depth + 1)))
+            elif isinstance(node, yaml.SequenceNode):
+                pending.extend((value, depth + 1) for value in node.value)
+        return loader.construct_document(root)
+    finally:
+        loader.dispose()

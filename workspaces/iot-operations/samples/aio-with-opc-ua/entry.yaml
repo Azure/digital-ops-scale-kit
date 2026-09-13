@@ -1,0 +1,16 @@
+apiVersion: siteops/v1alpha1
+kind: DeploymentEntry
+role: standalone
+category: sample
+tags: [aio, opc-ua, workload, composition]
+documentation: [README.md]
+outcome: Install AIO and the composed OPC UA-to-cloud example on a fresh cluster.
+prerequisites:
+  - A prepared Arc-connected cluster, configured Site and both installation and solution permissions.
+  - Review the selected release's connector limitations and the solution's simulator input.
+effects:
+  - Combines platform installation, simulated equipment, Device Registry resources, a dataflow and Event Hub resources.
+  - Creates billable resources and role assignments. Deployment does not establish telemetry delivery.
+removal:
+  - Use the component guides to remove owned resources deliberately while preserving retained infrastructure.
+coverage: Composition synopsis. The guides own detailed configuration and release-dependent functional limits. No readiness or telemetry observation is performed by browsing.

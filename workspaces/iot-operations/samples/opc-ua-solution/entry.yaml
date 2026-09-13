@@ -1,0 +1,17 @@
+apiVersion: siteops/v1alpha1
+kind: DeploymentEntry
+role: standalone
+category: sample
+tags: [aio, opc-ua, event-hub, bicep]
+documentation: [README.md]
+outcome: Deploy a simulated OPC UA-to-Event Hub solution on an existing AIO instance.
+prerequisites:
+  - An existing AIO instance, configured Site, deployment permissions and Arc Kubernetes access.
+  - Review the selected release's connector limitations and the commit-pinned external simulator document.
+effects:
+  - Creates Device Registry, Event Hub, role-assignment and dataflow resources and applies the simulator through kubectl.
+  - The external simulator document is obtained during execution, outside this local inspection.
+  - Provider completion is not telemetry-delivery evidence.
+removal:
+  - Follow the guide's Azure-resource and simulator cleanup, preserving shared infrastructure.
+coverage: Solution synopsis. This card does not certify the external execution input, package completeness, release support or data movement.

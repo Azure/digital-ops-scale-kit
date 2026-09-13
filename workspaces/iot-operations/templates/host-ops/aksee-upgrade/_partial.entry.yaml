@@ -1,0 +1,6 @@
+apiVersion: siteops/v1alpha1
+kind: DeploymentEntry
+role: partial
+tags: [host, aksee, upgrade]
+documentation: [../../../manifests/aksee-upgrade/README.md]
+coverage: Starts upgrade only. The composing entry must supply the worker-completion wait.

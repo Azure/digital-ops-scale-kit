@@ -4,6 +4,11 @@ Core operations for the AIO workspace. Each named directory contains its
 `manifest.yaml` and operator guide. Examples use the same entry shape under
 [`samples`](../samples/README.md).
 
+Optional `entry.yaml` describes the operator contract for `siteops browse`.
+Other manifest filenames use `<stem>.entry.yaml`. Keep those facts with their
+entry, rather than duplicating an inventory of cards. See the
+[authoring contract](../../../docs/browse-content.md#author-an-entry).
+
 ## Files
 
 | Operation | Purpose |

@@ -1,0 +1,16 @@
+apiVersion: siteops/v1alpha1
+kind: DeploymentEntry
+role: standalone
+category: sample
+tags: [aio, devices, assets, yaml]
+documentation: [README.md]
+outcome: Apply the worked YAML device and asset definitions to an existing AIO instance.
+prerequisites:
+  - An existing AIO instance with its ADR namespace, correct Site configuration and resource permissions.
+  - A reachable OPC UA endpoint and an authenticated client when observing telemetry.
+effects:
+  - Applies fixed shared resource-set sources. Resources can deploy even when the sample simulator is absent.
+  - Real telemetry requires a reachable server and the appropriate connector behavior for the selected release.
+removal:
+  - Delete owned assets before devices. Removing declarations does not delete previously applied resources.
+coverage: Fixed-declaration example. Detailed definitions and functional prerequisites are in the guide, not a complete operator input schema.

@@ -59,6 +59,21 @@ Deployment creates or updates Azure resources and can incur charges.
 Once that first site is working, expand the selector to deploy the same
 manifest across your fleet.
 
+## Browse deployment choices
+
+Inspect local operations and samples before supplying deployment inputs:
+
+```bash
+siteops -w workspaces/iot-operations browse
+siteops -w workspaces/iot-operations browse aio-install
+siteops -w workspaces/iot-operations browse --tag mqtt
+```
+
+Browsing reads descriptions and authored guidance without loading Site values
+or invoking deployment tools. Each card provides the path for the existing
+`plan` and `deploy` commands. See [browse deployment content](docs/browse-content.md)
+for filters, private JSON and the installation-to-workload journey.
+
 ## Learn and extend
 
 | Task | Start here |

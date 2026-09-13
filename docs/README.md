@@ -13,6 +13,7 @@ separates validation, planning, deployment, and health verification.
 | Install an identified Site Ops release | [Install Site Ops](install-siteops.md) |
 | Configure and inspect a deployment target | [Site configuration](site-configuration.md) |
 | Understand the included AIO content | [IoT Operations workspace](../workspaces/iot-operations/README.md) |
+| Find and inspect deployment choices | [Browse deployment content](browse-content.md) |
 | Diagnose a failed command or provider operation | [Troubleshooting](troubleshooting.md) |
 
 Installing the CLI does not acquire a workspace. The included IoT Operations

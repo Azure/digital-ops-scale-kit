@@ -52,6 +52,18 @@ release installation step.
 
 ## 2. Set your target
 
+Inspect the installation's purpose, requirements and effects before supplying
+target values:
+
+```bash
+siteops -w workspaces/iot-operations browse aio-install
+```
+
+The card is authored guidance, not an environment assessment. Browse other
+choices with `siteops -w workspaces/iot-operations browse`. See
+[content inspection](browse-content.md) for filtering and the same-Site
+basic-routing journey.
+
 Create the `workspaces/iot-operations/sites.local/` directory and save the
 following as `munich-dev.yaml`. Replace every placeholder with your target's
 values:

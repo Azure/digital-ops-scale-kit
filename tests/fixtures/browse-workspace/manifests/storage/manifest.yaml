@@ -1,0 +1,11 @@
+apiVersion: siteops/v1
+kind: Manifest
+name: storage
+description: Create a storage account in a configured resource group.
+selector: environment=example
+parameters:
+  - defaults.yaml
+steps:
+  - name: storage-account
+    template: templates/storage.json
+    scope: resourceGroup

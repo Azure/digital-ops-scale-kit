@@ -1520,6 +1520,11 @@ def _read_manifest_spec(path: Path) -> tuple[dict[str, Any], str, str]:
     with open(path, "r", encoding="utf-8") as f:
         data = yamlio.load(f)
 
+    return _parse_manifest_spec(data, path)
+
+
+def _parse_manifest_spec(data: Any, path: Path) -> tuple[dict[str, Any], str, str]:
+    """Validate and unwrap a loaded manifest using the shared header contract."""
     if not data:
         raise ValueError(f"Empty or invalid YAML file: {path}")
 

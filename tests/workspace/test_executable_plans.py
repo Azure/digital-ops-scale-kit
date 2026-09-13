@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from siteops.browse import inspect_content
 from siteops.compilation import TemplateKind
 from siteops.planning import (
     CapabilityKind,
@@ -54,6 +55,32 @@ _AIO_INSTALL_TEMPLATES = {
     "resolve-aio": Path("templates/aio/resolve-aio.bicep"),
     "secretsync": Path("templates/secretsync/enable-secretsync.bicep"),
 }
+
+
+def _assert_guidance_supplies_are_retained(workspace, manifest_path, plan):
+    inspection = inspect_content(workspace, str(manifest_path))
+    assert not inspection.diagnostics
+    entry = inspection.entries[0]
+    assert entry.metadata_status == "declared"
+    for supplied in entry.guidance.supplied or ():
+        consumers = [
+            operation
+            for target in plan.targets
+            for operation in target.operations
+            if operation.identity.step == supplied.step
+            and operation.disposition is PlanDisposition.EXECUTE
+        ]
+        assert consumers, f"Guidance names an unexercised consumer: {supplied.step}"
+        for consumer in consumers:
+            details = consumer.details
+            assert isinstance(details, DeploymentOperation)
+            schema = plan.template_unit(details.template_unit_key)
+            assert supplied.input in schema.parameter_names
+            retained = {
+                parameter.key.value for parameter in details.parameters.entries
+                if isinstance(parameter.key, LiteralValue)
+            }
+            assert supplied.input in retained
 
 
 def _guard_local_compilation(
@@ -174,6 +201,9 @@ def test_catalog_executable_plan(
     assert result.executable
     assert result.plan is not None
     plan = result.plan
+    _assert_guidance_supplies_are_retained(
+        workspace, workspace / "samples" / sample / "manifest.yaml", plan
+    )
     assert plan.intent is PlanIntent.EXECUTABLE
     assert [target.name for target in plan.targets] == [site_name]
     target = plan.targets[0]
@@ -302,6 +332,9 @@ def test_aio_install_executable_plan_omits_nullable_instance_parameters(
     assert result.status is PlanStatus.PLANNED
     assert result.executable
     assert result.plan is not None
+    _assert_guidance_supplies_are_retained(
+        workspace, workspace / "manifests" / "aio-install" / "manifest.yaml", result.plan
+    )
     target = result.plan.targets[0]
     selected = {
         operation.identity.step: operation

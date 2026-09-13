@@ -1,0 +1,16 @@
+apiVersion: siteops/v1alpha1
+kind: DeploymentEntry
+role: standalone
+category: operation
+tags: [aio, secretsync, identity]
+documentation: [README.md]
+outcome: Enable workload-identity-backed Secret Sync on an existing AIO instance.
+prerequisites:
+  - An existing AIO instance and cluster with OIDC issuer and workload identity enabled.
+  - A configured Site, instance name, release selection and permissions for identities, vault resources and role assignments as applicable.
+effects:
+  - Can create or configure identity, vault, federation, permissions and Secret Provider Class resources, and update the instance.
+  - Enablement is separate from materializing selected secret values in Kubernetes.
+removal:
+  - Remove only the identities, permissions, data and synchronized resources you own. Configuration removal is not automatic cleanup.
+coverage: Enablement synopsis. The guide owns vault selection and preservation settings. Secret values and effective permissions are not inspected or exported.

@@ -8,6 +8,11 @@ need target-specific permissions, and may assume an existing AIO installation.
 Choose a sample from [the workspace table](#samples-in-this-workspace), read
 its prerequisites, and prepare one explicit site before running it.
 
+Use `siteops -w workspaces/iot-operations browse --category sample` to explore
+the examples. Each entry's optional `entry.yaml` keeps descriptive guidance
+beside its manifest and README. See [browse](../../../docs/browse-content.md)
+for selection, filtering and private output.
+
 Two shapes are supported, and the line between them is whether other samples can compose the directory.
 
 - **Self-contained workload bundle.** The directory carries a `_partial.yaml` defining its own steps, so other samples can compose it. It may also carry a Bicep template, chaining inputs, and declaration files. Examples: `opc-ua-solution` (with its own template), `secretsync-sample`.

@@ -39,7 +39,7 @@ def _all_manifest_files(workspace: Path) -> list[Path]:
     if templates.is_dir():
         for ext in ("yaml", "yml"):
             found.extend(sorted(templates.rglob(f"_*.{ext}")))
-    return found
+    return [path for path in found if not path.name.endswith(".entry.yaml")]
 
 
 class TestManifestValidation:

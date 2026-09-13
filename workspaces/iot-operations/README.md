@@ -24,6 +24,19 @@ health.
 
 ## Choose the operation
 
+Browse the same operations and examples locally, without loading Site values:
+
+```bash
+siteops -w workspaces/iot-operations browse
+siteops -w workspaces/iot-operations browse aio-install
+siteops -w workspaces/iot-operations browse --tag mqtt
+```
+
+See [browsing](../../docs/browse-content.md) for filtering, private JSON and the
+configured-Site deployment journey. Each entry owns its operator guide and
+optional descriptive `entry.yaml`. These are not package verification or
+deployment-readiness evidence.
+
 | Goal | Entry point | Read first |
 |---|---|---|
 | Install AIO on a prepared cluster | `manifests/aio-install/manifest.yaml` | [Install guide](manifests/aio-install/README.md) |

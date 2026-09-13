@@ -1,0 +1,16 @@
+apiVersion: siteops/v1alpha1
+kind: DeploymentEntry
+role: standalone
+category: sample
+tags: [aio, host, windows, aksee, composition]
+documentation: [README.md]
+outcome: Bootstrap the host, wait for worker state, then install AIO fundamentals.
+prerequisites:
+  - The host bootstrap and AIO installation prerequisites both apply.
+  - A configured Site identifying the intended host and resulting cluster.
+effects:
+  - Combines privileged host work, possible reboots and AIO resource deployment.
+  - The state-only wait does not provide run-correlated completion. This composition does not add Secret Sync.
+removal:
+  - Follow each component's ownership and cleanup guidance. There is no combined rollback.
+coverage: Composition synopsis. Review both component guides and observe host, AIO readiness and workload outcomes separately.

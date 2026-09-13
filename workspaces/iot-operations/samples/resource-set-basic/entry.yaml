@@ -1,0 +1,66 @@
+apiVersion: siteops/v1alpha1
+kind: DeploymentEntry
+role: standalone
+category: sample
+tags: [aio, workload, mqtt, beginner, resource-sets]
+documentation: [README.md]
+outcome: Route local MQTT messages through the existing AIO instance's default endpoint and profile.
+inputs:
+  - field: subscription
+    type: string
+    requirement: required
+    description: Subscription for the existing AIO instance.
+    source: sites/catalog-basic.yaml
+  - field: resourceGroup
+    type: string
+    requirement: required
+    description: Resource group containing the intended AIO instance.
+    source: sites/catalog-basic.yaml
+  - field: location
+    type: string
+    requirement: required
+    description: Required by the Site model. Keep the correct target location even though these workload templates do not consume it as a dataflow input.
+    source: sites/catalog-basic.yaml
+  - field: properties.aioRelease
+    type: string
+    requirement: required
+    sensitivity: non-sensitive
+    description: Select the release configuration appropriate to the existing installation's API generation.
+    defaultBehavior: Inherited from the Site configuration, not discovered by browsing.
+    source: sites/base-site.yaml
+  - field: parameters.aioInstanceName
+    type: string
+    requirement: optional
+    sensitivity: non-sensitive
+    description: Supply the actual name when the existing instance differs from the naming convention. The lookup needs this name as input.
+    defaultBehavior: The shared fallback derives the name from the Site name.
+    source: templates/aio/resolve-aio.bicep
+  - field: properties.resourceSets.dataflows
+    type: list
+    requirement: required
+    sensitivity: non-sensitive
+    description: Select basic-routing for this intended outcome.
+    defaultBehavior: The committed catalog-basic Site selects the basic-routing set.
+    source: sites/catalog-basic.yaml
+supplied:
+  - step: dataflow-resources
+    input: customLocationName
+    description: During deployment, resolve-aio reads the custom location bound to the named instance. This higher-priority step binding supersedes the conventional Site-derived name.
+    source: parameters/inputs/catalog.yaml
+  - step: dataflow-resources
+    input: dataflows
+    description: The selected resource set supplies the governed dataflow collection.
+    source: resource-sets/dataflows/basic-routing.yaml
+prerequisites:
+  - An existing AIO installation ready for the workload, with its default endpoint and profile.
+  - For a new installation, use catalog-basic for both aio-install and this sample. For an existing installation, configure its instance name and release rather than reinstalling.
+  - Azure CLI and Bicep, with permission for the ARM deployments, associated reads and AIO child-resource writes.
+  - Cluster access and an authenticated MQTT client are separate requirements for functional observation. This manifest has no kubectl step.
+effects:
+  - Reads the existing instance's associated infrastructure during deployment and creates or updates the basic-routing dataflow.
+  - Reads azure-iot-operations/data/siteops-samples/basic/# and republishes to siteops-samples/<site-name>/basic.
+  - The selected set declares no additional endpoint, profile or cloud service. It uses existing AIO capacity, which is not a zero-cost guarantee.
+removal:
+  - Deselecting the set stops applying it and does not delete the dataflow.
+  - Delete the intended dataflow explicitly before removing example configuration.
+coverage: Covers the basic-routing set and its existing-instance handoff. Deployment success does not establish dataflow health or message delivery. Subscribe first, publish a unique payload and observe it at the destination using the guide's MQTT procedure.
