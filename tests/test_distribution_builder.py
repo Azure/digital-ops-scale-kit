@@ -768,6 +768,33 @@ def test_published_wheel_is_identical_to_the_bundled_wheel(builder, built_applic
         assert (output / wheel.name).read_bytes() == released.read(manifest.application_wheel)
 
 
+def test_publication_creates_both_artifacts_with_owner_only_permissions(builder, tmp_path, monkeypatch):
+    archive = tmp_path / "input.zip"
+    wheel = tmp_path / "siteops-1.0-py3-none-any.whl"
+    archive.write_bytes(b"archive")
+    wheel.write_bytes(b"wheel")
+    output = tmp_path / "output"
+    output.mkdir()
+    opened = {}
+    original_open = builder.os.open
+
+    def record_open(path, flags, mode):
+        opened[Path(path).name] = mode
+        return original_open(path, flags, mode)
+
+    monkeypatch.setattr(builder.os, "open", record_open)
+    builder._publish_artifacts(
+        archive, wheel, output / "siteops-install.zip",
+        hashlib.sha256(wheel.read_bytes()).hexdigest(),
+    )
+    assert opened == {"siteops-install.zip": 0o600, wheel.name: 0o600}
+    for original, name in ((archive, "siteops-install.zip"), (wheel, wheel.name)):
+        artifact = output / name
+        assert artifact.read_bytes() == original.read_bytes()
+        if sys.platform != "win32":
+            assert artifact.stat().st_mode & 0o077 == 0
+
+
 @pytest.mark.parametrize("existing", ["siteops-install.zip", "siteops-1.0-py3-none-any.whl"])
 def test_publication_never_overwrites_either_artifact(builder, tmp_path, existing):
     archive = tmp_path / "input.zip"

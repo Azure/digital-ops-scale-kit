@@ -952,7 +952,7 @@ def _publish(staged_file: Path, output: Path, expected_sha256: str) -> None:
         descriptor = os.open(
             output,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
-            0o644,
+            0o600,
         )
     except FileExistsError as error:
         raise BuildError("The output path already exists.") from error
