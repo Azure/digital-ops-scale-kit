@@ -15,17 +15,20 @@ Ordinary validation needs no target. Planning and deployment require `-l`.
 
 ```yaml
 # manifests/aio-install/manifest.yaml
-selector: "environment=prod"   # default scope
+selector: "environment=dev"    # shipped default scope
 ```
 
 ```bash
-siteops deploy manifests/aio-install/manifest.yaml                    # all env=prod sites
+siteops deploy manifests/aio-install/manifest.yaml                    # all env=dev sites
 siteops deploy manifests/aio-install/manifest.yaml -l name=munich-dev # only munich-dev
 ```
 
 ## Selector grammar
 
 A selector is one or more `key=value` pairs joined by commas. Pairs AND-combine across distinct keys.
+
+The following label examples are illustrative. Define the referenced labels
+on your Sites, or substitute keys and values from your own inventory.
 
 ```bash
 siteops deploy manifests/aio-install/manifest.yaml -l environment=prod,region=eu

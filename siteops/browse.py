@@ -13,15 +13,19 @@ import os
 import stat
 from collections import Counter
 from dataclasses import dataclass, field, replace
-from pathlib import Path, PureWindowsPath
-from typing import Any
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
+from typing import Any, Callable
 
 import yaml
 
 from siteops import yamlio
+from siteops.content_metadata import API_VERSION
+from siteops.content_metadata import require_mapping as _mapping
+from siteops.content_metadata import require_text as _string
+from siteops.content_metadata import require_text_list as _strings
+from siteops.content_metadata import validate_envelope as _envelope
 from siteops.models import _parse_manifest_spec
 
-API_VERSION = "siteops/v1alpha1"
 MAX_FILE_BYTES = 256 * 1024
 MAX_TOTAL_BYTES = 8 * 1024 * 1024
 MAX_ENTRIES = 1000
@@ -132,14 +136,35 @@ class ContentEntry:
     guidance: EntryGuidance = field(default_factory=EntryGuidance)
     metadata_status: str = "absent"
     name_ambiguous: bool | None = None
+    targeting_known: bool = True
 
     def document(self) -> dict[str, Any]:
         return {
             "path": self.path, "name": self.name, "description": self.description,
             "role": self.guidance.role, "metadataStatus": self.metadata_status,
             "nameAmbiguous": self.name_ambiguous,
-            "targeting": {"selector": self.selector, "sites": list(self.sites)},
+            "targeting": {
+                "known": self.targeting_known, "selector": self.selector, "sites": list(self.sites),
+            },
             "guidance": self.guidance.document(),
+        }
+
+
+@dataclass(frozen=True)
+class BrowseSource:
+    """Consumer-established source context, never a package's self-certification."""
+
+    kind: str
+    reference: str
+    revision: str | None = None
+    provider: str | None = None
+    index_status: str | None = None
+
+    def document(self, workspace: str) -> dict[str, Any]:
+        return {
+            "kind": self.kind, "reference": self.reference, "version": self.revision,
+            "provider": self.provider, "workspace": workspace,
+            "indexStatus": self.index_status, "verification": "not-performed",
         }
 
 
@@ -152,6 +177,7 @@ class BrowseResult:
     discovered: int = 0
     matched: int = 0
     name_inventory_complete: bool | None = None
+    source: BrowseSource | None = None
 
     @property
     def status(self) -> str:
@@ -160,12 +186,16 @@ class BrowseResult:
         return "partial" if self.entries else "invalid"
 
     def document(self) -> dict[str, Any]:
-        """Project private inspection data without executable or provider state."""
+        """Project inspection without prepared values or resource-state observations.
+
+        `local-private` retains the existing destination label. It does not
+        mean the described source is a local filesystem.
+        """
         return {
             "apiVersion": API_VERSION, "kind": "ContentInspection",
             "projection": "local-private", "status": self.status,
             "mode": "entry" if self.selected else "inventory",
-            "source": {
+            "source": self.source.document(self.workspace) if self.source else {
                 "kind": "local", "workspace": self.workspace,
                 "version": None, "verification": "not-performed",
             },
@@ -178,42 +208,12 @@ class BrowseResult:
         }
 
 
-def _mapping(value: Any, allowed: frozenset[str] | set[str] | None = None) -> dict[str, Any]:
-    if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
-        raise ValueError("Expected a string-keyed mapping.")
-    if allowed is not None and value.keys() - allowed:
-        raise ValueError("Unknown metadata field.")
-    return value
-
-
-def _string(value: Any, *, empty: bool = False) -> str:
-    if not isinstance(value, str) or (not empty and not value.strip()):
-        raise ValueError("Expected text.")
-    return value
-
-
 def _optional_string(data: dict[str, Any], key: str) -> str | None:
     return _string(data[key]) if key in data else None
 
 
-def _strings(value: Any) -> tuple[str, ...]:
-    if not isinstance(value, list):
-        raise ValueError("Expected a list.")
-    result = tuple(_string(item) for item in value)
-    if len(result) != len(set(result)):
-        raise ValueError("Duplicate list item.")
-    return result
-
-
 def _optional_strings(data: dict[str, Any], key: str) -> tuple[str, ...] | None:
     return _strings(data[key]) if key in data else None
-
-
-def _envelope(data: Any, kind: str, allowed: frozenset[str] | set[str]) -> dict[str, Any]:
-    data = _mapping(data, allowed)
-    if data.get("apiVersion") != API_VERSION or data.get("kind") != kind:
-        raise ValueError("Unsupported metadata version or kind.")
-    return data
 
 
 def _is_link(info: os.stat_result) -> bool:
@@ -227,6 +227,116 @@ def _is_guidance_file(path: Path) -> bool:
     return name == "entry.yaml" or name.endswith(".entry.yaml")
 
 
+def guidance_path(path: PurePosixPath) -> PurePosixPath:
+    """Locate the sidecar without accessing a filesystem or source provider."""
+    return (
+        path.with_name("entry.yaml")
+        if path.name.casefold() in {"manifest.yaml", "manifest.yml"}
+        else path.with_suffix(".entry.yaml")
+    )
+
+
+def conventional_candidate(path: PurePosixPath) -> bool:
+    """Apply the shared discovery convention to a workspace-relative source path."""
+    if not path.parts or path.parts[0] not in {"manifests", "samples"}:
+        return False
+    if any(part.startswith(".") or part.casefold() in _PROTECTED for part in path.parts):
+        return False
+    if _is_guidance_file(path) or path.suffix.casefold() not in {".yaml", ".yml"}:
+        return False
+    return (
+        path.parts[0] == "manifests"
+        or path.name.casefold() in {"manifest.yaml", "manifest.yml"}
+        or path.name.startswith("_")
+    )
+
+
+def check_path_components(relative: PurePath, *, reference: bool = False) -> None:
+    """Apply the shared portable-path policy without accessing a filesystem."""
+    for part in relative.parts:
+        if part != part.rstrip(" .") or PureWindowsPath(part).is_reserved():
+            raise BrowseError("path.alias", "Ambiguous Windows path components are excluded.")
+        if ":" in part:
+            raise BrowseError("path.invalid", "Content paths cannot address alternate streams.")
+        if part.startswith(".") or (not reference and part.casefold() in _PROTECTED):
+            raise BrowseError(
+                "path.protected", "Configuration and working-state paths are excluded."
+            )
+
+
+def parse_guidance(
+    document: Any,
+    *,
+    documentation_reference: Callable[[str], str] | None = None,
+    source_reference: Callable[[str], str] | None = None,
+) -> EntryGuidance:
+    """Parse descriptive facts independently of local or remote source access."""
+    data = _envelope(document, "DeploymentEntry", _GUIDANCE_KEYS)
+    role = _string(data.get("role", "unclassified"))
+    if role not in {"standalone", "partial", "unclassified"}:
+        raise ValueError("Invalid role.")
+
+    def source(row: dict[str, Any]) -> str | None:
+        value = _optional_string(row, "source")
+        return source_reference(value) if value is not None and source_reference else value
+
+    inputs = None
+    if "inputs" in data:
+        if not isinstance(data["inputs"], list):
+            raise ValueError("Invalid inputs.")
+        parsed_inputs = []
+        for raw in data["inputs"]:
+            row = _mapping(raw, {
+                "field", "type", "requirement", "description",
+                "sensitivity", "defaultBehavior", "source",
+            })
+            requirement = _string(row.get("requirement"))
+            sensitivity = _string(row.get("sensitivity", "unknown"))
+            if requirement not in {"required", "optional", "conditional", "unknown"}:
+                raise ValueError("Invalid requirement.")
+            if sensitivity not in {"sensitive", "non-sensitive", "unknown"}:
+                raise ValueError("Invalid sensitivity.")
+            if sensitivity != "non-sensitive" and "defaultBehavior" in row:
+                raise ValueError("Protected inputs cannot carry default text.")
+            parsed_inputs.append(InputGuidance(
+                field=_string(row.get("field")), type=_string(row.get("type")),
+                requirement=requirement, description=_string(row.get("description")),
+                sensitivity=sensitivity, default_behavior=_optional_string(row, "defaultBehavior"),
+                source=source(row),
+            ))
+        if len({item.field for item in parsed_inputs}) != len(parsed_inputs):
+            raise ValueError("Duplicate input.")
+        inputs = tuple(parsed_inputs)
+    supplied = None
+    if "supplied" in data:
+        if not isinstance(data["supplied"], list):
+            raise ValueError("Invalid supplied inputs.")
+        parsed_supplied = []
+        for raw in data["supplied"]:
+            row = _mapping(raw, {"step", "input", "description", "source"})
+            parsed_supplied.append(SuppliedGuidance(
+                step=_string(row.get("step")), input=_string(row.get("input")),
+                description=_string(row.get("description")), source=source(row),
+            ))
+        if len({(item.step, item.input) for item in parsed_supplied}) != len(parsed_supplied):
+            raise ValueError("Duplicate supplied input.")
+        supplied = tuple(parsed_supplied)
+    documentation = _strings(data.get("documentation", []))
+    return EntryGuidance(
+        role=role, category=_optional_string(data, "category"),
+        tags=_strings(data.get("tags", [])),
+        documentation=tuple(
+            documentation_reference(item) if documentation_reference else item
+            for item in documentation
+        ),
+        outcome=_optional_string(data, "outcome"), inputs=inputs, supplied=supplied,
+        prerequisites=_optional_strings(data, "prerequisites"),
+        effects=_optional_strings(data, "effects"),
+        removal=_optional_strings(data, "removal"),
+        coverage=_optional_string(data, "coverage"),
+    )
+
+
 class ContentReader:
     """One bounded read of a selected workspace, independent of Site state."""
 
@@ -236,23 +346,13 @@ class ContentReader:
         self.directory_items = 0
         self.diagnostics: list[BrowseDiagnostic] = []
         self.names_complete = True
+        self.snapshots: dict[str, bytes | None] = {}
+        self.candidate_paths: tuple[str, ...] = ()
         if not self.workspace.is_dir():
             raise BrowseError("workspace.missing", "Workspace directory was not found.")
 
     def _relative(self, path: Path) -> str:
         return path.relative_to(self.workspace).as_posix()
-
-    @staticmethod
-    def _check_components(relative: Path, *, reference: bool) -> None:
-        for part in relative.parts:
-            if part != part.rstrip(" .") or PureWindowsPath(part).is_reserved():
-                raise BrowseError("path.alias", "Ambiguous Windows path components are excluded.")
-            if ":" in part:
-                raise BrowseError("path.invalid", "Content paths cannot address alternate streams.")
-            if part.startswith(".") or (not reference and part.casefold() in _PROTECTED):
-                raise BrowseError(
-                    "path.protected", "Configuration and working-state paths are excluded."
-                )
 
     def _incomplete(self, diagnostic: BrowseDiagnostic) -> None:
         self.names_complete = False
@@ -271,7 +371,7 @@ class ContentReader:
             relative = path.relative_to(self.workspace)
         except ValueError:
             raise BrowseError("path.outside", "Choose a path inside the workspace.") from None
-        self._check_components(relative, reference=reference)
+        check_path_components(relative, reference=reference)
         current = self.workspace
         for part in relative.parts:
             current /= part
@@ -294,7 +394,7 @@ class ContentReader:
             canonical_relative = canonical.relative_to(self.workspace)
         except ValueError:
             raise BrowseError("path.outside", "Choose a path inside the workspace.") from None
-        self._check_components(canonical_relative, reference=reference)
+        check_path_components(canonical_relative, reference=reference)
         return canonical
 
     def _yaml(self, path: Path, *, optional: bool = False) -> Any:
@@ -312,6 +412,9 @@ class ContentReader:
                 content = stream.read(MAX_FILE_BYTES + 1)
         except FileNotFoundError:
             if optional:
+                if relative in self.snapshots and self.snapshots[relative] is not None:
+                    raise BrowseError("source.changed", "Content changed during inspection.", relative)
+                self.snapshots[relative] = None
                 return None
             raise BrowseError("file.missing", "Content file was not found.", relative) from None
         except OSError:
@@ -319,8 +422,15 @@ class ContentReader:
         self.bytes_read += len(content)
         if len(content) > MAX_FILE_BYTES or self.bytes_read > MAX_TOTAL_BYTES:
             raise BrowseError("read.limit", "Content exceeds the inspection read budget.", relative)
+        if relative in self.snapshots and self.snapshots[relative] != content:
+            raise BrowseError("source.changed", "Content changed during inspection.", relative)
+        self.snapshots[relative] = content
         try:
             return yamlio.load_bounded(content.decode("utf-8"))
+        except yamlio.YamlStructureLimitError:
+            raise BrowseError(
+                "yaml.limit", "Content YAML exceeds inspection structural limits.", relative
+            ) from None
         except (UnicodeError, yaml.YAMLError, RecursionError) as error:
             mark = getattr(error, "problem_mark", None)
             line = mark.line + 1 if mark is not None else None
@@ -333,69 +443,11 @@ class ContentReader:
         path = self._path(parent / path_text, reference=True)
         return self._relative(path) + (separator + fragment if separator else "")
 
-    def _source(self, data: dict[str, Any]) -> str | None:
-        value = _optional_string(data, "source")
-        return self._reference(value, self.workspace) if value is not None else None
-
     def _guidance(self, document: Any, path: Path) -> EntryGuidance:
-        data = _envelope(document, "DeploymentEntry", _GUIDANCE_KEYS)
-        role = _string(data.get("role", "unclassified"))
-        if role not in {"standalone", "partial", "unclassified"}:
-            raise ValueError("Invalid role.")
-        inputs = None
-        if "inputs" in data:
-            if not isinstance(data["inputs"], list):
-                raise ValueError("Invalid inputs.")
-            parsed_inputs = []
-            for raw in data["inputs"]:
-                row = _mapping(raw, {
-                    "field", "type", "requirement", "description",
-                    "sensitivity", "defaultBehavior", "source",
-                })
-                requirement = _string(row.get("requirement"))
-                sensitivity = _string(row.get("sensitivity", "unknown"))
-                if requirement not in {"required", "optional", "conditional", "unknown"}:
-                    raise ValueError("Invalid requirement.")
-                if sensitivity not in {"sensitive", "non-sensitive", "unknown"}:
-                    raise ValueError("Invalid sensitivity.")
-                if sensitivity != "non-sensitive" and "defaultBehavior" in row:
-                    raise ValueError("Protected inputs cannot carry default text.")
-                parsed_inputs.append(InputGuidance(
-                    field=_string(row.get("field")), type=_string(row.get("type")),
-                    requirement=requirement, description=_string(row.get("description")),
-                    sensitivity=sensitivity, default_behavior=_optional_string(row, "defaultBehavior"),
-                    source=self._source(row),
-                ))
-            if len({item.field for item in parsed_inputs}) != len(parsed_inputs):
-                raise ValueError("Duplicate input.")
-            inputs = tuple(parsed_inputs)
-        supplied = None
-        if "supplied" in data:
-            if not isinstance(data["supplied"], list):
-                raise ValueError("Invalid supplied inputs.")
-            parsed_supplied = []
-            for raw in data["supplied"]:
-                row = _mapping(raw, {"step", "input", "description", "source"})
-                parsed_supplied.append(SuppliedGuidance(
-                    step=_string(row.get("step")), input=_string(row.get("input")),
-                    description=_string(row.get("description")),
-                    source=self._source(row),
-                ))
-            if len({(item.step, item.input) for item in parsed_supplied}) != len(parsed_supplied):
-                raise ValueError("Duplicate supplied input.")
-            supplied = tuple(parsed_supplied)
-        return EntryGuidance(
-            role=role, category=_optional_string(data, "category"),
-            tags=_strings(data.get("tags", [])),
-            documentation=tuple(
-                self._reference(item, path.parent)
-                for item in _strings(data.get("documentation", []))
-            ),
-            outcome=_optional_string(data, "outcome"), inputs=inputs, supplied=supplied,
-            prerequisites=_optional_strings(data, "prerequisites"),
-            effects=_optional_strings(data, "effects"),
-            removal=_optional_strings(data, "removal"),
-            coverage=_optional_string(data, "coverage"),
+        return parse_guidance(
+            document,
+            documentation_reference=lambda value: self._reference(value, path.parent),
+            source_reference=lambda value: self._reference(value, self.workspace),
         )
 
     def entry(self, path: Path) -> ContentEntry:
@@ -417,11 +469,7 @@ class ContentReader:
             if isinstance(error, BrowseError):
                 raise
             raise BrowseError("manifest.invalid", "Manifest header is invalid.", relative) from None
-        metadata = (
-            path.with_name("entry.yaml")
-            if path.name.casefold() in {"manifest.yaml", "manifest.yml"}
-            else path.with_suffix(".entry.yaml")
-        )
+        metadata = self.workspace / guidance_path(PurePosixPath(relative)).as_posix()
         try:
             document = self._yaml(metadata, optional=True)
             if document is None:
@@ -441,9 +489,9 @@ class ContentReader:
 
     def _scan(self) -> set[Path]:
         candidates: set[Path] = set()
-        stack = [(self.workspace / name, 0, name) for name in ("samples", "manifests")]
+        stack = [(self.workspace / name, 0) for name in ("samples", "manifests")]
         while stack:
-            directory, depth, kind = stack.pop()
+            directory, depth = stack.pop()
             try:
                 directory = self._path(directory)
                 if not directory.exists():
@@ -478,15 +526,8 @@ class ContentReader:
                         ))
                         continue
                     if child.is_dir(follow_symlinks=False):
-                        stack.append((path, depth + 1, kind))
-                    elif (
-                        path.suffix.casefold() in {".yaml", ".yml"}
-                        and (
-                            kind == "manifests"
-                            or path.name.casefold() in {"manifest.yaml", "manifest.yml"}
-                            or path.name.startswith("_")
-                        )
-                    ):
+                        stack.append((path, depth + 1))
+                    elif conventional_candidate(PurePosixPath(self._relative(path))):
                         candidates.add(path)
                         if len(candidates) > MAX_ENTRIES:
                             raise BrowseError("scan.limit", "Entry inventory exceeds the limit.")
@@ -525,6 +566,7 @@ class ContentReader:
             ))
         if len(candidates) > MAX_ENTRIES:
             self._incomplete(BrowseDiagnostic("scan.limit", "Entry inventory exceeds the limit."))
+        self.candidate_paths = tuple(sorted(self._relative(path) for path in candidates))
         entries = []
         canonical: set[str] = set()
         for path in sorted(candidates, key=self._relative)[:MAX_ENTRIES]:
@@ -542,6 +584,20 @@ class ContentReader:
         return tuple(entries)
 
 
+def validate_browse_options(
+    selection: str | None,
+    search: str | None,
+    tags: tuple[str, ...],
+    category: str | None,
+    limit: int | None,
+) -> None:
+    """Reject incompatible presentation options before source access."""
+    if limit is not None and limit < 1:
+        raise ValueError("The result limit must be positive.")
+    if selection is not None and (search is not None or tags or category is not None or limit):
+        raise ValueError("A selected entry cannot be combined with inventory filters.")
+
+
 def inspect_content(
     workspace: Path,
     selection: str | None = None,
@@ -553,10 +609,7 @@ def inspect_content(
     limit: int | None = None,
 ) -> BrowseResult:
     """Inspect a path or exact name, or filter a complete local inventory."""
-    if limit is not None and limit < 1:
-        raise ValueError("The result limit must be positive.")
-    if selection is not None and (search is not None or tags or category is not None or limit):
-        raise ValueError("A selected entry cannot be combined with inventory filters.")
+    validate_browse_options(selection, search, tags, category, limit)
     reader = ContentReader(workspace)
     if selection is not None and (
         "/" in selection or "\\" in selection or PureWindowsPath(selection).drive
@@ -572,33 +625,66 @@ def inspect_content(
             str(reader.workspace), (entry,), tuple(reader.diagnostics), True, 1, 1
         )
     inventory = reader.inventory()
+    return select_entries(
+        BrowseResult(
+            str(reader.workspace), inventory, tuple(reader.diagnostics),
+            discovered=len(inventory), name_inventory_complete=reader.names_complete,
+        ),
+        selection, search=search, tags=tags, category=category,
+        include_partials=include_partials, limit=limit,
+    )
+
+
+def select_entries(
+    result: BrowseResult,
+    selection: str | None = None,
+    *,
+    search: str | None = None,
+    tags: tuple[str, ...] = (),
+    category: str | None = None,
+    include_partials: bool = False,
+    limit: int | None = None,
+    selection_is_path: bool = False,
+) -> BrowseResult:
+    """Use one selection and filtering model for local and published inventories."""
+    validate_browse_options(selection, search, tags, category, limit)
+    diagnostics = list(result.diagnostics)
+    if selection is not None and selection_is_path:
+        matches = tuple(entry for entry in result.entries if entry.path == selection)
+        if not matches:
+            diagnostics.append(BrowseDiagnostic(
+                "lookup.missing", "This path is not included in the published index."
+            ))
+        return replace(
+            result, entries=matches, diagnostics=tuple(diagnostics),
+            selected=len(matches) == 1, matched=len(matches),
+        )
     visible = tuple(
-        entry for entry in inventory if include_partials or entry.guidance.role != "partial"
+        entry for entry in result.entries if include_partials or entry.guidance.role != "partial"
     )
     counts = Counter(entry.name for entry in visible)
     visible = tuple(replace(
         entry,
-        name_ambiguous=counts[entry.name] > 1 if reader.names_complete else None,
+        name_ambiguous=counts[entry.name] > 1 if result.name_inventory_complete else None,
     ) for entry in visible)
     if selection is not None:
         matches = tuple(entry for entry in visible if entry.name == selection)
-        if not reader.names_complete:
-            reader.diagnostics.append(BrowseDiagnostic(
+        if not result.name_inventory_complete:
+            diagnostics.append(BrowseDiagnostic(
                 "lookup.incomplete", "Name lookup requires a complete inventory. Use an explicit path."
             ))
             matches = ()
         elif not matches:
-            reader.diagnostics.append(BrowseDiagnostic(
+            diagnostics.append(BrowseDiagnostic(
                 "lookup.missing", "Entry name was not found. Browse the inventory or use a path."
             ))
         elif len(matches) > 1:
-            reader.diagnostics.append(BrowseDiagnostic(
+            diagnostics.append(BrowseDiagnostic(
                 "lookup.ambiguous", "Entry name is ambiguous. Select one of the explicit paths."
             ))
-        return BrowseResult(
-            str(reader.workspace), matches, tuple(reader.diagnostics),
-            len(matches) == 1, len(inventory), len(matches),
-            name_inventory_complete=reader.names_complete,
+        return replace(
+            result, entries=matches, diagnostics=tuple(diagnostics),
+            selected=len(matches) == 1, matched=len(matches),
         )
     terms = tuple((search or "").casefold().split())
     matches = tuple(
@@ -613,8 +699,4 @@ def inspect_content(
             )).casefold() for term in terms)
         )
     )
-    return BrowseResult(
-        str(reader.workspace), matches[:limit], tuple(reader.diagnostics),
-        False, len(inventory), len(matches),
-        name_inventory_complete=reader.names_complete,
-    )
+    return replace(result, entries=matches[:limit], selected=False, matched=len(matches))

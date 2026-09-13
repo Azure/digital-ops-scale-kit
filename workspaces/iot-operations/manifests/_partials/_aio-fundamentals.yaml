@@ -7,7 +7,7 @@ description: |
   no samples.
 
   Internal partial (filename prefixed `_`). Not deployed directly. Composed
-  by `aio-install.yaml` (which adds the secret sync step) and by compositional
+  by `aio-install` (which adds the secret sync step) and by compositional
   samples (which add capabilities on top).
 
 # Shared parameters applied to all steps (auto-filtered per template). The

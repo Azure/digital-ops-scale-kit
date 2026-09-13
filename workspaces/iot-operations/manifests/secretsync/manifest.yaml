@@ -5,7 +5,7 @@ description: |
   Enable secret sync on existing Azure IoT Operations instances.
 
   This is a standalone manifest for day-2 enablement. For new deployments,
-  use aio-install.yaml with deployOptions.enableSecretSync = true.
+  use the aio-install entry with deployOptions.enableSecretSync = true.
 
   Prerequisites:
     - AIO instance must be deployed and running

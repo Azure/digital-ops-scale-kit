@@ -14,6 +14,7 @@ separates validation, planning, deployment, and health verification.
 | Configure and inspect a deployment target | [Site configuration](site-configuration.md) |
 | Understand the included AIO content | [IoT Operations workspace](../workspaces/iot-operations/README.md) |
 | Find and inspect deployment choices | [Browse deployment content](browse-content.md) |
+| Browse a published source without cloning | [Remote content indexes](remote-content.md) |
 | Diagnose a failed command or provider operation | [Troubleshooting](troubleshooting.md) |
 
 Installing the CLI does not acquire a workspace. The included IoT Operations

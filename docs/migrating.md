@@ -5,8 +5,8 @@ first. Apply the sections between your current and target releases,
 starting with the oldest applicable release.
 
 To upgrade deployed Azure IoT Operations or Kubernetes instead, see
-[aio-releases.md](aio-releases.md) and the `aio-upgrade.yaml` and
-`aksee-upgrade.yaml` manifests.
+[aio-releases.md](aio-releases.md) and the `aio-upgrade` and
+`aksee-upgrade` entries.
 
 For release summaries, see the
 [release notes](https://github.com/Azure/digital-ops-scale-kit/releases).

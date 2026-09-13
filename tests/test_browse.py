@@ -89,6 +89,14 @@ def test_explicit_empty_guidance_remains_an_author_statement(tmp_path):
     assert "not an environment assessment" in render_browse_plain(result)
 
 
+def test_category_never_hides_unclassified_or_partial_role(tmp_path):
+    _entry(tmp_path, "unknown", guidance={"category": "core", "role": "unclassified"})
+    _entry(tmp_path, "fragment", guidance={"category": "core", "role": "partial"})
+    output = render_browse_plain(inspect_content(tmp_path, include_partials=True))
+    assert "unknown [core, unclassified]" in output
+    assert "fragment [core, partial]" in output
+
+
 def test_inventory_order_filters_limit_and_partial_visibility(tmp_path):
     _entry(tmp_path, "zeta", guidance={"tags": ["mqtt", "local"], "category": "sample"})
     _entry(tmp_path, "alpha", guidance={"tags": ["mqtt"]})

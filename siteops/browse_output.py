@@ -55,7 +55,7 @@ def _section(lines: list[str], title: str, values: tuple[str, ...] | None) -> No
             lines.extend(_wrap(_text(value), indent="  - ", hanging="    "))
 
 
-def _card(entry: ContentEntry, workspace: str) -> list[str]:
+def _card(entry: ContentEntry, workspace: str, *, local: bool = True) -> list[str]:
     guidance = entry.guidance
     lines = [
         _text(entry.name), f"Path: {_text(entry.path)}",
@@ -67,11 +67,13 @@ def _card(entry: ContentEntry, workspace: str) -> list[str]:
         lines.append("Tags: " + ", ".join(_text(tag) for tag in guidance.tags))
     lines.extend(_prose(guidance.outcome or entry.description))
     lines.extend(("", "Authored targeting"))
-    if entry.selector:
+    if not entry.targeting_known:
+        lines.append("  Targeting is not included in the published index.")
+    elif entry.selector:
         lines.extend(_wrap("Default selector: " + _text(entry.selector)))
     if entry.sites:
         lines.extend(_wrap("Named Sites: " + ", ".join(_text(site) for site in entry.sites)))
-    if not entry.selector and not entry.sites:
+    if entry.targeting_known and not entry.selector and not entry.sites:
         lines.append("  No targets declared. Supply an explicit selector when planning.")
     lines.append("  Targets have not been resolved. A CLI selector replaces manifest targeting.")
     lines.extend(("", "Supported Site inputs"))
@@ -119,7 +121,12 @@ def _card(entry: ContentEntry, workspace: str) -> list[str]:
             or not any(character in workspace + entry.path for character in "&|<>%!^")
         )
     )
-    if guidance.role == "standalone" and command_paths_safe:
+    if not local:
+        lines.extend((
+            "", "Remote preview only. Deployable workspace content has not been acquired.",
+            "Read the pinned guide. Plan and deploy require a complete, reviewed local workspace.",
+        ))
+    elif guidance.role == "standalone" and command_paths_safe:
         lines.extend((
             "", "Next: choose a configured Site, then review its executable plan.",
             f"{shell} commands (not Command Prompt):" if shell == "PowerShell"
@@ -143,34 +150,53 @@ def _card(entry: ContentEntry, workspace: str) -> list[str]:
 
 def render_browse_plain(result: BrowseResult) -> str:
     """Render compact inventory rows or one detailed card without terminal controls."""
+    local = result.source is None or result.source.kind == "local"
+    heading = f"Source: local workspace {_text(result.workspace)}"
+    if not local:
+        heading = f"Source: {_text(result.source.reference)}"
+        if result.source.revision:
+            heading += f" @ {_text(result.source.revision)}"
+        heading += f"\nWorkspace: {_text(result.workspace) or '(not selected)'}"
+        if result.source.index_status:
+            heading += f"\nIndex: {_text(result.source.index_status)}"
     lines = [
-        f"Source: local workspace {_text(result.workspace)}",
+        heading,
         "Private inspection. Package verification, preparation and outcomes are not checked.",
         "",
     ]
     if result.selected and len(result.entries) == 1:
-        lines.extend(_card(result.entries[0], result.workspace))
+        lines.extend(_card(result.entries[0], result.workspace, local=local))
     else:
         lines.append(
             f"Deployment content: {len(result.entries)} shown, {result.matched} matches, "
-            f"{result.discovered} headers read."
+            f"{result.discovered} {'headers read' if local else 'indexed entries'}."
         )
         for entry in result.entries:
             label = entry.guidance.category or entry.guidance.role
+            if entry.guidance.category and entry.guidance.role != "standalone":
+                label += ", " + entry.guidance.role
             summary = " ".join((entry.guidance.outcome or entry.description).split())
             summary = textwrap.shorten(_text(summary), width=68, placeholder="...")
             lines.append(f"  {_text(entry.name)} [{_text(label)}] {summary}".rstrip())
             if entry.name_ambiguous is not False or entry.guidance.role == "partial":
                 lines.append(f"    {_text(entry.path)}")
         if not result.entries and not result.diagnostics:
-            lines.append("  No matching entries. Use an explicit path for a custom layout.")
+            lines.append(
+                "  No matching entries. Use an explicit path for a custom layout."
+                if local else
+                "  No published entries match. Clear filters or select another indexed workspace."
+            )
         if result.matched > len(result.entries):
             lines.append("  More matches are available. Omit --limit or narrow the filters.")
         lines.extend((
             "", "Use --search TEXT, --tag TAG or --category CATEGORY to narrow the inventory.",
-            "Inspect with browse NAME, or use the shown path for ambiguous names and fragments.",
+            "Inspect with browse NAME, or use the shown path for ambiguous names and fragments."
+            if local else
+            "Inspect with browse NAME and the same --source, --ref and source-relative -w options.",
             "Use --include-partials to include declared reusable fragments.",
         ))
+        if not local and result.source.revision:
+            lines.append("Pin --ref to the displayed revision to keep the same source snapshot.")
     if result.diagnostics:
         lines.extend(("", "Inspection is incomplete:"))
         for diagnostic in result.diagnostics:

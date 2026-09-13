@@ -462,8 +462,9 @@ See [run-output.md](run-output.md) for projections and recovery guidance.
 To add a new manifest to the deployment workflows:
 
 1. Create your manifest at the appropriate location in the workspace:
-   - Standalone day-2 manifests under `workspaces/<workspace>/manifests/`
-   - Workload bundles or composed manifests under `workspaces/<workspace>/samples/<name>/`
+   - Core operations at `workspaces/<workspace>/manifests/<name>/manifest.yaml`
+   - Worked examples at `workspaces/<workspace>/samples/<name>/manifest.yaml`
+   - Keep the operator guide and optional `entry.yaml` beside each public entry.
 2. Update the workflow/pipeline to add the path to the dropdown:
 
 **GitHub Actions** (`.github/workflows/deploy.yaml`): add the path to the `manifest` input's `options:` list.
@@ -474,7 +475,7 @@ manifest:
     type: choice
     options:
         # ... existing entries ...
-        - manifests/my-new-manifest.yaml  # Add here (full path)
+        - manifests/my-new-manifest/manifest.yaml
 ```
 
 **Azure DevOps** (`.pipelines/deploy.yaml`): add the same path to the `manifest` parameter's `values:` list.
@@ -485,10 +486,14 @@ manifest:
   default: manifests/aio-install/manifest.yaml
   values:
     # ... existing entries ...
-    - manifests/my-new-manifest.yaml  # Add here (full path)
+    - manifests/my-new-manifest/manifest.yaml
 ```
 
 Keep the two lists in step. A manifest offered on one platform and not the other is deployable only from that platform. `tests/workspace/test_deploy_registration.py` derives the expected set from the workspace and fails when either list drifts, so the current entries are whatever those files hold rather than what this page lists.
+
+Regenerate the [content index](remote-content.md#publish-descriptions-from-a-workspace)
+after updating discovery inputs. Descriptive metadata does not replace either
+platform's environment, credential or approval policy.
 
 ### Adding new workspaces
 

@@ -1,0 +1,444 @@
+{
+  "apiVersion": "siteops/v1alpha1",
+  "candidates": [
+    "manifests/_partials/_aio-fundamentals.yaml",
+    "manifests/_partials/_aio-resources.yaml",
+    "manifests/_partials/_assets.yaml",
+    "manifests/_partials/_dataflows.yaml",
+    "manifests/_partials/_resolve-aio.yaml",
+    "manifests/_partials/_secretsync.yaml",
+    "manifests/aio-install/manifest.yaml",
+    "manifests/aio-resources/manifest.yaml",
+    "manifests/aio-upgrade/manifest.yaml",
+    "manifests/aksee-bootstrap/manifest.yaml",
+    "manifests/aksee-upgrade/manifest.yaml",
+    "manifests/secretsync/manifest.yaml",
+    "samples/aio-with-aksee-bootstrap/manifest.yaml",
+    "samples/aio-with-opc-ua/manifest.yaml",
+    "samples/asset-sample/manifest.yaml",
+    "samples/dataflow-sample/manifest.yaml",
+    "samples/opc-ua-solution/_partial.yaml",
+    "samples/opc-ua-solution/manifest.yaml",
+    "samples/resource-set-basic/manifest.yaml",
+    "samples/resource-set-composition/_external-provider.yaml",
+    "samples/resource-set-composition/manifest.yaml",
+    "samples/secretsync-sample/_partial.yaml",
+    "samples/secretsync-sample/manifest.yaml",
+    "templates/host-bootstrap/aksee/_partial.yaml",
+    "templates/host-ops/aksee-upgrade/_partial.yaml"
+  ],
+  "indexDigest": "b2117f7809b0118bafc0ffc2a8f073facb7ec58f4e1c819c255f614ebd205742",
+  "inputs": [
+    {
+      "digests": {
+        "git-blob-sha1": "6fef82ce46b31ae934fcd77cbf7accaeda718a4b",
+        "git-blob-sha1-crlf": "8be2ef5580ea2d9c16f55008fcdcae9dedb3c45f",
+        "sha256": "bbb372886ae0ceb20b3023bb96b7223c240af78f3d18962174842798ba75b66b"
+      },
+      "path": "content.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "9c6479cb75bacb11c3a11217bd9cb1b3bfbb5901",
+        "git-blob-sha1-crlf": "17d3e2d1fe6e141e0aedf3818753fceb8f2b5c36",
+        "sha256": "65c1b64fff590c5611e89be94ad717c6e4715b54cfca7d23dd98846ef20e4c71"
+      },
+      "path": "manifests/_partials/_aio-fundamentals.entry.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "4ee5c11b759f2f48ad35673e28e8c02592db5d57",
+        "git-blob-sha1-crlf": "2fe46341e12ff1f1de23112263a4af27ee1f2b6d",
+        "sha256": "c33ed26ffc97571217fae687a282e4645864bf9e71f8f5ac89f437f48ef589bb"
+      },
+      "path": "manifests/_partials/_aio-fundamentals.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "c112baec45c2c51203244fc28eaca6ce50d11172",
+        "git-blob-sha1-crlf": "3f92606aed9da3a78d7230f064eb9b8720bdef6a",
+        "sha256": "ff9ba9b79a9ceaf91c74e66b312a4acd9b7e722670f5c3b367786547682c786c"
+      },
+      "path": "manifests/_partials/_aio-resources.entry.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "8a847a66caf439cc4c67018b1f168efeb01867a5",
+        "git-blob-sha1-crlf": "111ba1bc19459acf66e0916caf370b04af4c9b62",
+        "sha256": "ac350eaeb2474e5e00a11a53f5e39a42e16e70577509a3287df43df1e05e7349"
+      },
+      "path": "manifests/_partials/_aio-resources.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "4df9bc1990ec36632d64613b3f835f7a2f9a1788",
+        "git-blob-sha1-crlf": "fe34e8de56ed879a54291aeb7d9a8254abbe3de1",
+        "sha256": "e67aafbb558b2a8a2397077444596913bfcb863eb05c77b201c4c0f105779ad6"
+      },
+      "path": "manifests/_partials/_assets.entry.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "5a2808e26e1667fa304d27721dd73325f3fc110d",
+        "git-blob-sha1-crlf": "abc446a9d4e2f4ad94c9994ccbb648e14833fbe9",
+        "sha256": "ff1819e418a0a2387ab94bd1705c70726eadcdaf4f5ce6bfa7df022367f4edab"
+      },
+      "path": "manifests/_partials/_assets.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "5845e3ac91c1250231b32a26d9df6d7a279db25c",
+        "git-blob-sha1-crlf": "dbbd043a5040831e535f0b583c4337124807e1c6",
+        "sha256": "84628fbe9bf2dd717a2d5295831aab897c2439ed6fa9cf3a04e4f6e4634b6dec"
+      },
+      "path": "manifests/_partials/_dataflows.entry.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "fbca604e407927942aab841fd68f588ade633d9a",
+        "git-blob-sha1-crlf": "e463cd53defb975358f9c29c6a4f73e194a55b44",
+        "sha256": "9a54d3afde7fa538de943a175f1f9224c93787056d93e85c010d37f6a4c9d5e2"
+      },
+      "path": "manifests/_partials/_dataflows.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "6c52efd098c043bab6001de4edaf7f5a79e5509d",
+        "git-blob-sha1-crlf": "b4478b232774137f7de80c45342d1e6f18677c1c",
+        "sha256": "a537ce04384457141d27209c6b807f4e9391e365416117e13f941bff4df72eba"
+      },
+      "path": "manifests/_partials/_resolve-aio.entry.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "0bb84b6a4c20245855fa8176fd1a42385e7b7165",
+        "git-blob-sha1-crlf": "de754db6449725468704d17ef68ea97aac855d74",
+        "sha256": "ebbbce27daa5e500014c48c60bbf59525e77861e28fc7e56cf97eee2d73f340e"
+      },
+      "path": "manifests/_partials/_resolve-aio.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "1712d8f4cb2185cd194eaac0a0b338efbf33bf9d",
+        "git-blob-sha1-crlf": "66184c220ea193cd2200c7291df47133197dc8c4",
+        "sha256": "b055b550453e271b6505765d2aa0cac4a5849324b1258f0e89c5c77668088ec8"
+      },
+      "path": "manifests/_partials/_secretsync.entry.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "6f3345843eb47fda188724f01b05c21913e92fd8",
+        "git-blob-sha1-crlf": "cb05187185684b4f6d0779d76cdf295cefc9e661",
+        "sha256": "d50bb8eefd997d4296021690b396f41acecb0777eb1192e6efc63835e37ae881"
+      },
+      "path": "manifests/_partials/_secretsync.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "17aae77f09ab1dcafa93e085537f90c1a48aa665",
+        "git-blob-sha1-crlf": "c81292f430ef47b41f55aa0431e6c6268e931962",
+        "sha256": "b2f9649d13ef9f41f8fd2c5ceacd8562396b7b18a84f02f099a01672a3caefc0"
+      },
+      "path": "manifests/aio-install/entry.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "3f727846478a2c1b4d0f77ee02745b1f40f40619",
+        "git-blob-sha1-crlf": "2abefe3d217cddcd6a87833c580b9bc748a2267a",
+        "sha256": "ca2470c6d6ff01ad2dd67bb565e8bb884b93b90841ba592d9daa6751cda9adab"
+      },
+      "path": "manifests/aio-install/manifest.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "009db009e098e6c7325e6d34e95a4711d83ce4d9",
+        "git-blob-sha1-crlf": "49e097a6a329f9d8e1e60c773ea28f48fad75406",
+        "sha256": "76117a6a58a8cc3da8a9784baf71dfe31d1857259f5dc7b4003f49832ede3e4d"
+      },
+      "path": "manifests/aio-resources/entry.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "76dcde7e559f917dabf4fa5e45e9365f56ab95ef",
+        "git-blob-sha1-crlf": "f4d7c2064977b36f9995ee50158fccf01a1c406a",
+        "sha256": "b5aac5b4423ec2f0c8fb9a6f10a9d716c282fe0311274dac7f08e392f289efb4"
+      },
+      "path": "manifests/aio-resources/manifest.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "50cde924e9f5031a8b533e6df1bf558b048c088b",
+        "git-blob-sha1-crlf": "b7f023e8b160e721f27bcf9487380599718734b3",
+        "sha256": "dc606bb09cb7004bb436f38499c05d400e152481ae92e62ffd558c687bd145ad"
+      },
+      "path": "manifests/aio-upgrade/entry.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "ed6be16b59444bba0832239146baece31938cbc7",
+        "git-blob-sha1-crlf": "bf0cbef1058d4792a4afe706d4f807c0b7768ec6",
+        "sha256": "43794924535c8563c839b2e41d35448db244701ff3fa9dd41807451b16002e7c"
+      },
+      "path": "manifests/aio-upgrade/manifest.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "6361fffa21cd9523fe0a20b1f64e52dfb05db3a6",
+        "git-blob-sha1-crlf": "9ed05a18df80970afce3810478e632b25e6596da",
+        "sha256": "7de3c9739ba01cbe8269d44af38626c2bc059909515acd75d5d9806612ccac10"
+      },
+      "path": "manifests/aksee-bootstrap/entry.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "96ea8b754ba8f066f72fc510c6f800ed58312fae",
+        "git-blob-sha1-crlf": "17e283c1d3cc7fa06b4f847f4f92bf01d57c1a14",
+        "sha256": "7f9d333671050672b27ebfaf2407d78b76cabff6db55310a97ba99134f17c50c"
+      },
+      "path": "manifests/aksee-bootstrap/manifest.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "b2b14ba504c27aff52a874375ff042c4eb95b5fe",
+        "git-blob-sha1-crlf": "fe065d98add4ff63e4d44cee88a493fbd3a56412",
+        "sha256": "4be30502dff0bb520428a701284bc49c20236940a27908ddf4e00113ca491c24"
+      },
+      "path": "manifests/aksee-upgrade/entry.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "382ea752055ca29aaa47a4349024631e7a94f092",
+        "git-blob-sha1-crlf": "3e2fa184112534f4b2367d6b489acfb63d74d130",
+        "sha256": "b993f1bdd3e773fdd78da518ea0b91b7475524cedb8ba1c6a8a94fde7e14b30d"
+      },
+      "path": "manifests/aksee-upgrade/manifest.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "a1c22c19c9b442a007cfc052c2e70013ccd7577f",
+        "git-blob-sha1-crlf": "b99e0c2175f9bd06b2d115fd371c9e9ba354f8aa",
+        "sha256": "dfa31ea5ddc0dc06e62f519d885ffd1bab7daa0b78fa1b88365b3521f47a3409"
+      },
+      "path": "manifests/secretsync/entry.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "2bfbeafe46ebbb946e48b45e61f4d4a558d63b25",
+        "git-blob-sha1-crlf": "a95f9bfb527a16f66a098a189e6d708523c49b6b",
+        "sha256": "266e1e8572024db87d7ceb54d3befeab1fb801354342be56eb87f423e0712454"
+      },
+      "path": "manifests/secretsync/manifest.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "c97053d9f716a995cadcc78aff9724d026c3725e",
+        "git-blob-sha1-crlf": "108d1ad25d9e393bfea97c7dc98ccaa61635432e",
+        "sha256": "72498d3c1ef104bb87544912ff1f8a4d1ae24c26153e5f2071fe9e46fdfbb747"
+      },
+      "path": "samples/aio-with-aksee-bootstrap/entry.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "56fad80ae5cfd4d3f269ec15b0d2b473652a758c",
+        "git-blob-sha1-crlf": "35ac2ca4ec3275c86aa273e541259bb7398f3131",
+        "sha256": "5649d54813f612289aa1e2ad20e9384fd4ab971b466a4ef7cba66b012934f3a6"
+      },
+      "path": "samples/aio-with-aksee-bootstrap/manifest.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "473a2586b0afb7a6caac2e05b3b90c8ca253a03e",
+        "git-blob-sha1-crlf": "25cbcff0d7451ea4a6029acaac501ca9a761ee5a",
+        "sha256": "d288c58a53e7305fee4d1ea16956ad6cc7497eb31695726dbabf0ccecd922380"
+      },
+      "path": "samples/aio-with-opc-ua/entry.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "2db178bf9566a02b88604eca88d3916d98506ac1",
+        "git-blob-sha1-crlf": "4dcfd0f1f9a5b259f04d628759e0180265113e86",
+        "sha256": "401c173b3caab094ac5712d0703296e714ef0f21d9248155c13ed25a760af581"
+      },
+      "path": "samples/aio-with-opc-ua/manifest.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "0cc121a568326e09f58263d81b6f6299f4f65881",
+        "git-blob-sha1-crlf": "12c5c7954afd058323967b46a905ef43f99fb909",
+        "sha256": "11e9d0d0f6b33e2609f39a79d59dd609da32bbc54f3def96f2b3e8e2f7d5300a"
+      },
+      "path": "samples/asset-sample/entry.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "581215486a96eb7c4de3d281a0c95228bd6898d1",
+        "git-blob-sha1-crlf": "c9791c2606d2dbfc85be30adc7db160b8df39906",
+        "sha256": "0681d7fcdee6724c160e3b5e2426f5267a9e68a13c8f137b7e5208137a454e21"
+      },
+      "path": "samples/asset-sample/manifest.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "5538da8fd2304e04fafd9a007335941408ba5af9",
+        "git-blob-sha1-crlf": "1e9da1f989580a2b1700eb94ee900dd5d08ddd6c",
+        "sha256": "0cb65035a1ba9e0d1e40df3dc966c9b18669971619fed1a57a56ff66ab260ddf"
+      },
+      "path": "samples/dataflow-sample/entry.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "4fe49ded368094ce6d836e0668be726ebd9916a7",
+        "git-blob-sha1-crlf": "522bf6ca5c75ad292180c6d9200403359f344bbf",
+        "sha256": "0f750ca01a1cd390b888ca9d1c993e3ac3ffc143f99907c9aa9ed5e097702e22"
+      },
+      "path": "samples/dataflow-sample/manifest.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "52a507c58399cd58521bf91d1d2d26b5c9fb32ad",
+        "git-blob-sha1-crlf": "4d125dcc279b2981af78e276031936f8d0abf759",
+        "sha256": "4cf9473c4a62169455c11eb9794109cdca6ddbe6843780992160df71988fc6bd"
+      },
+      "path": "samples/opc-ua-solution/_partial.entry.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "a8474912e5baba1aa226eb5ff87558047ac2dac8",
+        "git-blob-sha1-crlf": "1b3a1097db5de3fd72be7185a69153984b6222c5",
+        "sha256": "c0c256442e53122ada94b3c9154b236cd7342733a54c2c242961a6039b13c14b"
+      },
+      "path": "samples/opc-ua-solution/_partial.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "55f560e04d1f4f9be1f937bb2ad21f6eb3c98dbf",
+        "git-blob-sha1-crlf": "9b13aa6315288256809f3b849af75594cc856662",
+        "sha256": "a9220b1d71612b1b1f35ed34df267a53437bca35c8a786c8a6507f422dc785ef"
+      },
+      "path": "samples/opc-ua-solution/entry.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "ee0a00cc5c5f133fd05e4e9aeb02370aae93398b",
+        "git-blob-sha1-crlf": "b4e0223428df9cc1d4ee0ef7475d38398c7655ba",
+        "sha256": "ceb359901ac7e32639c6d8e915683ed02717b7a7f6eb965c37ce62318b3ea9c4"
+      },
+      "path": "samples/opc-ua-solution/manifest.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "f4f86f3b16f700c89e5f6ba90008271b38da37df",
+        "git-blob-sha1-crlf": "3d416ca911a30bc424c9642b90b9fdc3b4ebc574",
+        "sha256": "226e7aa698a067a45144f2ee47bf3e80297d42df9b429136005945e6013fe70b"
+      },
+      "path": "samples/resource-set-basic/entry.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "f41163e354ff8d35510dba9d55fbd3042be14f12",
+        "git-blob-sha1-crlf": "8d26c8d727a863e8b5b62a5c1f60d601270fe859",
+        "sha256": "2bbbdda5d4759b367bf2e6e7aa58e98aae3791bca5343b7d70bb821f6f94dbe8"
+      },
+      "path": "samples/resource-set-basic/manifest.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "e943b6f5e453be03f37bc215ef4db5f51be31ccd",
+        "git-blob-sha1-crlf": "c4c22c2961583dbde56769bf8cd7408847b7ec26",
+        "sha256": "3fff5a7dbaae84623a0cae40ba73427bd969717380357863d6676e43b205fcc4"
+      },
+      "path": "samples/resource-set-composition/_external-provider.entry.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "96b915eddbc136bfa93ee2116985d20d0ba4d571",
+        "git-blob-sha1-crlf": "bcb70f862eb721268dbfc073f8ce623ca07f0887",
+        "sha256": "f2c2981f212cdb990fa2f6b5787eb11ba2926015429a681682c65a93e0ea5c5f"
+      },
+      "path": "samples/resource-set-composition/_external-provider.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "76b821f86f2fb3d10d92d0c6fee28eb0eb79b12d",
+        "git-blob-sha1-crlf": "55f1b087788f5deea9c6d5137fb49578733e4de1",
+        "sha256": "114f1daef6c295d8dd35dbd56e01b04b3912e349fe91ec658764f6c28e0a1c5a"
+      },
+      "path": "samples/resource-set-composition/entry.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "e6d25595b03fee6c2e9829a41e91b21aa56494de",
+        "git-blob-sha1-crlf": "63261dce480e509e762d426c73e67a91c4f30fc1",
+        "sha256": "abecf3bd5d9afacbc67cf2284307c8e27df33e2b497a738a3aa0809050607417"
+      },
+      "path": "samples/resource-set-composition/manifest.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "f86a22ab4242d7aa4adcef934053b3248264c064",
+        "git-blob-sha1-crlf": "3462827eb9951ea1dd6fdbedcd0d28d642cd61f9",
+        "sha256": "8e78b92aede36f805a8f5fa504ff40d4708bb8b28d8c41c52c03581baea44de1"
+      },
+      "path": "samples/secretsync-sample/_partial.entry.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "3a64cf5f6f7852c3eb8f558c12d4fde06d4aabb2",
+        "git-blob-sha1-crlf": "ebef3c1562da341093038d3d9d33a11525eedc88",
+        "sha256": "3cecdf1c467ce8d3235bcbfd0f7eb6dfb1a9b3c9d574245f051f36d1cc9675f4"
+      },
+      "path": "samples/secretsync-sample/_partial.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "e0b30a6f291a70a24f18da80bab1d66c702379b2",
+        "git-blob-sha1-crlf": "b326db92f359b622d225d466d27f7999be28435c",
+        "sha256": "a4b8bf5b3d0b8f7fb8f716a468bbaf83ca2444b52318ee911ae07a9cec29affd"
+      },
+      "path": "samples/secretsync-sample/entry.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "7778bfba4312d6443a310d1add47a776f360079f",
+        "git-blob-sha1-crlf": "a8421ed953d19f0d7499d718e690ce9a33529ca4",
+        "sha256": "28d5280b5f3b92733d2c8278684321f10775cf51d9e964aef537d699d74a3777"
+      },
+      "path": "samples/secretsync-sample/manifest.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "aba56e7cd6d9c20cfbc6a527c7a1d26c58051c5a",
+        "git-blob-sha1-crlf": "be3dd096bbffc1b594e9d83ad0b1fe3614b163d3",
+        "sha256": "acd6569f2965685fc678ce991fb2ed95e89c131a5a806f26349c1a1280c0e52c"
+      },
+      "path": "templates/host-bootstrap/aksee/_partial.entry.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "49279df8fe2e65dcef266a84a377f6822ee0218c",
+        "git-blob-sha1-crlf": "531287be069471a5a1c2dc6452d3033ce95bd5d6",
+        "sha256": "92734451b0ba79d26a0ff16348f309fff119ca1953bb7897b3e0607e4f771ad4"
+      },
+      "path": "templates/host-bootstrap/aksee/_partial.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "089b726ff81ad12fef5567b27a6b9bdaaded9f0f",
+        "git-blob-sha1-crlf": "4241d6ae8673bed2de0a5bcc426696eb595f80d1",
+        "sha256": "a0421f2bcad4af0a3eb5a827a06f4a52c369ccca3d3303e5f02df62b28bdf407"
+      },
+      "path": "templates/host-ops/aksee-upgrade/_partial.entry.yaml"
+    },
+    {
+      "digests": {
+        "git-blob-sha1": "2c412ea4eab8970f451ecaf61bdae6cfaa83a2de",
+        "git-blob-sha1-crlf": "a0c5faeb2c91df5748d60af43fa322bac4b1887a",
+        "sha256": "cb1d241571b7214f811ed6b8ae7bc32d20b42a1e5e5dec6c7d136683a4e69599"
+      },
+      "path": "templates/host-ops/aksee-upgrade/_partial.yaml"
+    }
+  ],
+  "kind": "ContentIndexBindings",
+  "normalization": "utf8-lf",
+  "projection": "source-private"
+}

@@ -37,6 +37,11 @@ configured-Site deployment journey. Each entry owns its operator guide and
 optional descriptive `entry.yaml`. These are not package verification or
 deployment-readiness evidence.
 
+The generated `siteops-index.json` presents approved descriptions to remote
+browsers. `siteops-index.inputs.json` holds separate source freshness
+bindings. Follow [index publication](../../docs/remote-content.md#publish-descriptions-from-a-workspace)
+when updating those artifacts. Neither file is an execution package.
+
 | Goal | Entry point | Read first |
 |---|---|---|
 | Install AIO on a prepared cluster | `manifests/aio-install/manifest.yaml` | [Install guide](manifests/aio-install/README.md) |

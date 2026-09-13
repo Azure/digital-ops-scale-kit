@@ -19,6 +19,10 @@ def test_inventory_covers_actual_manifests_and_classifies_their_roles(workspace)
         assert entry.guidance.role == (
             "partial" if expected[entry.path].name.startswith("_") else "standalone"
         )
+        if entry.guidance.role == "standalone":
+            assert entry.guidance.category == (
+                "sample" if entry.path.startswith("samples/") else "core"
+            )
         assert entry.guidance.coverage
         for reference in entry.guidance.documentation:
             assert (workspace / reference.split("#", 1)[0]).is_file()

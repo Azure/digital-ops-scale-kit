@@ -239,7 +239,7 @@ pytest tests/integration/ -v -m integration
 `SITEOPS_E2E_UPGRADE_PHASE=1` does two things:
 
 - **Narrows test collection** to `_UPGRADE_PHASE_ALLOWED_CLASSES` in `tests/integration/conftest.py`. Classes whose assertions require install-phase outputs are listed in `_UPGRADE_PHASE_INSTALL_ONLY_CLASSES` instead. A workspace test requires every class in the upgrade module to appear in exactly one collection.
-- **Short-circuits the `aio_install_result` fixture** so `aio-install.yaml` is not re-deployed at the new release on top of the existing instance.
+- **Short-circuits the `aio_install_result` fixture** so `aio-install` is not re-deployed at the new release on top of the existing instance.
 
 ## Troubleshooting
 

@@ -25,7 +25,10 @@ The quick test is whether the file contains `{{ steps.`. If it does, it is a cha
 
 Attaching a declaration at step level makes it unoverridable, because step level outranks site level and lists are replaced wholesale. Keep the two kinds in separate files even when the same step consumes both. The workspace test `test_manifest_level_parameters_carry_no_step_output_refs` enforces the chaining half of the rule.
 
-Manifest-level attachment is safe to use broadly because parameters are filtered per template: a step receives only the keys its own template declares. A `@secure()` value therefore reaches only the template that declares it.
+Schema filtering keeps only the parameter names a consuming template accepts.
+It is not a confidentiality classifier or permission to publish values.
+An attached binding can also be filtered out, so input guidance must
+distinguish authored wiring from the inputs actually retained by preparation.
 
 Resource collections governed by a `ParameterComposition` contract are the
 exception to ordinary tier precedence. They compose only from manifest-level
@@ -75,11 +78,12 @@ clExtensionIds: "{{ steps.aio-enablement.outputs.clExtensionIds }}"
 > records them as typed deferred references rather than resolving them to
 > values.
 
-## `parameters/` layout
+## Parameter sources and resource sets
 
-The directory groups files by the role they play in the parameter merge:
+Shared defaults and step wiring live under `parameters`. Reusable workload
+declarations live in the separate resource-set library:
 
-| Subdir | Role | Example |
+| Location | Role | Example |
 |---|---|---|
 | `parameters/common/` | Site-derived shared values applied to all steps | `common.yaml` |
 | `parameters/inputs/` | Consumer fan-in (a step pulls outputs from upstream producers) | `inputs/aio-instance.yaml` pulls from `schema-registry`, `adr-ns`, `aio-enablement` |

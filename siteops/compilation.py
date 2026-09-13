@@ -49,7 +49,7 @@ CommandRunner: TypeAlias = Callable[
 ToolResolver: TypeAlias = Callable[[str], str | None]
 
 
-def _resolve_tool_from_path(name: str) -> str | None:
+def resolve_tool_from_path(name: str) -> str | None:
     """Resolve an executable only from absolute PATH entries."""
     path_value = os.environ.get("PATH")
     if not path_value:
@@ -757,7 +757,7 @@ class TemplateCompilationSession:
         self,
         *,
         command_runner: CommandRunner = _run_command,
-        tool_resolver: ToolResolver = _resolve_tool_from_path,
+        tool_resolver: ToolResolver = resolve_tool_from_path,
         timeout_seconds: int = DEFAULT_COMPILATION_TIMEOUT_SECONDS,
         runtime_paths: RuntimePaths | None = None,
     ) -> None:

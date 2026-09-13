@@ -79,8 +79,23 @@ def load(stream):
     return yaml.load(stream, Loader=_StrictLoader)
 
 
+class YamlStructureLimitError(yaml.YAMLError):
+    """Inspection input exceeds its configured YAML structure budget."""
+
+
 def load_bounded(text: str, *, max_nodes: int = 10000, max_depth: int = 40):
-    """Use the engine loader with bounded nesting and expanded alias structure."""
+    """Use the engine's YAML rules within explicit inspection budgets.
+
+    `max_nodes` bounds expanded scalar and collection nodes, including repeated
+    alias references. Parsing admits at most three times that many events to
+    account for collection start/end markers. `max_depth` bounds collection
+    nesting and expanded alias depth. Unbounded execution loading is unchanged.
+
+    Raises:
+        YamlStructureLimitError: A parsing or expanded-structure budget is exceeded.
+        DuplicateKeyError: A mapping declares a key more than once.
+        yaml.YAMLError: The document is otherwise malformed.
+    """
     depth = 0
     events = 0
     for event in yaml.parse(text):
@@ -90,7 +105,7 @@ def load_bounded(text: str, *, max_nodes: int = 10000, max_depth: int = 40):
         elif isinstance(event, yaml.events.CollectionEndEvent):
             depth -= 1
         if events > max_nodes * 3 or depth > max_depth:
-            raise yaml.YAMLError("YAML structure exceeds the inspection limit.")
+            raise YamlStructureLimitError("YAML structure exceeds the inspection limit.")
 
     loader = _StrictLoader(text)
     try:
@@ -103,7 +118,7 @@ def load_bounded(text: str, *, max_nodes: int = 10000, max_depth: int = 40):
             node, depth = pending.pop()
             expanded += 1
             if expanded > max_nodes or depth > max_depth:
-                raise yaml.YAMLError("Expanded YAML exceeds the inspection limit.")
+                raise YamlStructureLimitError("Expanded YAML exceeds the inspection limit.")
             if isinstance(node, yaml.MappingNode):
                 for key, value in node.value:
                     pending.extend(((key, depth + 1), (value, depth + 1)))

@@ -20,7 +20,11 @@ names, assumptions, or release policy.
 
 ## From workspace to outcome
 
-Site Ops follows one command path:
+Browsing and execution have separate responsibilities. `browse` reads
+descriptive content without loading Site values. A remote browse consumes a
+published index tied to one source revision, not a remote execution filesystem.
+
+Preparation and deployment follow one shared command path:
 
 1. Load the workspace, site definitions, overlays, manifest, includes,
    parameter sources, and composition contracts.
@@ -54,6 +58,12 @@ readiness and functional verification.
 The engine recognizes the generic workspace shape. Field names beneath
 `site.properties`, label conventions, AIO release keys, and resource-family
 semantics belong to the workspace.
+
+Public entries own optional `entry.yaml` guidance beside their manifest and
+operator guide. The workspace's optional `content.yaml` names extra discovery
+paths rather than repeating entry descriptions. Generated indexes are
+publication artifacts, not another authored source or an executable package.
+See [browsing](browse-content.md) and [remote indexes](remote-content.md).
 
 ## Choose the owning layer
 

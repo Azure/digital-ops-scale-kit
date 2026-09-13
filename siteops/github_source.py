@@ -10,8 +10,9 @@ import binascii
 import hashlib
 import http.client
 import json
+import logging
+import os
 import re
-import shutil
 import subprocess
 import threading
 import time
@@ -23,6 +24,7 @@ from typing import Any, BinaryIO, Callable
 from urllib.parse import quote, urlsplit
 
 from siteops.browse import BrowseError
+from siteops.compilation import resolve_tool_from_path
 
 GITHUB_API_VERSION = "2026-03-10"
 _API_ROOT = "https://api.github.com"
@@ -35,6 +37,7 @@ _MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 _MAX_STDERR_BYTES = 64 * 1024
 _MAX_TREE_ENTRIES = 20_000
 _READ_CHUNK_BYTES = 64 * 1024
+logger = logging.getLogger(__name__)
 
 _SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 _OWNER_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
@@ -195,14 +198,14 @@ class GitHubReference:
             if parsed.path.endswith("//"):
                 raise _error(
                     "github.reference",
-                    "GitHub repository URL must not contain extra path segments.",
+                    "Use a root repository URL, with --ref for the revision and -w for the workspace.",
                 )
             path = parsed.path[:-1] if parsed.path.endswith("/") else parsed.path
             components = path.split("/")
             if len(components) != 3 or components[0]:
                 raise _error(
                     "github.reference",
-                    "GitHub repository URL must not contain extra path segments.",
+                    "Use a root repository URL, with --ref for the revision and -w for the workspace.",
                 )
             owner, repository = components[1:]
             if repository.endswith(".git"):
@@ -229,7 +232,11 @@ class GitHubTreeEntry:
 
     def __post_init__(self) -> None:
         _validate_tree_path(self.path)
-        _validate_sha(self.sha, summary="GitHub returned an invalid tree object ID.")
+        object.__setattr__(
+            self, "sha", _validate_sha(self.sha, summary="GitHub returned an invalid tree object ID.")
+        )
+        if not isinstance(self.mode, str) or not isinstance(self.type, str):
+            raise _error("github.invalid-data", "GitHub returned an invalid tree entry type.")
         expected_type = _MODE_TYPES.get(self.mode)
         if expected_type is None or self.type != expected_type:
             raise _error(
@@ -270,8 +277,9 @@ def _validate_route(route: object) -> str:
 
 def _classify_status(status: int, headers: Any = None, detail: bytes = b"") -> BrowseError:
     lower_detail = detail.lower()
-    remaining = headers.get("X-RateLimit-Remaining") if headers is not None else None
-    retry_after = headers.get("Retry-After") if headers is not None else None
+    normalized = {key.casefold(): value for key, value in headers.items()} if headers else {}
+    remaining = normalized.get("x-ratelimit-remaining")
+    retry_after = normalized.get("retry-after")
     if status in {408, 504}:
         return _error("github.timeout", "GitHub did not respond within the read timeout.")
     if status == 404:
@@ -290,7 +298,7 @@ def _classify_status(status: int, headers: Any = None, detail: bytes = b"") -> B
     ):
         return _error(
             "github.rate-limit",
-            "GitHub API rate limit was reached; retry after the limit resets.",
+            "GitHub API rate limit was reached. Retry after the limit resets.",
         )
     if status in {401, 403}:
         return _error(
@@ -300,25 +308,41 @@ def _classify_status(status: int, headers: Any = None, detail: bytes = b"") -> B
     if 300 <= status < 400:
         return _error(
             "github.redirect",
-            "GitHub API redirected the request; redirects are not accepted.",
+            "GitHub redirected the request. Use the repository's current owner and name.",
         )
     if status >= 500:
         return _error(
             "github.network",
-            "GitHub API is temporarily unavailable; retry the read later.",
+            "GitHub API is temporarily unavailable. Retry the read later.",
         )
     return _error("github.invalid-data", "GitHub rejected the requested repository object.")
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate JSON field.")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError("Non-finite JSON value.")
 
 
 def _decode_json(payload: bytes) -> Any:
     if len(payload) > _MAX_RESPONSE_BYTES:
         raise _error(
             "github.response-limit",
-            "GitHub response exceeds the remote browsing limit; narrow the repository scope.",
+            "GitHub response exceeds the remote browsing limit. Narrow the repository scope.",
         )
     try:
-        return json.loads(payload.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError, RecursionError):
+        return json.loads(
+            payload.decode("utf-8"), object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_json_constant,
+        )
+    except (UnicodeError, ValueError, RecursionError):
         raise _error("github.invalid-data", "GitHub returned invalid JSON data.") from None
 
 
@@ -335,7 +359,7 @@ def _anonymous_request(route: str) -> Any:
         method="GET",
     )
     opener = urllib.request.build_opener(
-        urllib.request.ProxyHandler({}),
+        urllib.request.ProxyHandler(),
         _RejectRedirects(),
     )
     try:
@@ -347,7 +371,7 @@ def _anonymous_request(route: str) -> Any:
             if final_url != url:
                 raise _error(
                     "github.redirect",
-                    "GitHub API redirected the request; redirects are not accepted.",
+                    "GitHub API redirected the request. Redirects are not accepted.",
                 )
             if not isinstance(status, int) or isinstance(status, bool):
                 raise _error("github.invalid-data", "GitHub returned an invalid HTTP status.")
@@ -425,7 +449,7 @@ def _stop_process(process: subprocess.Popen[bytes]) -> None:
             process.kill()
             process.wait(timeout=_PROCESS_STOP_SECONDS)
         except (OSError, subprocess.TimeoutExpired):
-            pass
+            logger.warning("GitHub CLI process cleanup could not be confirmed.")
 
 
 def _close_process_pipes(process: subprocess.Popen[bytes]) -> None:
@@ -434,15 +458,15 @@ def _close_process_pipes(process: subprocess.Popen[bytes]) -> None:
             try:
                 stream.close()
             except OSError:
-                pass
+                logger.warning("A GitHub CLI output stream could not be closed.")
 
 
 def _resolve_gh() -> str:
-    executable = shutil.which("gh")
+    executable = resolve_tool_from_path("gh.exe" if os.name == "nt" else "gh")
     if executable is None:
         raise _error(
             "github.tool-missing",
-            "GitHub CLI is required for auth='cli'; install gh and configure github.com.",
+            "GitHub CLI is required for auth='cli'. Install gh and configure github.com.",
         )
     try:
         resolved = Path(executable).resolve(strict=True)
@@ -456,6 +480,8 @@ def _resolve_gh() -> str:
             "github.tool-missing",
             "GitHub CLI executable could not be resolved.",
         )
+    if os.name == "nt" and resolved.suffix.casefold() != ".exe":
+        raise _error("github.tool-missing", "Use an installed gh.exe binary, not a shell wrapper.")
     return str(resolved)
 
 
@@ -467,6 +493,7 @@ def _run_gh(argv: list[str]) -> tuple[int, bytes, bytes]:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             shell=False,
+            bufsize=0,
         )
     except (FileNotFoundError, PermissionError, OSError):
         raise _error(
@@ -484,45 +511,46 @@ def _run_gh(argv: list[str]) -> tuple[int, bytes, bytes]:
         threading.Thread(target=stdout.read, args=(process.stdout,), daemon=True),
         threading.Thread(target=stderr.read, args=(process.stderr,), daemon=True),
     ]
-    for reader in readers:
-        reader.start()
+    try:
+        for reader in readers:
+            reader.start()
 
-    deadline = time.monotonic() + _CLI_TIMEOUT_SECONDS
-    timed_out = False
-    while process.poll() is None:
+        deadline = time.monotonic() + _CLI_TIMEOUT_SECONDS
+        timed_out = False
+        while process.poll() is None:
+            if stdout.exceeded.is_set() or stderr.exceeded.is_set():
+                _stop_process(process)
+                break
+            if stdout.failed.is_set() or stderr.failed.is_set():
+                _stop_process(process)
+                break
+            if time.monotonic() >= deadline:
+                timed_out = True
+                _stop_process(process)
+                break
+            time.sleep(0.01)
+
+        for reader in readers:
+            reader.join(timeout=_PROCESS_STOP_SECONDS)
+        if any(reader.is_alive() for reader in readers):
+            raise _error("github.network", "GitHub CLI output could not be captured safely.")
+        if timed_out:
+            raise _error("github.timeout", "GitHub CLI read timed out.")
         if stdout.exceeded.is_set() or stderr.exceeded.is_set():
-            _stop_process(process)
-            break
+            raise _error(
+                "github.response-limit",
+                "GitHub CLI output exceeded the remote browsing limit.",
+            )
         if stdout.failed.is_set() or stderr.failed.is_set():
+            raise _error("github.network", "GitHub CLI output could not be captured safely.")
+        return_code = process.poll()
+        if return_code is None:
+            raise _error("github.timeout", "GitHub CLI read timed out.")
+        return return_code, bytes(stdout.content), bytes(stderr.content)
+    finally:
+        if process.poll() is None:
             _stop_process(process)
-            break
-        if time.monotonic() >= deadline:
-            timed_out = True
-            _stop_process(process)
-            break
-        time.sleep(0.01)
-
-    for reader in readers:
-        reader.join(timeout=_PROCESS_STOP_SECONDS)
-    if any(reader.is_alive() for reader in readers):
-        _stop_process(process)
         _close_process_pipes(process)
-        raise _error("github.network", "GitHub CLI output could not be captured safely.")
-    _close_process_pipes(process)
-    if timed_out:
-        raise _error("github.timeout", "GitHub CLI read timed out.")
-    if stdout.exceeded.is_set() or stderr.exceeded.is_set():
-        raise _error(
-            "github.response-limit",
-            "GitHub CLI output exceeded the remote browsing limit.",
-        )
-    if stdout.failed.is_set() or stderr.failed.is_set():
-        raise _error("github.network", "GitHub CLI output could not be captured safely.")
-    return_code = process.poll()
-    if return_code is None:
-        _stop_process(process)
-        raise _error("github.timeout", "GitHub CLI read timed out.")
-    return return_code, bytes(stdout.content), bytes(stderr.content)
 
 
 def _split_cli_response(payload: bytes) -> tuple[list[int], dict[str, str], bytes]:
@@ -675,20 +703,32 @@ class GitHubClient:
     def resolve_commit(self) -> str:
         """Resolve the configured reference or repository default branch to a commit."""
         selected_ref = self.reference.ref
-        if selected_ref is None:
+        if selected_ref is None or self.auth == "cli":
             repository = self._request(self._repository_route())
             if not isinstance(repository, dict):
                 raise _error(
                     "github.invalid-data",
                     "GitHub returned invalid repository metadata.",
                 )
-            try:
-                selected_ref = _validate_ref(repository.get("default_branch"))
-            except BrowseError:
-                raise _error(
-                    "github.invalid-data",
-                    "GitHub returned an invalid default branch.",
-                ) from None
+            if self.auth == "cli":
+                # gh can follow redirects before returning its final response.
+                full_name = repository.get("full_name")
+                if not isinstance(full_name, str):
+                    raise _error("github.invalid-data", "GitHub did not identify the repository.")
+                expected = f"{self.reference.owner}/{self.reference.repository}"
+                if full_name.casefold() != expected.casefold():
+                    raise _error(
+                        "github.repository-moved",
+                        "The repository has moved. Use its current owner and repository name.",
+                    )
+            if selected_ref is None:
+                try:
+                    selected_ref = _validate_ref(repository.get("default_branch"))
+                except BrowseError:
+                    raise _error(
+                        "github.invalid-data",
+                        "GitHub returned an invalid default branch.",
+                    ) from None
 
         route = f"{self._repository_route()}/commits/{quote(selected_ref, safe='')}"
         commit = self._request(route)
@@ -719,12 +759,12 @@ class GitHubClient:
         if truncated:
             raise _error(
                 "github.tree-limit",
-                "GitHub truncated the repository tree; use a smaller published content scope.",
+                "GitHub truncated the repository tree. Use a smaller published content scope.",
             )
         if len(tree) > _MAX_TREE_ENTRIES:
             raise _error(
                 "github.tree-limit",
-                "Repository tree exceeds 20,000 entries; use a smaller published content scope.",
+                "Repository tree exceeds 20,000 entries. Use a smaller published content scope.",
             )
         try:
             encoded_size = len(

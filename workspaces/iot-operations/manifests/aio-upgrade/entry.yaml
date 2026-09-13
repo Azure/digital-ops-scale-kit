@@ -1,7 +1,7 @@
 apiVersion: siteops/v1alpha1
 kind: DeploymentEntry
 role: standalone
-category: operation
+category: core
 tags: [aio, upgrade]
 documentation: [README.md]
 outcome: Upgrade AIO-related extensions and resources explicitly required by the selected release.

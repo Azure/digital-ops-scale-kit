@@ -74,6 +74,11 @@ or invoking deployment tools. Each card provides the path for the existing
 `plan` and `deploy` commands. See [browse deployment content](docs/browse-content.md)
 for filters, private JSON and the installation-to-workload journey.
 
+Use `browse --source` to inspect a source's published index without cloning.
+[Remote browsing](docs/remote-content.md) identifies the exact source revision
+and links to its pinned guides. It does not acquire deployable workspace
+content or grant deployment permissions.
+
 ## Learn and extend
 
 | Task | Start here |

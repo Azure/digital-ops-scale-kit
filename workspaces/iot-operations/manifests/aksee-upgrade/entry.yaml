@@ -1,7 +1,7 @@
 apiVersion: siteops/v1alpha1
 kind: DeploymentEntry
 role: standalone
-category: operation
+category: core
 tags: [host, windows, aksee, upgrade]
 documentation: [README.md]
 outcome: Upgrade an existing AKS Edge Essentials cluster through its Arc-enabled host.

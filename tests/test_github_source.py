@@ -5,6 +5,7 @@ import base64
 import hashlib
 import io
 import json
+import os
 import subprocess
 import urllib.error
 
@@ -518,7 +519,7 @@ def _install_cli(monkeypatch, tmp_path, process):
     executable.write_bytes(b"test")
     calls = []
 
-    monkeypatch.setattr(github_source.shutil, "which", lambda _name: str(executable))
+    monkeypatch.setattr(github_source, "resolve_tool_from_path", lambda _name: str(executable))
 
     def popen(argv, **kwargs):
         calls.append((argv, kwargs))
@@ -537,7 +538,7 @@ def test_cli_transport_uses_absolute_argv_and_parses_bounded_json(monkeypatch, t
     calls = _install_cli(monkeypatch, tmp_path, process)
     client = GitHubClient(GitHubReference.parse("github:owner/repo", "main"), auth="cli")
 
-    assert client.resolve_commit() == COMMIT
+    assert client._request("/repos/owner/repo/commits/main")["sha"] == COMMIT
     argv, kwargs = calls[0]
     assert argv[0] == str((tmp_path / "gh.exe").resolve())
     assert argv[1:6] == ["api", "--hostname", "github.com", "--method", "GET"]
@@ -604,7 +605,7 @@ def test_cli_transport_classifies_failures_without_included_headers(
 
 
 def test_cli_transport_reports_missing_tool_without_fallback(monkeypatch):
-    monkeypatch.setattr(github_source.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(github_source, "resolve_tool_from_path", lambda _name: None)
     client = GitHubClient(GitHubReference.parse("github:owner/repo"), auth="cli")
 
     with pytest.raises(BrowseError) as error:
@@ -616,7 +617,7 @@ def test_cli_transport_reports_missing_tool_without_fallback(monkeypatch):
 def test_cli_transport_reports_executable_start_failure(monkeypatch, tmp_path):
     executable = tmp_path / "gh.exe"
     executable.write_bytes(b"test")
-    monkeypatch.setattr(github_source.shutil, "which", lambda _name: str(executable))
+    monkeypatch.setattr(github_source, "resolve_tool_from_path", lambda _name: str(executable))
     monkeypatch.setattr(
         github_source.subprocess,
         "Popen",
@@ -672,3 +673,99 @@ def test_cli_transport_bounds_stdout_stderr_and_elapsed_time(monkeypatch, tmp_pa
         client._request("/repos/owner/repo")
     _assert_code(error, "github.timeout")
     assert hanging.terminated
+
+
+def test_cli_cancellation_terminates_the_owned_process(monkeypatch, tmp_path):
+    process = _Process(b"", hangs=True)
+    _install_cli(monkeypatch, tmp_path, process)
+
+    def cancel(_seconds):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(github_source.time, "sleep", cancel)
+    client = GitHubClient(GitHubReference.parse("github:owner/repo"), auth="cli")
+    with pytest.raises(KeyboardInterrupt):
+        client.resolve_commit()
+    assert process.terminated or process.killed
+
+
+def test_tree_mode_validation_handles_non_scalar_input():
+    with pytest.raises(BrowseError):
+        GitHubTreeEntry("manifest.yaml", "a" * 40, "blob", [], 1)
+
+
+def test_api_json_rejects_duplicate_identity_fields(monkeypatch):
+    requested = "https://api.github.com/repos/owner/repo"
+    response = _Response(requested, b'{"sha":"first","sha":"second"}')
+    monkeypatch.setattr(
+        github_source.urllib.request, "build_opener", lambda *_handlers: _Opener(response)
+    )
+    client = GitHubClient(GitHubReference.parse("github:owner/repo"))
+    with pytest.raises(BrowseError) as error:
+        client._request("/repos/owner/repo")
+    _assert_code(error, "github.invalid-data")
+
+
+def test_gh_resolution_ignores_cwd_and_relative_path_entries(tmp_path, monkeypatch):
+    cwd = tmp_path / "content"
+    trusted = tmp_path / "tools"
+    cwd.mkdir()
+    trusted.mkdir()
+    filename = "gh.exe" if os.name == "nt" else "gh"
+    for root in (cwd, trusted):
+        executable = root / filename
+        executable.write_bytes(b"fixture")
+        executable.chmod(0o755)
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("PATH", os.pathsep.join((".", str(trusted))))
+    monkeypatch.setenv("PATHEXT", ".EXE")
+    assert github_source._resolve_gh() == str((trusted / filename).resolve())
+
+
+@pytest.mark.parametrize("ref", [None, "main"])
+def test_authenticated_resolution_rejects_a_followed_repository_transfer(ref):
+    calls = []
+
+    def transport(route):
+        calls.append(route)
+        if route == "/repos/owner/repo":
+            return {"full_name": "other/transferred", "default_branch": "main"}
+        return {"sha": COMMIT}
+
+    client = GitHubClient(GitHubReference("owner", "repo", ref), auth="cli", transport=transport)
+    with pytest.raises(BrowseError) as failure:
+        client.resolve_commit()
+    assert failure.value.diagnostic.code == "github.repository-moved"
+    assert calls == ["/repos/owner/repo"]
+
+
+def test_authenticated_resolution_accepts_the_same_repository_identity():
+    calls = []
+
+    def transport(route):
+        calls.append(route)
+        if route == "/repos/owner/repo":
+            return {"full_name": "Owner/Repo", "default_branch": "main"}
+        return {"sha": COMMIT}
+
+    client = GitHubClient(
+        GitHubReference("owner", "repo", "main"), auth="cli", transport=transport
+    )
+    assert client.resolve_commit() == COMMIT
+    assert calls == ["/repos/owner/repo", "/repos/owner/repo/commits/main"]
+
+
+def test_live_cli_output_limit_terminates_then_kills_when_needed(monkeypatch, tmp_path):
+    class Uncooperative(_Process):
+        def terminate(self):
+            self.terminated = True
+            raise OSError("fixture")
+
+    process = Uncooperative(b"too much output", hangs=True)
+    _install_cli(monkeypatch, tmp_path, process)
+    monkeypatch.setattr(github_source, "_MAX_RESPONSE_BYTES", 4)
+    client = GitHubClient(GitHubReference("owner", "repo"), auth="cli")
+    with pytest.raises(BrowseError) as failure:
+        client._request("/repos/owner/repo")
+    assert failure.value.diagnostic.code == "github.response-limit"
+    assert process.terminated and process.killed

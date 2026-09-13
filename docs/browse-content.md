@@ -17,11 +17,22 @@ load Sites or overlays, expand includes, read parameter values, compile
 templates, probe deployment tools, contact services or perform deployment.
 It works with an explicitly selected workspace that has no configured Sites.
 
+For a published remote catalog, use `browse --source`. See
+[remote browsing](remote-content.md) for pinned GitHub sources, authorized
+reads and source-index publication. Remote preview does not acquire
+deployable workspace content.
+
 ## Find the right choice
 
 The default inventory lists declared standalone entries and visibly
 unclassified candidates. Declared partials require `--include-partials`.
 A standalone role describes author intent, not readiness or certification.
+
+The included AIO workspace labels its ordinary deployment paths as `core`
+and its instructional examples as `sample`. Use `--category core` or
+`--category sample` to focus on either. These categories are separate from
+standalone/partial roles and do not establish support, trust or qualification.
+Internal fundamental fragments remain partials, not standalone core choices.
 
 Inventory rows are compact and ordered by workspace-relative path. All
 matches are returned by default, including for large collections. Use:
@@ -184,6 +195,7 @@ directory items, with 12 levels of traversal beneath conventional roots.
 Each file is limited to 256 KiB and total reads to 8 MiB. YAML nesting and
 expanded alias structure are bounded separately. Exceeding a limit is an
 explicit failure, not a silently complete inventory.
+`yaml.limit` distinguishes a structure-budget failure from malformed YAML.
 
 ## Private output and source trust
 
@@ -192,10 +204,13 @@ descriptions. It is unavailable while destination redaction is enabled.
 Use `SITEOPS_REDACT_OUTPUT=0` only for an authorized private destination.
 JSON contains its preview version, projection, source context, processing
 status, counts, entries and diagnostics. It is not a deployment plan.
+The `local-private` projection label describes the authorized output
+destination, not whether the content source is local or remote.
 `nameInventoryComplete` distinguishes complete name discovery from descriptive
 metadata quality. A null value means no name inventory was performed.
 
 A local clone or materialized directory does not become a verified package
 because of its location. Browsing does not inspect Git remotes or claim
-publisher verification. No remote acquisition or public gallery projection
-is implemented by this command.
+publisher verification. Remote browsing consumes a separately generated
+publication projection. It does not implement workspace acquisition or a
+privileged gallery.

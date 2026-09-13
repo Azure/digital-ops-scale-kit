@@ -1,7 +1,7 @@
 apiVersion: siteops/v1alpha1
 kind: DeploymentEntry
 role: standalone
-category: operation
+category: core
 tags: [aio, secretsync, identity]
 documentation: [README.md]
 outcome: Enable workload-identity-backed Secret Sync on an existing AIO instance.

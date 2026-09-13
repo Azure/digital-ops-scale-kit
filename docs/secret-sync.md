@@ -96,7 +96,7 @@ properties:
     enableSecretSync: true
 ```
 
-Then deploy with `aio-install.yaml` as usual. The resolve-aio and secretsync steps run automatically after the AIO instance is configured:
+Then deploy with `aio-install` as usual. The resolve-aio and secretsync steps run automatically after the AIO instance is configured:
 
 ```bash
 siteops -w workspaces/iot-operations deploy manifests/aio-install/manifest.yaml -l "name=my-site"
@@ -112,7 +112,7 @@ Use the standalone manifest to enable secret sync on instances that are already 
 siteops -w workspaces/iot-operations deploy manifests/secretsync/manifest.yaml -l "name=my-site"
 ```
 
-The standalone `secretsync.yaml` manifest runs the same two steps (resolve-aio → enable-secretsync) without the full AIO installation pipeline.
+The standalone `secretsync` entry runs the same two steps (resolve-aio → enable-secretsync) without the full AIO installation pipeline.
 
 ### CI/CD
 
@@ -248,7 +248,7 @@ instanceLocation: "{{ steps.resolve-aio.outputs.instanceLocation }}"
     - samples/secretsync-sample/inputs.yaml
 ```
 
-Gate the step when the composition makes secret sync optional. `aio-install.yaml` puts the `when:` on the `_secretsync.yaml` include rather than on individual steps, so every spliced step inherits one condition.
+Gate the step when the composition makes secret sync optional. `aio-install` puts the `when:` on the `_secretsync.yaml` include rather than on individual steps, so every spliced step inherits one condition.
 
 The declaration file holds `secrets` and `secretValues` and attaches at manifest level, which puts it below site parameters in the [merge order](parameter-resolution.md#merge-order) so a site or a `sites.local/` overlay overrides it:
 
