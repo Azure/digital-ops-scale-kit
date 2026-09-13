@@ -567,4 +567,4 @@ def test_non_aio_browse_plan_deploy_uses_configured_site(tmp_path, monkeypatch, 
     assert submissions[0]["resource_group"] == "configured-group"
     assert submissions[0]["parameters"]["storageAccountName"] == "configuredstorage"
     assert submissions[0]["parameters"]["location"] == "westus2"
-    assert submissions[0]["template_path"] == workspace / "templates" / "storage.json"
+    assert submissions[0]["template_path"] == workspace / "templates" / "storage.template.json"

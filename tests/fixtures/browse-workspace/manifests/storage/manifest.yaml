@@ -7,5 +7,5 @@ parameters:
   - defaults.yaml
 steps:
   - name: storage-account
-    template: templates/storage.json
+    template: templates/storage.template.json
     scope: resourceGroup
