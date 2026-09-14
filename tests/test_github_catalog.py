@@ -111,6 +111,34 @@ def test_remote_inventory_keeps_source_context_in_next_steps(workspace):
     assert "custom layout" not in empty
 
 
+def test_remote_name_filename_ambiguity_uses_explicit_paths(workspace):
+    manifest = workspace / "manifests" / "storage" / "manifest.yaml"
+    document = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+    document["name"] = "choice.yaml"
+    manifest.write_text(yaml.safe_dump(document), encoding="utf-8")
+    (workspace / "choice.yaml").write_text(
+        yaml.safe_dump({**document, "name": "file-choice"}), encoding="utf-8",
+    )
+    (workspace / "choice.entry.yaml").write_text(yaml.safe_dump({
+        "apiVersion": "siteops/v1alpha1", "kind": "DeploymentEntry", "role": "standalone",
+    }), encoding="utf-8")
+    (workspace / "content.yaml").write_text(yaml.safe_dump({
+        "apiVersion": "siteops/v1alpha1", "kind": "WorkspaceContent", "entries": ["choice.yaml"],
+    }), encoding="utf-8")
+    client = _Client()
+    _publish(workspace, client)
+    result = inspect_github("github:example/kit", "choice.yaml", client=client)
+    assert not result.selected
+    assert result.diagnostics[-1].code == "lookup.ambiguous"
+    assert {entry.path for entry in result.entries} == {
+        "choice.yaml", "manifests/storage/manifest.yaml",
+    }
+    result = inspect_github("github:example/kit", "./choice.yaml", client=client)
+    assert result.selected and result.entries[0].name == "file-choice"
+    result = inspect_github("github:example/kit", "file-choice", client=client)
+    assert result.selected and result.entries[0].path == "choice.yaml"
+
+
 def test_100_remote_entries_need_no_per_entry_fetch(workspace):
     original = workspace / "manifests" / "storage"
     for index in range(99):

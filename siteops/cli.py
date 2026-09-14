@@ -30,9 +30,22 @@ from typing import Any, Callable
 import yaml
 
 from siteops import __version__
-from siteops.browse import BrowseError, BrowseResult, inspect_content, validate_browse_options
+from siteops.browse import (
+    BrowseError,
+    BrowseResult,
+    ContentReader,
+    inspect_content,
+    validate_browse_options,
+)
+from siteops.browse_output import _text as _content_text
 from siteops.browse_output import render_browse_plain, serialize_browse_json
 from siteops.composition import CompositionError, report_composition_error
+from siteops.manifest_selection import (
+    ManifestSelectionError,
+    explicit_manifest_reference,
+    is_explicit_manifest_path,
+    select_manifest_path,
+)
 from siteops.models import (
     Manifest,
     MultipleSubscriptionSitesError,
@@ -77,11 +90,41 @@ def setup_logging(verbose: bool = False) -> None:
         logging.getLogger("siteops.executor").setLevel(logging.WARNING)
 
 
-def resolve_manifest_path(manifest: Path, workspace: Path) -> Path:
-    """Resolve manifest path - if relative, make it relative to workspace."""
-    if manifest.is_absolute():
-        return manifest
-    return workspace / manifest
+def resolve_manifest_path(manifest: str | Path, workspace: Path) -> Path:
+    """Resolve a name or filename while preserving trusted explicit local paths."""
+    if is_explicit_manifest_path(manifest):
+        path = Path(str(manifest).replace("\\", "/"))
+        return path if path.is_absolute() else workspace / path
+    reader = ContentReader(workspace)
+    entries = reader.inventory()
+    selection = str(manifest)
+    path = select_manifest_path(
+        selection,
+        ((entry.name, entry.path) for entry in entries if entry.guidance.role != "partial"),
+        names_complete=reader.names_complete,
+        filename_match=reader.filename_candidate(selection),
+    )
+    return reader.workspace / path
+
+
+def _command_manifest(args: argparse.Namespace) -> Path | None:
+    try:
+        path = resolve_manifest_path(args.manifest, args.workspace)
+        if not path.is_file():
+            raise ManifestSelectionError(
+                "lookup.missing", "Manifest not found.", (str(path),)
+            )
+    except (ManifestSelectionError, BrowseError) as error:
+        print(f"Error: {error}", file=sys.stderr)
+        if isinstance(error, ManifestSelectionError) and error.paths and not is_redaction_enabled():
+            print("Explicit paths:", file=sys.stderr)
+            for choice in error.paths:
+                print(f"  {_content_text(explicit_manifest_reference(choice))}", file=sys.stderr)
+        return None
+    if isinstance(args.manifest, str) and not is_explicit_manifest_path(args.manifest):
+        if not is_redaction_enabled():
+            print(f"Manifest: {_content_text(str(path))}", file=sys.stderr)
+    return path
 
 
 def cmd_browse(args: argparse.Namespace) -> int:
@@ -244,9 +287,8 @@ def _write_plan_result(
 
 def cmd_plan(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     """Validate and prepare a deployment plan without executing it."""
-    manifest_path = resolve_manifest_path(args.manifest, args.workspace)
-    if not manifest_path.exists():
-        print(f"Error: Manifest not found: {manifest_path}", file=sys.stderr)
+    manifest_path = _command_manifest(args)
+    if manifest_path is None:
         return 1
 
     try:
@@ -363,13 +405,11 @@ def _install_stop_handler(
 
 def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     """Execute deployment."""
-    manifest_path = resolve_manifest_path(args.manifest, args.workspace)
-
-    if not manifest_path.exists():
-        print(f"Error: Manifest not found: {manifest_path}", file=sys.stderr)
-        return 1
     if getattr(args, "dry_run", False):
         return cmd_plan(args, orchestrator)
+    manifest_path = _command_manifest(args)
+    if manifest_path is None:
+        return 1
 
     try:
         json_output, projection = _output_settings(args)
@@ -467,12 +507,6 @@ def _note_superseded_verbose(
 
 def cmd_validate(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     """Validate manifest and optionally show deployment plan."""
-    manifest_path = resolve_manifest_path(args.manifest, args.workspace)
-
-    if not manifest_path.exists():
-        print(f"Error: Manifest not found: {manifest_path}", file=sys.stderr)
-        return 1
-
     selector = getattr(args, "selector", None)
     show_plan = getattr(args, "plan", False)
     try:
@@ -490,6 +524,9 @@ def cmd_validate(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         plan_args.describe = True
         return cmd_plan(plan_args, orchestrator)
 
+    manifest_path = _command_manifest(args)
+    if manifest_path is None:
+        return 1
     try:
         manifest = Manifest.from_file(
             manifest_path,
@@ -975,10 +1012,10 @@ Examples:
   siteops -w workspaces/iot-operations browse aio-install
   siteops -w workspaces/iot-operations sites
   siteops -w workspaces/iot-operations sites munich-dev --output yaml
-  siteops -w workspaces/iot-operations validate manifests/aio-install/manifest.yaml
-  siteops -w workspaces/iot-operations plan manifests/aio-install/manifest.yaml
-  siteops -w workspaces/iot-operations deploy manifests/aio-install/manifest.yaml
-  siteops -w workspaces/iot-operations plan manifests/aio-install/manifest.yaml -l environment=prod
+  siteops -w workspaces/iot-operations validate aio-install
+  siteops -w workspaces/iot-operations plan aio-install
+  siteops -w workspaces/iot-operations deploy aio-install
+  siteops -w workspaces/iot-operations plan aio-install -l environment=prod
 """,
     )
     parser.add_argument("--version", action="version", version=f"siteops {__version__}")
@@ -1073,7 +1110,7 @@ Examples:
             "progress to return or reach their own timeout."
         ),
     )
-    p_deploy.add_argument("manifest", type=Path, help="Path to manifest file")
+    p_deploy.add_argument("manifest", help="Exact manifest name or explicit manifest path")
     p_deploy.add_argument(
         "--dry-run",
         action="store_true",
@@ -1126,7 +1163,7 @@ Examples:
             "without executing it."
         ),
     )
-    p_plan.add_argument("manifest", type=Path, help="Path to manifest file")
+    p_plan.add_argument("manifest", help="Exact manifest name or explicit manifest path")
     p_plan.add_argument(
         "-l",
         "--selector",
@@ -1182,7 +1219,7 @@ Examples:
             "plan shape."
         ),
     )
-    p_validate.add_argument("manifest", type=Path, help="Path to manifest file")
+    p_validate.add_argument("manifest", help="Exact manifest name or explicit manifest path")
     p_validate.add_argument(
         "-l",
         "--selector",

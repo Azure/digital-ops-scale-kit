@@ -53,14 +53,21 @@ siteops -w workspaces/iot-operations browse resource-set-basic
 siteops -w workspaces/iot-operations browse samples/resource-set-basic/manifest.yaml
 ```
 
-Names are case-sensitive conveniences, not execution aliases. An ambiguous
-name reports candidate paths, including when filters show only one of the
-same-named entries. An incomplete manifest-name inventory cannot establish
-uniqueness, so use an explicit path. Broken optional entry guidance retains
-the known name and returns a partial card rather than disabling unrelated
-name lookup. Path-shaped arguments, including YAML
-filenames, select files. Prefix `./` when disambiguating another filename.
-Selection cannot be combined with inventory filters.
+`browse`, `validate`, `plan` and `deploy` accept the same exact manifest names.
+Names are case-sensitive and scoped to the selected workspace, not a global
+registry. Declared partials use explicit paths for execution.
+
+A bare token can identify a manifest name or a file at the workspace root.
+If those identify different files, the command reports the available paths.
+Use `./file.yaml` to select a filename explicitly, or the displayed
+`manifests/...` or `samples/...` path to select another entry. This also
+applies to extensionless filenames and names ending in `.yaml`.
+
+An incomplete manifest-name inventory cannot establish uniqueness, so use
+an explicit path. Broken optional entry guidance retains the known name and
+returns a partial card. Guidance is not an execution admission rule.
+Inventory filters preserve known name ambiguity even when only one matching
+row remains visible. Selection cannot be combined with inventory filters.
 
 ## From inspection to deployment
 
@@ -70,16 +77,16 @@ Use the same explicit Site for both operations:
 
 ```bash
 siteops -w workspaces/iot-operations browse aio-install
-siteops -w workspaces/iot-operations plan manifests/aio-install/manifest.yaml -l name=catalog-basic
-siteops -w workspaces/iot-operations deploy manifests/aio-install/manifest.yaml -l name=catalog-basic
+siteops -w workspaces/iot-operations plan aio-install -l name=catalog-basic
+siteops -w workspaces/iot-operations deploy aio-install -l name=catalog-basic
 ```
 
 After assessing AIO readiness, inspect and apply the workload:
 
 ```bash
 siteops -w workspaces/iot-operations browse resource-set-basic
-siteops -w workspaces/iot-operations plan samples/resource-set-basic/manifest.yaml -l name=catalog-basic
-siteops -w workspaces/iot-operations deploy samples/resource-set-basic/manifest.yaml -l name=catalog-basic
+siteops -w workspaces/iot-operations plan resource-set-basic -l name=catalog-basic
+siteops -w workspaces/iot-operations deploy resource-set-basic -l name=catalog-basic
 ```
 
 For an existing installation, omit installation and configure the correct
@@ -97,6 +104,7 @@ POSIX shell elsewhere. PowerShell suggestions are not Command Prompt
 commands. Paths containing control characters or Windows shell metacharacters
 are displayed as data without executable command suggestions. Private JSON
 retains canonical paths for callers that construct argument arrays directly.
+Prefix a root-level filename with `./` when using that path as a CLI argument.
 
 ## Authored guidance and uncertainty
 

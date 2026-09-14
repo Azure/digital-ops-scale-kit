@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import replace
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 from urllib.parse import quote
 
@@ -29,6 +29,7 @@ from siteops.content_index import (
     load_source_bindings,
     validate_source_snapshot,
 )
+from siteops.manifest_selection import is_explicit_manifest_path
 
 if TYPE_CHECKING:
     from siteops.github_source import GitHubClient, GitHubTreeEntry
@@ -179,15 +180,16 @@ def inspect_github(
             workspace_name or ".", entries, discovered=len(entries),
             name_inventory_complete=True, source=context,
         )
-        selection_is_path = selection is not None and (
-            "/" in selection or "\\" in selection or PureWindowsPath(selection).drive
-            or selection.casefold().endswith((".yaml", ".yml"))
-        )
+        selection_is_path = selection is not None and is_explicit_manifest_path(selection)
         if selection_is_path:
             selection = canonical_index_path(selection.replace("\\", "/").removeprefix("./"))
+        filename_match = next(
+            (entry.path for entry in entries if entry.path == selection), None
+        ) if not selection_is_path else None
         return select_entries(
             result, selection, search=search, tags=tags, category=category,
             include_partials=include_partials, limit=limit, selection_is_path=selection_is_path,
+            filename_match=filename_match,
         )
     except BrowseError as error:
         return BrowseResult(

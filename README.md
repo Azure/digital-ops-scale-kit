@@ -70,8 +70,8 @@ siteops -w workspaces/iot-operations browse --tag mqtt
 ```
 
 Browsing reads descriptions and authored guidance without loading Site values
-or invoking deployment tools. Each card provides the path for the existing
-`plan` and `deploy` commands. See [browse deployment content](docs/browse-content.md)
+or invoking deployment tools. Use the same name with `plan` and `deploy`,
+or select the explicit path shown on the card. See [browse deployment content](docs/browse-content.md)
 for filters, private JSON and the installation-to-workload journey.
 
 Use `browse --source` to inspect a source's published index without cloning.
