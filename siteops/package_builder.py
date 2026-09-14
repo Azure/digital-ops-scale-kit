@@ -140,7 +140,7 @@ def _discover_template_sources(root: Path, workspace: str) -> tuple[str, ...]:
     try:
         reader = ContentReader(workspace_path)
         entries = reader.inventory()
-        if reader.diagnostics or not reader.names_complete:
+        if not reader.names_complete:
             raise ArtifactError(
                 "Workspace deployment entries could not be inspected for package compilation."
             )

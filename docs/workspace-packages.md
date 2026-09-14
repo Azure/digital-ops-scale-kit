@@ -59,6 +59,8 @@ workspace discovery rules, loads their manifests with the shared manifest
 parser, expands includes, and compiles the distinct deployment template paths.
 It does not load Sites, resolve parameter values, or treat every Bicep module
 as a deployment root.
+Incomplete manifest discovery blocks production. Optional advisory-guidance
+errors do not independently prevent template discovery or compilation.
 
 Native ARM JSON deployment roots are validated and mapped at their authored
 path. Bicep roots are compiled to

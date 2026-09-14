@@ -194,6 +194,22 @@ def test_complete_package_preserves_workspace_and_companion_paths(snapshot, tmp_
     assert (destination / package.PACKAGE_NAME).is_file()
 
 
+def test_optional_guidance_does_not_block_package_template_discovery(snapshot, tmp_path):
+    sidecar = snapshot / "workspace" / "manifests" / "storage" / "entry.yaml"
+    sidecar.write_text("invalid: [\n", encoding="utf-8")
+    built = _build(snapshot, tmp_path / "package.zip")
+    assert [mapping.source_path for mapping in built.metadata.templates] == [
+        "templates/storage.template.json",
+    ]
+
+
+def test_incomplete_manifest_inventory_still_blocks_package_compilation(snapshot, tmp_path):
+    (snapshot / "workspace" / "manifests" / "broken.yaml").write_text("name: [\n", encoding="utf-8")
+    with pytest.raises(ArtifactError, match="deployment entries"):
+        _build(snapshot, tmp_path / "package.zip")
+    assert not (tmp_path / "package.zip").exists()
+
+
 def test_production_is_deterministic_across_source_timestamps(snapshot, tmp_path):
     first = _build(snapshot, tmp_path / "first.zip")
     for path in snapshot.rglob("*"):
