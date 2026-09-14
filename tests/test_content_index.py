@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -262,19 +263,68 @@ def test_index_refresh_does_not_silently_remove_adapter_bindings(workspace):
     assert (workspace / BINDINGS_NAME).read_bytes() == bound.bindings
 
 
-def test_generated_file_creation_respects_public_and_private_modes(workspace, monkeypatch):
+@pytest.mark.parametrize("umask", [0, 0o077])
+def test_generated_file_creation_respects_public_and_private_modes(workspace, monkeypatch, umask):
     bundle = build_content_index(workspace, approve_public=True)
     original = os.open
     requested_modes = {}
 
-    def record(path, flags, mode=0o777, **kwargs):
+    def record(path, flags, mode=0o600, **kwargs):
         if Path(path).name in {INDEX_NAME, BINDINGS_NAME}:
             requested_modes[Path(path).name] = mode
         return original(path, flags, mode, **kwargs)
 
     monkeypatch.setattr(os, "open", record)
+    previous_umask = os.umask(umask)
+    try:
+        write_content_index(workspace, bundle)
+    finally:
+        os.umask(previous_umask)
+    assert requested_modes == {INDEX_NAME: 0o644, BINDINGS_NAME: 0o600}
+    if os.name != "nt":
+        assert stat.S_IMODE((workspace / INDEX_NAME).stat().st_mode) == 0o644 & ~umask
+        assert stat.S_IMODE((workspace / BINDINGS_NAME).stat().st_mode) == 0o600 & ~umask
+
+
+@pytest.mark.parametrize(("existing_mode", "public_mode", "private_mode"), [
+    (0o7777, 0o644, 0o600),
+    (0o666, 0o644, 0o600),
+    (0o644, 0o644, 0o600),
+    (0o640, 0o640, 0o600),
+    (0o600, 0o600, 0o600),
+    (0o444, 0o444, 0o400),
+    (0o400, 0o400, 0o400),
+])
+def test_generated_file_refresh_preserves_only_safe_modes(
+    workspace, monkeypatch, existing_mode, public_mode, private_mode,
+):
+    bundle = build_content_index(workspace, approve_public=True)
     write_content_index(workspace, bundle)
-    assert requested_modes == {INDEX_NAME: 0o666, BINDINGS_NAME: 0o600}
+    expected = {INDEX_NAME: public_mode, BINDINGS_NAME: private_mode}
+    original_stat = Path.stat
+    original_chmod = Path.chmod
+    requested_modes = {}
+
+    def existing_permissions(path, *args, **kwargs):
+        info = original_stat(path, *args, **kwargs)
+        if path.parent == workspace and path.name in expected:
+            return os.stat_result((stat.S_IFREG | existing_mode, *info[1:]))
+        return info
+
+    def record_chmod(path, mode, *args, **kwargs):
+        if path.name in expected and path.parent.name.startswith(".siteops-index-"):
+            requested_modes[path.name] = mode
+        return original_chmod(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", existing_permissions)
+    monkeypatch.setattr(Path, "chmod", record_chmod)
+    write_content_index(workspace, bundle)
+    assert requested_modes == expected
+
+
+def test_generated_file_refresh_keeps_restrictive_public_permissions(workspace):
+    bundle = build_content_index(workspace, approve_public=True)
+    write_content_index(workspace, bundle)
     public = workspace / INDEX_NAME
     public.chmod(0o600)
     existing_mode = public.stat().st_mode & 0o777
