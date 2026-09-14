@@ -67,7 +67,7 @@ def built_application(builder, tmp_path_factory):
         source_sha="abcdef1234567890abcdef1234567890abcdef12",
         runtime_requirements=runtime,
     )
-    assert roots == frozenset({"pyyaml"})
+    assert roots == frozenset({"pyyaml", "packaging"})
     wheel = builder._build_application_wheel(source, root / "wheels")
     builder._inspect_application_wheel(
         wheel,
@@ -113,42 +113,45 @@ def _write_wheel_record(archive, prefix):
 def _synthetic_wheelhouse(
     builder, root: Path, *, extra: str | None = None,
     requires_python: str = ">=3.8", dependencies: tuple[str, ...] = (),
-    include_record: bool = True,
+    include_record: bool = True, include_packaging: bool = True,
 ):
     wheelhouse = root / "wheelhouse"
     wheelhouse.mkdir(parents=True)
-    hashes = []
+    hashes = {}
     filenames = [filename for _, filename in _runtime_filenames()]
+    if include_packaging:
+        filenames.append("packaging-26.3-py3-none-any.whl")
     if extra:
         filenames.append(extra)
     for filename in filenames:
         path = wheelhouse / filename
-        tags = parse_wheel_filename(filename)[3]
+        name, version, _, tags = parse_wheel_filename(filename)
+        prefix = f"{name}-{version}.dist-info"
         with zipfile.ZipFile(path, "w") as archive:
             archive.writestr(
-                "pyyaml-6.0.3.dist-info/METADATA",
-                "Metadata-Version: 2.3\nName: PyYAML\nVersion: 6.0.3\n"
+                prefix + "/METADATA",
+                f"Metadata-Version: 2.3\nName: {name}\nVersion: {version}\n"
                 + f"Requires-Python: {requires_python}\n"
-                + "".join(f"Requires-Dist: {value}\n" for value in dependencies),
+                + "".join(f"Requires-Dist: {value}\n" for value in dependencies if name == "pyyaml"),
             )
             archive.writestr(
-                "pyyaml-6.0.3.dist-info/WHEEL",
+                prefix + "/WHEEL",
                 "Wheel-Version: 1.0\nRoot-Is-Purelib: false\n"
                 + "".join(f"Tag: {tag}\n" for tag in sorted(tags, key=str)),
             )
             archive.writestr("fixture.txt", "runtime fixture payload")
             if include_record:
-                _write_wheel_record(archive, "pyyaml-6.0.3.dist-info")
-        hashes.append(hashlib.sha256(path.read_bytes()).hexdigest())
+                _write_wheel_record(archive, prefix)
+        hashes.setdefault((name, str(version)), []).append(hashlib.sha256(path.read_bytes()).hexdigest())
     lock = root / "runtime.txt"
-    hash_lines = []
-    for index, digest in enumerate(hashes):
-        continuation = " \\" if index < len(hashes) - 1 else ""
-        hash_lines.append(f"    --hash=sha256:{digest}{continuation}")
+    lines = []
+    for (name, version), digests in sorted(hashes.items()):
+        lines.append(f"{name}=={version} \\")
+        for index, digest in enumerate(digests):
+            continuation = " \\" if index < len(digests) - 1 else ""
+            lines.append(f"    --hash=sha256:{digest}{continuation}")
     lock.write_text(
-        "PyYAML==6.0.3 \\\n"
-        + "\n".join(hash_lines)
-        + "\n",
+        "\n".join(lines) + "\n",
         encoding="utf-8",
         newline="\n",
     )
@@ -187,7 +190,7 @@ def test_committed_locks_pin_real_runtime_and_build_hashes(builder):
     build = builder._read_locked_requirements(SCRIPTS / "siteops-build-requirements.txt")
 
     assert [(item.name, item.version, len(item.hashes)) for item in runtime] == [
-        ("pyyaml", "6.0.3", 10)
+        ("packaging", "26.3", 1), ("pyyaml", "6.0.3", 10),
     ]
     assert {(item.name, item.version, len(item.hashes)) for item in build} == {
         ("pip", "26.2.1", 1),
@@ -215,7 +218,7 @@ def test_genuine_application_wheel_has_derived_identity_and_notices(built_applic
 
         assert metadata["Name"] == "siteops"
         assert metadata["Version"] == version
-        assert direct_requirements == ["pyyaml==6.0.3"]
+        assert direct_requirements == ["packaging==26.3", "pyyaml==6.0.3"]
         assert f'__version__ = "{version}"' in packaged_init
         assert archive.read(prefix + "licenses/LICENSE") == (source / "LICENSE").read_bytes()
         assert archive.read(prefix + "licenses/ThirdPartyNotices.txt") == (
@@ -240,14 +243,14 @@ def test_staged_version_and_dependency_pins_do_not_mutate_checkout(builder, tmp_
     )
 
     assert version == "1.0.0b1+build.7.3.g111111111111"
-    assert roots == frozenset({"pyyaml"})
+    assert roots == frozenset({"pyyaml", "packaging"})
     assert b'__version__ = "1.0.0b1"' in checkout_init
     assert (ROOT / "siteops" / "__init__.py").read_bytes() == checkout_init
     assert (ROOT / "pyproject.toml").read_bytes() == checkout_project
     assert b'__version__ = "1.0.0b1+build.7.3.g111111111111"' in (
         source / "siteops" / "__init__.py"
     ).read_bytes()
-    assert 'dependencies = ["pyyaml==6.0.3"]' in (
+    assert 'dependencies = ["packaging==26.3", "pyyaml==6.0.3"]' in (
         source / "pyproject.toml"
     ).read_text(encoding="utf-8")
 
@@ -262,7 +265,7 @@ def test_versioned_engine_release_preserves_the_source_version(builder, tmp_path
     assert builder._derive_staged_source(
         source, build_number=9, build_attempt=2, source_sha="a" * 40,
         runtime_requirements=runtime, version_mode="source",
-    ) == (base, base, frozenset({"pyyaml"}))
+    ) == (base, base, frozenset({"pyyaml", "packaging"}))
     wheel = builder._build_application_wheel(source, tmp_path / "wheels")
     builder._inspect_application_wheel(
         wheel, source=source, version=base, runtime_requirements=runtime,
@@ -286,8 +289,9 @@ def test_wheelhouse_selects_every_declared_target(builder, tmp_path):
     selected = builder._collect_runtime_wheels(wheelhouse, requirements)
 
     assert set(selected) == {key for key, _ in _runtime_filenames()}
+    by_name = {requirement.name: requirement for requirement in requirements}
     assert all(
-        wheel.sha256 in requirements[0].hashes
+        wheel.sha256 in by_name[wheel.name].hashes
         for wheels in selected.values() for wheel in wheels
     )
 
@@ -446,7 +450,8 @@ def test_source_dependency_drift_is_rejected_before_pinning(builder, tmp_path, d
     project = source / "pyproject.toml"
     project.write_text(
         project.read_text(encoding="utf-8").replace(
-            'dependencies = ["pyyaml>=6.0"]', "dependencies = " + json.dumps(declarations),
+            'dependencies = ["pyyaml>=6.0", "packaging>=26.3"]',
+            "dependencies = " + json.dumps(declarations),
         ),
         encoding="utf-8",
     )
@@ -481,7 +486,7 @@ def test_wheel_python_requirement_must_cover_every_declared_target(builder, tmp_
 
 def test_renamed_pinned_wheels_do_not_change_their_target(builder, tmp_path):
     wheelhouse, requirements = _synthetic_wheelhouse(builder, tmp_path)
-    first, second = list(wheelhouse.iterdir())[:2]
+    first, second = sorted(wheelhouse.glob("pyyaml-*.whl"))[:2]
     first_bytes, second_bytes = first.read_bytes(), second.read_bytes()
     first.write_bytes(second_bytes)
     second.write_bytes(first_bytes)
@@ -621,7 +626,7 @@ def test_runtime_python_requirement_must_cover_the_selected_target(builder, tmp_
 
 def test_runtime_closure_can_include_a_shared_pure_wheel(builder, tmp_path):
     wheelhouse, requirements = _synthetic_wheelhouse(
-        builder, tmp_path, dependencies=("support>=1",),
+        builder, tmp_path, dependencies=("support>=1",), include_packaging=False,
     )
     path = wheelhouse / "support-1.0-py3-none-any.whl"
     with zipfile.ZipFile(path, "w") as archive:
@@ -690,7 +695,7 @@ def test_generated_pylock_contains_exact_portable_wheel_inventory(builder, built
     assert lock["created-by"] == "siteops"
     assert lock["requires-python"] == ">=3.10,<3.15"
     assert {(package["name"], package["version"]) for package in lock["packages"]} == {
-        ("siteops", manifest.version), ("pyyaml", "6.0.3"),
+        ("siteops", manifest.version), ("pyyaml", "6.0.3"), ("packaging", "26.3"),
     }
     expected = {entry.path: entry for entry in manifest.files if entry.path.endswith(".whl")}
     actual = {}
@@ -837,8 +842,10 @@ def test_production_builds_once_and_emits_the_same_wheel(
     if not source_has_dependencies:
         project = source / "pyproject.toml"
         text = project.read_text(encoding="utf-8")
-        assert 'dependencies = ["pyyaml>=6.0"]' in text
-        project.write_text(text.replace('dependencies = ["pyyaml>=6.0"]', "dependencies = []"), encoding="utf-8")
+        assert 'dependencies = ["pyyaml>=6.0", "packaging>=26.3"]' in text
+        project.write_text(text.replace(
+            'dependencies = ["pyyaml>=6.0", "packaging>=26.3"]', "dependencies = []",
+        ), encoding="utf-8")
     wheelhouse, runtime = _synthetic_wheelhouse(builder, tmp_path / "dependencies")
     shutil.copyfile(tmp_path / "dependencies" / "runtime.txt", source / "scripts" / builder._RUNTIME_LOCK)
     shutil.copyfile(SCRIPTS / builder._BUILD_LOCK, source / "scripts" / builder._BUILD_LOCK)

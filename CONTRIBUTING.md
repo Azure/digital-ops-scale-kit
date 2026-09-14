@@ -118,6 +118,10 @@ operator-facing installation path.
 
 ## Build local distribution artifacts
 
+For complete workspace content ZIPs, use the
+[workspace package producer](docs/workspace-packages.md). The instructions
+below build the separate Site Ops engine installation bundle.
+
 Use a clean checkout and an isolated Python 3.11 or newer build environment.
 Install `scripts/siteops-build-requirements.txt` with pip's
 `--require-hashes` and `--only-binary=:all:` options through your approved

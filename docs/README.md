@@ -79,6 +79,7 @@ for production.
 |---|---|
 | Update an existing workspace to the current preview contract | [Migration guide](migrating.md) |
 | Prepare and publish a Scale Kit or Site Ops release | [Release guide](releasing.md) |
+| Build a complete workspace content artifact | [Workspace packages](workspace-packages.md) |
 | Understand repository and workspace boundaries | [Repository and workspace guide](repository-guide.md) |
 | Set up a development environment and submit changes | [Contributing](../CONTRIBUTING.md) |
 

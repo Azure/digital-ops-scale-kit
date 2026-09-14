@@ -19,6 +19,8 @@ from typing import Any, Callable
 import yaml
 
 from siteops import yamlio
+from siteops.artifacts import ArtifactError, check_portable_component
+from siteops.artifacts import is_link as _is_link
 from siteops.content_metadata import API_VERSION
 from siteops.content_metadata import require_mapping as _mapping
 from siteops.content_metadata import require_text as _string
@@ -221,12 +223,6 @@ def _optional_strings(data: dict[str, Any], key: str) -> tuple[str, ...] | None:
     return _strings(data[key]) if key in data else None
 
 
-def _is_link(info: os.stat_result) -> bool:
-    return stat.S_ISLNK(info.st_mode) or bool(
-        getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-    )
-
-
 def _is_guidance_file(path: Path) -> bool:
     name = path.name.casefold()
     return name == "entry.yaml" or name.endswith(".entry.yaml")
@@ -259,10 +255,10 @@ def conventional_candidate(path: PurePosixPath) -> bool:
 def check_path_components(relative: PurePath, *, reference: bool = False) -> None:
     """Apply the shared portable-path policy without accessing a filesystem."""
     for part in relative.parts:
-        if part != part.rstrip(" .") or PureWindowsPath(part).is_reserved():
-            raise BrowseError("path.alias", "Ambiguous Windows path components are excluded.")
-        if ":" in part:
-            raise BrowseError("path.invalid", "Content paths cannot address alternate streams.")
+        try:
+            check_portable_component(part)
+        except ArtifactError as error:
+            raise BrowseError(error.code, str(error)) from None
         if part.startswith(".") or (not reference and part.casefold() in _PROTECTED):
             raise BrowseError(
                 "path.protected", "Configuration and working-state paths are excluded."

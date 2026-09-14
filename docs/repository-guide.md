@@ -64,6 +64,9 @@ operator guide. The workspace's optional `content.yaml` names extra discovery
 paths rather than repeating entry descriptions. Generated indexes are
 publication artifacts, not another authored source or an executable package.
 See [browsing](browse-content.md) and [remote indexes](remote-content.md).
+The [workspace package producer](workspace-packages.md) keeps complete
+content artifacts separate from those descriptive indexes and from the
+engine installation bundle.
 
 ## Choose the owning layer
 
