@@ -334,7 +334,7 @@ class TestAioUpgradeIdempotency:
     def test_redeploy_succeeds_with_stable_ids_and_versions(
         self, orchestrator, selector, aio_upgrade_result
     ):
-        manifest_path = WORKSPACE_PATH / "manifests" / "aio-upgrade.yaml"
+        manifest_path = WORKSPACE_PATH / "manifests" / "aio-upgrade" / "manifest.yaml"
         manifest = Manifest.from_file(manifest_path, workspace_root=WORKSPACE_PATH)
         sites = orchestrator.resolve_sites(manifest, selector)
         result2 = orchestrator.deploy(

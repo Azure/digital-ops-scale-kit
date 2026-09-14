@@ -61,7 +61,7 @@ The dataflow carries whatever assets publish. For real telemetry through it, dep
 
 ## Sharing a declaration across sites
 
-This sample keeps its declaration next to itself. A fleet usually wants the opposite: one declaration shared by every site of a class. Move the file to `parameters/dataflows/<set>.yaml`, point sites at it, and deploy `manifests/aio-resources.yaml`:
+This sample keeps its declaration next to itself. A fleet usually wants the opposite: one declaration shared by every site of a class. Move the file to `resource-sets/dataflows/<set>.yaml`, point sites at it, and deploy `manifests/aio-resources/manifest.yaml`:
 
 ```yaml
 # sites/<site>.yaml

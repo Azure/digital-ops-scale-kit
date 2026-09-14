@@ -4,6 +4,8 @@
 """Command-line interface for Azure Site Ops.
 
 Commands:
+    browse   - Discover and inspect deployment content
+    index    - Build approved public descriptions and source bindings
     sites    - Inspect sites as plain text, YAML, or JSON
     validate - Validate manifest structure and references
     plan     - Prepare and preflight a deployment plan
@@ -28,6 +30,8 @@ from typing import Any, Callable
 import yaml
 
 from siteops import __version__
+from siteops.browse import BrowseError, BrowseResult, inspect_content, validate_browse_options
+from siteops.browse_output import render_browse_plain, serialize_browse_json
 from siteops.composition import CompositionError, report_composition_error
 from siteops.models import (
     Manifest,
@@ -78,6 +82,71 @@ def resolve_manifest_path(manifest: Path, workspace: Path) -> Path:
     if manifest.is_absolute():
         return manifest
     return workspace / manifest
+
+
+def cmd_browse(args: argparse.Namespace) -> int:
+    """Inspect content before any Site configuration or Orchestrator is loaded."""
+    if is_redaction_enabled():
+        print(
+            "Content inspection output is private. Use SITEOPS_REDACT_OUTPUT=0 "
+            "only for an authorized private destination.",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        validate_browse_options(args.name, args.search, tuple(args.tag), args.category, args.limit)
+        if args.source:
+            from siteops.github_catalog import inspect_github
+
+            result = inspect_github(
+                args.source, args.name, ref=args.ref, workspace=args.workspace, auth=args.auth,
+                search=args.search, tags=tuple(args.tag), category=args.category,
+                include_partials=args.include_partials, limit=args.limit,
+            )
+        else:
+            if args.ref or args.auth != "anonymous":
+                raise ValueError("--ref and --auth apply only to --source.")
+            workspace = args.workspace or _auto_discover_workspace(Path.cwd()) or Path.cwd()
+            result = inspect_content(
+                workspace, args.name, search=args.search, tags=tuple(args.tag),
+                category=args.category, include_partials=args.include_partials, limit=args.limit,
+            )
+    except BrowseError as error:
+        result = BrowseResult(str(args.workspace or ""), diagnostics=(error.diagnostic,))
+    except ValueError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        return 1
+    if args.output == "json":
+        print(serialize_browse_json(result))
+    else:
+        print(render_browse_plain(result), end="")
+    return 1 if result.diagnostics else 0
+
+
+def cmd_index(args: argparse.Namespace) -> int:
+    """Build public descriptions without publishing private inspection output."""
+    from siteops.content_index import build_content_index, write_content_index
+
+    try:
+        if not args.public:
+            raise BrowseError("index.approval", "Use --public to approve the authored publication.")
+        workspace = args.workspace or _auto_discover_workspace(Path.cwd()) or Path.cwd()
+        digests = None
+        if args.for_source == "github":
+            from siteops.github_catalog import github_input_digests
+
+            digests = github_input_digests
+        bundle = build_content_index(workspace, approve_public=True, additional_digests=digests)
+        write_content_index(workspace, bundle, check=args.check)
+    except BrowseError as error:
+        print(f"{error.diagnostic.code}: {error.diagnostic.summary}", file=sys.stderr)
+        return 1
+    action = "Current" if args.check else "Generated"
+    print(f"{action} index: {bundle.published} published entries, "
+          f"{bundle.unclassified} unclassified candidates omitted.")
+    print("Commit both generated files next to the workspace. "
+          "Publish only siteops-index.json, not siteops-index.inputs.json, to a gallery.")
+    return 0
 
 
 def _output_settings(
@@ -902,12 +971,14 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  siteops -w workspaces/iot-operations browse
+  siteops -w workspaces/iot-operations browse aio-install
   siteops -w workspaces/iot-operations sites
   siteops -w workspaces/iot-operations sites munich-dev --output yaml
-  siteops -w workspaces/iot-operations validate manifests/aio-install.yaml
-  siteops -w workspaces/iot-operations plan manifests/aio-install.yaml
-  siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml
-  siteops -w workspaces/iot-operations plan manifests/aio-install.yaml -l environment=prod
+  siteops -w workspaces/iot-operations validate manifests/aio-install/manifest.yaml
+  siteops -w workspaces/iot-operations plan manifests/aio-install/manifest.yaml
+  siteops -w workspaces/iot-operations deploy manifests/aio-install/manifest.yaml
+  siteops -w workspaces/iot-operations plan manifests/aio-install/manifest.yaml -l environment=prod
 """,
     )
     parser.add_argument("--version", action="version", version=f"siteops {__version__}")
@@ -947,6 +1018,50 @@ Examples:
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    p_browse = subparsers.add_parser(
+        "browse",
+        help="Discover and inspect deployment content",
+        description=(
+            "Inspect local manifest headers and optional authored guidance without "
+            "loading Sites, compiling templates or contacting deployment services."
+        ),
+    )
+    p_browse.add_argument(
+        "name", nargs="?", help="Exact entry name or explicit workspace-relative manifest path"
+    )
+    p_browse.add_argument("--search", help="Case-insensitive text filter")
+    p_browse.add_argument("--tag", action="append", default=[], help="Required tag (repeatable)")
+    p_browse.add_argument("--category", help="Exact authored category")
+    p_browse.add_argument(
+        "--include-partials", action="store_true", help="Include declared reusable fragments"
+    )
+    p_browse.add_argument("--limit", type=int, help="Maximum inventory rows (positive integer)")
+    p_browse.add_argument(
+        "--output", choices=("plain", "json"), default="plain", help="Private output format"
+    )
+    p_browse.add_argument(
+        "--source", help="Published GitHub index: github:OWNER/REPO[@REF] or repository URL"
+    )
+    p_browse.add_argument("--ref", help="Source branch, tag or commit (default: repository default branch)")
+    p_browse.add_argument(
+        "--auth", choices=("anonymous", "cli"), default="anonymous",
+        help="Remote read access: anonymous or configured GitHub CLI authentication",
+    )
+    p_index = subparsers.add_parser(
+        "index", help="Build a public content index and separate source bindings",
+        description="Generate deterministic index files in the selected workspace. No remote publication.",
+    )
+    p_index.add_argument(
+        "--public", action="store_true",
+        help="Approve the selected authored descriptions for public indexing (required)",
+    )
+    p_index.add_argument(
+        "--for-source", choices=("github",), help="Include optional freshness identities for a source adapter"
+    )
+    p_index.add_argument(
+        "--check", action="store_true", help="Compare generated files without writing them"
+    )
 
     # deploy command
     p_deploy = subparsers.add_parser(
@@ -1158,6 +1273,11 @@ Examples:
     # Setup logging - use verbose from subcommand if available, otherwise False
     verbose = getattr(args, "verbose", False)
     setup_logging(verbose)
+
+    if args.command == "browse":
+        sys.exit(cmd_browse(args))
+    if args.command == "index":
+        sys.exit(cmd_index(args))
 
     # Workspace resolution. Explicit -w wins. Otherwise auto-discover
     # from cwd. If discovery is ambiguous or finds nothing, fall back to cwd

@@ -9,13 +9,13 @@ description: |
 parameters:
   - parameters/common/common.yaml
   - "parameters/aio-releases/{{ site.properties.aioRelease }}.yaml"
-  - path: "parameters/devices/{{ item }}.yaml"
+  - path: "resource-sets/devices/{{ item }}.yaml"
     forEach: "{{ site.properties.resourceSets.devices }}"
     collections: [devices]
-  - path: "parameters/assets/{{ item }}.yaml"
+  - path: "resource-sets/assets/{{ item }}.yaml"
     forEach: "{{ site.properties.resourceSets.assets }}"
     collections: [assets]
-  - path: "parameters/dataflows/{{ item }}.yaml"
+  - path: "resource-sets/dataflows/{{ item }}.yaml"
     forEach: "{{ site.properties.resourceSets.dataflows }}"
     collections: [dataflowEndpoints, dataflowProfiles, dataflows]
 

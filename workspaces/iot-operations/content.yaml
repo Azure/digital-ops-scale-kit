@@ -1,0 +1,5 @@
+apiVersion: siteops/v1alpha1
+kind: WorkspaceContent
+entries:
+  - templates/host-bootstrap/aksee/_partial.yaml
+  - templates/host-ops/aksee-upgrade/_partial.yaml

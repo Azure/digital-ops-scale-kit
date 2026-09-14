@@ -245,8 +245,8 @@ jobs:
         #     which are not manifests.
         run: |
           MANIFESTS=$(
-            { find "$WORKSPACE_DIR/manifests" -maxdepth 1 \
-                \( -name "*.yaml" -o -name "*.yml" \) -not -name "_*" 2>/dev/null
+            { find "$WORKSPACE_DIR/manifests" -mindepth 2 -maxdepth 2 \
+                \( -name "manifest.yaml" -o -name "manifest.yml" \) 2>/dev/null
               find "$WORKSPACE_DIR/samples" -mindepth 2 -maxdepth 2 \
                 \( -name "manifest.yaml" -o -name "manifest.yml" \) 2>/dev/null
             } | tr '\n' ' '
@@ -272,7 +272,7 @@ jobs:
           for manifest in $MANIFESTS; do
             manifest_rel="${manifest#$WORKSPACE_DIR/}"
             echo "::group::Validating $manifest"
-            echo "### $(basename $manifest)" >> $GITHUB_STEP_SUMMARY
+            echo "### $manifest_rel" >> $GITHUB_STEP_SUMMARY
             echo '```' >> $GITHUB_STEP_SUMMARY
 
             # Libraries without targets remain structurally valid. Executable

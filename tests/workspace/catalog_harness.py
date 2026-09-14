@@ -43,8 +43,8 @@ from siteops.composition import load_contract
 from siteops.models import Manifest, ParameterSource
 
 # The catalog entry point. A family is wired by having a declaration path here.
-CATALOG_MANIFEST = "manifests/aio-resources.yaml"
-CATALOG_PARTIAL = "manifests/_aio-resources.yaml"
+CATALOG_MANIFEST = "manifests/aio-resources/manifest.yaml"
+CATALOG_PARTIAL = "manifests/_partials/_aio-resources.yaml"
 CATALOG_CONTRACT = "contracts/aio-catalog.yaml"
 _RESOURCE_SET_EXPRESSION = re.compile(
     r"\{\{\s*site\.properties\.resourceSets\.(?P<key>[\w-]+)\s*\}\}"
@@ -331,7 +331,7 @@ def entry_point(workspace: Path, spec: FamilySpec) -> Path:
 def parameter_dirs(workspace: Path, spec: FamilySpec) -> tuple[Path, ...]:
     """Distinct selectable directories that feed one deployment family."""
     return tuple(
-        workspace / "parameters" / directory
+        workspace / "resource-sets" / directory
         for directory in dict.fromkeys(
             spec.parameters_dir_for(kind) for kind in spec.kinds
         )
@@ -394,7 +394,7 @@ def declaration_files(workspace: Path, spec: FamilySpec) -> tuple[Path, ...]:
     """Every committed file that declares resources for one family.
 
     Walks the workspace and selects structurally, so a declaration added under
-    `samples/` or `parameters/<area>/` is picked up without a list being
+    `samples/` or `resource-sets/<area>/` is picked up without a list being
     maintained here. Both YAML extensions are matched, since a file named `.yml`
     would otherwise be skipped with no signal.
     """

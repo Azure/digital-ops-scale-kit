@@ -1,6 +1,6 @@
 # asset-sample
 
-Reference sample that declares Azure Device Registry devices and assets in YAML and deploys them onto an existing AIO instance. It carries no Bicep of its own. The shared templates deploy `parameters/devices/site-devices.yaml` and `parameters/assets/site-assets.yaml` as one internally ordered Device Registry step.
+Reference sample that declares Azure Device Registry devices and assets in YAML and deploys them onto an existing AIO instance. It carries no Bicep of its own. The shared templates deploy `resource-sets/devices/site-devices.yaml` and `resource-sets/assets/site-assets.yaml` as one internally ordered Device Registry step.
 
 Compare this directory with `../opc-ua-solution/`, which expresses its device and asset as ARM resources in `template.bicep`. Both approaches are supported, and both deploy the same kind of resource.
 
@@ -70,7 +70,7 @@ properties:
 ```
 
 ```bash
-siteops -w workspaces/iot-operations deploy manifests/aio-resources.yaml -l environment=dev
+siteops -w workspaces/iot-operations deploy manifests/aio-resources/manifest.yaml -l environment=dev
 ```
 
 The definitions are identical on both routes. Only the manifest that selects

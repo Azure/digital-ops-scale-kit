@@ -236,7 +236,7 @@ class TestParameterChaining:
         if not refs:
             return
 
-        aio_steps = self._get_manifest_step_names(workspace / "manifests" / "aio-install.yaml", workspace_root=workspace)
+        aio_steps = self._get_manifest_step_names(workspace / "manifests" / "aio-install" / "manifest.yaml", workspace_root=workspace)
 
         for step_name, output_path, raw in refs:
             assert step_name in aio_steps, (
@@ -251,7 +251,7 @@ class TestParameterChaining:
         if not refs:
             return
 
-        aio_steps = self._get_manifest_step_names(workspace / "manifests" / "aio-install.yaml", workspace_root=workspace)
+        aio_steps = self._get_manifest_step_names(workspace / "manifests" / "aio-install" / "manifest.yaml", workspace_root=workspace)
 
         for step_name, output_path, raw in refs:
             assert step_name in aio_steps, (
@@ -429,8 +429,12 @@ class TestConditionalStepCoverage:
             r"\{\{\s*site\.properties\.([\w.-]+)\s*\}\}"
         )
 
+        from tests.workspace.test_manifest_validation import _all_manifest_files
+
         manifests_dir = workspace / "manifests"
-        for manifest_file in sorted(manifests_dir.glob("*.yaml")):
+        for manifest_file in _all_manifest_files(workspace):
+            if not manifest_file.is_relative_to(manifests_dir):
+                continue
             from siteops.models import Manifest, ParameterSource
 
             manifest = Manifest.from_file(
@@ -641,7 +645,7 @@ class TestAioUpgradeChaining:
         return set.intersection(*per_file_keys)
 
     def _fixed_manifest_parameter_keys(self, workspace: Path) -> set[str]:
-        manifest_path = workspace / "manifests" / "aio-upgrade.yaml"
+        manifest_path = workspace / "manifests" / "aio-upgrade" / "manifest.yaml"
         manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
         keys: set[str] = set()
         for parameter_path in manifest.get("parameters", []):
@@ -660,7 +664,7 @@ class TestAioUpgradeChaining:
 
     def test_aio_upgrade_chaining_refs_valid_steps(self, workspace):
         from siteops.models import Manifest
-        manifest = Manifest.from_file(workspace / "manifests" / "aio-upgrade.yaml", workspace_root=workspace)
+        manifest = Manifest.from_file(workspace / "manifests" / "aio-upgrade" / "manifest.yaml", workspace_root=workspace)
         manifest_steps = {step.name for step in manifest.steps}
 
         for _, chaining_parts, _ in self.CONSUMERS:

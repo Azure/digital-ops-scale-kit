@@ -40,7 +40,7 @@ parameters:
   - "parameters/aio-releases/{{ site.properties.aioRelease }}.yaml"
 
 steps:
-  - include: _resolve-aio.yaml
+  - include: ../_partials/_resolve-aio.yaml
 
   - name: resolve-extensions
     template: templates/aio/upgrade/resolve-extensions.bicep

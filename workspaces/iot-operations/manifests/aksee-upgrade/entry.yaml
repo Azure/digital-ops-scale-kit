@@ -1,0 +1,16 @@
+apiVersion: siteops/v1alpha1
+kind: DeploymentEntry
+role: standalone
+category: core
+tags: [host, windows, aksee, upgrade]
+documentation: [README.md]
+outcome: Upgrade an existing AKS Edge Essentials cluster through its Arc-enabled host.
+prerequisites:
+  - An existing supported host and cluster with the guide's permissions and upgrade settings.
+  - An approved maintenance window and access for potential console remediation.
+effects:
+  - Runs target-side upgrade work and can interrupt workloads during node VM reboot.
+  - Completion uses a worker state tag rather than run-correlated evidence.
+removal:
+  - Follow the documented failure phase and remediation path before retrying. There is no general rollback.
+coverage: Operational synopsis. Platform readiness does not establish AIO workload health. Detailed host constraints and recovery requirements remain in the operator guide.

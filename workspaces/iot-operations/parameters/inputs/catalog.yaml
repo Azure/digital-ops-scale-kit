@@ -3,7 +3,7 @@
 # declare it, so a family template receives only the keys it accepts and a key added
 # here for one family does not reach the others.
 # Chaining files attach at step level, where they are scoped to their consumers and
-# cannot be overridden by a site. Definitions live in parameters/<area>/<set>.yaml
+# cannot be overridden by a site. Definitions live in resource-sets/<area>/<set>.yaml
 # and attach at manifest level.
 # See docs/resource-catalog.md for the authoring contract.
 # Consumed by: the family step in manifests/_<family>.yaml

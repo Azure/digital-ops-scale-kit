@@ -115,7 +115,7 @@ A name may interpolate site values, and the rules apply to the resolved value. T
 
 ## Where a declaration's values come from
 
-Every `{{ ... }}` in a declaration resolves per site, so one committed file deploys across a fleet and each site receives its own values. `parameters/devices/site-devices.yaml` and `parameters/assets/site-assets.yaml` ship as the worked pair. The asset carries `{{ site.name }}` in the display name, in an attribute, and in the MQTT topic its dataset publishes to, so a hundred sites deploying one file each land on their own topic and stay tellable apart in the portal.
+Every `{{ ... }}` in a declaration resolves per site, so one committed file deploys across a fleet and each site receives its own values. `resource-sets/devices/site-devices.yaml` and `resource-sets/assets/site-assets.yaml` ship as the worked pair. The asset carries `{{ site.name }}` in the display name, in an attribute, and in the MQTT topic its dataset publishes to, so a hundred sites deploying one file each land on their own topic and stay tellable apart in the portal.
 
 Interpolate into string-valued properties such as topics, display names, attributes, and endpoint addresses. The workspace tests compile each committed declaration against every supported API version, and they read a declaration as written rather than as resolved, so an interpolation in a numeric or boolean property is reported as a type error. State those values directly.
 
@@ -133,11 +133,11 @@ refers to its device by name through `deviceRef`, and ARM does not model that
 relationship, so each per-version module expresses the ordering with
 `dependsOn`.
 
-Across families, `manifests/aio-resources.yaml` runs the asset step before the dataflow step, so a dataflow whose source names an asset finds it already there.
+Across families, `manifests/aio-resources/manifest.yaml` runs the asset step before the dataflow step, so a dataflow whose source names an asset finds it already there.
 
 ## Composing with other steps
 
-`manifests/_assets.yaml` is a partial, so a manifest that already installs AIO can add devices and assets without a second deploy. `manifests/aio-resources.yaml` gates it when either selection list is non-empty, and `samples/asset-sample/` composes it alongside `_resolve-aio.yaml` as a standalone deploy.
+`manifests/_partials/_assets.yaml` is a partial, so a manifest that already installs AIO can add devices and assets without a second deploy. `manifests/aio-resources/manifest.yaml` gates it when either selection list is non-empty, and `samples/asset-sample/` composes it alongside `_resolve-aio.yaml` as a standalone deploy.
 
 `_assets.yaml` carries no manifest-level parameters, which is what lets a composing manifest gate it and supply the declaration.
 

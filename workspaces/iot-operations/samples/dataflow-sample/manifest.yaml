@@ -16,9 +16,9 @@ description: |
   in-cluster MQTT client to publish and subscribe when verifying the data path.
 
   `dataflows.yaml` attaches directly for this one-off sample. A fleet can place
-  the same definition under `parameters/dataflows/`, select it through
+  the same definition under `resource-sets/dataflows/`, select it through
   `properties.resourceSets.dataflows`, and deploy
-  `manifests/aio-resources.yaml`. Both routes run the same templates.
+  `manifests/aio-resources/manifest.yaml`. Both routes run the same templates.
 
   Prerequisites:
     - AIO instance must be deployed and running (run aio-install first)
@@ -36,5 +36,5 @@ parameters:
     collections: [dataflowEndpoints, dataflowProfiles, dataflows]
 
 steps:
-  - include: ../../manifests/_resolve-aio.yaml
-  - include: ../../manifests/_dataflows.yaml
+  - include: ../../manifests/_partials/_resolve-aio.yaml
+  - include: ../../manifests/_partials/_dataflows.yaml

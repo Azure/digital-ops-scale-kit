@@ -2,7 +2,7 @@
 #
 # Attached at manifest level, which puts it below site parameters in the merge order,
 # so a `sites.local/` overlay or a site definition overrides it. The same three keys
-# are what a committed set under `parameters/dataflows/` supplies, so a declaration
+# are what a committed set under `resource-sets/dataflows/` supplies, so a declaration
 # moves between the two routes unchanged.
 # See docs/dataflows.md for the authoring contract.
 # Consumed by: dataflow-resources

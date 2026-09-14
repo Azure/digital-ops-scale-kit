@@ -1,0 +1,6 @@
+apiVersion: siteops/v1alpha1
+kind: DeploymentEntry
+role: partial
+tags: [aio, opc-ua]
+documentation: [README.md]
+coverage: Solution and simulator fragment. The parent supplies the existing-instance lookup.

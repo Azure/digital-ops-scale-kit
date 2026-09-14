@@ -9,4 +9,4 @@ parallel: 1
 selector: "environment=sample,sample=resource-set-basic"
 
 steps:
-  - include: ../../manifests/_aio-resources.yaml
+  - include: ../../manifests/_partials/_aio-resources.yaml

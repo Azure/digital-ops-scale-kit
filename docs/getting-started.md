@@ -52,6 +52,18 @@ release installation step.
 
 ## 2. Set your target
 
+Inspect the installation's purpose, requirements and effects before supplying
+target values:
+
+```bash
+siteops -w workspaces/iot-operations browse aio-install
+```
+
+The card is authored guidance, not an environment assessment. Browse other
+choices with `siteops -w workspaces/iot-operations browse`. See
+[content inspection](browse-content.md) for filtering and the same-Site
+basic-routing journey.
+
 Create the `workspaces/iot-operations/sites.local/` directory and save the
 following as `munich-dev.yaml`. Replace every placeholder with your target's
 values:
@@ -89,8 +101,8 @@ inherited settings.
 Check the configuration and prepare a plan:
 
 ```bash
-siteops -w workspaces/iot-operations validate manifests/aio-install.yaml -l name=munich-dev
-siteops -w workspaces/iot-operations plan manifests/aio-install.yaml -l name=munich-dev
+siteops -w workspaces/iot-operations validate manifests/aio-install/manifest.yaml -l name=munich-dev
+siteops -w workspaces/iot-operations plan manifests/aio-install/manifest.yaml -l name=munich-dev
 ```
 
 `validate` checks structure without compilation. `plan` also compiles templates
@@ -106,7 +118,7 @@ deploy only this site:
 
 ```bash
 az login
-siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml -l name=munich-dev
+siteops -w workspaces/iot-operations deploy manifests/aio-install/manifest.yaml -l name=munich-dev
 ```
 
 Deployment applies the selected operations. Failure or interruption can leave
@@ -132,7 +144,7 @@ target them. You can keep the same manifest and select the fleet with
 Review the wider selection first:
 
 ```bash
-siteops -w workspaces/iot-operations plan manifests/aio-install.yaml -l "environment=prod"
+siteops -w workspaces/iot-operations plan manifests/aio-install/manifest.yaml -l "environment=prod"
 ```
 
 After review, use `deploy` with the same manifest and selector. See

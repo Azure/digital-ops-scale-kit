@@ -95,17 +95,11 @@ Source of truth for every pinned version number is the YAML itself. Cross-refere
 
 ## Upgrading an existing site
 
-Use `aio-upgrade.yaml` to move a site to a newer `aioRelease`. It bumps the Arc extension versions for AIO, secret-store, and (when the site declares `deployOptions.enableCertManager: true`) cert-manager, preserving each extension's existing `configurationSettings`, `releaseTrain`, and identity. After the extension update completes, a separate API-versioned step deploys resources explicitly named by the target release configuration. An upgrade to 2608 adds the OPC UA connector template.
-
-The IoT Operations instance ARM resource has no writable version property and is not mutated by this manifest. Current release configurations define no upgrade path for other instance child resource types, such as brokers or dataflow profiles.
-
-```bash
-# 1. Bump aioRelease on the site (or its parent) to the new YAML filename (without extension).
-# 2. Deploy the upgrade manifest:
-siteops -w workspaces/iot-operations deploy manifests/aio-upgrade.yaml -l "name=<site>"
-```
-
-`aio-install.yaml` remains the greenfield-install manifest. Running it against an already-deployed site is desired-state and can overwrite operator-applied changes on the AIO instance and its children. Use `aio-upgrade.yaml` for in-place version moves.
+Follow the [upgrade operation guide](../workspaces/iot-operations/manifests/aio-upgrade/README.md)
+to prepare and deploy an in-place release change. The operation updates
+extensions and release-required resources rather than reapplying the
+greenfield instance configuration. An upgrade to 2608 adds the OPC UA
+connector template.
 
 ### Catalog families and upgrade order
 
@@ -114,7 +108,7 @@ Bumping `aioRelease` changes the API version a site writes at, and that takes ef
 Deploy catalog families outside that window, and reapply them once the upgrade finishes:
 
 ```bash
-siteops -w workspaces/iot-operations deploy manifests/aio-resources.yaml -l "name=<site>"
+siteops -w workspaces/iot-operations deploy manifests/aio-resources/manifest.yaml -l "name=<site>"
 ```
 
 This applies to every resource area a site selects through `properties.resourceSets`. See [resource-catalog.md](resource-catalog.md).

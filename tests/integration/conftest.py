@@ -364,7 +364,7 @@ def aio_install_result(
     if _is_upgrade_phase():
         return _UPGRADE_PHASE_INSTALL_SENTINEL
 
-    manifest_path = WORKSPACE_PATH / "manifests" / "aio-install.yaml"
+    manifest_path = WORKSPACE_PATH / "manifests" / "aio-install" / "manifest.yaml"
     manifest, sites = _resolve_or_fail(orchestrator, manifest_path, selector)
     result = orchestrator.deploy(
         manifest_path=manifest_path,
@@ -380,7 +380,7 @@ def secretsync_result(
     aio_install_result: RunResult | object,
 ) -> RunResult:
     """Deploy secretsync.yaml after AIO is installed."""
-    manifest_path = WORKSPACE_PATH / "manifests" / "secretsync.yaml"
+    manifest_path = WORKSPACE_PATH / "manifests" / "secretsync" / "manifest.yaml"
     manifest, sites = _resolve_or_fail(orchestrator, manifest_path, selector)
     result = orchestrator.deploy(
         manifest_path=manifest_path,
@@ -518,7 +518,7 @@ def aio_resources_result(
     are restored afterwards. Without that, a later fixture would resolve a site
     that permanently selects these sets.
     """
-    manifest_path = WORKSPACE_PATH / "manifests" / "aio-resources.yaml"
+    manifest_path = WORKSPACE_PATH / "manifests" / "aio-resources" / "manifest.yaml"
     manifest, sites = _resolve_or_fail(orchestrator, manifest_path, selector)
 
     original = {id(site): copy.deepcopy(site.properties) for site in sites}
@@ -553,7 +553,7 @@ def aio_upgrade_result(
     extension identity, configurationSettings, and releaseNamespace are
     preserved.
     """
-    manifest_path = WORKSPACE_PATH / "manifests" / "aio-upgrade.yaml"
+    manifest_path = WORKSPACE_PATH / "manifests" / "aio-upgrade" / "manifest.yaml"
     manifest, sites = _resolve_or_fail(orchestrator, manifest_path, selector)
     result = orchestrator.deploy(
         manifest_path=manifest_path,
@@ -613,7 +613,7 @@ def aio_upgrade_with_overrides_result(
         encoding="utf-8",
     )
 
-    manifest_path = WORKSPACE_PATH / "manifests" / "aio-upgrade.yaml"
+    manifest_path = WORKSPACE_PATH / "manifests" / "aio-upgrade" / "manifest.yaml"
     manifest, sites = _resolve_or_fail(orchestrator, manifest_path, selector)
 
     # Append the tmp overrides file to update-extensions' parameter list.

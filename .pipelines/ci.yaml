@@ -116,8 +116,8 @@ jobs:
           # Excludes partials (filename prefixed `_`) and non-manifest YAML
           # under samples/ (inputs.yaml, outputs.yaml, etc.).
           MANIFESTS=$(
-            { find "$WORKSPACE_DIR/manifests" -maxdepth 1 \
-                \( -name "*.yaml" -o -name "*.yml" \) -not -name "_*" 2>/dev/null
+            { find "$WORKSPACE_DIR/manifests" -mindepth 2 -maxdepth 2 \
+                \( -name "manifest.yaml" -o -name "manifest.yml" \) 2>/dev/null
               find "$WORKSPACE_DIR/samples" -mindepth 2 -maxdepth 2 \
                 \( -name "manifest.yaml" -o -name "manifest.yml" \) 2>/dev/null
             } | tr '\n' ' '
@@ -137,7 +137,7 @@ jobs:
           for manifest in $MANIFESTS; do
             manifest_rel="${manifest#$WORKSPACE_DIR/}"
             echo "##[group]Validating $manifest"
-            echo "### $(basename $manifest)" >> "$SUMMARY_FILE"
+            echo "### $manifest_rel" >> "$SUMMARY_FILE"
             echo '```' >> "$SUMMARY_FILE"
 
             # Libraries without targets remain structurally valid. Executable

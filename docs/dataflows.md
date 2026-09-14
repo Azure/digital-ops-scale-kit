@@ -95,7 +95,7 @@ dataflow set and the `default` resources created with the AIO instance.
 
 ## Composing with other steps
 
-`manifests/_dataflows.yaml` is a partial, so a manifest that already installs AIO can add dataflows without a second deploy. `manifests/aio-resources.yaml` composes it that way, gated on the site's selected set.
+`manifests/_partials/_dataflows.yaml` is a partial, so a manifest that already installs AIO can add dataflows without a second deploy. `manifests/aio-resources/manifest.yaml` composes it that way, gated on the site's selected set.
 
 `_dataflows.yaml` carries no manifest-level parameters, which is what lets a composing manifest gate it and supply the declaration. A sample composes it the same way, attaching its declaration on its own manifest, as `samples/dataflow-sample/` does.
 

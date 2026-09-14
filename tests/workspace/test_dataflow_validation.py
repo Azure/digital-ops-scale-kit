@@ -46,7 +46,7 @@ _ENDPOINT_TYPES = frozenset(
 # The declaration the documentation points at for per-site values. Named rather
 # than counted, since another declaration carrying a site value would keep a
 # count above zero while this one quietly stopped using one.
-_WORKED_EXAMPLE = "parameters/dataflows/site-telemetry.yaml"
+_WORKED_EXAMPLE = "resource-sets/dataflows/site-telemetry.yaml"
 
 
 def _settings_key(endpoint_type: str) -> str:
@@ -114,7 +114,7 @@ properties:
         )
 
         errors = orchestrator.validate(
-            workspace / "manifests" / "aio-resources.yaml",
+            workspace / "manifests" / "aio-resources" / "manifest.yaml",
             selector="name=catalog-reference-test",
         )
 

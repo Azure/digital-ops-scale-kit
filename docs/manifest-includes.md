@@ -10,8 +10,8 @@ name: aio-with-opc-ua
 description: Compose AIO fundamentals with the OPC UA sample.
 
 steps:
-  - include: ../../manifests/_aio-fundamentals.yaml
-  - include: ../../manifests/_resolve-aio.yaml
+  - include: ../../manifests/_partials/_aio-fundamentals.yaml
+  - include: ../../manifests/_partials/_resolve-aio.yaml
   - include: ../opc-ua-solution/_partial.yaml
 ```
 
@@ -19,7 +19,7 @@ Include paths are resolved relative to the including manifest's directory. From 
 
 After resolution, the parent's step list is a flat sequence of every step the included manifests contribute, in declared order, interleaved with any inline steps the parent defines.
 
-The standalone-vs-partial distinction matters for composition. Compositions should include the leaf `_partial.yaml`s, not standalone `manifest.yaml`s. Composing two standalone manifests will collide on the `resolve-aio` step name. See [Standalone manifests vs partials](#standalone-manifests-vs-partials) and `workspaces/<workspace>/samples/README.md`.
+The standalone-vs-partial distinction matters for composition. Compositions should include the leaf `_partial.yaml`s, not standalone `manifest.yaml`s. Standalone manifests can repeat prerequisites such as `resolve-aio`, which causes a flattened step-name collision. See [Standalone manifests vs partials](#standalone-manifests-vs-partials) and `workspaces/<workspace>/samples/README.md`.
 
 ## Step shape
 
@@ -41,8 +41,9 @@ No other keys are allowed alongside `include:`. Adding `name`, `template`, `type
 A `when:` on the include step propagates to every spliced step:
 
 ```yaml
+# Illustrative manifests/custom/manifest.yaml. Define this flag in the Site.
 steps:
-  - include: ../samples/opc-ua-solution/_partial.yaml
+  - include: ../../samples/opc-ua-solution/_partial.yaml
     when: "{{ site.properties.deployOptions.enableOpcUa }}"
 ```
 
@@ -91,7 +92,7 @@ Any manifest can be included. When it is, top-level fields that only make sense 
 - Only `steps:`, manifest-level `parameters:`, and
   `parameterCompositions:` are spliced into the parent.
 
-The convention for files authored primarily to be included is the `_` filename prefix (e.g., `_aio-fundamentals.yaml`, `_partial.yaml`). Standalone manifests such as `manifests/aio-install.yaml` exist as convenience entry points for `siteops deploy`. **Compositions should include the `_` partials, not the standalone manifests**, so that two siblings can share a common preamble without colliding on step names.
+The convention for files authored primarily to be included is the `_` filename prefix (e.g., `_aio-fundamentals.yaml`, `_partial.yaml`). Standalone manifests such as `manifests/aio-install/manifest.yaml` exist as convenience entry points for `siteops deploy`. **Compositions should include the `_` partials, not the standalone manifests**, so that two siblings can share a common preamble without colliding on step names.
 
 ## Empty includes
 

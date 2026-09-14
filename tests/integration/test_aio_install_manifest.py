@@ -225,7 +225,7 @@ class TestAioInstallIdempotency:
         extension identity below is what covers that.
         """
         result2 = orchestrator.deploy(
-            manifest_path=WORKSPACE_PATH / "manifests" / "aio-install.yaml",
+            manifest_path=WORKSPACE_PATH / "manifests" / "aio-install" / "manifest.yaml",
             selector=selector,
         )
         assert result2.status is RunStatus.SUCCEEDED
@@ -255,7 +255,7 @@ class TestAioInstallIdempotency:
         the old principal, and both deploys still report success.
         """
         result2 = orchestrator.deploy(
-            manifest_path=WORKSPACE_PATH / "manifests" / "aio-install.yaml",
+            manifest_path=WORKSPACE_PATH / "manifests" / "aio-install" / "manifest.yaml",
             selector=selector,
         )
         assert result2.status is RunStatus.SUCCEEDED

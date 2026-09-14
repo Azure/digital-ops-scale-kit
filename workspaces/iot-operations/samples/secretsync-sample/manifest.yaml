@@ -34,6 +34,6 @@ parameters:
   - samples/secretsync-sample/secrets.yaml
 
 steps:
-  - include: ../../manifests/_resolve-aio.yaml
-  - include: ../../manifests/_secretsync.yaml
+  - include: ../../manifests/_partials/_resolve-aio.yaml
+  - include: ../../manifests/_partials/_secretsync.yaml
   - include: _partial.yaml

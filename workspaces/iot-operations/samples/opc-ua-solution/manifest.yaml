@@ -28,6 +28,6 @@ parameters:
   - "parameters/aio-releases/{{ site.properties.aioRelease }}.yaml"
 
 steps:
-  - include: ../../manifests/_resolve-aio.yaml
+  - include: ../../manifests/_partials/_resolve-aio.yaml
   - include: _partial.yaml
 

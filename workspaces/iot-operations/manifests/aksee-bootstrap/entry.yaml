@@ -1,0 +1,16 @@
+apiVersion: siteops/v1alpha1
+kind: DeploymentEntry
+role: standalone
+category: core
+tags: [host, windows, aksee, bootstrap]
+documentation: [README.md]
+outcome: Bootstrap an AKS Edge Essentials cluster through an Arc-enabled Windows host.
+prerequisites:
+  - An Arc-enabled Windows host meeting the guide's requirements, with the required managed-identity permissions and resource providers.
+  - Explicit host and cluster configuration, target-side installer review and approval for reboots.
+effects:
+  - Delivers a privileged host worker through Arc Run Command and can reboot the machine.
+  - The parent waits on worker state. Launcher completion is not worker completion, and the wait does not compare run IDs.
+removal:
+  - Use the operator guide's phase-specific remediation and cleanup. Do not treat reapplication as a general rollback.
+coverage: Host-operation synopsis, not artifact qualification or a complete input contract. Installer identity, host health and downstream AIO health require their separate evidence.

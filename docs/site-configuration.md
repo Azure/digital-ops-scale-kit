@@ -546,10 +546,10 @@ or partial. It can be checked with `validate`, but `plan` and `deploy` require
 `-l` to supply targets.
 
 ```bash
-siteops deploy manifests/aio-install.yaml                           # uses manifest selector
-siteops deploy manifests/aio-install.yaml -l environment=dev        # CLI overrides manifest
-siteops deploy manifests/aio-install.yaml -l name=munich-dev        # single site
-siteops deploy manifests/aio-install.yaml -l name=a,name=b          # multi-site (name OR-combines)
+siteops deploy manifests/aio-install/manifest.yaml                           # uses manifest selector
+siteops deploy manifests/aio-install/manifest.yaml -l environment=dev        # CLI overrides manifest
+siteops deploy manifests/aio-install/manifest.yaml -l name=munich-dev        # single site
+siteops deploy manifests/aio-install/manifest.yaml -l name=a,name=b          # multi-site (name OR-combines)
 ```
 
 `-l` is repeatable. Distinct keys AND-combine. Repeated `name=` values OR-combine. Any other duplicate key is an error. Path-form names (`-l name=regions/eu/munich`) work for nested site files. See [targeting.md](targeting.md) for the full grammar, the no-match diagnostic, and the validation rules.

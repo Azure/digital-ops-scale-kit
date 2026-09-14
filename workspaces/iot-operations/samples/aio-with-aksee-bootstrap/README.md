@@ -46,6 +46,6 @@ The wait step and worker both target the Arc machine resource named by
 
 ## Variants
 
-- **Bootstrap only:** `siteops deploy manifests/aksee-bootstrap.yaml` stops after the cluster is Arc-connected and prepared for an AIO deployment. It does not install AIO.
+- **Bootstrap only:** `siteops deploy manifests/aksee-bootstrap/manifest.yaml` stops after the cluster is Arc-connected and prepared for an AIO deployment. It does not install AIO.
 - **Bootstrap + AIO + sample workload:** add another `include:` to a sample partial (e.g., `../opc-ua-solution/_partial.yaml`) to land an OPC UA solution on top.
-- **Bootstrap + AIO + secret sync:** add `../../manifests/_resolve-aio.yaml` and `../../manifests/_secretsync.yaml` after the fundamentals step.
+- **Bootstrap + AIO + secret sync:** add `../../manifests/_partials/_resolve-aio.yaml` and `../../manifests/_partials/_secretsync.yaml` after the fundamentals step.

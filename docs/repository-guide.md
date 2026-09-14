@@ -20,7 +20,11 @@ names, assumptions, or release policy.
 
 ## From workspace to outcome
 
-Site Ops follows one command path:
+Browsing and execution have separate responsibilities. `browse` reads
+descriptive content without loading Site values. A remote browse consumes a
+published index tied to one source revision, not a remote execution filesystem.
+
+Preparation and deployment follow one shared command path:
 
 1. Load the workspace, site definitions, overlays, manifest, includes,
    parameter sources, and composition contracts.
@@ -44,8 +48,9 @@ readiness and functional verification.
 |---|---|---|
 | `sites/` | Where to deploy | Committed sites and reusable `SiteTemplate` defaults |
 | `sites.local/` | Local target overrides | Gitignored overlays that cannot introduce inheritance |
-| `manifests/` | What to run and in what order | Standalone entry points and reusable partials |
-| `parameters/` | Values and reusable resource definitions | Shared inputs, output chaining, release pins, and resource sets |
+| `manifests/` | Core operations | Named entry directories with a manifest and operator guide, plus shared `_partials/` |
+| `parameters/` | Defaults and step bindings | Shared inputs, output chaining and release pins |
+| `resource-sets/` | Reusable workload intent | Site-selected device, asset and dataflow definitions |
 | `contracts/` | How governed collections compose | Resource identity, reference, and provider-seed rules |
 | `templates/` | How provider resources or operations work | Bicep entry points, modules, and host-delivered content |
 | `samples/` | Worked deployments | Self-contained bundles and compositions with their own prerequisites |
@@ -53,6 +58,12 @@ readiness and functional verification.
 The engine recognizes the generic workspace shape. Field names beneath
 `site.properties`, label conventions, AIO release keys, and resource-family
 semantics belong to the workspace.
+
+Public entries own optional `entry.yaml` guidance beside their manifest and
+operator guide. The workspace's optional `content.yaml` names extra discovery
+paths rather than repeating entry descriptions. Generated indexes are
+publication artifacts, not another authored source or an executable package.
+See [browsing](browse-content.md) and [remote indexes](remote-content.md).
 
 ## Choose the owning layer
 

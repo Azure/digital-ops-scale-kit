@@ -1,0 +1,6 @@
+apiVersion: siteops/v1alpha1
+kind: DeploymentEntry
+role: partial
+tags: [aio, composition]
+documentation: [README.md]
+coverage: Creates the example's simulator and Bicep-owned device before catalog consumers.

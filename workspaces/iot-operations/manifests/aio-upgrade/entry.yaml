@@ -1,0 +1,17 @@
+apiVersion: siteops/v1alpha1
+kind: DeploymentEntry
+role: standalone
+category: core
+tags: [aio, upgrade]
+documentation: [README.md]
+outcome: Upgrade AIO-related extensions and resources explicitly required by the selected release.
+prerequisites:
+  - An existing AIO installation and a supported upgrade transition.
+  - A configured Site with the intended target release and permission for the selected updates.
+effects:
+  - Updates extensions and release-required resources while preserving supported existing configuration.
+  - Does not perform general migrations of instance child resources.
+  - Avoid workload resource-set deployments between changing the release pin and completing the upgrade.
+removal:
+  - There is no general rollback. Review partial outcomes and recovery guidance before retrying.
+coverage: Operational synopsis. Follow the guide for release selection, supported paths and post-upgrade workload observations. Detailed input and effective permission coverage is not declared.

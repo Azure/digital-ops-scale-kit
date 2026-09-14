@@ -1,0 +1,6 @@
+apiVersion: siteops/v1alpha1
+kind: DeploymentEntry
+role: partial
+tags: [host, aksee, bootstrap]
+documentation: [../../../manifests/aksee-bootstrap/README.md]
+coverage: Starts bootstrap only. The composing entry must supply the worker-completion wait.

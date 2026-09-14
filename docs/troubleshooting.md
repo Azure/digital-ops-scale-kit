@@ -171,16 +171,16 @@ retry.
 
 ```bash
 # Prepare and show the executable deployment plan
-siteops -w workspaces/iot-operations plan manifests/aio-install.yaml
+siteops -w workspaces/iot-operations plan manifests/aio-install/manifest.yaml
 
 # Emit one publishable JSON plan document
-siteops -w workspaces/iot-operations plan manifests/aio-install.yaml --output json --projection publishable
+siteops -w workspaces/iot-operations plan manifests/aio-install/manifest.yaml --output json --projection publishable
 
 # Emit one publishable JSON run result
-siteops -w workspaces/iot-operations deploy manifests/aio-install.yaml --output json --projection publishable
+siteops -w workspaces/iot-operations deploy manifests/aio-install/manifest.yaml --output json --projection publishable
 
 # Show the faster compile-free plan shape
-siteops -w workspaces/iot-operations plan manifests/aio-install.yaml --describe
+siteops -w workspaces/iot-operations plan manifests/aio-install/manifest.yaml --describe
 
 # Show every value's source file (post inherit + overlay merge)
 siteops -w workspaces/iot-operations sites <name> --show-sources

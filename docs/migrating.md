@@ -5,8 +5,8 @@ first. Apply the sections between your current and target releases,
 starting with the oldest applicable release.
 
 To upgrade deployed Azure IoT Operations or Kubernetes instead, see
-[aio-releases.md](aio-releases.md) and the `aio-upgrade.yaml` and
-`aksee-upgrade.yaml` manifests.
+[aio-releases.md](aio-releases.md) and the `aio-upgrade` and
+`aksee-upgrade` entries.
 
 For release summaries, see the
 [release notes](https://github.com/Azure/digital-ops-scale-kit/releases).
@@ -33,12 +33,41 @@ Start with the changes that affect your workflow:
 
 | If you... | What to change |
 |---|---|
+| Reference shipped workspace paths | Update [entry and resource-set paths](#workspace-content-paths). |
 | Use `sites --render` | Replace it with [`--output yaml`](#inspect-sites). |
 | Preview a deployment | Use [`siteops plan`](#plan-and-validate). |
 | Author manifests or parameters | Review the [preparation checks](#preparation-checks). |
 | Capture output in scripts or CI | Use [structured results and explicit projections](#results-and-ci-output). |
 | Manage temporary files | Review the [new location and cleanup behavior](#temporary-files). |
 | Call the engine from Python | Update the [internal result consumers](#internal-python-callers). |
+
+### Workspace content paths
+
+Core entries now have the same directory shape as samples: a named directory
+with `manifest.yaml` and its operator guide.
+
+| Previous path | Current path |
+|---|---|
+| `manifests/aio-install.yaml` | `manifests/aio-install/manifest.yaml` |
+| `manifests/aio-upgrade.yaml` | `manifests/aio-upgrade/manifest.yaml` |
+| `manifests/aio-resources.yaml` | `manifests/aio-resources/manifest.yaml` |
+| `manifests/secretsync.yaml` | `manifests/secretsync/manifest.yaml` |
+| `manifests/aksee-bootstrap.yaml` | `manifests/aksee-bootstrap/manifest.yaml` |
+| `manifests/aksee-upgrade.yaml` | `manifests/aksee-upgrade/manifest.yaml` |
+| `manifests/_<name>.yaml` | `manifests/_partials/_<name>.yaml` |
+| `parameters/devices/<set>.yaml` | `resource-sets/devices/<set>.yaml` |
+| `parameters/assets/<set>.yaml` | `resource-sets/assets/<set>.yaml` |
+| `parameters/dataflows/<set>.yaml` | `resource-sets/dataflows/<set>.yaml` |
+
+Update custom commands, workflow selections and fixed parameter-source paths.
+Recompute relative `include` paths from each including file's directory.
+Source paths and provenance change, while manifest names, Site selection
+keys, set names, parameter precedence and resource intent remain unchanged.
+Sample entry paths and sample-local declarations retain their locations.
+
+There are no forwarding manifests at the old paths. An old command reports
+`Manifest not found`. Select the corresponding current path and review the
+plan before deploying. A file move does not delete or recreate Azure resources.
 
 ### Inspect sites
 
@@ -197,14 +226,14 @@ Update a custom catalog manifest from scalar path interpolation and the
 ```yaml
 # Before
 parameters:
-  - "parameters/dataflows/{{ site.properties.resourceSets.dataflows }}.yaml"
+  - "resource-sets/dataflows/{{ site.properties.resourceSets.dataflows }}.yaml"
 steps:
   - include: _dataflows.yaml
     when: "{{ site.properties.resourceSets.dataflows != 'none' }}"
 
 # After
 parameters:
-  - path: "parameters/dataflows/{{ item }}.yaml"
+  - path: "resource-sets/dataflows/{{ item }}.yaml"
     forEach: "{{ site.properties.resourceSets.dataflows }}"
     collections: [dataflowEndpoints, dataflowProfiles, dataflows]
 steps:

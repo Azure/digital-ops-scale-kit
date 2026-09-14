@@ -9,7 +9,7 @@ description: |
   completion tag.
 
   Internal partial (filename prefixed `_`). Not deployed directly. Composed by
-  the standalone `manifests/aksee-upgrade.yaml` (which adds the `type: wait`
+  the standalone `manifests/aksee-upgrade/manifest.yaml` (which adds the `type: wait`
   gate) and by any composition that adds an upgrade step.
 
 steps:

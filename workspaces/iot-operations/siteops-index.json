@@ -1,0 +1,759 @@
+{
+  "apiVersion": "siteops/v1alpha1",
+  "entries": [
+    {
+      "guidance": {
+        "coverage": "Shared platform fragment. Its parent owns targeting, ordering and optional capabilities.",
+        "documentation": [
+          "manifests/README.md"
+        ],
+        "tags": [
+          "aio",
+          "install"
+        ]
+      },
+      "name": "aio-fundamentals",
+      "path": "manifests/_partials/_aio-fundamentals.yaml",
+      "role": "partial"
+    },
+    {
+      "guidance": {
+        "coverage": "Shared source expansion and family ordering. The parent owns its target selection.",
+        "documentation": [
+          "manifests/README.md"
+        ],
+        "tags": [
+          "aio",
+          "resource-sets"
+        ]
+      },
+      "name": "aio-resource-steps",
+      "path": "manifests/_partials/_aio-resources.yaml",
+      "role": "partial"
+    },
+    {
+      "guidance": {
+        "coverage": "Requires the composing entry's prior instance lookup and selected declarations.",
+        "documentation": [
+          "manifests/README.md"
+        ],
+        "tags": [
+          "aio",
+          "devices",
+          "assets"
+        ]
+      },
+      "name": "asset-steps",
+      "path": "manifests/_partials/_assets.yaml",
+      "role": "partial"
+    },
+    {
+      "guidance": {
+        "coverage": "Requires the composing entry's prior instance lookup and selected declarations.",
+        "documentation": [
+          "manifests/README.md"
+        ],
+        "tags": [
+          "aio",
+          "dataflows"
+        ]
+      },
+      "name": "dataflow-steps",
+      "path": "manifests/_partials/_dataflows.yaml",
+      "role": "partial"
+    },
+    {
+      "guidance": {
+        "coverage": "The parent supplies the instance name and release configuration. Associated infrastructure is read during deployment.",
+        "documentation": [
+          "manifests/README.md"
+        ],
+        "tags": [
+          "aio",
+          "lookup"
+        ]
+      },
+      "name": "resolve-aio",
+      "path": "manifests/_partials/_resolve-aio.yaml",
+      "role": "partial"
+    },
+    {
+      "guidance": {
+        "coverage": "Requires preceding instance and cluster lookup outputs from the composing entry.",
+        "documentation": [
+          "manifests/README.md"
+        ],
+        "tags": [
+          "aio",
+          "secretsync"
+        ]
+      },
+      "name": "secretsync-step",
+      "path": "manifests/_partials/_secretsync.yaml",
+      "role": "partial"
+    },
+    {
+      "guidance": {
+        "category": "core",
+        "coverage": "Covers the first configured-Site installation and selected optional settings. It is not an exhaustive template input, permission, pricing or compatibility contract. Observe AIO readiness and workload functionality separately.",
+        "documentation": [
+          "manifests/aio-install/README.md"
+        ],
+        "effects": [
+          "Creates or updates AIO extensions, instance resources, custom location, ADR namespace, Schema Registry storage and role assignments.",
+          "Optional settings add their own effects. Subscription-scoped Edge Site work needs an applicable subscription target.",
+          "Deployment can incur Azure charges and leave partial changes after failure or interruption.",
+          "Use the upgrade entry for in-place version changes. Reapplying installation can overwrite operator-managed settings."
+        ],
+        "inputs": [
+          {
+            "description": "Target subscription from the configured Site, replacing any example placeholder.",
+            "field": "subscription",
+            "requirement": "required",
+            "sensitivity": "unknown",
+            "type": "string"
+          },
+          {
+            "description": "Existing resource group containing the intended cluster and installation.",
+            "field": "resourceGroup",
+            "requirement": "required",
+            "sensitivity": "unknown",
+            "type": "string"
+          },
+          {
+            "description": "Confirm the real target region. Shared configuration also uses it as cluster location.",
+            "field": "location",
+            "requirement": "required",
+            "sensitivity": "unknown",
+            "type": "string"
+          },
+          {
+            "description": "Existing Arc-connected Kubernetes cluster name, not the Site name.",
+            "field": "parameters.clusterName",
+            "requirement": "required",
+            "sensitivity": "unknown",
+            "type": "string"
+          },
+          {
+            "defaultBehavior": "Confirm the committed example's release selection before planning.",
+            "description": "Release selection inherited from the Site or deliberately overridden.",
+            "field": "properties.aioRelease",
+            "requirement": "required",
+            "sensitivity": "non-sensitive",
+            "type": "string"
+          },
+          {
+            "description": "Preserve the example's supporting labels for naming, tags and optional Edge Site addressing.",
+            "field": "labels",
+            "requirement": "required",
+            "sensitivity": "unknown",
+            "type": "mapping"
+          },
+          {
+            "defaultBehavior": "The shared fallback derives the name from the Site name.",
+            "description": "Override the supported AIO instance naming convention when needed.",
+            "field": "parameters.aioInstanceName",
+            "requirement": "optional",
+            "sensitivity": "non-sensitive",
+            "type": "string"
+          },
+          {
+            "defaultBehavior": "The shared fallback derives the name from the Site name.",
+            "description": "Installation can accept a Site override of the shared custom-location name.",
+            "field": "parameters.customLocationName",
+            "requirement": "optional",
+            "sensitivity": "non-sensitive",
+            "type": "string"
+          },
+          {
+            "description": "Broker settings have inherited or template defaults. Review capacity and trust requirements.",
+            "field": "parameters.brokerConfig",
+            "requirement": "optional",
+            "sensitivity": "unknown",
+            "type": "object"
+          },
+          {
+            "description": "Review cert-manager, Edge Site and optional Secret Sync settings. Host flags do not retrofit OIDC or workload identity through this entry.",
+            "field": "properties.deployOptions",
+            "requirement": "conditional",
+            "sensitivity": "unknown",
+            "type": "mapping"
+          }
+        ],
+        "outcome": "Install AIO platform fundamentals on an existing Arc-connected Kubernetes cluster.",
+        "prerequisites": [
+          "An existing resource group and Arc-connected Kubernetes cluster meeting the selected AIO release's requirements.",
+          "Azure CLI and Bicep for executable preparation and deployment. This manifest contains no kubectl step.",
+          "An authorized deployment identity, including the required role-assignment permissions. Common guidance is Owner or User Access Administrator plus Contributor.",
+          "Enabling Secret Sync requires pre-existing OIDC and workload-identity readiness on the cluster."
+        ],
+        "removal": [
+          "Remove created resources deliberately while preserving the existing cluster and other retained resources.",
+          "There is no automatic rollback or general uninstall entry."
+        ],
+        "supplied": [
+          {
+            "description": "The Schema Registry operation supplies the created registry ID.",
+            "input": "schemaRegistryId",
+            "step": "aio-instance"
+          },
+          {
+            "description": "The ADR namespace operation supplies the namespace ID.",
+            "input": "adrNamespaceId",
+            "step": "aio-instance"
+          },
+          {
+            "description": "The enablement operation supplies the required extension IDs.",
+            "input": "clExtensionIds",
+            "step": "aio-instance"
+          },
+          {
+            "description": "The instance operation supplies the AIO extension identity's principal.",
+            "input": "aioExtensionPrincipalId",
+            "step": "schema-registry-role"
+          }
+        ],
+        "tags": [
+          "aio",
+          "install",
+          "existing-cluster"
+        ]
+      },
+      "name": "aio-install",
+      "path": "manifests/aio-install/manifest.yaml",
+      "role": "standalone"
+    },
+    {
+      "guidance": {
+        "category": "core",
+        "coverage": "Operational synopsis. The guide owns collection authoring and composition. Actual selected resources and accepted inputs come from preparation, not this card.",
+        "documentation": [
+          "manifests/aio-resources/README.md"
+        ],
+        "effects": [
+          "Resolves associated infrastructure and applies selected collections, with Device Registry resources preceding dataflows.",
+          "Omitted areas do not select resources. Explicit empty lists clear inherited selections.",
+          "Does not install AIO or implicitly enable Secret Sync."
+        ],
+        "outcome": "Apply the device, asset and dataflow resource sets selected by each Site.",
+        "prerequisites": [
+          "An existing AIO instance, correct instance name and matching release configuration.",
+          "Resource-set selections and permission for their deployments, reads and resource writes."
+        ],
+        "removal": [
+          "Deselection does not delete resources. Remove the intended resources deliberately."
+        ],
+        "tags": [
+          "aio",
+          "workload",
+          "resource-sets"
+        ]
+      },
+      "name": "aio-resources",
+      "path": "manifests/aio-resources/manifest.yaml",
+      "role": "standalone"
+    },
+    {
+      "guidance": {
+        "category": "core",
+        "coverage": "Operational synopsis. Follow the guide for release selection, supported paths and post-upgrade workload observations. Detailed input and effective permission coverage is not declared.",
+        "documentation": [
+          "manifests/aio-upgrade/README.md"
+        ],
+        "effects": [
+          "Updates extensions and release-required resources while preserving supported existing configuration.",
+          "Does not perform general migrations of instance child resources.",
+          "Avoid workload resource-set deployments between changing the release pin and completing the upgrade."
+        ],
+        "outcome": "Upgrade AIO-related extensions and resources explicitly required by the selected release.",
+        "prerequisites": [
+          "An existing AIO installation and a supported upgrade transition.",
+          "A configured Site with the intended target release and permission for the selected updates."
+        ],
+        "removal": [
+          "There is no general rollback. Review partial outcomes and recovery guidance before retrying."
+        ],
+        "tags": [
+          "aio",
+          "upgrade"
+        ]
+      },
+      "name": "aio-upgrade",
+      "path": "manifests/aio-upgrade/manifest.yaml",
+      "role": "standalone"
+    },
+    {
+      "guidance": {
+        "category": "core",
+        "coverage": "Host-operation synopsis, not artifact qualification or a complete input contract. Installer identity, host health and downstream AIO health require their separate evidence.",
+        "documentation": [
+          "manifests/aksee-bootstrap/README.md"
+        ],
+        "effects": [
+          "Delivers a privileged host worker through Arc Run Command and can reboot the machine.",
+          "The parent waits on worker state. Launcher completion is not worker completion, and the wait does not compare run IDs."
+        ],
+        "outcome": "Bootstrap an AKS Edge Essentials cluster through an Arc-enabled Windows host.",
+        "prerequisites": [
+          "An Arc-enabled Windows host meeting the guide's requirements, with the required managed-identity permissions and resource providers.",
+          "Explicit host and cluster configuration, target-side installer review and approval for reboots."
+        ],
+        "removal": [
+          "Use the operator guide's phase-specific remediation and cleanup. Do not treat reapplication as a general rollback."
+        ],
+        "tags": [
+          "host",
+          "windows",
+          "aksee",
+          "bootstrap"
+        ]
+      },
+      "name": "aksee-bootstrap",
+      "path": "manifests/aksee-bootstrap/manifest.yaml",
+      "role": "standalone"
+    },
+    {
+      "guidance": {
+        "category": "core",
+        "coverage": "Operational synopsis. Platform readiness does not establish AIO workload health. Detailed host constraints and recovery requirements remain in the operator guide.",
+        "documentation": [
+          "manifests/aksee-upgrade/README.md"
+        ],
+        "effects": [
+          "Runs target-side upgrade work and can interrupt workloads during node VM reboot.",
+          "Completion uses a worker state tag rather than run-correlated evidence."
+        ],
+        "outcome": "Upgrade an existing AKS Edge Essentials cluster through its Arc-enabled host.",
+        "prerequisites": [
+          "An existing supported host and cluster with the guide's permissions and upgrade settings.",
+          "An approved maintenance window and access for potential console remediation."
+        ],
+        "removal": [
+          "Follow the documented failure phase and remediation path before retrying. There is no general rollback."
+        ],
+        "tags": [
+          "host",
+          "windows",
+          "aksee",
+          "upgrade"
+        ]
+      },
+      "name": "aksee-upgrade",
+      "path": "manifests/aksee-upgrade/manifest.yaml",
+      "role": "standalone"
+    },
+    {
+      "guidance": {
+        "category": "core",
+        "coverage": "Enablement synopsis. The guide owns vault selection and preservation settings. Secret values and effective permissions are not inspected or exported.",
+        "documentation": [
+          "manifests/secretsync/README.md"
+        ],
+        "effects": [
+          "Can create or configure identity, vault, federation, permissions and Secret Provider Class resources, and update the instance.",
+          "Enablement is separate from materializing selected secret values in Kubernetes."
+        ],
+        "outcome": "Enable workload-identity-backed Secret Sync on an existing AIO instance.",
+        "prerequisites": [
+          "An existing AIO instance and cluster with OIDC issuer and workload identity enabled.",
+          "A configured Site, instance name, release selection and permissions for identities, vault resources and role assignments as applicable."
+        ],
+        "removal": [
+          "Remove only the identities, permissions, data and synchronized resources you own. Configuration removal is not automatic cleanup."
+        ],
+        "tags": [
+          "aio",
+          "secretsync",
+          "identity"
+        ]
+      },
+      "name": "secretsync",
+      "path": "manifests/secretsync/manifest.yaml",
+      "role": "standalone"
+    },
+    {
+      "guidance": {
+        "category": "sample",
+        "coverage": "Composition synopsis. Review both component guides and observe host, AIO readiness and workload outcomes separately.",
+        "documentation": [
+          "samples/aio-with-aksee-bootstrap/README.md"
+        ],
+        "effects": [
+          "Combines privileged host work, possible reboots and AIO resource deployment.",
+          "The state-only wait does not provide run-correlated completion. This composition does not add Secret Sync."
+        ],
+        "outcome": "Bootstrap the host, wait for worker state, then install AIO fundamentals.",
+        "prerequisites": [
+          "The host bootstrap and AIO installation prerequisites both apply.",
+          "A configured Site identifying the intended host and resulting cluster."
+        ],
+        "removal": [
+          "Follow each component's ownership and cleanup guidance. There is no combined rollback."
+        ],
+        "tags": [
+          "aio",
+          "host",
+          "windows",
+          "aksee",
+          "composition"
+        ]
+      },
+      "name": "aio-with-aksee-bootstrap",
+      "path": "samples/aio-with-aksee-bootstrap/manifest.yaml",
+      "role": "standalone"
+    },
+    {
+      "guidance": {
+        "category": "sample",
+        "coverage": "Composition synopsis. The guides own detailed configuration and release-dependent functional limits. No readiness or telemetry observation is performed by browsing.",
+        "documentation": [
+          "samples/aio-with-opc-ua/README.md"
+        ],
+        "effects": [
+          "Combines platform installation, simulated equipment, Device Registry resources, a dataflow and Event Hub resources.",
+          "Creates billable resources and role assignments. Deployment does not establish telemetry delivery."
+        ],
+        "outcome": "Install AIO and the composed OPC UA-to-cloud example on a fresh cluster.",
+        "prerequisites": [
+          "A prepared Arc-connected cluster, configured Site and both installation and solution permissions.",
+          "Review the selected release's connector limitations and the solution's simulator input."
+        ],
+        "removal": [
+          "Use the component guides to remove owned resources deliberately while preserving retained infrastructure."
+        ],
+        "tags": [
+          "aio",
+          "opc-ua",
+          "workload",
+          "composition"
+        ]
+      },
+      "name": "aio-with-opc-ua",
+      "path": "samples/aio-with-opc-ua/manifest.yaml",
+      "role": "standalone"
+    },
+    {
+      "guidance": {
+        "category": "sample",
+        "coverage": "Fixed-declaration example. Detailed definitions and functional prerequisites are in the guide, not a complete operator input schema.",
+        "documentation": [
+          "samples/asset-sample/README.md"
+        ],
+        "effects": [
+          "Applies fixed shared resource-set sources. Resources can deploy even when the sample simulator is absent.",
+          "Real telemetry requires a reachable server and the appropriate connector behavior for the selected release."
+        ],
+        "outcome": "Apply the worked YAML device and asset definitions to an existing AIO instance.",
+        "prerequisites": [
+          "An existing AIO instance with its ADR namespace, correct Site configuration and resource permissions.",
+          "A reachable OPC UA endpoint and an authenticated client when observing telemetry."
+        ],
+        "removal": [
+          "Delete owned assets before devices. Removing declarations does not delete previously applied resources."
+        ],
+        "tags": [
+          "aio",
+          "devices",
+          "assets",
+          "yaml"
+        ]
+      },
+      "name": "asset-sample",
+      "path": "samples/asset-sample/manifest.yaml",
+      "role": "standalone"
+    },
+    {
+      "guidance": {
+        "category": "sample",
+        "coverage": "Local-declaration example. Review namespace assumptions and routing behavior in the guide before applying it.",
+        "documentation": [
+          "samples/dataflow-sample/README.md"
+        ],
+        "effects": [
+          "Applies the local declaration through shared templates, with Site-specific topics and client identity.",
+          "Provisions routing resources without establishing their health or message movement."
+        ],
+        "outcome": "Apply sample-local YAML endpoints, profiles and dataflows to an existing AIO instance.",
+        "prerequisites": [
+          "An existing instance, configured Site and permission for the selected resource deployments.",
+          "An authenticated MQTT client or actual telemetry source for functional observation."
+        ],
+        "removal": [
+          "Delete the owned routes, endpoints and profiles explicitly. Declaration removal is not pruning."
+        ],
+        "tags": [
+          "aio",
+          "dataflows",
+          "mqtt",
+          "yaml"
+        ]
+      },
+      "name": "dataflow-sample",
+      "path": "samples/dataflow-sample/manifest.yaml",
+      "role": "standalone"
+    },
+    {
+      "guidance": {
+        "coverage": "Solution and simulator fragment. The parent supplies the existing-instance lookup.",
+        "documentation": [
+          "samples/opc-ua-solution/README.md"
+        ],
+        "tags": [
+          "aio",
+          "opc-ua"
+        ]
+      },
+      "name": "opc-ua-solution",
+      "path": "samples/opc-ua-solution/_partial.yaml",
+      "role": "partial"
+    },
+    {
+      "guidance": {
+        "category": "sample",
+        "coverage": "Solution synopsis. This card does not certify the external execution input, package completeness, release support or data movement.",
+        "documentation": [
+          "samples/opc-ua-solution/README.md"
+        ],
+        "effects": [
+          "Creates Device Registry, Event Hub, role-assignment and dataflow resources and applies the simulator through kubectl.",
+          "The external simulator document is obtained during execution, outside this local inspection.",
+          "Provider completion is not telemetry-delivery evidence."
+        ],
+        "outcome": "Deploy a simulated OPC UA-to-Event Hub solution on an existing AIO instance.",
+        "prerequisites": [
+          "An existing AIO instance, configured Site, deployment permissions and Arc Kubernetes access.",
+          "Review the selected release's connector limitations and the commit-pinned external simulator document."
+        ],
+        "removal": [
+          "Follow the guide's Azure-resource and simulator cleanup, preserving shared infrastructure."
+        ],
+        "tags": [
+          "aio",
+          "opc-ua",
+          "event-hub",
+          "bicep"
+        ]
+      },
+      "name": "opc-ua-solution",
+      "path": "samples/opc-ua-solution/manifest.yaml",
+      "role": "standalone"
+    },
+    {
+      "guidance": {
+        "category": "sample",
+        "coverage": "Covers the basic-routing set and its existing-instance handoff. Deployment success does not establish dataflow health or message delivery. Subscribe first, publish a unique payload and observe it at the destination using the guide's MQTT procedure.",
+        "documentation": [
+          "samples/resource-set-basic/README.md"
+        ],
+        "effects": [
+          "Reads the existing instance's associated infrastructure during deployment and creates or updates the basic-routing dataflow.",
+          "Reads azure-iot-operations/data/siteops-samples/basic/# and republishes to siteops-samples/<site-name>/basic.",
+          "The selected set declares no additional endpoint, profile or cloud service. It uses existing AIO capacity, which is not a zero-cost guarantee."
+        ],
+        "inputs": [
+          {
+            "description": "Subscription for the existing AIO instance.",
+            "field": "subscription",
+            "requirement": "required",
+            "sensitivity": "unknown",
+            "type": "string"
+          },
+          {
+            "description": "Resource group containing the intended AIO instance.",
+            "field": "resourceGroup",
+            "requirement": "required",
+            "sensitivity": "unknown",
+            "type": "string"
+          },
+          {
+            "description": "Required by the Site model. Keep the correct target location even though these workload templates do not consume it as a dataflow input.",
+            "field": "location",
+            "requirement": "required",
+            "sensitivity": "unknown",
+            "type": "string"
+          },
+          {
+            "defaultBehavior": "Inherited from the Site configuration, not discovered by browsing.",
+            "description": "Select the release configuration appropriate to the existing installation's API generation.",
+            "field": "properties.aioRelease",
+            "requirement": "required",
+            "sensitivity": "non-sensitive",
+            "type": "string"
+          },
+          {
+            "defaultBehavior": "The shared fallback derives the name from the Site name.",
+            "description": "Supply the actual name when the existing instance differs from the naming convention. The lookup needs this name as input.",
+            "field": "parameters.aioInstanceName",
+            "requirement": "optional",
+            "sensitivity": "non-sensitive",
+            "type": "string"
+          },
+          {
+            "defaultBehavior": "The committed catalog-basic Site selects the basic-routing set.",
+            "description": "Select basic-routing for this intended outcome.",
+            "field": "properties.resourceSets.dataflows",
+            "requirement": "required",
+            "sensitivity": "non-sensitive",
+            "type": "list"
+          }
+        ],
+        "outcome": "Route local MQTT messages through the existing AIO instance's default endpoint and profile.",
+        "prerequisites": [
+          "An existing AIO installation ready for the workload, with its default endpoint and profile.",
+          "For a new installation, use catalog-basic for both aio-install and this sample. For an existing installation, configure its instance name and release rather than reinstalling.",
+          "Azure CLI and Bicep, with permission for the ARM deployments, associated reads and AIO child-resource writes.",
+          "Cluster access and an authenticated MQTT client are separate requirements for functional observation. This manifest has no kubectl step."
+        ],
+        "removal": [
+          "Deselecting the set stops applying it and does not delete the dataflow.",
+          "Delete the intended dataflow explicitly before removing example configuration."
+        ],
+        "supplied": [
+          {
+            "description": "During deployment, resolve-aio reads the custom location bound to the named instance. This higher-priority step binding supersedes the conventional Site-derived name.",
+            "input": "customLocationName",
+            "step": "dataflow-resources"
+          },
+          {
+            "description": "The selected resource set supplies the governed dataflow collection.",
+            "input": "dataflows",
+            "step": "dataflow-resources"
+          }
+        ],
+        "tags": [
+          "aio",
+          "workload",
+          "mqtt",
+          "beginner",
+          "resource-sets"
+        ]
+      },
+      "name": "resource-set-basic",
+      "path": "samples/resource-set-basic/manifest.yaml",
+      "role": "standalone"
+    },
+    {
+      "guidance": {
+        "coverage": "Creates the example's simulator and Bicep-owned device before catalog consumers.",
+        "documentation": [
+          "samples/resource-set-composition/README.md"
+        ],
+        "tags": [
+          "aio",
+          "composition"
+        ]
+      },
+      "name": "resource-set-external-provider",
+      "path": "samples/resource-set-composition/_external-provider.yaml",
+      "role": "partial"
+    },
+    {
+      "guidance": {
+        "category": "sample",
+        "coverage": "Advanced-composition synopsis. The guide owns the selected sets and functional observation procedure. Detailed operator input and permission coverage is not declared.",
+        "documentation": [
+          "samples/resource-set-composition/README.md"
+        ],
+        "effects": [
+          "Applies a local simulator and Bicep-owned provider before the selected catalog resources.",
+          "External assertions describe expected providers. They are not live existence observations."
+        ],
+        "outcome": "Demonstrate inherited selections, managed and external providers, and cross-resource composition.",
+        "prerequisites": [
+          "An existing AIO installation and the configured catalog-composition Site.",
+          "Review the guide's simulator, resource permissions and external-provider ownership."
+        ],
+        "removal": [
+          "Remove managed resources and the example provider according to their actual ownership. Deselection does not prune."
+        ],
+        "tags": [
+          "aio",
+          "resource-sets",
+          "composition",
+          "advanced"
+        ]
+      },
+      "name": "resource-set-composition",
+      "path": "samples/resource-set-composition/manifest.yaml",
+      "role": "standalone"
+    },
+    {
+      "guidance": {
+        "coverage": "Requires prior resolve and enablement operations. The parent owns private secret declarations.",
+        "documentation": [
+          "samples/secretsync-sample/README.md"
+        ],
+        "tags": [
+          "aio",
+          "secretsync"
+        ]
+      },
+      "name": "secretsync-sample-step",
+      "path": "samples/secretsync-sample/_partial.yaml",
+      "role": "partial"
+    },
+    {
+      "guidance": {
+        "category": "sample",
+        "coverage": "Sensitive-data example synopsis. No secret values, actual target configuration or materialization evidence are read or exported.",
+        "documentation": [
+          "samples/secretsync-sample/README.md"
+        ],
+        "effects": [
+          "Writes declared Key Vault values and creates SecretSync resources after enablement.",
+          "Declared Secret Provider Class objects can replace out-of-band object configuration."
+        ],
+        "outcome": "Demonstrate Secret Sync enablement, secret population and synchronized resources.",
+        "prerequisites": [
+          "Existing AIO, OIDC and workload-identity readiness, plus the required Azure and Kubernetes permissions.",
+          "Replace placeholder secret declarations through an authorized private authoring route."
+        ],
+        "removal": [
+          "Follow the guide's ownership and removal procedure for synchronized objects and retained vault data."
+        ],
+        "tags": [
+          "aio",
+          "secretsync",
+          "identity"
+        ]
+      },
+      "name": "secretsync-sample",
+      "path": "samples/secretsync-sample/manifest.yaml",
+      "role": "standalone"
+    },
+    {
+      "guidance": {
+        "coverage": "Starts bootstrap only. The composing entry must supply the worker-completion wait.",
+        "documentation": [
+          "manifests/aksee-bootstrap/README.md"
+        ],
+        "tags": [
+          "host",
+          "aksee",
+          "bootstrap"
+        ]
+      },
+      "name": "aksee-bootstrap",
+      "path": "templates/host-bootstrap/aksee/_partial.yaml",
+      "role": "partial"
+    },
+    {
+      "guidance": {
+        "coverage": "Starts upgrade only. The composing entry must supply the worker-completion wait.",
+        "documentation": [
+          "manifests/aksee-upgrade/README.md"
+        ],
+        "tags": [
+          "host",
+          "aksee",
+          "upgrade"
+        ]
+      },
+      "name": "aksee-upgrade",
+      "path": "templates/host-ops/aksee-upgrade/_partial.yaml",
+      "role": "partial"
+    }
+  ],
+  "kind": "ContentIndex",
+  "projection": "publishable"
+}

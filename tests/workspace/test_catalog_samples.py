@@ -19,7 +19,7 @@ class TestSharedCatalogPartial:
 
     def test_entry_points_include_the_same_catalog_partial(self, workspace):
         manifests = [
-            workspace / "manifests" / "aio-resources.yaml",
+            workspace / "manifests" / "aio-resources" / "manifest.yaml",
             workspace / _BASIC_MANIFEST,
             workspace / _ADVANCED_MANIFEST,
         ]
@@ -34,13 +34,13 @@ class TestSharedCatalogPartial:
             ]
 
         assert includes == {
-            "manifests/aio-resources.yaml": ["_aio-resources.yaml"],
+            "manifests/aio-resources/manifest.yaml": ["../_partials/_aio-resources.yaml"],
             "samples/resource-set-basic/manifest.yaml": [
-                "../../manifests/_aio-resources.yaml"
+                "../../manifests/_partials/_aio-resources.yaml"
             ],
             "samples/resource-set-composition/manifest.yaml": [
                 "_external-provider.yaml",
-                "../../manifests/_aio-resources.yaml"
+                "../../manifests/_partials/_aio-resources.yaml"
             ],
         }
 
@@ -50,7 +50,7 @@ class TestSharedCatalogPartial:
         orchestrator,
     ):
         manifest = Manifest.from_file(
-            workspace / "manifests" / "aio-resources.yaml",
+            workspace / "manifests" / "aio-resources" / "manifest.yaml",
             workspace_root=workspace,
         )
 
@@ -89,7 +89,7 @@ class TestBeginnerResourceSetSample:
         )
         assert composition is not None
         assert _source_paths(composition) == [
-            "parameters/dataflows/basic-routing.yaml"
+            "resource-sets/dataflows/basic-routing.yaml"
         ]
         assert [entry.identity for entry in composition.entries["dataflows"]] == [
             ("default", "basic-routing")
@@ -162,14 +162,14 @@ class TestAdvancedResourceSetSample:
         )
         assert composition is not None
         assert _source_paths(composition) == [
-            "parameters/devices/composition-opc-ua.yaml",
-            "parameters/devices/external-opc-ua-device.yaml",
-            "parameters/assets/composition-oven-assets.yaml",
-            "parameters/assets/boiler-assets.yaml",
-            "parameters/assets/external-oven-assets.yaml",
-            "parameters/dataflows/shared-mqtt-endpoint.yaml",
-            "parameters/dataflows/shared-dataflow-profile.yaml",
-            "parameters/dataflows/advanced-routing.yaml",
+            "resource-sets/devices/composition-opc-ua.yaml",
+            "resource-sets/devices/external-opc-ua-device.yaml",
+            "resource-sets/assets/composition-oven-assets.yaml",
+            "resource-sets/assets/boiler-assets.yaml",
+            "resource-sets/assets/external-oven-assets.yaml",
+            "resource-sets/dataflows/shared-mqtt-endpoint.yaml",
+            "resource-sets/dataflows/shared-dataflow-profile.yaml",
+            "resource-sets/dataflows/advanced-routing.yaml",
         ]
 
         assert len(composition.entries["devices"]) == 1
@@ -198,10 +198,10 @@ class TestAdvancedResourceSetSample:
             if reference.rule_id == "dataflow-destination-endpoint"
         )
         assert profile_ref.target_source == Path(
-            "parameters/dataflows/shared-dataflow-profile.yaml"
+            "resource-sets/dataflows/shared-dataflow-profile.yaml"
         )
         assert destination_ref.target_source == Path(
-            "parameters/dataflows/shared-mqtt-endpoint.yaml"
+            "resource-sets/dataflows/shared-mqtt-endpoint.yaml"
         )
         route = composition.entries["dataflows"][0].value
         source = route["properties"]["operations"][0]["sourceSettings"]
@@ -225,7 +225,7 @@ class TestAdvancedResourceSetSample:
         existing = yaml.safe_load(
             (
                 workspace
-                / "parameters"
+                / "resource-sets"
                 / "assets"
                 / "site-assets.yaml"
             ).read_text(encoding="utf-8")

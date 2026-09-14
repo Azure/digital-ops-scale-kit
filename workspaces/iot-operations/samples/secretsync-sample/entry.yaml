@@ -1,0 +1,16 @@
+apiVersion: siteops/v1alpha1
+kind: DeploymentEntry
+role: standalone
+category: sample
+tags: [aio, secretsync, identity]
+documentation: [README.md]
+outcome: Demonstrate Secret Sync enablement, secret population and synchronized resources.
+prerequisites:
+  - Existing AIO, OIDC and workload-identity readiness, plus the required Azure and Kubernetes permissions.
+  - Replace placeholder secret declarations through an authorized private authoring route.
+effects:
+  - Writes declared Key Vault values and creates SecretSync resources after enablement.
+  - Declared Secret Provider Class objects can replace out-of-band object configuration.
+removal:
+  - Follow the guide's ownership and removal procedure for synchronized objects and retained vault data.
+coverage: Sensitive-data example synopsis. No secret values, actual target configuration or materialization evidence are read or exported.

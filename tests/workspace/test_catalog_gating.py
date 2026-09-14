@@ -1,6 +1,6 @@
 """Tests for catalog gating and deployment-family completeness.
 
-`manifests/aio-resources.yaml` deploys a family only when the site selects a
+`manifests/aio-resources/manifest.yaml` deploys a family only when the site selects a
 resource set it serves, so the gate keeps an unconfigured site from running
 empty deployments. These properties matter:
 
@@ -405,7 +405,7 @@ class TestPerSiteResolution:
         failures: list[str] = []
         for include in family_includes:
             manifest = Manifest.from_file(
-                workspace / "manifests" / include, workspace_root=workspace
+                (workspace / CATALOG_PARTIAL).parent / include, workspace_root=workspace
             )
             for step in manifest.steps:
                 attached = set(getattr(step, "parameters", []) or [])
@@ -531,7 +531,7 @@ class TestCatalogStepOrder:
         a fleet deploy from paying a round trip per kind per site.
         """
         manifest = Manifest.from_file(
-            workspace / "manifests" / "_dataflows.yaml", workspace_root=workspace
+            workspace / "manifests" / "_partials" / "_dataflows.yaml", workspace_root=workspace
         )
         assert [s.name for s in manifest.steps] == ["dataflow-resources"]
 
@@ -544,7 +544,7 @@ class TestCatalogStepOrder:
         issues for this family.
         """
         manifest = Manifest.from_file(
-            workspace / "manifests" / "_assets.yaml", workspace_root=workspace
+            workspace / "manifests" / "_partials" / "_assets.yaml", workspace_root=workspace
         )
         assert [s.name for s in manifest.steps] == ["asset-resources"]
 
@@ -586,12 +586,12 @@ class TestCatalogStepOrder:
             for entry in raw.get("parameters") or []
         ]
         devices_path = next(
-            (i for i, p in enumerate(paths) if "parameters/devices/" in p),
+            (i for i, p in enumerate(paths) if "resource-sets/devices/" in p),
             None,
         )
-        assets_path = next((i for i, p in enumerate(paths) if "parameters/assets/" in p), None)
+        assets_path = next((i for i, p in enumerate(paths) if "resource-sets/assets/" in p), None)
         dataflows_path = next(
-            (i for i, p in enumerate(paths) if "parameters/dataflows/" in p), None
+            (i for i, p in enumerate(paths) if "resource-sets/dataflows/" in p), None
         )
         assert (
             devices_path is not None
@@ -629,7 +629,7 @@ class TestCatalogStepOrder:
 
         for include in includes:
             manifest = Manifest.from_file(
-                workspace / "manifests" / include, workspace_root=workspace
+                (workspace / CATALOG_PARTIAL).parent / include, workspace_root=workspace
             )
             for step in manifest.steps:
                 assert step.template.endswith("/main.bicep"), (

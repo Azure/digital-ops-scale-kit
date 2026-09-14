@@ -1,0 +1,6 @@
+apiVersion: siteops/v1alpha1
+kind: DeploymentEntry
+role: partial
+tags: [aio, install]
+documentation: [../README.md]
+coverage: Shared platform fragment. Its parent owns targeting, ordering and optional capabilities.

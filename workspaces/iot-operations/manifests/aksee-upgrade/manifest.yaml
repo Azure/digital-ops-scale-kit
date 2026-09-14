@@ -44,7 +44,7 @@ parallel: 3
 selector: "environment=dev"
 
 steps:
-  - include: ../templates/host-ops/aksee-upgrade/_partial.yaml
+  - include: ../../templates/host-ops/aksee-upgrade/_partial.yaml
 
   # Gate completion on the worker reaching its terminal state. The worker writes
   # siteops.aksee.upgrade.state=succeeded on the Arc machine resource at the end

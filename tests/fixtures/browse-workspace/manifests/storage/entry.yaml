@@ -1,0 +1,26 @@
+apiVersion: siteops/v1alpha1
+kind: DeploymentEntry
+role: standalone
+category: example
+tags: [storage]
+documentation: [README.md]
+outcome: A storage account in the selected Site's resource group.
+inputs:
+  - field: parameters.storageAccountName
+    type: string
+    requirement: required
+    sensitivity: non-sensitive
+    description: Globally unique storage account name.
+  - field: location
+    type: string
+    requirement: required
+    sensitivity: non-sensitive
+    description: Azure location from the configured Site.
+supplied: []
+prerequisites:
+  - An existing resource group and permission to deploy its resources.
+effects:
+  - Creates or updates a storage account.
+removal:
+  - Delete the account deliberately after preserving required data.
+coverage: Illustrative storage deployment, not a complete provider constraint or permission schema.

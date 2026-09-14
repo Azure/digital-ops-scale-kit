@@ -6,7 +6,7 @@ description: |
   existing AIO instance. Expects an upstream `resolve-aio` step. One
   API-versioned deployment creates devices before the assets that bind to them.
 
-  Internal partial. `aio-resources.yaml` and direct samples include it. See
+  Internal partial. `aio-resources` and direct samples include it. See
   docs/assets.md for the resource shapes and docs/resource-catalog.md for set
   selection.
 

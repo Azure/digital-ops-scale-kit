@@ -13,9 +13,9 @@ implementation.
 | Path | Role |
 |---|---|
 | `<operation>/template.bicep` | The entry template invoked by the operation's `_partial.yaml`. |
-| `<operation>/_partial.yaml` | Partial that wires the template into a deployable step. Composed by the standalone `manifests/<operation>.yaml`. |
+| `<operation>/_partial.yaml` | Partial that wires the template into a deployable step. Composed by `manifests/<operation>/manifest.yaml`. |
 | `<operation>/scripts/` | Host-runtime artifacts the template delivers, inlined with `loadTextContent`. |
-| `<operation>/README.md` | Operator-facing docs for the operation. |
+| `<operation>/README.md` | Implementation ownership and a link to the public entry's operator guide. |
 | `<operation>/scripts/README.md` | Dev workflow for the scripts, including launcher regeneration. |
 
 ## Operations
@@ -42,9 +42,9 @@ implementation.
 
 1. Create `<operation>/` with `template.bicep` and `_partial.yaml`.
 2. Add `scripts/` with the host-runtime artifacts and a `scripts/README.md`.
-3. Add `<operation>/README.md` covering prerequisites, configuration, run,
-   monitor, verify, and troubleshoot.
-4. Add a standalone entry point at `manifests/<operation>.yaml` that includes
+3. Keep implementation guidance with the source and put the operator procedure
+   beside the public entry.
+4. Add a standalone entry point at `manifests/<operation>/manifest.yaml` that includes
    the partial and then waits on the completion tag the worker writes.
 5. Register the manifest in the deploy dropdowns on both CI platforms.
 6. Add a row to the operations table above.

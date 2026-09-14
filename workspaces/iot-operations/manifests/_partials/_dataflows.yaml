@@ -7,7 +7,7 @@ description: |
   API-versioned deployment creates endpoints and profiles before the dataflows
   that reference them.
 
-  Internal partial. `aio-resources.yaml` and direct samples include it. See
+  Internal partial. `aio-resources` and direct samples include it. See
   docs/dataflows.md for the resource shapes and docs/resource-catalog.md for
   set selection.
 

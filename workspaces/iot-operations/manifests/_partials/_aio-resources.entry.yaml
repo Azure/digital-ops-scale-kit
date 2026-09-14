@@ -1,0 +1,6 @@
+apiVersion: siteops/v1alpha1
+kind: DeploymentEntry
+role: partial
+tags: [aio, resource-sets]
+documentation: [../README.md]
+coverage: Shared source expansion and family ordering. The parent owns its target selection.

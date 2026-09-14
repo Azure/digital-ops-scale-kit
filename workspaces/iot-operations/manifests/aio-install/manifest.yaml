@@ -24,9 +24,9 @@ parallel: 3
 selector: "environment=dev"
 
 steps:
-  - include: _aio-fundamentals.yaml
-  - include: _resolve-aio.yaml
+  - include: ../_partials/_aio-fundamentals.yaml
+  - include: ../_partials/_resolve-aio.yaml
     when: "{{ site.properties.deployOptions.enableSecretSync }}"
-  - include: _secretsync.yaml
+  - include: ../_partials/_secretsync.yaml
     when: "{{ site.properties.deployOptions.enableSecretSync }}"
 

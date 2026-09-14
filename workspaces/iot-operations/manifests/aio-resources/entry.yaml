@@ -1,0 +1,17 @@
+apiVersion: siteops/v1alpha1
+kind: DeploymentEntry
+role: standalone
+category: core
+tags: [aio, workload, resource-sets]
+documentation: [README.md]
+outcome: Apply the device, asset and dataflow resource sets selected by each Site.
+prerequisites:
+  - An existing AIO instance, correct instance name and matching release configuration.
+  - Resource-set selections and permission for their deployments, reads and resource writes.
+effects:
+  - Resolves associated infrastructure and applies selected collections, with Device Registry resources preceding dataflows.
+  - Omitted areas do not select resources. Explicit empty lists clear inherited selections.
+  - Does not install AIO or implicitly enable Secret Sync.
+removal:
+  - Deselection does not delete resources. Remove the intended resources deliberately.
+coverage: Operational synopsis. The guide owns collection authoring and composition. Actual selected resources and accepted inputs come from preparation, not this card.
