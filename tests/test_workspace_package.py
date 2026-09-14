@@ -2,6 +2,7 @@
 
 import copy
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -25,6 +26,12 @@ from siteops.artifacts import (
     hash_stream,
     open_regular_file,
     relative_artifact_path,
+)
+from siteops.compilation import (
+    CompiledTemplate,
+    DependencyCoverage,
+    TemplateCompilationSession,
+    TemplateKind,
 )
 
 
@@ -52,8 +59,94 @@ def _document(files=None):
     records = tuple(PayloadFile(name, hashlib.sha256(data).hexdigest(), len(data)) for name, data in files.items())
     return package.WorkspacePackage(
         "example", "7", "opaque-revision", "workspace", ">=1.0.0b1,<2",
-        ("manifest/v1",), records, package.workspace_tree_digest(records, "workspace"),
+        ("manifest/v1", package.COMPILED_TEMPLATE_FEATURE), records,
+        package.workspace_tree_digest(records, "workspace"), (),
     ).document()
+
+
+def _native_document(content):
+    path = "workspace/templates/main.template.json"
+    record = PayloadFile(path, hashlib.sha256(content).hexdigest(), len(content))
+    mapping = package.PackageTemplateMapping(
+        source_path="templates/main.template.json",
+        source_kind=TemplateKind.ARM_JSON,
+        source_sha256=record.sha256,
+        source_size=record.size,
+        artifact_path="templates/main.template.json",
+        artifact_sha256=record.sha256,
+        artifact_size=record.size,
+        producer_mode="native-arm-json",
+        invocation=("read-arm-json",),
+        driver=None,
+        compiler=None,
+        configuration=None,
+        dependencies=package.PackageDependencyIdentity(
+            DependencyCoverage.NOT_APPLICABLE
+        ),
+    )
+    return package.WorkspacePackage(
+        "example", "7", "opaque-revision", "workspace", ">=1.0.0b1,<2",
+        ("manifest/v1", package.COMPILED_TEMPLATE_FEATURE), (record,),
+        package.workspace_tree_digest((record,), "workspace"), (mapping,),
+    ).document()
+
+
+def _bicep_document():
+    source_content = b"param name string\n"
+    artifact_content = json.dumps({
+        "$schema": (
+            "https://schema.management.azure.com/schemas/2019-04-01/"
+            "deploymentTemplate.json#"
+        ),
+        "contentVersion": "1.0.0.0",
+        "metadata": {
+            "_generator": {
+                "name": "bicep",
+                "version": "0.45.15",
+                "templateHash": "root-hash",
+            }
+        },
+        "resources": [],
+    }).encode()
+    source = PayloadFile(
+        "workspace/templates/main.bicep",
+        hashlib.sha256(source_content).hexdigest(),
+        len(source_content),
+    )
+    artifact = PayloadFile(
+        "workspace/.siteops/compiled/v1/templates/main.bicep.json",
+        hashlib.sha256(artifact_content).hexdigest(),
+        len(artifact_content),
+    )
+    mapping = package.PackageTemplateMapping(
+        source_path="templates/main.bicep",
+        source_kind=TemplateKind.BICEP,
+        source_sha256=source.sha256,
+        source_size=source.size,
+        artifact_path=".siteops/compiled/v1/templates/main.bicep.json",
+        artifact_sha256=artifact.sha256,
+        artifact_size=artifact.size,
+        producer_mode="azure-cli-bicep",
+        invocation=("az", "bicep", "build", "--no-restore"),
+        driver=package.PackageToolIdentity("azure-cli", "2.87.0"),
+        compiler=package.PackageToolIdentity("azure-cli-bicep", "0.45.15"),
+        configuration=package.PackageConfigurationIdentity(
+            package.ConfigurationDiscovery.PRODUCER_DEFAULT,
+            package.PRODUCER_DEFAULT_BICEP_CONFIGURATION_SHA256,
+        ),
+        dependencies=package.PackageDependencyIdentity(
+            DependencyCoverage.COMPILED_OUTPUT_ONLY
+        ),
+    )
+    records = (source, artifact)
+    return package.WorkspacePackage(
+        "example", "7", "opaque-revision", "workspace", ">=1.0.0b1,<2",
+        ("manifest/v1", package.COMPILED_TEMPLATE_FEATURE), records,
+        package.workspace_tree_digest(records, "workspace"), (mapping,),
+    ).document(), {
+        source.path: source_content,
+        artifact.path: artifact_content,
+    }
 
 
 def _archive(path, document=None, files=None, *, info_mutator=None, raw_metadata=None):
@@ -77,6 +170,14 @@ def test_complete_package_preserves_workspace_and_companion_paths(snapshot, tmp_
     assert built == inspected
     assert built.metadata.source_revision == "feed:immutable-revision-7"
     assert built.metadata.workspace_root == "workspace"
+    assert built.metadata.required_features == (
+        package.COMPILED_TEMPLATE_FEATURE,
+        "manifest/v1",
+    )
+    assert len(built.metadata.templates) == 1
+    mapping = built.metadata.templates[0]
+    assert mapping.source_kind is TemplateKind.ARM_JSON
+    assert mapping.source_path == mapping.artifact_path == "templates/storage.template.json"
     assert not any("github" in key.casefold() for key in built.metadata.document())
     expected = {
         path.relative_to(snapshot).as_posix(): path.read_bytes()
@@ -104,6 +205,299 @@ def test_production_is_deterministic_across_source_timestamps(snapshot, tmp_path
     with zipfile.ZipFile(tmp_path / "first.zip") as archive:
         assert all(info.date_time == (1980, 1, 1, 0, 0, 0) for info in archive.infolist())
         assert archive.namelist()[0] == package.PACKAGE_NAME
+
+
+class PackageCompiler:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, argv, timeout):
+        self.calls.append(argv)
+        if argv[1:] == ("version", "--output", "json"):
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout=json.dumps({"azure-cli": "2.87.0"}),
+                stderr="",
+            )
+        if argv[1:] == ("bicep", "version"):
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout="Bicep CLI version 0.45.15 (6a4a640fd8)",
+                stderr="",
+            )
+        output_path = Path(argv[argv.index("--outfile") + 1])
+        output_path.write_text(
+            json.dumps({
+                "$schema": (
+                    "https://schema.management.azure.com/schemas/2019-04-01/"
+                    "deploymentTemplate.json#"
+                ),
+                "contentVersion": "1.0.0.0",
+                "metadata": {
+                    "_generator": {
+                        "name": "bicep",
+                        "version": "0.45.15.0",
+                        "templateHash": "root-hash",
+                    }
+                },
+                "parameters": {"name": {"type": "string"}},
+                "resources": [],
+            }),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+
+def _controlled_factory(control_root, snapshot, tmp_path, compiler):
+    tools = tmp_path / "tools"
+    tools.mkdir(exist_ok=True)
+    azure_cli = tools / "az.cmd"
+    bicep = tools / "bicep.exe"
+    azure_cli.write_bytes(b"fixture")
+    bicep.write_bytes(b"fixture")
+    return lambda: package_builder.create_producer_compilation_session(
+        snapshot,
+        control_root,
+        azure_cli_path=azure_cli,
+        bicep_path=bicep,
+        command_runner=compiler,
+    )
+
+
+def test_bicep_package_maps_only_manifest_template_roots(tmp_path):
+    fixture = Path(__file__).parent / "fixtures" / "compiled-package-workspace"
+    control_root = tmp_path / "control"
+    control_root.mkdir()
+    snapshot = control_root / "source"
+    shutil.copytree(fixture, snapshot / "workspace")
+    compiler = PackageCompiler()
+
+    built = package_builder.build_package(
+        snapshot,
+        tmp_path / "package.zip",
+        workspace="workspace",
+        kit_id="example/bicep",
+        version="preview-1",
+        source_revision="fixture",
+        siteops_range=">=1.0.0b1,<2",
+        compilation_session_factory=_controlled_factory(
+            control_root,
+            snapshot,
+            tmp_path,
+            compiler,
+        ),
+    )
+
+    assert len(built.metadata.templates) == 1
+    mapping = built.metadata.templates[0]
+    assert mapping.source_path == "templates/main.bicep"
+    assert mapping.artifact_path == (
+        ".siteops/compiled/v1/templates/main.bicep.json"
+    )
+    assert mapping.configuration is not None
+    assert (
+        mapping.configuration.discovery.value
+        == "producer-default"
+    )
+    assert mapping.dependencies.coverage is DependencyCoverage.COMPILED_OUTPUT_ONLY
+    assert mapping.dependencies.template_hashes == ()
+    assert all("unused-module.bicep" not in " ".join(call) for call in compiler.calls)
+    build = next(call for call in compiler.calls if call[1:3] == ("bicep", "build"))
+    assert build[3] == "--no-restore"
+    assert str(control_root) not in json.dumps(built.metadata.document())
+
+    destination = tmp_path / "materialized"
+    package.extract_package(tmp_path / "package.zip", built.sha256, destination)
+    artifact = destination / "workspace" / Path(*mapping.artifact_path.split("/"))
+    acquired = TemplateCompilationSession().acquire(artifact)
+    assert isinstance(acquired, CompiledTemplate)
+    assert acquired.parameters[0].name == "name"
+
+
+def test_bicep_package_is_deterministic_across_control_roots(tmp_path):
+    fixture = Path(__file__).parent / "fixtures" / "compiled-package-workspace"
+    results = []
+    for name in ("first", "second"):
+        control_root = tmp_path / name / "control"
+        control_root.mkdir(parents=True)
+        snapshot = control_root / "source"
+        shutil.copytree(fixture, snapshot / "workspace")
+        compiler = PackageCompiler()
+        output = tmp_path / f"{name}.zip"
+        result = package_builder.build_package(
+            snapshot,
+            output,
+            workspace="workspace",
+            kit_id="example/bicep",
+            version="preview-1",
+            source_revision="fixture",
+            siteops_range=">=1.0.0b1,<2",
+            compilation_session_factory=_controlled_factory(
+                control_root,
+                snapshot,
+                tmp_path / name,
+                compiler,
+            ),
+        )
+        results.append((result, output.read_bytes()))
+
+    assert results[0] == results[1]
+
+
+def test_workspace_bicep_configuration_is_recorded(tmp_path):
+    fixture = Path(__file__).parent / "fixtures" / "compiled-package-workspace"
+    control_root = tmp_path / "control"
+    control_root.mkdir()
+    snapshot = control_root / "source"
+    shutil.copytree(fixture, snapshot / "workspace")
+    configuration = snapshot / "workspace" / "bicepconfig.json"
+    configuration.write_text('{"analyzers": {}}\n', encoding="utf-8")
+    compiler = PackageCompiler()
+
+    built = package_builder.build_package(
+        snapshot,
+        tmp_path / "package.zip",
+        workspace="workspace",
+        kit_id="example/bicep",
+        version="preview-1",
+        source_revision="fixture",
+        siteops_range=">=1.0.0b1,<2",
+        compilation_session_factory=_controlled_factory(
+            control_root,
+            snapshot,
+            tmp_path,
+            compiler,
+        ),
+    )
+
+    identity = built.metadata.templates[0].configuration
+    assert identity is not None
+    assert identity.discovery.value == "nearest-found"
+    assert identity.path == "bicepconfig.json"
+    assert identity.sha256 == hashlib.sha256(configuration.read_bytes()).hexdigest()
+
+
+def test_producer_session_isolates_configuration_cache_and_temp(tmp_path):
+    control_root = tmp_path / "control"
+    control_root.mkdir()
+    snapshot = control_root / "source"
+    snapshot.mkdir()
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    azure_cli = tools / "az.cmd"
+    bicep = tools / "bicep.exe"
+    azure_cli.write_bytes(b"fixture")
+    bicep.write_bytes(b"fixture")
+
+    session = package_builder.create_producer_compilation_session(
+        snapshot,
+        control_root,
+        azure_cli_path=azure_cli,
+        bicep_path=bicep,
+        command_runner=PackageCompiler(),
+    )
+
+    environment = dict(session.bicep_options.environment or ())
+    assert session.bicep_options.is_controlled_producer
+    assert environment["AZURE_BICEP_CHECK_VERSION"] == "false"
+    assert environment["AZURE_BICEP_USE_BINARY_FROM_PATH"] == "true"
+    assert environment["AZURE_CORE_COLLECT_TELEMETRY"] == "false"
+    assert Path(environment["AZURE_CONFIG_DIR"]).parent == control_root
+    assert Path(environment["HOME"]).parent == control_root
+    assert Path(environment["TEMP"]).parent == control_root
+    assert Path(environment["PATH"].split(os.pathsep)[0]).parent == control_root
+
+
+@pytest.mark.parametrize("tool", ["azure-cli", "bicep"])
+def test_producer_session_rejects_relative_explicit_tool_paths(tmp_path, tool):
+    control_root = tmp_path / "control"
+    control_root.mkdir()
+    snapshot = control_root / "source"
+    snapshot.mkdir()
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    azure_cli = tools / "az.cmd"
+    bicep = tools / "bicep.exe"
+    azure_cli.write_bytes(b"fixture")
+    bicep.write_bytes(b"fixture")
+    kwargs = {
+        "azure_cli_path": azure_cli,
+        "bicep_path": bicep,
+    }
+    kwargs["azure_cli_path" if tool == "azure-cli" else "bicep_path"] = Path(
+        "relative-tool"
+    )
+
+    with pytest.raises(ArtifactError, match="absolute"):
+        package_builder.create_producer_compilation_session(
+            snapshot,
+            control_root,
+            **kwargs,
+        )
+
+
+def test_real_aio_entries_produce_mapped_template_roots(tmp_path):
+    repository = Path(__file__).resolve().parents[1]
+    control_root = tmp_path / "control"
+    control_root.mkdir()
+    snapshot = control_root / "source"
+    shutil.copytree(
+        repository / "workspaces" / "iot-operations",
+        snapshot / "workspace",
+    )
+    compiler = PackageCompiler()
+
+    built = package_builder.build_package(
+        snapshot,
+        tmp_path / "aio.zip",
+        workspace="workspace",
+        kit_id="example/aio",
+        version="preview-1",
+        source_revision="fixture",
+        siteops_range=">=1.0.0b1,<2",
+        compilation_session_factory=_controlled_factory(
+            control_root,
+            snapshot,
+            tmp_path,
+            compiler,
+        ),
+    )
+
+    sources = {mapping.source_path for mapping in built.metadata.templates}
+    assert {
+        "templates/aio/enablement.bicep",
+        "templates/aio/instance.bicep",
+        "templates/deps/adr-ns.bicep",
+        "templates/deps/schema-registry-role.bicep",
+        "templates/deps/schema-registry.bicep",
+        "templates/edge-site/main.bicep",
+        "templates/edge-site/subscription.bicep",
+    } <= sources
+    assert "templates/aio/modules/instance-2025-10-01.bicep" not in sources
+    instance = next(
+        mapping
+        for mapping in built.metadata.templates
+        if mapping.source_path == "templates/aio/instance.bicep"
+    )
+    with zipfile.ZipFile(tmp_path / "aio.zip") as archive:
+        artifact = archive.read(
+            package.workspace_payload_path(
+                built.metadata.workspace_root,
+                instance.artifact_path,
+            )
+        )
+    acquired = TemplateCompilationSession().acquire(
+        _write_file(tmp_path / "instance.json", artifact)
+    )
+    assert isinstance(acquired, CompiledTemplate)
+    assert acquired.parameters[0].name == "name"
+
+
+def _write_file(path, content):
+    path.write_bytes(content)
+    return path
 
 
 def test_tree_identity_uses_raw_workspace_bytes_not_companion_bytes(snapshot, tmp_path):
@@ -146,6 +540,7 @@ def test_digest_is_checked_before_zip_parsing_or_destination_creation(tmp_path, 
 @pytest.mark.parametrize("mutate", [
     lambda document: document.update(apiVersion="unknown"),
     lambda document: document.update(hooks={"local": "PRIVATE_SENTINEL"}),
+    lambda document: document.pop("templates"),
     lambda document: document["workspace"].update(root="../escape"),
     lambda document: document["workspace"]["tree"].update(algorithm="sha1"),
     lambda document: document["workspace"]["tree"].update(digest="0" * 64),
@@ -179,6 +574,200 @@ def test_invalid_json_is_bounded_and_value_safe(tmp_path, raw):
     with pytest.raises(ArtifactError) as failed:
         package.inspect_package(path, digest)
     assert "PRIVATE_SENTINEL" not in str(failed.value)
+
+
+def test_malformed_mapped_arm_json_fails_before_materialization(tmp_path):
+    files = {"workspace/templates/main.template.json": b"{}"}
+    path = tmp_path / "package.zip"
+    digest = _archive(path, _native_document(files[next(iter(files))]), files)
+
+    with pytest.raises(ArtifactError, match="valid ARM"):
+        package.extract_package(path, digest, tmp_path / "staging")
+
+    assert not (tmp_path / "staging").exists()
+
+
+def test_invalid_mapped_arm_parameter_schema_fails_before_materialization(tmp_path):
+    content = json.dumps({
+        "$schema": (
+            "https://schema.management.azure.com/schemas/2019-04-01/"
+            "deploymentTemplate.json#"
+        ),
+        "contentVersion": "1.0.0.0",
+        "parameters": {"name": {}},
+        "resources": [],
+    }).encode()
+    files = {"workspace/templates/main.template.json": content}
+    path = tmp_path / "package.zip"
+    digest = _archive(path, _native_document(content), files)
+
+    with pytest.raises(ArtifactError, match="valid ARM"):
+        package.inspect_package(path, digest)
+
+
+def test_template_mapping_identity_must_match_file_inventory():
+    content = json.dumps({
+        "$schema": (
+            "https://schema.management.azure.com/schemas/2019-04-01/"
+            "deploymentTemplate.json#"
+        ),
+        "contentVersion": "1.0.0.0",
+        "resources": [],
+    }).encode()
+    document = _native_document(content)
+    document["templates"]["entries"][0]["source"]["sha256"] = "0" * 64
+    document["templates"]["entries"][0]["artifact"]["sha256"] = "0" * 64
+
+    with pytest.raises(ArtifactError, match="source identity"):
+        package.WorkspacePackage.from_document(document)
+
+
+def test_generated_namespace_requires_one_mapping_per_artifact():
+    content = json.dumps({
+        "$schema": (
+            "https://schema.management.azure.com/schemas/2019-04-01/"
+            "deploymentTemplate.json#"
+        ),
+        "contentVersion": "1.0.0.0",
+        "resources": [],
+    }).encode()
+    files = {
+        "workspace/file.txt": b"payload",
+        "workspace/.siteops/compiled/v1/orphan.json": content,
+    }
+    records = tuple(
+        PayloadFile(path, hashlib.sha256(value).hexdigest(), len(value))
+        for path, value in files.items()
+    )
+    document = package.WorkspacePackage(
+        "example", "7", "opaque-revision", "workspace", ">=1.0.0b1,<2",
+        ("manifest/v1", package.COMPILED_TEMPLATE_FEATURE), records,
+        package.workspace_tree_digest(records, "workspace"), (),
+    ).document()
+
+    with pytest.raises(ArtifactError, match="namespace"):
+        package.WorkspacePackage.from_document(document)
+
+
+def test_bicep_mapping_rejects_complete_dependency_claim():
+    document, _ = _bicep_document()
+    document["templates"]["entries"][0]["producer"]["dependencies"][
+        "coverage"
+    ] = "complete"
+
+    with pytest.raises(ArtifactError, match="inconsistent"):
+        package.WorkspacePackage.from_document(document)
+
+
+def test_bicep_mapping_configuration_must_be_effective():
+    document, _ = _bicep_document()
+    source = document["templates"]["entries"][0]["source"]
+    document["templates"]["entries"][0]["producer"]["configuration"] = {
+        "discovery": "nearest-found",
+        "path": source["path"],
+        "sha256": source["sha256"],
+    }
+
+    with pytest.raises(ArtifactError, match="effective"):
+        package.WorkspacePackage.from_document(document)
+
+
+def test_producer_default_configuration_digest_is_fixed():
+    document, _ = _bicep_document()
+    document["templates"]["entries"][0]["producer"]["configuration"][
+        "sha256"
+    ] = "0" * 64
+
+    with pytest.raises(ArtifactError, match="producer-default"):
+        package.WorkspacePackage.from_document(document)
+
+
+def test_template_mapping_paths_must_be_unique():
+    document, _ = _bicep_document()
+    document["templates"]["entries"].append(
+        copy.deepcopy(document["templates"]["entries"][0])
+    )
+
+    with pytest.raises(ArtifactError, match="must be unique"):
+        package.WorkspacePackage.from_document(document)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda document: document["templates"]["entries"][0]["producer"][
+                "dependencies"
+            ].update(templateHashes=["invented"]),
+            "dependency identity",
+        ),
+        (
+            lambda document: document["templates"]["entries"][0]["producer"][
+                "compiler"
+            ].update(version="0.46.0"),
+            "compiler identity",
+        ),
+    ],
+)
+def test_compiler_derived_mapping_identity_must_match_artifact(
+    tmp_path,
+    mutation,
+    message,
+):
+    document, files = _bicep_document()
+    mutation(document)
+    path = tmp_path / "package.zip"
+    digest = _archive(path, document, files)
+
+    with pytest.raises(ArtifactError, match=message):
+        package.inspect_package(path, digest)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        (
+            b'{"$schema":"https://schema.management.azure.com/schemas/'
+            b'2019-04-01/deploymentTemplate.json#","contentVersion":"1",'
+            b'"resources":[],"resources":[]}'
+        ),
+        (
+            b'{"$schema":"https://schema.management.azure.com/schemas/'
+            b'2019-04-01/deploymentTemplate.json#","contentVersion":"1",'
+            b'"resources":[],"value":NaN}'
+        ),
+    ],
+)
+def test_mapped_arm_json_uses_strict_json_parsing(tmp_path, raw):
+    files = {"workspace/templates/main.template.json": raw}
+    path = tmp_path / "package.zip"
+    digest = _archive(path, _native_document(raw), files)
+
+    with pytest.raises(ArtifactError, match="valid ARM"):
+        package.inspect_package(path, digest)
+
+
+def test_native_arm_dependency_coverage_must_match_artifact(tmp_path):
+    content = json.dumps({
+        "$schema": (
+            "https://schema.management.azure.com/schemas/2019-04-01/"
+            "deploymentTemplate.json#"
+        ),
+        "contentVersion": "1.0.0.0",
+        "resources": [{
+            "type": "Microsoft.Resources/deployments",
+            "apiVersion": "2022-09-01",
+            "name": "linked",
+            "properties": {"templateLink": {"uri": "https://example.invalid/template.json"}},
+        }],
+    }).encode()
+    document = _native_document(content)
+    path = tmp_path / "package.zip"
+    files = {"workspace/templates/main.template.json": content}
+    digest = _archive(path, document, files)
+
+    with pytest.raises(ArtifactError, match="dependency identity"):
+        package.inspect_package(path, digest)
 
 
 @pytest.mark.parametrize("path", [
@@ -510,3 +1099,63 @@ def test_git_companion_paths_are_literal_not_glob_patterns(git_snapshot, tmp_pat
     }
     assert "guide[one].md" in paths
     assert "guideo.md" not in paths
+
+
+def test_git_producer_rejects_bicep_configuration_outside_workspace(
+    git_snapshot,
+    tmp_path,
+):
+    root, _ = git_snapshot
+    manifest = root / "workspace" / "manifests" / "storage" / "manifest.yaml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            "templates/storage.template.json",
+            "templates/main.bicep",
+        ),
+        encoding="utf-8",
+    )
+    (root / "workspace" / "templates" / "main.bicep").write_text(
+        "param name string\n",
+        encoding="utf-8",
+    )
+    (root / "bicepconfig.json").write_text("{}\n", encoding="utf-8")
+    _git(root, "add", ".")
+    _git(root, "commit", "--quiet", "-m", "bicep fixture")
+    sha = _git(root, "rev-parse", "HEAD")
+
+    result = _producer(root, sha, tmp_path / "package.zip")
+
+    assert result.returncode == 1
+    assert "inside the packaged workspace" in result.stderr
+    assert not (tmp_path / "package.zip").exists()
+
+
+def test_nested_workspace_configuration_takes_precedence_over_repository_root(
+    git_snapshot,
+):
+    root, _ = git_snapshot
+    nested = root / "workspace" / "templates"
+    (nested / "main.bicep").write_text("param name string\n", encoding="utf-8")
+    (nested / "bicepconfig.json").write_text("{}\n", encoding="utf-8")
+    (root / "bicepconfig.json").write_text(
+        '{"analyzers": {"core": {"enabled": false}}}\n',
+        encoding="utf-8",
+    )
+    _git(root, "add", ".")
+    _git(root, "commit", "--quiet", "-m", "nested configuration")
+    sha = _git(root, "rev-parse", "HEAD")
+    script = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "source_snapshot.py"
+    )
+    spec = importlib.util.spec_from_file_location("package_source_snapshot", script)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    module.require_workspace_configuration_boundary(
+        root,
+        sha,
+        "workspace",
+    )

@@ -10,7 +10,7 @@ import stat
 import subprocess
 import unicodedata
 import zipfile
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 
 class SourceSnapshotError(RuntimeError):
@@ -132,3 +132,57 @@ def require_complete_export(root: Path, source_sha: str, paths: tuple[str, ...],
             raise SourceSnapshotError("Package source paths must be UTF-8.") from None
         if not snapshot.joinpath(*safe_archive_path(path)).is_file():
             raise SourceSnapshotError("The source export omitted a selected tracked file.")
+
+
+def require_workspace_configuration_boundary(
+    root: Path,
+    source_sha: str,
+    workspace: str,
+) -> None:
+    """Reject workspace Bicep whose effective configuration is not packaged."""
+    if workspace == ".":
+        return
+    workspace_path = PurePosixPath(workspace)
+    result = _git(root, ["ls-tree", "-r", "-z", "--full-tree", source_sha])
+    if result.returncode != 0:
+        raise SourceSnapshotError(
+            "Git could not inspect the workspace Bicep configuration."
+        )
+    paths = set()
+    for record in result.stdout.split(b"\0"):
+        if not record:
+            continue
+        _, raw_path = record.split(b"\t", 1)
+        try:
+            paths.add(PurePosixPath(raw_path.decode("utf-8")))
+        except UnicodeError:
+            raise SourceSnapshotError(
+                "Workspace configuration paths must be UTF-8."
+            ) from None
+    bicep_files = sorted(
+        path
+        for path in paths
+        if path.suffix.casefold() == ".bicep"
+        and path.is_relative_to(workspace_path)
+    )
+    configurations = {
+        path
+        for path in paths
+        if path.name.casefold() == "bicepconfig.json"
+    }
+    for source in bicep_files:
+        directory = source.parent
+        while True:
+            candidate = directory / "bicepconfig.json"
+            if candidate in configurations:
+                try:
+                    candidate.relative_to(workspace_path)
+                except ValueError:
+                    raise SourceSnapshotError(
+                        "Workspace package Bicep configuration must be inside "
+                        "the packaged workspace."
+                    ) from None
+                break
+            if directory == PurePosixPath("."):
+                break
+            directory = directory.parent

@@ -8,10 +8,12 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import shutil
 import stat
 import tempfile
 import zipfile
 import zlib
+from collections.abc import Callable
 from pathlib import Path
 
 from siteops import workspace_package as package
@@ -26,8 +28,23 @@ from siteops.artifacts import (
     relative_artifact_path,
     require_node,
 )
+from siteops.browse import BrowseError, ContentReader
+from siteops.compilation import (
+    BicepCompilationOptions,
+    CommandRunner,
+    CompilationFailure,
+    ConfigurationDiscovery,
+    DependencyCoverage,
+    TemplateCompilationSession,
+    TemplateKind,
+    VersionProvenance,
+    resolve_tool_from_path,
+)
+from siteops.models import DeploymentStep, Manifest
+from siteops.runtime import RuntimePaths
 
 logger = logging.getLogger(__name__)
+CompilationSessionFactory = Callable[[], TemplateCompilationSession]
 
 
 def _source_files(root: Path, workspace: str, companions: tuple[str, ...]) -> tuple[str, ...]:
@@ -66,6 +83,17 @@ def _source_files(root: Path, workspace: str, companions: tuple[str, ...]) -> tu
         except OSError:
             raise ArtifactError("The package source snapshot could not be inspected.") from None
     path_inventory([package.PACKAGE_NAME, *files], limit=package.MAX_NODES)
+    generated_prefix = package.workspace_payload_path(
+        workspace,
+        package.GENERATED_TEMPLATE_NAMESPACE,
+    )
+    if any(
+        path == generated_prefix or path.startswith(generated_prefix + "/")
+        for path in files
+    ):
+        raise ArtifactError(
+            "The authored workspace cannot use the producer-owned template namespace."
+        )
     return tuple(sorted(files))
 
 
@@ -89,6 +117,275 @@ def _record(root: Path, relative: str) -> tuple[PayloadFile, int]:
         else zipfile.ZIP_DEFLATED
     )
     return PayloadFile(relative, digest.hexdigest(), size), compression
+
+
+def _record_bytes(relative: str, content: bytes) -> tuple[PayloadFile, int]:
+    if len(content) > package.MAX_FILE_BYTES:
+        raise ArtifactError("A generated template artifact exceeds its byte limit.")
+    compressor = zlib.compressobj(level=6, wbits=-15)
+    compressed = len(compressor.compress(content)) + len(compressor.flush())
+    compression = (
+        zipfile.ZIP_STORED
+        if len(content) > package.MAX_COMPRESSION_RATIO * compressed
+        else zipfile.ZIP_DEFLATED
+    )
+    return (
+        PayloadFile(relative, hashlib.sha256(content).hexdigest(), len(content)),
+        compression,
+    )
+
+
+def _discover_template_sources(root: Path, workspace: str) -> tuple[str, ...]:
+    workspace_path = root if workspace == "." else checked_path(root, workspace, directory=True)
+    try:
+        reader = ContentReader(workspace_path)
+        entries = reader.inventory()
+        if reader.diagnostics or not reader.names_complete:
+            raise ArtifactError(
+                "Workspace deployment entries could not be inspected for package compilation."
+            )
+        sources: set[str] = set()
+        for entry in entries:
+            if entry.guidance.role == "partial":
+                continue
+            manifest = Manifest.from_file(
+                workspace_path.joinpath(*entry.path.split("/")),
+                workspace_root=workspace_path,
+            )
+            for step in manifest.steps:
+                if not isinstance(step, DeploymentStep):
+                    continue
+                source = relative_artifact_path(step.template)
+                checked_path(workspace_path, source)
+                sources.add(source)
+        return tuple(sorted(sources))
+    except ArtifactError:
+        raise
+    except (BrowseError, OSError, ValueError):
+        raise ArtifactError(
+            "Workspace deployment entries or template paths are invalid."
+        ) from None
+
+
+def workspace_bicep_sources(root: Path, workspace: str) -> tuple[str, ...]:
+    """Return the discovered deployment roots authored in Bicep."""
+    return tuple(
+        source
+        for source in _discover_template_sources(root, workspace)
+        if Path(source).suffix.casefold() == ".bicep"
+    )
+
+
+def resolve_azure_cli_bicep_path() -> Path | None:
+    """Resolve the already-installed Azure CLI Bicep binary without running it."""
+    configured = os.environ.get("AZURE_CONFIG_DIR")
+    config_root = Path(configured).expanduser() if configured else Path.home() / ".azure"
+    name = "bicep.exe" if os.name == "nt" else "bicep"
+    candidate = (config_root / "bin" / name).resolve()
+    return candidate if candidate.is_file() else None
+
+
+def create_producer_compilation_session(
+    source_snapshot: Path,
+    control_root: Path,
+    *,
+    azure_cli_path: Path | None = None,
+    bicep_path: Path | None = None,
+    command_runner: CommandRunner | None = None,
+) -> TemplateCompilationSession:
+    """Create an isolated Azure CLI Bicep session for package production."""
+    source_snapshot = source_snapshot.resolve()
+    control_root = control_root.resolve()
+    require_node(source_snapshot, directory=True)
+    require_node(control_root, directory=True)
+    if source_snapshot.parent != control_root:
+        raise ArtifactError(
+            "The package source snapshot must be a direct child of its compiler control root."
+        )
+
+    resolved_az = (
+        Path(azure_cli_path)
+        if azure_cli_path is not None
+        else None
+    )
+    if resolved_az is not None and not resolved_az.is_absolute():
+        raise ArtifactError("The Azure CLI path must be absolute.")
+    if resolved_az is not None:
+        resolved_az = resolved_az.resolve()
+    if resolved_az is None:
+        discovered_az = resolve_tool_from_path("az")
+        resolved_az = Path(discovered_az).resolve() if discovered_az else None
+    resolved_bicep = (
+        Path(bicep_path)
+        if bicep_path is not None
+        else resolve_azure_cli_bicep_path()
+    )
+    if resolved_bicep is not None and not resolved_bicep.is_absolute():
+        raise ArtifactError("The Bicep compiler path must be absolute.")
+    if resolved_bicep is not None:
+        resolved_bicep = resolved_bicep.resolve()
+    if (
+        resolved_az is None
+        or not resolved_az.is_absolute()
+        or not resolved_az.is_file()
+    ):
+        raise ArtifactError("Azure CLI must be installed at an absolute path.")
+    if (
+        resolved_bicep is None
+        or not resolved_bicep.is_absolute()
+        or not resolved_bicep.is_file()
+    ):
+        raise ArtifactError(
+            "An existing Azure CLI Bicep installation is required for package production."
+        )
+
+    fallback_configuration = control_root / "bicepconfig.json"
+    compiler_bin = control_root / "compiler-bin"
+    azure_config = control_root / "azure-config"
+    home = control_root / "home"
+    temp_root = control_root / "temp"
+    try:
+        for directory in (compiler_bin, azure_config, home, temp_root):
+            directory.mkdir(mode=0o700)
+        with fallback_configuration.open("xb") as fallback:
+            fallback.write(package.PRODUCER_DEFAULT_BICEP_CONFIGURATION)
+        controlled_bicep = compiler_bin / (
+            "bicep.exe" if os.name == "nt" else "bicep"
+        )
+        with (
+            open_regular_file(resolved_bicep) as source,
+            controlled_bicep.open("xb") as target,
+        ):
+            shutil.copyfileobj(source, target)
+        controlled_bicep.chmod(0o700)
+    except (FileExistsError, OSError):
+        raise ArtifactError(
+            "The controlled compiler environment could not be prepared."
+        ) from None
+
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.upper().startswith(("AZURE_", "BICEP_", "ARM_"))
+    }
+    environment.update({
+        "AZURE_BICEP_CHECK_VERSION": "false",
+        "AZURE_BICEP_USE_BINARY_FROM_PATH": "true",
+        "AZURE_CONFIG_DIR": str(azure_config),
+        "AZURE_CORE_COLLECT_TELEMETRY": "false",
+        "AZURE_CORE_ONLY_SHOW_ERRORS": "true",
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "TEMP": str(temp_root),
+        "TMP": str(temp_root),
+        "TMPDIR": str(temp_root),
+        "PATH": (
+            str(compiler_bin)
+            + (os.pathsep + environment["PATH"] if environment.get("PATH") else "")
+        ),
+    })
+    options = BicepCompilationOptions.controlled_producer(
+        environment=environment,
+        configuration_root=control_root,
+        producer_default_configuration=fallback_configuration,
+        bicep_executable_path=controlled_bicep,
+    )
+    return TemplateCompilationSession(
+        command_runner=command_runner,
+        tool_resolver=lambda name: str(resolved_az) if name == "az" else None,
+        runtime_paths=RuntimePaths(temp_root=temp_root),
+        bicep_options=options,
+    )
+
+
+def _package_tool(identity, label: str) -> package.PackageToolIdentity:
+    if (
+        identity is None
+        or identity.version is None
+        or identity.version_provenance is not VersionProvenance.KNOWN
+    ):
+        raise ArtifactError(f"Package {label} identity requires a known version.")
+    return package.PackageToolIdentity(identity.provider, identity.version)
+
+
+def _package_mapping(
+    compiled,
+    *,
+    source_path: str,
+    workspace_path: Path,
+) -> tuple[package.PackageTemplateMapping, tuple[str, bytes] | None]:
+    source_kind = compiled.key.template_kind
+    source_identity = compiled.identity.source
+    if source_kind is TemplateKind.ARM_JSON:
+        return (
+            package.PackageTemplateMapping(
+                source_path=source_path,
+                source_kind=source_kind,
+                source_sha256=source_identity.content_digest,
+                source_size=source_identity.size_bytes,
+                artifact_path=source_path,
+                artifact_sha256=compiled.identity.compiled_output_digest,
+                artifact_size=len(compiled.arm_json_bytes),
+                producer_mode="native-arm-json",
+                invocation=compiled.key.invocation,
+                driver=None,
+                compiler=None,
+                configuration=None,
+                dependencies=package.PackageDependencyIdentity(
+                    compiled.identity.dependencies.coverage,
+                    compiled.identity.dependencies.template_hashes,
+                ),
+            ),
+            None,
+        )
+
+    configuration = compiled.identity.configuration
+    if configuration is None:
+        raise ArtifactError("Package Bicep compilation omitted configuration identity.")
+    if configuration.discovery is ConfigurationDiscovery.NEAREST_FOUND:
+        try:
+            configuration_path = configuration.path.relative_to(workspace_path).as_posix()
+        except (AttributeError, ValueError):
+            raise ArtifactError(
+                "Package Bicep configuration must be inside the authored workspace."
+            ) from None
+        package_configuration = package.PackageConfigurationIdentity(
+            configuration.discovery,
+            configuration.content_digest or "",
+            relative_artifact_path(configuration_path),
+        )
+    elif configuration.discovery is ConfigurationDiscovery.PRODUCER_DEFAULT:
+        package_configuration = package.PackageConfigurationIdentity(
+            configuration.discovery,
+            configuration.content_digest or "",
+        )
+    else:
+        raise ArtifactError("Package Bicep compilation requires explicit configuration identity.")
+    if compiled.identity.dependencies.coverage is not DependencyCoverage.COMPILED_OUTPUT_ONLY:
+        raise ArtifactError("Package Bicep dependency coverage is inconsistent.")
+    artifact_path = package.compiled_template_path(source_path)
+    artifact = (artifact_path, compiled.arm_json_bytes)
+    return (
+        package.PackageTemplateMapping(
+            source_path=source_path,
+            source_kind=source_kind,
+            source_sha256=source_identity.content_digest,
+            source_size=source_identity.size_bytes,
+            artifact_path=artifact_path,
+            artifact_sha256=compiled.identity.compiled_output_digest,
+            artifact_size=len(compiled.arm_json_bytes),
+            producer_mode="azure-cli-bicep",
+            invocation=compiled.key.invocation,
+            driver=_package_tool(compiled.identity.compiler_driver, "driver"),
+            compiler=_package_tool(compiled.identity.compiler, "compiler"),
+            configuration=package_configuration,
+            dependencies=package.PackageDependencyIdentity(
+                compiled.identity.dependencies.coverage,
+                compiled.identity.dependencies.template_hashes,
+            ),
+        ),
+        artifact,
+    )
 
 
 def _zip_info(path: str, compression: int) -> zipfile.ZipInfo:
@@ -134,6 +431,7 @@ def build_package(
     siteops_range: str,
     companions: tuple[str, ...] = (),
     required_features: tuple[str, ...] = ("manifest/v1",),
+    compilation_session_factory: CompilationSessionFactory | None = None,
 ) -> package.PackageInspection:
     """Package every workspace file and approved companion, without publishing remotely.
 
@@ -159,9 +457,76 @@ def build_package(
         if total > package.MAX_TOTAL_BYTES:
             raise ArtifactError("The package source exceeds its total byte limit.")
     files = tuple(records)
+    workspace_path = snapshot if workspace == "." else checked_path(
+        snapshot,
+        workspace,
+        directory=True,
+    )
+    template_sources = _discover_template_sources(snapshot, workspace)
+    requires_bicep = any(
+        Path(source).suffix.casefold() == ".bicep"
+        for source in template_sources
+    )
+    if requires_bicep:
+        if compilation_session_factory is None:
+            raise ArtifactError(
+                "Bicep package production requires a controlled compilation session."
+            )
+        session = compilation_session_factory()
+        if not session.bicep_options.is_controlled_producer:
+            raise ArtifactError(
+                "Bicep package production requires controlled compiler options."
+            )
+    else:
+        session = TemplateCompilationSession()
+
+    mappings = []
+    generated: dict[str, bytes] = {}
+    inventory = {entry.path: entry for entry in files}
+    for source_path in template_sources:
+        outcome = session.acquire(workspace_path.joinpath(*source_path.split("/")))
+        if isinstance(outcome, CompilationFailure):
+            raise ArtifactError(
+                f"Template '{source_path}' could not be produced: {outcome.summary}"
+            )
+        mapping, artifact = _package_mapping(
+            outcome,
+            source_path=source_path,
+            workspace_path=workspace_path,
+        )
+        source_entry = inventory.get(
+            package.workspace_payload_path(workspace, source_path)
+        )
+        if source_entry is None or (
+            source_entry.sha256,
+            source_entry.size,
+        ) != (
+            mapping.source_sha256,
+            mapping.source_size,
+        ):
+            raise ArtifactError("A template source changed during package production.")
+        mappings.append(mapping)
+        if artifact is not None:
+            artifact_path, content = artifact
+            package_path = package.workspace_payload_path(workspace, artifact_path)
+            if package_path in inventory or package_path in generated:
+                raise ArtifactError("A generated template artifact path is not unique.")
+            entry, method = _record_bytes(package_path, content)
+            records.append(entry)
+            compression[package_path] = method
+            generated[package_path] = content
+            total += entry.size
+            if total > package.MAX_TOTAL_BYTES:
+                raise ArtifactError("The package source exceeds its total byte limit.")
+    files = tuple(sorted(records, key=lambda entry: entry.path))
+    features = (
+        required_features
+        if package.COMPILED_TEMPLATE_FEATURE in required_features
+        else (*required_features, package.COMPILED_TEMPLATE_FEATURE)
+    )
     metadata = package.WorkspacePackage(
-        kit_id, version, source_revision, workspace, siteops_range, required_features,
-        files, package.workspace_tree_digest(files, workspace),
+        kit_id, version, source_revision, workspace, siteops_range, features,
+        files, package.workspace_tree_digest(files, workspace), tuple(mappings),
     )
     metadata = package.WorkspacePackage.from_document(metadata.document())
     package.check_compatibility(metadata)
@@ -177,6 +542,9 @@ def build_package(
                 for entry in metadata.files:
                     info = _zip_info(entry.path, compression[entry.path])
                     info.file_size = entry.size
+                    if entry.path in generated:
+                        archive.writestr(info, generated[entry.path])
+                        continue
                     digest = hashlib.sha256()
                     size = 0
                     with (

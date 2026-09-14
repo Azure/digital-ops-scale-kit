@@ -1,9 +1,10 @@
 # Build a workspace package
 
 Content authors can produce one ZIP containing a complete workspace, its
-approved companion documentation, and licensing files. The package preserves
-source-relative paths, so a guide outside the workspace can remain in its
-canonical location.
+approved companion documentation, licensing files, and producer-compiled ARM
+JSON for executable Bicep roots. The package preserves every authored file at
+its source-relative path. Generated templates use a separate producer-owned
+namespace.
 
 This is a content artifact, separate from the Site Ops installation bundle.
 Building it performs no upload, signing, release operation or deployment.
@@ -13,9 +14,10 @@ package structure do not authenticate the publisher.
 ## Produce from a reviewed commit
 
 Use a clean source checkout and the repository's development environment.
-Git and the declared Python dependencies must be installed. Choose an
-existing output directory outside the source checkout, or a gitignored
-directory. The output filename must be new.
+Git, Azure CLI, an existing Azure CLI-managed Bicep installation, and the
+declared Python dependencies must be installed. Choose an existing output
+directory outside the source checkout, or a gitignored directory. The output
+filename must be new.
 
 From the repository root, substitute your kit version and output directory:
 
@@ -37,6 +39,9 @@ python scripts\build-workspace-package.py `
   --output '<absolute-output-directory>\iot-operations.zip'
 ```
 
+Use `--bicep <absolute-path>` when the provisioned Azure CLI-managed Bicep
+binary is outside the current Azure CLI configuration directory.
+
 Use forward slashes for source-relative `--workspace`, `--include` and
 `--license` values on every platform. `--root` and `--output` are native
 filesystem paths. The script also runs on Linux using its ordinary Python
@@ -49,9 +54,38 @@ An export that omits selected tracked files, such as through `export-ignore`,
 is rejected. Submodules, symbolic links and Git LFS pointers require explicit
 source preparation rather than automatic downloads.
 
+The producer finds standalone deployment entries through the existing
+workspace discovery rules, loads their manifests with the shared manifest
+parser, expands includes, and compiles the distinct deployment template paths.
+It does not load Sites, resolve parameter values, or treat every Bicep module
+as a deployment root.
+
+Native ARM JSON deployment roots are validated and mapped at their authored
+path. Bicep roots are compiled to
+`.siteops/compiled/v1/<source-path>.json`. Authored content cannot use the
+`.siteops/compiled` namespace.
+
+Package compilation uses an absolute Azure CLI path and a copied,
+already-provisioned Bicep executable. The invocation runs with isolated Azure
+CLI configuration, user cache, and temporary directories. Azure CLI telemetry
+and automatic Bicep upgrade checks are disabled. `--no-restore` prevents
+implicit module restoration, and Azure CLI is configured to use only the
+controlled Bicep binary from `PATH`. A readable `az bicep version` result is
+required before the first build.
+
+An authored `bicepconfig.json` must be inside the packaged workspace. The
+nearest workspace configuration is recorded by path and digest. When the
+workspace supplies none, the producer uses an explicit empty configuration
+outside the package source as the nearest boundary and records
+`producer-default` with its digest. Every tracked Bicep file in the workspace
+must resolve to a configuration inside the workspace or to that producer
+default. This accounts for module-level configuration discovery without
+claiming a complete module graph.
+
 The output is a JSON summary with the ZIP's SHA-256, size, kit identity and
-workspace path. Keep those exact bytes for separate provenance signing and
-qualification. Reconstructing another ZIP is a different artifact.
+workspace path, plus the number of mapped deployment templates. Keep those
+exact bytes for separate provenance signing and qualification. Reconstructing
+another ZIP is a different artifact.
 
 ## Package identities
 
@@ -66,6 +100,7 @@ The first member, `siteops-package.json`, uses `siteops/v1alpha1` and kind
 | `workspace.tree` | SHA-256 over the sorted workspace-relative file inventory |
 | `compatibility` | Bounded PEP 440 Site Ops version range and required engine features |
 | `files` | Exact package-relative payload paths, raw-byte SHA-256 digests and sizes |
+| `templates` | Exact source-to-ARM-artifact mappings and producer compilation identities |
 
 File hashes preserve raw bytes, including line endings. The workspace tree
 uses the domain prefix `siteops.workspace-tree/v1` followed by a NUL byte and
@@ -75,9 +110,77 @@ workspace affect the archive identity, not the workspace tree identity.
 The metadata file is excluded from its own payload inventory.
 
 Supported required features are `manifest/v1`, `composition/v1` and
-`manifest-selection/v1`. Unsupported required features and incompatible
+`manifest-selection/v1`. Package production also requires
+`compiled-templates/v1`. Unsupported required features and incompatible
 engine versions are rejected. Compatibility describes the declared engine
-contract, not successful compilation, deployment or workload qualification.
+contract, not deployment or workload qualification.
+
+## Template mapping
+
+`templates.artifactRoot` is `.siteops/compiled/v1`. Each entry uses
+workspace-relative paths, so `source.path` is the same canonical path stored in
+the manifest.
+
+```json
+{
+  "templates": {
+    "artifactRoot": ".siteops/compiled/v1",
+    "entries": [
+      {
+        "source": {
+          "path": "templates/aio/instance.bicep",
+          "kind": "bicep",
+          "sha256": "<source-sha256>",
+          "size": 1234
+        },
+        "artifact": {
+          "path": ".siteops/compiled/v1/templates/aio/instance.bicep.json",
+          "kind": "arm-json",
+          "sha256": "<artifact-sha256>",
+          "size": 5678
+        },
+        "producer": {
+          "mode": "azure-cli-bicep",
+          "invocation": ["az", "bicep", "build", "--no-restore"],
+          "driver": {
+            "provider": "azure-cli",
+            "version": "2.87.0"
+          },
+          "compiler": {
+            "provider": "azure-cli-bicep",
+            "version": "0.45.15.0"
+          },
+          "configuration": {
+            "discovery": "producer-default",
+            "sha256": "<configuration-sha256>"
+          },
+          "dependencies": {
+            "coverage": "compiled-output-only",
+            "templateHashes": []
+          }
+        }
+      }
+    ]
+  }
+}
+```
+
+A workspace-authored configuration uses `nearest-found` and adds its
+workspace-relative `path`. Native ARM JSON uses the same entry shape with
+identical source and artifact paths and identities. It uses
+`mode: "native-arm-json"`, `invocation: ["read-arm-json"]`, and null tool
+and configuration fields.
+
+Source paths and artifact paths are unique. Every identity must match the
+exact package file inventory. Every generated namespace file must have one
+mapping, and every mapped artifact must be valid ARM deployment JSON. Missing
+fields, unsupported toolchain modes, changed identities, malformed output,
+or generated files without mappings invalidate the package.
+
+Compiler-emitted nested template hashes are retained with
+`compiled-output-only` coverage. They do not claim a complete source module,
+file-read, or configuration graph. Native ARM JSON records
+`not-applicable`, or `unknown` when it contains a linked template.
 
 ## Bounded materialization
 
@@ -121,9 +224,13 @@ materialization, a protected cache with atomic publication, and separate
 operator-owned Site configuration. Packaged example Sites must not silently
 become deployment targets.
 
-Archive confinement does not validate paths referenced inside Bicep or
-manifests, and a complete source-file inventory is not proof of every
-execution dependency. Those checks belong to the execution boundary.
+Producer compilation is limited to the selected source snapshot, but Bicep
+does not expose an allowed-root switch or a complete file-read graph. The
+mapping therefore does not claim complete dependency coverage. Engine-owned
+manifest and parameter path confinement remains part of the acquired
+execution boundary.
 
-There is currently no `plan --source` or `deploy --source` route. Continue to
-use a reviewed local workspace with configured Sites for execution.
+There is currently no `plan --source` or `deploy --source` route. Package
+production and inspection are implemented, while acquired-plan selection and
+execution wiring remain separate work. Continue to use a reviewed local
+workspace with configured Sites for execution.

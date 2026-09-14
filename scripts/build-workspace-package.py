@@ -13,13 +13,18 @@ from source_snapshot import (
     SourceSnapshotError,
     export_tracked_source,
     require_complete_export,
+    require_workspace_configuration_boundary,
     validate_repository,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from siteops.artifacts import ArtifactError, relative_artifact_path  # noqa: E402
-from siteops.package_builder import build_package  # noqa: E402
+from siteops.package_builder import (  # noqa: E402
+    build_package,
+    create_producer_compilation_session,
+    workspace_bicep_sources,
+)
 
 
 def main() -> int:
@@ -33,6 +38,11 @@ def main() -> int:
     parser.add_argument("--require-feature", action="append", default=[], help="Required engine feature")
     parser.add_argument("--include", action="append", default=[], help="Approved companion file or directory")
     parser.add_argument("--license", action="append", required=True, help="Required source-relative license file")
+    parser.add_argument(
+        "--bicep",
+        type=Path,
+        help="Existing Azure CLI-managed Bicep executable",
+    )
     parser.add_argument("--output", required=True, type=Path, help="New output ZIP path")
     args = parser.parse_args()
     try:
@@ -43,9 +53,17 @@ def main() -> int:
         paths = (workspace, *companions)
         validate_repository(root, args.expected_source_sha)
         with tempfile.TemporaryDirectory(prefix="siteops-package-source-") as temporary:
-            snapshot = Path(temporary) / "source"
+            control_root = Path(temporary)
+            snapshot = control_root / "source"
             export_tracked_source(root, snapshot, args.expected_source_sha, paths=paths)
             require_complete_export(root, args.expected_source_sha, paths, snapshot)
+            bicep_sources = workspace_bicep_sources(snapshot, workspace)
+            if bicep_sources:
+                require_workspace_configuration_boundary(
+                    root,
+                    args.expected_source_sha,
+                    workspace,
+                )
             for license_path in args.license:
                 if not snapshot.joinpath(*license_path.split("/")).is_file():
                     raise ArtifactError("A declared package license file is missing.")
@@ -54,6 +72,11 @@ def main() -> int:
                 source_revision=args.expected_source_sha, siteops_range=args.requires_siteops,
                 companions=companions,
                 required_features=tuple(args.require_feature) or ("manifest/v1",),
+                compilation_session_factory=lambda: create_producer_compilation_session(
+                    snapshot,
+                    control_root,
+                    bicep_path=args.bicep,
+                ),
             )
     except (ArtifactError, SourceSnapshotError) as error:
         print(f"Error: {error}", file=sys.stderr)
@@ -62,6 +85,7 @@ def main() -> int:
         "file": output.name, "sha256": result.sha256, "size": result.size,
         "kit": result.metadata.kit_id, "version": result.metadata.version,
         "workspace": result.metadata.workspace_root, "files": len(result.metadata.files),
+        "templates": len(result.metadata.templates),
         "provenance": "not-established",
     }, sort_keys=True))
     return 0

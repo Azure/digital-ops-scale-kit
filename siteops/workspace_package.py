@@ -23,7 +23,7 @@ import zlib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO
 
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
@@ -39,18 +39,42 @@ from siteops.artifacts import (
     relative_artifact_path,
     require_node,
 )
+from siteops.compilation import (
+    ConfigurationDiscovery,
+    DependencyCoverage,
+    TemplateKind,
+    TemplateOutputError,
+    arm_json_dependency_identity,
+    extract_compiler_template_hashes,
+    extract_compiler_version,
+    extract_template_parameters,
+    validate_arm_template,
+)
 
 PACKAGE_NAME = "siteops-package.json"
 PACKAGE_API = "siteops/v1alpha1"
+GENERATED_TEMPLATE_NAMESPACE = ".siteops/compiled"
+GENERATED_TEMPLATE_ROOT = f"{GENERATED_TEMPLATE_NAMESPACE}/v1"
+PRODUCER_DEFAULT_BICEP_CONFIGURATION = b"{}\n"
+PRODUCER_DEFAULT_BICEP_CONFIGURATION_SHA256 = hashlib.sha256(
+    PRODUCER_DEFAULT_BICEP_CONFIGURATION
+).hexdigest()
 MAX_FILES = 10000
 MAX_NODES = 20000
+MAX_TEMPLATE_MAPPINGS = 4096
 MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_TOTAL_BYTES = 512 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 128 * 1024 * 1024
 MAX_METADATA_BYTES = 4 * 1024 * 1024
 MAX_CENTRAL_BYTES = 8 * 1024 * 1024
 MAX_COMPRESSION_RATIO = 200
-SUPPORTED_FEATURES = frozenset({"manifest/v1", "composition/v1", "manifest-selection/v1"})
+COMPILED_TEMPLATE_FEATURE = "compiled-templates/v1"
+SUPPORTED_FEATURES = frozenset({
+    "manifest/v1",
+    "composition/v1",
+    "manifest-selection/v1",
+    COMPILED_TEMPLATE_FEATURE,
+})
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 logger = logging.getLogger(__name__)
 
@@ -74,6 +98,30 @@ def _digest(value: Any) -> str:
     if not isinstance(value, str) or not _SHA256.fullmatch(value):
         raise ArtifactError("Workspace package identities must be lowercase SHA-256 digests.")
     return value
+
+
+def _strict_json(raw: bytes, *, label: str) -> Any:
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ArtifactError(f"{label} contains a duplicate JSON key.")
+            result[key] = value
+        return result
+
+    def invalid_constant(value: str) -> None:
+        raise ArtifactError(f"{label} contains a non-JSON number.")
+
+    try:
+        return json.loads(
+            raw.decode("utf-8-sig"),
+            object_pairs_hook=unique_object,
+            parse_constant=invalid_constant,
+        )
+    except (UnicodeError, ValueError, RecursionError) as error:
+        if isinstance(error, ArtifactError):
+            raise
+        raise ArtifactError(f"{label} must be bounded UTF-8 JSON.") from None
 
 
 def _engine_range(value: Any) -> str:
@@ -113,6 +161,270 @@ def workspace_tree_digest(files: tuple[PayloadFile, ...], workspace: str) -> str
     return hashlib.sha256(framed).hexdigest()
 
 
+def workspace_payload_path(workspace: str, relative: str) -> str:
+    """Return one package-relative path below the declared workspace."""
+    relative = relative_artifact_path(relative)
+    return relative if workspace == "." else f"{workspace}/{relative}"
+
+
+def compiled_template_path(source_path: str) -> str:
+    """Return the deterministic producer-owned artifact path for Bicep source."""
+    source_path = relative_artifact_path(source_path)
+    return relative_artifact_path(
+        f"{GENERATED_TEMPLATE_ROOT}/{source_path}.json"
+    )
+
+
+@dataclass(frozen=True)
+class PackageToolIdentity:
+    provider: str
+    version: str
+
+    def document(self) -> dict[str, str]:
+        return {"provider": self.provider, "version": self.version}
+
+
+@dataclass(frozen=True)
+class PackageConfigurationIdentity:
+    discovery: ConfigurationDiscovery
+    sha256: str
+    path: str | None = None
+
+    def document(self) -> dict[str, str]:
+        document = {
+            "discovery": self.discovery.value,
+            "sha256": self.sha256,
+        }
+        if self.path is not None:
+            document["path"] = self.path
+        return document
+
+
+@dataclass(frozen=True)
+class PackageDependencyIdentity:
+    coverage: DependencyCoverage
+    template_hashes: tuple[str, ...] = ()
+
+    def document(self) -> dict[str, Any]:
+        return {
+            "coverage": self.coverage.value,
+            "templateHashes": list(self.template_hashes),
+        }
+
+
+@dataclass(frozen=True)
+class PackageTemplateMapping:
+    source_path: str
+    source_kind: TemplateKind
+    source_sha256: str
+    source_size: int
+    artifact_path: str
+    artifact_sha256: str
+    artifact_size: int
+    producer_mode: str
+    invocation: tuple[str, ...]
+    driver: PackageToolIdentity | None
+    compiler: PackageToolIdentity | None
+    configuration: PackageConfigurationIdentity | None
+    dependencies: PackageDependencyIdentity
+
+    def document(self) -> dict[str, Any]:
+        return {
+            "source": {
+                "path": self.source_path,
+                "kind": self.source_kind.value,
+                "sha256": self.source_sha256,
+                "size": self.source_size,
+            },
+            "artifact": {
+                "path": self.artifact_path,
+                "kind": TemplateKind.ARM_JSON.value,
+                "sha256": self.artifact_sha256,
+                "size": self.artifact_size,
+            },
+            "producer": {
+                "mode": self.producer_mode,
+                "invocation": list(self.invocation),
+                "driver": None if self.driver is None else self.driver.document(),
+                "compiler": None if self.compiler is None else self.compiler.document(),
+                "configuration": (
+                    None
+                    if self.configuration is None
+                    else self.configuration.document()
+                ),
+                "dependencies": self.dependencies.document(),
+            },
+        }
+
+
+def _file_identity(value: Any, *, include_kind: bool) -> tuple[str, str, int, str | None]:
+    keys = {"path", "sha256", "size", "kind"} if include_kind else {"path", "sha256", "size"}
+    row = _object(value, keys)
+    path = relative_artifact_path(row["path"])
+    size = row["size"]
+    if type(size) is not int or not 0 <= size <= MAX_FILE_BYTES:
+        raise ArtifactError("A template identity size is invalid or exceeds its limit.")
+    kind = row.get("kind")
+    if include_kind and kind not in {item.value for item in TemplateKind}:
+        raise ArtifactError("A template source kind is unsupported.")
+    return path, _digest(row["sha256"]), size, kind
+
+
+def _package_tool(value: Any) -> PackageToolIdentity:
+    row = _object(value, {"provider", "version"})
+    return PackageToolIdentity(
+        _text(row["provider"], maximum=128),
+        _text(row["version"], maximum=128),
+    )
+
+
+def _package_configuration(value: Any) -> PackageConfigurationIdentity:
+    if not isinstance(value, dict):
+        raise ArtifactError("A Bicep template requires configuration identity.")
+    discovery = value.get("discovery")
+    if discovery == ConfigurationDiscovery.NEAREST_FOUND.value:
+        row = _object(value, {"discovery", "path", "sha256"})
+        return PackageConfigurationIdentity(
+            ConfigurationDiscovery.NEAREST_FOUND,
+            _digest(row["sha256"]),
+            relative_artifact_path(row["path"]),
+        )
+    if discovery == ConfigurationDiscovery.PRODUCER_DEFAULT.value:
+        row = _object(value, {"discovery", "sha256"})
+        digest = _digest(row["sha256"])
+        if digest != PRODUCER_DEFAULT_BICEP_CONFIGURATION_SHA256:
+            raise ArtifactError(
+                "The producer-default Bicep configuration identity is invalid."
+            )
+        return PackageConfigurationIdentity(
+            ConfigurationDiscovery.PRODUCER_DEFAULT,
+            digest,
+        )
+    raise ArtifactError("A package Bicep configuration identity is unsupported.")
+
+
+def _effective_workspace_configuration(
+    inventory: dict[str, PayloadFile],
+    workspace_root: str,
+    source_path: str,
+) -> str | None:
+    directory = PurePosixPath(source_path).parent
+    while True:
+        candidate = (
+            "bicepconfig.json"
+            if directory == PurePosixPath(".")
+            else (directory / "bicepconfig.json").as_posix()
+        )
+        if workspace_payload_path(workspace_root, candidate) in inventory:
+            return candidate
+        if directory == PurePosixPath("."):
+            return None
+        directory = directory.parent
+
+
+def _package_dependencies(value: Any) -> PackageDependencyIdentity:
+    row = _object(value, {"coverage", "templateHashes"})
+    try:
+        coverage = DependencyCoverage(row["coverage"])
+    except (TypeError, ValueError):
+        raise ArtifactError("A template dependency coverage value is unsupported.") from None
+    hashes = row["templateHashes"]
+    if not isinstance(hashes, list) or len(hashes) > MAX_TEMPLATE_MAPPINGS:
+        raise ArtifactError("A template dependency identity exceeds its limits.")
+    template_hashes = tuple(
+        _text(item, maximum=256)
+        for item in hashes
+    )
+    if len(template_hashes) != len(set(template_hashes)):
+        raise ArtifactError("A template dependency identity contains duplicate hashes.")
+    return PackageDependencyIdentity(coverage, tuple(sorted(template_hashes)))
+
+
+def _template_mapping(value: Any) -> PackageTemplateMapping:
+    row = _object(value, {"source", "artifact", "producer"})
+    source_path, source_sha256, source_size, source_kind_value = _file_identity(
+        row["source"],
+        include_kind=True,
+    )
+    artifact_path, artifact_sha256, artifact_size, artifact_kind = _file_identity(
+        row["artifact"],
+        include_kind=True,
+    )
+    if artifact_kind != TemplateKind.ARM_JSON.value:
+        raise ArtifactError("Package template artifacts must be ARM JSON.")
+    source_kind = TemplateKind(source_kind_value)
+    producer = _object(
+        row["producer"],
+        {"mode", "invocation", "driver", "compiler", "configuration", "dependencies"},
+    )
+    mode = _text(producer["mode"], maximum=128)
+    raw_invocation = producer["invocation"]
+    if not isinstance(raw_invocation, list) or not 1 <= len(raw_invocation) <= 16:
+        raise ArtifactError("A package template invocation is invalid.")
+    invocation = tuple(_text(item, maximum=128) for item in raw_invocation)
+    dependencies = _package_dependencies(producer["dependencies"])
+
+    if source_path.startswith(f"{GENERATED_TEMPLATE_NAMESPACE}/"):
+        raise ArtifactError("Template sources cannot use the producer-owned namespace.")
+    if source_kind is TemplateKind.BICEP:
+        if (
+            not source_path.casefold().endswith(".bicep")
+            or artifact_path != compiled_template_path(source_path)
+            or mode != "azure-cli-bicep"
+            or invocation != ("az", "bicep", "build", "--no-restore")
+            or producer["driver"] is None
+            or producer["compiler"] is None
+            or producer["configuration"] is None
+            or dependencies.coverage is not DependencyCoverage.COMPILED_OUTPUT_ONLY
+        ):
+            raise ArtifactError("A Bicep package template mapping is inconsistent.")
+        driver = _package_tool(producer["driver"])
+        compiler = _package_tool(producer["compiler"])
+        if (
+            driver.provider != "azure-cli"
+            or compiler.provider != "azure-cli-bicep"
+        ):
+            raise ArtifactError("A Bicep package toolchain identity is unsupported.")
+        configuration = _package_configuration(producer["configuration"])
+    else:
+        if (
+            not source_path.casefold().endswith(".json")
+            or artifact_path != source_path
+            or source_sha256 != artifact_sha256
+            or source_size != artifact_size
+            or mode != "native-arm-json"
+            or invocation != ("read-arm-json",)
+            or producer["driver"] is not None
+            or producer["compiler"] is not None
+            or producer["configuration"] is not None
+            or dependencies.coverage not in {
+                DependencyCoverage.NOT_APPLICABLE,
+                DependencyCoverage.UNKNOWN,
+            }
+            or dependencies.template_hashes
+        ):
+            raise ArtifactError("A native ARM package template mapping is inconsistent.")
+        driver = None
+        compiler = None
+        configuration = None
+
+    return PackageTemplateMapping(
+        source_path=source_path,
+        source_kind=source_kind,
+        source_sha256=source_sha256,
+        source_size=source_size,
+        artifact_path=artifact_path,
+        artifact_sha256=artifact_sha256,
+        artifact_size=artifact_size,
+        producer_mode=mode,
+        invocation=invocation,
+        driver=driver,
+        compiler=compiler,
+        configuration=configuration,
+        dependencies=dependencies,
+    )
+
+
 @dataclass(frozen=True)
 class WorkspacePackage:
     kit_id: str
@@ -123,6 +435,7 @@ class WorkspacePackage:
     required_features: tuple[str, ...]
     files: tuple[PayloadFile, ...]
     tree_sha256: str
+    templates: tuple[PackageTemplateMapping, ...]
 
     def document(self) -> dict[str, Any]:
         return {
@@ -138,12 +451,17 @@ class WorkspacePackage:
                 "siteops": self.siteops_range, "requiredFeatures": list(self.required_features),
             },
             "files": [entry.document() for entry in self.files],
+            "templates": {
+                "artifactRoot": GENERATED_TEMPLATE_ROOT,
+                "entries": [entry.document() for entry in self.templates],
+            },
         }
 
     @classmethod
     def from_document(cls, document: Any) -> WorkspacePackage:
         root = _object(document, {
             "apiVersion", "kind", "kit", "source", "workspace", "compatibility", "files",
+            "templates",
         })
         if root["apiVersion"] != PACKAGE_API or root["kind"] != "WorkspacePackage":
             raise ArtifactError("The workspace package format is unsupported.")
@@ -163,6 +481,10 @@ class WorkspacePackage:
         required_features = tuple(_text(item, maximum=128) for item in features)
         if len(set(required_features)) != len(required_features):
             raise ArtifactError("The required-feature inventory contains duplicates.")
+        if COMPILED_TEMPLATE_FEATURE not in required_features:
+            raise ArtifactError(
+                "The package must require compiled-template mapping support."
+            )
         entries = root["files"]
         if not isinstance(entries, list) or not 1 <= len(entries) <= MAX_FILES:
             raise ArtifactError("The package file inventory exceeds its limits or is empty.")
@@ -185,10 +507,102 @@ class WorkspacePackage:
         expected_tree = _digest(tree["digest"])
         if workspace_tree_digest(ordered, workspace_root) != expected_tree:
             raise ArtifactError("The workspace tree identity does not match its file inventory.")
+        template_document = _object(root["templates"], {"artifactRoot", "entries"})
+        if template_document["artifactRoot"] != GENERATED_TEMPLATE_ROOT:
+            raise ArtifactError("The producer-owned template namespace is unsupported.")
+        template_entries = template_document["entries"]
+        if not isinstance(template_entries, list) or len(template_entries) > MAX_TEMPLATE_MAPPINGS:
+            raise ArtifactError("The package template mapping exceeds its limits.")
+        templates = tuple(sorted(
+            (_template_mapping(value) for value in template_entries),
+            key=lambda entry: entry.source_path,
+        ))
+        source_paths = [entry.source_path for entry in templates]
+        artifact_paths = [entry.artifact_path for entry in templates]
+        if (
+            len(source_paths) != len(set(source_paths))
+            or len(artifact_paths) != len(set(artifact_paths))
+        ):
+            raise ArtifactError("Package template source and artifact paths must be unique.")
+        inventory = {entry.path: entry for entry in ordered}
+        for template in templates:
+            source_record = inventory.get(
+                workspace_payload_path(workspace_root, template.source_path)
+            )
+            artifact = inventory.get(
+                workspace_payload_path(workspace_root, template.artifact_path)
+            )
+            if source_record is None or (
+                source_record.sha256,
+                source_record.size,
+            ) != (
+                template.source_sha256,
+                template.source_size,
+            ):
+                raise ArtifactError("A template source identity does not match the file inventory.")
+            if artifact is None or (
+                artifact.sha256,
+                artifact.size,
+            ) != (
+                template.artifact_sha256,
+                template.artifact_size,
+            ):
+                raise ArtifactError("A template artifact identity does not match the file inventory.")
+            configuration = template.configuration
+            if template.source_kind is TemplateKind.BICEP:
+                effective_configuration = _effective_workspace_configuration(
+                    inventory,
+                    workspace_root,
+                    template.source_path,
+                )
+                if configuration is None:
+                    raise ArtifactError(
+                        "A Bicep template mapping requires configuration identity."
+                    )
+                if configuration.discovery is ConfigurationDiscovery.NEAREST_FOUND:
+                    if configuration.path != effective_configuration:
+                        raise ArtifactError(
+                            "A Bicep configuration identity is not the effective "
+                            "workspace configuration."
+                        )
+                    config = inventory.get(
+                        workspace_payload_path(
+                            workspace_root,
+                            configuration.path or "",
+                        )
+                    )
+                    if config is None or config.sha256 != configuration.sha256:
+                        raise ArtifactError(
+                            "A Bicep configuration identity does not match the file inventory."
+                        )
+                elif effective_configuration is not None:
+                    raise ArtifactError(
+                        "A producer-default configuration cannot replace an "
+                        "authored workspace configuration."
+                    )
+        generated = {
+            entry.path
+            for entry in ordered
+            if entry.path.startswith(
+                workspace_payload_path(
+                    workspace_root,
+                    GENERATED_TEMPLATE_NAMESPACE,
+                ) + "/"
+            )
+        }
+        mapped_generated = {
+            workspace_payload_path(workspace_root, entry.artifact_path)
+            for entry in templates
+            if entry.source_kind is TemplateKind.BICEP
+        }
+        if generated != mapped_generated:
+            raise ArtifactError(
+                "The producer-owned template namespace does not match its mappings."
+            )
         return cls(
             _text(kit["id"], maximum=128), _text(kit["version"], maximum=128),
             _text(source["revision"]), workspace_root, _engine_range(compatibility["siteops"]),
-            tuple(sorted(required_features)), ordered, expected_tree,
+            tuple(sorted(required_features)), ordered, expected_tree, templates,
         )
 
 
@@ -222,27 +636,9 @@ def check_compatibility(
 def _load_metadata(raw: bytes) -> WorkspacePackage:
     if len(raw) > MAX_METADATA_BYTES:
         raise ArtifactError("Workspace package metadata exceeds its byte limit.")
-
-    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise ArtifactError("Workspace package metadata contains a duplicate JSON key.")
-            result[key] = value
-        return result
-
-    def invalid_constant(value: str) -> None:
-        raise ArtifactError("Workspace package metadata contains a non-JSON number.")
-
-    try:
-        document = json.loads(
-            raw.decode("utf-8"), object_pairs_hook=unique_object, parse_constant=invalid_constant,
-        )
-    except (UnicodeError, ValueError, RecursionError) as error:
-        if isinstance(error, ArtifactError):
-            raise
-        raise ArtifactError("Workspace package metadata must be bounded UTF-8 JSON.") from None
-    return WorkspacePackage.from_document(document)
+    return WorkspacePackage.from_document(
+        _strict_json(raw, label="Workspace package metadata")
+    )
 
 
 def _preflight_directory(stream: BinaryIO, size: int) -> None:
@@ -318,6 +714,72 @@ def _read_metadata_member(archive: zipfile.ZipFile, entry: zipfile.ZipInfo) -> b
     return bytes(data)
 
 
+def _read_template_artifact(
+    archive: zipfile.ZipFile,
+    entry: PayloadFile,
+) -> bytes:
+    data = bytearray()
+    digest = hashlib.sha256()
+    with archive.open(entry.path) as source:
+        while chunk := source.read(min(1024 * 1024, entry.size - len(data) + 1)):
+            data.extend(chunk)
+            digest.update(chunk)
+            if len(data) > entry.size:
+                raise ArtifactError("A template artifact exceeds its declared byte count.")
+    if len(data) != entry.size or digest.hexdigest() != entry.sha256:
+        raise ArtifactError("A template artifact does not match its declared identity.")
+    return bytes(data)
+
+
+def _validate_template_artifacts(
+    archive: zipfile.ZipFile,
+    metadata: WorkspacePackage,
+) -> None:
+    inventory = {entry.path: entry for entry in metadata.files}
+    for mapping in metadata.templates:
+        entry = inventory[
+            workspace_payload_path(
+                metadata.workspace_root,
+                mapping.artifact_path,
+            )
+        ]
+        try:
+            document = _strict_json(
+                _read_template_artifact(archive, entry),
+                label="A mapped template artifact",
+            )
+            validate_arm_template(document)
+            extract_template_parameters(document)
+        except (ArtifactError, TemplateOutputError):
+            raise ArtifactError(
+                "A mapped template artifact is not valid ARM deployment JSON."
+            ) from None
+        if mapping.source_kind is TemplateKind.BICEP:
+            emitted_hashes = extract_compiler_template_hashes(document)
+            if emitted_hashes != mapping.dependencies.template_hashes:
+                raise ArtifactError(
+                    "A mapped template dependency identity does not match its ARM artifact."
+                )
+            emitted_version = extract_compiler_version(document)
+            if (
+                emitted_version is not None
+                and (
+                    mapping.compiler is None
+                    or emitted_version != mapping.compiler.version
+                )
+            ):
+                raise ArtifactError(
+                    "A mapped template compiler identity does not match its ARM artifact."
+                )
+        elif (
+            arm_json_dependency_identity(document).coverage
+            is not mapping.dependencies.coverage
+        ):
+            raise ArtifactError(
+                "A native ARM dependency identity does not match its artifact."
+            )
+
+
 @contextmanager
 def _open_package(path: Path, expected_sha256: str) -> Iterator[
     tuple[zipfile.ZipFile, PackageInspection, bytes]
@@ -339,6 +801,7 @@ def _open_package(path: Path, expected_sha256: str) -> Iterator[
                     if entries[entry.path].file_size != entry.size:
                         raise ArtifactError("A package ZIP file size differs from its declared size.")
                 check_compatibility(metadata)
+                _validate_template_artifacts(archive, metadata)
                 yield archive, PackageInspection(metadata, actual, size), raw
     except (EOFError, struct.error, zipfile.BadZipFile, zlib.error):
         raise ArtifactError("The package archive could not be read safely.") from None
