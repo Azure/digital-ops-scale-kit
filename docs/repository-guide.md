@@ -93,6 +93,22 @@ Site inspection and local-private plans contain target identities and
 configuration detail. Keep them in authorized destinations. Use explicit
 publishable projections for CI artifacts and summaries.
 
+### Separate content and Site configuration
+
+The engine can bind an operator Site configuration root independently of
+deployment content. Its primary `sites/`, `sites.local/`, inheritance fallback
+and Site provenance labels then use that configuration root. Manifests,
+templates and parameter libraries remain under the content workspace.
+
+Extra trusted Site directories augment the selected configuration root.
+They are not a substitute for separating operator targets from packaged
+examples. An empty operator root does not fall back to content-owned Sites.
+The caller owns this root selection, not the package's metadata.
+
+Ordinary local CLI commands retain their existing single-workspace behavior.
+The separate-root engine boundary supports acquisition integration and does
+not introduce a new CLI flag or a public Python SDK.
+
 ## Contributor route
 
 Use [CONTRIBUTING.md](../CONTRIBUTING.md) for source setup and validation.

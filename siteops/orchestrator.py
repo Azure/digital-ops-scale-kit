@@ -692,6 +692,7 @@ class Orchestrator:
 
     Attributes:
         workspace: Path to the Site Ops workspace directory
+        site_config_root: Root for Sites and overlays, defaulting to the workspace
         dry_run: If True, commands are logged but not executed
         executor: The AzCliExecutor instance for running commands
     """
@@ -701,8 +702,15 @@ class Orchestrator:
         workspace: Path,
         dry_run: bool = False,
         extra_trusted_sites_dirs: list[Path] | None = None,
+        *,
+        site_config_root: Path | None = None,
     ):
         self.workspace = Path(workspace).resolve()
+        self.site_config_root = (
+            Path(site_config_root).resolve() if site_config_root is not None else self.workspace
+        )
+        if site_config_root is not None and not self.site_config_root.is_dir():
+            raise FileNotFoundError("The operator Site configuration root was not found.")
         self.dry_run = dry_run
         self.executor = AzCliExecutor(workspace=self.workspace, dry_run=dry_run)
         self._params_cache: dict[Path, dict[str, Any]] = {}
@@ -752,7 +760,7 @@ class Orchestrator:
     def _normalize_extra_sites_dirs(self, dirs: list[Path]) -> list[Path]:
         """Validate and deduplicate extra trusted site directories.
 
-        Extra trusted dirs are searched between the workspace's `sites/` and
+        Extra trusted dirs are searched between the configuration root's `sites/` and
         `sites.local/` directories, and receive the same trust level as
         `sites/`: site files in them are allowed to declare `inherits`.
 
@@ -770,8 +778,8 @@ class Orchestrator:
                 would let overlays inject inheritance, breaking the overlay
                 security invariant.
         """
-        primary = (self.workspace / "sites").resolve()
-        overlay = (self.workspace / "sites.local").resolve()
+        primary = (self.site_config_root / "sites").resolve()
+        overlay = (self.site_config_root / "sites.local").resolve()
         result: list[Path] = []
         seen: set[Path] = set()
         for candidate in dirs:
@@ -805,7 +813,7 @@ class Orchestrator:
         Trusted means: `inherits` is honored in files from these dirs.
         Excludes `sites.local/` (overlay, always strips `inherits`).
         """
-        return [self.workspace / "sites", *self._extra_trusted_sites_dirs]
+        return [self.site_config_root / "sites", *self._extra_trusted_sites_dirs]
 
     def _find_trusted_site_file(self, identifier: str) -> Path | None:
         """Return the trusted file path for the named site.
@@ -1153,11 +1161,11 @@ class Orchestrator:
         1. Relative to the child file's directory (default, locality-preserving).
         2. Narrow fallback: if the relative path does not exist AND
            `inherits_value` is a bare filename (no path separators), look for
-           it in the workspace's `sites/` directory. This lets a site file
-           in an extra trusted dir reference a workspace-owned template
+           it in the configuration root's `sites/` directory. This lets a site file
+           in an extra trusted dir reference an operator-owned template
            (e.g. `base-site.yaml`) without copying the template or inventing
            a new syntax. The fallback is intentionally limited to
-           `workspace/sites/`. It does NOT search other extras or
+           the primary `sites/` directory. It does NOT search other extras or
            `sites.local/`, so there is no cross-extra-dir shared namespace
            and no way for an overlay to inject a new inheritance target.
 
@@ -1200,7 +1208,7 @@ class Orchestrator:
             return relative
 
         if "/" not in inherits_value and "\\" not in inherits_value:
-            workspace_candidate = (self.workspace / "sites" / inherits_value).resolve()
+            workspace_candidate = (self.site_config_root / "sites" / inherits_value).resolve()
             if workspace_candidate != relative:
                 tried.append(workspace_candidate)
                 if workspace_candidate.exists():
@@ -1370,7 +1378,7 @@ class Orchestrator:
         """
         site_dirs = [
             *self._trusted_sites_dirs,
-            self.workspace / "sites.local",
+            self.site_config_root / "sites.local",
         ]
 
         merged_data: dict[str, Any] = {}
@@ -1466,15 +1474,15 @@ class Orchestrator:
         return merged_data
 
     def _origin_label(self, path: Path) -> str:
-        """Return a stable workspace-relative label for a source file.
+        """Return a stable configuration-root-relative label for a Site source.
 
         Used by the provenance walk so per-key attribution renders
         identically across machines. Falls back to the absolute path
-        when the file lives outside the workspace (e.g., an extra
+        when the file lives outside the configuration root (e.g., an extra
         trusted dir under a different parent).
         """
         try:
-            return path.resolve().relative_to(self.workspace.resolve()).as_posix()
+            return path.resolve().relative_to(self.site_config_root).as_posix()
         except ValueError:
             return path.as_posix()
 
