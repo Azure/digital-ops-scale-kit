@@ -264,7 +264,7 @@ def test_index_refresh_does_not_silently_remove_adapter_bindings(workspace):
 
 
 @pytest.mark.parametrize("umask", [0, 0o077])
-def test_generated_file_creation_respects_public_and_private_modes(workspace, monkeypatch, umask):
+def test_generated_file_creation_is_owner_only(workspace, monkeypatch, umask):
     bundle = build_content_index(workspace, approve_public=True)
     original = os.open
     requested_modes = {}
@@ -280,27 +280,27 @@ def test_generated_file_creation_respects_public_and_private_modes(workspace, mo
         write_content_index(workspace, bundle)
     finally:
         os.umask(previous_umask)
-    assert requested_modes == {INDEX_NAME: 0o644, BINDINGS_NAME: 0o600}
+    assert requested_modes == {INDEX_NAME: 0o600, BINDINGS_NAME: 0o600}
     if os.name != "nt":
-        assert stat.S_IMODE((workspace / INDEX_NAME).stat().st_mode) == 0o644 & ~umask
-        assert stat.S_IMODE((workspace / BINDINGS_NAME).stat().st_mode) == 0o600 & ~umask
+        for name in (INDEX_NAME, BINDINGS_NAME):
+            assert stat.S_IMODE((workspace / name).stat().st_mode) == 0o600 & ~umask
 
 
-@pytest.mark.parametrize(("existing_mode", "public_mode", "private_mode"), [
-    (0o7777, 0o644, 0o600),
-    (0o666, 0o644, 0o600),
-    (0o644, 0o644, 0o600),
-    (0o640, 0o640, 0o600),
-    (0o600, 0o600, 0o600),
-    (0o444, 0o444, 0o400),
-    (0o400, 0o400, 0o400),
+@pytest.mark.parametrize(("existing_mode", "expected_mode"), [
+    (0o7777, 0o600),
+    (0o666, 0o600),
+    (0o644, 0o600),
+    (0o640, 0o600),
+    (0o600, 0o600),
+    (0o444, 0o400),
+    (0o400, 0o400),
 ])
 def test_generated_file_refresh_preserves_only_safe_modes(
-    workspace, monkeypatch, existing_mode, public_mode, private_mode,
+    workspace, monkeypatch, existing_mode, expected_mode,
 ):
     bundle = build_content_index(workspace, approve_public=True)
     write_content_index(workspace, bundle)
-    expected = {INDEX_NAME: public_mode, BINDINGS_NAME: private_mode}
+    expected = {INDEX_NAME: expected_mode, BINDINGS_NAME: expected_mode}
     original_stat = Path.stat
     original_chmod = Path.chmod
     requested_modes = {}

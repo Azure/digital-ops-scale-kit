@@ -422,15 +422,14 @@ def write_content_index(workspace: Path, bundle: BuiltIndex, *, check: bool = Fa
         directory = Path(tempfile.mkdtemp(dir=root, prefix=".siteops-index-"))
         for path, content, _ in outputs:
             temporary = directory / path.name
-            mode = 0o644 if path.name == INDEX_NAME else 0o600
-            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             staged.append((temporary, path))
             with os.fdopen(descriptor, "wb") as stream:
                 stream.write(content)
                 stream.flush()
                 os.fsync(stream.fileno())
             if path in modes:
-                temporary.chmod(modes[path] & mode)
+                temporary.chmod(modes[path] & 0o600)
         for temporary, path in staged:
             temporary.replace(path)
     except OSError:

@@ -109,9 +109,8 @@ The command writes two generated files:
 | `siteops-index.json` | Approved descriptive entries. Suitable as input to a separately implemented read-only gallery |
 | `siteops-index.inputs.json` | Source-private input paths and freshness digests. Keep with the authorized source, not in the gallery |
 
-On POSIX, new public indexes allow at most owner read/write and group/other
-read access. New binding files allow at most owner read/write access.
-Refreshing preserves existing permissions only within those limits.
+On POSIX, both generated files allow at most owner read/write access.
+Refreshing preserves existing permissions only within that limit.
 On Windows, files inherit access controls from the workspace directory.
 Protect that directory according to the source's access requirements.
 
