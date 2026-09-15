@@ -1,0 +1,4 @@
+apiVersion: siteops/v1alpha1
+kind: DeploymentEntry
+role: standalone
+outcome: Compile one non-AIO template root.

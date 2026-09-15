@@ -121,12 +121,14 @@ class SubmissionMode(str, Enum):
     """Artifact form submitted to the deployment provider."""
 
     SOURCE = "source"
+    ARM_JSON = "arm-json"
 
 
 class CompilationBinding(str, Enum):
     """Strength of the link between observed and submitted compilation."""
 
     OBSERVED_NOT_ENFORCED = "observed-not-enforced"
+    PACKAGE_ARTIFACT = "package-artifact"
 
 
 class CapabilityKind(str, Enum):
@@ -866,15 +868,27 @@ class DeploymentOperation:
 
     template: Path
     input_status: InputStatus
+    effective_template: Path | None = None
     parameters: MappingValue | None = None
     template_unit_key: CompilationKey | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "template", Path(self.template))
+        if self.effective_template is not None:
+            object.__setattr__(
+                self,
+                "effective_template",
+                Path(self.effective_template),
+            )
         if self.input_status is InputStatus.PREPARED and self.parameters is None:
             raise ValueError(
                 "Prepared deployment inputs require a parameter mapping."
             )
+
+    @property
+    def submission_template(self) -> Path:
+        """Return the authored source or its selected executable artifact."""
+        return self.effective_template or self.template
 
 
 @dataclass(frozen=True)
@@ -1110,6 +1124,15 @@ class DeploymentPlan:
         _require_text(self.manifest_name, "Manifest name")
         if self.max_parallel_sites < 0:
             raise ValueError("Maximum parallel sites must be non-negative.")
+        if (
+            self.submission_mode is SubmissionMode.SOURCE
+        ) != (
+            self.compilation_binding
+            is CompilationBinding.OBSERVED_NOT_ENFORCED
+        ):
+            raise ValueError(
+                "Plan submission mode and compilation binding are inconsistent."
+            )
         step_names = [step.name for step in self.steps]
         if len(step_names) != len(set(step_names)):
             raise ValueError("Prepared plan step names must be unique.")
@@ -1141,11 +1164,11 @@ class DeploymentPlan:
                             "unknown template unit."
                         )
                     unit = units[key]
-                    if details.template.resolve() != (
+                    if details.submission_template.resolve() != (
                         unit.identity.source.path
                     ):
                         raise ValueError(
-                            "Prepared deployment operation template must "
+                            "Prepared deployment operation artifact must "
                             "match its template unit source."
                         )
                     referenced_units.add(key)
@@ -1259,7 +1282,9 @@ def required_capability_kinds(
     details = operation.details
     if isinstance(details, DeploymentOperation):
         try:
-            template_kind = detect_template_kind(details.template)
+            template_kind = detect_template_kind(
+                details.submission_template
+            )
         except ValueError:
             return frozenset()
         required = {CapabilityKind.ARM_CONTROL_PLANE}
@@ -1357,6 +1382,10 @@ def render_plain_plan(
         lines.extend(("", f"  {plan.description}"))
 
     if plan.intent is PlanIntent.EXECUTABLE:
+        binding_description = {
+            CompilationBinding.OBSERVED_NOT_ENFORCED: "compilation observed, not enforced",
+            CompilationBinding.PACKAGE_ARTIFACT: "package artifact",
+        }[plan.compilation_binding]
         lines.extend(
             (
                 "",
@@ -1366,10 +1395,7 @@ def render_plain_plan(
                     if result.executable
                     else "  Executable: no"
                 ),
-                (
-                    "  Submission: source "
-                    "(compilation observed, not enforced)"
-                ),
+                f"  Submission: {plan.submission_mode.value} ({binding_description})",
             )
         )
         if not result.executable:
@@ -2098,6 +2124,10 @@ def _local_operation_details(
             "templatePath": details.template.as_posix(),
             "inputStatus": details.input_status.value,
         }
+        if details.effective_template is not None:
+            document["effectiveTemplatePath"] = (
+                details.effective_template.as_posix()
+            )
         if include_parameter_descriptors:
             document["parameters"] = (
                 _parameter_descriptors(

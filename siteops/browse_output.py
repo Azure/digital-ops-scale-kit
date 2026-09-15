@@ -10,6 +10,7 @@ import textwrap
 import unicodedata
 
 from siteops.browse import BrowseResult, ContentEntry
+from siteops.manifest_selection import explicit_manifest_reference
 from siteops.reporting import _wrap
 
 
@@ -131,9 +132,11 @@ def _card(entry: ContentEntry, workspace: str, *, local: bool = True) -> list[st
             "", "Next: choose a configured Site, then review its executable plan.",
             f"{shell} commands (not Command Prompt):" if shell == "PowerShell"
             else f"{shell} commands:",
-            f"  siteops -w {_quote(workspace)} plan {_quote(entry.path)} -l 'name=<site>'",
+            f"  siteops -w {_quote(workspace)} plan "
+            f"{_quote(explicit_manifest_reference(entry.path))} -l 'name=<site>'",
             "After review, deploy with the same explicit target. Deployment prepares again.",
-            f"  siteops -w {_quote(workspace)} deploy {_quote(entry.path)} -l 'name=<site>'",
+            f"  siteops -w {_quote(workspace)} deploy "
+            f"{_quote(explicit_manifest_reference(entry.path))} -l 'name=<site>'",
         ))
     elif guidance.role == "standalone":
         lines.extend((
@@ -171,6 +174,7 @@ def render_browse_plain(result: BrowseResult) -> str:
             f"Deployment content: {len(result.entries)} shown, {result.matched} matches, "
             f"{result.discovered} {'headers read' if local else 'indexed entries'}."
         )
+        ambiguous = any(item.code == "lookup.ambiguous" for item in result.diagnostics)
         for entry in result.entries:
             label = entry.guidance.category or entry.guidance.role
             if entry.guidance.category and entry.guidance.role != "standalone":
@@ -178,8 +182,8 @@ def render_browse_plain(result: BrowseResult) -> str:
             summary = " ".join((entry.guidance.outcome or entry.description).split())
             summary = textwrap.shorten(_text(summary), width=68, placeholder="...")
             lines.append(f"  {_text(entry.name)} [{_text(label)}] {summary}".rstrip())
-            if entry.name_ambiguous is not False or entry.guidance.role == "partial":
-                lines.append(f"    {_text(entry.path)}")
+            if ambiguous or entry.name_ambiguous is not False or entry.guidance.role == "partial":
+                lines.append(f"    {_text(explicit_manifest_reference(entry.path))}")
         if not result.entries and not result.diagnostics:
             lines.append(
                 "  No matching entries. Use an explicit path for a custom layout."

@@ -25,6 +25,7 @@ from siteops.planning import (
     ArmTagWaitOperation,
     CapabilityKind,
     CapabilityStatus,
+    CompilationBinding,
     DataReference,
     DeploymentOperation,
     InputStatus,
@@ -37,6 +38,7 @@ from siteops.planning import (
     PlanNotExecutableError,
     PlanStatus,
     SkipReasonCode,
+    SubmissionMode,
     resolve_plan_value,
 )
 from siteops.results import OperationStatus, RunStatus, SiteStatus
@@ -253,6 +255,11 @@ def test_shared_bicep_compiles_once_across_targets_and_execution(tmp_path):
     assert result.status is PlanStatus.PLANNED
     assert result.executable
     assert result.plan is not None
+    assert result.plan.submission_mode is SubmissionMode.SOURCE
+    assert (
+        result.plan.compilation_binding
+        is CompilationBinding.OBSERVED_NOT_ENFORCED
+    )
     assert runner.compile_count == 1
     assert len(result.plan.template_units) == 1
     unit_keys = {
@@ -274,6 +281,9 @@ def test_shared_bicep_compiles_once_across_targets_and_execution(tmp_path):
     )
 
     def deploy(**kwargs):
+        assert kwargs["template_path"] == (
+            workspace / "templates" / "shared.bicep"
+        )
         return DeploymentResult(
             success=True,
             step_name=kwargs["step_name"],

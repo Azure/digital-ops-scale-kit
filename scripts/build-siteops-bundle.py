@@ -14,7 +14,6 @@ import json
 import os
 import re
 import shlex
-import shutil
 import stat
 import subprocess
 import sys
@@ -30,6 +29,12 @@ from siteops_distribution import (
     DistributionError,
     PayloadFile,
     verify_payload,
+)
+from source_snapshot import (
+    SourceSnapshotError,
+    export_tracked_source,
+    safe_archive_path,
+    validate_repository,
 )
 
 _OUTPUT_NAME = "siteops-install.zip"
@@ -178,86 +183,24 @@ def _run(
 
 
 def _validate_repository(root: Path, expected_source_sha: str) -> None:
-    if _SOURCE_SHA.fullmatch(expected_source_sha) is None:
-        raise BuildError("The expected source commit must be a full lowercase Git SHA.")
-    head = _run(
-        ["git", "-C", str(root), "rev-parse", "--verify", "HEAD"],
-        cwd=root,
-        timeout=30,
-    )
-    if head.returncode != 0 or head.stdout.decode("ascii", errors="ignore").strip() != expected_source_sha:
-        raise BuildError("The checked out commit does not match --expected-source-sha.")
-    status = _run(
-        [
-            "git",
-            "-C",
-            str(root),
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=all",
-        ],
-        cwd=root,
-        timeout=30,
-    )
-    if status.returncode != 0:
-        raise BuildError("Git could not confirm the source state.")
-    if status.stdout:
-        raise BuildError("The source checkout has tracked or untracked changes.")
+    try:
+        validate_repository(root, expected_source_sha)
+    except SourceSnapshotError as error:
+        raise BuildError(str(error)) from error
 
 
 def _safe_archive_path(name: str) -> tuple[str, ...]:
-    if not name or "\\" in name or name.startswith("/"):
-        raise BuildError("The source archive contains an unsafe path.")
-    stripped = name[:-1] if name.endswith("/") else name
-    components = tuple(stripped.split("/"))
-    if any(component in {"", ".", ".."} or ":" in component for component in components):
-        raise BuildError("The source archive contains an unsafe path.")
-    return components
+    try:
+        return safe_archive_path(name)
+    except SourceSnapshotError as error:
+        raise BuildError(str(error)) from error
 
 
 def _export_tracked_source(root: Path, destination: Path, source_sha: str) -> None:
-    archive = destination.parent / "source.zip"
-    with archive.open("xb") as stream:
-        try:
-            result = subprocess.run(
-                ["git", "-C", str(root), "archive", "--format=zip", source_sha],
-                cwd=root,
-                stdin=subprocess.DEVNULL,
-                stdout=stream,
-                stderr=subprocess.PIPE,
-                timeout=120,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as error:
-            raise BuildError("Git could not export the tracked source.") from error
-    if result.returncode != 0:
-        raise BuildError("Git could not export the tracked source.")
-    destination.mkdir()
-    normalized: set[str] = set()
     try:
-        with zipfile.ZipFile(archive) as source:
-            for item in source.infolist():
-                components = _safe_archive_path(item.filename)
-                relative = "/".join(components)
-                key = relative.casefold()
-                if key in normalized:
-                    raise BuildError("The source archive contains colliding paths.")
-                normalized.add(key)
-                mode = item.external_attr >> 16
-                if stat.S_ISLNK(mode):
-                    raise BuildError("The source archive cannot contain symbolic links.")
-                target = destination.joinpath(*components)
-                if item.is_dir():
-                    target.mkdir(parents=True, exist_ok=True)
-                    continue
-                if mode and not stat.S_ISREG(mode):
-                    raise BuildError("The source archive contains a nonregular file.")
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with source.open(item) as input_stream, target.open("xb") as output_stream:
-                    shutil.copyfileobj(input_stream, output_stream)
-    except (OSError, zipfile.BadZipFile) as error:
-        raise BuildError("The tracked source archive could not be extracted.") from error
+        export_tracked_source(root, destination, source_sha)
+    except SourceSnapshotError as error:
+        raise BuildError(str(error)) from error
 
 
 def _read_utf8(path: Path, label: str) -> str:

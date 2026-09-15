@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 import yaml
@@ -399,46 +398,42 @@ class TestExtraSitesDirsValidation:
 class TestCliExtraSitesDirsResolution:
     """Tests for CLI flag + env var resolution logic."""
 
-    def test_cli_flag_only(self, tmp_path):
+    def test_cli_flag_only(self, tmp_path, monkeypatch):
         d = tmp_path / "x"
         d.mkdir()
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("SITEOPS_EXTRA_SITES_DIRS", None)
-            assert _resolve_extra_sites_dirs([d]) == [d]
+        monkeypatch.delenv("SITEOPS_EXTRA_SITES_DIRS", raising=False)
+        assert _resolve_extra_sites_dirs([d]) == [d]
 
-    def test_env_var_only_parsed_with_pathsep(self, tmp_path):
+    def test_env_var_only_parsed_with_pathsep(self, tmp_path, monkeypatch):
         a = tmp_path / "a"
         b = tmp_path / "b"
         a.mkdir()
         b.mkdir()
         env_val = os.pathsep.join([str(a), str(b)])
-        with patch.dict(os.environ, {"SITEOPS_EXTRA_SITES_DIRS": env_val}):
-            result = _resolve_extra_sites_dirs(None)
+        monkeypatch.setenv("SITEOPS_EXTRA_SITES_DIRS", env_val)
+        result = _resolve_extra_sites_dirs(None)
         assert result == [a, b]
 
-    def test_env_var_empty_segments_tolerated(self, tmp_path):
+    def test_env_var_empty_segments_tolerated(self, tmp_path, monkeypatch):
         a = tmp_path / "a"
         a.mkdir()
         # Leading / trailing / doubled separators should all be skipped.
         env_val = os.pathsep + str(a) + os.pathsep + os.pathsep
-        with patch.dict(os.environ, {"SITEOPS_EXTRA_SITES_DIRS": env_val}):
-            assert _resolve_extra_sites_dirs(None) == [a]
+        monkeypatch.setenv("SITEOPS_EXTRA_SITES_DIRS", env_val)
+        assert _resolve_extra_sites_dirs(None) == [a]
 
-    def test_cli_wins_over_env(self, tmp_path, capsys):
+    def test_cli_wins_over_env(self, tmp_path, capsys, monkeypatch):
         cli_dir = tmp_path / "cli"
         env_dir = tmp_path / "env"
         cli_dir.mkdir()
         env_dir.mkdir()
-        with patch.dict(
-            os.environ, {"SITEOPS_EXTRA_SITES_DIRS": str(env_dir)}
-        ):
-            result = _resolve_extra_sites_dirs([cli_dir])
+        monkeypatch.setenv("SITEOPS_EXTRA_SITES_DIRS", str(env_dir))
+        result = _resolve_extra_sites_dirs([cli_dir])
         assert result == [cli_dir]
         captured = capsys.readouterr()
         assert "SITEOPS_EXTRA_SITES_DIRS" in captured.err
         assert "ignored" in captured.err
 
-    def test_neither_provided_returns_empty(self):
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("SITEOPS_EXTRA_SITES_DIRS", None)
-            assert _resolve_extra_sites_dirs(None) == []
+    def test_neither_provided_returns_empty(self, monkeypatch):
+        monkeypatch.delenv("SITEOPS_EXTRA_SITES_DIRS", raising=False)
+        assert _resolve_extra_sites_dirs(None) == []

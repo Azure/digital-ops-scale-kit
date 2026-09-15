@@ -26,6 +26,7 @@ from typing import Any, Callable, Iterable, Iterator
 import yaml
 
 from siteops import yamlio
+from siteops.artifacts import ArtifactError
 from siteops.compilation import (
     CompilationFailure,
     CompiledTemplate,
@@ -79,6 +80,7 @@ from siteops.planning import (
     CapabilityKind,
     CapabilityProviderIdentity,
     CapabilityStatus,
+    CompilationBinding,
     CompositionReference,
     CompositionRequirement,
     CompositionResource,
@@ -112,6 +114,7 @@ from siteops.planning import (
     ResourceDisposition,
     ResourceIdentity,
     SkipReasonCode,
+    SubmissionMode,
     TargetKind,
     UnavailableDataReferenceError,
     classify_plan_value,
@@ -144,6 +147,7 @@ from siteops.sanitize import (
     scrub_site_for_output,
     site_name_for_output,
 )
+from siteops.workspace_package import MaterializedPackageBinding
 
 logger = logging.getLogger(__name__)
 
@@ -685,13 +689,14 @@ class Orchestrator:
     """Resolve, validate, plan, and execute manifests across sites.
 
     The orchestrator is responsible for:
-    - Loading and caching sites from the workspace
+    - Loading and caching Sites from the configured Site root
     - Resolving manifest steps, parameter composition, and template variables
     - Executing deployment, kubectl, and wait steps
     - Managing parallel deployment to multiple sites with configurable concurrency
 
     Attributes:
-        workspace: Path to the Site Ops workspace directory
+        workspace: Root for manifests, templates, and parameter libraries
+        site_config_root: Root for Sites and overlays, defaulting to the workspace
         dry_run: If True, commands are logged but not executed
         executor: The AzCliExecutor instance for running commands
     """
@@ -701,10 +706,47 @@ class Orchestrator:
         workspace: Path,
         dry_run: bool = False,
         extra_trusted_sites_dirs: list[Path] | None = None,
+        *,
+        site_config_root: Path | None = None,
+        materialized_package: MaterializedPackageBinding | None = None,
+        executor: AzCliExecutor | None = None,
     ):
         self.workspace = Path(workspace).resolve()
+        self._materialized_package = materialized_package
+        if materialized_package is not None:
+            if self.workspace != materialized_package.workspace:
+                raise ValueError(
+                    "The acquired package binding does not match the "
+                    "orchestrator workspace."
+                )
+            if site_config_root is None:
+                raise ValueError(
+                    "Acquired package execution requires a separate operator "
+                    "Site configuration root."
+                )
+        self.site_config_root = (
+            Path(site_config_root).resolve() if site_config_root is not None else self.workspace
+        )
+        if site_config_root is not None and not self.site_config_root.is_dir():
+            raise FileNotFoundError("The operator Site configuration root was not found.")
+        if materialized_package is not None:
+            try:
+                self.site_config_root.relative_to(
+                    materialized_package.package_root
+                )
+            except ValueError:
+                pass
+            else:
+                raise ValueError(
+                    "Operator Site configuration must stay outside acquired "
+                    "package content."
+                )
         self.dry_run = dry_run
-        self.executor = AzCliExecutor(workspace=self.workspace, dry_run=dry_run)
+        self.executor = (
+            executor
+            if executor is not None
+            else AzCliExecutor(workspace=self.workspace, dry_run=dry_run)
+        )
         self._params_cache: dict[Path, dict[str, Any]] = {}
         self._params_cache_lock = threading.Lock()
         self._composition_cache: dict[
@@ -749,12 +791,67 @@ class Orchestrator:
             extra_trusted_sites_dirs or []
         )
 
+    def _validate_materialized_package(self) -> None:
+        if self._materialized_package is not None:
+            self._materialized_package.validate()
+
+    def _require_manifest_path(self, manifest_path: Path) -> Path:
+        if self._materialized_package is None:
+            return Path(manifest_path)
+        return self._materialized_package.require_manifest(
+            Path(manifest_path)
+        )
+
+    def _guard_manifest_input(self, path: Path) -> Path:
+        if self._materialized_package is None:
+            return path
+        resolved, _ = self._materialized_package.require_workspace_file(path)
+        return resolved
+
+    def _require_bound_manifest_model(
+        self,
+        manifest: Manifest,
+        manifest_path: Path,
+    ) -> None:
+        if self._materialized_package is None:
+            return
+        if manifest.source_path is None:
+            raise ArtifactError(
+                "An acquired manifest model must retain its package source path."
+            )
+        source_path = self._materialized_package.require_manifest(
+            manifest.source_path
+        )
+        if source_path != manifest_path:
+            raise ArtifactError(
+                "The acquired manifest model does not match the selected "
+                "package entry."
+            )
+
+    def _content_file(self, reference: str, *, label: str) -> Path:
+        if self._materialized_package is not None:
+            return self._materialized_package.require_authored_file(
+                reference,
+                label=label,
+            )
+        return (self.workspace / reference).resolve()
+
+    def _deployment_template_paths(
+        self,
+        reference: str,
+    ) -> tuple[Path, Path]:
+        if self._materialized_package is None:
+            source = (self.workspace / reference).resolve()
+            return source, source
+        bound = self._materialized_package.bind_template(reference)
+        return bound.source_path, bound.artifact_path
+
     def _normalize_extra_sites_dirs(self, dirs: list[Path]) -> list[Path]:
         """Validate and deduplicate extra trusted site directories.
 
-        Extra trusted dirs are searched between the workspace's `sites/` and
-        `sites.local/` directories, and receive the same trust level as
-        `sites/`: site files in them are allowed to declare `inherits`.
+        Extra trusted directories are searched after the configuration root's
+        `sites/` directory and before `sites.local/`. They receive the same
+        trust level as `sites/`, so their Site files may declare `inherits`.
 
         Args:
             dirs: Candidate directories to add to the trusted search path.
@@ -764,14 +861,14 @@ class Orchestrator:
 
         Raises:
             FileNotFoundError: If any directory does not exist.
-            ValueError: If a directory collides with the workspace's own
+            ValueError: If a directory collides with the configuration root's
                 `sites/` or `sites.local/`. A `sites.local/` collision
                 is specifically refused because registering it as trusted
                 would let overlays inject inheritance, breaking the overlay
                 security invariant.
         """
-        primary = (self.workspace / "sites").resolve()
-        overlay = (self.workspace / "sites.local").resolve()
+        primary = (self.site_config_root / "sites").resolve()
+        overlay = (self.site_config_root / "sites.local").resolve()
         result: list[Path] = []
         seen: set[Path] = set()
         for candidate in dirs:
@@ -780,6 +877,18 @@ class Orchestrator:
                 raise FileNotFoundError(
                     f"Extra trusted site directory not found: {candidate}"
                 )
+            if self._materialized_package is not None:
+                try:
+                    resolved.relative_to(
+                        self._materialized_package.package_root
+                    )
+                except ValueError:
+                    pass
+                else:
+                    raise ValueError(
+                        "Extra trusted Site directories must stay outside "
+                        "acquired package content."
+                    )
             if resolved == primary:
                 raise ValueError(
                     f"Extra site dir '{candidate}' is the workspace's "
@@ -805,7 +914,7 @@ class Orchestrator:
         Trusted means: `inherits` is honored in files from these dirs.
         Excludes `sites.local/` (overlay, always strips `inherits`).
         """
-        return [self.workspace / "sites", *self._extra_trusted_sites_dirs]
+        return [self.site_config_root / "sites", *self._extra_trusted_sites_dirs]
 
     def _find_trusted_site_file(self, identifier: str) -> Path | None:
         """Return the trusted file path for the named site.
@@ -1149,24 +1258,16 @@ class Orchestrator:
     def _resolve_inherits(self, child_path: Path, inherits_value: str) -> Path:
         """Resolve an `inherits:` reference to an absolute path.
 
-        Resolution order:
-        1. Relative to the child file's directory (default, locality-preserving).
-        2. Narrow fallback: if the relative path does not exist AND
-           `inherits_value` is a bare filename (no path separators), look for
-           it in the workspace's `sites/` directory. This lets a site file
-           in an extra trusted dir reference a workspace-owned template
-           (e.g. `base-site.yaml`) without copying the template or inventing
-           a new syntax. The fallback is intentionally limited to
-           `workspace/sites/`. It does NOT search other extras or
-           `sites.local/`, so there is no cross-extra-dir shared namespace
-           and no way for an overlay to inject a new inheritance target.
+        Resolution starts relative to the child file. If a bare filename is
+        missing there, the resolver checks only the configuration root's
+        `sites/` directory. It does not search other extra directories or
+        `sites.local/`.
 
-        `inherits:` is author-trusted: the value comes from a trusted site
-        file (workspace `sites/` or an operator-vouched extras dir), so the
-        resolver deliberately does NOT sandbox the resolved path to a
-        specific set of filesystem roots. The real control is who may
-        author files in those trusted locations. See the "Trust model"
-        section in docs/site-configuration.md.
+        Files in `sites/` and extra trusted directories may author
+        `inherits:`. The resolved parent is therefore not confined to a fixed
+        set of filesystem roots. The security boundary is who can write those
+        trusted directories. See the "Trust model" section in
+        docs/site-configuration.md.
 
         Args:
             child_path: Absolute path of the file that declares `inherits`.
@@ -1177,8 +1278,7 @@ class Orchestrator:
 
         Raises:
             FileNotFoundError: If the parent cannot be resolved by either
-                strategy. The error lists every path that was probed so
-                the operator can see why fallback did not help.
+                strategy. The error lists every path that was checked.
             ValueError: If the value is not a path.
         """
         # Checked here rather than with the other field types, since this is
@@ -1200,7 +1300,7 @@ class Orchestrator:
             return relative
 
         if "/" not in inherits_value and "\\" not in inherits_value:
-            workspace_candidate = (self.workspace / "sites" / inherits_value).resolve()
+            workspace_candidate = (self.site_config_root / "sites" / inherits_value).resolve()
             if workspace_candidate != relative:
                 tried.append(workspace_candidate)
                 if workspace_candidate.exists():
@@ -1370,7 +1470,7 @@ class Orchestrator:
         """
         site_dirs = [
             *self._trusted_sites_dirs,
-            self.workspace / "sites.local",
+            self.site_config_root / "sites.local",
         ]
 
         merged_data: dict[str, Any] = {}
@@ -1466,15 +1566,15 @@ class Orchestrator:
         return merged_data
 
     def _origin_label(self, path: Path) -> str:
-        """Return a stable workspace-relative label for a source file.
+        """Return a stable configuration-root-relative label for a Site source.
 
         Used by the provenance walk so per-key attribution renders
         identically across machines. Falls back to the absolute path
-        when the file lives outside the workspace (e.g., an extra
+        when the file lives outside the configuration root (e.g., an extra
         trusted dir under a different parent).
         """
         try:
-            return path.resolve().relative_to(self.workspace.resolve()).as_posix()
+            return path.resolve().relative_to(self.site_config_root).as_posix()
         except ValueError:
             return path.as_posix()
 
@@ -1811,6 +1911,8 @@ class Orchestrator:
             Dict of parameters (deep copy from cache)
         """
         path = path.resolve()
+        if self._materialized_package is not None:
+            path, _ = self._materialized_package.require_workspace_file(path)
 
         with self._params_cache_lock:
             if path in self._params_cache:
@@ -2073,19 +2175,28 @@ class Orchestrator:
                 f"Check the value the site selects for a typo, or add the file."
             )
 
-    @staticmethod
     def _kubectl_file_validation_error(
+        self,
         file_path: str,
         workspace: Path,
     ) -> str | None:
         """Validate one known kubectl file path without contacting a cluster."""
-        security_error = Orchestrator._kubectl_file_security_error(
+        security_error = self._kubectl_file_security_error(
             file_path,
             workspace,
         )
         if security_error is not None:
             return security_error
         if HTTPS_URL_PATTERN.match(file_path):
+            return None
+        if self._materialized_package is not None:
+            try:
+                self._materialized_package.require_authored_path(
+                    file_path,
+                    label="Kubectl file",
+                )
+            except ArtifactError as error:
+                return str(error)
             return None
 
         workspace_root = workspace.resolve()
@@ -2094,16 +2205,30 @@ class Orchestrator:
             return f"Kubectl file not found: {file_path}"
         return None
 
-    @staticmethod
     def _kubectl_file_security_error(
+        self,
         file_path: str,
         workspace: Path,
     ) -> str | None:
         """Validate kubectl URL scheme and workspace confinement."""
         if HTTPS_URL_PATTERN.match(file_path):
+            if self._materialized_package is not None:
+                return (
+                    "Acquired package kubectl inputs must be local verified "
+                    "workspace paths, not remote URLs."
+                )
             return None
         if file_path.lower().startswith("http://"):
             return f"HTTP URLs not allowed (use HTTPS): {file_path}"
+        if self._materialized_package is not None:
+            try:
+                self._materialized_package.authored_path(
+                    file_path,
+                    label="Kubectl file",
+                )
+            except ArtifactError as error:
+                return str(error)
+            return None
 
         workspace_root = workspace.resolve()
         resolved = (workspace_root / file_path).resolve()
@@ -2268,7 +2393,12 @@ class Orchestrator:
         if not manifest.parameter_compositions:
             return None
         contracts = [
-            load_contract((self.workspace / path).resolve())
+            load_contract(
+                self._content_file(
+                    path,
+                    label="Parameter composition",
+                )
+            )
             for path in manifest.parameter_compositions
         ]
         return merge_contracts(contracts)
@@ -2326,7 +2456,10 @@ class Orchestrator:
                     site,
                 )
             ):
-                full_path = (self.workspace / resolved_path).resolve()
+                full_path = self._content_file(
+                    resolved_path,
+                    label="Manifest parameter file",
+                )
                 previous = resolved_sources.get(full_path)
                 if previous is not None:
                     previous_path, previous_collections = previous
@@ -2433,7 +2566,10 @@ class Orchestrator:
                 )
                 if "{{" in resolved_path:
                     continue
-                full_path = (self.workspace / resolved_path).resolve()
+                full_path = self._content_file(
+                    resolved_path,
+                    label="Step parameter file",
+                )
                 if not full_path.is_file():
                     continue
                 file_params = self.load_parameters(full_path)
@@ -2536,7 +2672,10 @@ class Orchestrator:
         for param_path in step.parameters:
             resolved_path = manifest.resolve_parameter_path(param_path, site)
             self._require_selected_parameter_file(param_path, resolved_path, site, self.workspace, "Step")
-            full_path = (self.workspace / resolved_path).resolve()
+            full_path = self._content_file(
+                resolved_path,
+                label="Step parameter file",
+            )
             if full_path.exists():
                 file_params = self.load_parameters(full_path)
                 params = self._deep_merge(params, file_params)
@@ -2592,9 +2731,8 @@ class Orchestrator:
                 available_sources[name] = identity
                 outputs[identity] = values
 
-        outcome = TemplateCompilationSession().acquire(
-            (self.workspace / step.template).resolve()
-        )
+        _, template_path = self._deployment_template_paths(step.template)
+        outcome = TemplateCompilationSession().acquire(template_path)
         if isinstance(outcome, CompilationFailure):
             raise ValueError(outcome.detail)
         template_unit = outcome.prepared_unit()
@@ -3085,7 +3223,8 @@ class Orchestrator:
         - Governed collections and composition metadata stay at manifest level
         - Template files exist
         - Parameter files exist and are valid YAML (manifest and step level)
-        - Authored kubectl paths stay in the workspace and URLs use HTTPS
+        - Authored kubectl paths stay in the workspace
+        - Trusted local URLs use HTTPS and acquired remote URLs are rejected
         - Applicable site-resolved kubectl files exist
         - Conditions have valid syntax
         - Required site fields are present
@@ -3102,14 +3241,22 @@ class Orchestrator:
         """
         errors: list[str] = []
 
-        if manifest is None:
-            try:
+        try:
+            self._validate_materialized_package()
+            manifest_path = self._require_manifest_path(manifest_path)
+            if manifest is None:
                 manifest = Manifest.from_file(
                     manifest_path,
                     workspace_root=self.workspace,
+                    input_path_guard=self._guard_manifest_input,
                 )
-            except (ValueError, OSError, yaml.YAMLError) as e:
-                return [f"Failed to parse manifest: {e}"]
+            else:
+                self._require_bound_manifest_model(
+                    manifest,
+                    manifest_path,
+                )
+        except (ValueError, OSError, yaml.YAMLError) as e:
+            return [f"Failed to parse manifest: {e}"]
 
         resolve_targets = sites is None
         try:
@@ -3184,7 +3331,15 @@ class Orchestrator:
                         source_error = True
                         continue
                     for resolved, _ in expanded:
-                        full_path = (self.workspace / resolved).resolve()
+                        try:
+                            full_path = self._content_file(
+                                resolved,
+                                label="Manifest parameter file",
+                            )
+                        except ArtifactError as e:
+                            errors.append(str(e))
+                            source_error = True
+                            continue
                         if not full_path.is_file():
                             errors.append(
                                 "Manifest parameter file not found: "
@@ -3222,7 +3377,14 @@ class Orchestrator:
                     and source.for_each is not None
                 ):
                     continue
-                full_path = (self.workspace / raw_path).resolve()
+                try:
+                    full_path = self._content_file(
+                        raw_path,
+                        label="Manifest parameter file",
+                    )
+                except ArtifactError as e:
+                    errors.append(str(e))
+                    continue
                 if not full_path.exists():
                     errors.append(
                         f"Manifest parameter file not found: {raw_path}"
@@ -3333,7 +3495,13 @@ class Orchestrator:
                                 f"which does not execute before it"
                             )
             else:
-                template_path = (self.workspace / step.template).resolve()
+                try:
+                    template_path, _ = self._deployment_template_paths(
+                        step.template
+                    )
+                except ArtifactError as e:
+                    errors.append(f"{e} (step: {step.name})")
+                    continue
 
                 if not template_path.exists():
                     errors.append(f"Template not found: {step.template}")
@@ -3356,7 +3524,10 @@ class Orchestrator:
                                 continue
                             try:
                                 params = self.load_parameters(
-                                    (self.workspace / resolved).resolve()
+                                    self._content_file(
+                                        resolved,
+                                        label="Step parameter file",
+                                    )
                                 )
                                 errors.extend(
                                     self._validate_output_references(
@@ -3372,7 +3543,14 @@ class Orchestrator:
                                 errors.append(f"Invalid parameter file {resolved}: {e}")
                         continue
 
-                    full_path = (self.workspace / param_path).resolve()
+                    try:
+                        full_path = self._content_file(
+                            param_path,
+                            label="Step parameter file",
+                        )
+                    except ArtifactError as e:
+                        errors.append(f"{e} (step: {step.name})")
+                        continue
                     if not full_path.exists():
                         errors.append(f"Parameter file not found: {param_path} (step: {step.name})")
                     else:
@@ -3716,8 +3894,8 @@ class Orchestrator:
             requirements=requirements,
         )
 
-    @staticmethod
     def _build_plan_step(
+        self,
         step: ManifestStep,
         sequence: int,
     ) -> PlanStep:
@@ -3755,9 +3933,21 @@ class Orchestrator:
         else:
             kind = OperationKind.DEPLOYMENT
             scope = OperationScope(step.scope)
+            effective_template = None
+            template = Path(step.template)
+            if self._materialized_package is not None:
+                bound = self._materialized_package.bind_template(
+                    step.template
+                )
+                template = Path(bound.source_relative_path)
+                if bound.artifact_relative_path != bound.source_relative_path:
+                    effective_template = Path(
+                        bound.artifact_relative_path
+                    )
             details = DeploymentOperation(
-                template=Path(step.template),
+                template=template,
                 input_status=InputStatus.DESCRIBED,
+                effective_template=effective_template,
             )
         return PlanStep(
             name=step.name,
@@ -3834,7 +4024,9 @@ class Orchestrator:
                     "unit."
                 )
             params = self._merge_known_parameters(step, site, manifest)
-            template_path = (self.workspace / step.template).resolve()
+            template_path, effective_template = (
+                self._deployment_template_paths(step.template)
+            )
             accepted_parameters = template_unit.parameter_names
             filtered: dict[Any, Any] = {}
             unused: list[Any] = []
@@ -3882,6 +4074,11 @@ class Orchestrator:
                 DeploymentOperation(
                     template=template_path,
                     input_status=InputStatus.PREPARED,
+                    effective_template=(
+                        effective_template
+                        if effective_template != template_path
+                        else None
+                    ),
                     parameters=classified,
                     template_unit_key=template_unit.key,
                 ),
@@ -4213,7 +4410,9 @@ class Orchestrator:
                 ):
                     continue
                 try:
-                    template_kind = detect_template_kind(details.template)
+                    template_kind = detect_template_kind(
+                        details.submission_template
+                    )
                 except ValueError:
                     template_kind = None
                 if (
@@ -4225,9 +4424,16 @@ class Orchestrator:
                     and template_kind is TemplateKind.BICEP
                 ):
                     continue
-                template_path = (
-                    self.workspace / details.template
-                ).resolve()
+                if self._materialized_package is not None:
+                    template_path = (
+                        self._materialized_package.bind_template(
+                            details.template.as_posix()
+                        ).artifact_path
+                    )
+                else:
+                    template_path = (
+                        self.workspace / details.submission_template
+                    ).resolve()
                 outcome = session.acquire(template_path)
                 if isinstance(outcome, CompiledTemplate):
                     unit = outcome.prepared_unit()
@@ -4334,6 +4540,23 @@ class Orchestrator:
 
         return validated, diagnostics
 
+    def _bind_deployment_unit(
+        self,
+        details: DeploymentOperation,
+        unit: PreparedTemplateUnit,
+    ) -> DeploymentOperation:
+        if self._materialized_package is not None:
+            return replace(
+                details,
+                effective_template=unit.identity.source.path,
+                template_unit_key=unit.key,
+            )
+        return replace(
+            details,
+            template=unit.identity.source.path,
+            template_unit_key=unit.key,
+        )
+
     def _prepare_plan_targets(
         self,
         manifest: Manifest,
@@ -4400,10 +4623,9 @@ class Orchestrator:
                         isinstance(details, DeploymentOperation)
                         and isinstance(unit, PreparedTemplateUnit)
                     ):
-                        details = replace(
+                        details = self._bind_deployment_unit(
                             details,
-                            template=unit.identity.source.path,
-                            template_unit_key=unit.key,
+                            unit,
                         )
                     blocked = replace(
                         operation,
@@ -4501,10 +4723,9 @@ class Orchestrator:
                         isinstance(blocked_details, DeploymentOperation)
                         and template_unit is not None
                     ):
-                        blocked_details = replace(
+                        blocked_details = self._bind_deployment_unit(
                             blocked_details,
-                            template=template_unit.identity.source.path,
-                            template_unit_key=template_unit.key,
+                            template_unit,
                         )
                     prepared = replace(
                         operation,
@@ -4560,10 +4781,9 @@ class Orchestrator:
                         isinstance(blocked_details, DeploymentOperation)
                         and template_unit is not None
                     ):
-                        blocked_details = replace(
+                        blocked_details = self._bind_deployment_unit(
                             blocked_details,
-                            template=template_unit.identity.source.path,
-                            template_unit_key=template_unit.key,
+                            template_unit,
                         )
                     prepared = replace(
                         operation,
@@ -4628,10 +4848,18 @@ class Orchestrator:
         additionally acquires template schemas and local capabilities.
         """
         try:
+            self._validate_materialized_package()
+            manifest_path = self._require_manifest_path(manifest_path)
             if manifest is None:
                 manifest = Manifest.from_file(
                     manifest_path,
                     workspace_root=self.workspace,
+                    input_path_guard=self._guard_manifest_input,
+                )
+            else:
+                self._require_bound_manifest_model(
+                    manifest,
+                    manifest_path,
                 )
             if sites is None:
                 sites = self.resolve_sites(manifest, selector)
@@ -4876,6 +5104,16 @@ class Orchestrator:
             targets=tuple(targets),
             template_units=template_units,
             capabilities=capabilities,
+            submission_mode=(
+                SubmissionMode.ARM_JSON
+                if self._materialized_package is not None
+                else SubmissionMode.SOURCE
+            ),
+            compilation_binding=(
+                CompilationBinding.PACKAGE_ARTIFACT
+                if self._materialized_package is not None
+                else CompilationBinding.OBSERVED_NOT_ENFORCED
+            ),
             cli_selector=selector,
             manifest_selector=manifest.site_selector,
             composition_enabled=bool(manifest.parameter_compositions),
@@ -5068,7 +5306,23 @@ class Orchestrator:
                     template_unit,
                     parameters,
                 )
-            template_path = template_unit.identity.source.path
+            if self._materialized_package is not None:
+                bound = self._materialized_package.bind_template_path(
+                    details.template
+                )
+                if (
+                    bound.artifact_path
+                    != template_unit.identity.source.path
+                    or bound.mapping.artifact_sha256
+                    != template_unit.identity.source.content_digest
+                ):
+                    raise ValueError(
+                        "The deployment template no longer matches its "
+                        "acquired package artifact."
+                    )
+                template_path = bound.artifact_path
+            else:
+                template_path = template_unit.identity.source.path
             deployment_name = self._prepared_deployment_name(
                 plan.manifest_name,
                 target.name,
@@ -5139,6 +5393,25 @@ class Orchestrator:
                 )
                 for file_value in details.files
             ]
+            if self._materialized_package is not None:
+                for file_path in files:
+                    if (
+                        execution_mode is PlanExecutionMode.PREVIEW
+                        and _carries_template(file_path)
+                    ):
+                        continue
+                    error = self._kubectl_file_validation_error(
+                        file_path,
+                        self.workspace,
+                    )
+                    if error is not None:
+                        raise PlanValueResolutionError(
+                            detail=error,
+                            public_message=(
+                                "A resolved kubectl input is not part of the "
+                                "acquired package."
+                            ),
+                        )
             if details.operation == "apply":
                 return self.executor.kubectl_apply(
                     cluster_name=cluster_name,
@@ -5749,6 +6022,54 @@ class Orchestrator:
             kubectl=kubectl,
         )
 
+    def _validate_materialized_plan(self, plan: DeploymentPlan) -> None:
+        if self._materialized_package is None:
+            if (
+                plan.compilation_binding
+                is CompilationBinding.PACKAGE_ARTIFACT
+            ):
+                raise ValueError(
+                    "Package-bound plans require their original materialized "
+                    "package binding."
+                )
+            return
+        self._materialized_package.validate()
+        self._materialized_package.require_manifest(plan.source_path)
+        if (
+            plan.submission_mode is not SubmissionMode.ARM_JSON
+            or plan.compilation_binding
+            is not CompilationBinding.PACKAGE_ARTIFACT
+        ):
+            raise ValueError(
+                "The prepared plan does not carry the acquired package "
+                "execution binding."
+            )
+        for target in plan.targets:
+            for operation in target.operations:
+                details = operation.details
+                if (
+                    not isinstance(details, DeploymentOperation)
+                    or details.template_unit_key is None
+                ):
+                    continue
+                bound = self._materialized_package.bind_template_path(
+                    details.template
+                )
+                unit = plan.template_unit(details.template_unit_key)
+                if (
+                    details.submission_template.resolve()
+                    != bound.artifact_path
+                    or unit.identity.source.path != bound.artifact_path
+                    or unit.identity.source.content_digest
+                    != bound.mapping.artifact_sha256
+                    or unit.identity.source.size_bytes
+                    != bound.mapping.artifact_size
+                ):
+                    raise ValueError(
+                        "A prepared deployment does not match its acquired "
+                        "package artifact."
+                    )
+
     def execute_plan(
         self,
         result: PlanBuildResult,
@@ -5764,6 +6085,7 @@ class Orchestrator:
         progress_owner = _ProgressOwner(progress)
         stop_requested = stop_requested if stop_requested is not None else threading.Event()
         try:
+            self._validate_materialized_plan(plan)
             self._bind_plan_capabilities(plan)
             if not plan.targets:
                 return RunResult.from_sites((), elapsed=0.0)

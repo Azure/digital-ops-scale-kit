@@ -64,6 +64,9 @@ operator guide. The workspace's optional `content.yaml` names extra discovery
 paths rather than repeating entry descriptions. Generated indexes are
 publication artifacts, not another authored source or an executable package.
 See [browsing](browse-content.md) and [remote indexes](remote-content.md).
+The [workspace package producer](workspace-packages.md) keeps complete
+content artifacts separate from those descriptive indexes and from the
+engine installation bundle.
 
 ## Choose the owning layer
 
@@ -89,6 +92,23 @@ matching committed site but cannot add `inherits:`.
 Site inspection and local-private plans contain target identities and
 configuration detail. Keep them in authorized destinations. Use explicit
 publishable projections for CI artifacts and summaries.
+
+### Separate content and Site configuration
+
+Internal acquisition callers can bind an operator Site configuration root
+independently of deployment content. Its primary `sites/`, `sites.local/`,
+inheritance fallback and Site provenance labels then use that configuration
+root. Manifests, templates and parameter libraries remain under the content
+workspace.
+
+Extra trusted Site directories augment the selected configuration root.
+They are not a substitute for separating operator targets from packaged
+examples. An empty operator root does not fall back to content-owned Sites.
+The caller owns this root selection, not the package's metadata.
+
+Ordinary local CLI commands retain their existing single-workspace behavior.
+This separate-root boundary does not introduce a new CLI flag or a public
+Python SDK.
 
 ## Contributor route
 

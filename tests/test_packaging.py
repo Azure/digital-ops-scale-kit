@@ -93,6 +93,12 @@ def test_wheel_preserves_metadata_and_entry_point(built_wheel):
     assert metadata["Version"] == __version__
     assert metadata["Requires-Python"] == ">=3.10"
     assert metadata["License-Expression"] == "MIT"
+    runtime = {
+        Requirement(value).name.lower()
+        for value in metadata.get_all("Requires-Dist", [])
+        if Requirement(value).marker is None
+    }
+    assert runtime == {"pyyaml", "packaging"}
     assert entry_points["console_scripts"]["siteops"] == "siteops.cli:main"
 
 
@@ -105,3 +111,13 @@ def test_wheel_retains_both_license_notices(built_wheel):
         }
         for name in ("LICENSE", "ThirdPartyNotices.txt"):
             assert wheel.read(prefix + "licenses/" + name) == (ROOT / name).read_bytes()
+
+
+def test_third_party_license_blocks_remain_contiguous():
+    text = (ROOT / "ThirdPartyNotices.txt").read_text(encoding="utf-8")
+    pyyaml, packaging = text.split("License notice for packaging,", 1)
+    assert "Permission is hereby granted" in pyyaml
+    assert 'THE SOFTWARE IS PROVIDED "AS IS"' in pyyaml
+    assert "CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE." in pyyaml
+    assert "Copyright (c) Donald Stufft" in packaging
+    assert "THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS" in packaging

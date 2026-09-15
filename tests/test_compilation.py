@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from siteops.compilation import (
+    BicepCompilationOptions,
     BicepConfigurationIdentity,
     CompilationFailure,
     CompilationFailureCode,
@@ -159,6 +160,29 @@ def test_configuration_discovery_records_explicit_absence(tmp_path):
         discovery=ConfigurationDiscovery.NONE_FOUND,
     )
     assert snapshot.content is None
+
+
+def test_configuration_discovery_stops_at_controlled_producer_default(tmp_path):
+    fallback = tmp_path / "bicepconfig.json"
+    fallback.write_text("{}\n", encoding="utf-8")
+    source = tmp_path / "source" / "templates" / "main.bicep"
+    source.parent.mkdir(parents=True)
+    source.write_text("", encoding="utf-8")
+
+    snapshot = discover_bicep_configuration(
+        source,
+        configuration_root=tmp_path,
+        producer_default_configuration=fallback,
+    )
+
+    assert (
+        snapshot.identity.discovery
+        is ConfigurationDiscovery.PRODUCER_DEFAULT
+    )
+    assert snapshot.identity.path == fallback.resolve()
+    assert snapshot.identity.content_digest == hashlib.sha256(
+        fallback.read_bytes()
+    ).hexdigest()
 
 
 def test_template_parameter_schema_is_sorted_and_typed():
@@ -793,6 +817,124 @@ def test_bicep_unit_compiles_once_per_session(tmp_path):
     assert compiler.compile_count == 1
     assert first.identity.compiler is not None
     assert first.identity.compiler.version == "0.45.15 (commit)"
+
+
+def test_controlled_producer_requires_version_and_disables_restore(tmp_path):
+    control_root = tmp_path / "control"
+    source = control_root / "source" / "main.bicep"
+    source.parent.mkdir(parents=True)
+    source.write_text("param name string\n", encoding="utf-8")
+    fallback = control_root / "bicepconfig.json"
+    fallback.write_text("{}\n", encoding="utf-8")
+    bicep = control_root / "bin" / "bicep.exe"
+    bicep.parent.mkdir()
+    bicep.write_bytes(b"fixture")
+    compiler = FakeCompiler()
+    options = BicepCompilationOptions.controlled_producer(
+        environment={"PATH": str(bicep.parent)},
+        configuration_root=control_root,
+        producer_default_configuration=fallback,
+        bicep_executable_path=bicep,
+    )
+    session = TemplateCompilationSession(
+        command_runner=compiler,
+        tool_resolver=lambda name: _tool_path(tmp_path, name),
+        bicep_options=options,
+    )
+
+    result = session.acquire(source)
+
+    assert isinstance(result, CompiledTemplate)
+    assert result.key.invocation == (
+        "az",
+        "bicep",
+        "build",
+        "--no-restore",
+    )
+    assert result.identity.compiler is not None
+    assert result.identity.compiler.resolved_path == bicep.resolve()
+    assert result.identity.configuration is not None
+    assert (
+        result.identity.configuration.discovery
+        is ConfigurationDiscovery.PRODUCER_DEFAULT
+    )
+    build = next(argv for argv in compiler.calls if argv[1:3] == ("bicep", "build"))
+    assert build[3] == "--no-restore"
+
+
+def test_controlled_producer_stops_when_version_evidence_is_unknown(tmp_path):
+    control_root = tmp_path / "control"
+    source = control_root / "source" / "main.bicep"
+    source.parent.mkdir(parents=True)
+    source.write_text("param name string\n", encoding="utf-8")
+    fallback = control_root / "bicepconfig.json"
+    fallback.write_text("{}\n", encoding="utf-8")
+    bicep = control_root / "bin" / "bicep.exe"
+    bicep.parent.mkdir()
+    bicep.write_bytes(b"fixture")
+    compiler = FakeCompiler()
+    compiler.bicep_version_result = subprocess.CompletedProcess(
+        ("az", "bicep", "version"),
+        0,
+        stdout="unexpected",
+        stderr="",
+    )
+    session = TemplateCompilationSession(
+        command_runner=compiler,
+        tool_resolver=lambda name: _tool_path(tmp_path, name),
+        bicep_options=BicepCompilationOptions.controlled_producer(
+            environment={"PATH": str(bicep.parent)},
+            configuration_root=control_root,
+            producer_default_configuration=fallback,
+            bicep_executable_path=bicep,
+        ),
+    )
+
+    result = session.acquire(source)
+
+    assert isinstance(result, CompilationFailure)
+    assert result.code is CompilationFailureCode.TOOL_UNAVAILABLE
+    assert compiler.compile_count == 0
+
+
+def test_controlled_producer_requires_azure_cli_version(tmp_path):
+    control_root = tmp_path / "control"
+    source = control_root / "source" / "main.bicep"
+    source.parent.mkdir(parents=True)
+    source.write_text("param name string\n", encoding="utf-8")
+    fallback = control_root / "bicepconfig.json"
+    fallback.write_text("{}\n", encoding="utf-8")
+    bicep = control_root / "bin" / "bicep.exe"
+    bicep.parent.mkdir()
+    bicep.write_bytes(b"fixture")
+    compiler = FakeCompiler()
+
+    def unknown_azure_cli(argv, timeout):
+        if argv[1:] == ("version", "--output", "json"):
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout="{}",
+                stderr="",
+            )
+        return compiler(argv, timeout)
+
+    session = TemplateCompilationSession(
+        command_runner=unknown_azure_cli,
+        tool_resolver=lambda name: _tool_path(tmp_path, name),
+        bicep_options=BicepCompilationOptions.controlled_producer(
+            environment={"PATH": str(bicep.parent)},
+            configuration_root=control_root,
+            producer_default_configuration=fallback,
+            bicep_executable_path=bicep,
+        ),
+    )
+
+    result = session.acquire(source)
+
+    assert isinstance(result, CompilationFailure)
+    assert result.code is CompilationFailureCode.TOOL_UNAVAILABLE
+    assert compiler.calls == []
 
 
 def test_compiled_template_produces_plan_safe_unit_without_arm_bytes(tmp_path):

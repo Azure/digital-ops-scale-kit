@@ -34,6 +34,9 @@ Start with the changes that affect your workflow:
 | If you... | What to change |
 |---|---|
 | Reference shipped workspace paths | Update [entry and resource-set paths](#workspace-content-paths). |
+| Select a manifest by a bare filename | Review [name and path selection](#manifest-names-and-paths). |
+| Use Windows batch-based tools | Review [literal tool arguments](#windows-tool-arguments). |
+| Produce workspace packages | Use canonical `bicepconfig.json` filenames and committed source bytes as described in [workspace packages](workspace-packages.md). |
 | Use `sites --render` | Replace it with [`--output yaml`](#inspect-sites). |
 | Preview a deployment | Use [`siteops plan`](#plan-and-validate). |
 | Author manifests or parameters | Review the [preparation checks](#preparation-checks). |
@@ -68,6 +71,42 @@ Sample entry paths and sample-local declarations retain their locations.
 There are no forwarding manifests at the old paths. An old command reports
 `Manifest not found`. Select the corresponding current path and review the
 plan before deploying. A file move does not delete or recreate Azure resources.
+
+### Manifest names and paths
+
+Use an exact name with `browse`, `validate`, `plan` or `deploy`, such as
+`siteops -w workspaces/iot-operations plan aio-install`.
+Names refer to the selected workspace's discoverable manifests.
+
+Bare filenames now participate in name lookup too, including `.yaml` and
+extensionless filenames. If a name and filename identify different files,
+the command reports `Manifest selection is ambiguous`. Select one of its
+explicit paths. With an incomplete inventory, it reports
+`Name lookup requires a complete inventory`.
+
+Prefix a filename with `./` to retain direct file selection, for example
+`plan ./install.yaml` or `plan ./install`. Relative paths containing a
+directory and absolute local execution paths retain their existing meaning.
+Browsing remains confined to inspectable paths inside its selected workspace.
+
+### Windows tool arguments
+
+Site Ops passes arguments to Windows `.cmd` and `.bat` launchers as literal
+quoted values, with AutoRun and delayed expansion disabled. Paths containing
+ampersands or parentheses remain one argument.
+
+Batch launchers report
+`Windows batch launchers require arguments without percent signs, double quotes or control characters`
+when an argument cannot be passed literally. An oversized invocation reports
+`The Windows batch command exceeds its supported length.` Both failures occur
+before process creation. Use a native executable where available, shorten the
+invocation, or change the selected path or input. These constraints apply to
+command arguments, including content, cache and temporary paths passed to
+tools. Values inside parameter JSON files are unaffected.
+
+For an immutable package with an unsupported path, select a corrected package
+rather than editing cached content. Native `.exe` and Linux process argument
+vectors retain their existing behavior.
 
 ### Inspect sites
 

@@ -1,0 +1,7 @@
+apiVersion: siteops/v1
+kind: Manifest
+name: compiled-package-example
+steps:
+  - name: example
+    template: templates/main.bicep
+    scope: resourceGroup

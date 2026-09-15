@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from siteops import __version__
+from siteops.process_args import prepare_process_args
 from siteops.runtime import (
     RuntimePathError,
     RuntimePaths,
@@ -599,7 +600,7 @@ def _probe_arc_proxy_ready(
         run_timeout = max(1.0, min(10.0, remaining))
         try:
             result = subprocess.run(
-                cmd,
+                prepare_process_args(cmd),
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -922,7 +923,7 @@ class AzCliExecutor:
             # subprocess's reader thread, which surfaces as `stdout=None` rather
             # than as an error.
             result = subprocess.run(
-                cmd,
+                prepare_process_args(cmd),
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -972,7 +973,7 @@ class AzCliExecutor:
 
         try:
             result = subprocess.run(
-                cmd,
+                prepare_process_args(cmd),
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -1097,7 +1098,7 @@ class AzCliExecutor:
                 if os.name == "nt":
                     # Windows: use CREATE_NEW_PROCESS_GROUP for signal handling
                     proxy_process = subprocess.Popen(
-                        cmd,
+                        prepare_process_args(cmd),
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                         text=True,
@@ -1108,7 +1109,7 @@ class AzCliExecutor:
                 else:
                     # Unix: use setsid to create new process group
                     proxy_process = subprocess.Popen(
-                        cmd,
+                        prepare_process_args(cmd),
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                         text=True,

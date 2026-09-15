@@ -128,6 +128,56 @@ def test_ambiguous_names_require_paths(tmp_path):
     assert selected.selected
 
 
+@pytest.mark.parametrize("command", [("browse",), ("validate",), ("plan", "--describe"), ("deploy",)])
+@pytest.mark.parametrize("token", ["choice", "choice.yaml"])
+def test_name_filename_ambiguity_has_the_same_paths_across_commands(
+    tmp_path, monkeypatch, capsys, command, token,
+):
+    _entry(tmp_path, token, relative="manifests/named/manifest.yaml")
+    _entry(tmp_path, "file-choice", relative=token, metadata=False)
+    def blocked(*args, **kwargs):
+        pytest.fail("Prepared an ambiguous selection")
+
+    monkeypatch.setattr(cli, "Orchestrator", lambda **k: SimpleNamespace(
+        build_plan=blocked, deploy=blocked, validate=blocked,
+    ))
+    code, out, err = _cli(monkeypatch, capsys, tmp_path, *command, token)
+    assert code == 1
+    assert "ambiguous" in (out + err).lower()
+    assert "manifests/named/manifest.yaml" in out + err
+    assert "./" + token in out + err
+    result = inspect_content(tmp_path, "./" + token)
+    assert result.selected and result.entries[0].name == "file-choice"
+
+
+def test_name_with_yaml_suffix_is_not_forced_to_be_a_filename(tmp_path):
+    _entry(tmp_path, "example.yaml")
+    result = inspect_content(tmp_path, "example.yaml")
+    assert result.selected
+    assert result.entries[0].path == "manifests/example.yaml/manifest.yaml"
+    assert result.entries[0].name_ambiguous is False
+
+
+def test_root_manifest_suggestions_use_unambiguous_path_syntax(tmp_path):
+    _entry(tmp_path, "example.yaml", relative="example.yaml")
+    _entry(tmp_path, "example.yaml", relative="manifests/other/manifest.yaml")
+    result = inspect_content(tmp_path, "./example.yaml")
+    output = render_browse_plain(result)
+    assert "plan './example.yaml'" in output or "plan ./example.yaml" in output
+    assert "deploy './example.yaml'" in output or "deploy ./example.yaml" in output
+
+
+def test_bare_filename_requires_complete_names_but_explicit_path_does_not(tmp_path):
+    _entry(tmp_path, "local", relative="local.yaml", metadata=False)
+    directory = tmp_path / "manifests"
+    directory.mkdir()
+    (directory / "broken.yaml").write_text("name: [", encoding="utf-8")
+    result = inspect_content(tmp_path, "local.yaml")
+    assert not result.selected
+    assert result.diagnostics[-1].code == "lookup.incomplete"
+    assert inspect_content(tmp_path, "./local.yaml").selected
+
+
 def test_incomplete_inventory_cannot_prove_name_uniqueness(tmp_path):
     path = _entry(tmp_path)
     broken = tmp_path / "manifests" / "broken.yaml"
@@ -521,7 +571,8 @@ def test_empty_inventory_and_invalid_option_combinations(tmp_path):
         inspect_content(tmp_path / "missing")
 
 
-def test_non_aio_browse_plan_deploy_uses_configured_site(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("by_name", [False, True])
+def test_non_aio_browse_plan_deploy_uses_configured_site(tmp_path, monkeypatch, capsys, by_name):
     source = Path(__file__).parent / "fixtures" / "browse-workspace"
     workspace = tmp_path / "materialized"
     shutil.copytree(source, workspace)
@@ -559,18 +610,42 @@ def test_non_aio_browse_plan_deploy_uses_configured_site(tmp_path, monkeypatch, 
     assert code == 0
     inspection = json.loads(out)
     assert "configuredstorage" not in out
-    path = inspection["entries"][0]["path"]
+    path = "storage" if by_name else inspection["entries"][0]["path"]
     assert inspection["source"]["verification"] == "not-performed"
+    inventories = []
+    original_inventory = browse.ContentReader.inventory
+
+    def inventory(reader):
+        inventories.append(reader.workspace)
+        return original_inventory(reader)
+
+    monkeypatch.setattr(browse.ContentReader, "inventory", inventory)
+    code, out, _ = _cli(monkeypatch, capsys, workspace, "validate", path)
+    assert code == 0
+    assert len(inventories) == int(by_name)
+    inventories.clear()
     code, out, _ = _cli(
         monkeypatch, capsys, workspace, "plan", path, "-l", "name=example", "--output", "json"
     )
     assert code == 0 and json.loads(out)["status"] == "planned"
     assert "configuredstorage" not in out
     assert not submissions
+    assert len(inventories) == int(by_name)
+    for command, option in (("validate", "--plan"), ("deploy", "--dry-run")):
+        inventories.clear()
+        code, out, _ = _cli(
+            monkeypatch, capsys, workspace, command, path, option,
+            "-l", "name=example", "--output", "json",
+        )
+        assert code == 0 and json.loads(out)["status"] == "planned"
+        assert not submissions
+        assert len(inventories) == int(by_name)
+    inventories.clear()
     code, out, _ = _cli(
         monkeypatch, capsys, workspace, "deploy", path, "-l", "name=example", "--output", "json"
     )
     assert code == 0 and json.loads(out)["status"] == "succeeded"
+    assert len(inventories) == int(by_name)
     assert len(submissions) == 1
     assert submissions[0]["resource_group"] == "configured-group"
     assert submissions[0]["parameters"]["storageAccountName"] == "configuredstorage"

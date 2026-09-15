@@ -11,11 +11,13 @@ import os
 import re
 import subprocess
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, TypeAlias
 
+from siteops.process_args import prepare_process_args
 from siteops.runtime import RuntimePathError, RuntimePaths, prepare_root
 
 DEFAULT_COMPILATION_TIMEOUT_SECONDS = 300
@@ -123,6 +125,7 @@ class ConfigurationDiscovery(str, Enum):
 
     NEAREST_FOUND = "nearest-found"
     NONE_FOUND = "none-found"
+    PRODUCER_DEFAULT = "producer-default"
 
 
 class DependencyCoverage(str, Enum):
@@ -220,7 +223,10 @@ class BicepConfigurationIdentity:
     discovery: ConfigurationDiscovery
 
     def __post_init__(self) -> None:
-        if self.discovery is ConfigurationDiscovery.NEAREST_FOUND:
+        if self.discovery in {
+            ConfigurationDiscovery.NEAREST_FOUND,
+            ConfigurationDiscovery.PRODUCER_DEFAULT,
+        }:
             if self.path is None or self.content_digest is None:
                 raise ValueError(
                     "A discovered Bicep configuration requires path and "
@@ -246,12 +252,96 @@ class ConfigurationSnapshot:
 
     def __post_init__(self) -> None:
         if (
-            self.identity.discovery
-            is ConfigurationDiscovery.NEAREST_FOUND
+            self.identity.discovery is not ConfigurationDiscovery.NONE_FOUND
         ) != (self.content is not None):
             raise ValueError(
                 "Bicep configuration content must match its discovery state."
             )
+
+
+@dataclass(frozen=True)
+class BicepCompilationOptions:
+    """Bicep process controls that preserve local defaults unless selected."""
+
+    no_restore: bool = False
+    require_known_version: bool = False
+    environment: tuple[tuple[str, str], ...] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    configuration_root: Path | None = None
+    producer_default_configuration: Path | None = None
+    bicep_executable_path: Path | None = None
+
+    def __post_init__(self) -> None:
+        if self.environment is not None:
+            environment = tuple(self.environment)
+            if len(environment) != len({key for key, _ in environment}):
+                raise ValueError("Compilation environment keys must be unique.")
+            if any(
+                not isinstance(key, str)
+                or not key
+                or not isinstance(value, str)
+                for key, value in environment
+            ):
+                raise ValueError("Compilation environment entries must be strings.")
+            object.__setattr__(self, "environment", environment)
+
+        for field_name in (
+            "configuration_root",
+            "producer_default_configuration",
+            "bicep_executable_path",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(self, field_name, Path(value).resolve())
+
+        if self.producer_default_configuration is not None:
+            if self.configuration_root is None:
+                raise ValueError(
+                    "A producer default configuration requires a configuration root."
+                )
+            try:
+                self.producer_default_configuration.relative_to(
+                    self.configuration_root
+                )
+            except ValueError:
+                raise ValueError(
+                    "The producer default configuration must be inside its "
+                    "configuration root."
+                ) from None
+
+    @classmethod
+    def controlled_producer(
+        cls,
+        *,
+        environment: Mapping[str, str],
+        configuration_root: Path,
+        producer_default_configuration: Path,
+        bicep_executable_path: Path,
+    ) -> BicepCompilationOptions:
+        """Require a provisioned compiler, isolated paths and no restoration."""
+        return cls(
+            no_restore=True,
+            require_known_version=True,
+            environment=tuple(sorted(environment.items())),
+            configuration_root=configuration_root,
+            producer_default_configuration=producer_default_configuration,
+            bicep_executable_path=bicep_executable_path,
+        )
+
+    @property
+    def is_controlled_producer(self) -> bool:
+        """Return whether all producer confinement controls are explicit."""
+        return (
+            self.no_restore
+            and self.require_known_version
+            and self.environment is not None
+            and self.configuration_root is not None
+            and self.producer_default_configuration is not None
+            and self.bicep_executable_path is not None
+        )
 
 
 @dataclass(frozen=True)
@@ -481,10 +571,33 @@ def read_source_snapshot(path: Path) -> SourceSnapshot:
     )
 
 
-def discover_bicep_configuration(source_path: Path) -> ConfigurationSnapshot:
+def discover_bicep_configuration(
+    source_path: Path,
+    *,
+    configuration_root: Path | None = None,
+    producer_default_configuration: Path | None = None,
+) -> ConfigurationSnapshot:
     """Find the nearest ancestor `bicepconfig.json` for an entry file."""
     resolved = source_path.resolve()
+    root = configuration_root.resolve() if configuration_root is not None else None
+    if root is not None:
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            raise OSError("Template source is outside the configuration root.") from None
+    default = (
+        producer_default_configuration.resolve()
+        if producer_default_configuration is not None
+        else None
+    )
+    directories = []
     for directory in (resolved.parent, *resolved.parent.parents):
+        directories.append(directory)
+        if root is not None and directory == root:
+            break
+    if root is not None and (not directories or directories[-1] != root):
+        raise OSError("Template source is outside the configuration root.")
+    for directory in directories:
         candidate = directory / "bicepconfig.json"
         if not candidate.is_file():
             continue
@@ -493,7 +606,11 @@ def discover_bicep_configuration(source_path: Path) -> ConfigurationSnapshot:
             identity=BicepConfigurationIdentity(
                 path=candidate,
                 content_digest=sha256_bytes(content),
-                discovery=ConfigurationDiscovery.NEAREST_FOUND,
+                discovery=(
+                    ConfigurationDiscovery.PRODUCER_DEFAULT
+                    if default is not None and candidate.resolve() == default
+                    else ConfigurationDiscovery.NEAREST_FOUND
+                ),
             ),
             content=content,
         )
@@ -739,14 +856,16 @@ def arm_json_dependency_identity(arm_json: Any) -> DependencyIdentity:
 def _run_command(
     argv: tuple[str, ...],
     timeout: int,
+    environment: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        argv,
+        prepare_process_args(argv),
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
         timeout=timeout,
+        env=None if environment is None else dict(environment),
     )
 
 
@@ -756,16 +875,18 @@ class TemplateCompilationSession:
     def __init__(
         self,
         *,
-        command_runner: CommandRunner = _run_command,
+        command_runner: CommandRunner | None = None,
         tool_resolver: ToolResolver = resolve_tool_from_path,
         timeout_seconds: int = DEFAULT_COMPILATION_TIMEOUT_SECONDS,
         runtime_paths: RuntimePaths | None = None,
+        bicep_options: BicepCompilationOptions | None = None,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("Compilation timeout must be positive.")
         self._command_runner = command_runner
         self._tool_resolver = tool_resolver
         self._timeout_seconds = timeout_seconds
+        self._bicep_options = bicep_options or BicepCompilationOptions()
         # Engine-owned roots. Resolved on the first compiler allocation, so
         # constructing a session, resolving a tool, or acquiring an ARM JSON
         # template creates no directory and reads no environment.
@@ -781,6 +902,11 @@ class TemplateCompilationSession:
             str,
         ] | CompilationFailure | None = None
         self._kubectl: ToolIdentity | CompilationFailure | None = None
+
+    @property
+    def bicep_options(self) -> BicepCompilationOptions:
+        """Return the explicit Bicep process controls for this session."""
+        return self._bicep_options
 
     @property
     def outcomes(self) -> tuple[CompilationOutcome, ...]:
@@ -840,7 +966,13 @@ class TemplateCompilationSession:
         configuration = self._configurations.get(resolved)
         try:
             if configuration is None:
-                configuration = discover_bicep_configuration(resolved)
+                configuration = discover_bicep_configuration(
+                    resolved,
+                    configuration_root=self._bicep_options.configuration_root,
+                    producer_default_configuration=(
+                        self._bicep_options.producer_default_configuration
+                    ),
+                )
                 self._configurations[resolved] = configuration
         except OSError as error:
             failure = CompilationFailure(
@@ -865,7 +997,7 @@ class TemplateCompilationSession:
                     configuration.identity.content_digest
                     or _NO_CONFIGURATION_DIGEST
                 ),
-                invocation=("az", "bicep", "build"),
+                invocation=self._bicep_invocation(),
             )
             cached = self._outcomes.get(key)
             if cached is not None:
@@ -889,7 +1021,7 @@ class TemplateCompilationSession:
                 configuration.identity.content_digest
                 or _NO_CONFIGURATION_DIGEST
             ),
-            invocation=("az", "bicep", "build"),
+            invocation=self._bicep_invocation(),
         )
         cached = self._outcomes.get(key)
         if cached is not None:
@@ -917,11 +1049,58 @@ class TemplateCompilationSession:
         if isinstance(azure_cli, CompilationFailure):
             self._bicep_toolchain = azure_cli
             return azure_cli
+        if (
+            self._bicep_options.require_known_version
+            and azure_cli.version is None
+        ):
+            self._bicep_toolchain = CompilationFailure(
+                code=CompilationFailureCode.TOOL_UNAVAILABLE,
+                summary="The Azure CLI compiler driver is unavailable.",
+                detail=(
+                    "`az version` must report the Azure CLI version before "
+                    "controlled package compilation."
+                ),
+            )
+            return self._bicep_toolchain
         resolved_az = azure_cli.resolved_path
-        bicep_version = self._probe_bicep_version(str(resolved_az))
+        bicep_available, bicep_version = self._probe_bicep_version(
+            str(resolved_az)
+        )
+        if self._bicep_options.require_known_version and (
+            not bicep_available or bicep_version is None
+        ):
+            self._bicep_toolchain = CompilationFailure(
+                code=CompilationFailureCode.TOOL_UNAVAILABLE,
+                summary="The provisioned Bicep compiler is unavailable.",
+                detail=(
+                    "`az bicep version` must succeed with a readable version "
+                    "before controlled package compilation."
+                ),
+            )
+            return self._bicep_toolchain
+        compiler_path = (
+            self._bicep_options.bicep_executable_path
+            or resolved_az
+        )
+        if (
+            self._bicep_options.bicep_executable_path is not None
+            and (
+                not compiler_path.is_absolute()
+                or not compiler_path.is_file()
+            )
+        ):
+            self._bicep_toolchain = CompilationFailure(
+                code=CompilationFailureCode.TOOL_MISSING,
+                summary="The provisioned Bicep compiler is unavailable.",
+                detail=(
+                    "The controlled Bicep executable must be an existing "
+                    "absolute file."
+                ),
+            )
+            return self._bicep_toolchain
         compiler = ToolIdentity(
             provider="azure-cli-bicep",
-            resolved_path=resolved_az,
+            resolved_path=compiler_path,
             version=bicep_version,
             version_provenance=(
                 VersionProvenance.KNOWN
@@ -934,7 +1113,9 @@ class TemplateCompilationSession:
                 {
                     "azureCliPath": str(resolved_az),
                     "azureCliVersion": azure_cli.version,
+                    "bicepPath": str(compiler_path),
                     "bicepVersion": bicep_version,
+                    "invocation": self._bicep_invocation(),
                 },
                 sort_keys=True,
                 separators=(",", ":"),
@@ -1044,9 +1225,8 @@ class TemplateCompilationSession:
         az_path: str,
     ) -> tuple[bool, str | None]:
         try:
-            result = self._command_runner(
+            result = self._run(
                 (az_path, "version", "--output", "json"),
-                self._timeout_seconds,
             )
         except (OSError, subprocess.SubprocessError):
             return False, None
@@ -1067,24 +1247,45 @@ class TemplateCompilationSession:
     def _probe_bicep_version(
         self,
         az_path: str,
-    ) -> str | None:
+    ) -> tuple[bool, str | None]:
         """Observe Bicep's version. Build may acquire a missing compiler."""
         try:
-            result = self._command_runner(
+            result = self._run(
                 (az_path, "bicep", "version"),
-                self._timeout_seconds,
             )
         except (OSError, subprocess.SubprocessError):
-            return None
+            return False, None
         if result.returncode != 0:
-            return None
+            return False, None
         match = _BICEP_VERSION_PATTERN.search(
             f"{result.stdout}\n{result.stderr}"
         )
         if match is None:
-            return None
+            return True, None
         version, commit = match.groups()
-        return f"{version} ({commit})" if commit else version
+        return True, f"{version} ({commit})" if commit else version
+
+    def _run(
+        self,
+        argv: tuple[str, ...],
+    ) -> subprocess.CompletedProcess[str]:
+        if self._command_runner is not None:
+            return self._command_runner(argv, self._timeout_seconds)
+        return _run_command(
+            argv,
+            self._timeout_seconds,
+            (
+                None
+                if self._bicep_options.environment is None
+                else dict(self._bicep_options.environment)
+            ),
+        )
+
+    def _bicep_invocation(self) -> tuple[str, ...]:
+        invocation = ["az", "bicep", "build"]
+        if self._bicep_options.no_restore:
+            invocation.append("--no-restore")
+        return tuple(invocation)
 
     def _acquire_arm_json(
         self,
@@ -1157,20 +1358,21 @@ class TemplateCompilationSession:
             dir=temporary_parent,
         ) as temporary_directory:
             output_path = Path(temporary_directory) / "template.json"
-            argv = (
+            argv = [
                 str(azure_cli.resolved_path),
                 "bicep",
                 "build",
+            ]
+            if self._bicep_options.no_restore:
+                argv.append("--no-restore")
+            argv.extend((
                 "--file",
                 str(source.identity.path),
                 "--outfile",
                 str(output_path),
-            )
+            ))
             try:
-                result = self._command_runner(
-                    argv,
-                    self._timeout_seconds,
-                )
+                result = self._run(tuple(argv))
             except subprocess.TimeoutExpired:
                 return CompilationFailure(
                     code=CompilationFailureCode.TIMEOUT,
@@ -1272,8 +1474,8 @@ class TemplateCompilationSession:
                 arm_json_bytes=output,
             )
 
-    @staticmethod
     def _changed_input(
+        self,
         source: SourceSnapshot,
         configuration: ConfigurationSnapshot,
     ) -> str | None:
@@ -1292,7 +1494,11 @@ class TemplateCompilationSession:
 
         try:
             current_configuration = discover_bicep_configuration(
-                source.identity.path
+                source.identity.path,
+                configuration_root=self._bicep_options.configuration_root,
+                producer_default_configuration=(
+                    self._bicep_options.producer_default_configuration
+                ),
             )
         except OSError as error:
             return (

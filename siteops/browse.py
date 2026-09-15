@@ -19,11 +19,18 @@ from typing import Any, Callable
 import yaml
 
 from siteops import yamlio
+from siteops.artifacts import ArtifactError, check_portable_component
+from siteops.artifacts import is_link as _is_link
 from siteops.content_metadata import API_VERSION
 from siteops.content_metadata import require_mapping as _mapping
 from siteops.content_metadata import require_text as _string
 from siteops.content_metadata import require_text_list as _strings
 from siteops.content_metadata import validate_envelope as _envelope
+from siteops.manifest_selection import (
+    ManifestSelectionError,
+    is_explicit_manifest_path,
+    select_manifest_path,
+)
 from siteops.models import _parse_manifest_spec
 
 MAX_FILE_BYTES = 256 * 1024
@@ -216,12 +223,6 @@ def _optional_strings(data: dict[str, Any], key: str) -> tuple[str, ...] | None:
     return _strings(data[key]) if key in data else None
 
 
-def _is_link(info: os.stat_result) -> bool:
-    return stat.S_ISLNK(info.st_mode) or bool(
-        getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
-    )
-
-
 def _is_guidance_file(path: Path) -> bool:
     name = path.name.casefold()
     return name == "entry.yaml" or name.endswith(".entry.yaml")
@@ -254,10 +255,10 @@ def conventional_candidate(path: PurePosixPath) -> bool:
 def check_path_components(relative: PurePath, *, reference: bool = False) -> None:
     """Apply the shared portable-path policy without accessing a filesystem."""
     for part in relative.parts:
-        if part != part.rstrip(" .") or PureWindowsPath(part).is_reserved():
-            raise BrowseError("path.alias", "Ambiguous Windows path components are excluded.")
-        if ":" in part:
-            raise BrowseError("path.invalid", "Content paths cannot address alternate streams.")
+        try:
+            check_portable_component(part)
+        except ArtifactError as error:
+            raise BrowseError(error.code, str(error)) from None
         if part.startswith(".") or (not reference and part.casefold() in _PROTECTED):
             raise BrowseError(
                 "path.protected", "Configuration and working-state paths are excluded."
@@ -353,6 +354,21 @@ class ContentReader:
 
     def _relative(self, path: Path) -> str:
         return path.relative_to(self.workspace).as_posix()
+
+    def filename_candidate(self, selection: str) -> str | None:
+        """Return a regular workspace file candidate without reading metadata."""
+        try:
+            path = self._path(selection)
+        except BrowseError as error:
+            if error.diagnostic.code in {
+                "path.invalid", "path.outside", "path.alias", "path.protected",
+            }:
+                return None
+            raise
+        try:
+            return self._relative(path) if path.is_file() else None
+        except OSError:
+            raise BrowseError("path.unreadable", "The content path is unreadable.") from None
 
     def _incomplete(self, diagnostic: BrowseDiagnostic) -> None:
         self.names_complete = False
@@ -611,10 +627,7 @@ def inspect_content(
     """Inspect a path or exact name, or filter a complete local inventory."""
     validate_browse_options(selection, search, tags, category, limit)
     reader = ContentReader(workspace)
-    if selection is not None and (
-        "/" in selection or "\\" in selection or PureWindowsPath(selection).drive
-        or selection.casefold().endswith((".yaml", ".yml"))
-    ):
+    if selection is not None and is_explicit_manifest_path(selection):
         try:
             entry = reader.entry(Path(selection.replace("\\", "/")))
         except BrowseError as error:
@@ -625,6 +638,19 @@ def inspect_content(
             str(reader.workspace), (entry,), tuple(reader.diagnostics), True, 1, 1
         )
     inventory = reader.inventory()
+    filename_match = None
+    if selection is not None:
+        try:
+            filename_match = reader.filename_candidate(selection)
+            if filename_match is not None and not any(
+                entry.path == filename_match for entry in inventory
+            ):
+                inventory = (*inventory, reader.entry(reader.workspace / filename_match))
+        except BrowseError as error:
+            return BrowseResult(
+                str(reader.workspace), diagnostics=(*reader.diagnostics, error.diagnostic),
+                selected=True,
+            )
     return select_entries(
         BrowseResult(
             str(reader.workspace), inventory, tuple(reader.diagnostics),
@@ -632,6 +658,7 @@ def inspect_content(
         ),
         selection, search=search, tags=tags, category=category,
         include_partials=include_partials, limit=limit,
+        filename_match=filename_match,
     )
 
 
@@ -645,6 +672,7 @@ def select_entries(
     include_partials: bool = False,
     limit: int | None = None,
     selection_is_path: bool = False,
+    filename_match: str | None = None,
 ) -> BrowseResult:
     """Use one selection and filtering model for local and published inventories."""
     validate_browse_options(selection, search, tags, category, limit)
@@ -668,23 +696,26 @@ def select_entries(
         name_ambiguous=counts[entry.name] > 1 if result.name_inventory_complete else None,
     ) for entry in visible)
     if selection is not None:
-        matches = tuple(entry for entry in visible if entry.name == selection)
-        if not result.name_inventory_complete:
-            diagnostics.append(BrowseDiagnostic(
-                "lookup.incomplete", "Name lookup requires a complete inventory. Use an explicit path."
-            ))
-            matches = ()
-        elif not matches:
-            diagnostics.append(BrowseDiagnostic(
-                "lookup.missing", "Entry name was not found. Browse the inventory or use a path."
-            ))
-        elif len(matches) > 1:
-            diagnostics.append(BrowseDiagnostic(
-                "lookup.ambiguous", "Entry name is ambiguous. Select one of the explicit paths."
-            ))
+        candidates_by_path = {entry.path: entry for entry in result.entries}
+        candidates_by_path.update((entry.path, entry) for entry in visible)
+        try:
+            path = select_manifest_path(
+                selection, ((entry.name, entry.path) for entry in visible),
+                names_complete=bool(result.name_inventory_complete),
+                filename_match=filename_match,
+            )
+        except ManifestSelectionError as error:
+            diagnostics.append(BrowseDiagnostic(error.code, str(error)))
+            matches = tuple(
+                candidates_by_path[path] for path in error.paths if path in candidates_by_path
+            ) if error.code == "lookup.ambiguous" else ()
+            selected = False
+        else:
+            matches = (candidates_by_path[path],) if path in candidates_by_path else ()
+            selected = len(matches) == 1
         return replace(
             result, entries=matches, diagnostics=tuple(diagnostics),
-            selected=len(matches) == 1, matched=len(matches),
+            selected=selected, matched=len(matches),
         )
     terms = tuple((search or "").casefold().split())
     matches = tuple(
