@@ -5,17 +5,30 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import quote
 
+from siteops.artifacts import open_regular_file
+from siteops.asset_transfer import download_https_asset
 from siteops.github_attestation import MAX_EVIDENCE_BYTES
-from siteops.github_source import GitHubReleaseAsset, GitHubReleaseSnapshot
+from siteops.github_source import GitHubClient, GitHubReleaseAsset, GitHubReleaseSnapshot
 from siteops.workspace_source import (
     MAX_DESCRIPTOR_BYTES,
+    MAX_SOURCE_ARTIFACT_BYTES,
     WORKSPACE_RELEASE_NAME,
     ArtifactIdentity,
     ResolvedReleaseSource,
     ResolvedWorkspaceSource,
     SourceResolutionError,
+)
+
+_ASSET_ORIGINS = (
+    "https://api.github.com",
+    "https://release-assets.githubusercontent.com",
+    "https://objects.githubusercontent.com",
 )
 
 
@@ -97,3 +110,64 @@ def bind_workspace_release(
         ResolvedWorkspaceSource(source, entry), release, descriptor_asset,
         assets[entry.package.name], assets[entry.proof.name],
     )
+
+
+@contextmanager
+def download_release_asset(
+    release: GitHubReleaseSnapshot, asset: GitHubReleaseAsset, *, staging_parent: Path,
+) -> Iterator[Path]:
+    """Download an observed asset by ID using anonymous HTTPS and fixed provider origins."""
+    if (
+        asset not in release.assets or type(asset.identifier) is not int
+        or not 0 < asset.identifier <= 2**63 - 1
+    ):
+        raise SourceResolutionError("The selected asset must belong to the observed release.")
+    identity = _artifact_identity(asset, limit=MAX_SOURCE_ARTIFACT_BYTES)
+    reference = release.reference
+    url = (
+        "https://api.github.com/repos/"
+        f"{quote(reference.owner, safe='')}/{quote(reference.repository, safe='')}"
+        f"/releases/assets/{asset.identifier}"
+    )
+    with download_https_asset(
+        url, identity, origins=_ASSET_ORIGINS, staging_parent=staging_parent,
+    ) as path:
+        yield path
+
+
+@dataclass(frozen=True)
+class GitHubWorkspaceDownload:
+    """Opaque package and proof paths valid only within the enclosing download context."""
+
+    source: GitHubWorkspaceSource
+    package: Path
+    proof: Path
+
+
+@contextmanager
+def download_workspace_release(
+    client: GitHubClient, *, staging_parent: Path, workspace: str | None = None,
+) -> Iterator[GitHubWorkspaceDownload]:
+    """Resolve and download one selected workspace without extracting or authorizing it.
+
+    Consumer policy and trusted roots are supplied separately to verification.
+    Source read access and descriptor metadata never select that authority.
+    """
+    if client.auth != "anonymous":
+        raise SourceResolutionError(
+            "Workspace asset acquisition currently uses anonymous HTTPS.",
+            code="source.auth-unsupported",
+        )
+    release = client.resolve_release()
+    descriptor = workspace_descriptor_asset(release)
+    with download_release_asset(release, descriptor, staging_parent=staging_parent) as path:
+        with open_regular_file(path) as stream:
+            selected = bind_workspace_release(
+                release, stream.read(MAX_DESCRIPTOR_BYTES + 1), workspace=workspace,
+            )
+    with download_release_asset(
+        release, selected.package_asset, staging_parent=staging_parent,
+    ) as package, download_release_asset(
+        release, selected.proof_asset, staging_parent=staging_parent,
+    ) as proof:
+        yield GitHubWorkspaceDownload(selected, package, proof)

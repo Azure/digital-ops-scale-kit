@@ -27,6 +27,7 @@ from urllib.parse import quote, urlsplit
 
 from siteops.browse import BrowseError
 from siteops.compilation import resolve_tool_from_path
+from siteops.process_capture import BoundedCapture as _BoundedCapture
 
 GITHUB_API_VERSION = "2026-03-10"
 _API_ROOT = "https://api.github.com"
@@ -38,7 +39,6 @@ _PROCESS_STOP_SECONDS = 1.0
 _MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 _MAX_STDERR_BYTES = 64 * 1024
 _MAX_TREE_ENTRIES = 20_000
-_READ_CHUNK_BYTES = 64 * 1024
 _RELEASE_ASSET_PAGE_SIZE = 100
 _MAX_RELEASE_ASSETS = 256
 _MAX_TAG_DEPTH = 8
@@ -478,37 +478,6 @@ def _anonymous_request(route: str) -> Any:
     if not isinstance(payload, bytes):
         raise _error("github.invalid-data", "GitHub returned an invalid response body.")
     return _decode_json(payload)
-
-
-@dataclass
-class _BoundedCapture:
-    limit: int
-    content: bytearray
-    exceeded: threading.Event
-    failed: threading.Event
-
-    @classmethod
-    def create(cls, limit: int) -> _BoundedCapture:
-        return cls(limit, bytearray(), threading.Event(), threading.Event())
-
-    def read(self, stream: BinaryIO) -> None:
-        try:
-            while True:
-                chunk = stream.read(_READ_CHUNK_BYTES)
-                if not chunk:
-                    return
-                if not isinstance(chunk, bytes):
-                    self.failed.set()
-                    return
-                remaining = self.limit - len(self.content)
-                if len(chunk) > remaining:
-                    if remaining > 0:
-                        self.content.extend(chunk[:remaining])
-                    self.exceeded.set()
-                else:
-                    self.content.extend(chunk)
-        except (OSError, ValueError):
-            self.failed.set()
 
 
 def _stop_process(process: subprocess.Popen[bytes]) -> None:

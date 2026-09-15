@@ -91,6 +91,45 @@ verification, the selected package enters the existing protected cache and
 execution flow. A descriptor, source observation or stored receipt alone
 does not authorize execution.
 
+## Anonymous asset transfer
+
+The internal `download_https_asset` context acquires opaque bytes into a new
+private directory beneath the caller's staging location. Trusted adapter code
+supplies the URL, permitted HTTPS origins and expected artifact identity.
+Artifact names remain descriptive and never become local output paths.
+
+The transfer uses normal TLS verification and configured proxies. It permits
+up to three redirects within the approved origins, rebuilding anonymous
+request headers at each hop. Redirect and error bodies are closed without
+being consumed. Responses must have supported HTTP framing and identity
+content encoding. Size and SHA-256 must match before the caller receives the
+file, and downloaded content is never imported or executed by the transfer.
+
+A fixed engine worker runs with isolated Python imports. Its deadline covers
+DNS, connection setup, headers and body reads. The default is 120 seconds,
+with an internal maximum of 300 seconds. HTTP header lines are limited to
+8 KiB and header count to 64. Worker output is bounded separately. Staging is
+removed after the caller exits the context and worker exit is confirmed.
+An unconfirmed exit retains staging and reports a warning.
+
+Failures provide safe categories and numeric HTTP status or retry information
+when available. The transfer does not automatically retry, switch credentials
+or substitute cached bytes. This primitive is anonymous and separate from
+GitHub metadata authentication.
+
+The internal `download_workspace_release` context resolves a GitHub release,
+downloads its descriptor and binds the selected workspace before requesting
+the package and proof. Each request addresses the observed asset ID through
+the GitHub API. Download locations are constructed by the adapter rather than
+read from the descriptor, with redirects restricted to the API and supported
+GitHub asset origins.
+
+Package and proof files remain opaque and available only within that context.
+A failed proof download also cleans up the temporary package. Configured CLI
+authentication is rejected explicitly for this acquisition path rather than
+silently changed to anonymous access. Retained proof inputs, verification/cache
+orchestration and public command integration remain separate work.
+
 ## Publication integration
 
 The descriptor should be generated after the package and proof bytes exist,
