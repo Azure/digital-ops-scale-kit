@@ -13,6 +13,7 @@ import stat
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from functools import lru_cache
 from pathlib import Path
 
 from siteops.artifacts import ArtifactError, check_portable_component, require_node
@@ -23,6 +24,7 @@ class CacheError(ArtifactError):
         super().__init__(message, code=code)
 
 
+@lru_cache(maxsize=1)
 def _windows():
     """Load native declarations only on Windows."""
     from ctypes import wintypes as w
@@ -67,6 +69,7 @@ def _sid_text(advapi, kernel, sid) -> str:
         kernel.LocalFree(value)
 
 
+@lru_cache(maxsize=1)
 def _current_windows_sid(advapi, kernel) -> str:
     from ctypes import wintypes as w
 

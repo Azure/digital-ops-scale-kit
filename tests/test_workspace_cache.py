@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from siteops import package_builder
+from siteops import cache_filesystem, package_builder
 from siteops import workspace_cache as cache_module
 from siteops.artifact_verification import ArtifactVerification
 from siteops.artifacts import ArtifactError, hash_file
@@ -122,6 +122,19 @@ def test_new_nested_cache_is_private_and_reopens(tmp_path):
         check_private_node(path, directory=True)
     check_private_node(root / "cache.json", directory=False)
     assert WorkspaceCache(root).root == cache.root
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows access-control contract")
+def test_windows_cache_reuses_native_declarations_and_process_identity(tmp_path):
+    cache_filesystem._windows.cache_clear()
+    cache_filesystem._current_windows_sid.cache_clear()
+    root = tmp_path / "private"
+    make_private_directory(root)
+    check_private_node(root, directory=True)
+    check_private_node(root, directory=True)
+    assert cache_filesystem._windows.cache_info().misses == 1
+    assert cache_filesystem._current_windows_sid.cache_info().misses == 1
+    assert cache_filesystem._current_windows_sid.cache_info().hits >= 2
 
 
 def test_publication_keeps_original_archive_and_exact_materialization(populated):
