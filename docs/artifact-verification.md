@@ -78,6 +78,8 @@ proof. They do not authenticate a publisher, select consumer policy or
 authorize execution. The method downloads no package or proof and adds no
 public command for source selection. Existing pins must retain their resolved
 identities rather than silently following the release tag again.
+The [workspace release descriptor](workspace-sources.md) connects those
+observations to one selected package and its detached proof.
 
 ### Verification receipts
 

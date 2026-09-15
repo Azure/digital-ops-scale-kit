@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import stat
 import unicodedata
@@ -13,7 +14,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
-from typing import BinaryIO
+from typing import Any, BinaryIO
 
 
 class ArtifactError(ValueError):
@@ -32,6 +33,36 @@ class PayloadFile:
 
     def document(self) -> dict[str, str | int]:
         return {"path": self.path, "sha256": self.sha256, "size": self.size}
+
+
+def load_artifact_json(raw: bytes, *, limit: int, label: str) -> Any:
+    """Parse bounded UTF-8 JSON while rejecting duplicate keys and non-JSON numbers."""
+    if type(limit) is not int or limit < 0 or not isinstance(raw, bytes):
+        raise ArtifactError("The artifact JSON input or byte limit is invalid.")
+    if len(raw) > limit:
+        raise ArtifactError(f"{label} exceeds its byte limit.")
+
+    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ArtifactError(f"{label} contains a duplicate JSON key.")
+            result[key] = value
+        return result
+
+    def invalid_constant(value: str) -> None:
+        raise ArtifactError(f"{label} contains a non-JSON number.")
+
+    try:
+        return json.loads(
+            raw.decode("utf-8-sig"),
+            object_pairs_hook=unique,
+            parse_constant=invalid_constant,
+        )
+    except (UnicodeError, ValueError, RecursionError) as error:
+        if isinstance(error, ArtifactError):
+            raise
+        raise ArtifactError(f"{label} must be bounded UTF-8 JSON.") from None
 
 
 def is_link(info: os.stat_result) -> bool:

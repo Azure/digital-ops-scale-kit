@@ -121,6 +121,7 @@ def test_repository_identity_must_match_before_release_resolution(metadata):
     {"draft": True}, {"draft": 0}, {"prerelease": None},
     {"id": True}, {"id": -1}, {"tag_name": "other"},
     {"published_at": None}, {"published_at": "invalid"}, {"published_at": "2026-01-01"},
+    {"immutable": 0},
 ])
 def test_unpublished_or_inconsistent_release_metadata_is_rejected(changes):
     transport = ReleaseTransport()
@@ -232,7 +233,7 @@ def test_asset_limit_prevents_unbounded_pagination():
     assert not any(route.endswith("page=4") for route in transport.calls)
 
 
-@pytest.mark.parametrize("change", ["repository", "release", "tag", "assets"])
+@pytest.mark.parametrize("change", ["repository", "release", "tag", "assets", "immutability"])
 def test_release_mutations_during_resolution_are_explicit(change):
     transport = ReleaseTransport()
 
@@ -243,6 +244,8 @@ def test_release_mutations_during_resolution_are_explicit(change):
         if transport.calls.count(RELEASE_ROUTE) == 2:
             if change == "release" and route == RELEASE_ROUTE:
                 result["id"] += 1
+            elif change == "immutability" and route == RELEASE_ROUTE:
+                result["immutable"] = True
             elif change == "tag" and route == TAG_ROUTE:
                 result["object"]["sha"] = "3" * 40
             elif change == "assets" and "/assets?" in route:

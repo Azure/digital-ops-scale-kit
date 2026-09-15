@@ -320,6 +320,7 @@ class GitHubReleaseSnapshot:
     source_commit: str
     prerelease: bool
     published_at: datetime
+    immutable: bool | None
     assets: tuple[GitHubReleaseAsset, ...]
 
 
@@ -847,7 +848,7 @@ class GitHubClient:
         repository_id = repository_identity(self._request(self._repository_route()))
         route = f"{self._repository_route()}/releases/tags/{quote(tag, safe='')}"
 
-        def release_identity(value: Any) -> tuple[int, bool, datetime]:
+        def release_identity(value: Any) -> tuple[int, bool, datetime, bool | None]:
             if not isinstance(value, dict) or value.get("tag_name") != tag:
                 raise _error("github.invalid-data", "GitHub did not identify the selected release.")
             if value.get("draft") is not False or not isinstance(value.get("prerelease"), bool):
@@ -861,9 +862,12 @@ class GitHubClient:
                 raise _error("github.invalid-data", "GitHub returned an invalid release timestamp.") from None
             if timestamp.tzinfo is None:
                 raise _error("github.invalid-data", "GitHub returned an invalid release timestamp.")
+            immutable = value.get("immutable")
+            if immutable is not None and not isinstance(immutable, bool):
+                raise _error("github.invalid-data", "GitHub returned invalid release immutability metadata.")
             return (
                 _release_identifier(value.get("id")), value["prerelease"],
-                timestamp.astimezone(timezone.utc),
+                timestamp.astimezone(timezone.utc), immutable,
             )
 
         identity = release_identity(self._request(route))
@@ -877,7 +881,7 @@ class GitHubClient:
             raise _error("github.source-changed", "The source repository changed during resolution. Retry explicitly.")
         return GitHubReleaseSnapshot(
             self.reference, repository_id, identity[0], tag_identity[0],
-            tag_identity[1], identity[1], identity[2], assets,
+            tag_identity[1], identity[1], identity[2], identity[3], assets,
         )
 
     def resolve_commit(self) -> str:
