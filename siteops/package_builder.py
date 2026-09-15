@@ -16,7 +16,10 @@ import zlib
 from collections.abc import Callable
 from pathlib import Path
 
+import yaml
+
 from siteops import workspace_package as package
+from siteops import yamlio
 from siteops.artifacts import (
     ArtifactError,
     PayloadFile,
@@ -40,7 +43,7 @@ from siteops.compilation import (
     VersionProvenance,
     resolve_tool_from_path,
 )
-from siteops.models import DeploymentStep, Manifest
+from siteops.models import DeploymentStep, Manifest, _parse_manifest_spec
 from siteops.runtime import RuntimePaths
 
 logger = logging.getLogger(__name__)
@@ -52,6 +55,7 @@ def _source_files(root: Path, workspace: str, companions: tuple[str, ...]) -> tu
     if workspace != ".":
         checked_path(root, workspace, directory=True)
     files: set[str] = set()
+    total_bytes = 0
     visited: set[str] = set()
     pending = [workspace, *companions]
     while pending:
@@ -77,6 +81,13 @@ def _source_files(root: Path, workspace: str, companions: tuple[str, ...]) -> tu
             else:
                 if relative == package.PACKAGE_NAME:
                     raise ArtifactError("The source already contains reserved package metadata.")
+                if info.st_size > package.MAX_FILE_BYTES:
+                    raise ArtifactError("A package source file exceeds its byte limit.")
+                total_bytes += info.st_size
+                if total_bytes > package.MAX_TOTAL_BYTES:
+                    raise ArtifactError("The package source exceeds its total byte limit.")
+                if workspace == "." or relative.startswith(workspace + "/"):
+                    package.check_configuration_filename(relative)
                 files.add(relative)
                 if len(files) > package.MAX_FILES:
                     raise ArtifactError("The source snapshot exceeds its file limit.")
@@ -144,20 +155,47 @@ def _discover_template_sources(root: Path, workspace: str) -> tuple[str, ...]:
             raise ArtifactError(
                 "Workspace deployment entries could not be inspected for package compilation."
             )
+        manifests = {entry.path for entry in entries}
         sources: set[str] = set()
-        for entry in entries:
-            if entry.guidance.role == "partial":
-                continue
+
+        def collect(manifest_path: str) -> set[str]:
             manifest = Manifest.from_file(
-                workspace_path.joinpath(*entry.path.split("/")),
+                workspace_path.joinpath(*manifest_path.split("/")),
                 workspace_root=workspace_path,
             )
+            result = set()
             for step in manifest.steps:
-                if not isinstance(step, DeploymentStep):
+                if isinstance(step, DeploymentStep):
+                    source = relative_artifact_path(step.template)
+                    checked_path(workspace_path, source)
+                    result.add(source)
+            return result
+
+        for manifest_path in sorted(manifests):
+            sources.update(collect(manifest_path))
+        for relative in _source_files(root, workspace, ()):
+            path = root.joinpath(*relative.split("/"))
+            manifest_path = path.relative_to(workspace_path).as_posix()
+            if manifest_path in manifests:
+                continue
+            try:
+                with open_regular_file(path) as stream:
+                    raw = stream.read(package.MAX_FILE_BYTES + 1)
+                if len(raw) > package.MAX_FILE_BYTES:
+                    raise ArtifactError("A package source file exceeds its byte limit.")
+                document = yamlio.load(raw.decode("utf-8"))
+                if not isinstance(document, dict):
                     continue
-                source = relative_artifact_path(step.template)
-                checked_path(workspace_path, source)
-                sources.add(source)
+                _parse_manifest_spec(document, path)
+            except ArtifactError:
+                raise
+            except (ValueError, yaml.YAMLError):
+                continue
+            try:
+                sources.update(collect(manifest_path))
+            except (ValueError, yaml.YAMLError):
+                if document.get("kind") == "Manifest":
+                    raise
         return tuple(sorted(sources))
     except ArtifactError:
         raise

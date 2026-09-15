@@ -326,6 +326,13 @@ def _effective_workspace_configuration(
         directory = directory.parent
 
 
+def check_configuration_filename(path: str) -> None:
+    """Keep workspace Bicep configuration discovery consistent across platforms."""
+    name = PurePosixPath(path).name
+    if name.casefold() == "bicepconfig.json" and name != "bicepconfig.json":
+        raise ArtifactError("Bicep configuration files must use the canonical filename bicepconfig.json.")
+
+
 def _package_dependencies(value: Any) -> PackageDependencyIdentity:
     row = _object(value, {"coverage", "templateHashes"})
     try:
@@ -497,6 +504,8 @@ class WorkspacePackage:
         for value in entries:
             row = _object(value, {"path", "sha256", "size"})
             path = relative_artifact_path(row["path"])
+            if workspace_root == "." or path.startswith(workspace_root + "/"):
+                check_configuration_filename(path)
             if path == PACKAGE_NAME:
                 raise ArtifactError("The package metadata cannot include itself in its payload.")
             size = row["size"]

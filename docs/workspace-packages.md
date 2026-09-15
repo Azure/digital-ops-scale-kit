@@ -53,12 +53,18 @@ It includes every tracked workspace file and each selected companion.
 An export that omits selected tracked files, such as through `export-ignore`,
 is rejected. Submodules, symbolic links and Git LFS pointers require explicit
 source preparation rather than automatic downloads.
+Source contents come from raw committed Git blobs. Archive substitutions and
+checkout line-ending settings do not rewrite the authored package files.
 
-The producer finds standalone deployment entries through the existing
-workspace discovery rules, loads their manifests with the shared manifest
-parser, expands includes, and compiles the distinct deployment template paths.
-It does not load Sites, resolve parameter values, or treat every Bicep module
-as a deployment root.
+The producer starts with the existing discovery inventory, including partials,
+then recognizes additional manifest documents throughout the complete workspace
+using the shared parser. Custom paths and extensionless manifests therefore
+receive the same template mappings as conventional entries. It expands includes
+and compiles distinct deployment template paths, not every Bicep module.
+Name-based browsing keeps its existing inventory rules.
+The producer does not construct Sites, apply overlays or resolve runtime
+parameter values. Unrelated data files are not deployment entries merely
+because they contain a key such as `steps`.
 Incomplete manifest discovery blocks production. Optional advisory-guidance
 errors do not independently prevent template discovery or compilation.
 
@@ -83,6 +89,8 @@ outside the package source as the nearest boundary and records
 must resolve to a configuration inside the workspace or to that producer
 default. This accounts for module-level configuration discovery without
 claiming a complete module graph.
+Configuration filenames must use exactly `bicepconfig.json` so discovery has
+the same meaning on case-sensitive and case-insensitive filesystems.
 
 The output is a JSON summary with the ZIP's SHA-256, size, kit identity and
 workspace path, plus the number of mapped deployment templates. Keep those

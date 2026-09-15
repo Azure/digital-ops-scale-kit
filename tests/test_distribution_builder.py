@@ -404,6 +404,25 @@ def test_git_export_remains_bound_when_head_advances(builder, git_source, tmp_pa
     assert (destination / "tracked.txt").read_text(encoding="utf-8") == "tracked\n"
 
 
+@pytest.mark.parametrize("substitute", [False, True])
+def test_git_export_preserves_committed_blob_bytes(builder, git_source, tmp_path, substitute):
+    repository, _ = git_source
+    _git(repository, "config", "core.autocrlf", "false")
+    original = b"$Format:%H$\r\n"
+    (repository / "tracked.txt").write_bytes(original)
+    if substitute:
+        (repository / ".gitattributes").write_text(
+            "tracked.txt export-subst\n", encoding="utf-8",
+        )
+    _git(repository, "add", ".")
+    _git(repository, "commit", "--quiet", "-m", "source bytes")
+    source_sha = _git(repository, "rev-parse", "HEAD")
+    destination = tmp_path / "export" / "source"
+    destination.parent.mkdir()
+    builder._export_tracked_source(repository, destination, source_sha)
+    assert (destination / "tracked.txt").read_bytes() == original
+
+
 def test_production_reads_locks_only_from_the_exact_export(
     builder, git_source, tmp_path, monkeypatch,
 ):

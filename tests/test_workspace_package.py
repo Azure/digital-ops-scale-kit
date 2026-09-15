@@ -667,6 +667,68 @@ def _write_file(path, content):
     return path
 
 
+@pytest.mark.parametrize("relative", [
+    "manifests/_orphan.yaml",
+    "custom/extra.yaml",
+    "custom/extensionless",
+    "custom/kindless",
+])
+def test_package_maps_templates_for_explicit_manifest_paths(snapshot, tmp_path, relative):
+    workspace = snapshot / "workspace"
+    manifest = workspace.joinpath(*relative.split("/"))
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    envelope = "" if relative.endswith("kindless") else "apiVersion: siteops/v1\nkind: Manifest\n"
+    manifest.write_text(
+        envelope + "name: extra\nsteps:\n"
+        "  - name: extra\n    template: templates/extra.json\n    scope: resourceGroup\n",
+        encoding="utf-8",
+    )
+    if relative.startswith("manifests/"):
+        manifest.with_suffix(".entry.yaml").write_text(
+            "apiVersion: siteops/v1alpha1\nkind: DeploymentEntry\nrole: partial\n",
+            encoding="utf-8",
+        )
+    shutil.copyfile(
+        workspace / "templates" / "storage.template.json",
+        workspace / "templates" / "extra.json",
+    )
+    output = tmp_path / "package.zip"
+    inspection = _build(snapshot, output)
+    assert "templates/extra.json" in {
+        mapping.source_path for mapping in inspection.metadata.templates
+    }
+    materialized = tmp_path / "materialized"
+    package.extract_package(output, inspection.sha256, materialized)
+    binding = package.MaterializedPackageBinding.bind(inspection, materialized, "./" + relative)
+    assert binding.bind_template("templates/extra.json").mapping.artifact_path == "templates/extra.json"
+
+
+def test_manifest_shaped_parameter_data_is_not_a_package_entry(snapshot, tmp_path):
+    data = snapshot / "workspace" / "data"
+    data.mkdir()
+    (data / "step-values.yaml").write_text("steps: [one, two]\n", encoding="utf-8")
+    (data / "path-values.yaml").write_text(
+        "steps:\n  - name: value\n    template: absent.json\n", encoding="utf-8",
+    )
+    inspection = _build(snapshot, tmp_path / "package.zip")
+    assert {entry.source_path for entry in inspection.metadata.templates} == {
+        "templates/storage.template.json",
+    }
+
+
+def test_mis_cased_workspace_configuration_is_rejected():
+    document, files = _bicep_document()
+    files["workspace/BicepConfig.json"] = b"{}\n"
+    identities = tuple(
+        PayloadFile(path, hashlib.sha256(content).hexdigest(), len(content))
+        for path, content in files.items()
+    )
+    document["files"] = [entry.document() for entry in identities]
+    document["workspace"]["tree"]["digest"] = package.workspace_tree_digest(identities, "workspace")
+    with pytest.raises(ArtifactError, match="bicepconfig.json"):
+        package.WorkspacePackage.from_document(document)
+
+
 def test_tree_identity_uses_raw_workspace_bytes_not_companion_bytes(snapshot, tmp_path):
     manifest = snapshot / "workspace" / "manifests" / "storage" / "manifest.yaml"
     lf = manifest.read_bytes().replace(b"\r\n", b"\n")
@@ -1251,6 +1313,23 @@ def test_git_producer_refuses_unidentified_or_incomplete_source(git_snapshot, tm
     assert not (tmp_path / "package.zip").exists()
 
 
+def test_git_producer_preserves_substitution_markers(git_snapshot, tmp_path):
+    root, _ = git_snapshot
+    original = b"$Format:%H$\n"
+    (root / "workspace" / "source.txt").write_bytes(original)
+    (root / ".gitattributes").write_text("workspace/source.txt export-subst\n", encoding="utf-8")
+    _git(root, "add", ".")
+    _git(root, "commit", "--quiet", "-m", "substitution fixture")
+    sha = _git(root, "rev-parse", "HEAD")
+    output = tmp_path / "package.zip"
+    result = _producer(root, sha, output)
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads(result.stdout)
+    materialized = tmp_path / "materialized"
+    package.extract_package(output, receipt["sha256"], materialized)
+    assert (materialized / "workspace" / "source.txt").read_bytes() == original
+
+
 def test_git_companion_paths_are_literal_not_glob_patterns(git_snapshot, tmp_path):
     root, _ = git_snapshot
     (root / "guide[one].md").write_text("literal guide", encoding="utf-8")
@@ -1268,9 +1347,11 @@ def test_git_companion_paths_are_literal_not_glob_patterns(git_snapshot, tmp_pat
     assert "guideo.md" not in paths
 
 
+@pytest.mark.parametrize("configuration_name", ["bicepconfig.json", "BicepConfig.json"])
 def test_git_producer_rejects_bicep_configuration_outside_workspace(
     git_snapshot,
     tmp_path,
+    configuration_name,
 ):
     root, _ = git_snapshot
     manifest = root / "workspace" / "manifests" / "storage" / "manifest.yaml"
@@ -1285,7 +1366,7 @@ def test_git_producer_rejects_bicep_configuration_outside_workspace(
         "param name string\n",
         encoding="utf-8",
     )
-    (root / "bicepconfig.json").write_text("{}\n", encoding="utf-8")
+    (root / configuration_name).write_text("{}\n", encoding="utf-8")
     _git(root, "add", ".")
     _git(root, "commit", "--quiet", "-m", "bicep fixture")
     sha = _git(root, "rev-parse", "HEAD")
@@ -1293,7 +1374,10 @@ def test_git_producer_rejects_bicep_configuration_outside_workspace(
     result = _producer(root, sha, tmp_path / "package.zip")
 
     assert result.returncode == 1
-    assert "inside the packaged workspace" in result.stderr
+    assert (
+        "inside the packaged workspace" in result.stderr
+        or "bicepconfig.json" in result.stderr
+    )
     assert not (tmp_path / "package.zip").exists()
 
 
