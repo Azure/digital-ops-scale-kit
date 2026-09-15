@@ -27,6 +27,8 @@ ARM JSON instead. Its local-private plan records `submission.mode: arm-json`,
 different `effectiveTemplatePath` when Bicep maps to generated JSON. Package
 integrity is checked again before execution. This binding is not a saved plan
 or a publisher-provenance decision.
+Plain output identifies this mode as
+`Submission: arm-json (package artifact)`.
 
 Planning does not establish Azure authorization, cluster connectivity, or
 workload health.

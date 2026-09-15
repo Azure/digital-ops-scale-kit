@@ -5404,6 +5404,11 @@ class Orchestrator:
             ]
             if self._materialized_package is not None:
                 for file_path in files:
+                    if (
+                        execution_mode is PlanExecutionMode.PREVIEW
+                        and _carries_template(file_path)
+                    ):
+                        continue
                     error = self._kubectl_file_validation_error(
                         file_path,
                         self.workspace,

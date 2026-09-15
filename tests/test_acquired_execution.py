@@ -30,6 +30,7 @@ from siteops.planning import (
     PlanProjection,
     PlanStatus,
     SubmissionMode,
+    render_plain_plan,
     serialize_plan,
 )
 from siteops.results import RunStatus
@@ -388,6 +389,9 @@ def test_acquired_plan_and_deploy_use_mapped_arm_artifacts(tmp_path):
         result.plan.compilation_binding
         is CompilationBinding.PACKAGE_ARTIFACT
     )
+    plain = render_plain_plan(result, redacted=False)
+    assert "Submission: arm-json (package artifact)" in plain
+    assert "Submission: source" not in plain
     assert [target.name for target in result.plan.targets] == ["operator"]
     assert CapabilityKind.BICEP_COMPILER not in {
         capability.kind
@@ -664,7 +668,9 @@ def test_changed_artifact_stops_deploy_before_provider_mutation(tmp_path):
     assert provider.closed
 
 
-def test_acquired_static_kubectl_url_fails_before_tool_preflight(tmp_path):
+@pytest.mark.parametrize("file_path", ["https://example.invalid/manifest.yaml", "../outside.yaml"])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_acquired_static_kubectl_paths_fail_before_tool_preflight(tmp_path, file_path, dry_run):
     manifest = yaml.safe_dump(
         {
             "apiVersion": "siteops/v1",
@@ -677,7 +683,7 @@ def test_acquired_static_kubectl_url_fails_before_tool_preflight(tmp_path):
                     "type": "kubectl",
                     "operation": "apply",
                     "arc": {"name": "cluster", "resourceGroup": "rg"},
-                    "files": ["https://example.invalid/manifest.yaml"],
+                    "files": [file_path],
                 }
             ],
         },
@@ -695,6 +701,7 @@ def test_acquired_static_kubectl_url_fails_before_tool_preflight(tmp_path):
     ):
         result = Orchestrator(
             binding.workspace,
+            dry_run=dry_run,
             site_config_root=project,
             materialized_package=binding,
         ).build_plan(
@@ -703,20 +710,26 @@ def test_acquired_static_kubectl_url_fails_before_tool_preflight(tmp_path):
         )
 
     assert result.status is PlanStatus.INVALID
-    assert "not remote URLs" in result.diagnostics[0].detail
+    if file_path.startswith("https://"):
+        assert "not remote URLs" in result.diagnostics[0].detail
 
 
 @pytest.mark.parametrize(
-    ("runtime_path", "expected_status", "kubectl_calls"),
+    ("runtime_path", "dry_run", "expected_status", "kubectl_calls"),
     [
-        ("config.yaml", RunStatus.SUCCEEDED, 1),
-        ("https://example.invalid/config.yaml", RunStatus.FAILED, 0),
-        ("../outside.yaml", RunStatus.FAILED, 0),
+        ("config.yaml", False, RunStatus.SUCCEEDED, 1),
+        ("https://example.invalid/config.yaml", False, RunStatus.FAILED, 0),
+        ("../outside.yaml", False, RunStatus.FAILED, 0),
+        ("config.yaml", True, RunStatus.SUCCEEDED, 1),
+        ("https://example.invalid/config.yaml", True, RunStatus.FAILED, 0),
+        ("../outside.yaml", True, RunStatus.FAILED, 0),
+        (None, True, RunStatus.SUCCEEDED, 1),
     ],
 )
 def test_acquired_runtime_kubectl_paths_are_checked_before_provider_mutation(
     tmp_path,
     runtime_path,
+    dry_run,
     expected_status,
     kubectl_calls,
 ):
@@ -754,7 +767,7 @@ def test_acquired_runtime_kubectl_paths_are_checked_before_provider_mutation(
     )
     project = _operator_project(tmp_path)
     provider = _RecordingExecutor(
-        deployment_outputs={
+        deployment_outputs={} if runtime_path is None else {
             "produce": {
                 "manifestPath": {
                     "type": "String",
@@ -767,6 +780,7 @@ def test_acquired_runtime_kubectl_paths_are_checked_before_provider_mutation(
     session = _consumer_session(tmp_path, runner)
     orchestrator = Orchestrator(
         binding.workspace,
+        dry_run=dry_run,
         site_config_root=project,
         materialized_package=binding,
         executor=provider,
@@ -795,4 +809,6 @@ def test_acquired_runtime_kubectl_paths_are_checked_before_provider_mutation(
     assert execution.status is expected_status
     assert len(provider.kubectl) == kubectl_calls
     if provider.kubectl:
-        assert provider.kubectl[0]["files"] == ["config.yaml"]
+        assert provider.kubectl[0]["files"] == [
+            "{{ steps.produce.outputs.manifestPath }}" if runtime_path is None else "config.yaml"
+        ]

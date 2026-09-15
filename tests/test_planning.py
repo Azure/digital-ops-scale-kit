@@ -1237,6 +1237,7 @@ def test_invalid_executable_plan_states_that_nothing_will_run():
 
     assert "Status: invalid" in rendered
     assert "Executable: no" in rendered
+    assert "Submission: source (compilation observed, not enforced)" in rendered
     assert "No operations will be submitted from this plan." in rendered
     assert "Blocked: 1" in rendered
 

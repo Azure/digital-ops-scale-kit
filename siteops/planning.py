@@ -1382,6 +1382,10 @@ def render_plain_plan(
         lines.extend(("", f"  {plan.description}"))
 
     if plan.intent is PlanIntent.EXECUTABLE:
+        binding_description = {
+            CompilationBinding.OBSERVED_NOT_ENFORCED: "compilation observed, not enforced",
+            CompilationBinding.PACKAGE_ARTIFACT: "package artifact",
+        }[plan.compilation_binding]
         lines.extend(
             (
                 "",
@@ -1391,10 +1395,7 @@ def render_plain_plan(
                     if result.executable
                     else "  Executable: no"
                 ),
-                (
-                    "  Submission: source "
-                    "(compilation observed, not enforced)"
-                ),
+                f"  Submission: {plan.submission_mode.value} ({binding_description})",
             )
         )
         if not result.executable:
