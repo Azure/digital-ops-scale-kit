@@ -4,70 +4,20 @@ import base64
 import json
 import shutil
 import sys
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import yaml
 
 from siteops import cli, github_source
 from siteops.browse_output import render_browse_plain
-from siteops.content_index import BINDINGS_NAME, INDEX_NAME, build_content_index
-from siteops.github_catalog import github_input_digests, inspect_github
-
-REVISION = "a" * 40
-PREFIX = "workspaces/example/"
-
-
-@dataclass(frozen=True)
-class _TreeEntry:
-    path: str
-    sha: str
-    type: str = "blob"
-    mode: str = "100644"
-    size: int | None = None
-
-
-class _Client:
-    def __init__(self):
-        self.reference = SimpleNamespace(web_url="https://github.com/example/kit")
-        self.tree = {}
-        self.blobs = {}
-        self.calls = []
-
-    def put(self, path, content):
-        sha = github_input_digests(content)["git-blob-sha1"]
-        self.tree[path] = _TreeEntry(path, sha, size=len(content))
-        self.blobs[sha] = content
-
-    def resolve_commit(self):
-        self.calls.append(("resolve",))
-        return REVISION
-
-    def get_tree(self, commit):
-        assert commit == REVISION
-        self.calls.append(("tree", commit))
-        return self.tree
-
-    def read_blob(self, entry, *, max_bytes):
-        self.calls.append(("blob", entry.sha))
-        value = self.blobs[entry.sha]
-        assert len(value) <= max_bytes
-        return value
-
-
-def _publish(workspace, client, prefix=PREFIX, *, git_bindings=True):
-    bundle = build_content_index(
-        workspace, approve_public=True,
-        additional_digests=github_input_digests if git_bindings else None,
-    )
-    for path in workspace.rglob("*"):
-        if path.is_file():
-            client.put(prefix + path.relative_to(workspace).as_posix(), path.read_bytes())
-    client.put(prefix + INDEX_NAME, bundle.index)
-    client.put(prefix + BINDINGS_NAME, bundle.bindings)
-    return bundle
+from siteops.content_index import BINDINGS_NAME, INDEX_NAME
+from siteops.github_catalog import inspect_github
+from tests.github_catalog_helpers import PREFIX, REVISION
+from tests.github_catalog_helpers import Client as _Client
+from tests.github_catalog_helpers import TreeEntry as _TreeEntry
+from tests.github_catalog_helpers import publish as _publish
 
 
 @pytest.fixture
@@ -262,6 +212,7 @@ def test_remote_path_selection_uses_index_identity_only(workspace):
 
 
 def test_actual_cli_and_transport_contract_use_five_pinned_reads(workspace, monkeypatch, capsys):
+    monkeypatch.setenv("SITEOPS_CACHE_DIR", str(workspace.parent / "cache"))
     fixture = _Client()
     _publish(workspace, fixture)
     routes = []

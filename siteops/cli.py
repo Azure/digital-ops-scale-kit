@@ -145,10 +145,11 @@ def cmd_browse(args: argparse.Namespace) -> int:
                 args.source, args.name, ref=args.ref, workspace=args.workspace, auth=args.auth,
                 search=args.search, tags=tuple(args.tag), category=args.category,
                 include_partials=args.include_partials, limit=args.limit,
+                refresh=args.refresh, offline=args.offline,
             )
         else:
-            if args.ref or args.auth != "anonymous":
-                raise ValueError("--ref and --auth apply only to --source.")
+            if args.ref or args.auth != "anonymous" or args.refresh or args.offline:
+                raise ValueError("--ref, --auth, --refresh and --offline apply only to --source.")
             workspace = args.workspace or _auto_discover_workspace(Path.cwd()) or Path.cwd()
             result = inspect_content(
                 workspace, args.name, search=args.search, tags=tuple(args.tag),
@@ -1084,6 +1085,13 @@ Examples:
     p_browse.add_argument(
         "--auth", choices=("anonymous", "cli"), default="anonymous",
         help="Remote read access: anonymous or configured GitHub CLI authentication",
+    )
+    cache_mode = p_browse.add_mutually_exclusive_group()
+    cache_mode.add_argument(
+        "--refresh", action="store_true", help="Resolve the remote reference again before browsing",
+    )
+    cache_mode.add_argument(
+        "--offline", action="store_true", help="Use cached source metadata without source requests",
     )
     p_index = subparsers.add_parser(
         "index", help="Build a public content index and separate source bindings",

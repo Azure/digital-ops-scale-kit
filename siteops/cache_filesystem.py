@@ -270,7 +270,7 @@ def cache_lock(path: Path, *, exclusive: bool, timeout: float) -> Iterator[None]
         while not attempt():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise CacheError("The package is in use. Retry after the active operation.", code="cache.busy")
+                raise CacheError("The cache entry is in use. Retry after the active operation.", code="cache.busy")
             time.sleep(min(0.05, remaining))
         locked = True
         yield

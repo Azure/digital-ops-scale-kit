@@ -35,6 +35,7 @@ Start with the changes that affect your workflow:
 |---|---|
 | Reference shipped workspace paths | Update [entry and resource-set paths](#workspace-content-paths). |
 | Select a manifest by a bare filename | Review [name and path selection](#manifest-names-and-paths). |
+| Browse a published source | Use [reference refresh and offline controls](#remote-source-observations) when choosing source freshness. |
 | Use Windows batch-based tools | Review [literal tool arguments](#windows-tool-arguments). |
 | Produce workspace packages | Use canonical `bicepconfig.json` filenames and committed source bytes as described in [workspace packages](workspace-packages.md). |
 | Use `sites --render` | Replace it with [`--output yaml`](#inspect-sites). |
@@ -88,6 +89,30 @@ Prefix a filename with `./` to retain direct file selection, for example
 `plan ./install.yaml` or `plan ./install`. Relative paths containing a
 directory and absolute local execution paths retain their existing meaning.
 Browsing remains confined to inspectable paths inside its selected workspace.
+
+### Remote source observations
+
+`browse --source` reuses branch, tag and default branch observations for up to
+five minutes. Use `--refresh` to resolve the reference again immediately, or
+`--offline` to select retained metadata explicitly. Offline output identifies
+an overdue observation rather than presenting it as the current branch head.
+
+Remote browsing now uses the protected Site Ops cache. Its default location
+and the `SITEOPS_CACHE_DIR` override are described in
+[workspace packages](workspace-packages.md#internal-workspace-cache).
+Anonymous and CLI access have separate cache scopes. Cached reads retain
+previously obtained data and do not confirm current remote permissions.
+
+Full 40 character hexadecimal references must resolve to the requested commit.
+A mismatch reports
+`GitHub resolved a different commit than the requested identity.`
+Qualify a named Git reference explicitly if its name has that shape, for
+example `--ref refs/heads/<branch>`.
+
+JSON source context adds an `observation` object with origin, observation time,
+refresh time and offline/stale status. The underlying index, source and
+package trust distinctions remain separate. See
+[remote browsing](remote-content.md#reuse-refresh-and-offline-browsing) for examples.
 
 ### Windows tool arguments
 

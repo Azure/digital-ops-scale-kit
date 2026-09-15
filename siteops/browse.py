@@ -13,12 +13,14 @@ import os
 import stat
 from collections import Counter
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 from typing import Any, Callable
 
 import yaml
 
 from siteops import yamlio
+from siteops.artifact_verification import utc_text
 from siteops.artifacts import ArtifactError, check_portable_component
 from siteops.artifacts import is_link as _is_link
 from siteops.content_metadata import API_VERSION
@@ -158,6 +160,24 @@ class ContentEntry:
 
 
 @dataclass(frozen=True)
+class SourceObservation:
+    """When source metadata was observed, independent of its index or package trust."""
+
+    origin: str
+    observed_at: datetime
+    refresh_after: datetime | None
+    offline: bool
+    stale: bool
+
+    def document(self) -> dict[str, Any]:
+        return {
+            "origin": self.origin, "observedAt": utc_text(self.observed_at),
+            "refreshAfter": utc_text(self.refresh_after) if self.refresh_after is not None else None,
+            "offline": self.offline, "stale": self.stale,
+        }
+
+
+@dataclass(frozen=True)
 class BrowseSource:
     """Consumer-established source context, never a package's self-certification."""
 
@@ -166,13 +186,17 @@ class BrowseSource:
     revision: str | None = None
     provider: str | None = None
     index_status: str | None = None
+    observation: SourceObservation | None = None
 
     def document(self, workspace: str) -> dict[str, Any]:
-        return {
+        result = {
             "kind": self.kind, "reference": self.reference, "version": self.revision,
             "provider": self.provider, "workspace": workspace,
             "indexStatus": self.index_status, "verification": "not-performed",
         }
+        if self.observation is not None:
+            result["observation"] = self.observation.document()
+        return result
 
 
 @dataclass(frozen=True)

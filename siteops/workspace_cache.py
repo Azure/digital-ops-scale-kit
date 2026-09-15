@@ -9,23 +9,27 @@ import hashlib
 import logging
 import os
 import re
-import shutil
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from siteops.artifact_verification import ArtifactVerification
-from siteops.artifacts import ArtifactError, hash_file, open_regular_file, path_inventory
+from siteops.artifacts import hash_file, open_regular_file, path_inventory
 from siteops.cache_filesystem import (
     CacheError,
     cache_lock,
-    check_cache_ancestors,
     check_private_node,
     make_private_directory,
 )
+from siteops.cache_layout import CACHE_DIR_ENV as CACHE_DIR_ENV
+from siteops.cache_layout import CacheLayout
+from siteops.cache_layout import cache_io as _cache_io
+from siteops.cache_layout import cleanup_directory as _cleanup_created_directory
+from siteops.cache_layout import default_cache_root as default_cache_root
+from siteops.cache_layout import write_new as _write_new
 from siteops.workspace_package import (
     MAX_ARCHIVE_BYTES,
     MAX_NODES,
@@ -38,9 +42,6 @@ from siteops.workspace_package import (
 from siteops.workspace_source import ArtifactIdentity
 
 logger = logging.getLogger(__name__)
-CACHE_DIR_ENV = "SITEOPS_CACHE_DIR"
-_MARKER = b'{"apiVersion":"siteops/v1alpha1","kind":"WorkspaceCache"}\n'
-_DIRECTORIES = ("objects", "receipts", "staging", "locks")
 _MAX_RECEIPT_BYTES = 8 * 1024 * 1024
 ArtifactVerifier = Callable[[Path], ArtifactVerification]
 SourceCheck = Callable[[PackageInspection], None]
@@ -50,48 +51,6 @@ def _digest(value: str) -> str:
     if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
         raise CacheError("Cache identities must be lowercase SHA-256 digests.", code="cache.identity")
     return value
-
-
-def default_cache_root(environment: Mapping[str, str] | None = None) -> Path:
-    """Resolve the one cache override or platform default without creating files."""
-    env = os.environ if environment is None else environment
-    selected = env.get(CACHE_DIR_ENV)
-    if selected is not None:
-        value, suffix = selected, ()
-    elif os.name == "nt":
-        value, suffix = env.get("LOCALAPPDATA", ""), ("siteops", "cache")
-    elif env.get("XDG_CACHE_HOME") and Path(env["XDG_CACHE_HOME"]).is_absolute():
-        value, suffix = env["XDG_CACHE_HOME"], ("siteops",)
-    else:
-        value, suffix = str(Path.home()), (".cache", "siteops")
-    if not value.strip():
-        raise CacheError("The cache location is empty. Select an absolute cache directory.", code="cache.path")
-    try:
-        root = Path(value).expanduser()
-    except RuntimeError:
-        raise CacheError("The cache location could not be expanded.", code="cache.path") from None
-    if not root.is_absolute() or root == root.parent or ".." in root.parts:
-        raise CacheError("The cache must be an absolute, non-root directory.", code="cache.path")
-    return root.joinpath(*suffix)
-
-
-def _write_new(path: Path, data: bytes) -> None:
-    descriptor = os.open(
-        path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600,
-    )
-    complete = False
-    try:
-        with os.fdopen(descriptor, "wb") as output:
-            output.write(data)
-            output.flush()
-            os.fsync(output.fileno())
-        complete = True
-    finally:
-        if not complete:
-            try:
-                path.unlink()
-            except OSError:
-                logger.warning("Cache file staging cleanup could not be completed.")
 
 
 def _copy_artifact(
@@ -118,23 +77,6 @@ def _copy_artifact(
         raise CacheError("The artifact differs from its expected size or SHA-256.", code="cache.identity")
 
 
-def _cleanup_created_directory(path: Path) -> None:
-    """Remove only a directory created by this operation, never a published object."""
-    try:
-        check_private_node(path, directory=True)
-        shutil.rmtree(path)
-    except (OSError, ArtifactError):
-        logger.warning("Cache staging cleanup could not be completed.")
-
-
-@contextmanager
-def _cache_io() -> Iterator[None]:
-    try:
-        yield
-    except OSError:
-        raise CacheError("The cache operation could not complete its file access.", code="cache.io") from None
-
-
 @dataclass(frozen=True)
 class CachedWorkspace:
     """Verified content usable only while the enclosing cache lease is held."""
@@ -147,7 +89,7 @@ class CachedWorkspace:
         return MaterializedPackageBinding.bind(self.inspection, self.package_root, manifest)
 
 
-class WorkspaceCache:
+class WorkspaceCache(CacheLayout):
     """Internal local storage with immutable objects and separate verification receipts.
 
     Callers supply independently resolved artifact/source identities and a trusted
@@ -155,105 +97,11 @@ class WorkspaceCache:
     hits. Persisted receipts are evidence, never execution authorization.
     """
 
-    def __init__(self, root: Path | None = None, *, lock_timeout: float = 20):
-        self.root = default_cache_root() if root is None else Path(root)
-        self.lock_timeout = lock_timeout
-        if not self.root.is_absolute() or self.root == self.root.parent or ".." in self.root.parts:
-            raise CacheError("The cache must be an absolute, non-root directory.", code="cache.path")
-        try:
-            self._initialize()
-        except OSError:
-            raise CacheError("The private cache directory could not be prepared.", code="cache.path") from None
-
-    def _check_root(self) -> None:
-        check_cache_ancestors(self.root)
-        check_private_node(self.root, directory=True)
-        marker = self.root / "cache.json"
-        check_private_node(marker, directory=False)
-        with open_regular_file(marker) as stream:
-            if stream.read(len(_MARKER) + 1) != _MARKER:
-                raise CacheError("The selected directory is not a supported Site Ops cache.")
-        names = {entry.name for entry in self.root.iterdir()}
-        required = {"cache.json", *_DIRECTORIES}
-        if not required <= names or names - required - {"proofs"}:
-            raise CacheError("The cache root contains an unexpected path.")
-        for name in (*_DIRECTORIES, "objects/sha256"):
-            check_private_node(self.root.joinpath(*name.split("/")), directory=True)
-        if "proofs" in names:
-            proofs = self.root / "proofs"
-            check_private_node(proofs, directory=True)
-            if {entry.name for entry in proofs.iterdir()} != {"sha256"}:
-                raise CacheError("The proof cache contains an unexpected path.")
-            check_private_node(proofs / "sha256", directory=True)
-
-    def _initialize(self) -> None:
-        try:
-            self.root.lstat()
-        except FileNotFoundError:
-            pass
-        else:
-            self._check_root()
-            return
-        missing: list[Path] = []
-        parent = self.root.parent
-        while True:
-            try:
-                parent.lstat()
-                break
-            except FileNotFoundError:
-                missing.append(parent)
-                parent = parent.parent
-        for directory in reversed(missing):
-            check_cache_ancestors(directory)
-            try:
-                make_private_directory(directory)
-            except FileExistsError:
-                pass
-            check_private_node(directory, directory=True)
-        check_cache_ancestors(self.root)
-        candidate = self.root.parent / f".siteops-cache-{uuid.uuid4().hex}"
-        make_private_directory(candidate)
-        published = False
-        try:
-            _write_new(candidate / "cache.json", _MARKER)
-            for name in _DIRECTORIES:
-                make_private_directory(candidate / name)
-            make_private_directory(candidate / "objects" / "sha256")
-            try:
-                candidate.rename(self.root)
-                published = True
-            except OSError:
-                # Another initializer can win publication with its complete root.
-                if not self.root.exists():
-                    raise
-            self._check_root()
-        finally:
-            if not published:
-                _cleanup_created_directory(candidate)
-
     def _object(self, digest: str) -> Path:
         return self.root / "objects" / "sha256" / _digest(digest)
 
     def _prepare_proofs(self) -> None:
-        """Add the optional namespace atomically while preserving existing package caches."""
-        self._check_root()
-        if (self.root / "proofs").exists():
-            return
-        candidate = self.root / "staging" / f"proofs-{uuid.uuid4().hex}"
-        make_private_directory(candidate)
-        published = False
-        try:
-            make_private_directory(candidate / "sha256")
-            try:
-                candidate.rename(self.root / "proofs")
-                published = True
-            except OSError:
-                if not (self.root / "proofs").exists():
-                    raise
-            self._check_root()
-        finally:
-            if not published:
-                _cleanup_created_directory(candidate)
+        self.prepare_namespace("proofs")
 
     @contextmanager
     def _locked_proof(self, expected: ArtifactIdentity, *, exclusive: bool) -> Iterator[Path]:

@@ -168,7 +168,9 @@ contain no GitHub transport fields. Other approved providers can use the same
 boundary without adding an executor or changing operator configuration.
 
 These are internal APIs. Public project pins, source selection in deployment
-commands, metadata caching and cache maintenance are separate capabilities.
+commands and cache maintenance are separate capabilities. Descriptive browsing
+uses its own [reference/index cache](remote-content.md#reuse-refresh-and-offline-browsing).
+Those observations never authorize package execution.
 
 ## Publication integration
 

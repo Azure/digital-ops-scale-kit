@@ -162,6 +162,14 @@ def render_browse_plain(result: BrowseResult) -> str:
         heading += f"\nWorkspace: {_text(result.workspace) or '(not selected)'}"
         if result.source.index_status:
             heading += f"\nIndex: {_text(result.source.index_status)}"
+        if result.source.observation is not None:
+            observation = result.source.observation.document()
+            origin = "offline cache" if observation["offline"] else observation["origin"]
+            heading += f"\nReference: {origin}, observed {_text(observation['observedAt'])}"
+            if observation["stale"]:
+                heading += " (refresh overdue)"
+            elif result.source.observation.refresh_after is not None:
+                heading += f"\nRefresh after: {_text(observation['refreshAfter'])}, or use --refresh"
     lines = [
         heading,
         "Private inspection. Package verification, preparation and outcomes are not checked.",

@@ -284,7 +284,8 @@ and workspace release publication remain separate capabilities.
 ## Internal workspace cache
 
 `WorkspaceCache` is an internal storage API for package publication and use
-leases. No public command uses it.
+leases. Public remote browsing shares its protected storage layout through a
+separate metadata cache, without acquiring executable packages.
 
 `publish` copies an opaque local archive into private staging, verifies its
 expected SHA-256 and consumer-owned provenance, then extracts and validates
@@ -346,6 +347,13 @@ leases when a process exits. Lease coordination protects cooperating Site Ops
 operations, not against another process running as the same user. Corrupt
 content and changed access controls are detected during reuse.
 
+Source observations and index bytes use the separate optional
+`metadata/records/` namespace. Each bounded record binds an exact provider,
+access scope and metadata identity to payload size, SHA-256 and observation
+time. Record filenames are hashes of those keys, never source paths.
+The same root marker and native access controls protect every namespace.
+See [remote browsing](remote-content.md#reuse-refresh-and-offline-browsing).
+
 Operator Sites, overlays, pins and run state remain outside the cache.
-No cache management command, retention policy or source-metadata cache is
-implemented.
+Cache management commands and automatic retention policies remain separate
+capabilities.

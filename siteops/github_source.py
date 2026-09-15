@@ -224,6 +224,11 @@ class GitHubReference:
         """Return the canonical repository web URL."""
         return f"https://github.com/{self.owner}/{self.repository}"
 
+    @property
+    def pinned_commit(self) -> str | None:
+        """A complete commit identity, distinct from a mutable name that resolves to one."""
+        return self.ref.lower() if self.ref is not None and _SHA_RE.fullmatch(self.ref) else None
+
 
 @dataclass(frozen=True)
 class GitHubTreeEntry:
@@ -254,6 +259,49 @@ class GitHubTreeEntry:
                 "github.invalid-data",
                 "GitHub returned an unexpected size for a non-blob tree entry.",
             )
+
+
+def parse_git_tree_entries(tree: Any) -> dict[str, GitHubTreeEntry]:
+    """Validate the same bounded tree entries from the API or a cached observation."""
+    if not isinstance(tree, list):
+        raise _error("github.invalid-data", "GitHub returned invalid tree metadata.")
+    if len(tree) > _MAX_TREE_ENTRIES:
+        raise _error("github.tree-limit", "Repository tree exceeds 20,000 entries.")
+    entries: dict[str, GitHubTreeEntry] = {}
+    for raw_entry in tree:
+        if not isinstance(raw_entry, dict):
+            raise _error("github.invalid-data", "GitHub returned an invalid tree entry.")
+        if "url" in raw_entry and not isinstance(raw_entry["url"], str):
+            raise _error("github.invalid-data", "GitHub returned an invalid tree entry.")
+        entry = GitHubTreeEntry(
+            path=raw_entry.get("path"), sha=raw_entry.get("sha"),
+            type=raw_entry.get("type"), mode=raw_entry.get("mode"),
+            size=_validate_size(raw_entry.get("size"), optional=True),
+        )
+        if entry.path in entries:
+            raise _error("github.invalid-data", "GitHub returned duplicate tree paths.")
+        entries[entry.path] = entry
+    return entries
+
+
+def validate_git_blob(entry: GitHubTreeEntry, content: bytes, *, max_bytes: int) -> bytes:
+    """Check cached and fetched bytes against the selected regular Git blob."""
+    if not isinstance(entry, GitHubTreeEntry) or not isinstance(content, bytes):
+        raise TypeError("A Git blob requires a validated tree entry and bytes.")
+    if type(max_bytes) is not int or max_bytes < 0:
+        raise ValueError("max_bytes must be a non-negative integer")
+    if entry.type != "blob" or entry.mode not in _REGULAR_BLOB_MODES:
+        raise _error("github.blob-mode", "Only regular Git blob entries can be read as content.")
+    if len(content) > max_bytes:
+        raise _error("github.blob-limit", "Git blob exceeds the configured metadata preview limit.")
+    if entry.size is not None and len(content) != entry.size:
+        raise _error("github.integrity", "GitHub blob size did not match the tree.")
+    identity = hashlib.sha1(
+        f"blob {len(content)}\0".encode("ascii") + content, usedforsecurity=False,
+    ).hexdigest()
+    if identity != entry.sha:
+        raise _error("github.integrity", "GitHub blob content failed Git object verification.")
+    return content
 
 
 def _release_identifier(value: Any) -> int:
@@ -887,10 +935,13 @@ class GitHubClient:
         commit = self._request(route)
         if not isinstance(commit, dict):
             raise _error("github.invalid-data", "GitHub returned invalid commit metadata.")
-        return _validate_sha(
+        resolved = _validate_sha(
             commit.get("sha"),
             summary="GitHub returned an invalid commit object ID.",
         )
+        if self.reference.pinned_commit is not None and resolved != self.reference.pinned_commit:
+            raise _error("github.integrity", "GitHub resolved a different commit than the requested identity.")
+        return resolved
 
     def get_tree(self, commit: str) -> dict[str, GitHubTreeEntry]:
         """Return the recursively enumerated Git tree pinned to an exact commit."""
@@ -931,23 +982,7 @@ class GitHubClient:
                 "Repository tree exceeds the remote browsing response limit.",
             )
 
-        entries: dict[str, GitHubTreeEntry] = {}
-        for raw_entry in tree:
-            if not isinstance(raw_entry, dict):
-                raise _error("github.invalid-data", "GitHub returned an invalid tree entry.")
-            if "url" in raw_entry and not isinstance(raw_entry["url"], str):
-                raise _error("github.invalid-data", "GitHub returned an invalid tree entry.")
-            entry = GitHubTreeEntry(
-                path=raw_entry.get("path"),
-                sha=raw_entry.get("sha"),
-                type=raw_entry.get("type"),
-                mode=raw_entry.get("mode"),
-                size=_validate_size(raw_entry.get("size"), optional=True),
-            )
-            if entry.path in entries:
-                raise _error("github.invalid-data", "GitHub returned duplicate tree paths.")
-            entries[entry.path] = entry
-        return entries
+        return parse_git_tree_entries(tree)
 
     def read_blob(
         self,
@@ -1015,10 +1050,4 @@ class GitHubClient:
         if len(content) != declared_size:
             raise _error("github.integrity", "GitHub blob content size did not match its metadata.")
 
-        identity = hashlib.sha1(
-            f"blob {len(content)}\0".encode("ascii") + content,
-            usedforsecurity=False,
-        ).hexdigest()
-        if identity != entry.sha.lower():
-            raise _error("github.integrity", "GitHub blob content failed Git object verification.")
-        return content
+        return validate_git_blob(entry, content, max_bytes=max_bytes)
