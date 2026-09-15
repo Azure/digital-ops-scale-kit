@@ -127,8 +127,48 @@ GitHub asset origins.
 Package and proof files remain opaque and available only within that context.
 A failed proof download also cleans up the temporary package. Configured CLI
 authentication is rejected explicitly for this acquisition path rather than
-silently changed to anonymous access. Retained proof inputs, verification/cache
-orchestration and public command integration remain separate work.
+silently changed to anonymous access. Retained proofs and cache orchestration
+use the internal acquisition boundary below.
+
+## Internal acquisition and pinned use
+
+`GitHubWorkspaceAcquirer` connects release selection, retained proofs and the
+existing workspace cache. Its caller supplies a local consumer policy and
+an independently provisioned trusted root. Repository approval, policy expiry
+and root identity are checked before source resolution.
+
+`acquire` resolves the explicit release and its descriptor, then reuses valid
+cached bytes or downloads the missing proof and package by observed asset ID.
+The package must pass the existing detached provenance verifier before
+extraction. Source revision, workspace, kit identity and version must agree
+with the selection before cache publication.
+
+`lease` accepts an already resolved selection. It checks the retained proof,
+current local policy and roots, package bytes and materialized content without
+contacting the source. Keep the lease open through inspection, planning and
+execution. The returned `CachedWorkspace` uses the existing manifest resolver,
+planner and executor with separate operator Sites.
+
+| Operation | Source access | Package and proof transfer |
+|---|---|---|
+| First acquisition | Resolve release and descriptor | Acquire missing identified bytes |
+| Explicit acquisition again | Resolve release and descriptor again | Reuse valid cached bytes |
+| Use an existing pin | None | None |
+| Pin with missing proof | None, returns `cache.proof-missing` | Explicit acquisition required |
+| Corrupt cached package or proof | Pinned use stays local | Reject without automatic repair |
+
+Every publication and lease invokes the trusted verifier. A changed local
+policy can revalidate the same bytes without another download. Expired policy,
+changed roots or a source outside the approved repository fail explicitly.
+Stored receipts are records of evaluation, never permission to bypass it.
+
+The common `WorkspaceAcquisition` layer accepts a trusted verifier supplied by
+application code. Its source expectations, proof storage and cache contracts
+contain no GitHub transport fields. Other approved providers can use the same
+boundary without adding an executor or changing operator configuration.
+
+These are internal APIs. Public project pins, source selection in deployment
+commands, metadata caching and cache maintenance are separate capabilities.
 
 ## Publication integration
 

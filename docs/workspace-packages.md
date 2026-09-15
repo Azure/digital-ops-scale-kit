@@ -276,10 +276,10 @@ manifest URLs fail before tool or proxy mutation, including when a prior
 operation produces the URL at runtime. Ordinary trusted local workspaces keep
 their existing HTTPS behavior.
 
-There is no public `plan --source` or `deploy --source` route yet. Source
-download and resolution, retained-proof provisioning and orchestration,
-project pins, source-selection CLI, cache management and workspace release
-assets are not implemented.
+The internal [source acquisition flow](workspace-sources.md) provides release
+resolution, downloads, retained proofs and verified cache use. Public
+`plan --source` and `deploy --source` routes, project pins, cache management
+and workspace release publication remain separate capabilities.
 
 ## Internal workspace cache
 
@@ -313,6 +313,24 @@ objects. Every use invokes the caller's trusted verifier. A stored receipt
 never authorizes execution by itself. A verifier with retained local proof
 and trusted-root inputs can support offline reuse without a source request.
 The storage layer performs no downloads and does not refresh project pins.
+
+`retain_proof` stores exact opaque verification inputs at
+`proofs/sha256/<proof-digest>/proof.bin`. This optional namespace is created
+atomically when first needed. Existing marked caches keep their marker and
+package objects unchanged. Invalid existing namespace contents are rejected
+rather than overwritten.
+
+Proofs remain inputs, not publisher authority. `lease_proof` holds a shared
+lease while the trusted verifier reads them and checks their identity again
+on return. Proof retention uses a separate exclusive lock. Missing proof bytes
+produce `cache.proof-missing`, while changed bytes or access controls fail
+without repair. Older builds that do not support this namespace may reject
+the cache. Use a separate cache directory when running such a build.
+
+Source acquisition supplies an additional source check to `publish` and
+`lease`. It compares the verified package with the selected workspace and kit
+before publication or use. See [workspace sources](workspace-sources.md) for
+the download, policy and pinned reuse flow.
 
 New directories use private POSIX modes or an explicit Windows DACL for the
 current user, SYSTEM and Administrators. Existing ownership and access

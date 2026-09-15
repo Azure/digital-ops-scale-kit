@@ -35,6 +35,7 @@ from siteops.workspace_package import (
     extract_package,
     inspect_package,
 )
+from siteops.workspace_source import ArtifactIdentity
 
 logger = logging.getLogger(__name__)
 CACHE_DIR_ENV = "SITEOPS_CACHE_DIR"
@@ -42,6 +43,7 @@ _MARKER = b'{"apiVersion":"siteops/v1alpha1","kind":"WorkspaceCache"}\n'
 _DIRECTORIES = ("objects", "receipts", "staging", "locks")
 _MAX_RECEIPT_BYTES = 8 * 1024 * 1024
 ArtifactVerifier = Callable[[Path], ArtifactVerification]
+SourceCheck = Callable[[PackageInspection], None]
 
 
 def _digest(value: str) -> str:
@@ -92,7 +94,10 @@ def _write_new(path: Path, data: bytes) -> None:
                 logger.warning("Cache file staging cleanup could not be completed.")
 
 
-def _copy_archive(source: Path, destination: Path, expected: str) -> None:
+def _copy_artifact(
+    source: Path, destination: Path, expected: str, *,
+    limit: int = MAX_ARCHIVE_BYTES, expected_size: int | None = None,
+) -> None:
     digest = hashlib.sha256()
     size = 0
     with open_regular_file(source) as original:
@@ -101,16 +106,16 @@ def _copy_archive(source: Path, destination: Path, expected: str) -> None:
             0o600,
         )
         with os.fdopen(descriptor, "wb") as output:
-            while chunk := original.read(min(1024 * 1024, MAX_ARCHIVE_BYTES - size + 1)):
+            while chunk := original.read(min(1024 * 1024, limit - size + 1)):
                 size += len(chunk)
-                if size > MAX_ARCHIVE_BYTES:
-                    raise CacheError("The package exceeds the cache archive limit.")
+                if size > limit:
+                    raise CacheError("The artifact exceeds its cache byte limit.")
                 digest.update(chunk)
                 output.write(chunk)
             output.flush()
             os.fsync(output.fileno())
-    if digest.hexdigest() != expected:
-        raise CacheError("The package SHA-256 does not match the selected source.", code="cache.identity")
+    if digest.hexdigest() != expected or (expected_size is not None and size != expected_size):
+        raise CacheError("The artifact differs from its expected size or SHA-256.", code="cache.identity")
 
 
 def _cleanup_created_directory(path: Path) -> None:
@@ -168,10 +173,18 @@ class WorkspaceCache:
         with open_regular_file(marker) as stream:
             if stream.read(len(_MARKER) + 1) != _MARKER:
                 raise CacheError("The selected directory is not a supported Site Ops cache.")
-        if {entry.name for entry in self.root.iterdir()} != {"cache.json", *_DIRECTORIES}:
+        names = {entry.name for entry in self.root.iterdir()}
+        required = {"cache.json", *_DIRECTORIES}
+        if not required <= names or names - required - {"proofs"}:
             raise CacheError("The cache root contains an unexpected path.")
         for name in (*_DIRECTORIES, "objects/sha256"):
             check_private_node(self.root.joinpath(*name.split("/")), directory=True)
+        if "proofs" in names:
+            proofs = self.root / "proofs"
+            check_private_node(proofs, directory=True)
+            if {entry.name for entry in proofs.iterdir()} != {"sha256"}:
+                raise CacheError("The proof cache contains an unexpected path.")
+            check_private_node(proofs / "sha256", directory=True)
 
     def _initialize(self) -> None:
         try:
@@ -220,6 +233,95 @@ class WorkspaceCache:
 
     def _object(self, digest: str) -> Path:
         return self.root / "objects" / "sha256" / _digest(digest)
+
+    def _prepare_proofs(self) -> None:
+        """Add the optional namespace atomically while preserving existing package caches."""
+        self._check_root()
+        if (self.root / "proofs").exists():
+            return
+        candidate = self.root / "staging" / f"proofs-{uuid.uuid4().hex}"
+        make_private_directory(candidate)
+        published = False
+        try:
+            make_private_directory(candidate / "sha256")
+            try:
+                candidate.rename(self.root / "proofs")
+                published = True
+            except OSError:
+                if not (self.root / "proofs").exists():
+                    raise
+            self._check_root()
+        finally:
+            if not published:
+                _cleanup_created_directory(candidate)
+
+    @contextmanager
+    def _locked_proof(self, expected: ArtifactIdentity, *, exclusive: bool) -> Iterator[Path]:
+        if not isinstance(expected, ArtifactIdentity):
+            raise CacheError("A retained proof requires an artifact identity.")
+        self._check_root()
+        with cache_lock(
+            self.root / "locks" / f"proof-{expected.sha256}.lock",
+            exclusive=exclusive, timeout=self.lock_timeout,
+        ):
+            self._check_root()
+            yield self.root / "proofs" / "sha256" / expected.sha256
+
+    def _read_proof(self, root: Path, expected: ArtifactIdentity) -> Path:
+        try:
+            root.lstat()
+        except FileNotFoundError:
+            raise CacheError(
+                "The pinned proof is not cached. Acquire that exact proof before use.",
+                code="cache.proof-missing",
+            ) from None
+        check_private_node(root, directory=True)
+        if {entry.name for entry in root.iterdir()} != {"proof.bin"}:
+            raise CacheError("The cached proof is incomplete or has unexpected paths.")
+        path = root / "proof.bin"
+        check_private_node(path, directory=False)
+        if hash_file(path, limit=expected.size) != (expected.size, expected.sha256):
+            raise CacheError("The cached proof differs from its expected identity.", code="cache.identity")
+        return path
+
+    def retain_proof(self, proof: Path, expected: ArtifactIdentity) -> None:
+        """Retain exact opaque proof bytes, independently of any claim of publisher trust."""
+        if not isinstance(expected, ArtifactIdentity):
+            raise CacheError("A retained proof requires an artifact identity.")
+        with _cache_io():
+            self._prepare_proofs()
+            with self._locked_proof(expected, exclusive=True) as target:
+                try:
+                    target.lstat()
+                except FileNotFoundError:
+                    pass
+                else:
+                    self._read_proof(target, expected)
+                    return
+                candidate = self.root / "staging" / f"proof-{uuid.uuid4().hex}"
+                make_private_directory(candidate)
+                published = False
+                try:
+                    _copy_artifact(
+                        proof, candidate / "proof.bin", expected.sha256,
+                        limit=expected.size, expected_size=expected.size,
+                    )
+                    self._read_proof(candidate, expected)
+                    candidate.rename(target)
+                    published = True
+                finally:
+                    if not published:
+                        _cleanup_created_directory(candidate)
+
+    @contextmanager
+    def lease_proof(self, expected: ArtifactIdentity) -> Iterator[Path]:
+        """Hold identified proof bytes through verification and check them again on return."""
+        with self._locked_proof(expected, exclusive=False) as root:
+            with _cache_io():
+                path = self._read_proof(root, expected)
+            yield path
+            with _cache_io():
+                self._read_proof(root, expected)
 
     @contextmanager
     def _locked(self, digest: str, *, exclusive: bool) -> Iterator[Path]:
@@ -311,6 +413,7 @@ class WorkspaceCache:
 
     def _read_object(
         self, root: Path, digest: str, source_revision: str, verify: ArtifactVerifier,
+        check_source: SourceCheck | None = None,
     ) -> CachedWorkspace:
         try:
             root.lstat()
@@ -327,18 +430,22 @@ class WorkspaceCache:
         inspection = inspect_package(archive, digest)
         content = root / "content"
         self._validate_content(content, inspection, source_revision)
+        if check_source is not None:
+            check_source(inspection)
         self._record(digest, verification)
         return CachedWorkspace(content, inspection, verification)
 
     def publish(
         self, archive: Path, expected_sha256: str, *,
         source_revision: str, verify: ArtifactVerifier,
+        check_source: SourceCheck | None = None,
     ) -> PackageInspection:
         """Verify and atomically publish an archive under its SHA-256 identity.
 
         The supplied verifier runs before extraction and when an existing
         object is reused. Corrupt objects fail rather than being repaired or
-        replaced in place. The operation performs no download.
+        replaced in place. An optional trusted source check runs after package
+        inspection and before publication or reuse. The operation performs no download.
         """
         digest = _digest(expected_sha256)
         with _cache_io(), self._locked(digest, exclusive=True) as target:
@@ -347,16 +454,18 @@ class WorkspaceCache:
             except FileNotFoundError:
                 pass
             else:
-                return self._read_object(target, digest, source_revision, verify).inspection
+                return self._read_object(target, digest, source_revision, verify, check_source).inspection
             candidate = self.root / "staging" / uuid.uuid4().hex
             make_private_directory(candidate)
             published = False
             try:
                 copied = candidate / "package.zip"
-                _copy_archive(archive, copied, digest)
+                _copy_artifact(archive, copied, digest)
                 verification = self._verify(copied, digest, verify)
                 inspection = extract_package(copied, digest, candidate / "content")
                 self._validate_content(candidate / "content", inspection, source_revision)
+                if check_source is not None:
+                    check_source(inspection)
                 self._record(digest, verification)
                 candidate.rename(target)
                 published = True
@@ -368,6 +477,7 @@ class WorkspaceCache:
     @contextmanager
     def lease(
         self, expected_sha256: str, *, source_revision: str, verify: ArtifactVerifier,
+        check_source: SourceCheck | None = None,
     ) -> Iterator[CachedWorkspace]:
         """Revalidate cached content and policy under a shared use lease.
 
@@ -378,5 +488,5 @@ class WorkspaceCache:
         digest = _digest(expected_sha256)
         with self._locked(digest, exclusive=False) as root:
             with _cache_io():
-                content = self._read_object(root, digest, source_revision, verify)
+                content = self._read_object(root, digest, source_revision, verify, check_source)
             yield content

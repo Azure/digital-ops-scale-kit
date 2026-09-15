@@ -144,15 +144,10 @@ class GitHubWorkspaceDownload:
     proof: Path
 
 
-@contextmanager
-def download_workspace_release(
+def resolve_workspace_release(
     client: GitHubClient, *, staging_parent: Path, workspace: str | None = None,
-) -> Iterator[GitHubWorkspaceDownload]:
-    """Resolve and download one selected workspace without extracting or authorizing it.
-
-    Consumer policy and trusted roots are supplied separately to verification.
-    Source read access and descriptor metadata never select that authority.
-    """
+) -> GitHubWorkspaceSource:
+    """Bind one workspace through its descriptor before downloading a package or proof."""
     if client.auth != "anonymous":
         raise SourceResolutionError(
             "Workspace asset acquisition currently uses anonymous HTTPS.",
@@ -162,12 +157,24 @@ def download_workspace_release(
     descriptor = workspace_descriptor_asset(release)
     with download_release_asset(release, descriptor, staging_parent=staging_parent) as path:
         with open_regular_file(path) as stream:
-            selected = bind_workspace_release(
+            return bind_workspace_release(
                 release, stream.read(MAX_DESCRIPTOR_BYTES + 1), workspace=workspace,
             )
+
+
+@contextmanager
+def download_workspace_release(
+    client: GitHubClient, *, staging_parent: Path, workspace: str | None = None,
+) -> Iterator[GitHubWorkspaceDownload]:
+    """Download one selected workspace without extracting or authorizing it.
+
+    Consumer policy and trusted roots are supplied separately to verification.
+    Source read access and descriptor metadata never select that authority.
+    """
+    selected = resolve_workspace_release(client, staging_parent=staging_parent, workspace=workspace)
     with download_release_asset(
-        release, selected.package_asset, staging_parent=staging_parent,
+        selected.release, selected.package_asset, staging_parent=staging_parent,
     ) as package, download_release_asset(
-        release, selected.proof_asset, staging_parent=staging_parent,
+        selected.release, selected.proof_asset, staging_parent=staging_parent,
     ) as proof:
         yield GitHubWorkspaceDownload(selected, package, proof)

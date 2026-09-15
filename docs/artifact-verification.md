@@ -100,6 +100,13 @@ native tool reads them. Artifact identity, policy expiry and policy-file
 identity are checked again before a receipt is returned. An expired or
 changed policy fails explicitly.
 
+The internal [workspace acquisition flow](workspace-sources.md#internal-acquisition-and-pinned-use)
+retains identified proofs separately from receipts. It binds the selected
+source to local consumer policy, then passes retained proof and root inputs
+to this same verifier on each cache publication and lease. Pinned reuse
+requires no source request. Policy and root paths are supplied by application
+code, not by package or release metadata.
+
 On POSIX, temporary files are owner-only. Windows inherits the staging
 parent's access controls, so acquisition must supply a protected location.
 Cleanup failures are warnings and do not replace a primary verification
