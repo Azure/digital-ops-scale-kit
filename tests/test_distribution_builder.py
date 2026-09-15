@@ -677,17 +677,24 @@ def test_runtime_wheel_requires_record_before_bundling(builder, tmp_path):
         builder._collect_runtime_wheels(wheelhouse, requirements)
 
 
-def test_runtime_wheel_reads_nonmetadata_members_before_bundling(builder, tmp_path):
+@pytest.mark.parametrize("package_name", ["packaging", "pyyaml"])
+def test_runtime_wheel_reads_nonmetadata_members_before_bundling(builder, tmp_path, package_name):
     wheelhouse, requirements = _synthetic_wheelhouse(builder, tmp_path)
-    path = next(wheelhouse.glob("*.whl"))
+    path = min(wheelhouse.glob(f"{package_name}-*.whl"))
     changed = path.read_bytes().replace(b"runtime fixture payload", b"damaged fixture payload")
     assert changed != path.read_bytes()
     path.write_bytes(changed)
-    requirement = requirements[0]
-    locks = (builder.LockedRequirement(
-        requirement.name, requirement.version,
-        requirement.hashes | {hashlib.sha256(changed).hexdigest()},
-    ),)
+    name, version, _, _ = parse_wheel_filename(path.name)
+    changed_digest = hashlib.sha256(changed).hexdigest()
+    locks = tuple(
+        builder.LockedRequirement(
+            requirement.name, requirement.version,
+            requirement.hashes | {changed_digest},
+        )
+        if (requirement.name, requirement.version) == (name, str(version))
+        else requirement
+        for requirement in requirements
+    )
     with pytest.raises(builder.BuildError, match="corrupt archive"):
         builder._collect_runtime_wheels(wheelhouse, locks)
 
