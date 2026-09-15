@@ -252,6 +252,21 @@ class ResolvedReleaseSource:
             )
         return descriptor
 
+    def document(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider, "reference": self.reference,
+            "release": self.release, "revision": self.revision,
+            "descriptor": self.descriptor.document(),
+        }
+
+    @classmethod
+    def from_document(cls, value: Any) -> ResolvedReleaseSource:
+        row = _record(value, {"provider", "reference", "release", "revision", "descriptor"})
+        return cls(
+            row["provider"], row["reference"], row["release"], row["revision"],
+            ArtifactIdentity.from_document(row["descriptor"]),
+        )
+
 
 @dataclass(frozen=True)
 class ResolvedWorkspaceSource:
@@ -273,3 +288,16 @@ class ResolvedWorkspaceSource:
             self.source.revision, self.entry.workspace, self.entry.kit_id, self.entry.kit_version
         ):
             raise SourceResolutionError("Package metadata differs from the selected source.", code="source.identity")
+
+    def document(self) -> dict[str, Any]:
+        return {"source": self.source.document(), "content": self.entry.document()}
+
+    @classmethod
+    def from_document(cls, value: Any) -> ResolvedWorkspaceSource:
+        row = _record(value, {"source", "content"})
+        result = cls(
+            ResolvedReleaseSource.from_document(row["source"]),
+            WorkspaceReleaseEntry.from_document(row["content"]),
+        )
+        WorkspaceReleaseAssets(result.source.revision, (result.entry,))
+        return result

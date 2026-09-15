@@ -56,7 +56,9 @@ def _section(lines: list[str], title: str, values: tuple[str, ...] | None) -> No
             lines.extend(_wrap(_text(value), indent="  - ", hanging="    "))
 
 
-def _card(entry: ContentEntry, workspace: str, *, local: bool = True) -> list[str]:
+def _card(
+    entry: ContentEntry, workspace: str, *, local: bool = True, project: str | None = None,
+) -> list[str]:
     guidance = entry.guidance
     lines = [
         _text(entry.name), f"Path: {_text(entry.path)}",
@@ -122,7 +124,12 @@ def _card(entry: ContentEntry, workspace: str, *, local: bool = True) -> list[st
             or not any(character in workspace + entry.path for character in "&|<>%!^")
         )
     )
-    if not local:
+    if project is not None:
+        lines.extend((
+            "", "Use plan or deploy with the same project and source/trust options.",
+            "Choose an explicit Site selector and review the executable plan before deployment.",
+        ))
+    elif not local:
         lines.extend((
             "", "Remote preview only. Deployable workspace content has not been acquired.",
             "Read the pinned guide. Plan and deploy require a complete, reviewed local workspace.",
@@ -154,6 +161,8 @@ def _card(entry: ContentEntry, workspace: str, *, local: bool = True) -> list[st
 def render_browse_plain(result: BrowseResult) -> str:
     """Render compact inventory rows or one detailed card without terminal controls."""
     local = result.source is None or result.source.kind == "local"
+    project = result.source.project if result.source is not None else None
+    verified = result.source is not None and result.source.verification == "verified"
     heading = f"Source: local workspace {_text(result.workspace)}"
     if not local:
         heading = f"Source: {_text(result.source.reference)}"
@@ -170,13 +179,16 @@ def render_browse_plain(result: BrowseResult) -> str:
                 heading += " (refresh overdue)"
             elif result.source.observation.refresh_after is not None:
                 heading += f"\nRefresh after: {_text(observation['refreshAfter'])}, or use --refresh"
+    if project is not None:
+        heading += f"\nProject: {_text(project)}"
     lines = [
         heading,
-        "Private inspection. Package verification, preparation and outcomes are not checked.",
+        "Private inspection. Package verified. Preparation and outcomes are not checked."
+        if verified else "Private inspection. Package verification, preparation and outcomes are not checked.",
         "",
     ]
     if result.selected and len(result.entries) == 1:
-        lines.extend(_card(result.entries[0], result.workspace, local=local))
+        lines.extend(_card(result.entries[0], result.workspace, local=local, project=project))
     else:
         lines.append(
             f"Deployment content: {len(result.entries)} shown, {result.matched} matches, "
@@ -195,19 +207,21 @@ def render_browse_plain(result: BrowseResult) -> str:
         if not result.entries and not result.diagnostics:
             lines.append(
                 "  No matching entries. Use an explicit path for a custom layout."
-                if local else
+                if local or project is not None else
                 "  No published entries match. Clear filters or select another indexed workspace."
             )
         if result.matched > len(result.entries):
             lines.append("  More matches are available. Omit --limit or narrow the filters.")
         lines.extend((
             "", "Use --search TEXT, --tag TAG or --category CATEGORY to narrow the inventory.",
+            "Inspect with browse NAME and the same project and source/trust options."
+            if project is not None else
             "Inspect with browse NAME, or use the shown path for ambiguous names and fragments."
             if local else
             "Inspect with browse NAME and the same --source, --ref and source-relative -w options.",
             "Use --include-partials to include declared reusable fragments.",
         ))
-        if not local and result.source.revision:
+        if not local and project is None and result.source.revision:
             lines.append("Pin --ref to the displayed revision to keep the same source snapshot.")
     if result.diagnostics:
         lines.extend(("", "Inspection is incomplete:"))

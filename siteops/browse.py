@@ -187,15 +187,19 @@ class BrowseSource:
     provider: str | None = None
     index_status: str | None = None
     observation: SourceObservation | None = None
+    project: str | None = None
+    verification: str = "not-performed"
 
     def document(self, workspace: str) -> dict[str, Any]:
         result = {
             "kind": self.kind, "reference": self.reference, "version": self.revision,
             "provider": self.provider, "workspace": workspace,
-            "indexStatus": self.index_status, "verification": "not-performed",
+            "indexStatus": self.index_status, "verification": self.verification,
         }
         if self.observation is not None:
             result["observation"] = self.observation.document()
+        if self.project is not None:
+            result["project"] = self.project
         return result
 
 

@@ -20,7 +20,7 @@ from siteops.github_attestation import (
     load_github_policy,
     verify_github_artifact,
 )
-from siteops.github_source import GitHubClient
+from siteops.github_source import GitHubClient, GitHubReference
 from siteops.github_workspace_source import (
     GitHubWorkspaceSource,
     download_release_asset,
@@ -28,7 +28,7 @@ from siteops.github_workspace_source import (
 )
 from siteops.workspace_acquisition import WorkspaceAcquisition
 from siteops.workspace_cache import CachedWorkspace, WorkspaceCache
-from siteops.workspace_source import ResolvedWorkspaceSource
+from siteops.workspace_source import ResolvedWorkspaceSource, SourceResolutionError
 
 
 class GitHubWorkspaceAcquirer:
@@ -83,16 +83,25 @@ class GitHubWorkspaceAcquirer:
         ) as path:
             self.cache.retain_proof(path, expected)
 
-    def acquire(self, client: GitHubClient, *, workspace: str | None = None) -> GitHubWorkspaceSource:
+    def acquire(
+        self, client: GitHubClient, *, workspace: str | None = None,
+        expected: ResolvedWorkspaceSource | None = None,
+    ) -> GitHubWorkspaceSource:
         """Resolve the explicit release, acquiring only missing identified package/proof bytes."""
         reference = client.reference
         self._policy_for(f"github:{reference.owner}/{reference.repository}")
         selected = resolve_workspace_release(
             client, staging_parent=self.cache.root / "staging", workspace=workspace,
         )
+        if expected is not None and selected.resolved != expected:
+            raise SourceResolutionError(
+                "The published source differs from the workspace pin. Repin explicitly to change the selection.",
+                code="source.pin-changed",
+            )
         try:
             with self._acquisition.lease(selected.resolved):
                 return selected
+
         except CacheError as error:
             if error.code not in {"cache.missing", "cache.proof-missing"}:
                 raise
@@ -106,6 +115,13 @@ class GitHubWorkspaceAcquirer:
         ) as path:
             self._acquisition.publish(selected.resolved, path)
         return selected
+
+    def restore(self, source: ResolvedWorkspaceSource) -> None:
+        """Acquire missing pinned bytes only when release observations still match the pin."""
+        if source.source.provider != "github-release/v1":
+            raise VerificationError("This acquisition adapter requires a GitHub release source.")
+        client = GitHubClient(GitHubReference.parse(source.source.reference, ref=source.source.release))
+        self.acquire(client, workspace=source.entry.workspace, expected=source)
 
     @contextmanager
     def lease(self, source: ResolvedWorkspaceSource) -> Iterator[CachedWorkspace]:

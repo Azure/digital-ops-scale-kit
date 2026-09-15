@@ -23,6 +23,7 @@ import os
 import signal
 import sys
 import threading
+from dataclasses import replace
 from pathlib import Path
 from types import FrameType
 from typing import Any, Callable
@@ -30,15 +31,18 @@ from typing import Any, Callable
 import yaml
 
 from siteops import __version__
+from siteops.artifacts import ArtifactError
 from siteops.browse import (
     BrowseError,
     BrowseResult,
+    BrowseSource,
     ContentReader,
     inspect_content,
     validate_browse_options,
 )
 from siteops.browse_output import _text as _content_text
 from siteops.browse_output import render_browse_plain, serialize_browse_json
+from siteops.command_context import open_command_context, require_trust_inputs
 from siteops.composition import CompositionError, report_composition_error
 from siteops.manifest_selection import (
     ManifestSelectionError,
@@ -47,7 +51,6 @@ from siteops.manifest_selection import (
     select_manifest_path,
 )
 from siteops.models import (
-    Manifest,
     MultipleSubscriptionSitesError,
     NoTargetingError,
     ParameterSelectionError,
@@ -65,6 +68,16 @@ from siteops.planning import (
     PlanStatus,
     render_plain_plan,
     serialize_plan_json,
+)
+from siteops.project import (
+    PIN_NAME,
+    ProjectError,
+    WorkspacePin,
+    pin_exists,
+    project_root,
+    read_pin,
+    require_separate_cache,
+    write_pin,
 )
 from siteops.reporting import (
     TextProgressReporter,
@@ -109,6 +122,12 @@ def resolve_manifest_path(manifest: str | Path, workspace: Path) -> Path:
 
 def _command_manifest(args: argparse.Namespace) -> Path | None:
     try:
+        binding = getattr(args, "package_binding", None)
+        if binding is not None:
+            path = binding.require_manifest(binding.manifest_path)
+            if not is_redaction_enabled():
+                print(f"Manifest: {_content_text(binding.manifest_relative_path)}", file=sys.stderr)
+            return path
         path = resolve_manifest_path(args.manifest, args.workspace)
         if not path.is_file():
             raise ManifestSelectionError(
@@ -127,6 +146,72 @@ def _command_manifest(args: argparse.Namespace) -> Path | None:
     return path
 
 
+def _context_options(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "workspace": args.workspace,
+        "project": getattr(args, "project", None),
+        "command": args.command,
+        "policy": getattr(args, "trust_policy", None),
+        "trusted_root": getattr(args, "trusted_root", None),
+        "offline": getattr(args, "offline", False),
+        "discover": _auto_discover_workspace,
+    }
+
+
+def cmd_project(args: argparse.Namespace) -> int:
+    """Inspect or explicitly change a project's complete workspace selection."""
+    if is_redaction_enabled():
+        print("Project source details are private. Use SITEOPS_REDACT_OUTPUT=0 for an authorized destination.",
+              file=sys.stderr)
+        return 1
+    try:
+        if args.project is not None or args.workspace is not None:
+            raise ProjectError("Project commands take their target directory as a positional argument.")
+        if args.project_command == "show":
+            if args.trust_policy is not None or args.trusted_root is not None:
+                raise ProjectError("Project show reads a selection without applying trust options.")
+            root = project_root(args.directory)
+            pin = read_pin(root).pin
+        else:
+            from siteops.github_source import GitHubClient, GitHubReference
+            from siteops.github_workspace_acquisition import GitHubWorkspaceAcquirer
+            from siteops.workspace_cache import WorkspaceCache, default_cache_root
+
+            cache_root = default_cache_root()
+            policy, trusted_root = require_trust_inputs(cache_root, args.trust_policy, args.trusted_root)
+            reference = GitHubReference.parse(args.source, ref=args.release)
+            if reference.ref is None:
+                raise ProjectError("Project pin requires an explicit published release with --release.")
+            require_separate_cache(Path(args.directory).absolute(), cache_root)
+            root = project_root(args.directory, create=True)
+            require_separate_cache(root, cache_root)
+            previous = read_pin(root) if pin_exists(root) else None
+            cache = WorkspaceCache(cache_root)
+            acquired = GitHubWorkspaceAcquirer(
+                cache, policy_file=policy, trusted_root=trusted_root,
+            ).acquire(GitHubClient(reference), workspace=args.release_workspace)
+            pin = WorkspacePin(acquired.resolved)
+            write_pin(root, pin, expected_previous=previous.sha256 if previous else None)
+        if args.output == "json":
+            print(pin.serialized().decode("ascii"), end="")
+        else:
+            selection = pin.selection
+            print(f"Project: {_content_text(str(root))}")
+            print(f"Pin: {PIN_NAME}")
+            print(f"Source: {_content_text(selection.source.reference)} @ {_content_text(selection.source.release)}")
+            print(f"Workspace: {_content_text(selection.entry.workspace)}")
+            print(f"Kit: {_content_text(selection.entry.kit_id)} {_content_text(selection.entry.kit_version)}")
+            print(f"Revision: {_content_text(selection.source.revision)}")
+            print(f"Package SHA-256: {selection.entry.package.sha256}")
+            print("The pin records selection. Package use revalidates current consumer policy.")
+        return 0
+    except (ArtifactError, BrowseError) as error:
+        print(f"Error: {error}", file=sys.stderr)
+        for choice in getattr(error, "choices", ()):
+            print(f"Workspace choice: {_content_text(choice)}", file=sys.stderr)
+        return 1
+
+
 def cmd_browse(args: argparse.Namespace) -> int:
     """Inspect content before any Site configuration or Orchestrator is loaded."""
     if is_redaction_enabled():
@@ -139,6 +224,8 @@ def cmd_browse(args: argparse.Namespace) -> int:
     try:
         validate_browse_options(args.name, args.search, tuple(args.tag), args.category, args.limit)
         if args.source:
+            if args.project is not None or args.trust_policy is not None or args.trusted_root is not None:
+                raise ProjectError("Choose metadata --source browsing or project content, not both.")
             from siteops.github_catalog import inspect_github
 
             result = inspect_github(
@@ -148,15 +235,34 @@ def cmd_browse(args: argparse.Namespace) -> int:
                 refresh=args.refresh, offline=args.offline,
             )
         else:
-            if args.ref or args.auth != "anonymous" or args.refresh or args.offline:
-                raise ValueError("--ref, --auth, --refresh and --offline apply only to --source.")
-            workspace = args.workspace or _auto_discover_workspace(Path.cwd()) or Path.cwd()
-            result = inspect_content(
-                workspace, args.name, search=args.search, tags=tuple(args.tag),
-                category=args.category, include_partials=args.include_partials, limit=args.limit,
-            )
+            if args.ref or args.auth != "anonymous" or args.refresh:
+                raise ValueError("--ref, --auth and --refresh apply only to --source.")
+            with open_command_context(**_context_options(args)) as context:
+                result = inspect_content(
+                    context.workspace, args.name, search=args.search, tags=tuple(args.tag),
+                    category=args.category, include_partials=args.include_partials, limit=args.limit,
+                )
+                if context.project is not None:
+                    selected = context.pin.selection if context.pin else None
+                    result = replace(result, source=BrowseSource(
+                        "package" if selected else "local",
+                        selected.source.reference if selected else str(context.workspace),
+                        revision=selected.source.revision if selected else None,
+                        provider=selected.source.provider if selected else None,
+                        project=str(context.project),
+                        verification="verified" if selected else "not-performed",
+                    ))
+                    if selected:
+                        result = replace(result, workspace=selected.entry.workspace)
+                rendered = serialize_browse_json(result) if args.output == "json" else render_browse_plain(result)
+            print(rendered, end="\n" if args.output == "json" else "")
+            return 1 if result.diagnostics else 0
     except BrowseError as error:
         result = BrowseResult(str(args.workspace or ""), diagnostics=(error.diagnostic,))
+    except ArtifactError as error:
+        from siteops.browse import BrowseDiagnostic
+
+        result = BrowseResult("", diagnostics=(BrowseDiagnostic(error.code, str(error)),))
     except ValueError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
@@ -174,6 +280,10 @@ def cmd_index(args: argparse.Namespace) -> int:
     try:
         if not args.public:
             raise BrowseError("index.approval", "Use --public to approve the authored publication.")
+        if args.project is not None or args.trust_policy is not None or args.trusted_root is not None:
+            raise BrowseError("index.project", "Index generation uses local workspace input, not project or trust options.")
+        if args.workspace is None and pin_exists(Path.cwd()):
+            raise BrowseError("index.project", "Select a local workspace with -w before generating an index from a project.")
         workspace = args.workspace or _auto_discover_workspace(Path.cwd()) or Path.cwd()
         digests = None
         if args.for_source == "github":
@@ -529,10 +639,7 @@ def cmd_validate(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     if manifest_path is None:
         return 1
     try:
-        manifest = Manifest.from_file(
-            manifest_path,
-            workspace_root=args.workspace,
-        )
+        manifest = orchestrator.load_manifest(manifest_path)
     except (ValueError, OSError, yaml.YAMLError) as error:
         _write_plain_validation_errors([report_site_load_error(error)])
         return 1
@@ -1017,6 +1124,10 @@ Examples:
   siteops -w workspaces/iot-operations plan aio-install
   siteops -w workspaces/iot-operations deploy aio-install
   siteops -w workspaces/iot-operations plan aio-install -l environment=prod
+  siteops --project ./factory sites
+  siteops --project ./factory -w ./clone plan storage -l name=one
+  siteops --trust-policy policy.json --trusted-root trusted-root.json project pin ./factory --source github:OWNER/REPO --release RELEASE
+  siteops project show ./factory
 """,
     )
     parser.add_argument("--version", action="version", version=f"siteops {__version__}")
@@ -1024,11 +1135,13 @@ Examples:
         "-w",
         "--workspace",
         type=Path,
+        metavar="PATH",
         default=None,
         help=(
-            "Workspace directory. When omitted, siteops uses the current "
-            "directory if it has the workspace shape, otherwise a single "
-            "workspace under ./workspaces/."
+            "Local content directory. Overrides project package content without "
+            "changing project Sites or its workspace pin. With browse --source, "
+            "selects a path inside that source instead. Without a project or -w, "
+            "uses local workspace discovery from the current directory."
         ),
     )
     parser.add_argument(
@@ -1044,6 +1157,18 @@ Examples:
             "docs/site-configuration.md for trust rules and precedence."
         ),
     )
+    parser.add_argument(
+        "--project", type=Path, metavar="DIRECTORY",
+        help="Operator project directory containing Sites and an optional workspace pin (a path, not a name)",
+    )
+    parser.add_argument(
+        "--trust-policy", type=Path, metavar="FILE",
+        help="Independent local artifact verification policy, required for pinning and pinned package use",
+    )
+    parser.add_argument(
+        "--trusted-root", type=Path, metavar="FILE",
+        help="Independent local trusted root snapshot, required for pinning and pinned package use",
+    )
 
     parser.add_argument(
         "-v",
@@ -1056,6 +1181,30 @@ Examples:
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    p_project = subparsers.add_parser("project", help="Inspect or explicitly pin a project's workspace source")
+    project_commands = p_project.add_subparsers(dest="project_command", required=True)
+    for name, help_text in (
+        ("pin", "Acquire an explicit release and atomically record its workspace selection"),
+        ("show", "Show the recorded workspace selection without acquiring or verifying package content"),
+    ):
+        description = help_text
+        if name == "pin":
+            description = (
+                "Acquire and verify an explicit workspace release, then atomically create or "
+                "replace DIRECTORY/siteops.pin without changing Sites. Supply the independent "
+                "global --trust-policy FILE and --trusted-root FILE options before 'project pin'."
+            )
+        command = project_commands.add_parser(name, help=help_text, description=description)
+        command.add_argument("directory", nargs="?", type=Path, default=Path("."),
+                             metavar="DIRECTORY", help="Operator project directory (default: current directory)")
+        command.add_argument("--output", choices=("plain", "json"), default="plain")
+        if name == "pin":
+            command.add_argument("--source", required=True,
+                                 help="Workspace release source: github:OWNER/REPO")
+            command.add_argument("--release", metavar="RELEASE", help="Explicit published release tag")
+            command.add_argument("--release-workspace", metavar="PATH",
+                                 help="Workspace path listed in the release descriptor, required when several are listed")
 
     p_browse = subparsers.add_parser(
         "browse",
@@ -1079,7 +1228,7 @@ Examples:
         "--output", choices=("plain", "json"), default="plain", help="Private output format"
     )
     p_browse.add_argument(
-        "--source", help="Published GitHub index: github:OWNER/REPO[@REF] or repository URL"
+        "--source", help="Published descriptive index source: github:OWNER/REPO[@REF] or repository URL"
     )
     p_browse.add_argument("--ref", help="Source branch, tag or commit (default: repository default branch)")
     p_browse.add_argument(
@@ -1091,7 +1240,8 @@ Examples:
         "--refresh", action="store_true", help="Resolve the remote reference again before browsing",
     )
     cache_mode.add_argument(
-        "--offline", action="store_true", help="Use cached source metadata without source requests",
+        "--offline", action="store_true",
+        help="Make no source requests: use cached index metadata with --source, or a cached project package and proof",
     )
     p_index = subparsers.add_parser(
         "index", help="Build a public content index and separate source bindings",
@@ -1260,13 +1410,18 @@ Examples:
             "local-private."
         ),
     )
+    for command in (p_plan, p_deploy, p_validate):
+        command.add_argument(
+            "--offline", action="store_true",
+            help="Use the pinned package and proof already in cache, without source requests",
+        )
 
     # sites command
     p_sites = subparsers.add_parser(
         "sites",
         help="List available sites",
         description=(
-            "List sites in the workspace. Pass a positional name "
+            "List selected Site configuration from the operator project or local workspace. Pass a positional name "
             "(filename or internal `name:`) to scope to one site."
         ),
     )
@@ -1323,39 +1478,62 @@ Examples:
         sys.exit(cmd_browse(args))
     if args.command == "index":
         sys.exit(cmd_index(args))
-
-    # Workspace resolution. Explicit -w wins. Otherwise auto-discover
-    # from cwd. If discovery is ambiguous or finds nothing, fall back to cwd
-    # (the prior default).
-    if args.workspace is None:
-        discovered = _auto_discover_workspace(Path.cwd())
-        args.workspace = discovered if discovered is not None else Path.cwd()
-    args.workspace = Path(args.workspace).resolve()
-
-    if not args.workspace.is_dir():
-        print(f"Error: Workspace directory not found: {args.workspace}", file=sys.stderr)
-        sys.exit(1)
+    if args.command == "project":
+        sys.exit(cmd_project(args))
 
     extra_sites_dirs = _resolve_extra_sites_dirs(args.extra_sites_dirs)
-
-    try:
-        orchestrator = Orchestrator(
-            workspace=args.workspace,
-            dry_run=getattr(args, "dry_run", False),
-            extra_trusted_sites_dirs=extra_sites_dirs,
-        )
-    except (FileNotFoundError, ValueError) as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-
     commands = {
         "deploy": cmd_deploy,
         "plan": cmd_plan,
         "validate": cmd_validate,
         "sites": cmd_sites,
     }
-
-    exit_code = commands[args.command](args, orchestrator)
+    if args.command in {"plan", "deploy", "validate"}:
+        try:
+            _output_settings(args, require_plan_flag=args.command == "validate")
+        except ValueError as error:
+            print(f"Error: {error}", file=sys.stderr)
+            sys.exit(1)
+    try:
+        with open_command_context(**_context_options(args)) as context:
+            args.workspace = context.workspace
+            binding = context.package.bind(args.manifest) if context.package is not None else None
+            args.package_binding = binding
+            if context.project is not None and args.command != "sites":
+                if context.pin is not None:
+                    selected = context.pin.selection
+                    if is_redaction_enabled():
+                        print("Source: verified pinned workspace.", file=sys.stderr)
+                    else:
+                        print(
+                            f"Source: {_content_text(selected.source.reference)} "
+                            f"@ {_content_text(selected.source.release)}\n"
+                            f"Workspace: {_content_text(selected.entry.workspace)}\n"
+                            f"Kit: {_content_text(selected.entry.kit_id)} {_content_text(selected.entry.kit_version)}\n"
+                            f"Revision: {_content_text(selected.source.revision)}\n"
+                            f"Package SHA-256: {selected.entry.package.sha256}",
+                            file=sys.stderr,
+                        )
+                else:
+                    print("Source: local workspace override. Operator configuration comes from the project.",
+                          file=sys.stderr)
+            options: dict[str, Any] = {}
+            if context.project is not None:
+                options["site_config_root"] = context.site_root
+            if binding is not None:
+                options["materialized_package"] = binding
+            orchestrator = Orchestrator(
+                workspace=context.workspace, dry_run=getattr(args, "dry_run", False),
+                extra_trusted_sites_dirs=extra_sites_dirs, **options,
+            )
+            exit_code = commands[args.command](args, orchestrator)
+    except (FileNotFoundError, ValueError) as error:
+        detail = str(error) if isinstance(error, ArtifactError) or not is_redaction_enabled() else "Command preparation failed."
+        print(f"Error: {detail}", file=sys.stderr)
+        if isinstance(error, ManifestSelectionError) and not is_redaction_enabled():
+            for choice in error.paths:
+                print(f"Explicit path: {_content_text(explicit_manifest_reference(choice))}", file=sys.stderr)
+        exit_code = 1
     sys.exit(exit_code)
 
 

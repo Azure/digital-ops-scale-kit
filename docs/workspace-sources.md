@@ -4,9 +4,9 @@
 in a content release. It lets an acquisition caller select one workspace
 without inspecting every ZIP or requiring a discovery index.
 
-This is an internal source contract. Release automation does not yet generate
-or publish this descriptor, and public `plan` and `deploy` commands do not
-acquire a release source.
+The [project commands](projects.md) acquire this source and connect its verified
+workspace to ordinary planning and deployment. Release automation does not yet
+generate or publish the workspace asset set.
 
 ## Descriptor
 
@@ -154,7 +154,7 @@ planner and executor with separate operator Sites.
 | First acquisition | Resolve release and descriptor | Acquire missing identified bytes |
 | Explicit acquisition again | Resolve release and descriptor again | Reuse valid cached bytes |
 | Use an existing pin | None | None |
-| Pin with missing proof | None, returns `cache.proof-missing` | Explicit acquisition required |
+| Internal lease with missing proof | None, returns `cache.proof-missing` | Caller decides whether to restore |
 | Corrupt cached package or proof | Pinned use stays local | Reject without automatic repair |
 
 Every publication and lease invokes the trusted verifier. A changed local
@@ -162,13 +162,18 @@ policy can revalidate the same bytes without another download. Expired policy,
 changed roots or a source outside the approved repository fail explicitly.
 Stored receipts are records of evaluation, never permission to bypass it.
 
+Project commands restore missing exact pinned objects unless `--offline` was
+requested. Restoration requires the fresh release selection to equal the
+workspace pin before package/proof transfer. The internal `lease` itself
+remains local and never performs that restoration.
+
 The common `WorkspaceAcquisition` layer accepts a trusted verifier supplied by
 application code. Its source expectations, proof storage and cache contracts
 contain no GitHub transport fields. Other approved providers can use the same
 boundary without adding an executor or changing operator configuration.
 
-These are internal APIs. Public project pins, source selection in deployment
-commands and cache maintenance are separate capabilities. Descriptive browsing
+These internal APIs support [project pins and configured Site execution](projects.md).
+Cache maintenance remains separate. Descriptive browsing
 uses its own [reference/index cache](remote-content.md#reuse-refresh-and-offline-browsing).
 Those observations never authorize package execution.
 

@@ -276,16 +276,17 @@ manifest URLs fail before tool or proxy mutation, including when a prior
 operation produces the URL at runtime. Ordinary trusted local workspaces keep
 their existing HTTPS behavior.
 
-The internal [source acquisition flow](workspace-sources.md) provides release
-resolution, downloads, retained proofs and verified cache use. Public
-`plan --source` and `deploy --source` routes, project pins, cache management
-and workspace release publication remain separate capabilities.
+The [source acquisition flow](workspace-sources.md) provides release resolution,
+downloads, retained proofs and verified cache use. [Operator projects](projects.md)
+connect pinned packages and separate configured Sites to ordinary plan/deploy.
+Cache management and workspace release publication remain separate capabilities.
 
 ## Internal workspace cache
 
 `WorkspaceCache` is an internal storage API for package publication and use
-leases. Public remote browsing shares its protected storage layout through a
-separate metadata cache, without acquiring executable packages.
+leases, consumed by project commands. Remote metadata browsing shares its
+protected storage layout through a separate cache without acquiring executable
+packages.
 
 `publish` copies an opaque local archive into private staging, verifies its
 expected SHA-256 and consumer-owned provenance, then extracts and validates

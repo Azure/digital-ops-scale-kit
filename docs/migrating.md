@@ -36,6 +36,7 @@ Start with the changes that affect your workflow:
 | Reference shipped workspace paths | Update [entry and resource-set paths](#workspace-content-paths). |
 | Select a manifest by a bare filename | Review [name and path selection](#manifest-names-and-paths). |
 | Browse a published source | Use [reference refresh and offline controls](#remote-source-observations) when choosing source freshness. |
+| Separate operator configuration from deployment content | Use an [operator project](projects.md) with a pin or explicit local workspace. |
 | Use Windows batch-based tools | Review [literal tool arguments](#windows-tool-arguments). |
 | Produce workspace packages | Use canonical `bicepconfig.json` filenames and committed source bytes as described in [workspace packages](workspace-packages.md). |
 | Use `sites --render` | Replace it with [`--output yaml`](#inspect-sites). |

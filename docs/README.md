@@ -15,11 +15,15 @@ separates validation, planning, deployment, and health verification.
 | Understand the included AIO content | [IoT Operations workspace](../workspaces/iot-operations/README.md) |
 | Find and inspect deployment choices | [Browse deployment content](browse-content.md) |
 | Browse a published source without cloning | [Remote content indexes](remote-content.md) |
+| Keep configured Sites separate from pinned or local content | [Operator projects](projects.md) |
 | Diagnose a failed command or provider operation | [Troubleshooting](troubleshooting.md) |
 
 Installing the CLI does not acquire a workspace. The included IoT Operations
 workspace is currently obtained from this repository. Review both the CLI
 release and the content checkout before deploying.
+
+An [operator project](projects.md) can instead use an approved release that
+provides complete workspace packages and detached proofs.
 
 ## Prepare and run deployments
 
@@ -92,6 +96,7 @@ for production.
 | **Site Ops** | The generic CLI and orchestration engine under `siteops/` |
 | **Workspace** | A directory containing sites, manifests, parameters, and templates, with optional contracts, samples, and local overlays |
 | **Site** | A deployable target with subscription, optional resource group, location, labels, parameters, and properties |
+| **Project** | An operator directory containing Site configuration and an optional pin to a complete workspace package |
 | **SiteTemplate** | A reusable site base referenced through `inherits:` and not deployed directly |
 | **Manifest** | An ordered set of operations with site targeting and parameter sources |
 | **Partial** | A manifest intended for `include:` composition, conventionally named with a leading underscore |

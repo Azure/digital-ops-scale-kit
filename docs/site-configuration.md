@@ -2,6 +2,12 @@
 
 Sites define **where** to deploy: the Azure subscription, resource group, location, and site-specific configuration.
 
+With an [operator project](projects.md), `--project <directory>` selects its
+`sites` and `sites.local` directories independently of the content workspace.
+An explicit `-w` can select local development content while retaining those
+project Sites. Without a project, the workspace owns Site configuration as
+described below. Extra trusted Site directories retain their existing rules.
+
 ## Quick decision table
 
 | I want to... | Do this |

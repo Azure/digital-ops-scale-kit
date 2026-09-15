@@ -77,8 +77,8 @@ refresh. Offline mode may use an expired reference observation and labels it
 as overdue. Its index is still checked against that exact cached revision.
 The displayed revision is not a claim about the branch's current head.
 
-`--refresh` and `--offline` are mutually exclusive and apply only to
-`browse --source`. Refreshing a reference reuses unchanged immutable trees and
+For `browse --source`, `--refresh` and `--offline` are mutually exclusive.
+Refreshing a reference reuses unchanged immutable trees and
 blobs. A network, authorization or quota failure is reported rather than
 silently selecting old data or another access mode. Offline cache misses
 report `cache.metadata-missing`. Fetch that source/workspace without
@@ -93,8 +93,11 @@ Records contain private source context and bindings, so keep them out of
 repositories and galleries. Cache refresh does not edit operator Sites or
 project pins.
 
-These options control descriptive browsing. They do not acquire an executable
-workspace or relax provenance policy expiry for package use.
+With `--source`, these options control descriptive browsing and do not acquire
+an executable workspace. With a selected [project](projects.md), `browse --offline`
+instead requires its package and proof already in cache. Neither mode relaxes
+provenance policy expiry for package use. `--refresh` applies only to source
+index browsing and never changes a workspace pin.
 
 ## Public and authorized source access
 
@@ -135,9 +138,10 @@ They report that targeting is unavailable rather than claiming no targets
 were declared. They also omit executable plan/deploy suggestions because this
 command has not acquired a complete deployable workspace.
 
-Read the pinned operator guide. Use a complete, reviewed local workspace and
-configured Sites with `plan` and `deploy`. Verified remote workspace
-acquisition and typed initialization are separate capabilities.
+Read the pinned operator guide. Use an [operator project](projects.md) to
+acquire an approved complete workspace package and execute it with configured
+Sites, or select a reviewed local workspace. Descriptive index browsing and
+typed initialization remain separate from that acquisition and execution path.
 
 Remote inspection still uses a private output destination:
 

@@ -2,6 +2,9 @@
 
 import hashlib
 import json
+import shutil
+import subprocess
+import sys
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -11,11 +14,14 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from siteops import cli, github_source
 from siteops import github_attestation as attestation
 from siteops import github_workspace_acquisition as acquisition
 from siteops import github_workspace_source as source
 from siteops.artifacts import ArtifactError
 from siteops.cache_filesystem import CacheError, make_private_directory
+from siteops.compilation import TemplateCompilationSession
+from siteops.executor import DeploymentResult
 from siteops.github_source import (
     GitHubClient,
     GitHubReference,
@@ -293,3 +299,320 @@ def test_cli_auth_is_not_substituted_during_acquisition(github):
     assert caught.value.code == "source.auth-unsupported"
     assert github.downloads == []
     assert github.calls == []
+
+
+@pytest.fixture
+def project_cli(github, tmp_path, monkeypatch):
+    root = tmp_path / "operator"
+    (root / "sites").mkdir(parents=True)
+    (root / "sites" / "one.yaml").write_text(
+        "apiVersion: siteops/v1\nkind: Site\nname: one\nsubscription: operator-sub\n"
+        "resourceGroup: operator-group\nlocation: eastus\n", encoding="utf-8",
+    )
+    monkeypatch.setenv("SITEOPS_CACHE_DIR", str(github.fixture.cache.root))
+    monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "0")
+
+    def make_client(reference):
+        assert reference == github.client.reference
+        return github.client
+
+    monkeypatch.setattr(github_source, "GitHubClient", make_client)
+    monkeypatch.setattr(acquisition, "GitHubClient", make_client)
+
+    def runner(argv, timeout):
+        assert argv[1:] == ("version", "--output", "json")
+        return subprocess.CompletedProcess(argv, 0, stdout='{"azure-cli":"test"}', stderr="")
+
+    compilation = TemplateCompilationSession(
+        command_runner=runner, tool_resolver=lambda name: str(tmp_path / f"{name}.exe"),
+    )
+    monkeypatch.setattr("siteops.orchestrator.TemplateCompilationSession", lambda: compilation)
+    monkeypatch.setattr("siteops.executor.subprocess.Popen", Mock(side_effect=AssertionError("Live operation.")))
+    original = cli.Orchestrator
+    engines = []
+    executor = Mock()
+
+    def submit(**args):
+        with pytest.raises(CacheError) as caught:
+            github.fixture.cache.publish(
+                github.fixture.archive, github.fixture.source.entry.package.sha256,
+                source_revision=github.fixture.source.source.revision, verify=Mock(),
+            )
+        assert caught.value.code == "cache.busy"
+        return DeploymentResult(
+            success=True, step_name=args["step_name"], site_name=args["site_name"],
+            deployment_name=args["deployment_name"],
+        )
+
+    executor.deploy_resource_group.side_effect = submit
+
+    def engine(**kwargs):
+        engines.append(kwargs)
+        return original(**kwargs, executor=executor)
+
+    monkeypatch.setattr(cli, "Orchestrator", engine)
+    return SimpleNamespace(
+        root=root, github=github, engines=engines, executor=executor,
+        trust=["--trust-policy", str(github.policy), "--trusted-root", str(github.roots)],
+    )
+
+
+def invoke(monkeypatch, capsys, args):
+    monkeypatch.setattr(sys, "argv", ["siteops", *args])
+    with pytest.raises(SystemExit) as stopped:
+        cli.main()
+    return stopped.value.code, capsys.readouterr()
+
+
+def pin_project(project_cli, monkeypatch, capsys):
+    state = project_cli
+    code, output = invoke(monkeypatch, capsys, [
+        *state.trust, "project", "pin", str(state.root),
+        "--source", "github:example/content", "--release", "release-7", "--output", "json",
+    ])
+    assert code == 0, output
+    assert json.loads(output.out)["kind"] == "WorkspacePin"
+
+
+def test_public_project_pin_and_plan_use_existing_site_configuration(project_cli, monkeypatch, capsys):
+    state = project_cli
+    site_before = (state.root / "sites" / "one.yaml").read_bytes()
+    pin_project(state, monkeypatch, capsys)
+    pin_before = (state.root / "siteops.pin").read_bytes()
+    downloads = list(state.github.downloads)
+    code, output = invoke(monkeypatch, capsys, [
+        "--project", str(state.root), *state.trust, "plan", "storage", "--output", "json",
+    ])
+    assert code == 0, output
+    document = json.loads(output.out)
+    assert document["status"] == "planned"
+    assert "operator-sub" in output.out
+    assert "Package SHA-256:" in output.err
+    assert state.engines[-1]["site_config_root"] == state.root
+    assert state.engines[-1]["materialized_package"].manifest_relative_path == "manifests/storage.yaml"
+    assert state.github.downloads == downloads
+    assert (state.root / "siteops.pin").read_bytes() == pin_before
+    assert (state.root / "sites" / "one.yaml").read_bytes() == site_before
+
+
+@pytest.mark.parametrize("command", ["validate", "describe", "dry-run", "deploy"])
+def test_public_project_commands_share_binding_and_keep_the_lease(project_cli, monkeypatch, capsys, command):
+    state = project_cli
+    pin_project(state, monkeypatch, capsys)
+    forms = {
+        "validate": ["validate", "storage"],
+        "describe": ["plan", "storage", "--describe", "--output", "json"],
+        "dry-run": ["deploy", "storage", "--dry-run", "--output", "json"],
+        "deploy": ["deploy", "storage", "--output", "json"],
+    }
+    code, output = invoke(monkeypatch, capsys, [
+        "--project", str(state.root), *state.trust, *forms[command],
+    ])
+    assert code == 0, output
+    assert state.engines[-1]["materialized_package"] is not None
+    if command == "deploy":
+        assert state.executor.deploy_resource_group.call_count == 1
+        assert state.executor.deploy_resource_group.call_args.kwargs["subscription"] == "operator-sub"
+    else:
+        state.executor.deploy_resource_group.assert_not_called()
+
+
+def test_public_project_browse_does_not_suggest_an_unverified_cache_path(project_cli, monkeypatch, capsys):
+    state = project_cli
+    pin_project(state, monkeypatch, capsys)
+    code, output = invoke(monkeypatch, capsys, [
+        "--project", str(state.root), *state.trust, "browse", "storage",
+    ])
+    assert code == 0, output
+    assert "Package verified" in output.out
+    assert "same project" in output.out
+    assert str(state.github.fixture.cache.root) not in output.out
+    assert "Remote preview only" not in output.out
+    assert state.engines == []
+
+
+def test_project_local_override_preserves_pin_and_operator_sites(project_cli, monkeypatch, capsys):
+    state = project_cli
+    pin_project(state, monkeypatch, capsys)
+    before = (state.root / "siteops.pin").read_bytes()
+    calls = len(state.github.calls)
+    local = state.github.fixture.archive.parent / "source" / "workspace"
+    code, output = invoke(monkeypatch, capsys, [
+        "--project", str(state.root), "-w", str(local), "plan", "storage", "--output", "json",
+    ])
+    assert code == 0, output
+    assert "operator-sub" in output.out
+    assert "local workspace override" in output.err
+    assert "materialized_package" not in state.engines[-1]
+    assert state.engines[-1]["site_config_root"] == state.root
+    assert (state.root / "siteops.pin").read_bytes() == before
+    assert len(state.github.calls) == calls
+
+
+def test_current_directory_pin_selects_project_without_global_project_flag(project_cli, monkeypatch, capsys):
+    state = project_cli
+    pin_project(state, monkeypatch, capsys)
+    monkeypatch.chdir(state.root)
+    code, output = invoke(monkeypatch, capsys, [*state.trust, "plan", "storage", "--describe"])
+    assert code == 0, output
+    assert state.engines[-1]["site_config_root"] == state.root
+
+
+def test_project_sites_and_show_do_not_require_verification(project_cli, monkeypatch, capsys):
+    state = project_cli
+    code, output = invoke(monkeypatch, capsys, ["--project", str(state.root), "sites", "--output", "json"])
+    assert code == 0, output
+    assert json.loads(output.out)[0]["subscription"] == "operator-sub"
+    assert state.github.calls == [] and state.github.downloads == []
+    pin_project(state, monkeypatch, capsys)
+    calls = len(state.github.calls)
+    code, output = invoke(monkeypatch, capsys, ["project", "show", str(state.root), "--output", "json"])
+    assert code == 0
+    assert json.loads(output.out)["kind"] == "WorkspacePin"
+    assert len(state.github.calls) == calls
+
+
+def remove_cached_package(state):
+    path = (
+        state.github.fixture.cache.root / "objects" / "sha256"
+        / state.github.fixture.source.entry.package.sha256
+    )
+    shutil.rmtree(path)
+
+
+def test_missing_package_restores_exact_pin_but_offline_never_fetches(project_cli, monkeypatch, capsys):
+    state = project_cli
+    pin_project(state, monkeypatch, capsys)
+    before = (state.root / "siteops.pin").read_bytes()
+    remove_cached_package(state)
+    downloads = len(state.github.downloads)
+    code, _ = invoke(monkeypatch, capsys, [
+        "--project", str(state.root), *state.trust, "plan", "storage", "--offline",
+    ])
+    assert code == 1 and len(state.github.downloads) == downloads
+    code, output = invoke(monkeypatch, capsys, [
+        "--project", str(state.root), *state.trust, "plan", "storage", "--describe",
+    ])
+    assert code == 0, output
+    assert state.github.downloads[downloads:] == [WORKSPACE_RELEASE_NAME, "workspace.zip"]
+    assert (state.root / "siteops.pin").read_bytes() == before
+
+
+def test_changed_release_does_not_restore_or_rewrite_the_pin(project_cli, monkeypatch, capsys):
+    state = project_cli
+    pin_project(state, monkeypatch, capsys)
+    before = (state.root / "siteops.pin").read_bytes()
+    remove_cached_package(state)
+    row = json.loads(state.github.inputs[WORKSPACE_RELEASE_NAME])
+    row["source"]["revision"] = "b" * 40
+    descriptor = json.dumps(row).encode()
+    state.github.inputs[WORKSPACE_RELEASE_NAME] = descriptor
+    release = state.github.client.resolve_release.return_value
+    state.github.client.resolve_release.return_value = replace(
+        release, source_commit="b" * 40,
+        assets=(replace(release.assets[0], size=len(descriptor), sha256=hashlib.sha256(descriptor).hexdigest()),
+                *release.assets[1:]),
+    )
+    downloads = len(state.github.downloads)
+    calls = len(state.github.calls)
+    code, output = invoke(monkeypatch, capsys, [
+        "--project", str(state.root), *state.trust, "plan", "storage",
+    ])
+    assert code == 1
+    assert "differs from the workspace pin" in output.err
+    assert state.github.downloads[downloads:] == [WORKSPACE_RELEASE_NAME]
+    assert len(state.github.calls) == calls
+    assert (state.root / "siteops.pin").read_bytes() == before
+    assert state.engines == []
+
+
+def test_project_manifest_escape_is_rejected_before_engine_construction(project_cli, monkeypatch, capsys):
+    state = project_cli
+    pin_project(state, monkeypatch, capsys)
+    code, _ = invoke(monkeypatch, capsys, [
+        "--project", str(state.root), *state.trust, "validate", "../outside.yaml",
+    ])
+    assert code == 1 and state.engines == []
+
+
+def test_project_validate_guards_inputs_before_the_manifest_parser(project_cli, monkeypatch, capsys):
+    from siteops.models import Manifest
+
+    state = project_cli
+    pin_project(state, monkeypatch, capsys)
+    original = Manifest.from_file
+    guarded = []
+
+    def load(path, **kwargs):
+        guard = kwargs.get("input_path_guard")
+        assert guard is not None
+        with pytest.raises(ArtifactError):
+            guard(state.root / "sites" / "one.yaml")
+        guarded.append(path)
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(Manifest, "from_file", load)
+    code, output = invoke(monkeypatch, capsys, [
+        "--project", str(state.root), *state.trust, "validate", "storage",
+    ])
+    assert code == 0, output
+    assert len(guarded) == 1
+
+
+def test_expired_project_policy_stops_before_site_or_engine_construction(project_cli, monkeypatch, capsys):
+    state = project_cli
+    pin_project(state, monkeypatch, capsys)
+    policy = json.loads(state.github.policy.read_bytes())
+    policy["validUntil"] = "2000-01-01T00:00:00Z"
+    state.github.policy.write_text(json.dumps(policy))
+    code, output = invoke(monkeypatch, capsys, [
+        "--project", str(state.root), *state.trust, "plan", "storage",
+    ])
+    assert code == 1 and "expired" in output.err
+    assert state.engines == []
+
+
+def test_project_publishable_plan_keeps_private_source_context_out_of_output(project_cli, monkeypatch, capsys):
+    state = project_cli
+    pin_project(state, monkeypatch, capsys)
+    monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1")
+    code, output = invoke(monkeypatch, capsys, [
+        "--project", str(state.root), *state.trust, "plan", "storage",
+        "--output", "json", "--projection", "publishable",
+    ])
+    assert code == 0, output
+    assert json.loads(output.out)["status"] == "planned"
+    assert "example/content" not in output.out + output.err
+    assert str(state.root) not in output.out + output.err
+    assert "operator-sub" not in output.out + output.err
+
+
+def test_project_pin_output_redaction_precedes_source_access(project_cli, monkeypatch, capsys):
+    state = project_cli
+    monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1")
+    code, output = invoke(monkeypatch, capsys, [
+        *state.trust, "project", "pin", str(state.root),
+        "--source", "github:example/content", "--release", "release-7",
+    ])
+    assert code == 1 and not output.out
+    assert state.github.calls == [] and state.github.downloads == []
+    assert not (state.root / "siteops.pin").exists()
+
+
+def test_project_pin_release_workspace_option_selects_the_declared_workspace(project_cli, monkeypatch, capsys):
+    state = project_cli
+    code, output = invoke(monkeypatch, capsys, [
+        *state.trust, "project", "pin", str(state.root),
+        "--source", "github:example/content", "--release", "release-7",
+        "--release-workspace", "workspace", "--output", "json",
+    ])
+    assert code == 0, output
+    assert json.loads(output.out)["content"]["workspace"] == "workspace"
+
+
+def test_project_pin_creates_a_new_project_outside_the_cache(project_cli, tmp_path, monkeypatch, capsys):
+    state = project_cli
+    state.root = tmp_path / "new-project"
+    assert not state.root.exists()
+    pin_project(state, monkeypatch, capsys)
+    assert (state.root / "siteops.pin").is_file()
