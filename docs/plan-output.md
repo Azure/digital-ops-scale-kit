@@ -17,10 +17,19 @@ This command runs structural validation, resolves the selected operations,
 compiles executable templates, preflights required capabilities, and prints
 the canonical plan. It performs no Azure or Kubernetes mutation.
 
-Deployment still submits the source Bicep, which Azure CLI may compile again.
-The plan records observed compilation identity, not a guarantee that ARM will
-receive those exact compiled bytes. Planning does not establish Azure
-authorization, cluster connectivity, or workload health.
+Ordinary local workspaces submit source Bicep, which Azure CLI may compile
+again. Their plans record observed compilation identity, not a guarantee that
+ARM will receive those exact compiled bytes.
+
+An internally bound materialized workspace package uses its producer-mapped
+ARM JSON instead. Its local-private plan records `submission.mode: arm-json`,
+`compilationBinding: package-artifact`, the authored `templatePath`, and a
+different `effectiveTemplatePath` when Bicep maps to generated JSON. Package
+integrity is checked again before execution. This binding is not a saved plan
+or a publisher-provenance decision.
+
+Planning does not establish Azure authorization, cluster connectivity, or
+workload health.
 
 Executable preparation may acquire the Bicep compiler or restore modules.
 It is not an offline mode. Private module sources need their required

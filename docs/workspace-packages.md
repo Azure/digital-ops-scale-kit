@@ -214,6 +214,11 @@ Files use owner-only POSIX permissions. On Windows, staging inherits its
 parent's access controls, so the caller must provide a protected parent.
 Failure removes only paths created by that materialization attempt.
 
+`PackageInspection` retains the metadata file's SHA-256 and size as well as
+the archive identity. A materialized binding uses those values to validate
+`siteops-package.json`, every payload file, and the exact file and directory
+inventory.
+
 ## Trust and execution boundary
 
 The package format, file identities and compatibility model contain no
@@ -232,7 +237,31 @@ mapping therefore does not claim complete dependency coverage. Engine-owned
 manifest and parameter path confinement remains part of the acquired
 execution boundary.
 
-There is currently no `plan --source` or `deploy --source` route. Package
-production and inspection are implemented, while acquired-plan selection and
-execution wiring remain separate work. Continue to use a reviewed local
-workspace with configured Sites for execution.
+`MaterializedPackageBinding.bind(inspection, package_root, manifest)` provides
+the internal execution binding. It revalidates the complete materialization,
+resolves the manifest through the shared exact name and path rules, binds every
+authored template to its mapped ARM JSON, and verifies package inputs before
+engine parsers or providers consume them.
+
+Pass that binding to
+`Orchestrator(..., site_config_root=<project>, materialized_package=binding)`.
+The Site configuration root is required and must stay outside package content.
+Packaged example Sites therefore remain content rather than deployment
+targets. Runtime Site values, overlays, selection, and prior-operation outputs
+continue through the ordinary planner and executor.
+
+The caller owns source-provenance verification and an immutable cache lease for
+the binding's full lifetime. A parsed receipt, package metadata, or a
+cache-shaped path does not establish that authority. The engine detects
+changed bytes, unexpected paths, links, path aliases, and inventory drift at
+its validation points. It does not provide an OS sandbox against another
+process running as the same user.
+
+Acquired kubectl inputs must be verified local package paths. Remote HTTPS
+manifest URLs fail before tool or proxy mutation, including when a prior
+operation produces the URL at runtime. Ordinary trusted local workspaces keep
+their existing HTTPS behavior.
+
+There is no public `plan --source` or `deploy --source` route yet. Source
+download, provenance policy, cache publication, cache leasing, project pins,
+and release delivery remain separate acquisition work.

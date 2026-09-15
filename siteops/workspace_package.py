@@ -33,7 +33,10 @@ from siteops import __version__
 from siteops.artifacts import (
     ArtifactError,
     PayloadFile,
+    checked_path,
+    hash_file,
     hash_stream,
+    is_link,
     open_regular_file,
     path_inventory,
     relative_artifact_path,
@@ -50,6 +53,7 @@ from siteops.compilation import (
     extract_template_parameters,
     validate_arm_template,
 )
+from siteops.manifest_selection import is_explicit_manifest_path, select_manifest_path
 
 PACKAGE_NAME = "siteops-package.json"
 PACKAGE_API = "siteops/v1alpha1"
@@ -613,6 +617,348 @@ class PackageInspection:
     metadata: WorkspacePackage
     sha256: str
     size: int
+    metadata_sha256: str
+    metadata_size: int
+
+
+@dataclass(frozen=True)
+class BoundPackageTemplate:
+    """One authored template and the package artifact used for execution."""
+
+    source_path: Path
+    artifact_path: Path
+    source_relative_path: str
+    artifact_relative_path: str
+    mapping: PackageTemplateMapping
+
+
+def _materialized_paths(root: Path) -> tuple[set[str], set[str]]:
+    files: set[str] = set()
+    directories: set[str] = set()
+    stack = [root]
+    while stack:
+        directory = stack.pop()
+        try:
+            children = list(os.scandir(directory))
+        except OSError:
+            raise ArtifactError(
+                "The materialized package inventory could not be read safely."
+            ) from None
+        for child in children:
+            path = Path(child.path)
+            relative = path.relative_to(root).as_posix()
+            relative_artifact_path(relative)
+            try:
+                info = child.stat(follow_symlinks=False)
+            except OSError:
+                raise ArtifactError(
+                    "A materialized package path could not be inspected."
+                ) from None
+            if is_link(info):
+                raise ArtifactError(
+                    "Materialized package paths must not use links or reparse points."
+                )
+            if child.is_dir(follow_symlinks=False):
+                require_node(path, directory=True)
+                try:
+                    if path.resolve(strict=True) != path:
+                        raise ArtifactError(
+                            "Materialized package paths cannot use filesystem aliases."
+                        )
+                except OSError:
+                    raise ArtifactError(
+                        "A materialized package path could not be resolved."
+                    ) from None
+                directories.add(relative)
+                stack.append(path)
+                continue
+            require_node(path, directory=False)
+            files.add(relative)
+    path_inventory(list(files), limit=MAX_NODES)
+    return files, directories
+
+
+def _validate_materialized_package(
+    root: Path,
+    inspection: PackageInspection,
+) -> Path:
+    root = Path(os.path.abspath(root))
+    require_node(root, directory=True)
+    try:
+        if root.resolve(strict=True) != root:
+            raise ArtifactError(
+                "The materialized package root cannot use a filesystem alias."
+            )
+    except OSError:
+        raise ArtifactError(
+            "The materialized package root could not be resolved."
+        ) from None
+
+    expected = {
+        PACKAGE_NAME: PayloadFile(
+            PACKAGE_NAME,
+            inspection.metadata_sha256,
+            inspection.metadata_size,
+        ),
+        **{entry.path: entry for entry in inspection.metadata.files},
+    }
+    expected_directories = path_inventory(
+        list(expected),
+        limit=MAX_NODES,
+    )
+    actual_files, actual_directories = _materialized_paths(root)
+    if actual_files != set(expected) or actual_directories != expected_directories:
+        raise ArtifactError(
+            "The materialized package does not match its declared path inventory."
+        )
+
+    for relative, identity in expected.items():
+        path = checked_path(root, relative)
+        size, digest = hash_file(path, limit=identity.size)
+        if size != identity.size or digest != identity.sha256:
+            raise ArtifactError(
+                "A materialized package file does not match its declared identity."
+            )
+
+    metadata_path = checked_path(root, PACKAGE_NAME)
+    try:
+        with open_regular_file(metadata_path) as stream:
+            raw = stream.read(MAX_METADATA_BYTES + 1)
+    except OSError:
+        raise ArtifactError(
+            "The materialized package metadata could not be read safely."
+        ) from None
+    if len(raw) != inspection.metadata_size:
+        raise ArtifactError(
+            "The materialized package metadata does not match its inspected identity."
+        )
+    if _load_metadata(raw) != inspection.metadata:
+        raise ArtifactError(
+            "The materialized package metadata differs from the inspected package."
+        )
+    check_compatibility(inspection.metadata)
+    return root
+
+
+@dataclass(frozen=True)
+class MaterializedPackageBinding:
+    """Bind one verified materialization and authored manifest to execution.
+
+    The caller must verify source provenance independently and hold an
+    immutable cache lease for this binding's full planning and execution
+    lifetime. A receipt document or cache-shaped path is not authority.
+    This class validates package bytes and inventory, but it is not an OS
+    sandbox against another process running as the same user.
+    """
+
+    inspection: PackageInspection
+    package_root: Path
+    workspace: Path
+    manifest_path: Path
+    manifest_relative_path: str
+
+    @classmethod
+    def bind(
+        cls,
+        inspection: PackageInspection,
+        package_root: Path,
+        manifest: str | Path,
+    ) -> MaterializedPackageBinding:
+        """Validate a materialized package and resolve one canonical manifest."""
+        root = _validate_materialized_package(package_root, inspection)
+        workspace = (
+            root
+            if inspection.metadata.workspace_root == "."
+            else checked_path(
+                root,
+                inspection.metadata.workspace_root,
+                directory=True,
+            )
+        )
+
+        if is_explicit_manifest_path(manifest):
+            raw = str(manifest).replace("\\", "/")
+            candidate = Path(raw)
+            path = candidate if candidate.is_absolute() else workspace / candidate
+        else:
+            from siteops.browse import ContentReader
+
+            reader = ContentReader(workspace)
+            entries = reader.inventory()
+            selection = str(manifest)
+            relative = select_manifest_path(
+                selection,
+                (
+                    (entry.name, entry.path)
+                    for entry in entries
+                    if entry.guidance.role != "partial"
+                ),
+                names_complete=reader.names_complete,
+                filename_match=reader.filename_candidate(selection),
+            )
+            path = workspace / relative
+
+        manifest_path, relative = _require_materialized_workspace_file(
+            root,
+            workspace,
+            inspection.metadata,
+            path,
+        )
+        return cls(
+            inspection=inspection,
+            package_root=root,
+            workspace=workspace,
+            manifest_path=manifest_path,
+            manifest_relative_path=relative,
+        )
+
+    def validate(self) -> None:
+        """Revalidate exact materialized bytes and inventory under the caller's lease."""
+        _validate_materialized_package(self.package_root, self.inspection)
+
+    def require_manifest(self, path: Path) -> Path:
+        """Require the manifest selected when this binding was created."""
+        resolved, _ = self.require_workspace_file(path)
+        if resolved != self.manifest_path:
+            raise ArtifactError(
+                "The requested manifest does not match the acquired package binding."
+            )
+        return resolved
+
+    def require_workspace_file(self, path: Path) -> tuple[Path, str]:
+        """Verify one package workspace file before an engine parser opens it."""
+        return _require_materialized_workspace_file(
+            self.package_root,
+            self.workspace,
+            self.inspection.metadata,
+            path,
+        )
+
+    def require_authored_file(self, reference: str, *, label: str) -> Path:
+        """Resolve one package-authored relative file reference."""
+        relative = self.authored_path(reference, label=label)
+        path, _ = self.require_workspace_file(self.workspace / relative)
+        return path
+
+    def authored_path(self, reference: str, *, label: str) -> str:
+        """Validate package-authored path syntax without opening a target."""
+        return _authored_package_path(reference, label=label)
+
+    def require_authored_path(
+        self,
+        reference: str,
+        *,
+        label: str,
+    ) -> Path:
+        """Resolve one package-authored regular file or declared directory."""
+        relative = self.authored_path(reference, label=label)
+        package_relative = workspace_payload_path(
+            self.inspection.metadata.workspace_root,
+            relative,
+        )
+        expected_directories = path_inventory(
+            [PACKAGE_NAME, *(entry.path for entry in self.inspection.metadata.files)],
+            limit=MAX_NODES,
+        )
+        if package_relative in expected_directories:
+            self.validate()
+            return checked_path(
+                self.package_root,
+                package_relative,
+                directory=True,
+            )
+        path, _ = self.require_workspace_file(self.workspace / relative)
+        return path
+
+    def bind_template(self, reference: str) -> BoundPackageTemplate:
+        """Return the authored source and its verified ARM JSON artifact."""
+        relative = self.authored_path(
+            reference,
+            label="Deployment template",
+        )
+        return self._bind_template_relative(relative)
+
+    def bind_template_path(self, path: Path) -> BoundPackageTemplate:
+        """Bind an already-resolved authored template from a prepared plan."""
+        _, relative = self.require_workspace_file(path)
+        return self._bind_template_relative(relative)
+
+    def _bind_template_relative(
+        self,
+        relative: str,
+    ) -> BoundPackageTemplate:
+        mapping = next(
+            (
+                entry
+                for entry in self.inspection.metadata.templates
+                if entry.source_path == relative
+            ),
+            None,
+        )
+        if mapping is None:
+            raise ArtifactError(
+                "The acquired deployment template has no compiled artifact mapping."
+            )
+        source, _ = self.require_workspace_file(self.workspace / mapping.source_path)
+        artifact, _ = self.require_workspace_file(
+            self.workspace / mapping.artifact_path
+        )
+        return BoundPackageTemplate(
+            source_path=source,
+            artifact_path=artifact,
+            source_relative_path=mapping.source_path,
+            artifact_relative_path=mapping.artifact_path,
+            mapping=mapping,
+        )
+
+
+def _authored_package_path(reference: str, *, label: str) -> str:
+    if not isinstance(reference, str):
+        raise ArtifactError(f"{label} must be a package-relative path.")
+    path = Path(reference)
+    if path.is_absolute() or ".." in path.parts:
+        raise ArtifactError(
+            f"{label} must be a package-relative path without '..' segments."
+        )
+    try:
+        return relative_artifact_path(reference)
+    except ArtifactError:
+        raise ArtifactError(f"{label} must be a portable package-relative path.") from None
+
+
+def _require_materialized_workspace_file(
+    package_root: Path,
+    workspace: Path,
+    metadata: WorkspacePackage,
+    path: Path,
+) -> tuple[Path, str]:
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = workspace / candidate
+    candidate = Path(os.path.abspath(candidate))
+    try:
+        relative = candidate.relative_to(workspace).as_posix()
+    except ValueError:
+        raise ArtifactError(
+            "An acquired workspace input resolves outside the package workspace."
+        ) from None
+    relative = relative_artifact_path(relative)
+    package_relative = workspace_payload_path(metadata.workspace_root, relative)
+    identity = next(
+        (entry for entry in metadata.files if entry.path == package_relative),
+        None,
+    )
+    if identity is None:
+        raise ArtifactError(
+            "An acquired workspace input is not present in the package inventory."
+        )
+    resolved = checked_path(package_root, package_relative)
+    size, digest = hash_file(resolved, limit=identity.size)
+    if size != identity.size or digest != identity.sha256:
+        raise ArtifactError(
+            "An acquired workspace input does not match its package identity."
+        )
+    return resolved, relative
 
 
 def check_compatibility(
@@ -802,7 +1148,13 @@ def _open_package(path: Path, expected_sha256: str) -> Iterator[
                         raise ArtifactError("A package ZIP file size differs from its declared size.")
                 check_compatibility(metadata)
                 _validate_template_artifacts(archive, metadata)
-                yield archive, PackageInspection(metadata, actual, size), raw
+                yield archive, PackageInspection(
+                    metadata=metadata,
+                    sha256=actual,
+                    size=size,
+                    metadata_sha256=hashlib.sha256(raw).hexdigest(),
+                    metadata_size=len(raw),
+                ), raw
     except (EOFError, struct.error, zipfile.BadZipFile, zlib.error):
         raise ArtifactError("The package archive could not be read safely.") from None
 

@@ -15,6 +15,7 @@ Resources support K8s-style apiVersion/kind validation:
 """
 
 import re
+from collections.abc import Callable
 from dataclasses import MISSING, dataclass, field, fields
 from fnmatch import fnmatchcase
 from pathlib import Path
@@ -1339,7 +1340,13 @@ class Manifest:
         _normalize_null_collections(self)
 
     @classmethod
-    def from_file(cls, path: Path, *, workspace_root: Path) -> "Manifest":
+    def from_file(
+        cls,
+        path: Path,
+        *,
+        workspace_root: Path,
+        input_path_guard: Callable[[Path], Path] | None = None,
+    ) -> "Manifest":
         """Load a manifest from a YAML file.
 
         Resolves any `- include: <path>` steps recursively, splicing the
@@ -1383,6 +1390,9 @@ class Manifest:
                 references. In production this is `Orchestrator.workspace`.
                 In tests, pass the workspace fixture (or `manifest_path.parent`
                 for a self-contained synthetic manifest).
+            input_path_guard: Optional internal verifier called immediately
+                before each manifest, include, or composition path is opened
+                or accepted.
 
         Returns:
             Manifest instance with all includes resolved into a flat step list.
@@ -1396,7 +1406,10 @@ class Manifest:
         path = Path(path)
         root = Path(workspace_root)
 
-        spec, name, description = _read_manifest_spec(path)
+        spec, name, description = _read_manifest_spec(
+            path,
+            input_path_guard=input_path_guard,
+        )
 
         sites = []
         for item in _require_collection(spec, "sites", path, list, str):
@@ -1436,6 +1449,7 @@ class Manifest:
             recursion_stack=[path.resolve()],
             include_chain=[path],
             depth=0,
+            input_path_guard=input_path_guard,
         )
 
         _validate_no_step_name_collisions(steps)
@@ -1509,7 +1523,11 @@ class Manifest:
 # ---------------------------------------------------------------------------
 
 
-def _read_manifest_spec(path: Path) -> tuple[dict[str, Any], str, str]:
+def _read_manifest_spec(
+    path: Path,
+    *,
+    input_path_guard: Callable[[Path], Path] | None = None,
+) -> tuple[dict[str, Any], str, str]:
     """Read a manifest YAML file and return (spec, name, description).
 
     Validates apiVersion + kind, rejects unknown top-level keys with a
@@ -1517,6 +1535,8 @@ def _read_manifest_spec(path: Path) -> tuple[dict[str, Any], str, str]:
     present. Raises ValueError on empty files, wrong kind, or unknown
     top-level keys.
     """
+    if input_path_guard is not None:
+        path = input_path_guard(path)
     with open(path, "r", encoding="utf-8") as f:
         data = yamlio.load(f)
 
@@ -1886,6 +1906,7 @@ def _parse_parameter_compositions(
     spec: dict[str, Any],
     manifest_path: Path,
     workspace_root: Path,
+    input_path_guard: Callable[[Path], Path] | None = None,
 ) -> list[str]:
     raw_paths = _require_collection(
         spec,
@@ -1915,6 +1936,8 @@ def _parse_parameter_compositions(
                 f"Manifest '{manifest_path}' parameter composition path "
                 f"'{raw}' resolves outside the workspace."
             ) from None
+        if input_path_guard is not None:
+            resolved = input_path_guard(resolved)
         if not resolved.is_file():
             raise ValueError(
                 f"Manifest '{manifest_path}' parameter composition path "
@@ -1933,6 +1956,7 @@ def _resolve_steps_and_params(
     recursion_stack: list[Path],
     include_chain: list[Path],
     depth: int,
+    input_path_guard: Callable[[Path], Path] | None = None,
 ) -> tuple[list["ManifestStep"], list[ManifestParameter], list[str]]:
     """Resolve includes into flat steps, parameters, and composition contracts.
 
@@ -1958,6 +1982,7 @@ def _resolve_steps_and_params(
         spec,
         manifest_path,
         workspace_root,
+        input_path_guard,
     )
 
     raw_steps = _require_collection(spec, "steps", manifest_path, list)
@@ -1983,7 +2008,10 @@ def _resolve_steps_and_params(
             )
 
         try:
-            sub_spec, _, _ = _read_manifest_spec(target_path)
+            sub_spec, _, _ = _read_manifest_spec(
+                target_path,
+                input_path_guard=input_path_guard,
+            )
         except ValueError as exc:
             raise IncludeError(
                 f"Include '{raw_target}' in '{manifest_path}' could not be loaded as a Manifest: {exc}"
@@ -1996,6 +2024,7 @@ def _resolve_steps_and_params(
             recursion_stack=recursion_stack + [target_path],
             include_chain=include_chain + [target_path],
             depth=depth + 1,
+            input_path_guard=input_path_guard,
         )
 
         # Manifest-level parameters merge unconditionally into every parent

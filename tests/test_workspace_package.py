@@ -14,6 +14,7 @@ import sys
 import tracemalloc
 import zipfile
 import zlib
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -33,6 +34,8 @@ from siteops.compilation import (
     TemplateCompilationSession,
     TemplateKind,
 )
+from siteops.orchestrator import Orchestrator
+from siteops.planning import PlanIntent, PlanStatus
 
 
 @pytest.fixture
@@ -174,6 +177,10 @@ def test_complete_package_preserves_workspace_and_companion_paths(snapshot, tmp_
         package.COMPILED_TEMPLATE_FEATURE,
         "manifest/v1",
     )
+    assert built.metadata_sha256 == hashlib.sha256(
+        package.json_bytes(built.metadata.document())
+    ).hexdigest()
+    assert built.metadata_size > 0
     assert len(built.metadata.templates) == 1
     mapping = built.metadata.templates[0]
     assert mapping.source_kind is TemplateKind.ARM_JSON
@@ -192,6 +199,89 @@ def test_complete_package_preserves_workspace_and_companion_paths(snapshot, tmp_
         if os.name != "nt":
             assert stat.S_IMODE(target.stat().st_mode) == 0o600
     assert (destination / package.PACKAGE_NAME).is_file()
+
+
+def test_materialized_binding_resolves_manifest_name_and_revalidates_inventory(
+    snapshot,
+    tmp_path,
+):
+    output = tmp_path / "package.zip"
+    inspected = _build(snapshot, output)
+    destination = tmp_path / "materialized"
+    package.extract_package(output, inspected.sha256, destination)
+
+    binding = package.MaterializedPackageBinding.bind(
+        inspected,
+        destination,
+        "storage",
+    )
+
+    assert binding.workspace == destination / "workspace"
+    assert binding.manifest_relative_path == "manifests/storage/manifest.yaml"
+    assert binding.manifest_path == (
+        destination / "workspace" / "manifests" / "storage" / "manifest.yaml"
+    )
+    binding.validate()
+
+    unexpected = binding.workspace / "unexpected.yaml"
+    unexpected.write_text("kind: ConfigMap\n", encoding="utf-8")
+    with pytest.raises(ArtifactError, match="path inventory"):
+        binding.validate()
+
+
+def test_materialized_binding_rejects_changed_payload(snapshot, tmp_path):
+    output = tmp_path / "package.zip"
+    inspected = _build(snapshot, output)
+    destination = tmp_path / "materialized"
+    package.extract_package(output, inspected.sha256, destination)
+    binding = package.MaterializedPackageBinding.bind(
+        inspected,
+        destination,
+        "storage",
+    )
+
+    binding.manifest_path.write_text("changed\n", encoding="utf-8")
+
+    with pytest.raises(ArtifactError, match="declared identity"):
+        binding.validate()
+
+
+def test_materialized_binding_rejects_changed_inspection_mapping(snapshot, tmp_path):
+    output = tmp_path / "package.zip"
+    inspected = _build(snapshot, output)
+    destination = tmp_path / "materialized"
+    package.extract_package(output, inspected.sha256, destination)
+    changed = replace(
+        inspected,
+        metadata=replace(inspected.metadata, templates=()),
+    )
+
+    with pytest.raises(ArtifactError, match="differs from the inspected"):
+        package.MaterializedPackageBinding.bind(
+            changed,
+            destination,
+            "storage",
+        )
+
+
+def test_materialized_binding_rejects_links(snapshot, tmp_path):
+    output = tmp_path / "package.zip"
+    inspected = _build(snapshot, output)
+    destination = tmp_path / "materialized"
+    package.extract_package(output, inspected.sha256, destination)
+    binding = package.MaterializedPackageBinding.bind(
+        inspected,
+        destination,
+        "storage",
+    )
+    link = binding.workspace / "linked.yaml"
+    try:
+        link.symlink_to(binding.manifest_path)
+    except OSError:
+        pytest.skip("Symbolic links are unavailable on this host.")
+
+    with pytest.raises(ArtifactError, match="links or reparse"):
+        binding.validate()
 
 
 def test_optional_guidance_does_not_block_package_template_discovery(snapshot, tmp_path):
@@ -509,6 +599,67 @@ def test_real_aio_entries_produce_mapped_template_roots(tmp_path):
     )
     assert isinstance(acquired, CompiledTemplate)
     assert acquired.parameters[0].name == "name"
+
+    materialized = tmp_path / "aio-materialized"
+    package.extract_package(
+        tmp_path / "aio.zip",
+        built.sha256,
+        materialized,
+    )
+    binding = package.MaterializedPackageBinding.bind(
+        built,
+        materialized,
+        "aio-install",
+    )
+    project = tmp_path / "aio-project"
+    shutil.copytree(snapshot / "workspace" / "sites", project / "sites")
+    local = Orchestrator(snapshot / "workspace").build_plan(
+        snapshot / "workspace" / "manifests" / "aio-install" / "manifest.yaml",
+        intent=PlanIntent.DESCRIBE,
+    )
+    package_plan = Orchestrator(
+        binding.workspace,
+        site_config_root=project,
+        materialized_package=binding,
+    ).build_plan(
+        binding.manifest_path,
+        intent=PlanIntent.DESCRIBE,
+    )
+    assert local.status is package_plan.status is PlanStatus.PLANNED
+    assert local.plan is not None
+    assert package_plan.plan is not None
+    assert [
+        (step.name, step.kind, step.scope)
+        for step in package_plan.plan.steps
+    ] == [
+        (step.name, step.kind, step.scope)
+        for step in local.plan.steps
+    ]
+    assert [
+        (
+            target.name,
+            [
+                (
+                    operation.identity,
+                    operation.disposition,
+                )
+                for operation in target.operations
+            ],
+        )
+        for target in package_plan.plan.targets
+    ] == [
+        (
+            target.name,
+            [
+                (
+                    operation.identity,
+                    operation.disposition,
+                )
+                for operation in target.operations
+            ],
+        )
+        for target in local.plan.targets
+    ]
 
 
 def _write_file(path, content):
