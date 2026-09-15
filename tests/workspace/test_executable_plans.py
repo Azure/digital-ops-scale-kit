@@ -7,6 +7,8 @@ silently skipping this coverage.
 """
 
 import copy
+import ctypes
+import os
 import re
 import subprocess
 import tempfile
@@ -32,6 +34,7 @@ from siteops.planning import (
     ResourceDisposition,
     SkipReasonCode,
 )
+from siteops.process_args import prepare_process_args
 from tests.workspace.conftest import az_path
 
 _DIAGNOSTIC = re.compile(
@@ -55,6 +58,40 @@ _AIO_INSTALL_TEMPLATES = {
     "resolve-aio": Path("templates/aio/resolve-aio.bicep"),
     "secretsync": Path("templates/secretsync/enable-secretsync.bicep"),
 }
+
+
+def _logical_process_args(argv):
+    """Decode only the literal batch form before applying the local-command allowlist."""
+    assert not isinstance(argv, bytes), "Byte command lines are not permitted"
+    if not isinstance(argv, str):
+        return list(argv)
+    assert os.name == "nt", "Shell commands are not permitted"
+    interpreter, separator, wrapped = argv.partition(" /d /v:off /s /c ")
+    assert separator and wrapped.startswith('"') and wrapped.endswith('"'), (
+        "Only prepared Windows batch commands are permitted"
+    )
+    expected = Path(os.environ["SystemRoot"]) / "System32" / "cmd.exe"
+    assert Path(interpreter.strip('"')).resolve() == expected.resolve()
+    body = wrapped[1:-1]
+    assert re.fullmatch(r'"[^"%\x00-\x1f\x7f]*"(?: "[^"%\x00-\x1f\x7f]*")*', body), (
+        "Batch arguments must remain quoted literal values"
+    )
+
+    from ctypes import wintypes
+
+    parser = ctypes.WinDLL("shell32", use_last_error=True).CommandLineToArgvW
+    parser.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_int)]
+    parser.restype = ctypes.POINTER(wintypes.LPWSTR)
+    count = ctypes.c_int()
+    parsed = parser(body, ctypes.byref(count))
+    assert parsed, "The native argument vector could not be decoded"
+    try:
+        return [parsed[index] for index in range(count.value)]
+    finally:
+        release = ctypes.WinDLL("kernel32").LocalFree
+        release.argtypes = [ctypes.c_void_p]
+        release.restype = ctypes.c_void_p
+        release(parsed)
 
 
 def _assert_guidance_supplies_are_retained(workspace, manifest_path, plan):
@@ -95,14 +132,12 @@ def _guard_local_compilation(
     original_run = subprocess.run
 
     def local_only_popen(argv, *args, **kwargs):
-        assert not isinstance(argv, (str, bytes)), (
-            "Shell commands are not permitted"
-        )
         assert not kwargs.get("shell"), "Shell commands are not permitted"
-        assert Path(argv[0]).resolve() == azure_cli, (
+        logical = _logical_process_args(argv)
+        assert Path(logical[0]).resolve() == azure_cli, (
             f"Executable planning must not invoke kubectl or other tools: {argv}"
         )
-        command = tuple(argv[1:])
+        command = tuple(logical[1:])
         if command not in {
             ("version", "--output", "json"),
             ("bicep", "version"),
@@ -123,7 +158,7 @@ def _guard_local_compilation(
 
     def checked_run(argv, *args, **kwargs):
         result = original_run(argv, *args, **kwargs)
-        if tuple(argv[1:3]) == ("bicep", "build"):
+        if tuple(_logical_process_args(argv)[1:3]) == ("bicep", "build"):
             output = f"{result.stdout or ''}\n{result.stderr or ''}"
             assert not _DIAGNOSTIC.search(output), output
         return result
@@ -133,6 +168,38 @@ def _guard_local_compilation(
     monkeypatch.setattr(subprocess, "run", checked_run)
     monkeypatch.setenv("AZURE_CORE_COLLECT_TELEMETRY", "0")
     return builds
+
+
+@pytest.mark.parametrize("command", [
+    ("deployment", "group", "create"),
+    ("connectedk8s", "proxy"),
+    ("account", "show"),
+])
+def test_compilation_guard_rejects_provider_commands(monkeypatch, tmp_path, command):
+    def unexpected(*args, **kwargs):
+        pytest.fail("A disallowed command reached process creation.")
+
+    monkeypatch.setattr(subprocess, "Popen", unexpected)
+    _guard_local_compilation(monkeypatch, tmp_path, set())
+    prepared = prepare_process_args((az_path(), *command))
+    with pytest.raises(AssertionError, match="Only local version probes and Bicep builds"):
+        subprocess.Popen(prepared)
+
+
+def test_compilation_guard_rejects_appended_shell_text(monkeypatch, tmp_path):
+    if os.name != "nt":
+        pytest.skip("Native Windows batch command form")
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("Shell text reached process creation.")
+
+    monkeypatch.setattr(subprocess, "Popen", unexpected)
+    _guard_local_compilation(monkeypatch, tmp_path, set())
+    prepared = prepare_process_args((az_path(), "version", "--output", "json"))
+    if not isinstance(prepared, str):
+        prepared = subprocess.list2cmdline(prepared)
+    with pytest.raises(AssertionError):
+        subprocess.Popen(prepared + ' & "disallowed"')
 
 
 @pytest.mark.parametrize(
