@@ -17,6 +17,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, TypeAlias
 
+from siteops.process_args import prepare_process_args
 from siteops.runtime import RuntimePathError, RuntimePaths, prepare_root
 
 DEFAULT_COMPILATION_TIMEOUT_SECONDS = 300
@@ -858,7 +859,7 @@ def _run_command(
     environment: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        argv,
+        prepare_process_args(argv),
         capture_output=True,
         text=True,
         encoding="utf-8",

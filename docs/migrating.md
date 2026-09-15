@@ -35,6 +35,7 @@ Start with the changes that affect your workflow:
 |---|---|
 | Reference shipped workspace paths | Update [entry and resource-set paths](#workspace-content-paths). |
 | Select a manifest by a bare filename | Review [name and path selection](#manifest-names-and-paths). |
+| Use Windows batch-based tools | Review [literal tool arguments](#windows-tool-arguments). |
 | Use `sites --render` | Replace it with [`--output yaml`](#inspect-sites). |
 | Preview a deployment | Use [`siteops plan`](#plan-and-validate). |
 | Author manifests or parameters | Review the [preparation checks](#preparation-checks). |
@@ -86,6 +87,23 @@ Prefix a filename with `./` to retain direct file selection, for example
 `plan ./install.yaml` or `plan ./install`. Relative paths containing a
 directory and absolute local execution paths retain their existing meaning.
 Browsing remains confined to inspectable paths inside its selected workspace.
+
+### Windows tool arguments
+
+Site Ops passes arguments to Windows `.cmd` and `.bat` launchers as literal
+quoted values, with AutoRun and delayed expansion disabled. Paths containing
+ampersands or parentheses remain one argument.
+
+Batch launchers report
+`Windows batch launchers require arguments without percent signs, double quotes or control characters`
+when an argument cannot be passed literally. Use a native executable where
+available, or change the selected path or input. This applies to command
+arguments, including content, cache and temporary paths passed to tools.
+Values inside parameter JSON files are unaffected.
+
+For an immutable package with an unsupported path, select a corrected package
+rather than editing cached content. Native `.exe` and Linux process argument
+vectors retain their existing behavior.
 
 ### Inspect sites
 
