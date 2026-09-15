@@ -620,6 +620,10 @@ class PackageInspection:
     metadata_sha256: str
     metadata_size: int
 
+    def validate_materialization(self, root: Path) -> Path:
+        """Revalidate the complete extracted tree against this inspected archive."""
+        return _validate_materialized_package(root, self)
+
 
 @dataclass(frozen=True)
 class BoundPackageTemplate:

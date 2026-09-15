@@ -263,5 +263,52 @@ operation produces the URL at runtime. Ordinary trusted local workspaces keep
 their existing HTTPS behavior.
 
 There is no public `plan --source` or `deploy --source` route yet. Source
-download, provenance policy, cache publication, cache leasing, project pins,
-and release delivery remain separate acquisition work.
+download, provenance-policy orchestration, project pins and release delivery
+remain separate acquisition work.
+
+## Private workspace cache
+
+`WorkspaceCache` provides internal package publication and use leases.
+`publish` copies an opaque local archive into private staging, verifies its
+expected SHA-256 and consumer-owned provenance, then extracts and validates
+the complete package before publishing it atomically. Existing valid objects
+are reused. Changed or incomplete objects fail rather than being repaired
+in place.
+
+`lease` checks the retained archive, materialized inventory, source revision,
+current-engine compatibility and consumer verification policy before returning
+a `CachedWorkspace`. Keep that shared lease open through browsing, planning
+and execution. Its `bind` method uses the same manifest resolver and
+`MaterializedPackageBinding` as other acquired execution callers.
+
+| Platform | Default cache root |
+|---|---|
+| Windows | `%LOCALAPPDATA%\siteops\cache` |
+| Linux | `$XDG_CACHE_HOME/siteops`, or `~/.cache/siteops` |
+
+`SITEOPS_CACHE_DIR` is the single cache-root override. It must select an
+absolute directory. Cache root resolution is lazy until the storage API is
+used. These defaults do not enable acquisition in the CLI.
+
+The cache retains the ZIP and its extracted package beneath
+`objects/sha256/<digest>/`, with verification receipts outside those immutable
+objects. Every use invokes the caller's trusted verifier. A stored receipt
+never authorizes execution by itself. A verifier with retained local proof
+and trusted-root inputs can support offline reuse without a source request.
+The storage layer performs no downloads and does not refresh project pins.
+
+New directories use private POSIX modes or an explicit Windows DACL for the
+current user, SYSTEM and Administrators. Existing ownership and access
+controls are checked rather than changed. Choose a local filesystem location
+whose ancestors prevent replacement by other users. An existing unmarked
+directory, a filesystem alias or a shared cache path is rejected.
+
+Shared process-held leases allow concurrent readers. Publication requires an
+exclusive lease for the package digest, and the operating system releases
+leases when a process exits. Lease coordination protects cooperating Site Ops
+operations, not against another process running as the same user. Corrupt
+content and changed access controls are detected during reuse.
+
+Operator Sites, overlays, pins and run state remain outside the cache.
+Cache maintenance commands, retention and source-metadata caching are
+separate work.
