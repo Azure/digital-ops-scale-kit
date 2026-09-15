@@ -60,6 +60,27 @@ qualification evidence.
 
 ## Receipt and lifecycle
 
+### Release source observations
+
+The internal `GitHubClient.resolve_release` method observes an explicitly
+selected published release before acquisition. It resolves the exact tag
+namespace, including a bounded chain of annotated tags, rather than treating
+a branch or `target_commitish` as immutable source identity.
+
+The result identifies the repository, release, tag object, source commit and
+uploaded assets. Asset metadata is enumerated through bounded pagination.
+Repository, release, tag and asset identities are rechecked before returning.
+Missing asset digests remain unknown, and a selected asset must supply its
+SHA-256 digest before acquisition can use it.
+
+These observations come from the source API, not a cryptographic provenance
+proof. They do not authenticate a publisher, select consumer policy or
+authorize execution. The method downloads no package or proof and adds no
+public command for source selection. Existing pins must retain their resolved
+identities rather than silently following the release tag again.
+
+### Verification receipts
+
 The `ArtifactVerification` receipt records:
 
 - The exact artifact SHA-256 and size.
