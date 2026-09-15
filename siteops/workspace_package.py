@@ -636,7 +636,7 @@ class PackageInspection:
 
 @dataclass(frozen=True)
 class BoundPackageTemplate:
-    """One authored template and the package artifact used for execution."""
+    """One authored template and its validated package artifact for execution."""
 
     source_path: Path
     artifact_path: Path
@@ -755,7 +755,7 @@ def _validate_materialized_package(
 
 @dataclass(frozen=True)
 class MaterializedPackageBinding:
-    """Bind one verified materialization and authored manifest to execution.
+    """Bind one validated materialization and authored manifest to execution.
 
     The caller must verify source provenance independently and hold an
     immutable cache lease for this binding's full planning and execution
@@ -884,7 +884,7 @@ class MaterializedPackageBinding:
         return path
 
     def bind_template(self, reference: str) -> BoundPackageTemplate:
-        """Return the authored source and its verified ARM JSON artifact."""
+        """Return the authored source and its validated ARM JSON artifact."""
         relative = self.authored_path(
             reference,
             label="Deployment template",

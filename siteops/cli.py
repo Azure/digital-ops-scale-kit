@@ -91,7 +91,7 @@ def setup_logging(verbose: bool = False) -> None:
 
 
 def resolve_manifest_path(manifest: str | Path, workspace: Path) -> Path:
-    """Resolve a name or filename while preserving trusted explicit local paths."""
+    """Resolve an exact name, root filename, or trusted explicit local path."""
     if is_explicit_manifest_path(manifest):
         path = Path(str(manifest).replace("\\", "/"))
         return path if path.is_absolute() else workspace / path

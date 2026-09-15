@@ -97,10 +97,12 @@ ampersands or parentheses remain one argument.
 
 Batch launchers report
 `Windows batch launchers require arguments without percent signs, double quotes or control characters`
-when an argument cannot be passed literally. Use a native executable where
-available, or change the selected path or input. This applies to command
-arguments, including content, cache and temporary paths passed to tools.
-Values inside parameter JSON files are unaffected.
+when an argument cannot be passed literally. An oversized invocation reports
+`The Windows batch command exceeds its supported length.` Both failures occur
+before process creation. Use a native executable where available, shorten the
+invocation, or change the selected path or input. These constraints apply to
+command arguments, including content, cache and temporary paths passed to
+tools. Values inside parameter JSON files are unaffected.
 
 For an immutable package with an unsupported path, select a corrected package
 rather than editing cached content. Native `.exe` and Linux process argument

@@ -1,15 +1,17 @@
 # Build a workspace package
 
-Content authors can produce one ZIP containing a complete workspace, its
-approved companion documentation, licensing files, and producer-compiled ARM
-JSON for executable Bicep roots. The package preserves every authored file at
-its source-relative path. Generated templates use a separate producer-owned
-namespace.
+Content authors can build one `WorkspacePackage` ZIP containing a complete
+authored workspace, approved companion documentation and licensing files, and
+producer-compiled ARM JSON for executable Bicep roots. Authored files keep
+their source-relative paths. Generated templates use a separate
+producer-owned namespace.
 
-This is a content artifact, separate from the Site Ops installation bundle.
-Building it performs no upload, signing, release operation or deployment.
-The producer reports `provenance: not-established`. A checksum and a valid
-package structure do not authenticate the publisher.
+This content artifact is separate from the Site Ops installation wheel or ZIP
+bundle. Building it performs no upload, signing, release operation or
+deployment. The producer reports `provenance: not-established`. A checksum
+and a valid package structure do not authenticate the publisher.
+Successful production establishes package integrity and declared compatibility,
+not deployment safety or a live AIO outcome.
 
 ## Produce from a reviewed commit
 
@@ -48,25 +50,27 @@ filesystem paths. The script also runs on Linux using its ordinary Python
 invocation and shell continuation syntax.
 
 The producer checks the expected source commit and clean checkout, then reads
-an export of that exact commit. Ignored local tools and secrets are excluded.
-It includes every tracked workspace file and each selected companion.
+an export of that exact commit. Untracked and ignored local files are
+excluded. It includes every tracked workspace file and each selected
+companion.
 An export that omits selected tracked files, such as through `export-ignore`,
 is rejected. Submodules, symbolic links and Git LFS pointers require explicit
 source preparation rather than automatic downloads.
 Source contents come from raw committed Git blobs. Archive substitutions and
 checkout line-ending settings do not rewrite the authored package files.
 
-The producer starts with the existing discovery inventory, including partials,
-then recognizes additional manifest documents throughout the complete workspace
-using the shared parser. Custom paths and extensionless manifests therefore
-receive the same template mappings as conventional entries. It expands includes
-and compiles distinct deployment template paths, not every Bicep module.
-Name-based browsing keeps its existing inventory rules.
-The producer does not construct Sites, apply overlays or resolve runtime
-parameter values. Unrelated data files are not deployment entries merely
-because they contain a key such as `steps`.
-Incomplete manifest discovery blocks production. Optional advisory-guidance
-errors do not independently prevent template discovery or compilation.
+The producer starts with the conventional entries and declared partials in the
+browse inventory. It then uses the engine parser to recognize additional
+parseable manifests throughout the workspace, including manifests available
+only by explicit path, extensionless manifests and valid manifests without a
+`kind`. Name-based browse discovery keeps its existing inventory rules.
+
+The producer expands includes and compiles distinct deployment template paths,
+not every Bicep module. It does not construct Sites, apply overlays or resolve
+runtime parameter values. Supplemental kindless parameter data that cannot
+form a manifest is ignored. Incomplete manifest discovery blocks production.
+Optional guidance remains advisory, so its errors do not independently
+prevent template discovery or compilation.
 
 Native ARM JSON deployment roots are validated and mapped at their authored
 path. Bicep roots are compiled to
@@ -81,16 +85,16 @@ implicit module restoration, and Azure CLI is configured to use only the
 controlled Bicep binary from `PATH`. A readable `az bicep version` result is
 required before the first build.
 
-An authored `bicepconfig.json` must be inside the packaged workspace. The
-nearest workspace configuration is recorded by path and digest. When the
-workspace supplies none, the producer uses an explicit empty configuration
-outside the package source as the nearest boundary and records
-`producer-default` with its digest. Every tracked Bicep file in the workspace
-must resolve to a configuration inside the workspace or to that producer
-default. This accounts for module-level configuration discovery without
-claiming a complete module graph.
-Configuration filenames must use exactly `bicepconfig.json` so discovery has
-the same meaning on case-sensitive and case-insensitive filesystems.
+An authored Bicep configuration must be inside the packaged workspace and use
+the exact basename `bicepconfig.json`. The nearest workspace configuration is
+recorded by path and digest. When the workspace supplies none, the producer
+uses an explicit empty configuration outside the package source as the
+nearest boundary and records `producer-default` with its digest. Every tracked
+Bicep file in the workspace must resolve to a configuration inside the
+workspace or to that producer default. This accounts for module-level
+configuration discovery without claiming a complete module graph and keeps
+ancestor checks consistent across case-sensitive and case-insensitive
+filesystems.
 
 The output is a JSON summary with the ZIP's SHA-256, size, kit identity and
 workspace path, plus the number of mapped deployment templates. Keep those
@@ -230,7 +234,7 @@ inventory.
 ## Trust and execution boundary
 
 The package format, file identities and compatibility model contain no
-GitHub-specific requirements. The first producer reads Git snapshots.
+GitHub-specific requirements. The current producer reads exact Git commits.
 Other approved producers can create the same package format.
 
 These integrity and materialization primitives are not a trusted acquisition
@@ -249,7 +253,9 @@ execution boundary.
 the internal execution binding. It revalidates the complete materialization,
 resolves the manifest through the shared exact name and path rules, binds every
 authored template to its mapped ARM JSON, and verifies package inputs before
-engine parsers or providers consume them.
+engine parsers or providers consume them. Missing mappings or changed source
+or artifact bytes fail. The consumer does not compile packaged Bicep as a
+fallback.
 
 Pass that binding to
 `Orchestrator(..., site_config_root=<project>, materialized_package=binding)`.
@@ -261,9 +267,9 @@ continue through the ordinary planner and executor.
 The caller owns source-provenance verification and an immutable cache lease for
 the binding's full lifetime. A parsed receipt, package metadata, or a
 cache-shaped path does not establish that authority. The engine detects
-changed bytes, unexpected paths, links, path aliases, and inventory drift at
-its validation points. It does not provide an OS sandbox against another
-process running as the same user.
+unexpected paths, links, path aliases, and inventory drift at its validation
+points. It does not provide an OS sandbox against another process running as
+the same user.
 
 Acquired kubectl inputs must be verified local package paths. Remote HTTPS
 manifest URLs fail before tool or proxy mutation, including when a prior
@@ -271,12 +277,15 @@ operation produces the URL at runtime. Ordinary trusted local workspaces keep
 their existing HTTPS behavior.
 
 There is no public `plan --source` or `deploy --source` route yet. Source
-download, provenance-policy orchestration, project pins and release delivery
-remain separate acquisition work.
+download and resolution, retained-proof provisioning and orchestration,
+project pins, source-selection CLI, cache management and workspace release
+assets are not implemented.
 
-## Private workspace cache
+## Internal workspace cache
 
-`WorkspaceCache` provides internal package publication and use leases.
+`WorkspaceCache` is an internal storage API for package publication and use
+leases. No public command uses it.
+
 `publish` copies an opaque local archive into private staging, verifies its
 expected SHA-256 and consumer-owned provenance, then extracts and validates
 the complete package before publishing it atomically. Existing valid objects
@@ -310,6 +319,8 @@ current user, SYSTEM and Administrators. Existing ownership and access
 controls are checked rather than changed. Choose a local filesystem location
 whose ancestors prevent replacement by other users. An existing unmarked
 directory, a filesystem alias or a shared cache path is rejected.
+Windows native declarations and the current process SID may be cached.
+Per-node access-control checks are not cached.
 
 Shared process-held leases allow concurrent readers. Publication requires an
 exclusive lease for the package digest, and the operating system releases
@@ -318,5 +329,5 @@ operations, not against another process running as the same user. Corrupt
 content and changed access controls are detected during reuse.
 
 Operator Sites, overlays, pins and run state remain outside the cache.
-Cache maintenance commands, retention and source-metadata caching are
-separate work.
+No cache management command, retention policy or source-metadata cache is
+implemented.

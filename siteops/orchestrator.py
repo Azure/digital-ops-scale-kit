@@ -689,13 +689,13 @@ class Orchestrator:
     """Resolve, validate, plan, and execute manifests across sites.
 
     The orchestrator is responsible for:
-    - Loading and caching sites from the workspace
+    - Loading and caching Sites from the configured Site root
     - Resolving manifest steps, parameter composition, and template variables
     - Executing deployment, kubectl, and wait steps
     - Managing parallel deployment to multiple sites with configurable concurrency
 
     Attributes:
-        workspace: Path to the Site Ops workspace directory
+        workspace: Root for manifests, templates, and parameter libraries
         site_config_root: Root for Sites and overlays, defaulting to the workspace
         dry_run: If True, commands are logged but not executed
         executor: The AzCliExecutor instance for running commands
@@ -849,9 +849,9 @@ class Orchestrator:
     def _normalize_extra_sites_dirs(self, dirs: list[Path]) -> list[Path]:
         """Validate and deduplicate extra trusted site directories.
 
-        Extra trusted dirs are searched between the configuration root's `sites/` and
-        `sites.local/` directories, and receive the same trust level as
-        `sites/`: site files in them are allowed to declare `inherits`.
+        Extra trusted directories are searched after the configuration root's
+        `sites/` directory and before `sites.local/`. They receive the same
+        trust level as `sites/`, so their Site files may declare `inherits`.
 
         Args:
             dirs: Candidate directories to add to the trusted search path.
@@ -861,7 +861,7 @@ class Orchestrator:
 
         Raises:
             FileNotFoundError: If any directory does not exist.
-            ValueError: If a directory collides with the workspace's own
+            ValueError: If a directory collides with the configuration root's
                 `sites/` or `sites.local/`. A `sites.local/` collision
                 is specifically refused because registering it as trusted
                 would let overlays inject inheritance, breaking the overlay
@@ -1258,24 +1258,16 @@ class Orchestrator:
     def _resolve_inherits(self, child_path: Path, inherits_value: str) -> Path:
         """Resolve an `inherits:` reference to an absolute path.
 
-        Resolution order:
-        1. Relative to the child file's directory (default, locality-preserving).
-        2. Narrow fallback: if the relative path does not exist AND
-           `inherits_value` is a bare filename (no path separators), look for
-           it in the configuration root's `sites/` directory. This lets a site file
-           in an extra trusted dir reference an operator-owned template
-           (e.g. `base-site.yaml`) without copying the template or inventing
-           a new syntax. The fallback is intentionally limited to
-           the primary `sites/` directory. It does NOT search other extras or
-           `sites.local/`, so there is no cross-extra-dir shared namespace
-           and no way for an overlay to inject a new inheritance target.
+        Resolution starts relative to the child file. If a bare filename is
+        missing there, the resolver checks only the configuration root's
+        `sites/` directory. It does not search other extra directories or
+        `sites.local/`.
 
-        `inherits:` is author-trusted: the value comes from a trusted site
-        file (workspace `sites/` or an operator-vouched extras dir), so the
-        resolver deliberately does NOT sandbox the resolved path to a
-        specific set of filesystem roots. The real control is who may
-        author files in those trusted locations. See the "Trust model"
-        section in docs/site-configuration.md.
+        Files in `sites/` and extra trusted directories may author
+        `inherits:`. The resolved parent is therefore not confined to a fixed
+        set of filesystem roots. The security boundary is who can write those
+        trusted directories. See the "Trust model" section in
+        docs/site-configuration.md.
 
         Args:
             child_path: Absolute path of the file that declares `inherits`.
@@ -1286,8 +1278,7 @@ class Orchestrator:
 
         Raises:
             FileNotFoundError: If the parent cannot be resolved by either
-                strategy. The error lists every path that was probed so
-                the operator can see why fallback did not help.
+                strategy. The error lists every path that was checked.
             ValueError: If the value is not a path.
         """
         # Checked here rather than with the other field types, since this is

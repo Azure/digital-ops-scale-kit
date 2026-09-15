@@ -21,14 +21,16 @@ Ordinary local workspaces submit source Bicep, which Azure CLI may compile
 again. Their plans record observed compilation identity, not a guarantee that
 ARM will receive those exact compiled bytes.
 
-An internally bound materialized workspace package uses its producer-mapped
-ARM JSON instead. Its local-private plan records `submission.mode: arm-json`,
+An internal materialized-package binding uses its producer-mapped ARM JSON
+instead. Its local-private plan records `submission.mode: arm-json`,
 `compilationBinding: package-artifact`, the authored `templatePath`, and a
 different `effectiveTemplatePath` when Bicep maps to generated JSON. Package
 integrity is checked again before execution. This binding is not a saved plan
-or a publisher-provenance decision.
-Plain output identifies this mode as
+or a publisher-provenance decision. Plain output identifies this mode as
 `Submission: arm-json (package artifact)`.
+
+Public `plan` and `deploy` commands continue to operate on a local workspace,
+including one selected with `-w`. They do not select a package source.
 
 Planning does not establish Azure authorization, cluster connectivity, or
 workload health.

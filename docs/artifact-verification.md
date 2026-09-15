@@ -1,21 +1,21 @@
 # Artifact verification policy
 
-An artifact digest identifies bytes. A provenance proof identifies the
-workflow that attested to those bytes. Consumer-owned policy decides which
-publisher and workflow identities are acceptable.
+Artifact verification binds downloaded bytes to publisher and workflow
+evidence under consumer-owned policy. An artifact digest identifies bytes.
+A provenance proof identifies the workflow that attested to those bytes.
 
-The verification boundary consumes an already downloaded artifact, its
-detached proof, a separately provisioned trusted-root snapshot, and trusted
-local policy. It creates a receipt only after the artifact identity and
-verified observations satisfy that policy.
+The verifier consumes an already downloaded artifact, its detached proof, a
+separately provisioned trusted-root snapshot, and trusted local policy. It
+creates a receipt only after the artifact identity and verified observations
+satisfy that policy.
 
-This is an acquisition building block, not a new deployment command or a
-public Python SDK. Source resolution, project pins and cache execution must
-use the receipt together with their own identity and access boundaries.
+This is an internal acquisition building block, not a deployment command or
+public Python SDK. Source resolution, project pins and cache execution must use
+the receipt together with their own identity and access boundaries.
 
 ## GitHub policy
 
-The first adapter supports GitHub CLI version 2.95 or newer within version 2,
+The current adapter supports GitHub CLI 2.95 or newer in the 2.x release line,
 GitHub-hosted runners, and same-repository, same-commit reusable workflows.
 The policy identifies both the reusable signing workflow and its top-level
 build workflow. It does not accept a workflow-prefix match.
@@ -40,14 +40,17 @@ An administrator supplies a policy with this shape, replacing the placeholders:
 }
 ```
 
-The approved source resolver supplies the exact source commit and expected
-artifact SHA-256 for each request. A package, release-note body, or verifier
-policy echo cannot supply the consumer's publisher policy.
+An acquisition caller must supply the exact source commit and expected
+artifact SHA-256 from an approved source resolver. Source resolution is not
+implemented by this verifier. A package, release-note body, or verifier policy
+echo cannot supply the consumer's publisher policy.
 
 The adapter checks the artifact hash before invoking GitHub CLI. It supplies
 the detached proof and custom trusted root, exact certificate identity,
 source and signer digests, source ref, GitHub OIDC issuer, SLSA predicate,
 hosted-runner requirement and SHA-256 algorithm explicitly.
+On Windows, it requires the native `gh.exe` executable rather than a batch
+wrapper.
 
 Successful tool exit alone is insufficient. Every returned result must
 contain the expected subject, certificate/source/builder observations and a

@@ -356,7 +356,7 @@ class ContentReader:
         return path.relative_to(self.workspace).as_posix()
 
     def filename_candidate(self, selection: str) -> str | None:
-        """Find a regular workspace file without interpreting its name as metadata."""
+        """Return a regular workspace file candidate without reading metadata."""
         try:
             path = self._path(selection)
         except BrowseError as error:

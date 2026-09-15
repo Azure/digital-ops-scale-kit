@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-"""Literal process arguments for native executables and Windows batch launchers."""
+"""Prepare process arguments for native executables and Windows batch launchers."""
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ def _quote_batch_argument(argument: str) -> str:
     rendered = subprocess.list2cmdline([argument])
     if rendered.startswith('"'):
         return rendered
-    # cmd also needs quotes around metacharacters without whitespace.
+    # Quote every argument because cmd treats unquoted metacharacters as syntax.
     trailing_slashes = len(argument) - len(argument.rstrip("\\"))
     return '"' + rendered + "\\" * trailing_slashes + '"'
 
@@ -56,8 +56,9 @@ def _quote_batch_argument(argument: str) -> str:
 def prepare_process_args(argv: Sequence[str]) -> Sequence[str] | str:
     """Preserve native argument vectors and prepare literal Windows batch input.
 
-    Batch invocation disables AutoRun and delayed expansion. Text that cannot
-    be preserved safely fails before process creation, without echoing values.
+    Windows batch invocation uses the system command interpreter with AutoRun
+    and delayed expansion disabled. Unsupported characters and oversized
+    command lines fail before process creation without echoing values.
     """
     if isinstance(argv, (str, bytes)) or not argv:
         raise ValueError("A process command requires a nonempty argument vector.")

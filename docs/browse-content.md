@@ -57,11 +57,11 @@ siteops -w workspaces/iot-operations browse samples/resource-set-basic/manifest.
 Names are case-sensitive and scoped to the selected workspace, not a global
 registry. Declared partials use explicit paths for execution.
 
-A bare token can identify a manifest name or a file at the workspace root.
-If those identify different files, the command reports the available paths.
-Use `./file.yaml` to select a filename explicitly, or the displayed
-`manifests/...` or `samples/...` path to select another entry. This also
-applies to extensionless filenames and names ending in `.yaml`.
+A bare token can identify a manifest name or a file at the workspace root,
+including extensionless filenames and names ending in `.yaml`. If the name
+and filename identify different files, the command reports the available
+paths. Use `./file.yaml` to select a root filename explicitly, or use the
+displayed `manifests/...` or `samples/...` path to select another entry.
 
 An incomplete manifest-name inventory cannot establish uniqueness, so use
 an explicit path. Broken optional entry guidance retains the known name and
@@ -104,7 +104,6 @@ POSIX shell elsewhere. PowerShell suggestions are not Command Prompt
 commands. Paths containing control characters or Windows shell metacharacters
 are displayed as data without executable command suggestions. Private JSON
 retains canonical paths for callers that construct argument arrays directly.
-Prefix a root-level filename with `./` when using that path as a CLI argument.
 
 ## Authored guidance and uncertainty
 

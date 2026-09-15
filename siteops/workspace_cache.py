@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-"""Content-addressed workspace storage, independent of source providers."""
+"""Internal content-addressed workspace storage, independent of source providers."""
 
 from __future__ import annotations
 
@@ -143,7 +143,7 @@ class CachedWorkspace:
 
 
 class WorkspaceCache:
-    """Private local storage with immutable objects and separate verification receipts.
+    """Internal local storage with immutable objects and separate verification receipts.
 
     Callers supply independently resolved artifact/source identities and a trusted
     verifier. The verifier runs for every publication and use, including warm
@@ -334,10 +334,11 @@ class WorkspaceCache:
         self, archive: Path, expected_sha256: str, *,
         source_revision: str, verify: ArtifactVerifier,
     ) -> PackageInspection:
-        """Copy and verify an opaque local archive before extraction and atomic publication.
+        """Verify and atomically publish an archive under its SHA-256 identity.
 
-        Reuse an existing valid object under the same verifier. Corrupt objects
-        fail rather than being repaired or replaced in place. Nothing downloads.
+        The supplied verifier runs before extraction and when an existing
+        object is reused. Corrupt objects fail rather than being repaired or
+        replaced in place. The operation performs no download.
         """
         digest = _digest(expected_sha256)
         with _cache_io(), self._locked(digest, exclusive=True) as target:
@@ -368,7 +369,7 @@ class WorkspaceCache:
     def lease(
         self, expected_sha256: str, *, source_revision: str, verify: ArtifactVerifier,
     ) -> Iterator[CachedWorkspace]:
-        """Revalidate cached bytes and current policy, holding a shared lease through use.
+        """Revalidate cached content and policy under a shared use lease.
 
         Keep the context open through browsing, preparation and deployment.
         The trusted verifier must use retained local proof/root inputs for

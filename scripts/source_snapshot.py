@@ -16,7 +16,7 @@ from typing import BinaryIO
 
 
 class SourceSnapshotError(RuntimeError):
-    """An expected source-export failure safe to report without tool output."""
+    """A source-export failure with a value-safe message."""
 
 
 def _git(
@@ -86,7 +86,7 @@ def safe_archive_path(name: str) -> tuple[str, ...]:
 def export_tracked_source(
     root: Path, destination: Path, source_sha: str, *, paths: tuple[str, ...] = (),
 ) -> None:
-    """Export an identified producer input, not an arbitrary downloaded archive."""
+    """Export selected commit files with archive exclusions and raw Git blob bytes."""
     archive_path = destination.parent / "source.zip"
     if archive_path.exists():
         raise SourceSnapshotError("The source archive staging path already exists.")
@@ -199,7 +199,7 @@ def require_workspace_configuration_boundary(
     source_sha: str,
     workspace: str,
 ) -> None:
-    """Reject workspace Bicep whose effective configuration is not packaged."""
+    """Reject Bicep whose nearest effective configuration is outside the workspace."""
     if workspace == ".":
         return
     workspace_path = PurePosixPath(workspace)

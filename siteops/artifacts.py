@@ -155,7 +155,7 @@ def hash_file(path: Path, *, limit: int) -> tuple[int, str]:
 
 
 def path_inventory(paths: list[str], *, limit: int) -> set[str]:
-    """Reject duplicate files, case aliases and file/directory conflicts."""
+    """Reject duplicate files, case aliases, and file/directory conflicts."""
     nodes: dict[str, tuple[str, bool]] = {}
     directories: set[str] = set()
     for path in paths:

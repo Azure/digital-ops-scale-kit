@@ -206,7 +206,7 @@ def _discover_template_sources(root: Path, workspace: str) -> tuple[str, ...]:
 
 
 def workspace_bicep_sources(root: Path, workspace: str) -> tuple[str, ...]:
-    """Return the discovered deployment roots authored in Bicep."""
+    """Return Bicep deployment roots discovered throughout the workspace."""
     return tuple(
         source
         for source in _discover_template_sources(root, workspace)
@@ -471,11 +471,11 @@ def build_package(
     required_features: tuple[str, ...] = ("manifest/v1",),
     compilation_session_factory: CompilationSessionFactory | None = None,
 ) -> package.PackageInspection:
-    """Package every workspace file and approved companion, without publishing remotely.
+    """Build a complete workspace package from a prepared source snapshot.
 
-    The caller supplies an immutable reviewed snapshot. The Git producer
-    command establishes that snapshot separately. This function creates no
-    provenance assertion and never overwrites an existing output.
+    Callers supply an immutable reviewed snapshot. The Git producer command
+    establishes it separately. This function creates no provenance assertion
+    and never overwrites an existing output.
     """
     require_node(snapshot, directory=True)
     snapshot = snapshot.resolve()

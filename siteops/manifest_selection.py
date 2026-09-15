@@ -8,7 +8,7 @@ from pathlib import PurePath, PureWindowsPath
 
 
 class ManifestSelectionError(ValueError):
-    """An unresolved selection with value-safe guidance and private path choices."""
+    """An unresolved selection with a safe summary and private canonical path choices."""
 
     def __init__(self, code: str, summary: str, paths: tuple[str, ...] = ()):
         super().__init__(summary)
@@ -17,14 +17,14 @@ class ManifestSelectionError(ValueError):
 
 
 def is_explicit_manifest_path(value: str | PurePath) -> bool:
-    """Keep path objects and explicit path syntax distinct from bare CLI tokens."""
+    """Return whether a value is a path object or uses explicit path syntax."""
     return isinstance(value, PurePath) or any(part in value for part in ("/", "\\")) or bool(
         PureWindowsPath(value).drive
     )
 
 
 def explicit_manifest_reference(path: str) -> str:
-    """Give a canonical path unambiguous CLI syntax, including root filenames."""
+    """Format a canonical CLI path, prefixing root filenames with `./`."""
     return path if is_explicit_manifest_path(path) else "./" + path
 
 
@@ -35,11 +35,11 @@ def select_manifest_path(
     names_complete: bool,
     filename_match: str | None = None,
 ) -> str:
-    """Select one canonical path across exact-name and filename interpretations.
+    """Select one canonical path from exact-name and root-filename matches.
 
     The source owns candidate visibility and canonical path validation.
-    Bare filenames need a complete name inventory too. An explicit path
-    bypasses this lookup and is handled by the source's path boundary.
+    Bare tokens require a complete name inventory. Explicit paths bypass this
+    lookup and remain subject to the source's path boundary.
     """
     paths = {path for name, path in candidates if name == selection}
     if filename_match is not None:
