@@ -212,6 +212,56 @@ def cmd_project(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_cache(args: argparse.Namespace) -> int:
+    """Inspect private cached storage or remove one explicitly selected entry."""
+    from siteops.cache_management import CacheManagement
+
+    if is_redaction_enabled():
+        print("Cache details are private. Use SITEOPS_REDACT_OUTPUT=0 for an authorized destination.",
+              file=sys.stderr)
+        return 1
+    try:
+        if any((
+            args.project is not None, args.workspace is not None,
+            args.trust_policy is not None, args.trusted_root is not None,
+            args.extra_sites_dirs,
+        )):
+            raise ProjectError("Cache commands use SITEOPS_CACHE_DIR or the platform default, not project or trust options.")
+        cache = CacheManagement()
+        if args.cache_command == "list":
+            listing = cache.list(kind=args.kind, identity=args.id, limit=args.limit)
+            if args.output == "json":
+                print(json.dumps(listing.document(), ensure_ascii=True, sort_keys=True, indent=2))
+            else:
+                print(f"Cache: {_content_text(str(listing.root))}")
+                print("Storage inventory only. Integrity and publisher trust are not evaluated.")
+                if not listing.initialized:
+                    print("The cache has not been initialized.")
+                for entry in listing.entries:
+                    size = str(entry.stored_bytes) if entry.stored_bytes is not None else "unknown"
+                    print(f"{entry.kind} {entry.identity}")
+                    print(f"  Storage: {entry.state}. Bytes: {size}.")
+                    if entry.issue is not None:
+                        print(f"  Issue: {entry.issue}")
+                print(f"{len(listing.entries)} shown, {listing.matched} matching entries.")
+                if listing.matched > len(listing.entries):
+                    print("Use --kind, --id or --limit to inspect the remaining entries.")
+            return 1 if any(entry.state == "unavailable" for entry in listing.entries) else 0
+        removed = cache.remove(args.kind, args.id)
+        if args.output == "json":
+            print(json.dumps({
+                "apiVersion": "siteops/v1alpha1", "kind": "CacheRemoval",
+                "entry": removed.document(),
+            }, ensure_ascii=True, sort_keys=True, indent=2))
+        else:
+            print(f"Removed cached {removed.kind} {removed.identity}. Bytes: {removed.stored_bytes}.")
+            print("Project pins, Site configuration and trust inputs are unchanged.")
+        return 0
+    except ArtifactError as error:
+        print(f"{error.code}: {error}", file=sys.stderr)
+        return 1
+
+
 def cmd_browse(args: argparse.Namespace) -> int:
     """Inspect content before any Site configuration or Orchestrator is loaded."""
     if is_redaction_enabled():
@@ -1182,6 +1232,23 @@ Examples:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    p_cache = subparsers.add_parser("cache", help="Inspect cached storage or remove a selected entry")
+    cache_commands = p_cache.add_subparsers(dest="cache_command", required=True)
+    for name, help_text in (
+        ("list", "List cached storage without verifying content or contacting sources"),
+        ("remove", "Remove one cached entry, refusing active use and preserving project configuration"),
+    ):
+        command = cache_commands.add_parser(name, help=help_text, description=help_text)
+        command.add_argument("--output", choices=("plain", "json"), default="plain")
+        if name == "list":
+            command.add_argument("--kind", choices=("package", "proof", "metadata"),
+                                 help="Limit inspection to one cache entry kind")
+            command.add_argument("--id", help="Complete cache entry ID, used with --kind")
+            command.add_argument("--limit", type=int, default=100, help="Maximum rows to inspect (default: 100)")
+        else:
+            command.add_argument("kind", choices=("package", "proof", "metadata"))
+            command.add_argument("id", help="Complete lowercase entry ID from cache list")
+
     p_project = subparsers.add_parser("project", help="Inspect or explicitly pin a project's workspace source")
     project_commands = p_project.add_subparsers(dest="project_command", required=True)
     for name, help_text in (
@@ -1480,6 +1547,8 @@ Examples:
         sys.exit(cmd_index(args))
     if args.command == "project":
         sys.exit(cmd_project(args))
+    if args.command == "cache":
+        sys.exit(cmd_cache(args))
 
     extra_sites_dirs = _resolve_extra_sites_dirs(args.extra_sites_dirs)
     commands = {

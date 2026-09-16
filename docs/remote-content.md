@@ -83,7 +83,8 @@ blobs. A network, authorization or quota failure is reported rather than
 silently selecting old data or another access mode. Offline cache misses
 report `cache.metadata-missing`. Fetch that source/workspace without
 `--offline` first. Inconsistent cache records and observations later than the
-system clock fail explicitly.
+system clock fail explicitly. Use [targeted cache maintenance](cache.md) to
+remove an inconsistent record before fetching it again.
 
 Metadata is stored separately from workspace packages and verification
 receipts, under `metadata/records/` in the

@@ -16,6 +16,7 @@ separates validation, planning, deployment, and health verification.
 | Find and inspect deployment choices | [Browse deployment content](browse-content.md) |
 | Browse a published source without cloning | [Remote content indexes](remote-content.md) |
 | Keep configured Sites separate from pinned or local content | [Operator projects](projects.md) |
+| Inspect storage or remove a cached entry safely | [Cache maintenance](cache.md) |
 | Diagnose a failed command or provider operation | [Troubleshooting](troubleshooting.md) |
 
 Installing the CLI does not acquire a workspace. The included IoT Operations

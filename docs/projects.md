@@ -108,6 +108,10 @@ package and proof already in cache. Offline use still requires valid local
 policy and roots. Expired policy, corrupt objects and invalid source expectations
 fail without automatic repair.
 
+[Cache maintenance](cache.md) can remove a specific corrupt entry before its
+exact content is restored. This does not modify the workspace pin or Site
+configuration, but it can make offline use require source access.
+
 Run `project pin` with an explicit approved release to change the selection.
 It acquires and verifies the package before atomically replacing a recognized
 pin. A concurrent pin change during acquisition is reported instead of being

@@ -90,13 +90,15 @@ def cache_io() -> Iterator[None]:
 class CacheLayout:
     """Validate the shared cache marker, ownership and closed storage namespaces."""
 
-    def __init__(self, root: Path | None = None, *, lock_timeout: float = 20):
+    def __init__(
+        self, root: Path | None = None, *, lock_timeout: float = 20, create: bool = True,
+    ):
         self.root = default_cache_root() if root is None else Path(root)
         self.lock_timeout = lock_timeout
         if not self.root.is_absolute() or self.root == self.root.parent or ".." in self.root.parts:
             raise CacheError("The cache must be an absolute, non-root directory.", code="cache.path")
         try:
-            self._initialize()
+            self._initialize(create=create)
         except OSError:
             raise CacheError("The private cache directory could not be prepared.", code="cache.path") from None
 
@@ -122,7 +124,7 @@ class CacheLayout:
                     raise CacheError("The cache namespace contains an unexpected path.")
                 check_private_node(directory / child, directory=True)
 
-    def _initialize(self) -> None:
+    def _initialize(self, *, create: bool = True) -> None:
         try:
             self.root.lstat()
         except FileNotFoundError:
@@ -130,6 +132,8 @@ class CacheLayout:
         else:
             self._check_root()
             return
+        if not create:
+            raise CacheError("The Site Ops cache has not been initialized.", code="cache.uninitialized")
         missing: list[Path] = []
         parent = self.root.parent
         while True:

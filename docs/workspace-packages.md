@@ -356,5 +356,5 @@ The same root marker and native access controls protect every namespace.
 See [remote browsing](remote-content.md#reuse-refresh-and-offline-browsing).
 
 Operator Sites, overlays, pins and run state remain outside the cache.
-Cache management commands and automatic retention policies remain separate
-capabilities.
+Use [cache maintenance](cache.md) to inspect storage or remove a selected
+entry. Automatic retention and pruning remain separate capabilities.

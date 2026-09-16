@@ -173,7 +173,8 @@ contain no GitHub transport fields. Other approved providers can use the same
 boundary without adding an executor or changing operator configuration.
 
 These internal APIs support [project pins and configured Site execution](projects.md).
-Cache maintenance remains separate. Descriptive browsing
+[Cache maintenance](cache.md) provides storage inspection and targeted removal.
+Descriptive browsing
 uses its own [reference/index cache](remote-content.md#reuse-refresh-and-offline-browsing).
 Those observations never authorize package execution.
 
