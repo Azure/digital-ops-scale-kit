@@ -1,6 +1,7 @@
 """Opaque transfer, origin policy, protocol bounds and native worker lifetime."""
 
 import hashlib
+import http.client
 import io
 import json
 import os
@@ -15,6 +16,7 @@ from email.message import Message
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import Mock
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -307,6 +309,7 @@ def https_source(monkeypatch):
             pass
 
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(certificate)
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server.socket = context.wrap_socket(server.socket, server_side=True)
@@ -341,6 +344,49 @@ def observed_processes(monkeypatch):
     monkeypatch.setattr(transfer.subprocess, "Popen", start)
     yield processes, calls
     assert all(process.poll() is not None for process in processes)
+
+
+def test_https_fixture_sets_tls_floor_before_wrapping_or_listening(monkeypatch):
+    context = Mock()
+    context.minimum_version = object()
+    server = Mock(server_port=1234)
+    thread = Mock()
+    thread.is_alive.return_value = False
+
+    def wrap(sock, *, server_side):
+        assert context.minimum_version == ssl.TLSVersion.TLSv1_2
+        assert server_side is True
+        thread.start.assert_not_called()
+        return object()
+
+    context.wrap_socket.side_effect = wrap
+    monkeypatch.setattr(ssl, "SSLContext", Mock(return_value=context))
+    monkeypatch.setattr(sys.modules[__name__], "ThreadingHTTPServer", Mock(return_value=server))
+    monkeypatch.setattr(threading, "Thread", Mock(return_value=thread))
+    fixture = https_source.__wrapped__(monkeypatch)
+    try:
+        next(fixture)
+        thread.start.assert_called_once_with()
+    finally:
+        fixture.close()
+    context.wrap_socket.assert_called_once()
+
+
+def test_https_fixture_accepts_a_verified_tls12_client(https_source):
+    origin, _, _, _ = https_source
+    parsed = urlsplit(origin)
+    certificate = Path(__file__).parent / "fixtures" / "localhost-test.pem"
+    context = ssl.create_default_context(cafile=str(certificate))
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.maximum_version = ssl.TLSVersion.TLSv1_2
+    connection = http.client.HTTPSConnection(parsed.hostname, parsed.port, context=context, timeout=5)
+    try:
+        connection.request("GET", "/asset")
+        response = connection.getresponse()
+        assert response.status == 200
+        assert response.read() == BODY
+    finally:
+        connection.close()
 
 
 def test_native_transfer_is_private_opaque_and_independent_of_workspace_imports(
