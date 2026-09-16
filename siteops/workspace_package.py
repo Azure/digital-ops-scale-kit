@@ -37,6 +37,7 @@ from siteops.artifacts import (
     hash_file,
     hash_stream,
     is_link,
+    load_artifact_json,
     open_regular_file,
     path_inventory,
     relative_artifact_path,
@@ -105,27 +106,7 @@ def _digest(value: Any) -> str:
 
 
 def _strict_json(raw: bytes, *, label: str) -> Any:
-    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise ArtifactError(f"{label} contains a duplicate JSON key.")
-            result[key] = value
-        return result
-
-    def invalid_constant(value: str) -> None:
-        raise ArtifactError(f"{label} contains a non-JSON number.")
-
-    try:
-        return json.loads(
-            raw.decode("utf-8-sig"),
-            object_pairs_hook=unique_object,
-            parse_constant=invalid_constant,
-        )
-    except (UnicodeError, ValueError, RecursionError) as error:
-        if isinstance(error, ArtifactError):
-            raise
-        raise ArtifactError(f"{label} must be bounded UTF-8 JSON.") from None
+    return load_artifact_json(raw, limit=MAX_FILE_BYTES, label=label)
 
 
 def _engine_range(value: Any) -> str:

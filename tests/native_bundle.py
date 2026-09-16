@@ -74,16 +74,17 @@ def write_wheel(
     module: str,
     entry_point: str | None = None,
     requires: tuple[str, ...] = (),
+    cli_source: str | None = None,
 ) -> None:
     """Write a minimal, valid pure Python wheel for lifecycle coverage."""
     prefix = f"{name.replace('-', '_')}-{version}.dist-info"
     contents = {
         f"{module}/__init__.py": f'__version__ = "{version}"\n'.encode(),
-        f"{module}/cli.py": (
+        f"{module}/cli.py": (cli_source if cli_source is not None else (
             f"from {module} import __version__\n"
             "def main():\n"
             f'    print("{module} " + __version__)\n'
-        ).encode(),
+        )).encode(),
         prefix + "/METADATA": (
             f"Metadata-Version: 2.3\nName: {name}\nVersion: {version}\n"
             "Requires-Python: >=3.10\n"

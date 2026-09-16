@@ -276,15 +276,18 @@ manifest URLs fail before tool or proxy mutation, including when a prior
 operation produces the URL at runtime. Ordinary trusted local workspaces keep
 their existing HTTPS behavior.
 
-There is no public `plan --source` or `deploy --source` route yet. Source
-download and resolution, retained-proof provisioning and orchestration,
-project pins, source-selection CLI, cache management and workspace release
-assets are not implemented.
+The [source acquisition flow](workspace-sources.md) provides release resolution,
+downloads, retained proofs and verified cache use. [Operator projects](projects.md)
+connect packaged content and separate configured Sites to ordinary planning
+and deployment. Cache maintenance has its own commands. Workspace asset
+publication is not integrated into the release workflow.
 
 ## Internal workspace cache
 
 `WorkspaceCache` is an internal storage API for package publication and use
-leases. No public command uses it.
+leases. Project commands consume it. Remote metadata browsing shares its
+protected storage layout through a separate cache without acquiring executable
+packages.
 
 `publish` copies an opaque local archive into private staging, verifies its
 expected SHA-256 and consumer-owned provenance, then extracts and validates
@@ -305,14 +308,33 @@ and execution. Its `bind` method uses the same manifest resolver and
 
 `SITEOPS_CACHE_DIR` is the single cache-root override. It must select an
 absolute directory. Cache root resolution is lazy until the storage API is
-used. These defaults do not enable acquisition in the CLI.
+used. Cache directory selection does not select a workspace, source or trust
+policy.
 
 The cache retains the ZIP and its extracted package beneath
 `objects/sha256/<digest>/`, with verification receipts outside those immutable
 objects. Every use invokes the caller's trusted verifier. A stored receipt
 never authorizes execution by itself. A verifier with retained local proof
 and trusted-root inputs can support offline reuse without a source request.
-The storage layer performs no downloads and does not refresh project pins.
+The storage layer performs no downloads and does not refresh workspace pins.
+
+`retain_proof` stores exact opaque verification inputs at
+`proofs/sha256/<proof-digest>/proof.bin`. This optional namespace is created
+atomically when first needed. Existing marked caches keep their marker and
+package objects unchanged. Invalid existing namespace contents are rejected
+rather than overwritten.
+
+Proofs remain inputs, not publisher authority. `lease_proof` holds a shared
+lease while the trusted verifier reads them and checks their identity again
+on return. Proof retention uses a separate exclusive lock. Missing proof bytes
+produce `cache.proof-missing`, while changed bytes or access controls fail
+without repair. Older builds that do not support this namespace may reject
+the cache. Use a separate cache directory when running such a build.
+
+Source acquisition supplies an additional source check to `publish` and
+`lease`. It compares the verified package with the selected workspace and kit
+before publication or use. See [workspace sources](workspace-sources.md) for
+the download, policy and pinned reuse flow.
 
 New directories use private POSIX modes or an explicit Windows DACL for the
 current user, SYSTEM and Administrators. Existing ownership and access
@@ -328,6 +350,13 @@ leases when a process exits. Lease coordination protects cooperating Site Ops
 operations, not against another process running as the same user. Corrupt
 content and changed access controls are detected during reuse.
 
+Source observations and index bytes use the separate optional
+`metadata/records/` namespace. Each bounded record binds an exact provider,
+access scope and metadata identity to payload size, SHA-256 and observation
+time. Record filenames are hashes of those keys, never source paths.
+The same root marker and native access controls protect every namespace.
+See [remote browsing](remote-content.md#use-cached-metadata-with-browse).
+
 Operator Sites, overlays, pins and run state remain outside the cache.
-No cache management command, retention policy or source-metadata cache is
-implemented.
+Use [cache maintenance](cache.md) to inspect storage or remove a selected
+entry. Automatic pruning is not implemented.

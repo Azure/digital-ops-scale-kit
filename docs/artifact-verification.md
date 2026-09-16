@@ -10,8 +10,8 @@ creates a receipt only after the artifact identity and verified observations
 satisfy that policy.
 
 This is an internal acquisition building block, not a deployment command or
-public Python SDK. Source resolution, project pins and cache execution must use
-the receipt together with their own identity and access boundaries.
+public Python SDK. Source resolution, workspace pins and cache execution must
+use the receipt together with their own identity and access boundaries.
 
 ## GitHub policy
 
@@ -60,6 +60,30 @@ qualification evidence.
 
 ## Receipt and lifecycle
 
+### Release source observations
+
+The internal `GitHubClient.resolve_release` method observes an explicitly
+selected published release before acquisition. It resolves the exact tag
+namespace, including a bounded chain of annotated tags, rather than treating
+a branch or `target_commitish` as immutable source identity.
+
+The result identifies the repository, release, tag object, source commit and
+uploaded assets. Asset metadata is enumerated through bounded pagination.
+Repository, release, tag and asset identities are rechecked before returning.
+Missing asset digests remain unknown, and a selected asset must supply its
+SHA-256 digest before acquisition can use it.
+
+These observations come from the source API, not a cryptographic provenance
+proof. They do not authenticate a publisher, select consumer policy or
+authorize execution. `resolve_release` downloads neither the package nor its
+proof. `project pin` uses the result only to identify selected assets before
+verification. Existing workspace pins retain those exact identities rather
+than following the release tag again.
+The [workspace release descriptor](workspace-sources.md) connects those
+observations to one selected package and its detached proof.
+
+### Verification receipts
+
 The `ArtifactVerification` receipt records:
 
 - The exact artifact SHA-256 and size.
@@ -76,6 +100,13 @@ Proof and root inputs are copied into invocation-owned staging before the
 native tool reads them. Artifact identity, policy expiry and policy-file
 identity are checked again before a receipt is returned. An expired or
 changed policy fails explicitly.
+
+The internal [workspace acquisition flow](workspace-sources.md#acquisition-and-workspace-pin-reuse)
+retains identified proofs separately from receipts. It binds the selected
+source to local consumer policy, then passes retained proof and root inputs
+to this same verifier on each cache publication and lease. Pinned reuse
+requires no source request. Policy and root paths are supplied by application
+code, not by package or release metadata.
 
 On POSIX, temporary files are owner-only. Windows inherits the staging
 parent's access controls, so acquisition must supply a protected location.

@@ -808,6 +808,14 @@ class Orchestrator:
         resolved, _ = self._materialized_package.require_workspace_file(path)
         return resolved
 
+    def load_manifest(self, path: Path) -> Manifest:
+        """Load the selected manifest with the same input guards used by preparation."""
+        return Manifest.from_file(
+            self._require_manifest_path(path),
+            workspace_root=self.workspace,
+            input_path_guard=self._guard_manifest_input,
+        )
+
     def _require_bound_manifest_model(
         self,
         manifest: Manifest,
@@ -3245,11 +3253,7 @@ class Orchestrator:
             self._validate_materialized_package()
             manifest_path = self._require_manifest_path(manifest_path)
             if manifest is None:
-                manifest = Manifest.from_file(
-                    manifest_path,
-                    workspace_root=self.workspace,
-                    input_path_guard=self._guard_manifest_input,
-                )
+                manifest = self.load_manifest(manifest_path)
             else:
                 self._require_bound_manifest_model(
                     manifest,
@@ -4851,11 +4855,7 @@ class Orchestrator:
             self._validate_materialized_package()
             manifest_path = self._require_manifest_path(manifest_path)
             if manifest is None:
-                manifest = Manifest.from_file(
-                    manifest_path,
-                    workspace_root=self.workspace,
-                    input_path_guard=self._guard_manifest_input,
-                )
+                manifest = self.load_manifest(manifest_path)
             else:
                 self._require_bound_manifest_model(
                     manifest,

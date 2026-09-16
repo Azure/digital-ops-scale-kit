@@ -16,15 +16,18 @@ import re
 import subprocess
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Callable
 from urllib.parse import quote, urlsplit
 
 from siteops.browse import BrowseError
 from siteops.compilation import resolve_tool_from_path
+from siteops.process_capture import BoundedCapture as _BoundedCapture
 
 GITHUB_API_VERSION = "2026-03-10"
 _API_ROOT = "https://api.github.com"
@@ -36,7 +39,9 @@ _PROCESS_STOP_SECONDS = 1.0
 _MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 _MAX_STDERR_BYTES = 64 * 1024
 _MAX_TREE_ENTRIES = 20_000
-_READ_CHUNK_BYTES = 64 * 1024
+_RELEASE_ASSET_PAGE_SIZE = 100
+_MAX_RELEASE_ASSETS = 256
+_MAX_TAG_DEPTH = 8
 logger = logging.getLogger(__name__)
 
 _SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
@@ -219,6 +224,11 @@ class GitHubReference:
         """Return the canonical repository web URL."""
         return f"https://github.com/{self.owner}/{self.repository}"
 
+    @property
+    def pinned_commit(self) -> str | None:
+        """Return the selected full commit SHA, or None for a named reference."""
+        return self.ref.lower() if self.ref is not None and _SHA_RE.fullmatch(self.ref) else None
+
 
 @dataclass(frozen=True)
 class GitHubTreeEntry:
@@ -249,6 +259,117 @@ class GitHubTreeEntry:
                 "github.invalid-data",
                 "GitHub returned an unexpected size for a non-blob tree entry.",
             )
+
+
+def parse_git_tree_entries(tree: Any) -> dict[str, GitHubTreeEntry]:
+    """Validate bounded tree entries from the API or a cached observation."""
+    if not isinstance(tree, list):
+        raise _error("github.invalid-data", "GitHub returned invalid tree metadata.")
+    if len(tree) > _MAX_TREE_ENTRIES:
+        raise _error("github.tree-limit", "Repository tree exceeds 20,000 entries.")
+    entries: dict[str, GitHubTreeEntry] = {}
+    for raw_entry in tree:
+        if not isinstance(raw_entry, dict):
+            raise _error("github.invalid-data", "GitHub returned an invalid tree entry.")
+        if "url" in raw_entry and not isinstance(raw_entry["url"], str):
+            raise _error("github.invalid-data", "GitHub returned an invalid tree entry.")
+        entry = GitHubTreeEntry(
+            path=raw_entry.get("path"), sha=raw_entry.get("sha"),
+            type=raw_entry.get("type"), mode=raw_entry.get("mode"),
+            size=_validate_size(raw_entry.get("size"), optional=True),
+        )
+        if entry.path in entries:
+            raise _error("github.invalid-data", "GitHub returned duplicate tree paths.")
+        entries[entry.path] = entry
+    return entries
+
+
+def validate_git_blob(entry: GitHubTreeEntry, content: bytes, *, max_bytes: int) -> bytes:
+    """Check cached and fetched bytes against the selected regular Git blob."""
+    if not isinstance(entry, GitHubTreeEntry) or not isinstance(content, bytes):
+        raise TypeError("A Git blob requires a validated tree entry and bytes.")
+    if type(max_bytes) is not int or max_bytes < 0:
+        raise ValueError("max_bytes must be a non-negative integer")
+    if entry.type != "blob" or entry.mode not in _REGULAR_BLOB_MODES:
+        raise _error("github.blob-mode", "Only regular Git blob entries can be read as content.")
+    if len(content) > max_bytes:
+        raise _error("github.blob-limit", "Git blob exceeds the configured metadata preview limit.")
+    if entry.size is not None and len(content) != entry.size:
+        raise _error("github.integrity", "GitHub blob size did not match the tree.")
+    identity = hashlib.sha1(
+        f"blob {len(content)}\0".encode("ascii") + content, usedforsecurity=False,
+    ).hexdigest()
+    if identity != entry.sha:
+        raise _error("github.integrity", "GitHub blob content failed Git object verification.")
+    return content
+
+
+def _release_identifier(value: Any) -> int:
+    if type(value) is not int or not 0 < value <= 2**63 - 1:
+        raise _error("github.invalid-data", "GitHub returned an invalid release or asset ID.")
+    return value
+
+
+def _release_asset_name(value: Any) -> str:
+    if (
+        not isinstance(value, str) or not value or len(value) > 255
+        or value != value.strip() or "/" in value or "\\" in value
+        or any(unicodedata.category(character).startswith("C") for character in value)
+    ):
+        raise _error("github.invalid-data", "GitHub returned an invalid release asset name.")
+    return value
+
+
+@dataclass(frozen=True)
+class GitHubReleaseAsset:
+    """Observed asset identity, not a trusted local path or publisher assertion."""
+
+    identifier: int
+    name: str
+    size: int
+    sha256: str | None
+
+    @classmethod
+    def from_metadata(cls, value: Any) -> GitHubReleaseAsset:
+        if not isinstance(value, dict):
+            raise _error("github.invalid-data", "GitHub returned invalid release asset metadata.")
+        identifier = _release_identifier(value.get("id"))
+        name = _release_asset_name(value.get("name"))
+        size = value.get("size")
+        if type(size) is not int or not 0 <= size <= 2**63 - 1:
+            raise _error("github.invalid-data", "GitHub returned an invalid release asset size.")
+        if value.get("state") != "uploaded":
+            raise _error("github.release-incomplete", "Release assets are not ready for acquisition.")
+        digest = value.get("digest")
+        if digest is not None:
+            if not isinstance(digest, str) or re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+                raise _error("github.invalid-data", "GitHub returned an unsupported release asset digest.")
+            digest = digest.removeprefix("sha256:")
+        return cls(identifier, name, size, digest)
+
+    def require_digest(self) -> str:
+        if self.sha256 is None:
+            raise _error("github.asset-digest-missing", "The selected release asset has no SHA-256 digest.")
+        return self.sha256
+
+
+@dataclass(frozen=True)
+class GitHubReleaseSnapshot:
+    """A published release observed at an exact tag object and source commit.
+
+    Asset and tag observations are source metadata. They do not authenticate
+    package bytes or replace consumer provenance policy.
+    """
+
+    reference: GitHubReference
+    repository_id: int
+    release_id: int
+    tag_object: str
+    source_commit: str
+    prerelease: bool
+    published_at: datetime
+    immutable: bool | None
+    assets: tuple[GitHubReleaseAsset, ...]
 
 
 class _RejectRedirects(urllib.request.HTTPRedirectHandler):
@@ -405,37 +526,6 @@ def _anonymous_request(route: str) -> Any:
     if not isinstance(payload, bytes):
         raise _error("github.invalid-data", "GitHub returned an invalid response body.")
     return _decode_json(payload)
-
-
-@dataclass
-class _BoundedCapture:
-    limit: int
-    content: bytearray
-    exceeded: threading.Event
-    failed: threading.Event
-
-    @classmethod
-    def create(cls, limit: int) -> _BoundedCapture:
-        return cls(limit, bytearray(), threading.Event(), threading.Event())
-
-    def read(self, stream: BinaryIO) -> None:
-        try:
-            while True:
-                chunk = stream.read(_READ_CHUNK_BYTES)
-                if not chunk:
-                    return
-                if not isinstance(chunk, bytes):
-                    self.failed.set()
-                    return
-                remaining = self.limit - len(self.content)
-                if len(chunk) > remaining:
-                    if remaining > 0:
-                        self.content.extend(chunk[:remaining])
-                    self.exceeded.set()
-                else:
-                    self.content.extend(chunk)
-        except (OSError, ValueError):
-            self.failed.set()
 
 
 def _stop_process(process: subprocess.Popen[bytes]) -> None:
@@ -669,7 +759,7 @@ def _cli_request(route: str) -> Any:
 
 
 class GitHubClient:
-    """Read repository commits, trees, and bounded blobs from GitHub."""
+    """Read bounded repository, release, tree and blob metadata from GitHub."""
 
     def __init__(
         self,
@@ -699,6 +789,117 @@ class GitHubClient:
         owner = quote(self.reference.owner, safe="")
         repository = quote(self.reference.repository, safe="")
         return f"/repos/{owner}/{repository}"
+
+    def _release_tag(self, tag: str) -> tuple[str, str]:
+        route = f"{self._repository_route()}/git/ref/tags/{quote(tag, safe='')}"
+        reference = self._request(route)
+        if not isinstance(reference, dict) or reference.get("ref") != f"refs/tags/{tag}":
+            raise _error("github.invalid-data", "GitHub did not identify the exact release tag.")
+        target = reference.get("object")
+        tag_object: str | None = None
+        seen: set[str] = set()
+        for depth in range(_MAX_TAG_DEPTH + 1):
+            if not isinstance(target, dict) or target.get("type") not in {"commit", "tag"}:
+                raise _error("github.invalid-data", "The release tag does not identify a source commit.")
+            identity = _validate_sha(target.get("sha"), summary="GitHub returned an invalid release tag object.")
+            if tag_object is None:
+                tag_object = identity
+            if target["type"] == "commit":
+                return tag_object, identity
+            if identity in seen or depth == _MAX_TAG_DEPTH:
+                raise _error("github.tag-limit", "The release tag chain is cyclic or exceeds its limit.")
+            seen.add(identity)
+            annotated = self._request(f"{self._repository_route()}/git/tags/{identity}")
+            if not isinstance(annotated, dict) or _validate_sha(
+                annotated.get("sha"), summary="GitHub returned an invalid annotated tag object.",
+            ) != identity:
+                raise _error("github.invalid-data", "GitHub returned a different annotated tag object.")
+            target = annotated.get("object")
+        raise AssertionError("The bounded tag walk did not terminate.")
+
+    def _release_assets(self, identifier: int) -> tuple[GitHubReleaseAsset, ...]:
+        assets: list[GitHubReleaseAsset] = []
+        identifiers: set[int] = set()
+        names: set[str] = set()
+        for page in range(1, _MAX_RELEASE_ASSETS // _RELEASE_ASSET_PAGE_SIZE + 2):
+            response = self._request(
+                f"{self._repository_route()}/releases/{identifier}/assets"
+                f"?per_page={_RELEASE_ASSET_PAGE_SIZE}&page={page}"
+            )
+            if not isinstance(response, list) or len(response) > _RELEASE_ASSET_PAGE_SIZE:
+                raise _error("github.invalid-data", "GitHub returned invalid release asset pagination.")
+            if len(assets) + len(response) > _MAX_RELEASE_ASSETS:
+                raise _error("github.release-limit", "The release asset inventory exceeds its limit.")
+            for value in response:
+                asset = GitHubReleaseAsset.from_metadata(value)
+                if asset.identifier in identifiers or asset.name in names:
+                    raise _error("github.invalid-data", "The release asset inventory contains duplicates.")
+                identifiers.add(asset.identifier)
+                names.add(asset.name)
+                assets.append(asset)
+            if len(response) < _RELEASE_ASSET_PAGE_SIZE:
+                return tuple(sorted(assets, key=lambda asset: asset.name))
+        raise _error("github.release-limit", "The release asset inventory exceeds its limit.")
+
+    def resolve_release(self) -> GitHubReleaseSnapshot:
+        """Observe an explicit published release without downloading its assets.
+
+        The exact tag namespace is used rather than a branch or target_commitish.
+        Metadata is rechecked after enumeration. Existing workspace pins retain
+        their resolved identities rather than follow this mutable selection again.
+        """
+        tag = self.reference.ref
+        if tag is None:
+            raise _error("github.release-tag-required", "Select an explicit release tag for package acquisition.")
+        expected_repository = f"{self.reference.owner}/{self.reference.repository}"
+
+        def repository_identity(value: Any) -> int:
+            if (
+                not isinstance(value, dict)
+                or not isinstance(value.get("full_name"), str)
+                or value["full_name"].casefold() != expected_repository.casefold()
+            ):
+                raise _error("github.repository-moved", "GitHub did not identify the requested source repository.")
+            return _release_identifier(value.get("id"))
+
+        repository_id = repository_identity(self._request(self._repository_route()))
+        route = f"{self._repository_route()}/releases/tags/{quote(tag, safe='')}"
+
+        def release_identity(value: Any) -> tuple[int, bool, datetime, bool | None]:
+            if not isinstance(value, dict) or value.get("tag_name") != tag:
+                raise _error("github.invalid-data", "GitHub did not identify the selected release.")
+            if value.get("draft") is not False or not isinstance(value.get("prerelease"), bool):
+                raise _error("github.release-unpublished", "Select a published release for package acquisition.")
+            published = value.get("published_at")
+            if not isinstance(published, str) or len(published) > 64:
+                raise _error("github.release-unpublished", "GitHub did not identify a published release time.")
+            try:
+                timestamp = datetime.fromisoformat(published.replace("Z", "+00:00"))
+            except ValueError:
+                raise _error("github.invalid-data", "GitHub returned an invalid release timestamp.") from None
+            if timestamp.tzinfo is None:
+                raise _error("github.invalid-data", "GitHub returned an invalid release timestamp.")
+            immutable = value.get("immutable")
+            if immutable is not None and not isinstance(immutable, bool):
+                raise _error("github.invalid-data", "GitHub returned invalid release immutability metadata.")
+            return (
+                _release_identifier(value.get("id")), value["prerelease"],
+                timestamp.astimezone(timezone.utc), immutable,
+            )
+
+        identity = release_identity(self._request(route))
+        tag_identity = self._release_tag(tag)
+        assets = self._release_assets(identity[0])
+        if release_identity(self._request(route)) != identity or self._release_tag(tag) != tag_identity:
+            raise _error("github.source-changed", "The selected release changed during resolution. Retry explicitly.")
+        if self._release_assets(identity[0]) != assets:
+            raise _error("github.source-changed", "The release assets changed during resolution. Retry explicitly.")
+        if repository_identity(self._request(self._repository_route())) != repository_id:
+            raise _error("github.source-changed", "The source repository changed during resolution. Retry explicitly.")
+        return GitHubReleaseSnapshot(
+            self.reference, repository_id, identity[0], tag_identity[0],
+            tag_identity[1], identity[1], identity[2], identity[3], assets,
+        )
 
     def resolve_commit(self) -> str:
         """Resolve the configured reference or repository default branch to a commit."""
@@ -734,10 +935,13 @@ class GitHubClient:
         commit = self._request(route)
         if not isinstance(commit, dict):
             raise _error("github.invalid-data", "GitHub returned invalid commit metadata.")
-        return _validate_sha(
+        resolved = _validate_sha(
             commit.get("sha"),
             summary="GitHub returned an invalid commit object ID.",
         )
+        if self.reference.pinned_commit is not None and resolved != self.reference.pinned_commit:
+            raise _error("github.integrity", "GitHub resolved a different commit than the requested identity.")
+        return resolved
 
     def get_tree(self, commit: str) -> dict[str, GitHubTreeEntry]:
         """Return the recursively enumerated Git tree pinned to an exact commit."""
@@ -778,23 +982,7 @@ class GitHubClient:
                 "Repository tree exceeds the remote browsing response limit.",
             )
 
-        entries: dict[str, GitHubTreeEntry] = {}
-        for raw_entry in tree:
-            if not isinstance(raw_entry, dict):
-                raise _error("github.invalid-data", "GitHub returned an invalid tree entry.")
-            if "url" in raw_entry and not isinstance(raw_entry["url"], str):
-                raise _error("github.invalid-data", "GitHub returned an invalid tree entry.")
-            entry = GitHubTreeEntry(
-                path=raw_entry.get("path"),
-                sha=raw_entry.get("sha"),
-                type=raw_entry.get("type"),
-                mode=raw_entry.get("mode"),
-                size=_validate_size(raw_entry.get("size"), optional=True),
-            )
-            if entry.path in entries:
-                raise _error("github.invalid-data", "GitHub returned duplicate tree paths.")
-            entries[entry.path] = entry
-        return entries
+        return parse_git_tree_entries(tree)
 
     def read_blob(
         self,
@@ -862,10 +1050,4 @@ class GitHubClient:
         if len(content) != declared_size:
             raise _error("github.integrity", "GitHub blob content size did not match its metadata.")
 
-        identity = hashlib.sha1(
-            f"blob {len(content)}\0".encode("ascii") + content,
-            usedforsecurity=False,
-        ).hexdigest()
-        if identity != entry.sha.lower():
-            raise _error("github.integrity", "GitHub blob content failed Git object verification.")
-        return content
+        return validate_git_blob(entry, content, max_bytes=max_bytes)

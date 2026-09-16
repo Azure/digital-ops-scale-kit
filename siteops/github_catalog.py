@@ -11,11 +11,13 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 from urllib.parse import quote
 
+from siteops.artifacts import ArtifactError
 from siteops.browse import (
     BrowseDiagnostic,
     BrowseError,
     BrowseResult,
     BrowseSource,
+    SourceObservation,
     check_path_components,
     select_entries,
     validate_browse_options,
@@ -32,6 +34,7 @@ from siteops.content_index import (
 from siteops.manifest_selection import is_explicit_manifest_path
 
 if TYPE_CHECKING:
+    from siteops.github_metadata_cache import CachedGitHubClient
     from siteops.github_source import GitHubClient, GitHubTreeEntry
 
 
@@ -86,21 +89,33 @@ def inspect_github(
     category: str | None = None,
     include_partials: bool = False,
     limit: int | None = None,
-    client: GitHubClient | None = None,
+    refresh: bool = False,
+    offline: bool = False,
+    client: GitHubClient | CachedGitHubClient | None = None,
 ) -> BrowseResult:
     """Browse one pinned index without acquiring or executing its workspace."""
     context = BrowseSource("remote", "requested GitHub source", provider="github")
     workspace_name = ""
     try:
         validate_browse_options(selection, search, tags, category, limit)
+        if type(refresh) is not bool or type(offline) is not bool or (refresh and offline):
+            raise BrowseError("source.cache-options", "Choose either --refresh or --offline.")
         requested_workspace = _workspace_name(workspace)
         if client is None:
+            from siteops.github_metadata_cache import CachedGitHubClient
             from siteops.github_source import GitHubClient, GitHubReference
+            from siteops.source_metadata_cache import SourceMetadataCache
 
-            client = GitHubClient(GitHubReference.parse(source, ref=ref), auth=auth)
+            live = GitHubClient(GitHubReference.parse(source, ref=ref), auth=auth)
+            client = CachedGitHubClient(
+                live, SourceMetadataCache(), refresh=refresh, offline=offline,
+            )
         context = replace(context, reference=client.reference.web_url)
         revision = client.resolve_commit()
         context = replace(context, revision=revision)
+        observation = getattr(client, "observation", None)
+        if isinstance(observation, SourceObservation):
+            context = replace(context, observation=observation)
         tree = client.get_tree(revision)
         if requested_workspace is not None:
             index_path = str(PurePosixPath(requested_workspace) / INDEX_NAME)
@@ -194,6 +209,11 @@ def inspect_github(
     except BrowseError as error:
         return BrowseResult(
             workspace_name, diagnostics=(error.diagnostic,),
+            source=replace(context, index_status="unavailable"),
+        )
+    except ArtifactError as error:
+        return BrowseResult(
+            workspace_name, diagnostics=(BrowseDiagnostic(error.code, str(error)),),
             source=replace(context, index_status="unavailable"),
         )
     except ValueError:

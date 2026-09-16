@@ -42,6 +42,64 @@ An index can serve a large collection without downloading every manifest.
 Source validation uses a pinned tree and index blobs, not a separate content
 request for every entry.
 
+## Use cached metadata with `browse`
+
+Remote browsing retains source observations, trees and index blobs in the
+private Site Ops cache. Repeat the same browse command to reuse them.
+Branch, tag and default branch observations can be reused for five minutes.
+After that interval, an ordinary browse resolves the reference again.
+
+Use `--refresh` to resolve it immediately, or `--offline` to select retained
+metadata without contacting the source:
+
+```bash
+siteops browse --source github:<owner>/<repository>
+siteops browse --source github:<owner>/<repository> --refresh
+siteops browse --source github:<owner>/<repository> --offline
+```
+
+Keep the same `--ref`, `--auth` and source workspace selection across these
+commands. A fully cached commit can also be selected directly:
+
+```bash
+siteops browse --source github:<owner>/<repository> --ref <full-commit-sha> --offline
+```
+
+Selecting the complete commit displayed by an earlier browse reuses that
+snapshot without resolving its branch again. A reference containing exactly
+40 hexadecimal characters is a commit identity and must resolve to that same
+commit. Qualify a named Git reference explicitly when needed, for example
+`--ref refs/heads/<branch>`.
+
+Plain and JSON output report whether the reference observation came from the
+source or cache, its observation time, and when a mutable reference needs
+refresh. Offline mode may use an expired reference observation and labels it
+as overdue. Its index is still checked against that exact cached revision.
+The displayed revision is not a claim about the branch's current head.
+
+For `browse --source`, `--refresh` and `--offline` are mutually exclusive.
+Refreshing a reference reuses unchanged immutable trees and
+blobs. A network, authorization or quota failure is reported rather than
+silently selecting old data or another access mode. Offline cache misses
+report `cache.metadata-missing`. Fetch that source/workspace without
+`--offline` first. Inconsistent cache records and observations later than the
+system clock fail explicitly. Use [targeted cache maintenance](cache.md) to
+remove an inconsistent record before fetching it again.
+
+Metadata is stored separately from workspace packages and verification
+receipts, under `metadata/records/` in the
+[Site Ops cache root](workspace-packages.md#internal-workspace-cache).
+`SITEOPS_CACHE_DIR` remains the one absolute cache directory override.
+Records contain private source context and bindings, so keep them out of
+repositories and galleries. Cache refresh does not edit operator Sites or
+workspace pins.
+
+With `--source`, these options control descriptive browsing and do not acquire
+an executable workspace. With a selected [project](projects.md),
+`browse --offline` instead requires its package and proof already in cache.
+Neither mode relaxes provenance policy expiry for package use. `--refresh`
+applies only to source index browsing and never changes a workspace pin.
+
 ## Public and authorized source access
 
 Public reads use anonymous HTTPS by default. Private repositories and higher
@@ -51,9 +109,19 @@ authenticated rate limits can use an already configured GitHub CLI:
 siteops browse --source github:<owner>/<repository> --auth cli
 ```
 
-This mode invokes `gh api` using the CLI's configured authentication. It does
-not extract tokens, inspect personal credential stores, change login or fall
-back to another credential source after failure.
+This mode sends required source requests through `gh api` using configured
+authentication. It does not extract tokens, inspect personal credential
+stores, change login or fall back to another credential source after failure.
+
+`--auth cli` applies only to descriptive metadata browsing. Package
+acquisition for `project pin` uses anonymous source access. Authenticated
+package acquisition is not implemented.
+
+Anonymous and CLI access use separate cache scopes. Retained data belongs to
+the current operating system user and stays available locally after the
+original read. Reuse does not confirm the current GitHub login or repository
+permission. Use `--refresh` when a fresh source access check is required.
+No credential or token is stored in the metadata cache.
 
 The GitHub CLI executable is resolved only from absolute PATH entries, not
 implicitly from the content directory. Because `gh api` can follow redirects,
@@ -75,9 +143,11 @@ They report that targeting is unavailable rather than claiming no targets
 were declared. They also omit executable plan/deploy suggestions because this
 command has not acquired a complete deployable workspace.
 
-Read the pinned operator guide. Use a complete, reviewed local workspace and
-configured Sites with `plan` and `deploy`. Verified remote workspace
-acquisition and typed initialization are separate capabilities.
+Read the operator guide at the displayed revision. Use an
+[operator project](projects.md) to acquire an approved complete workspace
+package and execute it with configured Sites, or select a reviewed local
+workspace. Descriptive index browsing remains separate from acquisition and
+execution. Typed setup is not implemented.
 
 Remote inspection still uses a private output destination:
 
