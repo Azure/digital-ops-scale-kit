@@ -226,7 +226,7 @@ class GitHubReference:
 
     @property
     def pinned_commit(self) -> str | None:
-        """A complete commit identity, distinct from a mutable name that resolves to one."""
+        """Return the selected full commit SHA, or None for a named reference."""
         return self.ref.lower() if self.ref is not None and _SHA_RE.fullmatch(self.ref) else None
 
 
@@ -262,7 +262,7 @@ class GitHubTreeEntry:
 
 
 def parse_git_tree_entries(tree: Any) -> dict[str, GitHubTreeEntry]:
-    """Validate the same bounded tree entries from the API or a cached observation."""
+    """Validate bounded tree entries from the API or a cached observation."""
     if not isinstance(tree, list):
         raise _error("github.invalid-data", "GitHub returned invalid tree metadata.")
     if len(tree) > _MAX_TREE_ENTRIES:
@@ -845,8 +845,8 @@ class GitHubClient:
         """Observe an explicit published release without downloading its assets.
 
         The exact tag namespace is used rather than a branch or target_commitish.
-        Metadata is rechecked after enumeration. Existing pins must retain their
-        own resolved identities rather than follow this mutable selection again.
+        Metadata is rechecked after enumeration. Existing workspace pins retain
+        their resolved identities rather than follow this mutable selection again.
         """
         tag = self.reference.ref
         if tag is None:

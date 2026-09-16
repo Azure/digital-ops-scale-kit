@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-"""GitHub browsing observations over the provider neutral metadata cache."""
+"""Cache GitHub browsing observations in provider neutral metadata storage."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ REFERENCE_MAX_AGE = 5 * 60
 
 
 class CachedGitHubClient:
-    """Reuse identified trees/blobs and bounded reference observations for private browsing."""
+    """Reuse identified trees, blobs and bounded reference observations for private browsing."""
 
     def __init__(
         self, client: GitHubClient, cache: SourceMetadataCache, *,

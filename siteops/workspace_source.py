@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-"""Workspace release routing and source expectations, independent of hosting providers."""
+"""Define provider neutral workspace release routing and source expectations."""
 
 from __future__ import annotations
 
@@ -72,7 +72,7 @@ def _workspace(value: Any) -> str:
 
 @dataclass(frozen=True)
 class ArtifactIdentity:
-    """The name and exact bytes of a release artifact, not its download location."""
+    """A release artifact filename and exact byte identity, not its download location."""
 
     name: str
     size: int
@@ -270,6 +270,8 @@ class ResolvedReleaseSource:
 
 @dataclass(frozen=True)
 class ResolvedWorkspaceSource:
+    """An exact workspace selection from one resolved release."""
+
     source: ResolvedReleaseSource
     entry: WorkspaceReleaseEntry
 

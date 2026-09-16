@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-"""Bounded storage inspection and explicitly targeted removal of cached entries."""
+"""Inspect bounded cache storage and remove only explicitly selected entries."""
 
 from __future__ import annotations
 
@@ -218,7 +218,7 @@ class CacheManagement:
             budget = _Budget(_MAX_LIST_NODES)
             for selected, value in selections[:limit]:
                 try:
-                    # Package readers also publish receipts, so inspection needs a quiet entry.
+                    # Package readers can write receipts, so inspection requires an exclusive lock.
                     with _lock(layout, selected, value, exclusive=True):
                         layout._check_root()
                         _check_parents(layout, selected)
@@ -246,11 +246,11 @@ class CacheManagement:
             return CacheListing(layout.root, True, len(selections), tuple(entries))
 
     def remove(self, kind: str, identity: str) -> CacheEntry:
-        """Remove only the selected entry after complete private-node preflight.
+        """Remove only the selected entry after all private nodes pass preflight.
 
         Filesystem failure can leave a partially removed entry. It remains
         invalid for acquisition and the same targeted removal can be retried.
-        There is no in-place repair or recursive deletion of a cache root.
+        Entries are not repaired in place, and the cache root is never removed.
         """
         _selection(kind, identity)
         with cache_io():

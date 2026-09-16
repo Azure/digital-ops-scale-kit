@@ -55,7 +55,7 @@ def test_remote_inventory_keeps_source_context_in_next_steps(workspace):
     result = inspect_github("github:example/kit", client=client)
     output = render_browse_plain(result)
     assert "same --source" in output
-    assert "Pin --ref" in output
+    assert "Use --ref" in output
     empty = render_browse_plain(inspect_github("github:example/kit", search="absent", client=client))
     assert "No published entries match" in empty
     assert "custom layout" not in empty

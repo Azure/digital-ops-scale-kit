@@ -36,7 +36,7 @@ Start with the changes that affect your workflow:
 | Reference shipped workspace paths | Update [entry and resource-set paths](#workspace-content-paths). |
 | Select a manifest by a bare filename | Review [name and path selection](#manifest-names-and-paths). |
 | Browse a published source | Use [reference refresh and offline controls](#remote-source-observations) when choosing source freshness. |
-| Separate operator configuration from deployment content | Use an [operator project](projects.md) with a pin or explicit local workspace. |
+| Separate operator configuration from deployment content | Use an [operator project](projects.md) with a workspace pin or explicit local workspace. |
 | Use Windows batch-based tools | Review [literal tool arguments](#windows-tool-arguments). |
 | Produce workspace packages | Use canonical `bicepconfig.json` filenames and committed source bytes as described in [workspace packages](workspace-packages.md). |
 | Use `sites --render` | Replace it with [`--output yaml`](#inspect-sites). |
@@ -104,16 +104,17 @@ and the `SITEOPS_CACHE_DIR` override are described in
 Anonymous and CLI access have separate cache scopes. Cached reads retain
 previously obtained data and do not confirm current remote permissions.
 
-Full 40 character hexadecimal references must resolve to the requested commit.
-A mismatch reports
+References of exactly 40 hexadecimal characters must resolve to the requested
+commit. A mismatch reports
 `GitHub resolved a different commit than the requested identity.`
 Qualify a named Git reference explicitly if its name has that shape, for
 example `--ref refs/heads/<branch>`.
 
-JSON source context adds an `observation` object with origin, observation time,
-refresh time and offline/stale status. The underlying index, source and
-package trust distinctions remain separate. See
-[remote browsing](remote-content.md#reuse-refresh-and-offline-browsing) for examples.
+JSON source context adds an `observation` object with origin, observation and
+refresh times, and the offline and stale states. Metadata refresh does not
+change a workspace pin. The index, source and package trust distinctions
+remain separate. See
+[remote browsing](remote-content.md#use-cached-metadata-with-browse) for examples.
 
 ### Windows tool arguments
 

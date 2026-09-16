@@ -32,11 +32,12 @@ from siteops.workspace_source import ResolvedWorkspaceSource, SourceResolutionEr
 
 
 class GitHubWorkspaceAcquirer:
-    """Acquire releases or reuse pinned bytes with current consumer policy.
+    """Acquire a release or reuse bytes identified by a workspace pin.
 
     Policy and trusted roots are local inputs selected by application code.
-    A pinned lease performs no source requests. Explicit acquisition resolves
-    the requested release again, reusing valid cached package and proof bytes.
+    Leasing bytes selected by a workspace pin performs no source requests.
+    Explicit acquisition resolves the requested release again, reusing valid
+    cached package and proof bytes.
     """
 
     def __init__(self, cache: WorkspaceCache, *, policy_file: Path, trusted_root: Path):
@@ -87,7 +88,7 @@ class GitHubWorkspaceAcquirer:
         self, client: GitHubClient, *, workspace: str | None = None,
         expected: ResolvedWorkspaceSource | None = None,
     ) -> GitHubWorkspaceSource:
-        """Resolve the explicit release, acquiring only missing identified package/proof bytes."""
+        """Resolve the explicit release and acquire only missing package and proof bytes."""
         reference = client.reference
         self._policy_for(f"github:{reference.owner}/{reference.repository}")
         selected = resolve_workspace_release(
@@ -117,7 +118,7 @@ class GitHubWorkspaceAcquirer:
         return selected
 
     def restore(self, source: ResolvedWorkspaceSource) -> None:
-        """Acquire missing pinned bytes only when release observations still match the pin."""
+        """Acquire missing bytes only when release observations match the workspace pin."""
         if source.source.provider != "github-release/v1":
             raise VerificationError("This acquisition adapter requires a GitHub release source.")
         client = GitHubClient(GitHubReference.parse(source.source.reference, ref=source.source.release))

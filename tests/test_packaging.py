@@ -175,7 +175,7 @@ def test_installed_project_cache_and_offline_plan_surface(installed_engine):
     removed = json.loads(app.run("cache", "remove", "proof", identities["proof"], "--output", "json").stdout)
     assert removed["entry"]["storageState"] == "removed"
     failed = app.run(*project_options, "plan", "storage", "--offline", expected=1)
-    assert "pinned proof is not cached" in failed.stderr
+    assert "selected proof is not cached" in failed.stderr
     assert (site.read_bytes(), (project / "siteops.pin").read_bytes()) == before
 
 

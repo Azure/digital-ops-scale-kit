@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-"""Bounded pipe capture for supervised native processes."""
+"""Capture bounded output from supervised native processes."""
 
 from __future__ import annotations
 

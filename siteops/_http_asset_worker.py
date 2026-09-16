@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-"""Isolated HTTPS worker. Keep imports limited to the Python standard library."""
+"""Run isolated HTTPS transfers using only the Python standard library."""
 
 from __future__ import annotations
 
@@ -177,7 +177,7 @@ def _response(url: str, origins: set[tuple[str, int]]) -> Any:
                     reset_at=_header_integer(error.headers, "X-RateLimit-Reset"),
                 ) from None
             finally:
-                # Close without draining an unbounded redirect or error body.
+                # Close without reading an unbounded redirect or error body.
                 error.close()
         else:
             if response.geturl() != url:
@@ -264,7 +264,7 @@ def _invalid_constant(value: str) -> None:
 
 
 def main() -> int:
-    # These limits apply only inside this isolated process.
+    # Limit parser state only in this isolated process.
     http.client._MAXLINE = 8192
     http.client._MAXHEADERS = 64
     try:

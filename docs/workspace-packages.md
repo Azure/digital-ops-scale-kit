@@ -278,13 +278,14 @@ their existing HTTPS behavior.
 
 The [source acquisition flow](workspace-sources.md) provides release resolution,
 downloads, retained proofs and verified cache use. [Operator projects](projects.md)
-connect pinned packages and separate configured Sites to ordinary plan/deploy.
-Cache management and workspace release publication remain separate capabilities.
+connect packaged content and separate configured Sites to ordinary planning
+and deployment. Cache maintenance has its own commands. Workspace asset
+publication is not integrated into the release workflow.
 
 ## Internal workspace cache
 
 `WorkspaceCache` is an internal storage API for package publication and use
-leases, consumed by project commands. Remote metadata browsing shares its
+leases. Project commands consume it. Remote metadata browsing shares its
 protected storage layout through a separate cache without acquiring executable
 packages.
 
@@ -307,14 +308,15 @@ and execution. Its `bind` method uses the same manifest resolver and
 
 `SITEOPS_CACHE_DIR` is the single cache-root override. It must select an
 absolute directory. Cache root resolution is lazy until the storage API is
-used. These defaults do not enable acquisition in the CLI.
+used. Cache directory selection does not select a workspace, source or trust
+policy.
 
 The cache retains the ZIP and its extracted package beneath
 `objects/sha256/<digest>/`, with verification receipts outside those immutable
 objects. Every use invokes the caller's trusted verifier. A stored receipt
 never authorizes execution by itself. A verifier with retained local proof
 and trusted-root inputs can support offline reuse without a source request.
-The storage layer performs no downloads and does not refresh project pins.
+The storage layer performs no downloads and does not refresh workspace pins.
 
 `retain_proof` stores exact opaque verification inputs at
 `proofs/sha256/<proof-digest>/proof.bin`. This optional namespace is created
@@ -353,8 +355,8 @@ Source observations and index bytes use the separate optional
 access scope and metadata identity to payload size, SHA-256 and observation
 time. Record filenames are hashes of those keys, never source paths.
 The same root marker and native access controls protect every namespace.
-See [remote browsing](remote-content.md#reuse-refresh-and-offline-browsing).
+See [remote browsing](remote-content.md#use-cached-metadata-with-browse).
 
 Operator Sites, overlays, pins and run state remain outside the cache.
 Use [cache maintenance](cache.md) to inspect storage or remove a selected
-entry. Automatic retention and pruning remain separate capabilities.
+entry. Automatic pruning is not implemented.

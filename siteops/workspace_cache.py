@@ -120,7 +120,7 @@ class WorkspaceCache(CacheLayout):
             root.lstat()
         except FileNotFoundError:
             raise CacheError(
-                "The pinned proof is not cached. Acquire that exact proof before use.",
+                "The selected proof is not cached. Acquire that exact proof before use.",
                 code="cache.proof-missing",
             ) from None
         check_private_node(root, directory=True)
@@ -267,7 +267,7 @@ class WorkspaceCache(CacheLayout):
             root.lstat()
         except FileNotFoundError:
             raise CacheError(
-                "The pinned package is not cached. Acquire that exact package before use.",
+                "The selected workspace package is not cached. Acquire that exact package before use.",
                 code="cache.missing",
             ) from None
         check_private_node(root, directory=True)
@@ -293,7 +293,8 @@ class WorkspaceCache(CacheLayout):
         The supplied verifier runs before extraction and when an existing
         object is reused. Corrupt objects fail rather than being repaired or
         replaced in place. An optional trusted source check runs after package
-        inspection and before publication or reuse. The operation performs no download.
+        inspection and before publication or reuse. The operation performs no
+        download.
         """
         digest = _digest(expected_sha256)
         with _cache_io(), self._locked(digest, exclusive=True) as target:

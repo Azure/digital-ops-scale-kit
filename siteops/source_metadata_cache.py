@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-"""Protected metadata observations with separate mutable and immutable key semantics."""
+"""Store protected metadata observations with mutable or immutable key semantics."""
 
 from __future__ import annotations
 
@@ -83,7 +83,7 @@ class MetadataObservation:
 
 
 class SourceMetadataCache(CacheLayout):
-    """Cache validated source bytes, never package trust or executable state.
+    """Cache validated source bytes without treating them as trust or executable state.
 
     Fetch callbacks belong to the trusted adapter and validate their response
     before returning bytes. Cache hits still need the adapter's identity and
@@ -209,9 +209,9 @@ class SourceMetadataCache(CacheLayout):
     ) -> MetadataObservation:
         """Reuse an observation or publish one validated fetch under the key's lock.
 
-        A missing maximum age denotes an immutable key. Refresh contacts the
-        source explicitly. Fetch failures preserve the prior record and propagate,
-        without silently selecting stale data or another source.
+        When maximum age is omitted, the key is immutable. Refresh contacts the
+        source explicitly. Fetch failures preserve the prior record and
+        propagate without selecting stale data or another source.
         """
         if (
             type(refresh) is not bool or type(offline) is not bool or (refresh and offline)

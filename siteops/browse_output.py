@@ -222,7 +222,7 @@ def render_browse_plain(result: BrowseResult) -> str:
             "Use --include-partials to include declared reusable fragments.",
         ))
         if not local and project is None and result.source.revision:
-            lines.append("Pin --ref to the displayed revision to keep the same source snapshot.")
+            lines.append("Use --ref with the displayed revision to select the same source snapshot.")
     if result.diagnostics:
         lines.extend(("", "Inspection is incomplete:"))
         for diagnostic in result.diagnostics:

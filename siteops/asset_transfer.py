@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-"""Opaque HTTPS acquisition with protected staging and a supervised deadline."""
+"""Acquire opaque HTTPS assets in protected staging under a supervised deadline."""
 
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ _FAILURES = {
 
 
 class AssetTransferError(ArtifactError):
-    """Safe failure text with optional numeric HTTP retry information."""
+    """Represent safe failure text with optional numeric HTTP retry information."""
 
     def __init__(
         self, reason: str, *, http_status: int | None = None,
@@ -186,12 +186,13 @@ def download_https_asset(
     url: str, identity: ArtifactIdentity, *, origins: tuple[str, ...],
     staging_parent: Path, timeout: float = 120,
 ) -> Iterator[Path]:
-    """Yield identified opaque bytes until context exit, without parsing or authorizing them.
+    """Yield bytes that match the expected identity until context exit.
 
     Trusted adapter code supplies the URL and permitted origins. The caller owns
     the existing private staging parent. A new child contains each transfer and
     is removed only after its worker has exited. TLS and configured proxies use
-    the standard library. This anonymous path reads no source credentials.
+    the standard library. The transfer does not parse or authorize content.
+    This anonymous path reads no source credentials.
     """
     if (
         not isinstance(identity, ArtifactIdentity) or not isinstance(origins, tuple)

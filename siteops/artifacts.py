@@ -36,7 +36,7 @@ class PayloadFile:
 
 
 def load_artifact_json(raw: bytes, *, limit: int, label: str) -> Any:
-    """Parse bounded UTF-8 JSON while rejecting duplicate keys and non-JSON numbers."""
+    """Parse bounded UTF-8 JSON while rejecting duplicate keys and numbers outside JSON syntax."""
     if type(limit) is not int or limit < 0 or not isinstance(raw, bytes):
         raise ArtifactError("The artifact JSON input or byte limit is invalid.")
     if len(raw) > limit:

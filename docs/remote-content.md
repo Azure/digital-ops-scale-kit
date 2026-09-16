@@ -42,7 +42,7 @@ An index can serve a large collection without downloading every manifest.
 Source validation uses a pinned tree and index blobs, not a separate content
 request for every entry.
 
-## Reuse, refresh and offline browsing
+## Use cached metadata with `browse`
 
 Remote browsing retains source observations, trees and index blobs in the
 private Site Ops cache. Repeat the same browse command to reuse them.
@@ -65,10 +65,10 @@ commands. A fully cached commit can also be selected directly:
 siteops browse --source github:<owner>/<repository> --ref <full-commit-sha> --offline
 ```
 
-Pinning a commit displayed by an earlier browse reuses that snapshot without
-resolving its branch again. A reference containing exactly 40 hexadecimal
-characters is a commit identity and must resolve to that same commit. Qualify
-a named Git reference explicitly when needed, for example
+Selecting the complete commit displayed by an earlier browse reuses that
+snapshot without resolving its branch again. A reference containing exactly
+40 hexadecimal characters is a commit identity and must resolve to that same
+commit. Qualify a named Git reference explicitly when needed, for example
 `--ref refs/heads/<branch>`.
 
 Plain and JSON output report whether the reference observation came from the
@@ -92,13 +92,13 @@ receipts, under `metadata/records/` in the
 `SITEOPS_CACHE_DIR` remains the one absolute cache directory override.
 Records contain private source context and bindings, so keep them out of
 repositories and galleries. Cache refresh does not edit operator Sites or
-project pins.
+workspace pins.
 
 With `--source`, these options control descriptive browsing and do not acquire
-an executable workspace. With a selected [project](projects.md), `browse --offline`
-instead requires its package and proof already in cache. Neither mode relaxes
-provenance policy expiry for package use. `--refresh` applies only to source
-index browsing and never changes a workspace pin.
+an executable workspace. With a selected [project](projects.md),
+`browse --offline` instead requires its package and proof already in cache.
+Neither mode relaxes provenance policy expiry for package use. `--refresh`
+applies only to source index browsing and never changes a workspace pin.
 
 ## Public and authorized source access
 
@@ -109,9 +109,13 @@ authenticated rate limits can use an already configured GitHub CLI:
 siteops browse --source github:<owner>/<repository> --auth cli
 ```
 
-This mode delegates required source requests to `gh api` using configured authentication. It does
-not extract tokens, inspect personal credential stores, change login or fall
-back to another credential source after failure.
+This mode sends required source requests through `gh api` using configured
+authentication. It does not extract tokens, inspect personal credential
+stores, change login or fall back to another credential source after failure.
+
+`--auth cli` applies only to descriptive metadata browsing. Package
+acquisition for `project pin` uses anonymous source access. Authenticated
+package acquisition is not implemented.
 
 Anonymous and CLI access use separate cache scopes. Retained data belongs to
 the current operating system user and stays available locally after the
@@ -139,10 +143,11 @@ They report that targeting is unavailable rather than claiming no targets
 were declared. They also omit executable plan/deploy suggestions because this
 command has not acquired a complete deployable workspace.
 
-Read the pinned operator guide. Use an [operator project](projects.md) to
-acquire an approved complete workspace package and execute it with configured
-Sites, or select a reviewed local workspace. Descriptive index browsing and
-typed initialization remain separate from that acquisition and execution path.
+Read the operator guide at the displayed revision. Use an
+[operator project](projects.md) to acquire an approved complete workspace
+package and execute it with configured Sites, or select a reviewed local
+workspace. Descriptive index browsing remains separate from acquisition and
+execution. Typed setup is not implemented.
 
 Remote inspection still uses a private output destination:
 

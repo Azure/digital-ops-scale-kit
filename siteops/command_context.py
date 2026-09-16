@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-"""One content and Site configuration selection boundary for local and pinned commands."""
+"""Select content and Site configuration for local or project commands."""
 
 from __future__ import annotations
 
@@ -78,7 +78,7 @@ def open_command_context(
         return
     if workspace is not None or root is None:
         if policy is not None or trusted_root is not None or offline:
-            raise ValueError("Trust and offline options apply only to pinned package use.")
+            raise ValueError("Trust and offline options apply only when using a workspace pin.")
         selected = workspace if workspace is not None else (discover(current) or current)
         selected = Path(selected).resolve()
         if not selected.is_dir():

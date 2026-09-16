@@ -255,7 +255,7 @@ def cmd_cache(args: argparse.Namespace) -> int:
             }, ensure_ascii=True, sort_keys=True, indent=2))
         else:
             print(f"Removed cached {removed.kind} {removed.identity}. Bytes: {removed.stored_bytes}.")
-            print("Project pins, Site configuration and trust inputs are unchanged.")
+            print("Workspace pins, Site configuration and trust inputs are unchanged.")
         return 0
     except ArtifactError as error:
         print(f"{error.code}: {error}", file=sys.stderr)
@@ -1213,11 +1213,11 @@ Examples:
     )
     parser.add_argument(
         "--trust-policy", type=Path, metavar="FILE",
-        help="Independent local artifact verification policy, required for pinning and pinned package use",
+        help="Independent local artifact verification policy, required to create or use a workspace pin",
     )
     parser.add_argument(
         "--trusted-root", type=Path, metavar="FILE",
-        help="Independent local trusted root snapshot, required for pinning and pinned package use",
+        help="Independent local trusted root snapshot, required to create or use a workspace pin",
     )
 
     parser.add_argument(

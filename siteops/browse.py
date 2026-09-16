@@ -161,7 +161,7 @@ class ContentEntry:
 
 @dataclass(frozen=True)
 class SourceObservation:
-    """When source metadata was observed, independent of its index or package trust."""
+    """Record when source metadata was observed, separately from index or package trust."""
 
     origin: str
     observed_at: datetime

@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-"""Source selection and retained proof verification through the ordinary workspace cache."""
+"""Verify selected source content and retained proofs through the workspace cache."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ ProofVerifier = Callable[[Path, Path, ResolvedWorkspaceSource], ArtifactVerifica
 
 
 class WorkspaceAcquisition:
-    """Join source expectations to a trusted verifier supplied by application code.
+    """Apply source expectations with a trusted verifier supplied by application code.
 
     Proof storage is opaque. The verifier runs on each publication and lease,
     with source and proof identity checked before package content is admitted.

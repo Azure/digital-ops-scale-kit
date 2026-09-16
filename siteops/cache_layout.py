@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-"""Marked private storage shared by workspace and source metadata caches."""
+"""Manage marked private storage shared by workspace and source metadata caches."""
 
 from __future__ import annotations
 
@@ -163,7 +163,7 @@ class CacheLayout:
                 candidate.rename(self.root)
                 published = True
             except OSError:
-                # Another initializer can win publication with its complete root.
+                # Another initializer may publish a complete root first.
                 if not self.root.exists():
                     raise
             self._check_root()
@@ -172,7 +172,7 @@ class CacheLayout:
                 cleanup_directory(candidate)
 
     def prepare_namespace(self, name: str) -> Path:
-        """Atomically create a supported optional namespace, preserving any existing winner."""
+        """Atomically create an optional namespace without replacing one created concurrently."""
         if not isinstance(name, str) or name not in _NAMESPACES:
             raise CacheError("The requested cache namespace is unsupported.")
         self._check_root()

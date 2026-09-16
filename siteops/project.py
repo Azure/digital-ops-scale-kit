@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-"""Visible workspace selections stored independently of operator configuration and trust."""
+"""Store workspace pins separately from operator configuration and trust."""
 
 from __future__ import annotations
 

@@ -10,8 +10,8 @@ creates a receipt only after the artifact identity and verified observations
 satisfy that policy.
 
 This is an internal acquisition building block, not a deployment command or
-public Python SDK. Source resolution, project pins and cache execution must use
-the receipt together with their own identity and access boundaries.
+public Python SDK. Source resolution, workspace pins and cache execution must
+use the receipt together with their own identity and access boundaries.
 
 ## GitHub policy
 
@@ -75,9 +75,10 @@ SHA-256 digest before acquisition can use it.
 
 These observations come from the source API, not a cryptographic provenance
 proof. They do not authenticate a publisher, select consumer policy or
-authorize execution. The method downloads no package or proof and adds no
-public command for source selection. Existing pins must retain their resolved
-identities rather than silently following the release tag again.
+authorize execution. `resolve_release` downloads neither the package nor its
+proof. `project pin` uses the result only to identify selected assets before
+verification. Existing workspace pins retain those exact identities rather
+than following the release tag again.
 The [workspace release descriptor](workspace-sources.md) connects those
 observations to one selected package and its detached proof.
 
@@ -100,7 +101,7 @@ native tool reads them. Artifact identity, policy expiry and policy-file
 identity are checked again before a receipt is returned. An expired or
 changed policy fails explicitly.
 
-The internal [workspace acquisition flow](workspace-sources.md#internal-acquisition-and-pinned-use)
+The internal [workspace acquisition flow](workspace-sources.md#acquisition-and-workspace-pin-reuse)
 retains identified proofs separately from receipts. It binds the selected
 source to local consumer policy, then passes retained proof and root inputs
 to this same verifier on each cache publication and lease. Pinned reuse
