@@ -9,7 +9,7 @@ inputs:
   - field: subscription
     type: string
     requirement: required
-    description: Target subscription from the configured Site, replacing any example placeholder.
+    description: Target subscription from a configured Site or typed single-Site answers.
     source: sites/catalog-basic.yaml
   - field: resourceGroup
     type: string
@@ -24,19 +24,19 @@ inputs:
   - field: parameters.clusterName
     type: string
     requirement: required
-    description: Existing Arc-connected Kubernetes cluster name, not the Site name.
+    description: Existing Arc-connected Kubernetes cluster name, not the Site name. A declared cluster resource ID can supply this and the target subscription, resource group and location through an explicit Azure read.
     source: templates/aio/instance.bicep
   - field: properties.aioRelease
     type: string
     requirement: required
     sensitivity: non-sensitive
-    description: Release selection inherited from the Site or deliberately overridden.
-    defaultBehavior: Confirm the committed example's release selection before planning.
+    description: The resolved Site needs an AIO release. The configured example inherits one, while the typed AIO route defaults to 2608.
+    defaultBehavior: Review the effective release in the selected Site before deployment.
     source: sites/base-site.yaml
   - field: labels
     type: mapping
     requirement: required
-    description: Preserve the example's supporting labels for naming, tags and optional Edge Site addressing.
+    description: Installation tags need environment and country labels. Configured Sites carry them, while typed answers ask for each. Optional Edge Site addressing also uses city.
     source: parameters/common/common.yaml
   - field: parameters.aioInstanceName
     type: string
@@ -55,12 +55,12 @@ inputs:
   - field: parameters.brokerConfig
     type: object
     requirement: optional
-    description: Broker settings have inherited or template defaults. Review capacity and trust requirements.
+    description: Broker settings have inherited or template defaults. The typed route starts with the Medium memory profile. Review capacity and trust requirements.
     source: templates/aio/instance.bicep
   - field: properties.deployOptions
     type: mapping
     requirement: conditional
-    description: Review cert-manager, Edge Site and optional Secret Sync settings. Host flags do not retrofit OIDC or workload identity through this entry.
+    description: Review cert-manager, Edge Site and optional Secret Sync settings. The typed defaults leave Secret Sync disabled. Guided enablement requires an observed cluster reporting OIDC and workload identity before writes. Host flags do not retrofit those features.
     source: sites/base-site.yaml
 supplied:
   - step: aio-instance
@@ -81,15 +81,16 @@ supplied:
     source: parameters/outputs/aio-instance.yaml
 prerequisites:
   - An existing resource group and Arc-connected Kubernetes cluster meeting the selected AIO release's requirements.
-  - Azure CLI and Bicep for executable preparation and deployment. This manifest contains no kubectl step.
+  - Azure CLI for ARM deployment. Source template preparation requires Bicep. Verified workspace packages contain compiled ARM JSON and need no local Bicep compiler for this entry. This manifest contains no kubectl step.
+  - Resource-derived guided inputs require an explicit read by the selected Azure provider using the operator's already configured Azure identity. Source access and deployment authorization remain separate.
   - An authorized deployment identity, including the required role-assignment permissions. Common guidance is Owner or User Access Administrator plus Contributor.
   - Enabling Secret Sync requires pre-existing OIDC and workload-identity readiness on the cluster.
 effects:
   - Creates or updates AIO extensions, instance resources, custom location, ADR namespace, Schema Registry storage and role assignments.
-  - Optional settings add their own effects. Subscription-scoped Edge Site work needs an applicable subscription target.
+  - Secret Sync enablement in this same deployment creates or updates identity, federation, vault and Secret Provider Class resources. Subscription-scoped Edge Site work needs an applicable subscription target.
   - Deployment can incur Azure charges and leave partial changes after failure or interruption.
   - Use the upgrade entry for in-place version changes. Reapplying installation can overwrite operator-managed settings.
 removal:
   - Remove created resources deliberately while preserving the existing cluster and other retained resources.
   - There is no automatic rollback or general uninstall entry.
-coverage: Covers the first configured-Site installation and selected optional settings. It is not an exhaustive template input, permission, pricing or compatibility contract. Observe AIO readiness and workload functionality separately.
+coverage: Covers existing-cluster installation through configured Sites or typed single-Site answers. This is descriptive guidance, not the executable input contract or a target readiness assessment. Observe workload functionality separately.

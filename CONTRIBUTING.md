@@ -65,6 +65,13 @@ paths remain within the platform limit. For offline tests, set
 `SITEOPS_TEST_BACKEND_WHEELHOUSE` to a directory containing the pip wheel
 pinned in `scripts/siteops-build-requirements.txt`.
 
+The bootstrap harness under `tests/fixtures/` uses controlled tools and
+no cloud credentials. Its pinned Ubuntu 24.04 image installs only Python
+and venv for testing. Run the harness without network access as an
+unprivileged user, with a read-only root and only the two required
+files mounted read only. Passing doubles does not qualify a signed
+published asset or a fresh Windows WinGet installation.
+
 Installed engine command coverage builds the real wheel, installs it into an
 isolated environment and invokes its commands from an unrelated directory.
 For a fully offline run, set `SITEOPS_TEST_RUNTIME_WHEELHOUSE` to a directory

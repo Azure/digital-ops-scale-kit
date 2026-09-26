@@ -14,8 +14,21 @@ def main():
     root = context_path.parent.resolve()
     context = json.loads(context_path.read_bytes())
     if name == "az":
-        assert args == ["version", "--output", "json"], "Deployment commands are forbidden."
-        print('{"azure-cli":"fixture"}')
+        if args == ["version", "--output", "json"]:
+            print('{"azure-cli":"fixture"}')
+            return
+        allowed = context.get("allowedRead")
+        assert allowed is not None, "Azure reads and deployment commands are forbidden."
+        assert args == [
+            "resource", "show", "--ids", allowed["id"],
+            "--api-version", allowed["apiVersion"],
+            "--subscription", allowed["subscription"],
+            "--output", "json", "--only-show-errors",
+        ], "Only the declared fixture resource read is permitted."
+        print(json.dumps({
+            "id": allowed["id"], "type": "Microsoft.Kubernetes/connectedClusters",
+            "location": "eastus", "name": "existing-arc",
+        }))
         return
     assert name == "gh"
     if args == ["--version"]:

@@ -200,7 +200,7 @@ jobs:
                   by_name[name] = (size, digest)
               return by_name
 
-          def native_wheel(by_name):
+          def native_wheel(by_name, *, built):
               archive = os.environ["ARCHIVE_NAME"]
               suffix = os.environ["ATTESTATION_SUFFIX"]
               wheels = [
@@ -210,7 +210,12 @@ jobs:
               if len(wheels) != 1:
                   raise SystemExit("::error::The approved release wheel inventory is invalid.")
               wheel = wheels[0]
-              if set(by_name) != {archive, archive + suffix, wheel, wheel + suffix}:
+              legacy = {archive, archive + suffix, wheel, wheel + suffix}
+              bootstrap = {
+                  name for script in ("siteops-bootstrap.ps1", "siteops-bootstrap.sh")
+                  for name in (script, script + suffix)
+              }
+              if set(by_name) not in ((legacy | bootstrap,) if built else (legacy, legacy | bootstrap)):
                   raise SystemExit("::error::The approved release asset inventory is invalid.")
               return wheel
 
@@ -256,7 +261,7 @@ jobs:
               ):
                   raise SystemExit("::error::The approved engine reference is inconsistent.")
               approved_assets = validate_assets(reference["assets"])
-          approved_wheel = native_wheel(approved_assets)
+          approved_wheel = native_wheel(approved_assets, built=engine["bundle"])
           if (
               approved_wheel != os.environ["APPROVED_WHEEL_NAME"]
               or approved_assets[approved_wheel][1] != os.environ["APPROVED_WHEEL_SHA"]
@@ -313,7 +318,7 @@ jobs:
                   str(linked.get("id")) != os.environ["APPROVED_ENGINE_ID"]
                   or linked.get("draft") is not False or linked.get("tag_name") != engine["releaseTag"]
                   or ref.get("object", {}).get("sha") != os.environ["APPROVED_ENGINE_REF"]
-                  or not isinstance(linked_assets, list) or len(linked_assets) != 4
+                  or not isinstance(linked_assets, list) or len(linked_assets) not in (4, 8)
                   or current != approved_assets
               ):
                   raise SystemExit("::error::The referenced engine release changed after approval.")
@@ -371,7 +376,10 @@ jobs:
           ):
               raise SystemExit("::error::The approved release asset digests are inconsistent.")
           if os.environ["BUNDLE"] == "true":
-              for name in (os.environ["ARCHIVE_NAME"], os.environ["WHEEL_NAME"]):
+              for name in (
+                  os.environ["ARCHIVE_NAME"], os.environ["WHEEL_NAME"],
+                  "siteops-bootstrap.ps1", "siteops-bootstrap.sh",
+              ):
                   sys.stdout.buffer.write((name + "\t_siteops-distribution.yaml\n").encode("utf-8"))
           plan = json.loads(Path(sys.argv[3]).read_bytes())
           for request in plan.get("workspaces", []):

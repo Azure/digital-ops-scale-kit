@@ -1,8 +1,11 @@
 # Install Azure IoT Operations
 
 Install AIO on an existing Arc-connected Kubernetes cluster. For a first
-deployment, follow the [one-site quickstart](../../../../docs/getting-started.md)
-to install Site Ops and configure an authorized local Site overlay.
+deployment with an approved workspace package, follow
+[guided inputs](../../../../docs/guided-inputs.md) to construct one
+explicit Site. For a local checkout or configured fleet, use the
+[configured-Site guide](../../../../docs/getting-started.md) to prepare
+an authorized Site overlay. Both routes execute this same manifest.
 
 Use [aio-upgrade](../aio-upgrade/README.md) for in-place version changes.
 Reapplying installation can overwrite operator-managed instance and child
@@ -25,6 +28,10 @@ Optional `properties.deployOptions` settings include `enableEdgeSite`,
 workload identity on the existing cluster. Host-bootstrap flags do not enable
 those features through this manifest. A subscription-scoped Edge Site needs
 an applicable subscription target, not just a flag on an RG-scoped Site.
+The guided resource ID route checks the reported identity prerequisites
+before writes when Secret Sync is enabled. Configured fleet Sites do not
+repeat that guided read, so confirm the prerequisites for each selected
+cluster before enabling Secret Sync across a fleet.
 
 ## Review and deploy
 

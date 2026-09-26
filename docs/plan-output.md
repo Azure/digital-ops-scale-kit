@@ -16,6 +16,9 @@ siteops -w <workspace> plan <manifest>
 This command runs structural validation, resolves the selected operations,
 compiles executable templates, preflights required capabilities, and prints
 the canonical plan. It performs no Azure or Kubernetes mutation.
+Supplying `--read-resources` with declared resource-ID answers explicitly
+performs bounded Azure reads in a setup phase before that planner runs.
+Without this option, plan preparation makes no Azure resource reads.
 
 Ordinary local workspaces submit source Bicep, which Azure CLI may compile
 again. Their plans record observed compilation identity, not a guarantee that
@@ -32,8 +35,9 @@ or a publisher-provenance decision. Plain output identifies this mode as
 Public `plan` and `deploy` commands continue to operate on a local workspace,
 including one selected with `-w`. They do not select a package source.
 
-Planning does not establish Azure authorization, cluster connectivity, or
-workload health.
+Planning does not establish deployment authorization, cluster connectivity,
+or workload health. A successful opted-in resource read proves only that the
+selected identity could read that resource when the command ran.
 
 Executable preparation may acquire the Bicep compiler or restore modules.
 It is not an offline mode. Private module sources need their required

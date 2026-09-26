@@ -147,6 +147,15 @@ def _reason_document(reason: OutcomeReason) -> dict[str, Any]:
 def _publishable_diagnostic_document(
     diagnostic: RunDiagnostic,
 ) -> dict[str, str]:
+    if diagnostic.public_summary is not None and (
+        diagnostic.code in {"inputs.invalid", "site.invalid", "plan.targeting.conflict"}
+        or diagnostic.code.startswith("inputs.resource.")
+    ):
+        return {
+            "code": diagnostic.code,
+            "severity": diagnostic.severity.value,
+            "summary": diagnostic.public_summary,
+        }
     code, summary = _PUBLISHABLE_RUN_DIAGNOSTICS.get(
         diagnostic.code,
         _GENERIC_RUN_DIAGNOSTIC,
@@ -209,6 +218,10 @@ def _base_document(
 ) -> dict[str, Any]:
     return {
         "apiVersion": _API_VERSION,
+        "assessments": {
+            "readiness": "not-assessed",
+            "functionality": "not-assessed",
+        },
         "engine": {
             "name": "siteops",
             "version": engine_version,
@@ -491,6 +504,7 @@ def _render_publishable_plain(result: RunResult) -> str:
     document = _publishable_document(result, engine_version="")
     lines = _heading("Deployment summary")
     lines.extend(_totals_lines(result, elapsed=False))
+    lines.append("  Readiness and functionality: not assessed.")
     no_work = _no_work_line(result)
     if no_work is not None:
         lines.append(no_work)
@@ -602,6 +616,7 @@ def render_plain_run(result: RunResult, *, redacted: bool) -> str:
     if result.sites:
         lines.append("")
     lines.extend(_totals_lines(result, elapsed=True))
+    lines.append("  Readiness and functionality: not assessed.")
     no_work = _no_work_line(result)
     if no_work is not None:
         lines.append(no_work)

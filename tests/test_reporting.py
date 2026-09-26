@@ -116,6 +116,21 @@ def _private_run() -> RunResult:
     )
 
 
+def test_run_reports_what_was_not_assessed_in_every_projection():
+    result = _private_run()
+    for projection in (PlanProjection.LOCAL_PRIVATE, PlanProjection.PUBLISHABLE):
+        document = json.loads(serialize_run_json(
+            result, projection, engine_version="test",
+        ))
+        assert document["assessments"] == {
+            "readiness": "not-assessed",
+            "functionality": "not-assessed",
+        }
+    for redacted in (False, True):
+        plain = render_plain_run(result, redacted=redacted)
+        assert "Readiness and functionality: not assessed." in plain
+
+
 @pytest.mark.parametrize("marker", ["GITHUB_ACTIONS", "TF_BUILD"])
 def test_ci_marker_selects_publishable_document_without_deleting_fixture_env(
     monkeypatch,
@@ -149,6 +164,10 @@ def test_publishable_json_is_an_allowlist_with_complete_counts():
 
     assert document == {
         "apiVersion": "siteops/v1alpha1",
+        "assessments": {
+            "readiness": "not-assessed",
+            "functionality": "not-assessed",
+        },
         "diagnostics": [
             {
                 "code": "run.diagnostic",

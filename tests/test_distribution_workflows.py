@@ -60,6 +60,8 @@ GUIDE_PATH = REPO_ROOT / "docs" / "install-siteops.md"
 
 ON = True
 ARCHIVE_NAME = "siteops-install.zip"
+BOOTSTRAP_PS1 = "siteops-bootstrap.ps1"
+BOOTSTRAP_SH = "siteops-bootstrap.sh"
 ATTESTATION_SUFFIX = ".attestation.jsonl"
 OIDC_ISSUER = "https://token.actions.githubusercontent.com"
 PREDICATE_TYPE = "https://slsa.dev/provenance/v1"
@@ -194,6 +196,9 @@ if [[ "$1 $2" == "attestation verify" ]]; then
   if [[ "$3" == *.whl ]]; then
     exit "${FAKE_GH_WHEEL_EXIT:-${FAKE_GH_ATTESTATION_EXIT:-0}}"
   fi
+  if [[ "$3" == *.ps1 || "$3" == *.sh ]]; then
+    exit "${FAKE_GH_BOOTSTRAP_EXIT:-${FAKE_GH_ATTESTATION_EXIT:-0}}"
+  fi
   exit "${FAKE_GH_ATTESTATION_EXIT:-0}"
 fi
 if [[ "$1" == "api" ]]; then
@@ -309,17 +314,21 @@ def test_build_job_passes_the_event_identity_to_the_producer():
     assert "--download-dependencies" in script
 
 
-def test_the_build_publishes_exactly_two_assets_from_one_wheel_build():
+def test_the_build_publishes_wheel_bundle_and_exact_bootstrap_scripts():
     build = REUSABLE["jobs"]["build"]
     assert build["outputs"]["wheel-name"] == "${{ steps.build.outputs.wheel-name }}"
     assert build["outputs"]["wheel-sha256"] == "${{ steps.build.outputs.wheel-sha256 }}"
     script = _script(build, "Build the installation bundle")
-    assert "${#produced[@]} -ne 2" in script
+    assert "${#produced[@]} -ne 4" in script
+    assert 'git show "$SOURCE_SHA:scripts/bootstrap/$script"' in script
     assert '"wheels/" + wheel.name' in script
     assert "is not the archive member byte for byte" in script
     assert 'document["package"]["wheel"] != member' in script
     assert "^siteops-[A-Za-z0-9._+!-]+-py3-none-any\\.whl$" in script
-    for output in ("archive-sha256", "wheel-name", "wheel-sha256", "staging-path"):
+    for output in (
+        "archive-sha256", "wheel-name", "wheel-sha256",
+        "bootstrap-ps1-sha256", "bootstrap-sh-sha256", "staging-path",
+    ):
         assert f'echo "{output}=' in script
     upload = _step(build, "Upload the build artifacts")["with"]
     assert upload["path"] == "${{ steps.build.outputs.staging-path }}"
@@ -337,9 +346,11 @@ def test_attestation_binds_the_exact_build_artifact_of_this_run():
     assert download["digest-mismatch"] == "error"
 
     payload = _script(attest, "Confirm the staged payload")
-    assert "${#entries[@]} -ne 2" in payload
+    assert "${#entries[@]} -ne 4" in payload
     assert "$EXPECTED_ARCHIVE_SHA256" in payload
     assert "$EXPECTED_WHEEL_SHA256" in payload
+    assert "$EXPECTED_BOOTSTRAP_PS1_SHA256" in payload
+    assert "$EXPECTED_BOOTSTRAP_SH_SHA256" in payload
 
 
 def test_each_published_asset_is_signed_independently():
@@ -350,10 +361,14 @@ def test_each_published_asset_is_signed_independently():
     assert [step["name"] for step in subjects] == [
         "Attest archive provenance",
         "Attest wheel provenance",
+        "Attest PowerShell bootstrap provenance",
+        "Attest Bash bootstrap provenance",
     ]
     assert [step["with"]["subject-path"] for step in subjects] == [
         f"${{{{ runner.temp }}}}/siteops-subject/{ARCHIVE_NAME}",
         "${{ runner.temp }}/siteops-subject/${{ needs.build.outputs.wheel-name }}",
+        f"${{{{ runner.temp }}}}/siteops-subject/{BOOTSTRAP_PS1}",
+        f"${{{{ runner.temp }}}}/siteops-subject/{BOOTSTRAP_SH}",
     ]
     for step in subjects:
         # Omitting every predicate input selects SLSA build provenance.
@@ -361,9 +376,11 @@ def test_each_published_asset_is_signed_independently():
         assert step["with"]["show-summary"] is False
 
     staging = _script(attest, "Stage the attested bytes")
-    assert "${#staged[@]} -ne 4" in staging
+    assert "${#staged[@]} -ne 8" in staging
     assert '"$ARCHIVE_BUNDLE_PATH"' in staging
     assert '"$WHEEL_BUNDLE_PATH"' in staging
+    assert '"$PS1_BUNDLE_PATH"' in staging
+    assert '"$SH_BUNDLE_PATH"' in staging
 
 
 def test_staging_uploads_never_overwrite_and_fail_on_empty_input():
@@ -408,7 +425,7 @@ def test_qualification_runs_on_hosted_windows_and_linux_without_write_access():
 
 def test_qualification_verifies_before_it_extracts():
     names = _step_names(REUSABLE["jobs"]["qualify"])
-    assert names.index("Verify both assets before use") < names.index(
+    assert names.index(    "Verify installation assets before use") < names.index(
         "Extract the verified bundle"
     )
     assert names.index("Extract the verified bundle") < names.index(
@@ -420,9 +437,325 @@ def test_qualification_verifies_before_it_extracts():
     assert names.index("Install the external qualification tooling") < names.index(
         "Install Site Ops from the verified lock"
     )
+    for name in ("Install with the signed Bash bootstrap", "Install with the signed PowerShell bootstrap"):
+        assert names.index("Install the external qualification tooling") < names.index(name)
+        assert names.index(name) < names.index("Install Site Ops from the verified lock")
     assert names.index("Install Site Ops from the verified lock") < names.index(
         "Install Site Ops from the standalone wheel"
     )
+
+
+def test_qualification_runs_both_signed_scripts_with_private_preseeded_assets():
+    qualify = REUSABLE["jobs"]["qualify"]
+    for name, platform, argument in (
+        ("Install with the signed Bash bootstrap", "ubuntu-24.04", "--yes"),
+        ("Install with the signed PowerShell bootstrap", "windows-2025", "-Yes"),
+    ):
+        step = _step(qualify, name)
+        assert step["if"] == f"matrix.os == '{platform}'"
+        if platform == "windows-2025":
+            assert step["shell"] == "powershell"
+        script = step["run"]
+        if platform == "ubuntu-24.04":
+            assert '"$download/$BOOTSTRAP_SH"' in script
+            assert '"$download/${ARCHIVE_NAME}${ATTESTATION_SUFFIX}"' in script
+        else:
+            assert "$env:BOOTSTRAP_PS1" in script
+            assert "$env:ARCHIVE_NAME + $env:ATTESTATION_SUFFIX" in script
+        assert argument in script
+        assert "install-downloads" in script and "Rechecking the retained release" in script
+        assert "SOURCE_SHA" in script and "SOURCE_REF" in script
+        assert "GH_CONFIG_DIR" in script and "PIPX_HOME" in script
+        assert "siteops" in script and "PACKAGE_VERSION" in script
+        assert "GH_TOKEN" in script and "GITHUB_TOKEN" in script
+        assert "az login" not in script and "--with-azure-cli" not in script
+    bash_step = _script(qualify, "Install with the signed Bash bootstrap")
+    assert 'bash "$download/$BOOTSTRAP_SH"' in bash_step
+    windows_step = _script(qualify, "Install with the signed PowerShell bootstrap")
+    assert "powershell.exe -NoProfile -ExecutionPolicy Bypass -File" in windows_step
+
+
+@pytest.mark.parametrize(("caller", "source_ref", "accepted"), [
+    ("ci.yaml", "refs/heads/feat/siteops-guided-inputs", True),
+    ("release.yaml", "refs/heads/main", True),
+    ("other.yaml", "refs/heads/feat/siteops-guided-inputs", False),
+])
+def test_signed_bash_qualification_resolves_caller_before_branch_path(
+    tmp_path, caller, source_ref, accepted,
+):
+    script = _script(REUSABLE["jobs"]["qualify"], "Install with the signed Bash bootstrap")
+    block = "caller=" + script.split("caller=", 1)[1].split("release=", 1)[0]
+    result = _run_script(
+        "set -euo pipefail\n" + block + "printf '%s\\n' \"$caller\"\n",
+        tmp_path,
+        {
+            "BUILDER_IDENTITY": (
+                f"https://github.com/example/publisher/.github/workflows/{caller}@{source_ref}"
+            ),
+        },
+    )
+    assert (result.returncode == 0) is accepted, result.stdout + result.stderr
+    if accepted:
+        assert result.stdout.strip() == caller
+
+
+def test_windows_bootstrap_qualification_captures_native_stderr_then_checks_exit():
+    script = _script(REUSABLE["jobs"]["qualify"], "Install with the signed PowerShell bootstrap")
+    invocation = script.index("& powershell.exe -NoProfile -ExecutionPolicy Bypass -File")
+    assert "$ErrorActionPreference = 'Continue'" in script[invocation - 170:invocation]
+    assert "$bootstrapStatus = $LASTEXITCODE" in script[invocation:invocation + 310]
+    assert "$ErrorActionPreference = $previousPreference" in script[invocation:invocation + 420]
+    assert "if ($bootstrapStatus -ne 0)" in script
+
+
+def test_windows_bootstrap_qualification_selects_private_user_profile_before_cache():
+    script = _script(REUSABLE["jobs"]["qualify"], "Install with the signed PowerShell bootstrap")
+    profile = "$profileHome = [Environment]::GetFolderPath('UserProfile')"
+    selection = "$env:LOCALAPPDATA = Join-Path $profileHome 'siteops-qualification-bootstrap'"
+    assert profile in script and selection in script
+    assert script.index(selection) < script.index('$cache = Join-Path $env:LOCALAPPDATA')
+    assert script.index("$bootstrapData = Join-Path $env:LOCALAPPDATA 'siteops'") < script.index(
+        '$cache = Join-Path $env:LOCALAPPDATA',
+    )
+    assert script.index("& icacls.exe $directory /inheritance:r") < script.index(
+        '$cache = Join-Path $env:LOCALAPPDATA',
+    )
+    assert script.index("& icacls.exe $directory /setowner") < script.index(
+        '$cache = Join-Path $env:LOCALAPPDATA',
+    )
+    assert "$env:LOCALAPPDATA = Join-Path $owned 'bootstrap-user'" not in script
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows ACL rules need Windows PowerShell 5.1.")
+@pytest.mark.parametrize("preexisting", [False, True])
+def test_windows_bootstrap_qualification_protects_preseeded_data_root(tmp_path, preexisting):
+    script = _script(REUSABLE["jobs"]["qualify"], "Install with the signed PowerShell bootstrap")
+    setup = script.split(
+        "$profileHome = [Environment]::GetFolderPath('UserProfile')\n", 1,
+    )[1].split("if ($env:BUILDER_IDENTITY -notmatch", 1)[0]
+    source = (REPO_ROOT / "scripts" / "bootstrap" / "siteops-bootstrap.ps1").read_text(
+        encoding="utf-8",
+    )
+    helper = re.search(r"(?ms)^function Require-PrivateDataRoot\([^\n]*\) \{.*?^\}", source)
+    assert helper is not None
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    grant = subprocess.run(
+        ["icacls.exe", str(profile), "/grant", "*S-1-5-32-545:(OI)(CI)RX"],
+        capture_output=True, text=True, timeout=20,
+    )
+    if grant.returncode:
+        pytest.skip("The local test user cannot set the fixture ACL.")
+    try:
+        existing = profile / "siteops-qualification-bootstrap"
+        if preexisting:
+            existing.mkdir()
+            (existing / "sentinel").write_text("keep", encoding="utf-8")
+        owned = tmp_path / "owned"
+        owned.mkdir()
+        wrapper = tmp_path / "qualify-root.ps1"
+        wrapper.write_text(
+            "$ErrorActionPreference='Stop'\n"
+            "$owned=$env:TEST_OWNED\n"
+            "$profileHome=$env:TEST_PROFILE_HOME\n"
+            + setup
+            + "\nfunction Fail([string]$message) { throw \"Site Ops installation: $message\" }\n"
+            + helper.group(0)
+            + "\n$cache=Join-Path $env:LOCALAPPDATA 'siteops\\install-downloads\\fixture'\n"
+            "New-Item -ItemType Directory -Path $cache -Force | Out-Null\n"
+            "Require-PrivateDataRoot (Join-Path $env:LOCALAPPDATA 'siteops')\n"
+            "'PRIVATE_ROOT_ACCEPTED'\n",
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
+            cwd=tmp_path,
+            env={
+                **os.environ,
+                "TEST_PROFILE_HOME": str(profile),
+                "TEST_OWNED": str(owned),
+                "PYTHON": sys.executable,
+            },
+            capture_output=True, text=True, timeout=30,
+        )
+        if preexisting:
+            assert result.returncode != 0
+            assert "The Windows qualification data root was not fresh." in result.stderr
+            assert (existing / "sentinel").read_text(encoding="utf-8") == "keep"
+        else:
+            assert result.returncode == 0, "The preseeded qualification root was not private."
+            assert "PRIVATE_ROOT_ACCEPTED" in result.stdout
+    finally:
+        subprocess.run(
+            ["icacls.exe", str(profile), "/remove:g", "*S-1-5-32-545"],
+            capture_output=True, text=True, check=True, timeout=20,
+        )
+
+
+def _run_windows_bootstrap_qualifier(
+    tmp_path: Path,
+    child: str,
+    extra_env: dict[str, str],
+    *,
+    success_marker: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    script = _script(REUSABLE["jobs"]["qualify"], "Install with the signed PowerShell bootstrap")
+    block = script.split("$log = Join-Path $owned 'logs\\bootstrap-ps1.log'\n", 1)[1].split(
+        "if ((Get-Content -LiteralPath $log -Raw) -notmatch", 1,
+    )[0]
+    (tmp_path / "logs").mkdir()
+    fake = tmp_path / "bootstrap.ps1"
+    fake.write_text(
+        "param([string]$Release,[string]$SourceCommit,[string]$Repository,"
+        "[string]$SourceRef,[string]$Caller,[switch]$Yes)\n" + child,
+        encoding="utf-8",
+    )
+    wrapper = tmp_path / "qualify.ps1"
+    wrapper.write_text(
+        "$ErrorActionPreference='Stop'\n"
+        "$owned=$env:TEST_ROOT;$download=$owned\n"
+        "$script=Join-Path $download $env:BOOTSTRAP_PS1\n"
+        "$log=Join-Path $owned 'logs\\bootstrap-ps1.log'\n"
+        "$release='siteops/v0.0.0-ci';$caller='ci.yaml'\n"
+        + block + ("\n'CAPTURE_ACCEPTED'\n" if success_marker else "\n"),
+        encoding="utf-8",
+    )
+    return subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
+        cwd=tmp_path,
+        env={
+            **os.environ, "TEST_ROOT": str(tmp_path), "BOOTSTRAP_PS1": fake.name,
+            "SOURCE_SHA": "c" * 40, "SOURCE_REPOSITORY": "example/publisher",
+            "SOURCE_REF": "refs/heads/feat/siteops-guided-inputs",
+            **extra_env,
+        },
+        capture_output=True, text=True, timeout=30,
+    )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Native PowerShell 5.1 redirects the private child log.")
+@pytest.mark.parametrize(
+    ("private_message", "public_message"),
+    [
+        *[
+            (
+                f"Configure a private Site Ops data root. {code} PRIVATE_PATH",
+                f"The signed PowerShell bootstrap rejected the isolated data root ({code}).",
+            )
+            for code in (
+                "ROOT_PATH", "ROOT_ANCESTOR_TYPE", "ROOT_ANCESTOR_OWNER",
+                "ROOT_ANCESTOR_ACL", "ROOT_DATA_CREATE", "ROOT_DATA_TYPE",
+                "ROOT_DATA_OWNER", "ROOT_DATA_ACL",
+            )
+        ],
+        (
+            "Configure a private Site Ops data root. PRIVATE_PATH",
+            "The signed PowerShell bootstrap rejected the isolated data root.",
+        ),
+        (
+            "Configure one approved HTTPS Python index. PRIVATE_URL",
+            "The signed PowerShell bootstrap rejected the configured Python feed.",
+        ),
+    ],
+)
+def test_windows_bootstrap_qualification_reports_only_bounded_failure(
+    tmp_path, private_message, public_message,
+):
+    result = _run_windows_bootstrap_qualifier(
+        tmp_path,
+        "function Fail([string]$message) { throw \"Site Ops installation: $message\" }\n"
+        "Fail $env:TEST_PRIVATE_MESSAGE\n",
+        {"TEST_PRIVATE_MESSAGE": private_message},
+    )
+    assert result.returncode != 0
+    assert public_message in result.stderr
+    assert "PRIVATE_PATH" not in result.stdout + result.stderr
+    assert "PRIVATE_URL" not in result.stdout + result.stderr
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Native PowerShell 5.1 formats root errors.")
+def test_windows_bootstrap_qualification_classifies_real_acl_failure(tmp_path):
+    source = (REPO_ROOT / "scripts" / "bootstrap" / "siteops-bootstrap.ps1").read_text(
+        encoding="utf-8",
+    )
+    helper = re.search(r"(?ms)^function Require-PrivateDataRoot\([^\n]*\) \{.*?^\}", source)
+    assert helper is not None
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    grant = subprocess.run(
+        ["icacls.exe", str(shared), "/grant", "*S-1-5-32-545:(OI)(CI)M"],
+        capture_output=True, text=True, timeout=20,
+    )
+    if grant.returncode:
+        pytest.skip("The local test user cannot change the fixture ACL.")
+    try:
+        result = _run_windows_bootstrap_qualifier(
+            tmp_path,
+            "function Fail([string]$message) { throw \"Site Ops installation: $message\" }\n"
+            + helper.group(0)
+            + "\nRequire-PrivateDataRoot $env:TEST_DATA_ROOT\n",
+            {"TEST_DATA_ROOT": str(shared / "siteops")},
+        )
+        assert result.returncode != 0
+        assert "rejected the isolated data root (ROOT_ANCESTOR_ACL)" in result.stderr
+        assert str(shared) not in result.stdout + result.stderr
+    finally:
+        subprocess.run(
+            ["icacls.exe", str(shared), "/remove:g", "*S-1-5-32-545"],
+            capture_output=True, text=True, check=True, timeout=20,
+        )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Native stderr needs Windows PowerShell 5.1.")
+@pytest.mark.parametrize(("bootstrap_exit", "emit_diagnostic"), [(0, True), (7, True), (7, False)])
+def test_windows_qualification_preserves_child_exit_with_private_stderr(
+    tmp_path, bootstrap_exit, emit_diagnostic,
+):
+    result = _run_windows_bootstrap_qualifier(
+        tmp_path,
+        "if ($env:TEST_EMIT_DIAGNOSTIC -eq '1') { "
+        "[Console]::Error.WriteLine('controlled benign diagnostic') }\n"
+        "exit [int]$env:TEST_BOOTSTRAP_EXIT\n",
+        {
+            "TEST_BOOTSTRAP_EXIT": str(bootstrap_exit),
+            "TEST_EMIT_DIAGNOSTIC": "1" if emit_diagnostic else "0",
+        },
+        success_marker=True,
+    )
+    assert (result.returncode == 0) is (bootstrap_exit == 0), result.stdout + result.stderr
+    if bootstrap_exit:
+        assert "did not install the verified build" in result.stderr
+        assert "CAPTURE_ACCEPTED" not in result.stdout
+    else:
+        assert "CAPTURE_ACCEPTED" in result.stdout
+        assert "controlled benign diagnostic" not in result.stdout + result.stderr
+    if emit_diagnostic:
+        assert "controlled benign diagnostic" in (tmp_path / "logs" / "bootstrap-ps1.log").read_text(
+            encoding="utf-16",
+        )
+
+
+def test_bootstrap_qualification_shells_parse():
+    bash_step = _script(REUSABLE["jobs"]["qualify"], "Install with the signed Bash bootstrap")
+    parsed = subprocess.run(
+        [str(_required_bash()), "-n"], input=bash_step, text=True, capture_output=True, timeout=20,
+    )
+    assert parsed.returncode == 0, parsed.stderr
+    if sys.platform == "win32":
+        windows_step = _script(
+            REUSABLE["jobs"]["qualify"], "Install with the signed PowerShell bootstrap",
+        )
+        parsed = subprocess.run(
+            [
+                "powershell.exe", "-NoProfile", "-Command",
+                "$tokens=$null;$errors=$null;"
+                "[System.Management.Automation.Language.Parser]::ParseInput("
+                "[Console]::In.ReadToEnd(),[ref]$tokens,[ref]$errors)|Out-Null;"
+                "if($errors.Count){$errors|ForEach-Object{Write-Error $_};exit 1}",
+            ],
+            input=windows_step, text=True, capture_output=True, timeout=20,
+        )
+        assert parsed.returncode == 0, parsed.stderr
 
 
 def test_qualification_policy_pins_the_caller_source_and_local_signer():
@@ -440,7 +773,9 @@ def test_qualification_policy_pins_the_caller_source_and_local_signer():
     assert environment["SIGNER_IDENTITY"] == (
         f"https://github.com/${{{{ github.repository }}}}/{SIGNER_WORKFLOW}@${{{{ github.ref }}}}"
     )
-    script = _script(qualify, "Verify both assets before use")
+    script = _script(qualify, "Verify installation assets before use")
+    assert '"$download/$BOOTSTRAP_PS1"' in script
+    assert '"$download/$BOOTSTRAP_SH"' in script
     for flag in VERIFY_FLAGS:
         assert flag in script
 
@@ -541,11 +876,13 @@ def test_the_qualification_tooling_pins_pipx_and_its_lock_reading_backend():
         assert wider not in guide, wider
 
 
-def test_the_bundle_ships_no_installation_program():
-    """The published paths are stock pipx commands, with no program of our own."""
+def test_the_bundle_keeps_native_installation_separate_from_bootstrap_scripts():
+    """The authenticated bundle uses stock pipx, not an embedded installer."""
     scripts = REPO_ROOT / "scripts"
     assert not (scripts / "install-siteops.py").exists()
     assert not list(scripts.glob("install*.py"))
+    assert (scripts / "bootstrap" / BOOTSTRAP_PS1).is_file()
+    assert (scripts / "bootstrap" / BOOTSTRAP_SH).is_file()
     retired = ("install.py", "siteops_distribution", "--store-dir", "SiteOpsInstallationResult")
     for path in (REUSABLE_PATH, GUIDE_PATH):
         text = path.read_text(encoding="utf-8")
@@ -615,6 +952,8 @@ def test_distribution_summary_uses_only_fixed_outputs_and_job_conclusions():
     assert "stdout" not in script
     assert "stderr" not in script
     assert REUSABLE["env"]["SITEOPS_REDACT_OUTPUT"] == "1"
+    assert "Both attested assets" not in script
+    assert "siteops-bootstrap.sh" in script and "siteops-bootstrap.ps1" in script
 
 
 def test_package_downloads_use_the_configured_feed_without_a_public_fallback():
@@ -810,6 +1149,8 @@ def test_distribution_summary_reports_the_complete_success_matrix(tmp_path):
     summary = summary_path.read_text(encoding="utf-8")
     assert summary.count("## Site Ops installer check") == 1
     assert "Version: <code>1.0.0b1+build.42.2.gcccccccccccc</code>" in summary
+    assert "four attested assets" in summary
+    assert "siteops-bootstrap.sh" in summary and "siteops-bootstrap.ps1" in summary
     assert (
         "[Download the attested installation assets]"
         "(https://github.com/example/publisher/actions/runs/42/artifacts/987)"
@@ -992,6 +1333,8 @@ def _qualification_exports(tmp_path: Path, log: Path) -> dict[str, str]:
         "ARCHIVE_NAME": ARCHIVE_NAME,
         "ATTESTATION_SUFFIX": ATTESTATION_SUFFIX,
         "WHEEL_NAME": WHEEL_NAME,
+        "BOOTSTRAP_PS1": BOOTSTRAP_PS1,
+        "BOOTSTRAP_SH": BOOTSTRAP_SH,
         "SOURCE_REPOSITORY": "example/publisher",
         "SOURCE_SHA": "c" * 40,
         "SOURCE_REF": "refs/heads/main",
@@ -1014,6 +1357,10 @@ def _staged_download(tmp_path: Path, *, missing: str | None = None) -> Path:
         ARCHIVE_NAME + ATTESTATION_SUFFIX: b"{}\n",
         WHEEL_NAME: b"wheel bytes",
         WHEEL_NAME + ATTESTATION_SUFFIX: b"{}\n",
+        BOOTSTRAP_PS1: b"PowerShell script bytes",
+        BOOTSTRAP_PS1 + ATTESTATION_SUFFIX: b"{}\n",
+        BOOTSTRAP_SH: b"Bash script bytes",
+        BOOTSTRAP_SH + ATTESTATION_SUFFIX: b"{}\n",
     }
     for name, content in staged.items():
         if name != missing:
@@ -1049,25 +1396,33 @@ def _expected_verification(asset: str) -> list[str]:
 def test_qualification_verification_passes_the_exact_policy_to_the_runner_cli(tmp_path):
     _, log = _fake_tools(tmp_path)
     download = _staged_download(tmp_path)
-    script = _script(REUSABLE["jobs"]["qualify"], "Verify both assets before use")
+    script = _script(REUSABLE["jobs"]["qualify"], "Verify installation assets before use")
     result = _run_script(script, tmp_path, _qualification_exports(tmp_path, log))
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert _invocations(log) == [
         _expected_verification(_bash_path(download / ARCHIVE_NAME)),
         _expected_verification(_bash_path(download / WHEEL_NAME)),
+        _expected_verification(_bash_path(download / BOOTSTRAP_PS1)),
+        _expected_verification(_bash_path(download / BOOTSTRAP_SH)),
     ]
 
 
-@pytest.mark.parametrize(("failing", "attempted"), [("archive", 1), ("wheel", 2)])
+@pytest.mark.parametrize(
+    ("failing", "attempted"), [("archive", 1), ("wheel", 2), ("bootstrap", 3)],
+)
 def test_qualification_stops_when_verification_fails(tmp_path, failing, attempted):
     _, log = _fake_tools(tmp_path)
     _staged_download(tmp_path)
     # The wheel case fails only the second subject, so a partial verification
     # cannot pass, and the attempt count shows a failed subject stops the step.
-    variable = "FAKE_GH_ATTESTATION_EXIT" if failing == "archive" else "FAKE_GH_WHEEL_EXIT"
+    variable = {
+        "archive": "FAKE_GH_ATTESTATION_EXIT",
+        "wheel": "FAKE_GH_WHEEL_EXIT",
+        "bootstrap": "FAKE_GH_BOOTSTRAP_EXIT",
+    }[failing]
     exports = {**_qualification_exports(tmp_path, log), variable: "1"}
-    script = _script(REUSABLE["jobs"]["qualify"], "Verify both assets before use")
+    script = _script(REUSABLE["jobs"]["qualify"], "Verify installation assets before use")
     result = _run_script(script, tmp_path, exports)
     assert result.returncode != 0
     assert len(_invocations(log)) == attempted
@@ -1088,7 +1443,7 @@ def test_native_qualification_checks_each_observed_claim(tmp_path, field):
     observations.append(changed)
     path.write_text(json.dumps(observations))
     result = _run_script(
-        _script(REUSABLE["jobs"]["qualify"], "Verify both assets before use"), tmp_path, exports,
+        _script(REUSABLE["jobs"]["qualify"], "Verify installation assets before use"), tmp_path, exports,
     )
     assert result.returncode != 0
     assert "certificate does not match" in result.stdout + result.stderr
@@ -1098,12 +1453,14 @@ def test_native_qualification_checks_each_observed_claim(tmp_path, field):
 
 @pytest.mark.parametrize(
     "missing",
-    [ARCHIVE_NAME + ATTESTATION_SUFFIX, WHEEL_NAME, WHEEL_NAME + ATTESTATION_SUFFIX],
+    [ARCHIVE_NAME + ATTESTATION_SUFFIX, WHEEL_NAME, WHEEL_NAME + ATTESTATION_SUFFIX,
+     BOOTSTRAP_PS1, BOOTSTRAP_PS1 + ATTESTATION_SUFFIX, BOOTSTRAP_SH,
+     BOOTSTRAP_SH + ATTESTATION_SUFFIX],
 )
 def test_qualification_stops_when_an_asset_or_proof_is_missing(tmp_path, missing):
     _, log = _fake_tools(tmp_path)
     _staged_download(tmp_path, missing=missing)
-    script = _script(REUSABLE["jobs"]["qualify"], "Verify both assets before use")
+    script = _script(REUSABLE["jobs"]["qualify"], "Verify installation assets before use")
     result = _run_script(script, tmp_path, _qualification_exports(tmp_path, log))
     assert result.returncode != 0
     assert _invocations(log) == []
@@ -1496,6 +1853,16 @@ fi
 exec "$REAL_PYTHON" "$@"
 """,
     )
+    _write_executable(
+        bin_dir / "git",
+        """#!/usr/bin/env bash
+[[ "$1" == show && "$2" == "$SOURCE_SHA:scripts/bootstrap/$BOOTSTRAP_PS1" ]] &&
+  { cat "$FAKE_BOOTSTRAP_DIR/$BOOTSTRAP_PS1"; exit 0; }
+[[ "$1" == show && "$2" == "$SOURCE_SHA:scripts/bootstrap/$BOOTSTRAP_SH" ]] &&
+  { cat "$FAKE_BOOTSTRAP_DIR/$BOOTSTRAP_SH"; exit 0; }
+exit 1
+""",
+    )
     exports = {
         "REAL_PYTHON": _python_executable_path(),
         "FAKE_ARCHIVE": _bash_path(archive),
@@ -1503,6 +1870,9 @@ exec "$REAL_PYTHON" "$@"
         "FAKE_EXTRA": extra or "",
         "RUNNER_TEMP": _bash_path(tmp_path / "temp"),
         "ARCHIVE_NAME": ARCHIVE_NAME,
+        "BOOTSTRAP_PS1": BOOTSTRAP_PS1,
+        "BOOTSTRAP_SH": BOOTSTRAP_SH,
+        "FAKE_BOOTSTRAP_DIR": _bash_path(REPO_ROOT / "scripts" / "bootstrap"),
         "SOURCE_REPOSITORY": "example/publisher",
         "SOURCE_REF": "refs/heads/main",
         "SOURCE_SHA": "c" * 40,
@@ -1526,7 +1896,7 @@ def _step_outputs(tmp_path: Path) -> dict[str, str]:
     )
 
 
-def test_build_step_publishes_and_records_both_assets(tmp_path, bundle_factory):
+def test_build_step_publishes_and_records_exact_installation_assets(tmp_path, bundle_factory):
     root, manifest = bundle_factory(91)
     archive, wheel = publish_assets(root, manifest, tmp_path / "published")
 
@@ -1543,19 +1913,23 @@ def test_build_step_publishes_and_records_both_assets(tmp_path, bundle_factory):
     assert outputs["package-version"] == manifest.version
     assert outputs["archive-sha256"] == hashlib.sha256(archive.read_bytes()).hexdigest()
     assert outputs["wheel-sha256"] == hashlib.sha256(wheel.read_bytes()).hexdigest()
+    for name, key in ((BOOTSTRAP_PS1, "bootstrap-ps1-sha256"), (BOOTSTRAP_SH, "bootstrap-sh-sha256")):
+        assert outputs[key] == hashlib.sha256(
+            (REPO_ROOT / "scripts" / "bootstrap" / name).read_bytes()
+        ).hexdigest()
     assert outputs["staging-path"].endswith("/siteops-build")
     staging = Path(tmp_path / "temp" / "siteops-build")
     assert sorted(path.name for path in staging.iterdir()) == sorted(
-        [ARCHIVE_NAME, wheel.name]
+        [ARCHIVE_NAME, wheel.name, BOOTSTRAP_PS1, BOOTSTRAP_SH]
     )
 
 
 @pytest.mark.parametrize(
     ("case", "message"),
     [
-        ("missing-wheel", "content other than the archive"),
-        ("extra-file", "content other than the archive"),
-        ("unsupported-name", "supported Site Ops wheel name"),
+        ("missing-wheel", "content other than its declared installation assets"),
+        ("extra-file", "content other than its declared installation assets"),
+        ("unsupported-name", "content other than its declared installation assets"),
         ("absent-member", "does not contain the standalone wheel"),
         ("changed-bytes", "byte for byte"),
     ],
@@ -1594,21 +1968,29 @@ def _staged_subject(tmp_path: Path, wheel_name: str = WHEEL_NAME) -> dict[str, s
     subject.mkdir(parents=True)
     (subject / ARCHIVE_NAME).write_bytes(b"archive bytes")
     (subject / wheel_name).write_bytes(b"wheel bytes")
-    for name in ("archive-proof", "wheel-proof"):
+    for script in (BOOTSTRAP_PS1, BOOTSTRAP_SH):
+        (subject / script).write_bytes(script.encode("ascii"))
+    for name in ("archive-proof", "wheel-proof", "ps1-proof", "sh-proof"):
         (tmp_path / name).write_text("{}\n", encoding="utf-8")
     return {
         "RUNNER_TEMP": _bash_path(tmp_path / "temp"),
         "ARCHIVE_NAME": ARCHIVE_NAME,
         "ATTESTATION_SUFFIX": ATTESTATION_SUFFIX,
         "WHEEL_NAME": wheel_name,
+        "BOOTSTRAP_PS1": BOOTSTRAP_PS1,
+        "BOOTSTRAP_SH": BOOTSTRAP_SH,
         "EXPECTED_ARCHIVE_SHA256": hashlib.sha256(b"archive bytes").hexdigest(),
         "EXPECTED_WHEEL_SHA256": hashlib.sha256(b"wheel bytes").hexdigest(),
+        "EXPECTED_BOOTSTRAP_PS1_SHA256": hashlib.sha256(BOOTSTRAP_PS1.encode("ascii")).hexdigest(),
+        "EXPECTED_BOOTSTRAP_SH_SHA256": hashlib.sha256(BOOTSTRAP_SH.encode("ascii")).hexdigest(),
         "ARCHIVE_BUNDLE_PATH": _bash_path(tmp_path / "archive-proof"),
         "WHEEL_BUNDLE_PATH": _bash_path(tmp_path / "wheel-proof"),
+        "PS1_BUNDLE_PATH": _bash_path(tmp_path / "ps1-proof"),
+        "SH_BUNDLE_PATH": _bash_path(tmp_path / "sh-proof"),
     }
 
 
-def test_signing_stages_exactly_the_four_published_files(tmp_path):
+def test_signing_stages_exactly_the_eight_published_files(tmp_path):
     exports = _staged_subject(tmp_path)
     attest = REUSABLE["jobs"]["attest"]
 
@@ -1624,13 +2006,18 @@ def test_signing_stages_exactly_the_four_published_files(tmp_path):
                 ARCHIVE_NAME + ATTESTATION_SUFFIX,
                 WHEEL_NAME,
                 WHEEL_NAME + ATTESTATION_SUFFIX,
+                BOOTSTRAP_PS1,
+                BOOTSTRAP_PS1 + ATTESTATION_SUFFIX,
+                BOOTSTRAP_SH,
+                BOOTSTRAP_SH + ATTESTATION_SUFFIX,
             ]
         )
     )
 
 
 @pytest.mark.parametrize(
-    "case", ["extra-subject", "changed-archive", "changed-wheel", "missing-wheel"]
+    "case", ["extra-subject", "changed-archive", "changed-wheel", "missing-wheel",
+             "changed-script", "missing-script"]
 )
 def test_signing_refuses_a_payload_that_is_not_the_build_output(tmp_path, case):
     exports = _staged_subject(tmp_path)
@@ -1641,6 +2028,10 @@ def test_signing_refuses_a_payload_that_is_not_the_build_output(tmp_path, case):
         (subject / ARCHIVE_NAME).write_bytes(b"replaced archive bytes")
     elif case == "changed-wheel":
         (subject / WHEEL_NAME).write_bytes(b"replaced wheel bytes")
+    elif case == "changed-script":
+        (subject / BOOTSTRAP_SH).write_bytes(b"replaced script bytes")
+    elif case == "missing-script":
+        (subject / BOOTSTRAP_PS1).unlink()
     else:
         (subject / WHEEL_NAME).unlink()
 
@@ -1650,7 +2041,7 @@ def test_signing_refuses_a_payload_that_is_not_the_build_output(tmp_path, case):
     assert result.returncode != 0
 
 
-@pytest.mark.parametrize("empty", ["archive-proof", "wheel-proof"])
+@pytest.mark.parametrize("empty", ["archive-proof", "wheel-proof", "ps1-proof", "sh-proof"])
 def test_signing_refuses_an_empty_detached_proof(tmp_path, empty):
     exports = _staged_subject(tmp_path)
     (tmp_path / empty).write_text("", encoding="utf-8")
@@ -1682,6 +2073,11 @@ def test_every_run_block_matches_its_declared_shell(tmp_path):
     for label, shell, script in blocks:
         if shell == "python":
             compile(script, label, "exec")
+            continue
+        if shell == "powershell":
+            assert label == (
+                "_siteops-distribution.yaml:qualify:Install with the signed PowerShell bootstrap"
+            )
             continue
         assert shell == "bash", f"Add syntax coverage for {label}: {shell}"
         path = tmp_path / "block.sh"

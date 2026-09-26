@@ -27,7 +27,7 @@
     "templates/host-bootstrap/aksee/_partial.yaml",
     "templates/host-ops/aksee-upgrade/_partial.yaml"
   ],
-  "indexDigest": "b2117f7809b0118bafc0ffc2a8f073facb7ec58f4e1c819c255f614ebd205742",
+  "indexDigest": "5ead7a235c7164628a4e3adb0039c6a397df671d90e3da560eb6419b3bcb3bb6",
   "inputs": [
     {
       "digests": {
@@ -135,9 +135,9 @@
     },
     {
       "digests": {
-        "git-blob-sha1": "17aae77f09ab1dcafa93e085537f90c1a48aa665",
-        "git-blob-sha1-crlf": "c81292f430ef47b41f55aa0431e6c6268e931962",
-        "sha256": "b2f9649d13ef9f41f8fd2c5ceacd8562396b7b18a84f02f099a01672a3caefc0"
+        "git-blob-sha1": "c1fc531173e0533de3697d6b22b7482f63576ac9",
+        "git-blob-sha1-crlf": "52692385a007be525a1c09efc441d5eca69f453e",
+        "sha256": "317ef0af4e3b178ec84f40544eb2bf1e24ba7fb8eecb107fac7347cf6ae2632a"
       },
       "path": "manifests/aio-install/entry.yaml"
     },

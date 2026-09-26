@@ -304,9 +304,12 @@ the release evidence.
 
 The reference is an exact engine release, not a minimum-version range.
 Stable content requires a stable referenced engine release. Candidate
-preparation requires its complete native asset set: the ZIP, standalone wheel,
-and one proof for each. It freezes their GitHub digests and rejects an older
-release that contains only a ZIP.
+preparation requires its complete native asset set and freezes the GitHub
+digests. Earlier engine releases with four assets (ZIP, standalone
+wheel and a proof for each) remain valid references. Newer releases also
+carry both bootstrap scripts and their separate proofs. Referencing an
+older release with four assets does not make the bootstrap routes available.
+A release that contains only a ZIP is rejected.
 
 Add reviewed `workspaces` records to publish complete workspace packages
 and their proofs with the content release. Their kit version comes
@@ -330,9 +333,10 @@ while the source engine version follows its existing policy. The included
 engine receives a distinguishable build version such as
 `1.0.0b1+build.12345.1.gabcdef123456`.
 
-It creates one content release with the Site Ops ZIP and standalone wheel,
-plus any declared workspace packages and their proofs. Each signed subject
-has its own proof. It does not create another Site Ops tag.
+It creates one content release with the Site Ops ZIP, standalone wheel,
+`siteops-bootstrap.sh`, `siteops-bootstrap.ps1`, and a separate detached
+proof for each. Any declared workspace packages have their own proofs.
+It does not create another Site Ops tag.
 This option requires a prerelease content version. Stable content references
 a separately released engine instead.
 
@@ -420,8 +424,9 @@ retain their authored Markdown heading levels. Installation commands are
 included in the final notes before approval and remain bound to that approval.
 Download the complete candidate payload from the summary for a local trial.
 It includes the declared workspace assets and, when an engine is built, its
-installation ZIP, standalone wheel, and one proof for each. The pipeline
-authenticates both engine artifacts and confirms their application wheel bytes match.
+installation ZIP, standalone wheel, both bootstrap scripts, and a separate
+proof for each. The pipeline authenticates all four engine subjects and
+confirms the application wheel bytes in the ZIP and standalone wheel match.
 For a verified installation, consume only the ZIP and its proof by following
 [the installation guide](install-siteops.md).
 The generated online command is for the published release.

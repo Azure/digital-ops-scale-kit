@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import stat
 from collections import Counter
+from collections.abc import Collection
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
@@ -265,13 +266,28 @@ def guidance_path(path: PurePosixPath) -> PurePosixPath:
     )
 
 
-def conventional_candidate(path: PurePosixPath) -> bool:
+def conventional_candidate(
+    path: PurePosixPath, *, available_paths: Collection[str] = (),
+) -> bool:
     """Apply the shared discovery convention to a workspace-relative source path."""
     if not path.parts or path.parts[0] not in {"manifests", "samples"}:
         return False
     if any(part.startswith(".") or part.casefold() in _PROTECTED for part in path.parts):
         return False
-    if _is_guidance_file(path) or path.suffix.casefold() not in {".yaml", ".yml"}:
+    if (
+        _is_guidance_file(path)
+        or path.name.casefold().endswith(".inputs.yaml")
+        or (
+            path.name.casefold() == "inputs.yaml"
+            and path.parts[0] == "manifests"
+            and len(path.parts) > 2
+            and any(
+                path.with_name(name).as_posix().casefold() in available_paths
+                for name in ("manifest.yaml", "manifest.yml")
+            )
+        )
+        or path.suffix.casefold() not in {".yaml", ".yml"}
+    ):
         return False
     return (
         path.parts[0] == "manifests"
@@ -549,6 +565,11 @@ class ContentReader:
                         if self.directory_items > MAX_DIRECTORY_ITEMS:
                             raise BrowseError("scan.limit", "Directory inventory exceeds the limit.")
                         children.append(child)
+                available_paths = {
+                    self._relative(Path(child.path)).casefold() for child in children
+                    if child.name.casefold() in {"manifest.yaml", "manifest.yml"}
+                    and child.is_file(follow_symlinks=False)
+                }
                 for child in sorted(children, key=lambda item: item.name):
                     if child.name.startswith(".") or child.name.casefold() in _PROTECTED:
                         continue
@@ -571,7 +592,9 @@ class ContentReader:
                         continue
                     if child.is_dir(follow_symlinks=False):
                         stack.append((path, depth + 1))
-                    elif conventional_candidate(PurePosixPath(self._relative(path))):
+                    elif conventional_candidate(
+                        PurePosixPath(self._relative(path)), available_paths=available_paths,
+                    ):
                         candidates.add(path)
                         if len(candidates) > MAX_ENTRIES:
                             raise BrowseError("scan.limit", "Entry inventory exceeds the limit.")

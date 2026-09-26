@@ -1,17 +1,30 @@
 # Site targeting
 
-How `siteops` decides which sites a manifest applies to. Three sources contribute: the manifest's `sites:` list, the manifest's `selector:`, and the CLI `-l/--selector` flag. This page covers the precedence between them, the grammar of selectors, the site-identity model, and the no-match diagnostic.
+How `siteops` decides which Sites a manifest applies to. You can supply one
+explicit Site with `--site-file`, `--input-file`, or `--input`. Otherwise,
+the manifest's `sites:` list, its `selector:`, and the CLI `-l/--selector`
+flag determine the configured target set.
 
 ## Precedence
 
-CLI `-l/--selector` overrides the manifest. Inside a manifest, `sites:` and `selector:` are mutually exclusive. Resolution chooses the first present source in this order:
+An explicit Site replaces the manifest's target list or selector, and cannot
+be combined with `-l`. For configured Sites, CLI `-l/--selector` overrides
+the manifest. Inside a manifest, `sites:` and `selector:` are mutually
+exclusive. Resolution chooses the first present source in this order:
 
 1. **CLI `-l`** if provided. Replaces manifest targeting entirely.
 2. **Manifest `sites:`** explicit list of site names.
 3. **Manifest `selector:`** label expression filter.
 
-A manifest with all three sources empty is allowed as a library or partial.
-Ordinary validation needs no target. Planning and deployment require `-l`.
+Resource ID inputs remain an explicit single-Site route. Only
+`--read-resources` asks Site Ops to read the supplied, declared Azure
+resource IDs before constructing that Site. It cannot be combined with
+`--site-file` or `-l`. See [guided inputs](guided-inputs.md) for the
+provider read and privacy boundary.
+
+A manifest with all three configured targeting sources empty is allowed as a
+library or partial. Ordinary validation needs no target. Planning and
+deployment require `-l` or an explicit Site.
 
 ```yaml
 # manifests/aio-install/manifest.yaml
@@ -22,6 +35,12 @@ selector: "environment=dev"    # shipped default scope
 siteops deploy manifests/aio-install/manifest.yaml                    # all env=dev sites
 siteops deploy manifests/aio-install/manifest.yaml -l name=munich-dev # only munich-dev
 ```
+
+The default `environment=dev` selects every matching Site, including one
+that already runs AIO. To install on a separate new cohort, review a plan
+with explicit `-l name=...` values and use the same selector for deploy.
+Reapplying `aio-install` to an existing AIO Site can overwrite settings
+managed there.
 
 ## Selector grammar
 
@@ -87,7 +106,8 @@ Each deployable site is reachable by three identifiers, all of which work in `-l
 ## Library and partial manifests
 
 A manifest with no `sites:` and no `selector:` is a library or partial.
-Standalone planning or deployment requires `-l` to supply the target.
+Standalone planning or deployment requires `-l` or an explicit Site to supply
+the target. See [guided inputs](guided-inputs.md) for the one-Site path.
 
 ```yaml
 # manifests/diagnostics.yaml

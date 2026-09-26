@@ -8,6 +8,7 @@ import shutil
 import stat
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,7 +16,7 @@ import pytest
 import yaml
 
 from siteops import browse, browse_output, cli, yamlio
-from siteops.browse import API_VERSION, BrowseError, inspect_content
+from siteops.browse import API_VERSION, BrowseError, BrowseSource, inspect_content
 from siteops.browse_output import render_browse_plain, serialize_browse_json
 from siteops.compilation import TemplateCompilationSession
 from siteops.executor import AzCliExecutor, DeploymentResult
@@ -87,6 +88,107 @@ def test_explicit_empty_guidance_remains_an_author_statement(tmp_path):
     result = inspect_content(tmp_path, "example")
     assert result.document()["entries"][0]["guidance"]["inputs"] == []
     assert "not an environment assessment" in render_browse_plain(result)
+
+
+def test_selected_card_distinguishes_advice_from_input_contract(tmp_path):
+    _entry(tmp_path)
+    local = inspect_content(tmp_path, "example")
+    plain = render_browse_plain(local)
+    assert "Authored Site input guidance" in plain
+    assert "descriptive, not the executable input contract" in plain
+    assert "siteops inputs" in plain
+    assert "typed answers where available, or select a configured Site" in " ".join(plain.split())
+    assert "Next: choose a configured Site" not in plain
+
+    remote = replace(
+        local,
+        source=BrowseSource(kind="github", reference="github:example/repo"),
+    )
+    remote_plain = render_browse_plain(remote)
+    assert "Pin an approved workspace" in remote_plain
+    assert "Remote metadata cannot validate typed inputs" in remote_plain
+
+
+def test_aio_guidance_distinguishes_typed_defaults_and_packaged_tools():
+    root = Path(__file__).resolve().parents[1]
+    workspace = root / "workspaces" / "iot-operations"
+    card = render_browse_plain(inspect_content(workspace, "aio-install"))
+    assert "environment and country" in card
+    assert "typed AIO route defaults to 2608" in card
+    assert "compiled ARM JSON" in card
+    assert "Authored Site input guidance" in card
+
+
+def test_typed_input_companion_is_not_another_deployment_entry(tmp_path):
+    manifest = _entry(tmp_path)
+    manifest.with_name("inputs.yaml").write_text(
+        "apiVersion: siteops.inputs/v1\nkind: SiteInputContract\ninputs: []\n",
+        encoding="utf-8",
+    )
+
+    result = inspect_content(tmp_path, include_partials=True)
+
+    assert [entry.name for entry in result.entries] == ["example"]
+    assert result.status == "complete"
+
+
+def test_root_manifest_named_inputs_remains_discoverable(tmp_path):
+    _entry(tmp_path, "inputs", relative="manifests/inputs.yaml")
+    result = inspect_content(tmp_path)
+    assert [entry.name for entry in result.entries] == ["inputs"]
+    assert result.status == "complete"
+
+
+def test_nested_inputs_manifest_remains_discoverable_without_a_sibling_entry(tmp_path):
+    manifest = _entry(tmp_path, "network", relative="manifests/network/inputs.yaml")
+    companion = _entry(tmp_path, "storage", relative="manifests/storage/manifest.yaml")
+    companion.with_name("inputs.yaml").write_text(
+        "apiVersion: siteops.inputs/v1\nkind: SiteInputContract\ninputs: []\n",
+        encoding="utf-8",
+    )
+
+    result = inspect_content(tmp_path)
+    assert result.status == "complete"
+    assert {entry.name for entry in result.entries} == {"network", "storage"}
+    assert next(entry.path for entry in result.entries if entry.name == "network") == (
+        "manifests/network/inputs.yaml"
+    )
+    assert cli.resolve_manifest_path("network", tmp_path) == manifest
+
+
+def test_ambiguous_nested_inputs_manifest_can_be_explicitly_listed(tmp_path):
+    _entry(tmp_path, "storage", relative="manifests/storage/manifest.yaml")
+    manifest = _entry(tmp_path, "network", relative="manifests/storage/inputs.yaml")
+    assert [entry.name for entry in inspect_content(tmp_path).entries] == ["storage"]
+
+    (tmp_path / "content.yaml").write_text(yaml.safe_dump({
+        "apiVersion": API_VERSION,
+        "kind": "WorkspaceContent",
+        "entries": ["manifests/storage/inputs.yaml"],
+    }), encoding="utf-8")
+    assert {entry.name for entry in inspect_content(tmp_path).entries} == {"network", "storage"}
+    assert cli.resolve_manifest_path("network", tmp_path) == manifest
+
+
+def test_nested_inputs_is_not_suppressed_by_a_sibling_directory(tmp_path):
+    _entry(tmp_path, "network", relative="manifests/network/inputs.yaml")
+    (tmp_path / "manifests" / "network" / "manifest.yaml").mkdir()
+
+    result = inspect_content(tmp_path)
+    assert result.status == "complete"
+    assert [entry.name for entry in result.entries] == ["network"]
+
+
+def test_flat_manifest_input_companion_preserves_name_lookup(tmp_path):
+    manifest = _entry(tmp_path, "storage", relative="manifests/storage.yaml")
+    manifest.with_name("storage.inputs.yaml").write_text(
+        "apiVersion: siteops.inputs/v1\nkind: SiteInputContract\ninputs: []\n",
+        encoding="utf-8",
+    )
+    result = inspect_content(tmp_path, "storage")
+    assert result.status == "complete"
+    assert result.selected
+    assert [entry.name for entry in result.entries] == ["storage"]
 
 
 def test_category_never_hides_unclassified_or_partial_role(tmp_path):
