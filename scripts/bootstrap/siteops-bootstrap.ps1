@@ -269,6 +269,80 @@ function Require-PrivateDataRoot([string]$Path) {
         }
     }
 }
+function Require-PrivateExecutablePath([string]$Path, [string]$PrivateRoot) {
+    function Reject([string]$Code) {
+        Fail "Choose a private Windows tool location. $Code Use trusted, non-symlinked directories and executables."
+    }
+    if ($Path -cnotmatch '^[A-Za-z]:\\' -or $PrivateRoot -cnotmatch '^[A-Za-z]:\\') {
+        Reject 'TOOL_PATH'
+    }
+    try {
+        $fullPath = [IO.Path]::GetFullPath($Path)
+        $fullRoot = [IO.Path]::GetFullPath($PrivateRoot)
+    } catch {
+        Reject 'TOOL_PATH'
+    }
+    if ($fullPath -cne $Path -or $fullRoot -cne $PrivateRoot) {
+        Reject 'TOOL_PATH'
+    }
+    $root = $PrivateRoot.TrimEnd('\')
+    if (-not $Path.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        Reject 'TOOL_PATH'
+    }
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $trusted = @($sid, 'S-1-5-18', 'S-1-5-32-544', 'S-1-3-4')
+    $trustedOwners = $trusted + 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+    $nodes = [Collections.Generic.List[string]]::new()
+    $parent = Split-Path -Parent $Path
+    while ($parent) {
+        $nodes.Add($parent)
+        $next = Split-Path -Parent $parent
+        if (-not $next -or $next -eq $parent) { break }
+        $parent = $next
+    }
+    $nodes.Reverse()
+    $nodes.Add($Path)
+    foreach ($nodePath in $nodes) {
+        $isFile = $nodePath -ceq $Path
+        try {
+            $node = Get-Item -LiteralPath $nodePath -Force -ErrorAction Stop
+        } catch {
+            Reject 'TOOL_TYPE'
+        }
+        if (($isFile -and $node.PSIsContainer) -or
+            (-not $isFile -and -not $node.PSIsContainer) -or
+            ($node.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            Reject 'TOOL_TYPE'
+        }
+        try {
+            $acl = if ($isFile) {
+                [IO.File]::GetAccessControl($nodePath)
+            } else {
+                [IO.Directory]::GetAccessControl($nodePath)
+            }
+            $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+            $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+        } catch {
+            Reject 'TOOL_ACL'
+        }
+        if ($owner -notin $trustedOwners) {
+            Reject 'TOOL_OWNER'
+        }
+        $privateNode = $isFile -or $nodePath -ieq $root -or
+            $nodePath.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)
+        # Within the selected tool root, create-only rights can plant files loaded by an executable.
+        $unsafeRights = if ($privateNode) { 0x500D0156 } else { 0x500D0140 }
+        foreach ($rule in $rules) {
+            if ($rule.AccessControlType -ne 'Allow' -or $rule.IdentityReference.Value -in $trusted -or
+                ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly)) {
+                continue
+            }
+            if ([int]$rule.FileSystemRights -band $unsafeRights) {
+                Reject 'TOOL_ACL'
+            }
+        }
+    }
+}
 function WinGetPackage([string]$Id, [bool]$UserScope = $true) {
     $winget = Native 'winget.exe'
     if (-not $winget) { Fail "Use an approved software channel to install $Id. WinGet is unavailable." }
@@ -302,6 +376,7 @@ if (-not $python) {
     if (-not $python) {
         $candidate = Join-Path $env:LOCALAPPDATA 'Programs\Python\Python312\python.exe'
         if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            Require-PrivateExecutablePath $candidate $env:LOCALAPPDATA
             $candidateVersion = & $candidate -c 'import sys;print(sys.version_info[0],sys.version_info[1],sys.maxsize>4294967296)'
             if ($LASTEXITCODE -eq 0 -and $candidateVersion -match '^3 12 True$') {
                 $python = $candidate
@@ -333,6 +408,7 @@ if ($WithAzureCli -and -not (AzureCli)) {
 $pipx = Native 'pipx.exe'
 $privatePipx = Join-Path $data 'tools\pipx\Scripts\pipx.exe'
 if (Test-Path -LiteralPath $privatePipx -PathType Leaf) { $pipx = $privatePipx }
+if ($pipx -ieq $privatePipx) { Require-PrivateExecutablePath $pipx $data }
 $pipxVersion = if ($pipx) { & $pipx --version 2>$null } else { '' }
 if ($pipxVersion -cne '1.17.2') {
     $tools = Join-Path $data 'tools'
@@ -349,11 +425,13 @@ if ($pipxVersion -cne '1.17.2') {
         if ($LASTEXITCODE -ne 0) { Fail 'The user pipx environment could not be created.' }
     }
     $toolPython = Join-Path $installed 'Scripts\python.exe'
+    Require-PrivateExecutablePath $toolPython $data
     Require-ApprovedPythonIndex $toolPython install
     & $toolPython -m pip install --only-binary=:all: --no-cache-dir 'pipx==1.17.2'
     if ($LASTEXITCODE -ne 0) { Fail 'pipx could not be installed from the configured feed.' }
     $pipx = Join-Path $installed 'Scripts\pipx.exe'
 }
+if ($pipx -ieq $privatePipx) { Require-PrivateExecutablePath $pipx $data }
 if ((& $pipx --version) -cne '1.17.2') { Fail 'pipx 1.17.2 is required.' }
 
 function InvokePipx([string[]]$Arguments, [string]$FailureMessage) {
@@ -576,6 +654,7 @@ try {
         & $python -m venv $backendTools
         if ($LASTEXITCODE -ne 0) { Fail 'Python venv is unavailable.' }
         $backendPython = Join-Path $backendTools 'Scripts\python.exe'
+        Require-PrivateExecutablePath $backendPython $download
         Require-ApprovedPythonIndex $backendPython download
         & $backendPython -m pip download 'pip==26.2.1' `
             --no-deps --only-binary=:all: --dest $wheelhouse
@@ -614,6 +693,7 @@ try {
     if (-not (Test-Path -LiteralPath $expectedCommand -PathType Leaf)) {
         Fail 'pipx did not expose the selected siteops command.'
     }
+    Require-PrivateExecutablePath $expectedCommand $binDir
     $env:PATH = $binDir + ';' + $env:PATH
     $siteops = Native 'siteops.exe'
     if (-not $siteops -or $siteops -ine $expectedCommand -or

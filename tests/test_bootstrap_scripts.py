@@ -186,6 +186,25 @@ def test_windows_bootstrap_admits_private_data_root_before_retained_tool_use():
     )
 
 
+def test_windows_bootstrap_checks_managed_executables_before_running_them():
+    powershell = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
+    assert powershell.index("Require-PrivateExecutablePath $candidate $env:LOCALAPPDATA") < (
+        powershell.index("$candidateVersion = & $candidate -c")
+    )
+    assert powershell.index("Require-PrivateExecutablePath $pipx $data") < (
+        powershell.index("$pipxVersion = if ($pipx)")
+    )
+    assert powershell.index("Require-PrivateExecutablePath $toolPython $data") < (
+        powershell.index("Require-ApprovedPythonIndex $toolPython install")
+    )
+    assert powershell.index("Require-PrivateExecutablePath $backendPython $download") < (
+        powershell.index("Require-ApprovedPythonIndex $backendPython download")
+    )
+    assert powershell.index("Require-PrivateExecutablePath $expectedCommand $binDir") < (
+        powershell.index("$siteops = Native 'siteops.exe'")
+    )
+
+
 def _windows_private_root_wrapper(tmp_path: Path, setup: str = "") -> Path:
     source = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
     helper = re.search(r"(?ms)^function Require-PrivateDataRoot\([^\n]*\) \{.*?^\}", source)
@@ -201,6 +220,230 @@ def _windows_private_root_wrapper(tmp_path: Path, setup: str = "") -> Path:
         encoding="utf-8",
     )
     return wrapper
+
+
+def _windows_selected_tool_wrapper(tmp_path: Path, kind: str) -> Path:
+    source = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
+    root = re.search(r"(?ms)^function Require-PrivateDataRoot\([^\n]*\) \{.*?^\}", source)
+    tool = re.search(r"(?ms)^function Require-PrivateExecutablePath\([^\n]*\) \{.*?^\}", source)
+    assert root
+    if kind == "pipx":
+        selection = source.split("$pipx = Native 'pipx.exe'\n", 1)[1].split(
+            "if ($pipxVersion -cne '1.17.2')", 1,
+        )[0]
+        setup = (
+            "function Native([string]$name) { return $null }\n"
+            "$data=$env:TEST_DATA_ROOT\n"
+            "Require-PrivateDataRoot $data\n"
+        )
+    else:
+        candidate = "        $candidate = Join-Path $env:LOCALAPPDATA 'Programs\\Python\\Python312\\python.exe'"
+        selection = candidate + source.split(candidate, 1)[1].split(
+            "\n    }\n    if (-not $python)", 1,
+        )[0]
+        setup = (
+            "$env:LOCALAPPDATA=$env:TEST_LOCALAPPDATA\n"
+            "Require-PrivateDataRoot $env:TEST_DATA_ROOT\n"
+            "$python=$null\n"
+        )
+    wrapper = tmp_path / f"select-{kind}.ps1"
+    wrapper.write_text(
+        'function Fail([string]$message) { throw "Site Ops installation: $message" }\n'
+        + root.group(0) + "\n"
+        + (tool.group(0) + "\n" if tool else "")
+        + "$ErrorActionPreference='Stop'\n"
+        + setup
+        + "$ErrorActionPreference='Continue'\n"
+        + selection + "\n"
+        + "'TOOL_SELECTION_COMPLETED'\n",
+        encoding="utf-8",
+    )
+    return wrapper
+
+
+def _windows_tool_probe(
+    wrapper: Path, root: Path, local_appdata: Path,
+    executable: Path | None = None, private_root: Path | None = None,
+):
+    env = {
+        **os.environ,
+        "TEST_DATA_ROOT": str(root),
+        "TEST_LOCALAPPDATA": str(local_appdata),
+    }
+    if executable is not None:
+        env["TEST_TOOL"] = str(executable)
+        env["TEST_PRIVATE_ROOT"] = str(private_root)
+    return subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
+        cwd=wrapper.parent,
+        env=env,
+        capture_output=True, text=True, timeout=20,
+    )
+
+
+def _windows_tool_path_wrapper(tmp_path: Path) -> Path:
+    source = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
+    root = re.search(r"(?ms)^function Require-PrivateDataRoot\([^\n]*\) \{.*?^\}", source)
+    tool = re.search(r"(?ms)^function Require-PrivateExecutablePath\([^\n]*\) \{.*?^\}", source)
+    assert root and tool
+    wrapper = tmp_path / "check-tool.ps1"
+    wrapper.write_text(
+        'function Fail([string]$message) { throw "Site Ops installation: $message" }\n'
+        + root.group(0) + "\n" + tool.group(0) + "\n"
+        + "$ErrorActionPreference='Stop'\n"
+        "Require-PrivateDataRoot $env:TEST_DATA_ROOT\n"
+        "Require-PrivateExecutablePath $env:TEST_TOOL $env:TEST_PRIVATE_ROOT\n"
+        "'TOOL_ADMITTED'\n",
+        encoding="utf-8",
+    )
+    return wrapper
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Native Windows ACL admission needs Windows.")
+@pytest.mark.parametrize("kind", ["pipx", "python"])
+def test_windows_bootstrap_rejects_untrusted_selected_executable_path(tmp_path, kind):
+    local_appdata = tmp_path / "LocalAppData"
+    local_appdata.mkdir()
+    root = local_appdata / "siteops"
+    initial = _windows_tool_probe(_windows_private_root_wrapper(tmp_path), root, local_appdata)
+    assert initial.returncode == 0, initial.stdout + initial.stderr
+
+    if kind == "pipx":
+        shared = root / "tools"
+        executable = shared / "pipx" / "Scripts" / "pipx.exe"
+        executable.parent.mkdir(parents=True)
+        rights = "(OI)(CI)M"
+    else:
+        shared = local_appdata
+        executable = shared / "Programs" / "Python" / "Python312" / "python.exe"
+        rights = "(OI)(CI)(WD,AD)"
+    grant = subprocess.run(
+        ["icacls.exe", str(shared), "/grant", f"*S-1-5-32-545:{rights}"],
+        capture_output=True, text=True, timeout=20,
+    )
+    if grant.returncode:
+        pytest.skip("The local test user cannot change the synthetic fixture ACL.")
+    try:
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(shutil.which("where.exe"), executable)
+        selected = _windows_tool_probe(_windows_selected_tool_wrapper(tmp_path, kind), root, local_appdata)
+        assert selected.returncode != 0
+        assert "TOOL_ACL" in selected.stderr
+        assert "TOOL_SELECTION_COMPLETED" not in selected.stdout
+    finally:
+        subprocess.run(
+            ["icacls.exe", str(shared), "/remove:g", "*S-1-5-32-545"],
+            capture_output=True, text=True, check=True, timeout=20,
+        )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Native Windows ACL admission needs Windows.")
+@pytest.mark.parametrize("kind", ["pipx", "python"])
+def test_windows_bootstrap_accepts_private_selected_executable_path(tmp_path, kind):
+    local_appdata = tmp_path / "LocalAppData"
+    local_appdata.mkdir()
+    root = local_appdata / "siteops"
+    initial = _windows_tool_probe(_windows_private_root_wrapper(tmp_path), root, local_appdata)
+    assert initial.returncode == 0, initial.stdout + initial.stderr
+    if kind == "pipx":
+        executable = root / "tools" / "pipx" / "Scripts" / "pipx.exe"
+    else:
+        executable = local_appdata / "Programs" / "Python" / "Python312" / "python.exe"
+    executable.parent.mkdir(parents=True)
+    shutil.copy2(shutil.which("where.exe"), executable)
+    selected = _windows_tool_probe(_windows_selected_tool_wrapper(tmp_path, kind), root, local_appdata)
+    assert selected.returncode == 0, selected.stdout + selected.stderr
+    assert "TOOL_SELECTION_COMPLETED" in selected.stdout
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Native Windows ACL admission needs Windows.")
+def test_windows_bootstrap_rejects_untrusted_executable_file_even_under_private_parent(tmp_path):
+    local_appdata = tmp_path / "LocalAppData"
+    local_appdata.mkdir()
+    root = local_appdata / "siteops"
+    wrapper = _windows_tool_path_wrapper(tmp_path)
+    initial = _windows_tool_probe(_windows_private_root_wrapper(tmp_path), root, local_appdata)
+    assert initial.returncode == 0, initial.stdout + initial.stderr
+    executable = root / "tools" / "pipx" / "Scripts" / "pipx.exe"
+    executable.parent.mkdir(parents=True)
+    shutil.copy2(shutil.which("where.exe"), executable)
+    grant = subprocess.run(
+        ["icacls.exe", str(executable), "/grant", "*S-1-5-32-545:M"],
+        capture_output=True, text=True, timeout=20,
+    )
+    if grant.returncode:
+        pytest.skip("The local test user cannot change the synthetic executable ACL.")
+    try:
+        rejected = _windows_tool_probe(wrapper, root, local_appdata, executable, root)
+        assert rejected.returncode != 0
+        assert "TOOL_ACL" in rejected.stderr
+        assert "TOOL_ADMITTED" not in rejected.stdout
+    finally:
+        subprocess.run(
+            ["icacls.exe", str(executable), "/remove:g", "*S-1-5-32-545"],
+            capture_output=True, text=True, check=True, timeout=20,
+        )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Native Windows junction rules need Windows.")
+def test_windows_bootstrap_rejects_linked_executable_ancestor(tmp_path):
+    local_appdata = tmp_path / "LocalAppData"
+    local_appdata.mkdir()
+    root = local_appdata / "siteops"
+    wrapper = _windows_tool_path_wrapper(tmp_path)
+    initial = _windows_tool_probe(_windows_private_root_wrapper(tmp_path), root, local_appdata)
+    assert initial.returncode == 0, initial.stdout + initial.stderr
+    external = tmp_path / "elsewhere"
+    (external / "pipx" / "Scripts").mkdir(parents=True)
+    alias = root / "tools"
+    try:
+        alias.symlink_to(external, target_is_directory=True)
+    except OSError:
+        junction = subprocess.run(
+            [
+                "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                "New-Item -ItemType Junction -Path $env:TEST_ALIAS -Target $env:TEST_TARGET | Out-Null",
+            ],
+            env={**os.environ, "TEST_ALIAS": str(alias), "TEST_TARGET": str(external)},
+            capture_output=True, text=True, timeout=20,
+        )
+        if junction.returncode:
+            pytest.skip("Creating a test reparse point is unavailable on this host.")
+    executable = alias / "pipx" / "Scripts" / "pipx.exe"
+    shutil.copy2(shutil.which("where.exe"), executable)
+    rejected = _windows_tool_probe(wrapper, root, local_appdata, executable, root)
+    assert rejected.returncode != 0
+    assert "TOOL_TYPE" in rejected.stderr
+    assert "TOOL_ADMITTED" not in rejected.stdout
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Native Windows ACL admission needs Windows.")
+def test_windows_bootstrap_accepts_create_only_ancestor_above_private_tool_root(tmp_path):
+    local_appdata = tmp_path / "LocalAppData"
+    local_appdata.mkdir()
+    root = local_appdata / "siteops"
+    initial = _windows_tool_probe(_windows_private_root_wrapper(tmp_path), root, local_appdata)
+    assert initial.returncode == 0, initial.stdout + initial.stderr
+    executable = root / "tools" / "pipx" / "Scripts" / "pipx.exe"
+    executable.parent.mkdir(parents=True)
+    shutil.copy2(shutil.which("where.exe"), executable)
+    grant = subprocess.run(
+        ["icacls.exe", str(tmp_path), "/grant", "*S-1-5-32-545:(WD,AD)"],
+        capture_output=True, text=True, timeout=20,
+    )
+    if grant.returncode:
+        pytest.skip("The local test user cannot change the synthetic ancestor ACL.")
+    try:
+        accepted = _windows_tool_probe(
+            _windows_tool_path_wrapper(tmp_path), root, local_appdata, executable, root,
+        )
+        assert accepted.returncode == 0, accepted.stdout + accepted.stderr
+        assert "TOOL_ADMITTED" in accepted.stdout
+    finally:
+        subprocess.run(
+            ["icacls.exe", str(tmp_path), "/remove:g", "*S-1-5-32-545"],
+            capture_output=True, text=True, check=True, timeout=20,
+        )
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows ACL and junction rules need Windows.")
