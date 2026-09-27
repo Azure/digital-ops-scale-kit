@@ -1,4 +1,9 @@
-# Deploy AIO to your first site
+# Deploy AIO from a local checkout
+
+For an approved workspace package with a typed input contract, use the
+[single-Site guided path](guided-inputs.md). It needs no repository clone or
+handwritten Site file. This page retains the local checkout route for
+operators who want a reusable configured Site and fleet targeting.
 
 Use one existing Arc-connected Kubernetes cluster to learn the workflow:
 configure a site, review a plan, then deploy Azure IoT Operations.
@@ -27,9 +32,12 @@ for later cleanup.
 ## 1. Get the CLI and workspace
 
 Choose a [Scale Kit release](https://github.com/Azure/digital-ops-scale-kit/releases)
-that provides installation assets or links to a Site Ops release. Run the
-**Install Site Ops** command in its notes, or follow the linked engine
-release's instructions. That selects the engine version for this content.
+that provides installation assets or links to a compatible Site Ops release.
+Use an installation route that the selected engine release actually publishes:
+the [verified bundle or direct wheel](install-siteops.md), a bootstrap script
+with its proof when available, or your managed software channel. A verified
+bootstrap route authenticates the script before execution. Match the engine
+version required by this content.
 Then confirm the command is available:
 
 ```bash

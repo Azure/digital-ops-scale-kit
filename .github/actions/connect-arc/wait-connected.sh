@@ -13,8 +13,14 @@ RESOURCE_GROUP="${2:?resource group required}"
 MAX_ATTEMPTS=20
 SLEEP_SECONDS=15
 
-ERR_FILE=$(mktemp)
-trap 'rm -f "${ERR_FILE}"' EXIT
+if [[ "${PRIVATE_PROVIDER_ERRORS:-false}" == "true" ]]; then
+  umask 077
+  mkdir -p "$RUNNER_TEMP/connectedk8s-diagnostics"
+  ERR_FILE="$RUNNER_TEMP/connectedk8s-diagnostics/wait-connected.err"
+else
+  ERR_FILE=$(mktemp)
+  trap 'rm -f "${ERR_FILE}"' EXIT
+fi
 
 for attempt in $(seq 1 $MAX_ATTEMPTS); do
   if STATUS=$(az connectedk8s show \

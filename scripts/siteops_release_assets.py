@@ -17,6 +17,7 @@ MAX_ASSETS = 512
 MAX_ASSET_BYTES = 4 * 1024 * 1024 * 1024
 ARCHIVE_NAME = "siteops-install.zip"
 PROOF_SUFFIX = ".attestation.jsonl"
+BOOTSTRAP_SCRIPTS = ("siteops-bootstrap.ps1", "siteops-bootstrap.sh")
 _WHEEL = re.compile(r"siteops-[0-9A-Za-z][0-9A-Za-z.!+_~-]*-py3-none-any\.whl")
 _RESERVED_NAMES = {
     "CON", "PRN", "AUX", "NUL",
@@ -93,14 +94,24 @@ def _unique_assets(values: tuple[ReleaseAsset, ...]) -> None:
         raise ReleaseAssetsError("Release asset filenames must be unique without case collisions.")
 
 
-def native_engine_wheel(assets: tuple[ReleaseAsset, ...]) -> ReleaseAsset:
-    """Require the engine ZIP and wheel, each with a detached attestation proof."""
+def native_engine_wheel(
+    assets: tuple[ReleaseAsset, ...], *, require_bootstrap: bool = False,
+) -> ReleaseAsset:
+    """Require the exact native subjects and proofs, including bootstrap for new builds."""
     _unique_assets(assets)
     wheels = [asset for asset in assets if _WHEEL.fullmatch(asset.name)]
-    if len(wheels) != 1 or {asset.name for asset in assets} != {
+    if len(wheels) != 1:
+        raise ReleaseAssetsError("The engine release requires its complete native asset set.")
+    native = {
         ARCHIVE_NAME, ARCHIVE_NAME + PROOF_SUFFIX,
         wheels[0].name, wheels[0].name + PROOF_SUFFIX,
-    }:
+    }
+    bootstrap = {
+        name for script in BOOTSTRAP_SCRIPTS
+        for name in (script, script + PROOF_SUFFIX)
+    }
+    names = {asset.name for asset in assets}
+    if names != (native | bootstrap) and (require_bootstrap or names != native):
         raise ReleaseAssetsError("The engine release requires its complete native asset set.")
     return wheels[0]
 
@@ -245,7 +256,7 @@ def publication_assets(plan: dict[str, Any], inventory: FrozenReleaseAssets) -> 
     if plan["siteops"]["bundle"]:
         if inventory.engine is not None:
             raise ReleaseAssetsError("A built engine cannot also select a referenced engine.")
-        native_engine_wheel(native)
+        native_engine_wheel(native, require_bootstrap=True)
     elif native or inventory.engine is None or inventory.engine.tag != plan["siteops"]["releaseTag"]:
         raise ReleaseAssetsError("The referenced engine differs from the reviewed selection.")
     return native, workspace

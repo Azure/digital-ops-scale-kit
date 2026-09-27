@@ -13,6 +13,9 @@ existing rules.
 
 | I want to... | Do this |
 |---|---|
+| Supply one complete Site without storing it in the workspace | Pass `--site-file FILE` to `validate`, `plan`, or `deploy` |
+| Answer a selected deployment's typed inputs | Use [`siteops inputs`](guided-inputs.md), then pass `--input-file FILE` or repeat `--input NAME=VALUE` |
+| Preview a resolved Site without writing it | Use `siteops inputs <manifest> --input-file FILE` with complete answers |
 | Add a new deployable site | Drop `my-site.yaml` under `workspace/sites/` (any subdir) or an extras dir |
 | Share a reusable template across sites | Put it in `workspace/sites/<name>.yaml` (same dir) or `workspace/sites/shared/<name>.yaml` (subdir) and reference via `inherits:` |
 | Override a committed site at runtime without a PR | Put `my-site.yaml` in `workspace/sites.local/` (overlay merges, `inherits:` stripped) |
@@ -98,6 +101,11 @@ properties:
 ### Site identity
 
 A site is reachable by its filename basename, its relative path under the trusted directory, or its internal `name:` field. The three forms are symmetric. By convention `name:` matches the basename, but it can differ when a friendlier identifier is needed. See [targeting.md](targeting.md) for the full identity model and the workspace invariants the orchestrator enforces at load time.
+
+Saving with `siteops inputs ... --save-site` into the selected `sites/`
+inventory checks Site identities before writing. A later plan loads that
+inventory again so concurrent or subsequent configuration changes are
+still checked.
 
 **Subscription-level site** (for shared resources):
 

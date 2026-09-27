@@ -79,7 +79,7 @@ def _card(
     if entry.targeting_known and not entry.selector and not entry.sites:
         lines.append("  No targets declared. Supply an explicit selector when planning.")
     lines.append("  Targets have not been resolved. A CLI selector replaces manifest targeting.")
-    lines.extend(("", "Supported Site inputs"))
+    lines.extend(("", "Authored Site input guidance"))
     if guidance.inputs is None:
         lines.append("  Input guidance is not documented. This does not mean no inputs are required.")
     elif not guidance.inputs:
@@ -96,6 +96,25 @@ def _card(
                 lines.extend(_wrap(
                     "Default behavior: " + _text(item.default_behavior), indent="    "
                 ))
+    if guidance.role == "standalone":
+        if local or project is not None:
+            lines.extend((
+                "", "Input guidance above is descriptive, not the executable input contract.",
+            ))
+            lines.extend(_wrap(
+                "Use `siteops inputs NAME` with this selected workspace or project "
+                "for exact typed answers, if the entry declares a contract.",
+                indent="",
+            ))
+        else:
+            lines.extend((
+                "", "Remote metadata cannot validate typed inputs.",
+            ))
+            lines.extend(_wrap(
+                "Pin an approved workspace or choose reviewed local content before "
+                "using `siteops inputs`.",
+                indent="",
+            ))
     lines.extend(("", "Supplied during deployment"))
     if guidance.supplied is None:
         lines.append("  Step-supplied inputs are not documented.")
@@ -124,7 +143,14 @@ def _card(
             or not any(character in workspace + entry.path for character in "&|<>%!^")
         )
     )
-    if project is not None:
+    if project is not None and guidance.role == "standalone":
+        lines.extend((
+            "", "Use typed answers where available, or select a configured Site.",
+            "Inspect typed answers with `siteops inputs NAME`.",
+            "Use plan or deploy with the same project and source/trust options.",
+            "For configured Sites, choose an explicit selector and review the executable plan.",
+        ))
+    elif project is not None:
         lines.extend((
             "", "Use plan or deploy with the same project and source/trust options.",
             "Choose an explicit Site selector and review the executable plan before deployment.",
@@ -136,9 +162,10 @@ def _card(
         ))
     elif guidance.role == "standalone" and command_paths_safe:
         lines.extend((
-            "", "Next: choose a configured Site, then review its executable plan.",
-            f"{shell} commands (not Command Prompt):" if shell == "PowerShell"
-            else f"{shell} commands:",
+            "", "Next: use typed answers where available, or select a configured Site.",
+            "Inspect typed answers with `siteops inputs NAME`.",
+            f"Configured-Site {shell} commands (not Command Prompt):" if shell == "PowerShell"
+            else f"Configured-Site {shell} commands:",
             f"  siteops -w {_quote(workspace)} plan "
             f"{_quote(explicit_manifest_reference(entry.path))} -l 'name=<site>'",
             "After review, deploy with the same explicit target. Deployment prepares again.",

@@ -1154,7 +1154,9 @@ jobs:
               exit 1
             fi
             wheel="$RUNNER_TEMP/release-bundle/$BUILD_WHEEL_NAME"
-            for asset in "$archive" "$wheel"; do
+            for asset in "$archive" "$wheel" \
+              "$RUNNER_TEMP/release-bundle/siteops-bootstrap.ps1" \
+              "$RUNNER_TEMP/release-bundle/siteops-bootstrap.sh"; do
               if ! timeout --kill-after=5 120 gh attestation verify "$asset" \
                 --bundle "${asset}${ATTESTATION_SUFFIX}" --repo "$GITHUB_REPOSITORY" \
                 --cert-identity "$SIGNER_IDENTITY" --signer-digest "$SOURCE_SHA" \
@@ -1206,16 +1208,18 @@ jobs:
           archive_name = os.environ["ARCHIVE_NAME"]
           wheel_name = os.environ["BUILD_WHEEL_NAME"]
           suffix = os.environ["ATTESTATION_SUFFIX"]
+          scripts = ["siteops-bootstrap.ps1", "siteops-bootstrap.sh"]
           expected_names = [archive_name, archive_name + suffix, wheel_name, wheel_name + suffix]
+          expected_names.extend(name for script in scripts for name in (script, script + suffix))
           entries = list(bundle_path.iterdir())
           if (
               sorted(entry.name for entry in entries) != sorted(expected_names)
               or any(entry.is_symlink() or not entry.is_file() for entry in entries)
-              or len({entry.name for entry in entries}) != 4
+              or len({entry.name for entry in entries}) != 8
           ):
               raise SystemExit("::error::The staged release asset inventory is invalid.")
           paths = {name: bundle_path / name for name in expected_names}
-          if any(paths[name].stat().st_size == 0 for name in (archive_name + suffix, wheel_name + suffix)):
+          if any(paths[name].stat().st_size == 0 for name in expected_names):
               raise SystemExit("::error::A staged attestation proof is empty.")
 
           def digest(path):
@@ -1283,7 +1287,7 @@ jobs:
           archive = os.environ["ARCHIVE_NAME"]
           suffix = os.environ["ATTESTATION_SUFFIX"]
           values = release.get("assets", [])
-          if not isinstance(values, list) or len(values) != 4:
+          if not isinstance(values, list) or len(values) not in (4, 8):
               raise SystemExit("::error::The referenced Site Ops release has no complete native asset set.")
           by_name = {asset.get("name"): asset for asset in values if isinstance(asset, dict)}
           wheels = [
@@ -1296,6 +1300,12 @@ jobs:
               raise SystemExit("::error::The referenced Site Ops release has an invalid wheel inventory.")
           wheel = wheels[0]
           names = [archive, archive + suffix, wheel, wheel + suffix]
+          if len(values) == 8:
+              names.extend(
+                  name
+                  for script in ("siteops-bootstrap.ps1", "siteops-bootstrap.sh")
+                  for name in (script, script + suffix)
+              )
           if set(by_name) != set(names):
               raise SystemExit("::error::The referenced Site Ops release has no complete native asset set.")
           assets = []

@@ -15,6 +15,8 @@
 #   - Uses `set -euo pipefail` throughout. Kubeconfig comes from the
 #     create-k3s-cluster action rather than a separate input.
 #   - `--only-show-errors` trims non-error Azure CLI chatter from logs.
+#   - Published qualification retains Azure provider errors on the runner
+#     rather than exposing their arbitrary resource identities in public logs.
 #
 # Assumes: caller has already run `azure/login` (OIDC) and that
 # `~/.kube/config` points at the k3s cluster.
@@ -44,6 +46,10 @@ inputs:
       Find with: az ad sp show --id bc313c14-388c-4e7d-a58e-70017303ee3b --query id -o tsv
       Provide if your azure login lacks Directory.Read permissions.
     default: ""
+  private-provider-errors:
+    required: false
+    description: Retain provider diagnostics on the runner instead of printing them.
+    default: "false"
 
 outputs:
   cluster-name:
@@ -72,11 +78,16 @@ runs:
         RESOURCE_GROUP: ${{ inputs.resource-group }}
         LOCATION: ${{ inputs.location }}
         CUSTOM_LOCATIONS_OID: ${{ inputs.custom-locations-oid }}
+        PRIVATE_PROVIDER_ERRORS: ${{ inputs.private-provider-errors }}
       run: |
         set -euo pipefail
 
         MAX_RETRIES=3
         RETRY_DELAY=60
+        if [[ "$PRIVATE_PROVIDER_ERRORS" == "true" ]]; then
+          umask 077
+          mkdir -p "$RUNNER_TEMP/connectedk8s-diagnostics"
+        fi
 
         # Build optional --custom-locations-oid arg
         CL_ARG=()
@@ -85,10 +96,17 @@ runs:
         fi
 
         retry() {
-          local what="$1"; shift
-          local attempt
+          local what="$1" log_name="$2"; shift 2
+          local attempt result
           for attempt in $(seq 1 $MAX_RETRIES); do
-            if "$@"; then
+            result=0
+            if [[ "$PRIVATE_PROVIDER_ERRORS" == "true" ]]; then
+              "$@" > "$RUNNER_TEMP/connectedk8s-diagnostics/$log_name-$attempt.out" \
+                2> "$RUNNER_TEMP/connectedk8s-diagnostics/$log_name-$attempt.err" || result=$?
+            else
+              "$@" || result=$?
+            fi
+            if [[ "$result" -eq 0 ]]; then
               echo "${what} succeeded (attempt ${attempt})."
               return 0
             fi
@@ -101,7 +119,7 @@ runs:
           done
         }
 
-        retry "az connectedk8s connect" \
+        retry "az connectedk8s connect" "connect" \
           az connectedk8s connect \
             --name "${CLUSTER_NAME}" \
             --resource-group "${RESOURCE_GROUP}" \
@@ -110,7 +128,7 @@ runs:
             -o none \
             "${CL_ARG[@]}"
 
-        retry "az connectedk8s enable-features" \
+        retry "az connectedk8s enable-features" "enable-features" \
           az connectedk8s enable-features \
             --name "${CLUSTER_NAME}" \
             --resource-group "${RESOURCE_GROUP}" \
@@ -124,6 +142,7 @@ runs:
       env:
         CLUSTER_NAME: ${{ inputs.cluster-name }}
         RESOURCE_GROUP: ${{ inputs.resource-group }}
+        PRIVATE_PROVIDER_ERRORS: ${{ inputs.private-provider-errors }}
       run: |
         set -euo pipefail
         bash "${GITHUB_ACTION_PATH}/wait-connected.sh" "${CLUSTER_NAME}" "${RESOURCE_GROUP}"
@@ -134,15 +153,23 @@ runs:
       env:
         CLUSTER_NAME: ${{ inputs.cluster-name }}
         RESOURCE_GROUP: ${{ inputs.resource-group }}
+        PRIVATE_PROVIDER_ERRORS: ${{ inputs.private-provider-errors }}
       run: |
         set -euo pipefail
-        az connectedk8s update \
-          --name "${CLUSTER_NAME}" \
-          --resource-group "${RESOURCE_GROUP}" \
-          --enable-oidc-issuer \
-          --enable-workload-identity \
-          --only-show-errors \
-          -o none
+        args=(--name "${CLUSTER_NAME}" --resource-group "${RESOURCE_GROUP}"
+          --enable-oidc-issuer --enable-workload-identity --only-show-errors -o none)
+        if [[ "$PRIVATE_PROVIDER_ERRORS" == "true" ]]; then
+          umask 077
+          mkdir -p "$RUNNER_TEMP/connectedk8s-diagnostics"
+          if ! az connectedk8s update "${args[@]}" \
+            > "$RUNNER_TEMP/connectedk8s-diagnostics/update.out" \
+            2> "$RUNNER_TEMP/connectedk8s-diagnostics/update.err"; then
+            echo "::error::Arc workload identity could not be enabled; private diagnostic retained."
+            exit 1
+          fi
+        else
+          az connectedk8s update "${args[@]}"
+        fi
 
     - name: Capture OIDC issuer URL
       id: issuer
@@ -151,13 +178,22 @@ runs:
       env:
         CLUSTER_NAME: ${{ inputs.cluster-name }}
         RESOURCE_GROUP: ${{ inputs.resource-group }}
+        PRIVATE_PROVIDER_ERRORS: ${{ inputs.private-provider-errors }}
       run: |
         set -euo pipefail
-        URL=$(az connectedk8s show \
-          --name "${CLUSTER_NAME}" \
-          --resource-group "${RESOURCE_GROUP}" \
-          --query oidcIssuerProfile.issuerUrl \
-          --output tsv)
+        args=(--name "${CLUSTER_NAME}" --resource-group "${RESOURCE_GROUP}"
+          --query oidcIssuerProfile.issuerUrl --output tsv)
+        if [[ "$PRIVATE_PROVIDER_ERRORS" == "true" ]]; then
+          umask 077
+          mkdir -p "$RUNNER_TEMP/connectedk8s-diagnostics"
+          if ! URL=$(az connectedk8s show "${args[@]}" \
+            2> "$RUNNER_TEMP/connectedk8s-diagnostics/issuer.err"); then
+            echo "::error::Arc OIDC issuer could not be queried; private diagnostic retained."
+            exit 1
+          fi
+        else
+          URL=$(az connectedk8s show "${args[@]}")
+        fi
         if [ -z "${URL}" ] || [ "${URL}" = "null" ]; then
           echo "::error::Arc returned an empty OIDC issuer URL after enable-oidc-issuer"
           exit 1
@@ -213,6 +249,7 @@ runs:
       env:
         CLUSTER_NAME: ${{ inputs.cluster-name }}
         RESOURCE_GROUP: ${{ inputs.resource-group }}
+        PRIVATE_PROVIDER_ERRORS: ${{ inputs.private-provider-errors }}
       run: |
         set -euo pipefail
         # Arc heartbeat can flap Offline during the API-server restart. Recheck

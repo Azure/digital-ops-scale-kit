@@ -167,6 +167,26 @@ def test_native_engine_keeps_both_subjects_and_both_proofs(engine_assets):
         native_engine_wheel((*engine_assets, ReleaseAsset("extra.zip", 1, "a" * 64)))
 
 
+def test_new_engine_requires_both_bootstrap_scripts_and_their_proofs(engine_assets):
+    scripts = tuple(
+        ReleaseAsset(name, 1, "a" * 64)
+        for name in (
+            "siteops-bootstrap.ps1", "siteops-bootstrap.ps1.attestation.jsonl",
+            "siteops-bootstrap.sh", "siteops-bootstrap.sh.attestation.jsonl",
+        )
+    )
+    assert native_engine_wheel((*engine_assets, *scripts), require_bootstrap=True) == engine_assets[2]
+    with pytest.raises(ReleaseAssetsError):
+        native_engine_wheel(engine_assets, require_bootstrap=True)
+    for script in scripts:
+        with pytest.raises(ReleaseAssetsError):
+            native_engine_wheel(
+                (*engine_assets, *(item for item in scripts if item != script)),
+                require_bootstrap=True,
+            )
+    assert native_engine_wheel(engine_assets) == engine_assets[2]
+
+
 @pytest.mark.parametrize("fault", ["root", "source", "asset", "version", "kind", "array", "missing"])
 def test_inventory_rejects_unknown_or_incomplete_contracts(inventory, fault):
     document = inventory.document()

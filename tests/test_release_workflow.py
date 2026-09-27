@@ -32,6 +32,11 @@ ARCHIVE = "siteops-install.zip"
 PROOF = ARCHIVE + ".attestation.jsonl"
 WHEEL = "siteops-1.0.0b1+build.42.1.gcccccccccccc-py3-none-any.whl"
 WHEEL_PROOF = WHEEL + ".attestation.jsonl"
+BOOTSTRAP = (
+    "siteops-bootstrap.ps1", "siteops-bootstrap.ps1.attestation.jsonl",
+    "siteops-bootstrap.sh", "siteops-bootstrap.sh.attestation.jsonl",
+)
+ENGINE_ASSETS = (ARCHIVE, PROOF, WHEEL, WHEEL_PROOF, *BOOTSTRAP)
 RENDERER = ROOT / "scripts" / "render-siteops-release.py"
 ASSET_MODEL = ROOT / "scripts" / "siteops_release_assets.py"
 PAYLOAD_TOOL = ROOT / "scripts" / "stage-release-payload.py"
@@ -110,6 +115,8 @@ def candidate(tmp_path):
     (bundle_dir / WHEEL).write_bytes(wheel_bytes)
     (bundle_dir / PROOF).write_text("synthetic proof")
     (bundle_dir / WHEEL_PROOF).write_text("synthetic wheel proof")
+    for name in BOOTSTRAP:
+        (bundle_dir / name).write_text("synthetic " + name, encoding="utf-8")
     (plan_dir / "release-notes.md").write_bytes(notes)
     (plan_dir / "plan.json").write_text(json.dumps(plan), encoding="utf-8")
     (directory / "release-notes").mkdir()
@@ -122,7 +129,7 @@ def candidate(tmp_path):
         "assets": [
             {"name": name, "size": (bundle_dir / name).stat().st_size,
              "sha256": digest((bundle_dir / name).read_bytes())}
-            for name in (ARCHIVE, PROOF, WHEEL, WHEEL_PROOF)
+            for name in ENGINE_ASSETS
         ],
         "engine": None,
     }
@@ -144,7 +151,7 @@ def _reference_inventory(candidate):
     inventory = json.loads(path.read_text(encoding="utf-8"))
     inventory["engine"] = {
         "releaseId": "71", "tag": "siteops/v1.0.0", "target": "d" * 40,
-        "assets": inventory["assets"],
+        "assets": inventory["assets"][:4],
     }
     inventory["assets"] = []
     path.write_text(json.dumps(inventory), encoding="utf-8")
@@ -387,7 +394,8 @@ else:
         packages = [request["package"] for request in candidate["plan"].get("workspaces", [])]
         environment["WORKSPACE_SUBJECTS"] = json.dumps(packages)
         observations = {}
-        for subject in (ARCHIVE, wheel_path.name, *packages):
+        scripts = tuple(name for name in BOOTSTRAP[::2] if (native_root / name).is_file())
+        for subject in (ARCHIVE, wheel_path.name, *scripts, *packages):
             signer = ".github/workflows/" + ("_workspace-distribution.yaml" if subject in packages else "_siteops-distribution.yaml")
             observation = verified_observation(
                 REPO, environment["SOURCE_SHA"], environment["SOURCE_REF"], signer,
@@ -755,7 +763,7 @@ def test_valid_preview_bundle_keeps_its_exact_source_and_artifact(candidate, run
     assert outputs["wheel-name"] == WHEEL
     assert len(outputs["wheel-sha"]) == len(outputs["asset-list-sha"]) == 64
     verifies = [call for call in calls if call[:2] == ["attestation", "verify"]]
-    assert [Path(call[2]).name for call in verifies] == [ARCHIVE, WHEEL]
+    assert [Path(call[2]).name for call in verifies] == [ARCHIVE, WHEEL, BOOTSTRAP[0], BOOTSTRAP[2]]
     for verify in verifies:
         assert verify[verify.index("--source-digest") + 1] == SHA
         assert verify[verify.index("--signer-digest") + 1] == SHA
@@ -766,7 +774,7 @@ def test_valid_preview_bundle_keeps_its_exact_source_and_artifact(candidate, run
     asset_list = json.loads(
         (candidate["root"] / "release-assets" / "release-assets.json").read_text()
     )
-    assert [item["name"] for item in asset_list["assets"]] == [ARCHIVE, PROOF, WHEEL, WHEEL_PROOF]
+    assert [item["name"] for item in asset_list["assets"]] == list(ENGINE_ASSETS)
     for item in asset_list["assets"]:
         assert item["size"] == (candidate["root"] / "release-bundle" / item["name"]).stat().st_size
         assert item["sha256"] == digest(
@@ -856,6 +864,8 @@ def test_real_git_declaration_and_cli_feed_the_candidate_controller(
         (candidate["root"] / "release-bundle" / wheel_name).write_bytes(wheel_bytes)
         (candidate["root"] / "release-bundle" / (ARCHIVE + ".attestation.jsonl")).write_text("proof")
         (candidate["root"] / "release-bundle" / (wheel_name + ".attestation.jsonl")).write_text("proof")
+        for name in BOOTSTRAP:
+            (candidate["root"] / "release-bundle" / name).write_text("synthetic " + name)
         candidate_extra = {
             "BUILD_WHEEL_NAME": wheel_name,
             "BUILD_WHEEL_SHA": digest(wheel_bytes),
@@ -930,11 +940,11 @@ def test_authentication_and_approved_digest_drift_fail_closed(runner, variable):
     assert not any("--method" in call for call in calls)
 
 
-def test_publisher_reauthenticates_both_approved_subjects(runner):
+def test_publisher_reauthenticates_all_approved_engine_subjects(runner):
     result, _, calls = runner("publish", "Verify the approved release assets")
     assert result.returncode == 0, result.stdout + result.stderr
     verifies = [call for call in calls if call[:2] == ["attestation", "verify"]]
-    assert [Path(call[2]).name for call in verifies] == [ARCHIVE, WHEEL]
+    assert [Path(call[2]).name for call in verifies] == [ARCHIVE, WHEEL, BOOTSTRAP[0], BOOTSTRAP[2]]
     for call in verifies:
         assert call[call.index("--cert-identity") + 1] == (
             f"https://github.com/{REPO}/.github/workflows/_siteops-distribution.yaml@refs/heads/main"
@@ -1007,7 +1017,7 @@ def test_publisher_rejects_approved_wheel_that_differs_from_the_bundle(candidate
     result, _, calls = runner("publish", "Verify the approved release assets")
     assert result.returncode != 0
     assert [Path(call[2]).name for call in calls if call[:2] == ["attestation", "verify"]] == [
-        ARCHIVE, WHEEL,
+        ARCHIVE, WHEEL, BOOTSTRAP[0], BOOTSTRAP[2],
     ]
 
 
@@ -1320,7 +1330,7 @@ def test_install_notes_bind_downloads_and_commands_to_the_selected_release(candi
     notes = _render_install_notes(candidate, runner)
     assert notes.count("## Install Site Ops") == 1
     base = f"https://github.com/{REPO}/releases/download/{urllib.parse.quote(tag, safe='')}/"
-    for name in (ARCHIVE, PROOF, WHEEL, WHEEL_PROOF):
+    for name in ENGINE_ASSETS:
         assert base + name in notes
     assert (
         f"https://github.com/{REPO}/blob/{SHA}/docs/install-siteops.md#install-the-verified-bundle"
@@ -1340,6 +1350,15 @@ def test_install_notes_bind_downloads_and_commands_to_the_selected_release(candi
     assert "`--index-url <your approved index>`" in notes
     assert "packagefeedproxy.microsoft.io" not in notes
     assert "pipx does not automatically verify GitHub attestations" in notes
+    assert (
+        f"https://github.com/{REPO}/blob/{SHA}/docs/install-siteops.md#verify-the-bootstrap-script"
+        in notes
+    )
+    assert "with those identities before running it" in notes
+    assert "HTTPS download alone does not authenticate the publisher" in notes
+    assert "use this release's reviewed provenance values instead" in notes
+    assert "configured-Site fleet selectors remain supported" in notes
+    assert "a project pin selects content, not operator Site configuration" in notes
     assert "`--force`" in notes
     assert "downloads only the ZIP and its detached proof, authenticates the ZIP before extraction" in notes
     assert f"Expected publisher: `{REPO}`" in notes
@@ -1464,11 +1483,13 @@ def test_publication_uploads_only_declared_assets(candidate, runner, bundle):
     assert any(value.endswith(PROOF) for value in command) is bundle
     assert any(value.endswith(WHEEL) for value in command) is bundle
     assert any(value.endswith(WHEEL_PROOF) for value in command) is bundle
+    for name in BOOTSTRAP:
+        assert any(value.endswith(name) for value in command) is bundle
     asset_arguments = [
         value for value in command
-        if Path(value).name in {ARCHIVE, PROOF, WHEEL, WHEEL_PROOF}
+        if Path(value).name in ENGINE_ASSETS
     ]
-    assert len(asset_arguments) == (4 if bundle else 0)
+    assert len(asset_arguments) == (8 if bundle else 0)
 
 
 @pytest.mark.parametrize("immutable", [False, True])
@@ -1477,7 +1498,7 @@ def test_published_asset_digests_and_immutable_release_are_checked(candidate, ru
     assets = [
         {"name": name, "size": (candidate["root"] / "release-bundle" / name).stat().st_size,
          "digest": "sha256:" + digest((candidate["root"] / "release-bundle" / name).read_bytes()), "state": "uploaded"}
-        for name in (ARCHIVE, PROOF, WHEEL, WHEEL_PROOF)
+        for name in ENGINE_ASSETS
     ]
     endpoint = f"repos/{REPO}/releases/tags/{tag}"
     candidate["responses"][endpoint] = {
@@ -1490,7 +1511,7 @@ def test_published_asset_digests_and_immutable_release_are_checked(candidate, ru
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert any(call[:2] == ["release", "verify"] for call in calls) is immutable
-    assert len([call for call in calls if call[:2] == ["release", "verify-asset"]]) == (4 if immutable else 0)
+    assert len([call for call in calls if call[:2] == ["release", "verify-asset"]]) == (8 if immutable else 0)
     assets[0]["digest"] = "sha256:" + "a" * 64
     result, _, _ = runner(
         "publish", "Confirm published assets and immutability",
@@ -1516,7 +1537,7 @@ def test_complete_workspace_candidate_reaches_only_the_approved_publication_set(
     root = candidate["root"]
     inventory = json.loads((root / "final-release-assets/release-assets.json").read_bytes())
     assert outputs["asset-list-sha"] == digest((root / "final-release-assets/release-assets.json").read_bytes())
-    assert len(inventory["assets"]) == (7 if built else 3)
+    assert len(inventory["assets"]) == (11 if built else 3)
     result, _, _ = runner("review", "Render the final release notes", extra={"ENGINE_VERSION": "1.0.0b1+build.42"})
     assert result.returncode == 0, result.stdout + result.stderr
     notes = (root / "publish-notes.md").read_text()

@@ -29,6 +29,7 @@ from siteops.cli import (
     resolve_manifest_path,
     setup_logging,
 )
+from siteops.models import Site
 from siteops.planning import (
     DiagnosticSeverity,
     OperationIdentity,
@@ -489,6 +490,31 @@ class TestCmdValidate:
         assert "Manifest is valid" in captured.out
         assert "library manifest" in captured.out
         assert "-l" in captured.out
+
+    def test_validate_library_with_explicit_site_does_not_suggest_selector(
+        self, complete_workspace, capsys,
+    ):
+        from siteops.orchestrator import Orchestrator
+
+        manifest_path = complete_workspace / "manifests" / "library.yaml"
+        manifest_path.write_text(
+            yaml.safe_dump({
+                "name": "library",
+                "steps": [{"name": "step1", "template": "templates/test.bicep"}],
+            }), encoding="utf-8",
+        )
+        site = Site.from_data({
+            "name": "operator-one",
+            "subscription": "00000000-0000-0000-0000-000000000001",
+            "resourceGroup": "rg-example",
+            "location": "eastus",
+        }, source="explicit test", default_name="operator-one")
+        args = Namespace(manifest=manifest_path, workspace=complete_workspace, selector=None)
+        with patch("siteops.cli._explicit_site", return_value=site):
+            assert cmd_validate(args, Orchestrator(complete_workspace)) == 0
+        output = capsys.readouterr().out
+        assert "Manifest is valid" in output
+        assert "Pass `-l" not in output
 
     @pytest.mark.parametrize("request_plan", [False, True])
     def test_library_validation_and_targeted_planning(
@@ -1292,6 +1318,133 @@ class TestMainArgumentParsing:
         assert "deploy" in captured.out
         assert "validate" in captured.out
         assert "sites" in captured.out
+
+    def test_help_leads_with_operator_work_and_distinguishes_global_options(self, capsys):
+        with patch.object(sys, "argv", ["siteops", "--help"]):
+            with pytest.raises(SystemExit) as stopped:
+                main()
+        assert stopped.value.code == 0
+        help_text = capsys.readouterr().out
+        rows = help_text.split("positional arguments:", 1)[1].split("options:", 1)[0]
+        order = re.findall(
+            r"^    (browse|inputs|sites|validate|plan|deploy|project|source|index|cache)\s",
+            rows, flags=re.MULTILINE,
+        )
+        assert order == [
+            "browse", "inputs", "sites", "validate", "plan", "deploy",
+            "project", "source", "index", "cache",
+        ]
+        assert "Global options such as --project and --approved-source precede the command." in help_text
+        assert "siteops --approved-source NAME project pin ./factory --release RELEASE" in help_text
+
+    @pytest.mark.parametrize("command", ["validate", "plan", "deploy"])
+    def test_misplaced_project_is_not_interpreted_as_projection(
+        self, capsys, command,
+    ):
+        with (
+            patch.object(
+                sys, "argv",
+                ["siteops", command, "aio-install", "--project", "publishable",
+                 "--output", "json"],
+            ),
+            patch("siteops.cli.open_command_context", side_effect=AssertionError("No content read")),
+        ):
+            with pytest.raises(SystemExit) as stopped:
+                main()
+        assert stopped.value.code == 2
+        error = capsys.readouterr().err
+        assert "unrecognized arguments: --project publishable" in error
+
+    def test_source_enrollment_rejects_abbreviated_authority_option(self, capsys):
+        with (
+            patch.object(
+                sys, "argv",
+                ["siteops", "source", "enroll", "approved", "--sour", "github:example/repo"],
+            ),
+            patch("siteops.cli.cmd_source", side_effect=AssertionError("No source enrollment")),
+        ):
+            with pytest.raises(SystemExit) as stopped:
+                main()
+        assert stopped.value.code == 2
+        assert "--source" in capsys.readouterr().err
+
+    @pytest.mark.parametrize(("arguments", "expected"), [
+        (["source", "--help"], "Enroll a consumer-approved source"),
+        (["source", "enroll", "--help"], "--trust-policy FILE"),
+        (["source", "show", "--help"], "private"),
+        (["source", "list", "--help"], "private"),
+        (["source", "remove", "--help"], "workspace pin"),
+        (["project", "pin", "--help"], "@RELEASE"),
+    ])
+    def test_source_and_project_help_explain_requiredness_and_effects(
+        self, capsys, arguments, expected,
+    ):
+        with patch.object(sys, "argv", ["siteops", *arguments]):
+            with pytest.raises(SystemExit) as stopped:
+                main()
+        assert stopped.value.code == 0
+        assert expected in capsys.readouterr().out
+
+    @pytest.mark.parametrize(("option", "first", "second"), [
+        ("-w", "one", "two"),
+        ("--project", "one", "two"),
+        ("--trust-policy", "one.json", "two.json"),
+        ("--trusted-root", "one.jsonl", "two.jsonl"),
+        ("--approved-source", "one", "two"),
+    ])
+    def test_repeated_global_content_and_trust_selection_fails_before_use(
+        self, capsys, option, first, second,
+    ):
+        with (
+            patch.object(sys, "argv", ["siteops", option, first, option, second, "sites"]),
+            patch("siteops.cli.open_command_context", side_effect=AssertionError("No source read")),
+        ):
+            with pytest.raises(SystemExit) as stopped:
+                main()
+        assert stopped.value.code == 2
+        output = capsys.readouterr().err
+        assert option in output and "only once" in output
+        assert first not in output and second not in output
+
+    @pytest.mark.parametrize("arguments", [
+        ["browse", "--source", "github:example/one", "--source", "github:example/two"],
+        ["browse", "--ref", "first", "--ref", "second"],
+        ["browse", "--auth", "anonymous", "--auth", "cli"],
+        ["project", "pin", "--source", "github:example/one", "--source", "github:example/two"],
+        ["project", "pin", "--release", "v1", "--release", "v2"],
+        ["project", "pin", "--release-workspace", "one", "--release-workspace", "two"],
+        ["source", "enroll", "approved", "--source", "github:example/one",
+         "--source", "github:example/two"],
+    ])
+    def test_repeated_publisher_or_access_selection_fails_before_use(
+        self, capsys, arguments,
+    ):
+        with (
+            patch.object(sys, "argv", ["siteops", *arguments]),
+            patch("siteops.cli.cmd_browse", side_effect=AssertionError("No remote read")),
+            patch("siteops.cli.cmd_project", side_effect=AssertionError("No project write")),
+            patch("siteops.cli.cmd_source", side_effect=AssertionError("No source enrollment")),
+        ):
+            with pytest.raises(SystemExit) as stopped:
+                main()
+        assert stopped.value.code == 2
+        assert "only once" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("command", ["plan", "deploy"])
+    def test_repeated_parallel_cap_does_not_silently_change_fleet_concurrency(
+        self, capsys, command,
+    ):
+        with (
+            patch.object(
+                sys, "argv",
+                ["siteops", command, "aio-install", "--parallel", "3", "-p", "0"],
+            ),
+            patch("siteops.cli.open_command_context", side_effect=AssertionError("No Site read")),
+        ):
+            with pytest.raises(SystemExit) as stopped:
+                main()
+        assert stopped.value.code == 2
+        assert "--parallel" in capsys.readouterr().err
 
     def test_version_flag(self, capsys):
         """Test --version shows version."""

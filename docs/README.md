@@ -1,30 +1,39 @@
 # Documentation
 
 Use this page to choose the shortest route for the task in front of you. New
-operators should begin with the [one-site quickstart](getting-started.md),
-which installs the CLI, obtains workspace content, prepares one target, and
-separates validation, planning, deployment, and health verification.
+operators with a compatible published workspace can start with
+[guided inputs](guided-inputs.md). For a local checkout and reusable Site
+file, use the [configured-Site guide](getting-started.md). Both routes
+separate planning, deployment, and health verification.
 
 ## Begin locally
 
 | Task | Guide |
 |---|---|
-| Deploy AIO to one prepared target | [First-site quickstart](getting-started.md) |
+| Deploy AIO to one explicit target | [Guided inputs](guided-inputs.md) |
+| Deploy AIO with a configured example Site | [Local checkout guide](getting-started.md) |
 | Install an identified Site Ops release | [Install Site Ops](install-siteops.md) |
 | Configure and inspect a deployment target | [Site configuration](site-configuration.md) |
 | Understand the included AIO content | [IoT Operations workspace](../workspaces/iot-operations/README.md) |
 | Find and inspect deployment choices | [Browse deployment content](browse-content.md) |
 | Browse a published source without cloning | [Remote content indexes](remote-content.md) |
+| Use typed answers or a complete Site file | [Guided inputs](guided-inputs.md) |
 | Use configured Sites with packaged or local content | [Operator projects](projects.md) |
 | Inspect storage or remove a cached entry safely | [Cache maintenance](cache.md) |
 | Diagnose a failed command or provider operation | [Troubleshooting](troubleshooting.md) |
 
-Installing the CLI does not acquire a workspace. The included IoT Operations
-workspace is currently obtained from this repository. Review both the CLI
-release and the content checkout before deploying.
+Installing the CLI does not acquire a workspace. For local use, select the
+included IoT Operations workspace from a checkout. When a compatible
+approved release publishes a complete package, pin it in an operator
+project without cloning. Review the selected CLI and content source
+before deploying. The bootstrap scripts and typed AIO package are not yet
+published in official releases. Use the local checkout route until
+compatible assets are available.
 
 When an approved source publishes a complete workspace package and detached
 proof, an [operator project](projects.md) can acquire and use that release.
+An authored input contract in that package also supports one explicit target
+without first saving a project Site.
 
 ## Prepare and run deployments
 
