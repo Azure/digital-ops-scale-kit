@@ -184,17 +184,18 @@ The workflow:
 8. Uploads only bounded count/status receipts and runs the existing persistent
    snapshot-delta teardown, preserving the operator-supplied RG.
 
-This first slice is deliberately constrained:
+Published qualification is deliberately bounded:
 
 | Input | Required value |
 |---|---|
 | `published-release` | Exact approved published tag |
 | `published-source-sha` | Exact full source commit |
-| `aio-releases` | One release, normally `2608` |
+| `aio-releases` | One release. Guided mode uses `2608`. |
 | `tests` | `aio-install` |
-| `secret-sync-modes` | `disabled` |
+| `published-journey` | `configured` or `guided` |
+| `secret-sync-modes` | `disabled` for configured Sites. Guided supports `disabled`, `enabled` or both. |
 | `resource-group` | Existing dedicated RG |
-| `cluster-name` | empty; the workflow creates a unique Arc registration |
+| `cluster-name` | Empty, so the workflow creates a unique Arc registration. |
 | `upgrade-to` | empty |
 | `skip-teardown` | `false` |
 | `keep-cluster-alive-minutes` | `0` |
@@ -205,20 +206,38 @@ until snapshot-delta cleanup completes. The RG itself is preserved. Anything
 another actor adds after the snapshot can enter the deletion delta, so use a
 dedicated RG and do not make concurrent changes during the run. The mode
 establishes the published engine/package deployment route and bounded AIO
-readiness observations. It does not establish Secret Sync, upgrade, workload
-data movement or general production health.
+readiness observations. They do not establish upgrade behavior, workload
+data movement or general production health. A configured disabled cell
+does not establish Secret Sync. A guided enabled cell additionally
+observes the Secret Provider Class, managed identity, vault, federated
+credential and instance binding. The cell compares current RG resource IDs
+with its private pre-run snapshot before selecting resources. It rejects
+missing or ambiguous run-owned resources without publishing their identities.
+Secret Sync infrastructure enablement does not prove secret materialization.
 
-Example:
+Within the guided disabled cell, the installed engine prepares resource-backed,
+manual-file and inline-input plans from the verified package.
+The manual and inline routes do not authorize a cluster resource read. A
+complete manual Site is also saved to the operator project and planned with a
+bounded configured-Site selector. The cell compares the selected target and
+operation identities and dispositions in private runner files, then deploys
+only the resource-backed target. These additional preparations do not prove
+byte-identical parameter values, a second deployment, or live readiness for
+the other input routes.
+
+Example guided qualification in one dedicated existing RG. Supply an
+approved published tag and its exact full main commit before running:
 
 ```bash
 gh workflow run e2e-test.yaml \
-  --ref <reviewed-branch> \
-  -f published-release=v0.0.4.dev20260919 \
+  --ref main \
+  -f published-release=<approved-published-release> \
   -f published-source-sha=<full-main-commit> \
   -f aio-releases=2608 \
   -f resource-group=<dedicated-existing-rg> \
+  -f published-journey=guided \
   -f tests=aio-install \
-  -f secret-sync-modes=disabled
+  -f secret-sync-modes=disabled,enabled
 ```
 
 ### What `skip-teardown` leaves behind
@@ -240,12 +259,24 @@ Persistent teardown deletes the Arc cluster only if it was not present in the pr
 
 **Use a dedicated RG for persistent mode.** Anything added to the RG between the snapshot and teardown (by operators, automation, or a `keep-cluster-alive-minutes` hold) appears in the delta and is deleted.
 
+Operator target names are masked before step environments can display them.
+Persistent runs serialize on a case-insensitive target key that does not
+contain the resource group name. For the published persistent snapshot and
+teardown, public logs and summaries report fixed reasons and aggregate counts.
+Those steps keep resource ID lists and provider diagnostics in private runner
+files. The published Arc connection also keeps provider diagnostics on the
+runner instead of printing arbitrary errors publicly. These files are not
+uploaded and disappear with the runner.
+When cleanup reports an incomplete or unknown result, inspect the dedicated
+RG privately through an authorized Azure inventory. A successful cleanup
+step is not an independent RG inventory check.
+
 A JUnit XML artifact is uploaded per source-mode matrix cell
 (`e2e-results-<release>-secretsync-<mode>.xml`). When `upgrade-to` is set and
 the cell exercises the upgrade phase, a second artifact
 (`e2e-results-<release>-to-<upgrade-to>-secretsync-<mode>.xml`) is uploaded
 with the upgrade-only test results. Published-package mode instead uploads
-only `published-deployment.json` and `published-readiness.json`; they contain
+only `published-deployment.json` and `published-readiness.json`. They contain
 public release identities and aggregate counts, not Azure resource IDs.
 
 ## Running locally

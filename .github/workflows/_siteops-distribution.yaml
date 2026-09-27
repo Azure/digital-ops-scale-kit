@@ -1,5 +1,5 @@
-# Reusable workflow that builds, attests, and qualifies one Site Ops release wheel
-# and the installation bundle that carries the identical wheel bytes. The caller
+# Reusable workflow that builds, attests, and qualifies the Site Ops release wheel,
+# installation bundle, and both platform bootstrap scripts. The caller
 # repository, ref, and commit identify the source being built. This workflow path
 # and its commit identify the trusted builder.
 #
@@ -7,7 +7,7 @@
 # attestation job receives the staged bytes, executes no repository source, and
 # signs each published asset independently. Qualification verifies the same
 # attested bytes with the runner's GitHub CLI before anything is extracted or
-# installed, then installs both supported paths with stock pipx.
+# installed, then exercises both platform scripts and both native pipx paths.
 #
 # Callers reference this workflow locally as
 # `./.github/workflows/_siteops-distribution.yaml`, which GitHub binds to the
@@ -65,13 +65,13 @@ on:
         description: "SHA-256 of the attested standalone Site Ops wheel."
         value: ${{ jobs.build.outputs.wheel-sha256 }}
       staging-artifact-id:
-        description: "Artifact ID holding both attested assets and their detached proofs."
+        description: "Artifact ID holding the attested installation assets and their detached proofs."
         value: ${{ jobs.attest.outputs.staging-artifact-id }}
       staging-artifact-name:
-        description: "Artifact name holding both attested assets and their detached proofs."
+        description: "Artifact name holding the attested installation assets and their detached proofs."
         value: ${{ jobs.attest.outputs.staging-artifact-name }}
       staging-artifact-url:
-        description: "Download page for both attested assets and their detached proofs."
+        description: "Download page for the attested installation assets and their detached proofs."
         value: ${{ jobs.attest.outputs.staging-artifact-url }}
       qualification-matrix:
         description: "Compact JSON results for each supported Python, Linux, and Windows qualification cell."
@@ -79,6 +79,8 @@ on:
 
 env:
   ARCHIVE_NAME: siteops-install.zip
+  BOOTSTRAP_PS1: siteops-bootstrap.ps1
+  BOOTSTRAP_SH: siteops-bootstrap.sh
   ATTESTATION_SUFFIX: .attestation.jsonl
   OIDC_ISSUER: https://token.actions.githubusercontent.com
   PREDICATE_TYPE: https://slsa.dev/provenance/v1
@@ -122,6 +124,8 @@ jobs:
       archive-sha256: ${{ steps.build.outputs.archive-sha256 }}
       wheel-name: ${{ steps.build.outputs.wheel-name }}
       wheel-sha256: ${{ steps.build.outputs.wheel-sha256 }}
+      bootstrap-ps1-sha256: ${{ steps.build.outputs.bootstrap-ps1-sha256 }}
+      bootstrap-sh-sha256: ${{ steps.build.outputs.bootstrap-sh-sha256 }}
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
 
     env:
@@ -237,17 +241,25 @@ jobs:
             --output "$archive" \
             --download-dependencies
 
+          for script in "$BOOTSTRAP_PS1" "$BOOTSTRAP_SH"; do
+            git show "$SOURCE_SHA:scripts/bootstrap/$script" > "$staging/$script"
+            if [[ ! -s "$staging/$script" ]] || [[ $(wc -c < "$staging/$script") -gt 131072 ]]; then
+              echo "::error::The selected bootstrap script is missing or exceeds its byte limit."
+              exit 1
+            fi
+          done
+
           shopt -s dotglob nullglob
           produced=("$staging"/*)
           wheel=""
           for path in "${produced[@]}"; do
-            if [[ "$path" != "$archive" ]]; then
+            if [[ "$path" == "$staging"/siteops-*-py3-none-any.whl ]]; then
               wheel="$path"
             fi
           done
           wheel_name="${wheel##*/}"
-          if [[ ${#produced[@]} -ne 2 || ! -f "$archive" || ! -f "$wheel" ]]; then
-            echo "::error::The build produced content other than the archive and its standalone wheel."
+          if [[ ${#produced[@]} -ne 4 || ! -f "$archive" || ! -f "$wheel" ]]; then
+            echo "::error::The build produced content other than its declared installation assets."
             exit 1
           fi
           if [[ ! "$wheel_name" =~ ^siteops-[A-Za-z0-9._+!-]+-py3-none-any\.whl$ ]]; then
@@ -255,7 +267,7 @@ jobs:
             exit 1
           fi
 
-          # The two published assets must carry one identical application build.
+          # The wheel and bundle must carry one identical application build.
           python - "$archive" "$wheel" <<'PY'
           import json
           import sys
@@ -289,6 +301,8 @@ jobs:
             echo "archive-sha256=$digest"
             echo "wheel-name=$wheel_name"
             echo "wheel-sha256=$wheel_digest"
+            echo "bootstrap-ps1-sha256=$(sha256sum "$staging/$BOOTSTRAP_PS1" | cut -d ' ' -f 1)"
+            echo "bootstrap-sh-sha256=$(sha256sum "$staging/$BOOTSTRAP_SH" | cut -d ' ' -f 1)"
             echo "staging-path=$staging"
           } >> "$GITHUB_OUTPUT"
           echo "Built $ARCHIVE_NAME with digest $digest."
@@ -329,6 +343,8 @@ jobs:
     env:
       EXPECTED_ARCHIVE_SHA256: ${{ needs.build.outputs.archive-sha256 }}
       EXPECTED_WHEEL_SHA256: ${{ needs.build.outputs.wheel-sha256 }}
+      EXPECTED_BOOTSTRAP_PS1_SHA256: ${{ needs.build.outputs.bootstrap-ps1-sha256 }}
+      EXPECTED_BOOTSTRAP_SH_SHA256: ${{ needs.build.outputs.bootstrap-sh-sha256 }}
       WHEEL_NAME: ${{ needs.build.outputs.wheel-name }}
 
     steps:
@@ -369,11 +385,13 @@ jobs:
           wheel="$subject/$WHEEL_NAME"
           shopt -s dotglob nullglob
           entries=("$subject"/*)
-          if [[ ${#entries[@]} -ne 2 || ! -f "$archive" || ! -f "$wheel" ]]; then
-            echo "::error::The downloaded artifact holds content other than $ARCHIVE_NAME and the standalone wheel."
+          if [[ ${#entries[@]} -ne 4 || ! -f "$archive" || ! -f "$wheel" || ! -f "$subject/$BOOTSTRAP_PS1" || ! -f "$subject/$BOOTSTRAP_SH" ]]; then
+            echo "::error::The downloaded artifact holds content other than the declared installation assets."
             exit 1
           fi
-          for subject_pair in "$archive|$EXPECTED_ARCHIVE_SHA256" "$wheel|$EXPECTED_WHEEL_SHA256"; do
+          for subject_pair in "$archive|$EXPECTED_ARCHIVE_SHA256" "$wheel|$EXPECTED_WHEEL_SHA256" \
+            "$subject/$BOOTSTRAP_PS1|$EXPECTED_BOOTSTRAP_PS1_SHA256" \
+            "$subject/$BOOTSTRAP_SH|$EXPECTED_BOOTSTRAP_SH_SHA256"; do
             path="${subject_pair%|*}"
             expected="${subject_pair##*|}"
             digest="$(sha256sum "$path" | cut -d ' ' -f 1)"
@@ -397,11 +415,27 @@ jobs:
           subject-path: ${{ runner.temp }}/siteops-subject/${{ needs.build.outputs.wheel-name }}
           show-summary: false
 
+      - name: Attest PowerShell bootstrap provenance
+        id: attest-ps1
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/siteops-subject/siteops-bootstrap.ps1
+          show-summary: false
+
+      - name: Attest Bash bootstrap provenance
+        id: attest-sh
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/siteops-subject/siteops-bootstrap.sh
+          show-summary: false
+
       - name: Stage the attested bytes
         shell: bash
         env:
           ARCHIVE_BUNDLE_PATH: ${{ steps.attest-archive.outputs.bundle-path }}
           WHEEL_BUNDLE_PATH: ${{ steps.attest-wheel.outputs.bundle-path }}
+          PS1_BUNDLE_PATH: ${{ steps.attest-ps1.outputs.bundle-path }}
+          SH_BUNDLE_PATH: ${{ steps.attest-sh.outputs.bundle-path }}
         run: |
           set -euo pipefail
           umask 077
@@ -413,8 +447,13 @@ jobs:
           cp "$ARCHIVE_BUNDLE_PATH" "$staging/${ARCHIVE_NAME}${ATTESTATION_SUFFIX}"
           cp "$subject/$WHEEL_NAME" "$staging/$WHEEL_NAME"
           cp "$WHEEL_BUNDLE_PATH" "$staging/${WHEEL_NAME}${ATTESTATION_SUFFIX}"
+          cp "$subject/$BOOTSTRAP_PS1" "$staging/$BOOTSTRAP_PS1"
+          cp "$PS1_BUNDLE_PATH" "$staging/${BOOTSTRAP_PS1}${ATTESTATION_SUFFIX}"
+          cp "$subject/$BOOTSTRAP_SH" "$staging/$BOOTSTRAP_SH"
+          cp "$SH_BUNDLE_PATH" "$staging/${BOOTSTRAP_SH}${ATTESTATION_SUFFIX}"
 
-          for staged_pair in "$ARCHIVE_NAME|$EXPECTED_ARCHIVE_SHA256" "$WHEEL_NAME|$EXPECTED_WHEEL_SHA256"; do
+          for staged_pair in "$ARCHIVE_NAME|$EXPECTED_ARCHIVE_SHA256" "$WHEEL_NAME|$EXPECTED_WHEEL_SHA256" \
+            "$BOOTSTRAP_PS1|$EXPECTED_BOOTSTRAP_PS1_SHA256" "$BOOTSTRAP_SH|$EXPECTED_BOOTSTRAP_SH_SHA256"; do
             name="${staged_pair%|*}"
             expected="${staged_pair##*|}"
             digest="$(sha256sum "$staging/$name" | cut -d ' ' -f 1)"
@@ -430,8 +469,8 @@ jobs:
 
           shopt -s dotglob nullglob
           staged=("$staging"/*)
-          if [[ ${#staged[@]} -ne 4 ]]; then
-            echo "::error::Staging holds content other than the two assets and their detached proofs."
+          if [[ ${#staged[@]} -ne 8 ]]; then
+            echo "::error::Staging holds content other than the four assets and their detached proofs."
             exit 1
           fi
 
@@ -516,7 +555,7 @@ jobs:
           merge-multiple: true
           digest-mismatch: error
 
-      - name: Verify both assets before use
+      - name: Verify installation assets before use
         run: |
           set -euo pipefail
           # The Windows runner reports a backslash temporary path.
@@ -524,14 +563,14 @@ jobs:
           download="$temp/siteops-download"
           archive="$download/$ARCHIVE_NAME"
           wheel="$download/$WHEEL_NAME"
-          for asset in "$archive" "$wheel"; do
+          for asset in "$archive" "$wheel" "$download/$BOOTSTRAP_PS1" "$download/$BOOTSTRAP_SH"; do
             if [[ ! -f "$asset" || ! -f "${asset}${ATTESTATION_SUFFIX}" ]]; then
-              echo "::error::The staged artifact does not hold both assets and their detached proofs."
+              echo "::error::The staged artifact lacks an installation asset or its detached proof."
               exit 1
             fi
           done
 
-          for asset in "$archive" "$wheel"; do
+          for asset in "$archive" "$wheel" "$download/$BOOTSTRAP_PS1" "$download/$BOOTSTRAP_SH"; do
             if ! timeout --kill-after=5 120 gh attestation verify "$asset" \
               --bundle "${asset}${ATTESTATION_SUFFIX}" \
               --repo "$SOURCE_REPOSITORY" \
@@ -579,7 +618,7 @@ jobs:
           ' "$temp/siteops-verification.json"
           done
 
-          echo "Both attested assets satisfy the exact source and signer policy."
+          echo "The attested installation assets satisfy the exact source and signer policy."
 
       - name: Extract the verified bundle
         env:
@@ -718,6 +757,193 @@ jobs:
           fi
           "$bin/python" -c 'from importlib.metadata import version; print("pipx " + version("pipx"))'
           echo "Provisioned the pipx backend $SHARED_PIP_SPEC from a hash-verified wheel."
+
+      - name: Install with the signed Bash bootstrap
+        if: matrix.os == 'ubuntu-24.04'
+        env:
+          PYTHON: ${{ steps.python.outputs.python-path }}
+          PIP_INDEX_URL: ${{ env.PACKAGE_INDEX_URL }}
+          PIP_NO_INPUT: "1"
+          PIP_KEYRING_PROVIDER: disabled
+          PIP_EXTRA_INDEX_URL: ""
+        run: |
+          set -euo pipefail
+          umask 077
+          unset PYTHONPATH PYTHONHOME GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
+          temp="${RUNNER_TEMP//\\//}"
+          owned="$temp/siteops-qualification"
+          download="$temp/siteops-download"
+          export HOME="$owned"
+          export XDG_DATA_HOME="$owned/bootstrap-data"
+          export XDG_CONFIG_HOME="$owned/bootstrap-config"
+          export TMPDIR="$owned/tmp"
+          export GH_CONFIG_DIR="$owned/gh-config"
+          export PIP_CONFIG_FILE=/dev/null
+          export PIPX_HOME="$owned/bootstrap-pipx"
+          export PIPX_BIN_DIR="$owned/bootstrap-pipx-bin"
+          export PIPX_MAN_DIR="$owned/bootstrap-pipx-man"
+          export PIPX_COMPLETION_DIR="$owned/bootstrap-pipx-completions"
+          export PIPX_SHARED_LIBS="$owned/pipx-shared"
+          export PIPX_DEFAULT_PYTHON="$PYTHON"
+          export PATH="$owned/tooling/bin:$PATH"
+          mkdir -p "$HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$TMPDIR" "$GH_CONFIG_DIR"
+          caller="${BUILDER_IDENTITY#*/.github/workflows/}"
+          caller="${caller%%@*}"
+          [[ "$caller" == ci.yaml || "$caller" == release.yaml ]] ||
+            { echo "::error::The attested caller is not supported by the bootstrap."; exit 1; }
+          release=siteops/v0.0.0-ci
+          selection="$(printf '%s\0' "$SOURCE_REPOSITORY" "$release" "$SOURCE_SHA" "$SOURCE_REF" "$caller" |
+            sha256sum | cut -d ' ' -f 1)"
+          cache="$XDG_DATA_HOME/siteops/install-downloads/$selection"
+          mkdir -p "$cache"
+          cp "$download/$ARCHIVE_NAME" "$cache/$ARCHIVE_NAME"
+          cp "$download/${ARCHIVE_NAME}${ATTESTATION_SUFFIX}" \
+            "$cache/${ARCHIVE_NAME}${ATTESTATION_SUFFIX}"
+          if ! bash "$download/$BOOTSTRAP_SH" --release "$release" \
+            --source-commit "$SOURCE_SHA" --repository "$SOURCE_REPOSITORY" \
+            --source-ref "$SOURCE_REF" --caller "$caller" --yes \
+            > "$owned/logs/bootstrap-sh.log" 2>&1; then
+            echo "::error::The signed Bash bootstrap did not install the verified build."
+            exit 1
+          fi
+          if ! grep -Fq 'Rechecking the retained release without downloading' \
+            "$owned/logs/bootstrap-sh.log"; then
+            echo "::error::The signed Bash bootstrap did not consume the private verified cache."
+            exit 1
+          fi
+          if [[ "$("$PIPX_BIN_DIR/siteops" --version)" != "siteops $PACKAGE_VERSION" ]]; then
+            echo "::error::The signed Bash bootstrap exposed another Site Ops build."
+            exit 1
+          fi
+          echo "The attested Bash bootstrap installed the verified bundle without a release download."
+
+      - name: Install with the signed PowerShell bootstrap
+        if: matrix.os == 'windows-2025'
+        shell: powershell
+        env:
+          PYTHON: ${{ steps.python.outputs.python-path }}
+          PIP_INDEX_URL: ${{ env.PACKAGE_INDEX_URL }}
+          PIP_NO_INPUT: "1"
+          PIP_KEYRING_PROVIDER: disabled
+          PIP_EXTRA_INDEX_URL: ""
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $owned = Join-Path $env:RUNNER_TEMP 'siteops-qualification'
+          $download = Join-Path $env:RUNNER_TEMP 'siteops-download'
+          foreach ($name in @('GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN',
+                              'PYTHONPATH', 'PYTHONHOME')) {
+              [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+          }
+          $profileHome = [Environment]::GetFolderPath('UserProfile')
+          if (-not [IO.Path]::IsPathRooted($profileHome)) {
+              throw 'The Windows qualification runner has no private user profile.'
+          }
+          # Keep retained bootstrap executables under the user's private profile.
+          $env:HOME = $owned
+          $env:LOCALAPPDATA = Join-Path $profileHome 'siteops-qualification-bootstrap'
+          $env:TEMP = Join-Path $owned 'bootstrap-temp'
+          $env:GH_CONFIG_DIR = Join-Path $owned 'gh-config'
+          $env:PIP_CONFIG_FILE = 'NUL'
+          $env:PIPX_HOME = Join-Path $owned 'bootstrap-pipx'
+          $env:PIPX_BIN_DIR = Join-Path $owned 'bootstrap-pipx-bin'
+          $env:PIPX_MAN_DIR = Join-Path $owned 'bootstrap-pipx-man'
+          $env:PIPX_COMPLETION_DIR = Join-Path $owned 'bootstrap-pipx-completions'
+          $env:PIPX_SHARED_LIBS = Join-Path $owned 'bootstrap-pipx-shared'
+          $env:PIPX_DEFAULT_PYTHON = $env:PYTHON
+          $env:PATH = (Split-Path -Parent $env:PYTHON) + ';' +
+              (Join-Path $owned 'tooling\Scripts') + ';' + $env:PATH
+          if (Test-Path -LiteralPath $env:LOCALAPPDATA) {
+              throw 'The Windows qualification data root was not fresh.'
+          }
+          $bootstrapData = Join-Path $env:LOCALAPPDATA 'siteops'
+          $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+          foreach ($directory in @($env:LOCALAPPDATA, $bootstrapData)) {
+              try {
+                  New-Item -ItemType Directory -Path $directory -ErrorAction Stop | Out-Null
+              } catch {
+                  throw 'The Windows qualification data root could not be created.'
+              }
+              $previousPreference = $ErrorActionPreference
+              try {
+                  $ErrorActionPreference = 'Continue'
+                  & icacls.exe $directory /setowner "*$sid" *> $null
+                  $ownedByUser = $LASTEXITCODE -eq 0
+                  if ($ownedByUser) {
+                      & icacls.exe $directory /inheritance:r /grant:r "*${sid}:(OI)(CI)F" *> $null
+                      $protected = $LASTEXITCODE -eq 0
+                  } else {
+                      $protected = $false
+                  }
+              } finally {
+                  $ErrorActionPreference = $previousPreference
+              }
+              if (-not $protected) {
+                  throw 'The Windows qualification data root could not be protected.'
+              }
+          }
+          foreach ($directory in @($env:TEMP, $env:GH_CONFIG_DIR)) {
+              New-Item -ItemType Directory -Path $directory -Force | Out-Null
+          }
+          if ($env:BUILDER_IDENTITY -notmatch '/(ci|release)\.yaml@') {
+              throw 'The attested caller is not supported by the bootstrap.'
+          }
+          $caller = $Matches[1] + '.yaml'
+          $release = 'siteops/v0.0.0-ci'
+          $selection = (@($env:SOURCE_REPOSITORY, $release, $env:SOURCE_SHA,
+                          $env:SOURCE_REF, $caller) -join [char]0) + [char]0
+          $hasher = [Security.Cryptography.SHA256]::Create()
+          try {
+              $selectionId = [BitConverter]::ToString(
+                  $hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($selection))
+              ).Replace('-', '').ToLowerInvariant()
+          } finally { $hasher.Dispose() }
+          $cache = Join-Path $env:LOCALAPPDATA "siteops\install-downloads\$selectionId"
+          New-Item -ItemType Directory -Path $cache -Force | Out-Null
+          Copy-Item -LiteralPath (Join-Path $download $env:ARCHIVE_NAME) -Destination $cache
+          Copy-Item -LiteralPath (Join-Path $download ($env:ARCHIVE_NAME + $env:ATTESTATION_SUFFIX)) `
+              -Destination $cache
+          $script = Join-Path $download $env:BOOTSTRAP_PS1
+          $log = Join-Path $owned 'logs\bootstrap-ps1.log'
+          $previousPreference = $ErrorActionPreference
+          try {
+              $ErrorActionPreference = 'Continue'
+              & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script `
+                  -Release $release -SourceCommit $env:SOURCE_SHA -Repository $env:SOURCE_REPOSITORY `
+                  -SourceRef $env:SOURCE_REF -Caller $caller -Yes *> $log
+              $bootstrapStatus = $LASTEXITCODE
+          } finally {
+              $ErrorActionPreference = $previousPreference
+          }
+          if ($bootstrapStatus -ne 0) {
+              if ((Get-Item -LiteralPath $log).Length -le 65536) {
+                  $privateLog = Get-Content -LiteralPath $log -Raw
+                  foreach ($code in @('ROOT_PATH', 'ROOT_ANCESTOR_TYPE', 'ROOT_ANCESTOR_OWNER',
+                                      'ROOT_ANCESTOR_ACL', 'ROOT_DATA_CREATE', 'ROOT_DATA_TYPE',
+                                      'ROOT_DATA_OWNER', 'ROOT_DATA_ACL')) {
+                      if ($privateLog -and $privateLog.Contains(
+                          "Configure a private Site Ops data root. $code"
+                      )) {
+                          throw "The signed PowerShell bootstrap rejected the isolated data root ($code)."
+                      }
+                  }
+                  if ($privateLog -and $privateLog.Contains('Configure a private Site Ops data root')) {
+                      throw 'The signed PowerShell bootstrap rejected the isolated data root.'
+                  }
+                  if ($privateLog -and $privateLog.Contains('Configure one approved HTTPS Python index')) {
+                      throw 'The signed PowerShell bootstrap rejected the configured Python feed.'
+                  }
+              }
+              throw 'The signed PowerShell bootstrap did not install the verified build.'
+          }
+          if ((Get-Content -LiteralPath $log -Raw) -notmatch
+              'Rechecking the retained release without downloading') {
+              throw 'The signed PowerShell bootstrap did not consume the private verified cache.'
+          }
+          $command = Join-Path $env:PIPX_BIN_DIR 'siteops.exe'
+          if ((& $command --version) -cne "siteops $env:PACKAGE_VERSION") {
+              throw 'The signed PowerShell bootstrap exposed another Site Ops build.'
+          }
+          Write-Host 'The attested PowerShell bootstrap installed the verified bundle without a release download.'
 
       - name: Install Site Ops from the verified lock
         env:
@@ -1076,8 +1302,8 @@ jobs:
                   )
               else:
                   outcome = (
-                      "All Linux and Windows installation checks passed. Both attested "
-                      "assets are ready for inspection."
+                      "All Linux and Windows installation checks passed. The four "
+                      "attested assets are ready for inspection."
                   )
 
               def code(value):
@@ -1108,9 +1334,10 @@ jobs:
                           + artifact_url
                           + ").",
                           "",
-                          "The Actions download contains the installation ZIP, the standalone "
-                          "Site Ops wheel, and a detached proof for each. Verify an asset "
-                          "before extracting or installing it.",
+                          "The Actions download contains four attested assets: the installation ZIP, "
+                          "the standalone Site Ops wheel, siteops-bootstrap.sh, and "
+                          "siteops-bootstrap.ps1. Each has its own detached proof. "
+                          "Verify an asset before extracting or installing it.",
                           "",
                       ]
                   )

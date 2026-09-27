@@ -83,7 +83,21 @@ def render_notes(
         raise RenderingError("The release asset list cannot render installation guidance.")
     wheel = native_engine_wheel(native).name
     downloads = home + "/releases/download/" + urllib.parse.quote(plan["release"]["tag"], safe="") + "/"
+    native_names = {asset.name for asset in native}
+    scripts = ("siteops-bootstrap.ps1", "siteops-bootstrap.sh")
+    bootstrap_links = (
+        " Bootstrap scripts: " + ", ".join(
+            f"[{name}]({downloads}{name}) and "
+            f"[{name}{attestation_suffix}]({downloads}{name}{attestation_suffix})"
+            for name in scripts
+        ) + "."
+        if all(name in native_names for name in scripts) else ""
+    )
     guide = home + "/blob/" + source["commit"] + "/docs/install-siteops.md#install-the-verified-bundle"
+    script_guide = (
+        home + "/blob/" + source["commit"]
+        + "/docs/install-siteops.md#verify-the-bootstrap-script"
+    )
     command = (
         f'pipx install "{downloads}{wheel}" --backend pip --fetch-python never '
         '--skip-maintenance --app siteops --pip-args "--only-binary=:all: --no-cache-dir"'
@@ -109,6 +123,12 @@ def render_notes(
         f"Expected publisher: `{repository}`. Source commit: `{source['commit']}`. "
         f"Source ref: `{source['ref']}`. Use these values with the guide verification policy. "
         "The guide also describes switching between online and locked installations.",
+        "For a bootstrap installation, review this release tag, publisher, source commit and "
+        "source ref against your approved selection. "
+        f"[Verify the versioned script and its detached proof]({script_guide}) "
+        "with those identities before running it. HTTPS download alone does not authenticate "
+        "the publisher. If the guide's example publisher, source ref, workflows or runner "
+        "differ from this release, use this release's reviewed provenance values instead.",
         f"Expected provenance runner class: `{runner_environment}`. "
         "The runner class does not identify a particular pool.",
         "The locked path is qualified with pipx 1.17.2 and its shared pip 26.2.1. "
@@ -116,9 +136,12 @@ def render_notes(
         f"Release assets: [{wheel}]({downloads}{wheel}), "
         f"[{wheel}{attestation_suffix}]({downloads}{wheel}{attestation_suffix}), "
         f"[{archive_name}]({downloads}{archive_name}), and "
-        f"[{archive_name}{attestation_suffix}]({downloads}{archive_name}{attestation_suffix}). "
-        "Use these assets instead of the generated source archives.",
+        f"[{archive_name}{attestation_suffix}]({downloads}{archive_name}{attestation_suffix})."
+        + bootstrap_links + " Use these assets instead of the generated source archives.",
         "Installing the CLI does not authenticate to Azure or deploy resources.",
+        "Existing local `-w` workspaces and configured-Site fleet selectors remain supported. "
+        "`siteops inputs` and explicit typed answers are optional for manifests with a typed "
+        "input contract; a project pin selects content, not operator Site configuration.",
     ]
     return notes + "\n\n".join(paragraphs) + "\n" + workspace_notes
 

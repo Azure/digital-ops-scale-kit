@@ -75,6 +75,11 @@ on:
         description: "Full main-branch commit expected for published-release. Required with published-release."
         type: string
         default: ""
+      published-journey:
+        description: "Published package scenario: configured Site control or guided single Site. Guided supports Secret Sync enabled and disabled."
+        type: choice
+        options: [configured, guided]
+        default: configured
 
 permissions:
   id-token: write
@@ -95,8 +100,6 @@ jobs:
       versions: ${{ steps.v.outputs.versions }}
       persistent: ${{ steps.v.outputs.persistent }}
       rg-key: ${{ steps.v.outputs.rg_key }}
-      rg-in: ${{ steps.v.outputs.rg_in }}
-      cluster-in: ${{ steps.v.outputs.cluster_in }}
       upgrade-to: ${{ steps.v.outputs.upgrade_to }}
       pytest-paths: ${{ steps.v.outputs.pytest_paths }}
       isolate-dataflow-sample: ${{ steps.v.outputs.isolate_dataflow_sample }}
@@ -105,6 +108,7 @@ jobs:
       published-mode: ${{ steps.v.outputs.published_mode }}
       published-release: ${{ steps.v.outputs.published_release }}
       published-source-sha: ${{ steps.v.outputs.published_source_sha }}
+      published-journey: ${{ steps.v.outputs.published_journey }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -123,19 +127,18 @@ jobs:
         shell: bash
         env:
           INPUT_RELEASES: "${{ inputs.aio-releases }}"
-          INPUT_RG: "${{ inputs.resource-group }}"
-          INPUT_CLUSTER: "${{ inputs.cluster-name }}"
           INPUT_UPGRADE_TO: "${{ inputs.upgrade-to }}"
           INPUT_SECRET_SYNC_MODES: "${{ inputs.secret-sync-modes }}"
           INPUT_TESTS: "${{ inputs.tests }}"
           INPUT_PUBLISHED_RELEASE: "${{ inputs.published-release }}"
           INPUT_PUBLISHED_SOURCE_SHA: "${{ inputs.published-source-sha }}"
+          INPUT_PUBLISHED_JOURNEY: "${{ inputs.published-journey }}"
           INPUT_SKIP_TEARDOWN: "${{ inputs.skip-teardown }}"
           INPUT_KEEP_ALIVE: "${{ inputs.keep-cluster-alive-minutes }}"
           RUN_ID: "${{ github.run_id }}"
         run: |
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          import json, os, re, sys, unicodedata
+          import hashlib, json, os, re, sys, unicodedata
           from pathlib import Path
 
           def output_token(value, label, maximum=256):
@@ -162,6 +165,15 @@ jobs:
           )
           published_source_sha = os.environ["INPUT_PUBLISHED_SOURCE_SHA"].strip()
           published_mode = bool(published_release)
+          published_journey = output_token(
+              os.environ["INPUT_PUBLISHED_JOURNEY"].strip(),
+              "published-journey",
+              maximum=16,
+          )
+          if published_journey not in {"configured", "guided"}:
+              sys.exit("published-journey must be configured or guided.")
+          if not published_mode and published_journey != "configured":
+              sys.exit("published-journey requires published-release.")
           if bool(published_source_sha) != published_mode:
               sys.exit(
                   "published-release and published-source-sha must be supplied together."
@@ -182,8 +194,17 @@ jobs:
                       f"{releases_dir}/<release>.yaml: {missing}. "
                       f"Available: {available}."
                   )
-          rg_in = output_token(os.environ["INPUT_RG"].strip(), "resource-group")
-          cl_in = output_token(os.environ["INPUT_CLUSTER"].strip(), "cluster-name")
+          target_inputs = json.loads(
+              Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8")
+          ).get("inputs")
+          if not isinstance(target_inputs, dict):
+              sys.exit("Workflow target inputs are unavailable.")
+          rg_in = target_inputs.get("resource-group", "")
+          cl_in = target_inputs.get("cluster-name", "")
+          if not isinstance(rg_in, str) or not isinstance(cl_in, str):
+              sys.exit("Workflow target inputs must be text.")
+          rg_in = output_token(rg_in.strip(), "resource-group")
+          cl_in = output_token(cl_in.strip(), "cluster-name")
           upgrade_to = output_token(
               os.environ["INPUT_UPGRADE_TO"].strip(), "upgrade-to", maximum=64,
           )
@@ -310,12 +331,14 @@ jobs:
           if published_mode:
               if len(rs) != 1:
                   sys.exit("Published E2E requires exactly one aio-releases entry.")
+              if published_journey == "guided" and rs != ["2608"]:
+                  sys.exit("Published guided E2E currently requires aio-releases=2608.")
               if not persistent or cl_in:
                   sys.exit(
                       "Published E2E requires an existing resource group and an "
                       "auto-generated cluster name."
                   )
-              if secret_sync_modes != ["disabled"]:
+              if published_journey == "configured" and secret_sync_modes != ["disabled"]:
                   sys.exit("Published E2E requires secret-sync-modes=disabled.")
               if ordered != ["aio-install"]:
                   sys.exit("Published E2E requires tests=aio-install.")
@@ -329,13 +352,9 @@ jobs:
           print(f"upgrade_to={upgrade_to}")
           print(f"persistent={'true' if persistent else 'false'}")
           print(f"published_mode={'true' if published_mode else 'false'}")
+          print(f"published_journey={published_journey}")
           print(f"published_release={published_release}")
           print(f"published_source_sha={published_source_sha}")
-          # Emit trimmed operator inputs so downstream steps use the exact
-          # values the validation was done against (no trailing-whitespace
-          # mismatch between prep and `Compute names`).
-          print(f"rg_in={rg_in}")
-          print(f"cluster_in={cl_in}")
           print(f"pytest_paths={pytest_paths}")
           print(
               "isolate_dataflow_sample="
@@ -348,7 +367,10 @@ jobs:
           #    runs' delta snapshots each see the other's in-flight resources.
           #  - ephemeral:  per-run key. Matrix cells parallelize via the
           #    matrix.aio-release suffix applied at the job level.
-          rg_key = f"persistent-{rg_in}" if persistent else f"ephemeral-{os.environ['RUN_ID']}"
+          rg_key = (
+              "persistent-" + hashlib.sha256(rg_in.casefold().encode("utf-8")).hexdigest()
+              if persistent else f"ephemeral-{os.environ['RUN_ID']}"
+          )
           print(f"rg_key={rg_key}")
           PY
 
@@ -375,8 +397,54 @@ jobs:
         secret-sync-mode: ${{ fromJSON(needs.prep.outputs.secret-sync-modes) }}
     env:
       PERSISTENT_RG: ${{ needs.prep.outputs.persistent }}
+      PUBLISHED_JOURNEY: ${{ needs.prep.outputs.published-journey }}
       DEBUG_USER_OID: ${{ secrets.DEBUG_USER_OID }}
     steps:
+      # Step headers show env values before shell commands can mask them.
+      - name: Mask operator target inputs
+        id: target-inputs
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+          import unicodedata
+          from pathlib import Path
+
+          event = json.loads(
+              Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8")
+          )
+          inputs = event.get("inputs")
+          if not isinstance(inputs, dict):
+              raise SystemExit("Workflow target inputs are unavailable.")
+          values = {}
+          for name, output_name in (
+              ("resource-group", "rg_in"),
+              ("cluster-name", "cluster_in"),
+          ):
+              value = inputs.get(name, "")
+              if not isinstance(value, str):
+                  raise SystemExit(f"{name} must be text.")
+              value = value.strip()
+              if value and (
+                  len(value) > 256
+                  or any(
+                      character.isspace()
+                      or unicodedata.category(character).startswith("C")
+                      for character in value
+                  )
+              ):
+                  raise SystemExit(f"{name} must be bounded text without whitespace or controls.")
+              if value:
+                  # Workflow commands decode percent sequences before registering masks.
+                  print(f"::add-mask::{value.replace('%', '%25')}", flush=True)
+              values[output_name] = value
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
+              for name, value in values.items():
+                  print(f"{name}={value}", file=output)
+          PY
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -385,8 +453,8 @@ jobs:
         id: names
         shell: bash
         env:
-          RG_IN: "${{ needs.prep.outputs.rg-in }}"
-          CL_IN: "${{ needs.prep.outputs.cluster-in }}"
+          RG_IN: "${{ steps.target-inputs.outputs.rg_in }}"
+          CL_IN: "${{ steps.target-inputs.outputs.cluster_in }}"
           RELEASE: "${{ matrix.aio-release }}"
           SECRET_SYNC_MODE: "${{ matrix.secret-sync-mode }}"
           RUN_ID: "${{ github.run_id }}"
@@ -434,6 +502,7 @@ jobs:
         env:
           RELEASE: ${{ needs.prep.outputs.published-release }}
           SOURCE_SHA: ${{ needs.prep.outputs.published-source-sha }}
+          PUBLISHED_JOURNEY: ${{ needs.prep.outputs.published-journey }}
         run: |
           set -euo pipefail
           umask 077
@@ -444,9 +513,23 @@ jobs:
           unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
           export SITEOPS_CACHE_DIR="$cache"
           export GH_CONFIG_DIR="$gh_config"
+          trust_args=(--trust-policy "$SITEOPS_E2E_POLICY" --trusted-root "$SITEOPS_E2E_TRUSTED_ROOT")
+          if [[ "$PUBLISHED_JOURNEY" == "guided" ]]; then
+            export XDG_CONFIG_HOME="$RUNNER_TEMP/published-source-config"
+            echo "XDG_CONFIG_HOME=$XDG_CONFIG_HOME" >> "$GITHUB_ENV"
+            if ! siteops \
+              --trust-policy "$SITEOPS_E2E_POLICY" \
+              --trusted-root "$SITEOPS_E2E_TRUSTED_ROOT" \
+              source enroll guided --source "github:$GITHUB_REPOSITORY" \
+              > "$RUNNER_TEMP/published-source-enroll.log" \
+              2> "$RUNNER_TEMP/published-source-enroll.err"; then
+              echo "::error::The approved published source could not be enrolled."
+              exit 1
+            fi
+            trust_args=(--approved-source guided)
+          fi
           if ! SITEOPS_REDACT_OUTPUT=0 siteops \
-            --trust-policy "$SITEOPS_E2E_POLICY" \
-            --trusted-root "$SITEOPS_E2E_TRUSTED_ROOT" \
+            "${trust_args[@]}" \
             project pin "$project" \
             --source "github:$GITHUB_REPOSITORY" \
             --release "$RELEASE" \
@@ -554,12 +637,17 @@ jobs:
         # Atomic write guards against a truncated snapshot.
         run: |
           set -euo pipefail
+          umask 077
           mkdir -p "$RUNNER_TEMP/e2e-teardown"
           TMP="$RUNNER_TEMP/e2e-teardown/pre-ids.txt.partial"
-          az resource list -g "$RG" --query "[].id" -o tsv > "$TMP"
+          if ! az resource list -g "$RG" --query "[].id" -o tsv \
+            > "$TMP" 2> "$RUNNER_TEMP/e2e-teardown/snapshot.err"; then
+            echo "::error::The selected resource group snapshot could not be captured."
+            exit 1
+          fi
           mv "$TMP" "$RUNNER_TEMP/e2e-teardown/pre-ids.txt"
           count=$(wc -l < "$RUNNER_TEMP/e2e-teardown/pre-ids.txt")
-          echo "Snapshot: $count pre-existing resource(s) in RG $RG will be preserved."
+          echo "Snapshot: $count pre-existing resource(s) will be preserved."
 
       - name: Create resource group (ephemeral mode)
         id: create-rg
@@ -608,7 +696,7 @@ jobs:
           echo "location=$LOC" >> "$GITHUB_OUTPUT"
 
       - name: Render and plan the published-package operator Site
-        if: needs.prep.outputs.published-mode == 'true'
+        if: needs.prep.outputs.published-mode == 'true' && needs.prep.outputs.published-journey == 'configured'
         shell: bash
         env:
           E2E_SITE_NAME: ${{ steps.names.outputs.site_name }}
@@ -617,7 +705,7 @@ jobs:
           E2E_LOCATION: ${{ steps.loc.outputs.location }}
           E2E_CLUSTER_NAME: ${{ steps.names.outputs.cluster }}
           E2E_AIO_RELEASE: ${{ matrix.aio-release }}
-          E2E_ENABLE_SECRET_SYNC: "false"
+          E2E_ENABLE_SECRET_SYNC: ${{ matrix.secret-sync-mode == 'enabled' && 'true' || 'false' }}
         run: |
           set -euo pipefail
           mkdir "$SITEOPS_E2E_PROJECT/sites"
@@ -683,10 +771,16 @@ jobs:
         # `az connectedk8s connect` error out opaquely.
         run: |
           set -euo pipefail
+          umask 077
           az extension add --name connectedk8s --upgrade --yes --only-show-errors
-          COUNT=$(az connectedk8s list -g "$RG" --query "length([?name=='$CLUSTER'])" -o tsv)
+          if ! COUNT=$(az connectedk8s list -g "$RG" \
+            --query "length([?name=='$CLUSTER'])" -o tsv \
+            2> "$RUNNER_TEMP/published-arc-preflight.err"); then
+            echo "::error::The Arc cluster registration could not be checked."
+            exit 1
+          fi
           if [[ "$COUNT" != "0" ]]; then
-            echo "::error::Arc cluster '$CLUSTER' already exists in RG '$RG'. This workflow registers a fresh k3s under this name. Re-using an existing registration is not supported. Delete the Arc resource (\`az connectedk8s delete -n $CLUSTER -g $RG\`) or pick an unused cluster-name."
+            echo "::error::An Arc cluster registration already exists under the selected name. This workflow requires a new registration. Choose an unused cluster name."
             exit 1
           fi
 
@@ -696,9 +790,358 @@ jobs:
           resource-group: ${{ steps.names.outputs.rg }}
           location: ${{ steps.loc.outputs.location }}
           custom-locations-oid: ${{ inputs.custom-locations-oid != '' && inputs.custom-locations-oid || secrets.CUSTOM_LOCATIONS_OID }}
+          private-provider-errors: ${{ needs.prep.outputs.published-mode }}
           # Secret Sync requires OIDC issuer and workload identity, so one
           # matrix axis intentionally controls all three settings.
           enable-workload-identity: ${{ matrix.secret-sync-mode == 'enabled' && 'true' || 'false' }}
+
+      - name: Prepare guided AIO answers and plan
+        if: needs.prep.outputs.published-mode == 'true' && needs.prep.outputs.published-journey == 'guided'
+        shell: bash
+        env:
+          E2E_SITE_NAME: ${{ steps.names.outputs.site_name }}
+          E2E_SUBSCRIPTION: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          E2E_RESOURCE_GROUP: ${{ steps.names.outputs.rg }}
+          E2E_CLUSTER_NAME: ${{ steps.names.outputs.cluster }}
+          E2E_AIO_RELEASE: ${{ matrix.aio-release }}
+          E2E_ENABLE_SECRET_SYNC: ${{ matrix.secret-sync-mode == 'enabled' && 'true' || 'false' }}
+        run: |
+          set -euo pipefail
+          umask 077
+          if [[ -e "$SITEOPS_E2E_PROJECT/sites" ]]; then
+            echo "::error::Guided package use must not require configured Sites."
+            exit 1
+          fi
+          cluster_id="/subscriptions/$E2E_SUBSCRIPTION/resourceGroups/$E2E_RESOURCE_GROUP/providers/Microsoft.Kubernetes/connectedClusters/$E2E_CLUSTER_NAME"
+          for value in "$E2E_SUBSCRIPTION" "$E2E_RESOURCE_GROUP" "$E2E_CLUSTER_NAME" "$cluster_id"; do
+            echo "::add-mask::$value"
+          done
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          answer_file = Path(os.environ["RUNNER_TEMP"]) / "published-answers.json"
+          values = {
+              "siteName": os.environ["E2E_SITE_NAME"],
+              "subscription": None, "resourceGroup": None, "location": None,
+              "clusterName": None,
+              "environment": "e2e", "country": "US",
+              "aioRelease": os.environ["E2E_AIO_RELEASE"],
+              "enableSecretSync": os.environ["E2E_ENABLE_SECRET_SYNC"] == "true",
+              "brokerMemoryProfile": "Low",
+              "cluster": (
+                  "/subscriptions/" + os.environ["E2E_SUBSCRIPTION"] +
+                  "/resourceGroups/" + os.environ["E2E_RESOURCE_GROUP"] +
+                  "/providers/Microsoft.Kubernetes/connectedClusters/" +
+                  os.environ["E2E_CLUSTER_NAME"]
+              ),
+          }
+          document = {
+              "apiVersion": "siteops.inputs/v1", "kind": "SiteInputValues",
+              "values": values,
+          }
+          fd = os.open(answer_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+          with os.fdopen(fd, "w", encoding="utf-8") as stream:
+              json.dump(document, stream, sort_keys=True)
+          PY
+          if ! siteops \
+            --project "$SITEOPS_E2E_PROJECT" \
+            --approved-source guided \
+            inputs aio-install --offline --example "$RUNNER_TEMP/published-example.yaml" \
+            --output json > "$RUNNER_TEMP/published-inspection.json" \
+            2> "$RUNNER_TEMP/published-inspection.err"; then
+            echo "::error::Guided input inspection failed."
+            exit 1
+          fi
+          if siteops \
+            --project "$SITEOPS_E2E_PROJECT" \
+            --approved-source guided \
+            plan aio-install --offline --input-file "$RUNNER_TEMP/published-answers.json" \
+            --output json > "$RUNNER_TEMP/published-no-read.json" \
+            2> "$RUNNER_TEMP/published-no-read.err"; then
+            echo "::error::A resource ID was accepted without --read-resources."
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"])
+          inspection = json.loads((root / "published-inspection.json").read_text(encoding="utf-8"))
+          example = (root / "published-example.yaml").read_text(encoding="utf-8")
+          rejected = json.loads((root / "published-no-read.json").read_text(encoding="utf-8"))
+          fields = {row["name"]: row for row in inspection["inputs"]}
+          if (
+              inspection.get("kind") != "SiteInputContract"
+              or fields.get("cluster", {}).get("type") != "azureResourceId"
+              or fields.get("location", {}).get("derivableFrom") != ["cluster"]
+              or "siteName: null" not in example
+              or rejected.get("status") != "invalid"
+              or rejected.get("diagnostics", [{}])[0].get("code") != "inputs.resource.read-required"
+          ):
+              raise SystemExit("Guided input inspection or no-read admission failed.")
+          PY
+          if [[ "$E2E_ENABLE_SECRET_SYNC" == "false" ]]; then
+            python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          root = Path(os.environ["RUNNER_TEMP"])
+          document = json.loads((root / "published-answers.json").read_text(encoding="utf-8"))
+          document["values"]["enableSecretSync"] = True
+          destination = root / "published-unready-answers.json"
+          fd = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+          with os.fdopen(fd, "w", encoding="utf-8") as stream:
+              json.dump(document, stream, sort_keys=True)
+          PY
+            az deployment group list -g "$E2E_RESOURCE_GROUP" --query '[].name' -o json \
+              > "$RUNNER_TEMP/published-before-negative.json"
+            if siteops \
+              --project "$SITEOPS_E2E_PROJECT" \
+              --approved-source guided \
+              deploy aio-install --offline \
+              --input-file "$RUNNER_TEMP/published-unready-answers.json" \
+              --read-resources --output json \
+              > "$RUNNER_TEMP/published-unready-run.json" \
+              2> "$RUNNER_TEMP/published-unready-run.err"; then
+              echo "::error::Guided Secret Sync ran without the cluster prerequisites."
+              exit 1
+            fi
+            az deployment group list -g "$E2E_RESOURCE_GROUP" --query '[].name' -o json \
+              > "$RUNNER_TEMP/published-after-negative.json"
+            python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          root = Path(os.environ["RUNNER_TEMP"])
+          failed = json.loads((root / "published-unready-run.json").read_text(encoding="utf-8"))
+          before = json.loads((root / "published-before-negative.json").read_text(encoding="utf-8"))
+          after = json.loads((root / "published-after-negative.json").read_text(encoding="utf-8"))
+          if (
+              failed.get("diagnostics", [{}])[0].get("code") != "inputs.resource.requirement-unmet"
+              or sorted(before) != sorted(after)
+          ):
+              raise SystemExit("Guided Secret Sync prerequisite failure changed Azure deployments.")
+          PY
+          fi
+          if ! SITEOPS_REDACT_OUTPUT=0 siteops \
+            --project "$SITEOPS_E2E_PROJECT" \
+            --approved-source guided \
+            plan aio-install --offline \
+            --input-file "$RUNNER_TEMP/published-answers.json" \
+            --read-resources --output json --projection local-private \
+            > "$RUNNER_TEMP/published-guided-plan.json" \
+            2> "$RUNNER_TEMP/published-guided-plan.err"; then
+            echo "::error::The installed engine could not prepare guided AIO."
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          raw = json.loads(
+              (Path(os.environ["RUNNER_TEMP"]) / "published-guided-plan.json").read_text(
+                  encoding="utf-8"
+              )
+          )
+          enabled = os.environ["E2E_ENABLE_SECRET_SYNC"] == "true"
+          plan = raw.get("plan") or {}
+          targets = plan.get("targets", [])
+          expected_steps = {
+              "global-edge-site": "skip", "edge-site": "skip",
+              "schema-registry": "execute", "adr-ns": "execute",
+              "aio-enablement": "execute", "aio-instance": "execute",
+              "schema-registry-role": "execute",
+              "resolve-aio": "execute" if enabled else "skip",
+              "secretsync": "execute" if enabled else "skip",
+          }
+          actual = (
+              {item["identity"]["step"]: item["disposition"]
+               for item in targets[0]["operations"]}
+              if len(targets) == 1 else {}
+          )
+          if (
+              raw.get("status") != "planned"
+              or raw.get("executable") is not True
+              or raw.get("engine", {}).get("version") != os.environ["SITEOPS_E2E_ENGINE_VERSION"]
+              or plan.get("manifest", {}).get("targetSelection") != "explicit-site"
+              or plan.get("submission", {}).get("mode") != "arm-json"
+              or plan.get("submission", {}).get("compilationBinding") != "package-artifact"
+              or actual != expected_steps
+          ):
+              raise SystemExit("Guided installed AIO plan has unexpected operations.")
+          PY
+
+      - name: Check published guided disabled Site routes
+        if: needs.prep.outputs.published-mode == 'true' && needs.prep.outputs.published-journey == 'guided' && matrix.secret-sync-mode == 'disabled'
+        shell: bash
+        env:
+          E2E_SITE_NAME: ${{ steps.names.outputs.site_name }}
+          E2E_SUBSCRIPTION: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          E2E_RESOURCE_GROUP: ${{ steps.names.outputs.rg }}
+          E2E_LOCATION: ${{ steps.loc.outputs.location }}
+          E2E_CLUSTER_NAME: ${{ steps.names.outputs.cluster }}
+          E2E_AIO_RELEASE: ${{ matrix.aio-release }}
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"])
+          source = json.loads((root / "published-answers.json").read_text(encoding="utf-8"))
+          values = source.get("values")
+          if (
+              source.get("apiVersion") != "siteops.inputs/v1"
+              or source.get("kind") != "SiteInputValues"
+              or not isinstance(values, dict)
+              or values.get("enableSecretSync") is not False
+              or not values.get("cluster")
+          ):
+              raise SystemExit("Guided disabled answers are invalid.")
+          manual = {
+              **values,
+              "subscription": os.environ["E2E_SUBSCRIPTION"],
+              "resourceGroup": os.environ["E2E_RESOURCE_GROUP"],
+              "location": os.environ["E2E_LOCATION"],
+              "clusterName": os.environ["E2E_CLUSTER_NAME"],
+              "cluster": None,
+          }
+          destination = root / "published-manual-answers.json"
+          fd = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+          with os.fdopen(fd, "w", encoding="utf-8") as stream:
+              json.dump({**source, "values": manual}, stream, sort_keys=True)
+          PY
+          if ! SITEOPS_REDACT_OUTPUT=0 siteops \
+            --project "$SITEOPS_E2E_PROJECT" --approved-source guided \
+            plan aio-install --offline \
+            --input-file "$RUNNER_TEMP/published-manual-answers.json" \
+            --output json --projection local-private \
+            > "$RUNNER_TEMP/published-manual-plan.json" \
+            2> "$RUNNER_TEMP/published-manual-plan.err"; then
+            echo "::error::The published guided manual plan failed."
+            exit 1
+          fi
+          if ! SITEOPS_REDACT_OUTPUT=0 siteops \
+            --project "$SITEOPS_E2E_PROJECT" --approved-source guided \
+            plan aio-install --offline \
+            --input "siteName=$E2E_SITE_NAME" \
+            --input "subscription=$E2E_SUBSCRIPTION" \
+            --input "resourceGroup=$E2E_RESOURCE_GROUP" \
+            --input "location=$E2E_LOCATION" \
+            --input "clusterName=$E2E_CLUSTER_NAME" \
+            --input environment=e2e --input country=US \
+            --input "aioRelease=$E2E_AIO_RELEASE" \
+            --input brokerMemoryProfile=Low --input enableSecretSync=false \
+            --output json --projection local-private \
+            > "$RUNNER_TEMP/published-inline-plan.json" \
+            2> "$RUNNER_TEMP/published-inline-plan.err"; then
+            echo "::error::The published guided inline plan failed."
+            exit 1
+          fi
+          mkdir "$SITEOPS_E2E_PROJECT/sites"
+          site="$SITEOPS_E2E_PROJECT/sites/$E2E_SITE_NAME.yaml"
+          if ! siteops \
+            --project "$SITEOPS_E2E_PROJECT" --approved-source guided \
+            inputs aio-install --offline \
+            --input-file "$RUNNER_TEMP/published-manual-answers.json" \
+            --save-site "$site" \
+            > "$RUNNER_TEMP/published-saved-site.txt" \
+            2> "$RUNNER_TEMP/published-saved-site.err"; then
+            echo "::error::The published guided Site could not be saved."
+            exit 1
+          fi
+          site_before="$(sha256sum "$site" | cut -d ' ' -f 1)"
+          if ! SITEOPS_REDACT_OUTPUT=0 siteops \
+            --project "$SITEOPS_E2E_PROJECT" --approved-source guided \
+            plan aio-install --offline -l "name=$E2E_SITE_NAME" \
+            --output json --projection local-private \
+            > "$RUNNER_TEMP/published-configured-plan.json" \
+            2> "$RUNNER_TEMP/published-configured-plan.err"; then
+            echo "::error::The published configured Site plan failed."
+            exit 1
+          fi
+          site_after="$(sha256sum "$site" | cut -d ' ' -f 1)"
+          if [[ "$site_before" != "$site_after" ]]; then
+            echo "::error::Published planning changed the configured Site."
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"])
+          site = os.environ["E2E_SITE_NAME"]
+          version = os.environ["SITEOPS_E2E_ENGINE_VERSION"]
+
+          def shape(filename, *, configured=False):
+              raw = json.loads((root / filename).read_text(encoding="utf-8"))
+              plan = raw["plan"]
+              manifest = plan["manifest"]
+              targets = plan["targets"]
+              if configured:
+                  selection_matches = (
+                      manifest.get("cliSelector") == f"name={site}"
+                      and manifest.get("targetSelection") is None
+                  )
+              else:
+                  selection_matches = (
+                      manifest.get("cliSelector") is None
+                      and manifest.get("targetSelection") == "explicit-site"
+                  )
+              if (
+                  raw.get("apiVersion") != "siteops/v1alpha1"
+                  or raw.get("kind") != "DeploymentPlan"
+                  or raw.get("status") != "planned"
+                  or raw.get("executable") is not True
+                  or raw.get("engine", {}).get("version") != version
+                  or raw.get("summary", {}).get("targetCount") != 1
+                  or len(targets) != 1
+                  or targets[0]["name"] != site
+                  or plan["submission"] != {
+                      "mode": "arm-json", "compilationBinding": "package-artifact"
+                  }
+                  or not selection_matches
+              ):
+                  raise ValueError("Plan shape differs.")
+              operations = targets[0]["operations"]
+              if len(operations) != 9 or raw["summary"]["operationCount"] != len(operations):
+                  raise ValueError("Operation count differs.")
+              target = targets[0]
+              identity = tuple(
+                  target[key] for key in (
+                      "name", "kind", "subscription", "resourceGroup", "location"
+                  )
+              )
+              steps = tuple(
+                  (
+                      item["identity"]["target"], item["identity"]["step"],
+                      item["kind"], item["scope"], item["disposition"]
+                  )
+                  for item in operations
+              )
+              if any(not isinstance(value, str) or not value for value in identity):
+                  raise ValueError("Target identity is incomplete.")
+              return identity, steps
+
+          try:
+              expected_target, expected_operations = shape("published-guided-plan.json")
+              for filename, configured in (
+                  ("published-manual-plan.json", False),
+                  ("published-inline-plan.json", False),
+                  ("published-configured-plan.json", True),
+              ):
+                  target, operations = shape(filename, configured=configured)
+                  if target != expected_target or operations != expected_operations:
+                      raise ValueError("Selected operations differ.")
+          except (OSError, ValueError, KeyError, TypeError, IndexError):
+              raise SystemExit("Published guided disabled Site controls differ.") from None
+          PY
 
       - name: Check for kubectl manifest steps
         id: rbac-check
@@ -829,28 +1272,35 @@ jobs:
           RELEASE: ${{ needs.prep.outputs.published-release }}
           SOURCE_SHA: ${{ needs.prep.outputs.published-source-sha }}
           SITE_NAME: ${{ steps.names.outputs.site_name }}
+          E2E_JOURNEY: ${{ needs.prep.outputs.published-journey }}
         run: |
           set -euo pipefail
           run_root="$RUNNER_TEMP/published-run"
           mkdir "$run_root"
           cd "$run_root"
+          target_args=(-l "name=$SITE_NAME")
+          trust_args=(--trust-policy "$SITEOPS_E2E_POLICY" --trusted-root "$SITEOPS_E2E_TRUSTED_ROOT")
+          if [[ "$PUBLISHED_JOURNEY" == "guided" ]]; then
+            target_args=(--input-file "$RUNNER_TEMP/published-answers.json" --read-resources)
+            trust_args=(--approved-source guided)
+          fi
           if ! siteops \
             --project "$SITEOPS_E2E_PROJECT" \
-            --trust-policy "$SITEOPS_E2E_POLICY" \
-            --trusted-root "$SITEOPS_E2E_TRUSTED_ROOT" \
+            "${trust_args[@]}" \
             deploy aio-install \
             --offline \
-            -l "name=$SITE_NAME" \
+            "${target_args[@]}" \
             --output json \
-            > "$RUNNER_TEMP/published-deploy-output.txt"; then
+            > "$RUNNER_TEMP/published-deploy-output.txt" \
+            2> "$RUNNER_TEMP/published-deploy-output.err"; then
             echo "::error::The published Site Ops deployment failed."
-            cat "$RUNNER_TEMP/published-deploy-output.txt"
             exit 1
           fi
           python - "$RUNNER_TEMP/published-deploy-output.txt" \
             "$RUNNER_TEMP/published-deployment.json" \
             "$RELEASE" "$SOURCE_SHA" "$SITEOPS_E2E_ENGINE_VERSION" <<'PY'
           import json
+          import os
           import sys
           from pathlib import Path
 
@@ -878,6 +1328,12 @@ jobs:
               or operations["total"] < 1
               or type(operation_counts.get("succeeded")) is not int
               or operation_counts["succeeded"] < 1
+              or (
+                  os.environ.get("E2E_JOURNEY") == "guided"
+                  and result.get("assessments") != {
+                      "readiness": "not-assessed", "functionality": "not-assessed"
+                  }
+              )
           ):
               raise SystemExit("The published deployment result is incomplete.")
           receipt = {
@@ -902,10 +1358,56 @@ jobs:
         shell: bash
         env:
           RG: ${{ steps.names.outputs.rg }}
+          E2E_JOURNEY: ${{ needs.prep.outputs.published-journey }}
+          E2E_ENABLE_SECRET_SYNC: ${{ matrix.secret-sync-mode == 'enabled' && 'true' || 'false' }}
         run: |
           set -euo pipefail
+          umask 077
           az resource list --resource-group "$RG" --output json \
             > "$RUNNER_TEMP/published-resources.json"
+          if [[ "$E2E_JOURNEY" == "guided" ]]; then
+            # Parse inputs requires an existing RG for published guided runs.
+            # The persistent snapshot precedes Arc connection. Missing state stays fatal.
+            python3 - \
+              "$RUNNER_TEMP/published-resources.json" \
+              "$RUNNER_TEMP/e2e-teardown/pre-ids.txt" \
+              "$RUNNER_TEMP/published-owned-resources.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          try:
+              resources = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          except (OSError, UnicodeError, ValueError):
+              raise SystemExit("Azure resource observation is invalid.") from None
+          try:
+              prior_ids = {
+                  line.strip().rstrip("/").casefold()
+                  for line in Path(sys.argv[2]).read_text(encoding="utf-8").splitlines()
+                  if line.strip()
+              }
+          except (OSError, UnicodeError):
+              raise SystemExit("Published guided ownership snapshot is unavailable.") from None
+          if not isinstance(resources, list):
+              raise SystemExit("Azure resource observation is invalid.")
+          owned = []
+          for resource in resources:
+              if not isinstance(resource, dict) or any(
+                  not isinstance(resource.get(key), str) or not resource[key]
+                  for key in ("id", "name", "type")
+              ):
+                  raise SystemExit("Azure resource observation is invalid.")
+              if resource["id"].rstrip("/").casefold() not in prior_ids:
+                  owned.append({
+                      "id": resource["id"], "name": resource.get("name"),
+                      "type": resource.get("type"),
+                  })
+          try:
+              Path(sys.argv[3]).write_text(json.dumps(owned), encoding="utf-8")
+          except OSError:
+              raise SystemExit("Published guided resource observation could not be stored.") from None
+          PY
+          fi
           ready=false
           for _ in {1..60}; do
             kubectl get pods --namespace azure-iot-operations --output json \
@@ -948,12 +1450,52 @@ jobs:
             echo "::error::AIO instance projection and operator readiness did not converge within five minutes."
             exit 1
           fi
+          if [[ "$E2E_JOURNEY" == "guided" && "$E2E_ENABLE_SECRET_SYNC" == "true" ]]; then
+            mapfile -t secret_resources < <(python3 - "$RUNNER_TEMP/published-owned-resources.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          owned = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          for resource_type in (
+              "microsoft.managedidentity/userassignedidentities",
+              "microsoft.iotoperations/instances",
+          ):
+              matching = [
+                  item for item in owned
+                  if item.get("type", "").lower() == resource_type
+              ]
+              if len(matching) != 1:
+                  label = (
+                      "managed identity"
+                      if resource_type.startswith("microsoft.managedidentity/")
+                      else "AIO instance"
+                  )
+                  raise SystemExit(f"Guided Secret Sync {label} selection is incomplete.")
+              print(matching[0]["name"] if resource_type.startswith("microsoft.managedidentity")
+                    else matching[0]["id"])
+          PY
+            )
+            if [[ "${#secret_resources[@]}" -ne 2 ]]; then
+              echo "::error::Guided Secret Sync resources could not be selected."
+              exit 1
+            fi
+            az identity federated-credential list -g "$RG" \
+              --identity-name "${secret_resources[0]}" --only-show-errors -o json \
+              > "$RUNNER_TEMP/published-federated.json" \
+              2> "$RUNNER_TEMP/published-federated.err"
+            az resource show --ids "${secret_resources[1]}" \
+              --api-version 2026-07-01 \
+              --only-show-errors -o json \
+              > "$RUNNER_TEMP/published-aio-instance.json" \
+              2> "$RUNNER_TEMP/published-aio-instance.err"
+          fi
           python - \
             "$RUNNER_TEMP/published-resources.json" \
             "$RUNNER_TEMP/published-pods.json" \
             "$RUNNER_TEMP/published-instances.json" \
             "$RUNNER_TEMP/published-readiness.json" <<'PY'
           import json
+          import os
           import sys
           from pathlib import Path
 
@@ -1002,6 +1544,57 @@ jobs:
               "readyOperatorPods": ready_pod_count,
               "instanceCustomResources": custom_resource_count,
           }
+          if os.environ["E2E_JOURNEY"] == "guided":
+              owned = json.loads(
+                  (Path(os.environ["RUNNER_TEMP"]) / "published-owned-resources.json")
+                  .read_text(encoding="utf-8")
+              )
+              if not isinstance(owned, list):
+                  raise SystemExit("Published guided resource observation is invalid.")
+              owned_types = [item.get("type", "").lower() for item in owned]
+              spcs = [
+                  item for item in owned
+                  if item.get("type", "").lower()
+                  == "microsoft.secretsynccontroller/azurekeyvaultsecretproviderclasses"
+              ]
+              identities = owned_types.count("microsoft.managedidentity/userassignedidentities")
+              vaults = owned_types.count("microsoft.keyvault/vaults")
+              enabled = os.environ["E2E_ENABLE_SECRET_SYNC"] == "true"
+              if enabled:
+                  root = Path(os.environ["RUNNER_TEMP"])
+                  federated = json.loads(
+                      (root / "published-federated.json").read_text(encoding="utf-8")
+                  )
+                  instance = json.loads(
+                      (root / "published-aio-instance.json").read_text(encoding="utf-8")
+                  )
+                  reference = (
+                      instance.get("properties", {})
+                      .get("defaultSecretProviderClassRef", {})
+                      .get("resourceId")
+                  )
+                  bound = (
+                      len(spcs) == 1
+                      and isinstance(reference, str)
+                      and reference.casefold() == spcs[0].get("id", "").casefold()
+                  )
+                  if (
+                      identities != 1 or vaults != 1 or not bound
+                      or not isinstance(federated, list) or not federated
+                  ):
+                      raise SystemExit("Guided Secret Sync infrastructure observations failed.")
+                  receipt.update({
+                      "secretSyncEnabled": True,
+                      "secretProviderClasses": len(spcs),
+                      "managedIdentities": identities,
+                      "keyVaults": vaults,
+                      "federatedCredentials": len(federated),
+                      "spcBoundToInstance": bound,
+                  })
+              else:
+                  if spcs or identities or vaults:
+                      raise SystemExit("Guided disabled path created Secret Sync resources.")
+                  receipt["secretSyncEnabled"] = False
           Path(sys.argv[4]).write_text(
               json.dumps(receipt, indent=2, sort_keys=True) + "\n",
               encoding="utf-8",
@@ -1017,7 +1610,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always() && needs.prep.outputs.published-mode == 'true'
         with:
-          name: published-e2e-${{ matrix.aio-release }}
+          name: published-e2e-${{ matrix.aio-release }}-${{ matrix.secret-sync-mode }}-${{ needs.prep.outputs.published-journey }}
           path: |
             ${{ runner.temp }}/published-deployment.json
             ${{ runner.temp }}/published-readiness.json
@@ -1206,10 +1799,11 @@ jobs:
         # up implicitly when scoped resources are deleted.
         run: |
           set +e
+          umask 077
           PRE_FILE="$RUNNER_TEMP/e2e-teardown/pre-ids.txt"
           if [[ ! -f "$PRE_FILE" ]]; then
-            echo "::warning::Snapshot file missing. Skipping delta cleanup. Inspect RG $RG manually."
-            echo "- Persistent-mode teardown skipped for RG \`$RG\` (snapshot missing)" >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::Snapshot file missing. Skipping delta cleanup. Inspect the selected RG privately."
+            echo "- Persistent-mode teardown skipped (snapshot missing)" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           # `az connectedk8s delete` reaches into the cluster via the Arc
@@ -1231,39 +1825,36 @@ jobs:
           # below re-lists and confirms the cluster eventually disappears.
           delete_arc_cluster_arm() {
             local rg="$1" cluster="$2"
-            local sub uri out
+            local sub uri
             sub=$(az account show --query id -o tsv 2>/dev/null)
             if [[ -z "$sub" ]]; then
               echo "::warning::[connectedk8s delete] cannot resolve subscription id"
               return 1
             fi
             uri="/subscriptions/${sub}/resourceGroups/${rg}/providers/Microsoft.Kubernetes/connectedClusters/${cluster}?api-version=2024-01-01"
-            if out=$(az rest --method DELETE --uri "$uri" --only-show-errors 2>&1); then
-              echo "[connectedk8s delete] $cluster (ARM DELETE accepted)"
+            if az rest --method DELETE --uri "$uri" --only-show-errors \
+              > "$RUNNER_TEMP/e2e-teardown/cluster-delete.out" \
+              2> "$RUNNER_TEMP/e2e-teardown/cluster-delete.err"; then
+              echo "[connectedk8s delete] ARM DELETE accepted"
               return 0
             fi
-            echo "::warning::[connectedk8s delete] $cluster ARM DELETE failed, will retry via parallel delete pass"
-            printf '%s\n' "$out" | sed "s/^/[connectedk8s delete $cluster] /"
+            echo "::warning::[connectedk8s delete] ARM DELETE failed; retrying through the delta pass."
             return 1
           }
           # Only delete the Arc cluster if it was created by THIS run: grep
           # the pre-snapshot for a matching connectedClusters/<name> id. If
           # it was already there, the operator owns it. Skip.
           if grep -qiE "/providers/Microsoft\.Kubernetes/connectedClusters/${CLUSTER}$" "$PRE_FILE"; then
-            echo "Skipping cluster delete: Arc resource '$CLUSTER' pre-existed the snapshot (operator-owned)."
+            echo "Skipping cluster delete: Arc resource pre-existed the snapshot (operator-owned)."
           else
             delete_arc_cluster_arm "$RG" "$CLUSTER"
           fi
           LIST_OK=0
-          redact() { sed -E 's/eyJ[A-Za-z0-9_.=-]{10,}/<redacted-jwt>/g' "$1"; }
           for i in 1 2 3 4 5; do
             LIST_ERR="$RUNNER_TEMP/e2e-teardown/list-err-$i.log"
             POST_IDS=$(az resource list -g "$RG" --query "[].id" -o tsv 2>"$LIST_ERR")
             if [[ $? -ne 0 ]]; then
-              echo "::warning::Teardown pass $i: az resource list failed, retrying."
-              echo "::group::az resource list stderr (pass $i)"
-              redact "$LIST_ERR"
-              echo "::endgroup::"
+              echo "::warning::Teardown pass $i: resource enumeration failed; private diagnostic retained."
               sleep 30
               continue
             fi
@@ -1272,13 +1863,9 @@ jobs:
             [[ -z "$DELTA" ]] && break
             count=$(printf '%s\n' "$DELTA" | wc -l)
             echo "::group::Teardown pass $i: deleting $count resource(s) in parallel"
-            printf '%s\n' "$DELTA"
             echo "::endgroup::"
-            # Parallel deletes (-P 10) with per-resource stdout/stderr
-            # prefixing so the GHA log shows which delete emitted what.
-            # Dependency-order failures on the first pass are expected.
-            # The retry loop handles them. Each failed delete is reported as a
-            # warning instead of being discarded with `|| true`.
+            # Parallel deletes retain per-resource output privately by ID digest.
+            # Dependency-order failures are retried and reported by fixed category.
             #
             # connectedClusters cannot be removed via `az resource delete`
             # (RP rejects with `ResourceDeletionValidateFailed`) and
@@ -1289,42 +1876,39 @@ jobs:
             # the regex anchor excludes via the trailing `[^/]+$` shape.
             printf '%s\n' "$DELTA" | xargs -r -P 10 -I{} bash -c '
               id="$1"
-              short="${id##*/}"
+              key=$(printf "%s" "$id" | sha256sum | cut -d " " -f 1)
+              out="$RUNNER_TEMP/e2e-teardown/delete-$2-$key.out"
+              err="$RUNNER_TEMP/e2e-teardown/delete-$2-$key.err"
               if [[ "$id" =~ /providers/Microsoft\.Kubernetes/connectedClusters/[^/]+$ ]]; then
-                if out=$(az rest --method DELETE --uri "${id}?api-version=2024-01-01" --only-show-errors 2>&1); then
-                  echo "[delete-ok pass=$2] $short (connectedk8s ARM)"
+                if az rest --method DELETE --uri "${id}?api-version=2024-01-01" \
+                  --only-show-errors > "$out" 2> "$err"; then
+                  echo "[delete-ok pass=$2] connectedk8s ARM"
                 else
-                  echo "::warning::[delete-failed pass=$2] $short (connectedk8s ARM)"
-                  printf "%s\n" "$out" | sed "s/^/[delete-failed $short] /"
+                  echo "::warning::[delete-failed pass=$2] connectedk8s ARM; private diagnostic retained."
                 fi
-              elif out=$(az resource delete --ids "$id" --verbose 2>&1); then
-                echo "[delete-ok pass=$2] $short"
+              elif az resource delete --ids "$id" --verbose > "$out" 2> "$err"; then
+                echo "[delete-ok pass=$2] resource"
               else
-                echo "::warning::[delete-failed pass=$2] $short"
-                printf "%s\n" "$out" | sed "s/^/[delete-failed $short] /"
+                echo "::warning::[delete-failed pass=$2] resource; private diagnostic retained."
               fi
             ' _ {} "$i"
             sleep 30
           done
           if [[ $LIST_OK -eq 0 ]]; then
-            echo "::warning::Persistent-mode teardown could not enumerate RG $RG. Delta cleanup did not run, so inspect the RG manually."
-            echo "- Persistent-mode teardown unable to enumerate RG \`$RG\` (az resource list failed)" >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::Persistent-mode teardown could not enumerate the selected RG. Delta cleanup did not run; inspect it privately."
+            echo "- Persistent-mode teardown unable to enumerate the selected RG" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           FINAL_ERR="$RUNNER_TEMP/e2e-teardown/list-err-final.log"
           POST_IDS=$(az resource list -g "$RG" --query "[].id" -o tsv 2>"$FINAL_ERR")
           if [[ $? -ne 0 ]]; then
             echo "::warning::Final residual check: az resource list failed, so residual state is unknown."
-            echo "::group::az resource list stderr (final)"
-            redact "$FINAL_ERR"
-            echo "::endgroup::"
-            echo "- Persistent-mode teardown final check failed for RG \`$RG\`" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Persistent-mode teardown final check failed for the selected RG" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           FINAL_DELTA=$(comm -23 <(printf '%s\n' "$POST_IDS" | sort -u) <(sort -u "$PRE_FILE") | sed '/^$/d')
           if [[ -n "$FINAL_DELTA" ]]; then
             residual=$(printf '%s\n' "$FINAL_DELTA" | wc -l)
-            echo "::warning::Persistent-mode teardown left $residual resource(s) in RG $RG created by this run."
-            echo "- Persistent-mode teardown incomplete in RG \`$RG\` ($residual residual resource(s))" >> "$GITHUB_STEP_SUMMARY"
-            printf '%s\n' "$FINAL_DELTA"
+            echo "::warning::Persistent-mode teardown left $residual resource(s) created by this run in the selected RG."
+            echo "- Persistent-mode teardown incomplete ($residual residual resource(s))" >> "$GITHUB_STEP_SUMMARY"
           fi

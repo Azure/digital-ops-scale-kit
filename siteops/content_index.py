@@ -338,8 +338,15 @@ def validate_source_snapshot(
     equivalent_algorithms: tuple[str, ...] = (),
 ) -> None:
     """Check freshness using a source adapter's immutable file identities."""
-    current = {path for path in source_paths if conventional_candidate(PurePosixPath(path))}
-    expected = {path for path in bindings.candidates if conventional_candidate(PurePosixPath(path))}
+    available_paths = {path.casefold() for path in source_paths}
+    current = {
+        path for path in source_paths
+        if conventional_candidate(PurePosixPath(path), available_paths=available_paths)
+    }
+    expected = {
+        path for path in bindings.candidates
+        if conventional_candidate(PurePosixPath(path), available_paths=available_paths)
+    }
     if current != expected:
         raise BrowseError("index.stale", "Deployment entries changed. The source owner must rebuild its index.")
     for item in bindings.inputs:

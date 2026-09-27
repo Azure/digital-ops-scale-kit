@@ -124,6 +124,35 @@ def test_source_snapshot_detects_changes_and_new_candidates(workspace):
         validate_source_snapshot(bindings, paths, digests, algorithm="unavailable")
 
 
+def test_nested_inputs_manifest_is_indexed_but_input_companion_is_not(workspace):
+    companion = workspace / "manifests" / "storage" / "inputs.yaml"
+    companion.write_text(
+        "apiVersion: siteops.inputs/v1\nkind: SiteInputContract\ninputs: []\n",
+        encoding="utf-8",
+    )
+    before = build_content_index(workspace, approve_public=True)
+    before_bindings = load_source_bindings(before.bindings, before.index)
+    paths, digests = _source(workspace, before_bindings)
+    validate_source_snapshot(before_bindings, paths, digests, algorithm="sha256")
+    assert "manifests/storage/inputs.yaml" not in before_bindings.candidates
+
+    manifest = workspace / "manifests" / "network" / "inputs.yaml"
+    manifest.parent.mkdir()
+    manifest.write_text(
+        "apiVersion: siteops/v1\nkind: Manifest\nname: network\nsteps: []\n",
+        encoding="utf-8",
+    )
+    paths, digests = _source(workspace, before_bindings)
+    with pytest.raises(BrowseError, match="entries changed"):
+        validate_source_snapshot(before_bindings, paths, digests, algorithm="sha256")
+
+    updated = build_content_index(workspace, approve_public=True)
+    updated_bindings = load_source_bindings(updated.bindings, updated.index)
+    assert "manifests/network/inputs.yaml" in updated_bindings.candidates
+    paths, digests = _source(workspace, updated_bindings)
+    validate_source_snapshot(updated_bindings, paths, digests, algorithm="sha256")
+
+
 def test_absent_guidance_and_workspace_metadata_are_bound(workspace):
     metadata = workspace / "manifests" / "storage" / "entry.yaml"
     metadata.unlink()

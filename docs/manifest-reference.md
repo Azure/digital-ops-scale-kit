@@ -50,9 +50,132 @@ siteops deploy manifest.yaml -l name=munich-dev,name=seattle-dev
 ```
 
 A manifest with neither `sites:` nor `selector:` is a library or partial.
-It can be checked with `validate`, while `plan` and `deploy` require `-l`.
+It can be checked with `validate`, while `plan` and `deploy` require `-l`
+or an explicit Site supplied with `--site-file`, `--input-file`, or `--input`.
 See [targeting.md](targeting.md) for the full grammar, the no-match diagnostic,
 and validation rules.
+
+## Typed input contract
+
+A deployment that supports [guided single-Site inputs](guided-inputs.md)
+places `inputs.yaml` next to `manifest.yaml` or `manifest.yml`. A flat manifest
+such as `manifests/storage.yaml` uses `manifests/storage.inputs.yaml` so
+several flat manifests cannot share one contract. The file is packaged with
+the workspace and checked against the acquired package's file inventory
+before Site Ops reads it. It is not a manifest, a browsing card, or a source
+of permission to deploy. Without a sibling `manifest.yaml` or `manifest.yml`,
+a nested `manifests/.../inputs.yaml` is itself conventionally discoverable as
+a manifest; if an actual manifest uses that name alongside a sibling
+`manifest.yaml` or `manifest.yml`, list it explicitly in `content.yaml`.
+Existing entry guidance remains descriptive.
+
+```yaml
+apiVersion: siteops.inputs/v1
+kind: SiteInputContract
+siteDefaults:
+  properties:
+    release: "1"
+inputs:
+  - name: siteName
+    type: string
+    description: Name for the explicit Site.
+    sitePath: name
+  - name: subscription
+    type: string
+    description: Subscription where the resources will be created.
+    sitePath: subscription
+  - name: location
+    type: string
+    description: Azure deployment region.
+    sitePath: location
+  - name: featureEnabled
+    type: boolean
+    description: Include the optional feature.
+    sitePath: properties.featureEnabled
+    default: false
+```
+
+`siteDefaults` may hold only `labels`, `properties`, and `parameters`.
+Each ordinary `inputs` row declares one semantic name, a `string` or
+`boolean` type, description, and a destination under `name`,
+`subscription`, `resourceGroup`, `location`, `labels`, `parameters`, or
+`properties`.
+An input without a default is required unless `required: false` is
+declared. Defaults, then answer files, then inline answers contribute
+values. A conditional row may use
+`when: {input: featureEnabled, equals: true}` to require it only when a
+previously declared unconditional controller has that value. Contracts
+declaring `sensitive: true` are rejected in this initial route until protected
+values can be preserved across planning and reporting without disclosure.
+Author only mappings that ordinary Site parsing and actual deployment
+preparation accept. Do not map two inputs onto the same Site field.
+
+A named `azureResourceId` input can instead derive values for existing
+semantic inputs. This is an optional read, not a source of Azure
+credentials or arbitrary provider commands. For example, after declaring
+`subscription`, `resourceGroup`, `location` and `clusterName` as string
+inputs:
+
+```yaml
+- name: cluster
+  type: azureResourceId
+  description: Existing Arc-connected Kubernetes cluster resource ID.
+  required: false
+  resource:
+    type: Microsoft.Kubernetes/connectedClusters
+    apiVersion: "2024-07-15-preview"
+  derive:
+    subscription: subscription
+    resourceGroup: resourceGroup
+    location: location
+    name: clusterName
+```
+
+When an optional resource ID derives required fields, `inputs --example`
+includes `cluster: null` alongside required fields left null. Leave the
+resource null for manual answers, or fill its ID and use
+`--read-resources` to derive the matching target facts. A null optional
+ID does not trigger an Azure read. The example remains incomplete until
+the operator supplies every requirement through one route.
+
+An operator provides `cluster` through the same `--input NAME=VALUE`
+or answer file used for strings, and explicitly adds `--read-resources`
+to `inputs`, `plan` or `deploy`. If the role is omitted, ordinary manual
+answers remain required and no Azure read occurs. The derived values
+fill missing answers. Any manually supplied answer must agree with the
+resource ID or the read response. A role may also use `sitePath` to bind
+its verified ID to one Site parameter, and `resource.subscription: site`
+to require the Site's subscription while allowing another resource
+group. Each contract admits at most four resource roles and only
+top-level resource-group ARM IDs.
+
+Conditions and prerequisites use a closed vocabulary. A connected
+cluster role can declare `requires` facts
+`connectedClusters.workloadIdentityEnabled` and
+`connectedClusters.oidcIssuerAvailable`, optionally gated by an earlier
+boolean input. An active prerequisite must be verified by an explicit
+read or input resolution fails before deployment. Neither fact proves
+readiness or secret materialization. The selected workspace declares
+resource types and allowed mappings. Site Ops selects the read provider
+and the operator's configured Azure identity. A later SDK reader can
+use the same contract and pinned ARM API version.
+
+`siteops inputs <manifest>` shows the contract and can write an incomplete
+answer file for the operator. Conditional fields are omitted from the example
+until their controller activates them. Complete typed answers let `inputs`
+preview the structurally validated Site without writing it. A completed
+file has kind `SiteInputValues` and a `values:` mapping. No Site is written
+or altered by `plan` or `deploy` with typed answers. Use
+`siteops inputs <manifest> --save-site FILE` after
+supplying complete non-protected answers to retain an ordinary Site. A
+manifest without a contract continues to accept complete Site files and
+configured Sites.
+
+`inputs --output json` returns the contract fields. With complete answers,
+it also includes `resolution.status: ready` and `resolution.site` for
+authorized private output. Redacted destinations set `resolution.site` to
+`null`, meaning the Site was resolved but its values were withheld. This
+inspection output is not public gallery metadata or an executable plan.
 
 ## Manifest-level parameters
 

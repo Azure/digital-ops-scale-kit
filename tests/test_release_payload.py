@@ -43,6 +43,8 @@ def inputs(tmp_path):
     native_assets = tuple(identity(native_dir, name, name.encode()) for name in (
         "siteops-install.zip", "siteops-install.zip.attestation.jsonl",
         "siteops-1.2.3-py3-none-any.whl", "siteops-1.2.3-py3-none-any.whl.attestation.jsonl",
+        "siteops-bootstrap.ps1", "siteops-bootstrap.ps1.attestation.jsonl",
+        "siteops-bootstrap.sh", "siteops-bootstrap.sh.attestation.jsonl",
     ))
     workspaces = tuple(identity(workspace_dir, name, name.encode()) for name in (
         "workspace.zip", "workspace.zip.attestation.jsonl", "siteops-workspaces.json",
@@ -88,7 +90,7 @@ def test_complete_payload_preserves_roles_and_exact_bytes(stage, inputs, built):
         inputs["selected"].write_text(json.dumps(selected))
     result = invoke(stage, inputs)
     native, workspace = publication_assets(inputs["plan"], result)
-    assert len(native) == (4 if built else 0) and len(workspace) == 3
+    assert len(native) == (8 if built else 0) and len(workspace) == 3
     assert {path.name for path in inputs["output"].iterdir()} == {asset.name for asset in result.assets}
     for asset in result.assets:
         assert hashlib.sha256((inputs["output"] / asset.name).read_bytes()).hexdigest() == asset.sha256

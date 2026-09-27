@@ -2,6 +2,7 @@
 
 import os
 import shlex
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -33,7 +34,7 @@ def _run_bash(
 ) -> subprocess.CompletedProcess[str]:
     bin_dir = tmp_path / "bin"
     temp_dir = tmp_path / "private-temp"
-    temp_dir.mkdir()
+    temp_dir.mkdir(exist_ok=True)
     preamble = [
         f"export PATH={shlex.quote(_bash_path(bin_dir))}:\"$PATH\"",
         f"export TMPDIR={shlex.quote(_bash_path(temp_dir))}",
@@ -84,6 +85,141 @@ def _fake_bin(tmp_path: Path) -> Path:
     return bin_dir
 
 
+def _action_step(name: str) -> dict:
+    data = yaml.safe_load(ACTION.read_text(encoding="utf-8"))
+    return next(step for step in data["runs"]["steps"] if step.get("name") == name)
+
+
+@pytest.mark.parametrize(
+    ("step_name", "failed_command", "diagnostic"),
+    [
+        ("Connect cluster to Arc + enable features", "connect", "connect-3.err"),
+        (
+            "Connect cluster to Arc + enable features",
+            "enable-features",
+            "enable-features-3.err",
+        ),
+        ("Enable OIDC issuer + workload identity", "update", "update.err"),
+        ("Capture OIDC issuer URL", "show", "issuer.err"),
+    ],
+)
+def test_published_arc_provider_errors_stay_on_runner(
+    tmp_path, step_name, failed_command, diagnostic,
+):
+    bin_dir = _fake_bin(tmp_path)
+    _write_executable(
+        bin_dir / "az",
+        """#!/usr/bin/env bash
+printf '%s\\n' "$2" >> "$FAKE_AZ_LOG"
+if [[ "$2" == "$FAKE_AZ_FAIL" ]]; then
+  printf 'provider details for %s\\n' "$PRIVATE_SENTINEL" >&2
+  exit 23
+fi
+if [[ "$2" == "show" ]]; then
+  printf '%s\\n' 'https://example.test/issuer'
+fi
+""",
+    )
+    script = _action_step(step_name)["run"].replace("RETRY_DELAY=60", "RETRY_DELAY=0")
+    result = _run_bash(
+        script,
+        tmp_path,
+        env={
+            "PRIVATE_PROVIDER_ERRORS": "true",
+            "PRIVATE_SENTINEL": PRIVATE_SENTINEL,
+            "FAKE_AZ_FAIL": failed_command,
+            "FAKE_AZ_LOG": _bash_path(tmp_path / "az-commands.log"),
+            "RUNNER_TEMP": _bash_path(tmp_path / "private-temp"),
+            "GITHUB_OUTPUT": _bash_path(tmp_path / "outputs.txt"),
+            "CLUSTER_NAME": "arc-private",
+            "RESOURCE_GROUP": "rg-private",
+            "LOCATION": "eastus2",
+            "CUSTOM_LOCATIONS_OID": "",
+        },
+    )
+
+    public = result.stdout + result.stderr
+    private = tmp_path / "private-temp" / "connectedk8s-diagnostics" / diagnostic
+    assert result.returncode != 0
+    assert PRIVATE_SENTINEL not in public
+    assert "::error::" in public
+    assert PRIVATE_SENTINEL in private.read_text(encoding="utf-8")
+    if os.name != "nt":
+        assert stat.S_IMODE(private.stat().st_mode) == 0o600
+    calls = (tmp_path / "az-commands.log").read_text(encoding="utf-8").splitlines()
+    assert calls.count(failed_command) == (
+        3 if failed_command in {"connect", "enable-features"} else 1
+    )
+    if failed_command == "enable-features":
+        assert calls[0] == "connect"
+    assert not (tmp_path / "outputs.txt").exists()
+
+
+def test_source_arc_provider_errors_remain_visible(tmp_path):
+    bin_dir = _fake_bin(tmp_path)
+    _write_executable(
+        bin_dir / "az",
+        """#!/usr/bin/env bash
+printf 'provider details for %s\\n' "$PRIVATE_SENTINEL" >&2
+exit 23
+""",
+    )
+    result = _run_bash(
+        _action_step("Connect cluster to Arc + enable features")["run"].replace(
+            "RETRY_DELAY=60", "RETRY_DELAY=0"
+        ),
+        tmp_path,
+        env={
+            "PRIVATE_PROVIDER_ERRORS": "false",
+            "PRIVATE_SENTINEL": PRIVATE_SENTINEL,
+            "CLUSTER_NAME": "arc-private",
+            "RESOURCE_GROUP": "rg-private",
+            "LOCATION": "eastus2",
+            "CUSTOM_LOCATIONS_OID": "",
+        },
+    )
+    assert result.returncode != 0
+    assert PRIVATE_SENTINEL in result.stderr
+    assert not list((tmp_path / "private-temp").iterdir())
+
+
+@pytest.mark.parametrize("private", ["true", "false"])
+def test_arc_provider_success_keeps_connect_and_issuer_outputs(tmp_path, private):
+    bin_dir = _fake_bin(tmp_path)
+    _write_executable(
+        bin_dir / "az",
+        """#!/usr/bin/env bash
+printf '%s\\n' "$2" >> "$FAKE_AZ_LOG"
+if [[ "$2" == "show" ]]; then
+  printf '%s\\n' 'https://example.test/issuer'
+fi
+""",
+    )
+    env = {
+        "PRIVATE_PROVIDER_ERRORS": private,
+        "FAKE_AZ_LOG": _bash_path(tmp_path / "az-commands.log"),
+        "RUNNER_TEMP": _bash_path(tmp_path / "private-temp"),
+        "GITHUB_OUTPUT": _bash_path(tmp_path / "outputs.txt"),
+        "CLUSTER_NAME": "arc-private",
+        "RESOURCE_GROUP": "rg-private",
+        "LOCATION": "eastus2",
+        "CUSTOM_LOCATIONS_OID": "",
+    }
+    for step_name in (
+        "Connect cluster to Arc + enable features",
+        "Enable OIDC issuer + workload identity",
+        "Capture OIDC issuer URL",
+    ):
+        result = _run_bash(_action_step(step_name)["run"], tmp_path, env=env)
+        assert result.returncode == 0, result.stderr
+    assert (tmp_path / "az-commands.log").read_text(encoding="utf-8").splitlines() == [
+        "connect", "enable-features", "update", "show",
+    ]
+    assert (tmp_path / "outputs.txt").read_text(encoding="utf-8").strip() == (
+        "url=https://example.test/issuer"
+    )
+
+
 @pytest.mark.parametrize(
     ("mode", "expected_exit", "expected_message"),
     [
@@ -92,11 +228,13 @@ def _fake_bin(tmp_path: Path) -> Path:
         ("failed", 1, "Arc connectivity could not be queried"),
     ],
 )
+@pytest.mark.parametrize("private", ["true", "false"])
 def test_wait_connected_omits_private_status_errors_and_arguments(
     tmp_path,
     mode,
     expected_exit,
     expected_message,
+    private,
 ):
     bin_dir = _fake_bin(tmp_path)
     _write_executable(
@@ -140,6 +278,8 @@ esac
             "PRIVATE_SENTINEL": PRIVATE_SENTINEL,
             "FAKE_AZ_LOG": _bash_path(tmp_path / "queries.log"),
             "FAKE_SLEEP_LOG": _bash_path(tmp_path / "sleeps.log"),
+            "PRIVATE_PROVIDER_ERRORS": private,
+            "RUNNER_TEMP": _bash_path(tmp_path / "private-temp"),
         },
     )
 
@@ -155,17 +295,21 @@ esac
         assert (tmp_path / "sleeps.log").read_text(encoding="utf-8").splitlines() == (
             ["15"] * 19
         )
-    assert not list((tmp_path / "private-temp").iterdir())
+    if private == "true":
+        diagnostic = tmp_path / "private-temp" / "connectedk8s-diagnostics" / (
+            "wait-connected.err"
+        )
+        assert diagnostic.is_file()
+        if mode != "connected":
+            assert PRIVATE_SENTINEL in diagnostic.read_text(encoding="utf-8")
+        if os.name != "nt":
+            assert stat.S_IMODE(diagnostic.stat().st_mode) == 0o600
+    else:
+        assert not list((tmp_path / "private-temp").iterdir())
 
 
 def _oidc_verification_script() -> str:
-    data = yaml.safe_load(ACTION.read_text(encoding="utf-8"))
-    step = next(
-        step
-        for step in data["runs"]["steps"]
-        if step.get("name") == "Verify OIDC discovery endpoint"
-    )
-    return step["run"]
+    return _action_step("Verify OIDC discovery endpoint")["run"]
 
 
 @pytest.mark.parametrize(

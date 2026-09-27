@@ -206,6 +206,14 @@ def test_interrupted_run_exit_code_overrides_aggregate_status():
     assert result.exit_code == 130
 
 
+def test_interrupted_preparation_without_sites_is_cancelled():
+    result = RunResult.from_sites((), elapsed=0.0, interrupted=True)
+
+    assert result.status is RunStatus.CANCELLED
+    assert result.interrupted is True
+    assert result.exit_code == 130
+
+
 def test_preparation_failure_is_invalid_and_nonzero():
     result = PlanBuildResult(
         status=PlanStatus.INVALID,

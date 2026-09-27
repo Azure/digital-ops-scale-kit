@@ -9,7 +9,8 @@ commands.
 
 `--project DIRECTORY` selects an operator project directory, not a registered
 project name. Site Ops has no global project registry. The project supplies
-your Site configuration. An explicit `-w PATH` selects local content.
+your configured Sites when you use them. [Guided inputs](guided-inputs.md)
+can construct one Site in memory instead. An explicit `-w PATH` selects local content.
 Otherwise, the project's workspace pin selects packaged content.
 
 | Selection | Deployment content | Site configuration |
@@ -65,6 +66,13 @@ Prepare these inputs:
 - A local consumer policy and independently provisioned trusted root.
 - Your configured Sites in the project directory.
 
+Configured Sites are optional for entries with a typed input contract. You
+can inspect `siteops inputs`, then supply one explicit target with
+`--input-file`, `--input`, or a complete `--site-file`.
+An explicitly selected `--read-resources` request reads only declared
+resource ID inputs using the configured Azure identity. Package
+verification and source trust do not authorize that Azure read.
+
 The [content release workflow](releasing.md) can publish the workspace asset
 set from reviewed declarations after qualification and approval. Choose a
 published source that implements the workspace release contract and review
@@ -85,6 +93,60 @@ siteops --project ./factory --trust-policy policy.json --trusted-root trusted-ro
 
 The workspace pin identifies the whole workspace. Each command still selects
 its manifest by the existing exact name/path rules.
+
+## Use an approved source
+
+An operator can explicitly enroll a named public release source in private
+user configuration. It records independently supplied policy and trusted
+root bytes outside the project and content cache:
+
+```text
+siteops --trust-policy policy.json --trusted-root trusted-root.json source enroll official --source github:Azure/digital-ops-scale-kit
+siteops source show official
+siteops --approved-source official project pin ./factory --release <approved-release>
+siteops --approved-source official --project ./factory browse aio-install
+```
+
+The [bootstrap scripts](install-siteops.md#choose-an-installation-route) can
+offer that enrollment when the operator explicitly chooses
+`--enroll-source official` or `-EnrollSource official`. This does not
+sign in to GitHub or Azure. Use `siteops source list` to inspect the names.
+Use `siteops source enroll --help` for the trust file options. In redacted
+CI output, explicit enrollment and removal report only success or failure,
+without echoing the source name. Inspect records with `show` or `list` only
+in an authorized private destination.
+The approved source selects the repository and its verification files only
+when `--approved-source NAME` is passed. It does not change a project's pin
+or select a deployment target. An explicit `--source` on `project pin` must
+match the approved source. Mixing an approved source with explicit trust
+files is rejected instead of silently overriding either.
+After browsing, [supply one explicit Site](guided-inputs.md) or use
+configured project Sites. To retire an enrollment deliberately, run
+`siteops source remove official`. This leaves the project pin intact,
+but later package use requires another explicitly selected approval.
+
+Source records are private user configuration. Package use still checks
+current policy validity, trusted-root identity, source selection, package
+provenance and byte integrity. Expired enrollment can be inspected and
+removed. To change approved trust, remove the old name deliberately and
+enroll the reviewed replacement. Keep the explicit policy and root route
+above for environments that manage those files separately.
+
+The bootstrap-generated approval lasts 30 days. Before it expires, review
+the publisher and a renewed policy and trusted root from independent,
+approved sources. Inspect the existing record and replace that exact name
+only when the new trust files are ready:
+
+```text
+siteops source show official
+siteops source remove official
+siteops --trust-policy renewed-policy.json --trusted-root renewed-root.jsonl source enroll official --source github:Azure/digital-ops-scale-kit
+```
+
+Removal leaves the project pin in place but package use fails closed until
+you enroll the reviewed replacement. Enrollment does not extend an expired
+policy automatically. Keep these commands and their files in a private
+operator environment.
 
 If a release contains several workspaces, add
 `--release-workspace <path-from-the-release>` to `project pin`.
@@ -121,7 +183,7 @@ pin. An altered release reports this error rather than updating the selection:
 The published source differs from the workspace pin. Repin explicitly to change the selection.
 ```
 
-Add `--offline` after `browse`, `validate`, `plan` or `deploy` to require the
+Add `--offline` after `browse`, `inputs`, `validate`, `plan` or `deploy` to require the
 package and proof already in cache. Offline use still requires valid local
 policy and roots. Expired policy, corrupt objects and invalid source
 expectations fail without automatic repair.

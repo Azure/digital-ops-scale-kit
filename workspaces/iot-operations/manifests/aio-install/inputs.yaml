@@ -1,0 +1,87 @@
+apiVersion: siteops.inputs/v1
+kind: SiteInputContract
+siteDefaults:
+  properties:
+    deployOptions:
+      enableGlobalSite: false
+      enableEdgeSite: false
+  parameters:
+    defaultDataflowInstanceCount: 1
+inputs:
+  - name: siteName
+    type: string
+    description: Name for this Site and its AIO resources.
+    sitePath: name
+  - name: subscription
+    type: string
+    description: Subscription containing the existing Arc cluster and resource group.
+    sitePath: subscription
+  - name: resourceGroup
+    type: string
+    description: Existing resource group containing the Arc cluster.
+    sitePath: resourceGroup
+  - name: location
+    type: string
+    description: Azure region of the existing Arc cluster.
+    sitePath: location
+  - name: clusterName
+    type: string
+    description: Name of the existing Arc-connected Kubernetes cluster.
+    sitePath: parameters.clusterName
+  - name: environment
+    type: string
+    description: Environment label applied to deployed resources, such as dev or prod.
+    sitePath: labels.environment
+  - name: country
+    type: string
+    description: Country label applied to deployed resources.
+    sitePath: labels.country
+  - name: enableSecretSync
+    type: boolean
+    description: Enable Secret Sync only when the existing cluster reports OIDC and workload identity.
+    sitePath: properties.deployOptions.enableSecretSync
+    default: false
+  - name: cluster
+    type: azureResourceId
+    required: false
+    description: Existing Arc cluster resource ID. Read it to derive the target fields.
+    resource:
+      type: Microsoft.Kubernetes/connectedClusters
+      apiVersion: 2024-07-15-preview
+    derive:
+      subscription: subscription
+      resourceGroup: resourceGroup
+      location: location
+      name: clusterName
+    requires:
+      - fact: connectedClusters.workloadIdentityEnabled
+        when: {input: enableSecretSync, equals: true}
+        description: The cluster reports workload identity enabled.
+      - fact: connectedClusters.oidcIssuerAvailable
+        when: {input: enableSecretSync, equals: true}
+        description: The cluster reports an OIDC issuer.
+  - name: existingVault
+    type: azureResourceId
+    required: false
+    when: {input: enableSecretSync, equals: true}
+    description: Existing Key Vault resource ID. Omit to create a new vault during enablement.
+    sitePath: parameters.existingKeyVaultResourceId
+    resource:
+      type: Microsoft.KeyVault/vaults
+      apiVersion: "2023-07-01"
+      subscription: site
+  - name: aioRelease
+    type: string
+    description: AIO release configuration selected by this workspace.
+    sitePath: properties.aioRelease
+    default: "2608"
+  - name: enableCertManager
+    type: boolean
+    description: Install the cert-manager Arc extension.
+    sitePath: properties.deployOptions.enableCertManager
+    default: true
+  - name: brokerMemoryProfile
+    type: string
+    description: AIO broker memory profile. Review cluster capacity before selecting another profile.
+    sitePath: parameters.brokerConfig.memoryProfile
+    default: Medium

@@ -4,9 +4,11 @@ import hashlib
 import json
 import shutil
 import sys
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import Mock
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -224,11 +226,46 @@ def test_missing_trust_options_fail_before_cache_initialization(pinned, monkeypa
     command_context.WorkspaceCache.assert_not_called()
 
 
+def test_packaged_command_uses_selected_approved_source_not_the_pin_for_trust(
+    pinned, tmp_path, monkeypatch,
+):
+    root, pin, _ = pinned
+    monkeypatch.setenv("SITEOPS_CACHE_DIR", str(tmp_path / "separate-cache"))
+    policy, trusted_root = tmp_path / "policy.json", tmp_path / "trusted-root.jsonl"
+    selected = SimpleNamespace(
+        reference=pin.selection.source.reference, policy=policy, trusted_root=trusted_root,
+    )
+    monkeypatch.setattr(command_context, "read_source", lambda name: selected if name == "approved" else None)
+    monkeypatch.setattr(command_context, "WorkspaceCache", lambda _: object())
+    used = []
+
+    class Acquirer:
+        def lease(self, source):
+            used.append(source)
+            return nullcontext(SimpleNamespace(package_root=tmp_path / "source"))
+
+    def acquire(source, cache, policy_file, root_file):
+        assert (policy_file, root_file) == (policy, trusted_root)
+        return Acquirer()
+
+    monkeypatch.setattr(command_context, "project_acquirer", acquire)
+    with context(project=root, approved_source="approved") as result:
+        assert result.workspace == tmp_path / "source" / "workspace"
+        assert result.pin == pin and result.package is not None
+    assert used == [pin.selection]
+    selected.reference = "github:other/content"
+    with pytest.raises(ProjectError, match="does not match"):
+        with context(project=root, approved_source="approved"):
+            pytest.fail("Pin selected its own verification authority.")
+    assert used == [pin.selection]
+
+
 @pytest.mark.parametrize("arguments,phrases", [
     (["--help"], ["--project DIRECTORY", "--workspace PATH", "Overrides project package content",
                   "--trust-policy FILE", "--trusted-root FILE", "project pin ./factory"]),
     (["project", "pin", "--help"], ["--release RELEASE", "--release-workspace PATH",
-                                  "without changing Sites", "global --trust-policy FILE"]),
+                                  "without changing Sites", "global --trust-policy FILE",
+                                  "--approved-source NAME"]),
     (["project", "show", "--help"], ["without acquiring or verifying package content"]),
     (["browse", "--help"], ["cached index metadata with --source", "cached project package and proof"]),
     (["sites", "--help"], ["operator project or local workspace"]),
@@ -271,6 +308,13 @@ def test_index_explicit_local_workspace_and_public_approval_controls(tmp_path, m
         output = capsys.readouterr()
         if expected:
             assert "index.approval:" in output.err
+    monkeypatch.setattr(sys, "argv", [
+        "siteops", "--approved-source", "official", "-w", str(local), "index", "--public",
+    ])
+    with pytest.raises(SystemExit) as stopped:
+        cli.main()
+    assert stopped.value.code == 1
+    assert "index.project:" in capsys.readouterr().err
     assert (local / "siteops-index.json").is_file()
     assert not (project / "siteops-index.json").exists()
 
@@ -291,3 +335,31 @@ def test_pin_rejects_cache_overlap_before_directory_creation(tmp_path, monkeypat
     assert "separate directory trees" in capsys.readouterr().err
     assert target.exists() is existing
     assert WorkspaceCache(cache.root).root == cache.root
+
+
+def test_pin_reports_progress_before_cold_acquisition(tmp_path, monkeypatch, capsys):
+    target = tmp_path / "factory"
+    monkeypatch.setenv("SITEOPS_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setattr(sys, "argv", [
+        "siteops", "--trust-policy", str(tmp_path / "policy.json"),
+        "--trusted-root", str(tmp_path / "root.json"),
+        "project", "pin", str(target),
+        "--source", "github:example/content", "--release", "v1",
+    ])
+
+    def stop_acquisition(*args, **kwargs):
+        progress = capsys.readouterr().err
+        assert "Resolving and verifying" in progress
+        assert "may take time" in progress
+        assert str(target) not in progress
+        raise ProjectError("Fixture acquisition stopped.")
+
+    with (
+        patch("siteops.workspace_cache.default_cache_root", return_value=tmp_path / "cache"),
+        patch("siteops.workspace_cache.WorkspaceCache"),
+        patch("siteops.github_workspace_acquisition.GitHubWorkspaceAcquirer") as acquirer,
+    ):
+        acquirer.return_value.acquire.side_effect = stop_acquisition
+        with pytest.raises(SystemExit) as stopped:
+            cli.main()
+    assert stopped.value.code == 1

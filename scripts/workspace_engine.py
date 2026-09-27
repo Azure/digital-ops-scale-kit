@@ -23,6 +23,7 @@ from siteops_distribution import BundleManifest, load_manifest, verify_payload
 from siteops_release import ReleaseIntent
 from siteops_release_assets import (
     ARCHIVE_NAME,
+    BOOTSTRAP_SCRIPTS,
     PROOF_SUFFIX,
     FrozenReleaseAssets,
     ReferencedEngine,
@@ -350,14 +351,14 @@ def prepare_engine(
             )
         paths = []
         for path in built_assets.iterdir():
-            if len(paths) == 4:
+            if len(paths) == 8:
                 raise ArtifactError("The engine build contains undeclared assets.")
             paths.append(path)
         assets = tuple(
             ReleaseAsset(path.name, *hash_file(path, limit=MAX_ENGINE_ASSET_BYTES))
             for path in paths
         )
-        wheel = native_engine_wheel(assets)
+        wheel = native_engine_wheel(assets, require_bootstrap=True)
         if (
             next(asset.sha256 for asset in assets if asset.name == ARCHIVE_NAME) != archive_sha
             or wheel.sha256 != wheel_sha
@@ -416,7 +417,12 @@ def prepare_engine(
             with original as path:
                 _copy(path, output / asset.name, asset, created)
         wheel = native_engine_wheel(assets)
-        for asset in (next(value for value in assets if value.name == ARCHIVE_NAME), wheel):
+        subjects = (
+            next(value for value in assets if value.name == ARCHIVE_NAME),
+            wheel,
+            *(value for value in assets if value.name in BOOTSTRAP_SCRIPTS),
+        )
+        for asset in subjects:
             proof = next(value for value in assets if value.name == asset.name + PROOF_SUFFIX)
             receipt = verifier(
                 output / asset.name,

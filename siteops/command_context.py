@@ -21,6 +21,7 @@ from siteops.project import (
     read_pin,
     require_separate_cache,
 )
+from siteops.source_profiles import read_source
 from siteops.workspace_cache import CachedWorkspace, WorkspaceCache, default_cache_root
 from siteops.workspace_source import ResolvedWorkspaceSource
 
@@ -32,10 +33,18 @@ class ProjectAcquirer(Protocol):
 
 def require_trust_inputs(
     cache_root: Path, policy: Path | None, trusted_root: Path | None,
+    *, approved_source: str | None = None, source_reference: str | None = None,
 ) -> tuple[Path, Path]:
+    if approved_source is not None:
+        if policy is not None or trusted_root is not None:
+            raise ProjectError("Choose --approved-source or explicit trust files, not both.")
+        profile = read_source(approved_source)
+        if source_reference is not None and profile.reference.casefold() != source_reference.casefold():
+            raise ProjectError("The approved source does not match the selected workspace source.")
+        policy, trusted_root = profile.policy, profile.trusted_root
     if policy is None or trusted_root is None:
         raise ProjectError(
-            "Pinned package use requires --trust-policy and --trusted-root supplied independently of the pin.",
+            "Pinned package use requires --approved-source or independent --trust-policy and --trusted-root.",
             code="project.trust-required",
         )
     for path in (policy, trusted_root):
@@ -65,6 +74,7 @@ class CommandContext:
 def open_command_context(
     *, workspace: Path | None, project: Path | None, command: str,
     policy: Path | None, trusted_root: Path | None, offline: bool,
+    approved_source: str | None = None,
     discover: Callable[[Path], Path | None],
 ) -> Iterator[CommandContext]:
     """Resolve paths from the invocation directory and hold any package lease through use."""
@@ -72,12 +82,12 @@ def open_command_context(
     selected_project = project if project is not None else (current if pin_exists(current) else None)
     root = project_root(selected_project) if selected_project is not None else None
     if command == "sites" and root is not None:
-        if policy is not None or trusted_root is not None:
+        if policy is not None or trusted_root is not None or approved_source is not None:
             raise ProjectError("Trust options apply to package use, not Site inspection.")
         yield CommandContext(root, root, project=root)
         return
     if workspace is not None or root is None:
-        if policy is not None or trusted_root is not None or offline:
+        if policy is not None or trusted_root is not None or approved_source is not None or offline:
             raise ValueError("Trust and offline options apply only when using a workspace pin.")
         selected = workspace if workspace is not None else (discover(current) or current)
         selected = Path(selected).resolve()
@@ -88,7 +98,10 @@ def open_command_context(
     selection = read_pin(root).pin
     cache_root = default_cache_root()
     require_separate_cache(root, cache_root)
-    policy, trusted_root = require_trust_inputs(cache_root, policy, trusted_root)
+    policy, trusted_root = require_trust_inputs(
+        cache_root, policy, trusted_root,
+        approved_source=approved_source, source_reference=selection.selection.source.reference,
+    )
     cache = WorkspaceCache(cache_root)
     acquirer = project_acquirer(selection.selection, cache, policy, trusted_root)
     with ExitStack() as stack:

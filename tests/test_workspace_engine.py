@@ -57,7 +57,7 @@ class Verifier:
         )
 
 
-def assets(bundle, manifest, tmp_path, mutate=None):
+def assets(bundle, manifest, tmp_path, mutate=None, *, bootstrap=True):
     directory = tmp_path / "native"
     directory.mkdir()
     with zipfile.ZipFile(directory / engine.ARCHIVE_NAME, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -72,7 +72,12 @@ def assets(bundle, manifest, tmp_path, mutate=None):
                     archive.writestr(mutate(info), path.read_bytes())
     wheel = bundle / manifest.application_wheel
     shutil.copyfile(wheel, directory / wheel.name)
-    for name in (engine.ARCHIVE_NAME, wheel.name):
+    subjects = (engine.ARCHIVE_NAME, wheel.name)
+    if bootstrap:
+        for name in ("siteops-bootstrap.ps1", "siteops-bootstrap.sh"):
+            (directory / name).write_bytes(name.encode("ascii"))
+        subjects += ("siteops-bootstrap.ps1", "siteops-bootstrap.sh")
+    for name in subjects:
         (directory / (name + engine.PROOF_SUFFIX)).write_bytes(b"opaque fixture proof")
     return directory, wheel.name
 
@@ -92,7 +97,9 @@ def test_built_engine_preserves_verified_wheel_and_declared_targets(bundle_facto
     directory, wheel = assets(bundle, manifest, tmp_path)
     verifier = Verifier()
     selected = prepare(directory, wheel, tmp_path, verifier)
-    assert [row[0] for row in verifier.calls] == [engine.ARCHIVE_NAME, wheel]
+    assert [row[0] for row in verifier.calls] == [
+        engine.ARCHIVE_NAME, wheel, "siteops-bootstrap.ps1", "siteops-bootstrap.sh",
+    ]
     assert selected.version == manifest.version
     assert selected.native.source["commit"] == "a" * 40
     assert len(selected.matrix()["include"]) == 10
@@ -104,9 +111,10 @@ def test_built_engine_preserves_verified_wheel_and_declared_targets(bundle_facto
     assert (materialized / manifest.application_wheel).read_bytes() == (directory / wheel).read_bytes()
 
 
-def test_referenced_engine_uses_its_own_commit_without_building(bundle_factory, tmp_path):
+@pytest.mark.parametrize("bootstrap", [False, True])
+def test_referenced_engine_uses_its_own_commit_without_building(bundle_factory, tmp_path, bootstrap):
     bundle, manifest = bundle_factory(version="1.2.3", source_sha="a" * 40)
-    directory, wheel = assets(bundle, manifest, tmp_path)
+    directory, wheel = assets(bundle, manifest, tmp_path, bootstrap=bootstrap)
     values = tuple(
         GitHubReleaseAsset(index, path.name, path.stat().st_size, hashlib.sha256(path.read_bytes()).hexdigest())
         for index, path in enumerate(sorted(directory.iterdir()), 1)
@@ -135,6 +143,10 @@ def test_referenced_engine_uses_its_own_commit_without_building(bundle_factory, 
         verifier=verifier, release_client=Client(), downloader=download,
     )
     assert downloads == [asset.identifier for asset in values]
+    assert [call[0] for call in verifier.calls] == [
+        engine.ARCHIVE_NAME, wheel,
+        *(("siteops-bootstrap.ps1", "siteops-bootstrap.sh") if bootstrap else ()),
+    ]
     assert selected.version == "1.2.3" and selected.reference.release_id == "71"
     assert selected.reference.target == "d" * 40
     assert selected.candidate["commit"] == "b" * 40

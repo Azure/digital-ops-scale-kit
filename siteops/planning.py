@@ -655,6 +655,7 @@ class PlanDiagnostic:
     summary: str
     detail: str | None = None
     serialized_detail: str | None = None
+    public_summary: str | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.code, "Diagnostic code")
@@ -666,6 +667,8 @@ class PlanDiagnostic:
                 self.serialized_detail,
                 "Serialized diagnostic detail",
             )
+        if self.public_summary is not None:
+            _require_text(self.public_summary, "Public diagnostic summary")
 
 
 @dataclass(frozen=True)
@@ -1106,6 +1109,7 @@ class DeploymentPlan:
     cli_selector: str | None = None
     manifest_selector: str | None = None
     composition_enabled: bool = False
+    target_selection: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "source_path", Path(self.source_path))
@@ -1411,6 +1415,8 @@ def render_plain_plan(
             )
         )
 
+    if plan.target_selection == "explicit-site":
+        lines.extend(("", "  Target selection: explicit Site (replaces manifest targeting)"))
     lines.extend(("", f"  Sites ({len(plan.targets)}):"))
     lines.extend(
         f"    • {target.name} ({target.location})"
@@ -1817,6 +1823,15 @@ _PUBLISHABLE_DIAGNOSTICS = {
 def _publishable_diagnostic(
     diagnostic: PlanDiagnostic,
 ) -> dict[str, str]:
+    if diagnostic.public_summary is not None and (
+        diagnostic.code in {"inputs.invalid", "site.invalid", "plan.targeting.conflict"}
+        or diagnostic.code.startswith("inputs.resource.")
+    ):
+        return {
+            "code": diagnostic.code,
+            "severity": diagnostic.severity.value,
+            "summary": diagnostic.public_summary,
+        }
     code, summary = _PUBLISHABLE_DIAGNOSTICS.get(
         diagnostic.code,
         (
@@ -2024,6 +2039,8 @@ def _local_plan_document(plan: DeploymentPlan) -> dict[str, Any]:
             for target in plan.targets
         ],
     }
+    if plan.target_selection is not None:
+        document["manifest"]["targetSelection"] = plan.target_selection
     if plan.intent is PlanIntent.EXECUTABLE:
         document["submission"] = {
             "mode": plan.submission_mode.value,

@@ -31,6 +31,7 @@ prints a plan and executes nothing.
   Result: failed in 76.5s
   Sites: 2 total, 1 succeeded, 1 failed
   Operations: 5 total, 3 succeeded, 1 failed, 1 not run
+  Readiness and functionality: not assessed.
 
   Incomplete
   ----------
@@ -70,6 +71,9 @@ Every prepared operation is accounted for, including work that never started.
 
 A site carries the same set of values, aggregated from its operations. A run
 adds `invalid`, which means preparation failed and nothing was executed.
+Every final result reports readiness and functionality as `not-assessed`.
+Provider deployment success alone does not establish AIO workload health
+or Secret Sync materialization.
 
 `unknown` means an operation's final effect or observation could not be
 confirmed. This includes ambiguous submission, lost observation, and a
@@ -105,6 +109,7 @@ manifest, are reported on stderr without a result document.
 ```json
 {
   "apiVersion": "siteops/v1alpha1",
+  "assessments": {"readiness": "not-assessed", "functionality": "not-assessed"},
   "diagnostics": [],
   "engine": {"name": "siteops", "version": "1.0.0b1"},
   "exitCode": 0,

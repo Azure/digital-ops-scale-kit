@@ -5,16 +5,19 @@ This workspace applies the generic Site Ops engine to
 It contains executable manifests, Bicep templates, release pins, site
 conventions, reusable resource definitions, and samples.
 
-Installing Site Ops does not install this workspace. The workspace is
-currently obtained from a Scale Kit repository checkout and selected with
-`-w workspaces/iot-operations`.
+Installing Site Ops does not install this workspace. Select a local
+checkout with `-w workspaces/iot-operations`, or pin a complete package
+from an approved release when one is published. The latter uses
+the same generic Site Ops planner without requiring a clone.
 
 ## Start with one target
 
-Follow the [one-site quickstart](../../docs/getting-started.md). It prepares
-a `sites.local/` overlay for one existing Arc-connected cluster, inspects the
-resolved target, validates the manifest, reviews an executable plan, and only
-then deploys.
+For an approved package and one explicit target, follow
+[guided inputs](../../docs/guided-inputs.md). For a checkout with a
+reusable Site, follow the [configured-Site guide](../../docs/getting-started.md).
+It prepares a `sites.local/` overlay for one existing Arc-connected cluster,
+inspects the target, validates the manifest, reviews an executable plan,
+and only then deploys. Both use the same manifest and executor.
 
 Workspace content runs with the identity supplied to Site Ops. Review the
 selected manifest and templates before use. AIO deployments can create role

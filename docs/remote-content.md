@@ -145,9 +145,10 @@ command has not acquired a complete deployable workspace.
 
 Read the operator guide at the displayed revision. Use an
 [operator project](projects.md) to acquire an approved complete workspace
-package and execute it with configured Sites, or select a reviewed local
-workspace. Descriptive index browsing remains separate from acquisition and
-execution. Typed setup is not implemented.
+package and execute it with configured Sites or, where the verified package
+contains a declared input contract, [guided inputs](guided-inputs.md).
+You can also select a reviewed local workspace. Descriptive index browsing
+remains separate from acquisition and execution.
 
 Remote inspection still uses a private output destination:
 

@@ -16,11 +16,28 @@ siteops -w workspaces/iot-operations browse --category sample --search "resource
 load Sites or overlays, expand includes, read parameter values, compile
 templates, probe deployment tools, contact services or perform deployment.
 It works with an explicitly selected workspace that has no configured Sites.
+The card's authored Site input guidance is descriptive. For an entry with
+an executable typed input contract, use
+`siteops -w workspaces/iot-operations inputs aio-install` after browsing
+to see the required answers. [Guided inputs](guided-inputs.md) describes
+the separate Site construction and planning step.
 
 For a published remote catalog, use `browse --source`. See
 [remote browsing](remote-content.md) for pinned GitHub sources, authorized
 reads and source-index publication. Remote preview does not acquire
 deployable workspace content.
+
+After pinning a verified workspace in an operator project, omit `-w` and
+browse the acquired package with the same approved source:
+
+```bash
+siteops --approved-source official --project ./factory browse aio-install
+siteops --approved-source official --project ./factory inputs aio-install
+```
+
+This reads the selected package rather than the checkout or the remote
+descriptive index. See [operator projects](projects.md) for the pin and
+approval steps.
 
 ## Find the right choice
 
@@ -169,6 +186,11 @@ the inspector.
 
 Conventional discovery covers YAML manifests beneath `manifests` and
 `manifest.yaml`, `manifest.yml` and underscore partials beneath `samples`.
+In a nested `manifests/` directory, `inputs.yaml` is a discoverable manifest
+unless the same directory has `manifest.yaml` or `manifest.yml`; alongside
+either of those names, it is reserved for that manifest's typed input
+contract. To browse an actual manifest named `inputs.yaml` in that ambiguous
+layout, list its path explicitly in `content.yaml`.
 Metadata files are excluded. The engine does not crawl arbitrary template or
 script trees. To list additional manifests, optionally name them in the
 workspace's `content.yaml`:
