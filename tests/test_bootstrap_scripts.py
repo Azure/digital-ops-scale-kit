@@ -186,6 +186,19 @@ def test_windows_bootstrap_admits_private_data_root_before_retained_tool_use():
     )
 
 
+def test_windows_bootstrap_owns_new_data_root_before_private_acl_and_admission():
+    powershell = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
+    create = powershell.split("function Require-PrivateDataRoot(", 1)[1].split(
+        "function Require-PrivateExecutablePath(", 1,
+    )[0].split("if (-not $exists)", 1)[1]
+    assert '& icacls.exe $Path /setowner "*$sid"' in create
+    assert create.index('& icacls.exe $Path /setowner "*$sid"') < create.index(
+        '& icacls.exe $Path /inheritance:r /grant:r "*${sid}:(OI)(CI)F"',
+    )
+    assert "if (-not $owned) {" in create
+    assert "Reject 'ROOT_DATA_OWNER'" in create
+
+
 def test_windows_bootstrap_checks_managed_executables_before_running_them():
     powershell = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
     assert powershell.index("Require-PrivateExecutablePath $candidate $env:LOCALAPPDATA") < (
@@ -200,9 +213,14 @@ def test_windows_bootstrap_checks_managed_executables_before_running_them():
     assert powershell.index("Require-PrivateExecutablePath $backendPython $download") < (
         powershell.index("Require-ApprovedPythonIndex $backendPython download")
     )
-    assert powershell.index("Require-PrivateExecutablePath $expectedCommand $binDir") < (
+    assert powershell.index(
+        "Require-PrivateExecutablePath $expectedCommand $binDir $expectedTarget $pipxHome",
+    ) < (
         powershell.index("$siteops = Native 'siteops.exe'")
     )
+    assert "Join-Path $pipxHome 'venvs\\siteops\\Scripts\\siteops.exe'" in powershell
+    assert "$siteops = $validatedTarget" in powershell
+    assert powershell.index("$siteops = $validatedTarget") < powershell.index("& $siteops --version")
 
 
 def _windows_private_root_wrapper(tmp_path: Path, setup: str = "") -> Path:
@@ -264,6 +282,7 @@ def _windows_selected_tool_wrapper(tmp_path: Path, kind: str) -> Path:
 def _windows_tool_probe(
     wrapper: Path, root: Path, local_appdata: Path,
     executable: Path | None = None, private_root: Path | None = None,
+    expected_target: Path | None = None, target_root: Path | None = None,
 ):
     env = {
         **os.environ,
@@ -273,6 +292,9 @@ def _windows_tool_probe(
     if executable is not None:
         env["TEST_TOOL"] = str(executable)
         env["TEST_PRIVATE_ROOT"] = str(private_root)
+    assert expected_target is None or target_root is not None
+    env["TEST_EXPECTED_TARGET"] = str(expected_target) if expected_target is not None else ""
+    env["TEST_TARGET_ROOT"] = str(target_root) if target_root is not None else ""
     return subprocess.run(
         ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
         cwd=wrapper.parent,
@@ -292,11 +314,26 @@ def _windows_tool_path_wrapper(tmp_path: Path) -> Path:
         + root.group(0) + "\n" + tool.group(0) + "\n"
         + "$ErrorActionPreference='Stop'\n"
         "Require-PrivateDataRoot $env:TEST_DATA_ROOT\n"
-        "Require-PrivateExecutablePath $env:TEST_TOOL $env:TEST_PRIVATE_ROOT\n"
+        "$selected=Require-PrivateExecutablePath $env:TEST_TOOL $env:TEST_PRIVATE_ROOT "
+        "$env:TEST_EXPECTED_TARGET $env:TEST_TARGET_ROOT\n"
+        "if ($env:TEST_EXPECTED_TARGET -and "
+        "(Get-Item -LiteralPath $env:TEST_TOOL -Force).LinkType -eq 'SymbolicLink' -and "
+        "$selected -cne $env:TEST_EXPECTED_TARGET) { throw 'Wrong target' }\n"
         "'TOOL_ADMITTED'\n",
         encoding="utf-8",
     )
     return wrapper
+
+
+def _windows_file_link(path: Path, target: Path) -> None:
+    try:
+        path.symlink_to(target)
+    except OSError as error:
+        if error.winerror == 1314:
+            if os.environ.get("SITEOPS_REQUIRE_WINDOWS_LINK") == "1":
+                pytest.fail("Required Windows file symlink capability is unavailable.")
+            pytest.skip("This local host cannot create a Windows file symlink.")
+        raise
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Native Windows ACL admission needs Windows.")
@@ -354,6 +391,174 @@ def test_windows_bootstrap_accepts_private_selected_executable_path(tmp_path, ki
     selected = _windows_tool_probe(_windows_selected_tool_wrapper(tmp_path, kind), root, local_appdata)
     assert selected.returncode == 0, selected.stdout + selected.stderr
     assert "TOOL_SELECTION_COMPLETED" in selected.stdout
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Native Windows launcher admission needs Windows.")
+def test_windows_bootstrap_accepts_private_copied_siteops_launcher(tmp_path):
+    local_appdata = tmp_path / "LocalAppData"
+    local_appdata.mkdir()
+    root = local_appdata / "siteops"
+    initial = _windows_tool_probe(_windows_private_root_wrapper(tmp_path), root, local_appdata)
+    assert initial.returncode == 0, initial.stdout + initial.stderr
+    bin_dir = root / "bin"
+    bin_dir.mkdir()
+    launcher = bin_dir / "siteops.exe"
+    shutil.copy2(shutil.which("where.exe"), launcher)
+
+    accepted = _windows_tool_probe(
+        _windows_tool_path_wrapper(tmp_path), root, local_appdata, launcher, bin_dir,
+    )
+    assert accepted.returncode == 0, accepted.stdout + accepted.stderr
+    assert "TOOL_ADMITTED" in accepted.stdout
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Native Windows launcher admission needs Windows.")
+def test_windows_bootstrap_accepts_private_pipx_style_linked_launcher(tmp_path):
+    local_appdata = tmp_path / "LocalAppData"
+    local_appdata.mkdir()
+    root = local_appdata / "siteops"
+    initial = _windows_tool_probe(_windows_private_root_wrapper(tmp_path), root, local_appdata)
+    assert initial.returncode == 0, initial.stdout + initial.stderr
+
+    target = root / "pipx" / "venvs" / "siteops" / "Scripts" / "siteops.exe"
+    target.parent.mkdir(parents=True)
+    shutil.copy2(shutil.which("where.exe"), target)
+    bin_dir = root / "bin"
+    bin_dir.mkdir()
+    launcher = bin_dir / "siteops.exe"
+    _windows_file_link(launcher, target)
+
+    accepted = _windows_tool_probe(
+        _windows_tool_path_wrapper(tmp_path), root, local_appdata, launcher, bin_dir,
+        target, root / "pipx",
+    )
+    assert accepted.returncode == 0, accepted.stdout + accepted.stderr
+    assert "TOOL_ADMITTED" in accepted.stdout
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Native Windows launcher admission needs Windows.")
+def test_windows_bootstrap_rejects_launcher_link_to_unrelated_executable(tmp_path):
+    local_appdata = tmp_path / "LocalAppData"
+    local_appdata.mkdir()
+    root = local_appdata / "siteops"
+    initial = _windows_tool_probe(_windows_private_root_wrapper(tmp_path), root, local_appdata)
+    assert initial.returncode == 0, initial.stdout + initial.stderr
+
+    unrelated = root / "pipx" / "venvs" / "other" / "Scripts" / "siteops.exe"
+    unrelated.parent.mkdir(parents=True)
+    shutil.copy2(shutil.which("where.exe"), unrelated)
+    expected = root / "pipx" / "venvs" / "siteops" / "Scripts" / "siteops.exe"
+    expected.parent.mkdir(parents=True)
+    shutil.copy2(shutil.which("where.exe"), expected)
+    bin_dir = root / "bin"
+    bin_dir.mkdir()
+    launcher = bin_dir / "siteops.exe"
+    _windows_file_link(launcher, unrelated)
+
+    rejected = _windows_tool_probe(
+        _windows_tool_path_wrapper(tmp_path), root, local_appdata, launcher, bin_dir,
+        expected, root / "pipx",
+    )
+    assert rejected.returncode != 0
+    assert "TOOL_TYPE" in rejected.stderr
+    assert "TOOL_ADMITTED" not in rejected.stdout
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Native Windows launcher admission needs Windows.")
+@pytest.mark.parametrize("writable", ["launcher", "target"])
+def test_windows_bootstrap_rejects_linked_launcher_with_writable_ancestor(tmp_path, writable):
+    local_appdata = tmp_path / "LocalAppData"
+    local_appdata.mkdir()
+    root = local_appdata / "siteops"
+    initial = _windows_tool_probe(_windows_private_root_wrapper(tmp_path), root, local_appdata)
+    assert initial.returncode == 0, initial.stdout + initial.stderr
+    target = root / "pipx" / "venvs" / "siteops" / "Scripts" / "siteops.exe"
+    target.parent.mkdir(parents=True)
+    shutil.copy2(shutil.which("where.exe"), target)
+    bin_dir = root / "bin"
+    bin_dir.mkdir()
+    launcher = bin_dir / "siteops.exe"
+    _windows_file_link(launcher, target)
+    shared = bin_dir if writable == "launcher" else target.parent
+    grant = subprocess.run(
+        ["icacls.exe", str(shared), "/grant", "*S-1-5-32-545:(OI)(CI)M"],
+        capture_output=True, text=True, timeout=20,
+    )
+    if grant.returncode:
+        pytest.skip("The local test user cannot change the synthetic target ACL.")
+    try:
+        rejected = _windows_tool_probe(
+            _windows_tool_path_wrapper(tmp_path), root, local_appdata, launcher, bin_dir,
+            target, root / "pipx",
+        )
+        assert rejected.returncode != 0
+        assert "TOOL_ACL" in rejected.stderr
+        assert "TOOL_ADMITTED" not in rejected.stdout
+    finally:
+        subprocess.run(
+            ["icacls.exe", str(shared), "/remove:g", "*S-1-5-32-545"],
+            capture_output=True, text=True, check=True, timeout=20,
+        )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Native Windows launcher admission needs Windows.")
+def test_windows_bootstrap_rejects_linked_tool_without_selected_target(tmp_path):
+    local_appdata = tmp_path / "LocalAppData"
+    local_appdata.mkdir()
+    root = local_appdata / "siteops"
+    initial = _windows_tool_probe(_windows_private_root_wrapper(tmp_path), root, local_appdata)
+    assert initial.returncode == 0, initial.stdout + initial.stderr
+    target = root / "pipx" / "venvs" / "siteops" / "Scripts" / "siteops.exe"
+    target.parent.mkdir(parents=True)
+    shutil.copy2(shutil.which("where.exe"), target)
+    bin_dir = root / "bin"
+    bin_dir.mkdir()
+    launcher = bin_dir / "siteops.exe"
+    _windows_file_link(launcher, target)
+    rejected = _windows_tool_probe(
+        _windows_tool_path_wrapper(tmp_path), root, local_appdata, launcher, bin_dir,
+    )
+    assert rejected.returncode != 0
+    assert "TOOL_TYPE" in rejected.stderr
+    assert "TOOL_ADMITTED" not in rejected.stdout
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Native Windows launcher admission needs Windows.")
+def test_windows_bootstrap_rejects_linked_launcher_with_reparse_target_ancestor(tmp_path):
+    local_appdata = tmp_path / "LocalAppData"
+    local_appdata.mkdir()
+    root = local_appdata / "siteops"
+    initial = _windows_tool_probe(_windows_private_root_wrapper(tmp_path), root, local_appdata)
+    assert initial.returncode == 0, initial.stdout + initial.stderr
+    target_directory = root / "pipx" / "venvs" / "other" / "Scripts"
+    target_directory.mkdir(parents=True)
+    shutil.copy2(shutil.which("where.exe"), target_directory / "siteops.exe")
+    alias = root / "pipx" / "venvs" / "siteops"
+    try:
+        alias.symlink_to(target_directory.parent, target_is_directory=True)
+    except OSError:
+        junction = subprocess.run(
+            [
+                "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                "New-Item -ItemType Junction -Path $env:TEST_ALIAS -Target $env:TEST_TARGET | Out-Null",
+            ],
+            env={**os.environ, "TEST_ALIAS": str(alias), "TEST_TARGET": str(target_directory.parent)},
+            capture_output=True, text=True, timeout=20,
+        )
+        if junction.returncode:
+            pytest.skip("Creating a test reparse point is unavailable on this host.")
+    target = alias / "Scripts" / "siteops.exe"
+    bin_dir = root / "bin"
+    bin_dir.mkdir()
+    launcher = bin_dir / "siteops.exe"
+    _windows_file_link(launcher, target)
+    rejected = _windows_tool_probe(
+        _windows_tool_path_wrapper(tmp_path), root, local_appdata, launcher, bin_dir,
+        target, root / "pipx",
+    )
+    assert rejected.returncode != 0
+    assert "TOOL_TYPE" in rejected.stderr
+    assert "TOOL_ADMITTED" not in rejected.stdout
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Native Windows ACL admission needs Windows.")
@@ -532,6 +737,7 @@ def test_windows_bootstrap_rejects_symlinked_data_ancestor(tmp_path):
         ("ancestor-error", "ROOT_ANCESTOR_TYPE"),
         ("root-probe-error", "ROOT_DATA_TYPE"),
         ("creation-error", "ROOT_DATA_CREATE"),
+        ("owner-error", "ROOT_DATA_OWNER"),
         ("protection-error", "ROOT_DATA_ACL"),
     ],
 )
@@ -549,10 +755,16 @@ def test_windows_bootstrap_root_filesystem_errors_are_bounded(tmp_path, case, ca
         setup = f"function Test-Path {{ throw '{marker}' }}\n"
     elif case == "creation-error":
         setup = f"function New-Item {{ throw '{marker}' }}\n"
-    else:
+    elif case == "owner-error":
         setup = (
             f"function icacls.exe {{ Write-Error '{marker}'; "
             "$global:LASTEXITCODE = 5 }\n"
+        )
+    else:
+        setup = (
+            "function icacls.exe { if ($args -contains '/setowner') { "
+            "$global:LASTEXITCODE = 0; return }; "
+            f"Write-Error '{marker}'; $global:LASTEXITCODE = 5 }}\n"
         )
     wrapper = _windows_private_root_wrapper(tmp_path, setup)
     result = subprocess.run(

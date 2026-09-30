@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -30,40 +31,40 @@ def test_root_quickstart_connects_install_to_aio_without_hiding_fleet_use():
     readme = (GUIDE.parent.parent / "README.md").read_text(encoding="utf-8")
     journey = readme.split("## Quick start\n", 1)[1].split("\n## Browse deployment choices", 1)[0]
     for phrase in (
-        "docs/install-siteops.md#bootstrap-from-https",
-        "docs/install-siteops.md#verify-the-bootstrap-script",
+        "docs/install-siteops.md",
+        "selected release's generated installation instructions",
+        "independently",
+        "private terminal",
+        "--yes",
+        "docs/guided-inputs.md#enable-secret-sync-on-an-existing-instance",
+        "enableSecretSync=true",
         "siteops --approved-source official project pin",
-        "inputs aio-install --example",
-        "plan aio-install",
-        "deploy aio-install",
-        "--read-resources",
         "docs/targeting.md",
         "docs/getting-started.md",
     ):
         assert phrase in journey
-    assert journey.index("project pin") < journey.index("inputs aio-install --example")
-    assert journey.index("inputs aio-install --example") < journey.index("plan aio-install")
-    assert journey.index("plan aio-install") < journey.index("deploy aio-install")
-    assert journey.index("deploy aio-install") < journey.index(
-        "plan aio-install -l name=plant-two,name=plant-three"
+    first = next(
+        line for line in journey.splitlines()
+        if line.startswith("siteops deploy aio-install --source")
     )
-    assert "generated example includes `cluster: null`" in " ".join(journey.split())
-    for verb in ("plan", "deploy"):
-        command = next(
-            line for line in journey.splitlines() if f" {verb} aio-install " in line
-        )
-        assert "--approved-source official" in command
-        assert "--input-file aio-inputs.yaml" in command
-        assert "--read-resources" in command
-    assert "&&\n    bash \"$script\"" in journey
+    assert shlex.split(first) == [
+        "siteops", "deploy", "aio-install", "--source", "official@<release>",
+        "--input", "cluster=<Arc-cluster-resource-ID>",
+    ]
+    assert journey.index(first) < journey.index("project pin")
+    assert "plan aio-install -l name=plant-two,name=plant-three" in journey
+    assert "siteops inputs aio-install --example" not in journey
+    assert "--read-resources" not in journey
+    assert "siteops-bootstrap.sh" not in journey
 
 
-def test_quickstart_distinguishes_unpublished_bootstrap_and_checkout_browsing():
+def test_quickstart_separates_release_installation_and_checkout_browsing():
     readme = (GUIDE.parent.parent / "README.md").read_text(encoding="utf-8")
-    assert "not yet published" in readme
+    assert "not yet published" not in readme
     assert "siteops --approved-source official --project factory browse aio-install" in readme
     assert "require a local checkout" in readme
-    assert "az login" in readme
+    assert "does not sign you in" in readme
+    assert "docs/install-siteops.md" in readme
 
 
 def test_hosted_bootstrap_guidance_matches_managed_host_behavior():
@@ -91,6 +92,7 @@ def test_project_source_renewal_and_saved_site_guide_are_executable():
     assert "siteops source remove official" in projects
     assert "siteops source show official" in projects
     assert "30 days" in projects and "renewed-policy.json" in projects
+    assert "source.profile-expired" in projects and "no automatic renewal" in projects
     assert "mkdir -p ./factory/sites" in guided
     assert "--input-file ./aio-inputs.yaml --read-resources --save-site" in guided
     assert "cluster: null" in guided
@@ -105,12 +107,16 @@ def test_project_source_renewal_and_saved_site_guide_are_executable():
 
 def test_guided_guide_selects_release_per_inline_site_then_configured_fleet():
     guided = (GUIDE.parent / "guided-inputs.md").read_text(encoding="utf-8")
-    assert "--input aioRelease=2608 --read-resources" in guided
-    assert "--input aioRelease=2607 --read-resources" in guided
+    assert 'deploy aio-install --source "official@<release>" --input "cluster=<Arc-cluster-resource-ID>" --input enableSecretSync=true' in guided
+    assert 'deploy secretsync --source "official@<release>" --input "instance=<AIO-instance-resource-ID>"' in guided
+    assert "--input aioRelease=2608" in guided
+    assert "--input aioRelease=2607" in guided
     assert "--input siteName=plant-2608" in guided
     assert "--input siteName=plant-2607" in guided
-    assert "deploy aio-install --input siteName=plant-2608" in guided
-    assert "deploy aio-install --input siteName=plant-2607" in guided
+    assert 'deploy aio-install --source "official@<release>" --input siteName=plant-2608' in guided
+    assert 'deploy aio-install --source "official@<release>" --input siteName=plant-2607' in guided
+    assert "--input aioRelease=2608 --read-resources" not in guided
+    assert "--input aioRelease=2607 --read-resources" not in guided
     assert "plan aio-install -l environment=dev" in guided
     assert "deploy aio-install -l environment=dev" in guided
     assert "every configured Site labeled `dev`" in guided
@@ -123,6 +129,8 @@ def test_reference_distinguishes_required_inputs_from_resource_derivation():
     configuration = (GUIDE.parent / "site-configuration.md").read_text(encoding="utf-8")
     assert "unless `required: false`" in reference
     assert "`cluster: null`" in reference
+    assert "SiteInputContract" in reference and "`siteops.inputs/` namespace" in reference
+    assert "Unrelated sample wiring" in reference and "declared contract" in reference
     assert "already runs AIO" in targeting
     assert "checks Site identities before writing" in configuration
 
@@ -143,13 +151,11 @@ def test_release_guide_distinguishes_bootstrap_assets_from_older_engine_referenc
 
 
 @pytest.mark.parametrize("download_succeeds", [False, True])
-def test_root_quickstart_waits_for_full_https_download_before_execution(tmp_path, download_succeeds):
-    readme = (GUIDE.parent.parent / "README.md").read_text(encoding="utf-8")
-    journey = readme.split("## Quick start\n", 1)[1].split("\n## Browse deployment choices", 1)[0]
-    block = re.search(r"```bash\n(.*?)\n```", journey, re.DOTALL).group(1)
+def test_installer_guide_waits_for_full_https_download_before_execution(tmp_path, download_succeeds):
+    block = _block(_section("### Bootstrap from HTTPS"), "bash")
     block = block.replace("<approved-Site-Ops-release>", "siteops/v1.0.0b1").replace(
         "<full-source-commit>", "c" * 40,
-    )
+    ).replace("<approved-release-tag>", "siteops/v1.0.0b1")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     write_executable(bin_dir / "curl", """#!/usr/bin/env bash
@@ -169,7 +175,22 @@ printf 'printf SCRIPT_RAN\\\\n\\n' > "$target"
     )
     assert (result.returncode == 0) is download_succeeds, result.stdout + result.stderr
     assert ("SCRIPT_RAN" in result.stdout) is download_succeeds
-    assert not list(tmp_path.glob("tmp.*"))
+
+
+def test_preview_migration_describes_rejections_not_aliases():
+    migration = (GUIDE.parent / "migrating.md").read_text(encoding="utf-8")
+    for old, replacement in (
+        ("`validate <manifest> --plan`", "`plan <manifest> --describe`"),
+        ("`deploy <manifest> --dry-run`", "`plan <manifest>`"),
+        ("`--offline`", "`--offline-content`"),
+    ):
+        assert old in migration and replacement in migration
+    assert "unrecognized arguments" in migration
+    assert "Noninteractive deployment" in migration
+    assert "source.profile-expired" in migration
+    packages = (GUIDE.parent / "workspace-packages.md").read_text(encoding="utf-8")
+    assert "`pipx install <wheel-url>`" in packages
+    assert "[installation guide](install-siteops.md)" in packages
 
 
 def _section(heading: str) -> str:

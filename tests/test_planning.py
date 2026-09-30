@@ -1264,6 +1264,34 @@ def test_describe_plan_discloses_missing_preflight():
     assert "deployment capabilities were not checked" in rendered
 
 
+@pytest.mark.parametrize("kind", [TargetKind.RESOURCE_GROUP, TargetKind.SUBSCRIPTION])
+def test_private_plan_discloses_target_scope_without_publishing_it(kind):
+    target = PreparedTarget(
+        name="private-site", kind=kind, subscription="private-subscription",
+        resource_group="private-group" if kind is TargetKind.RESOURCE_GROUP else None,
+        location="eastus", operations=(),
+    )
+    result = PlanBuildResult(
+        status=PlanStatus.PLANNED, executable=False,
+        plan=DeploymentPlan(
+            manifest_name="install", source_path=Path("manifest.yaml"),
+            intent=PlanIntent.DESCRIBE, description=None, max_parallel_sites=1,
+            steps=(), targets=(target,),
+        ),
+    )
+    private = render_plain_plan(result, redacted=False)
+    assert "Subscription: private-subscription" in private
+    if kind is TargetKind.RESOURCE_GROUP:
+        assert "Resource group: private-group" in private
+    else:
+        assert "Scope: subscription" in private
+        assert "Resource group:" not in private
+    public = render_plain_plan(result, redacted=True)
+    assert "private-subscription" not in public
+    assert "private-group" not in public
+    assert "private-site" not in public
+
+
 def test_local_private_projection_omits_prepared_wait_values():
     secret = "PRIVATE_WAIT_VALUE_SENTINEL"
     details = ArmTagWaitOperation(

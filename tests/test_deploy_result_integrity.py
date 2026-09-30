@@ -153,14 +153,18 @@ class TestAFailedFleetIsReportedAsFailed:
             workspace, monkeypatch, {"plant-east", "plant-west"}
         )
 
-        assert cmd_deploy(_deploy_args(workspace, manifest_path), orchestrator) == 1
+        args = _deploy_args(workspace, manifest_path)
+        args.yes = True
+        assert cmd_deploy(args, orchestrator) == 1
 
     def test_one_site_failing_among_several_exits_nonzero(self, fleet, monkeypatch):
         """A single failure carries the exit code for the whole run."""
         workspace, manifest_path = fleet
         orchestrator = self._orchestrator(workspace, monkeypatch, {"plant-west"})
 
-        assert cmd_deploy(_deploy_args(workspace, manifest_path), orchestrator) == 1
+        args = _deploy_args(workspace, manifest_path)
+        args.yes = True
+        assert cmd_deploy(args, orchestrator) == 1
 
     def test_the_summary_counts_what_the_sites_reported(self, fleet, monkeypatch):
         """The counts themselves, which the summary and any artifact reader use."""
@@ -184,7 +188,9 @@ class TestAFailedFleetIsReportedAsFailed:
         workspace, manifest_path = fleet
         orchestrator = self._orchestrator(workspace, monkeypatch, set())
 
-        assert cmd_deploy(_deploy_args(workspace, manifest_path), orchestrator) == 0
+        args = _deploy_args(workspace, manifest_path)
+        args.yes = True
+        assert cmd_deploy(args, orchestrator) == 0
 
 
 class TestAStepOutputReachesTheNextStep:

@@ -19,9 +19,11 @@ and install from the authenticated archive. Site Ops has no private package
 store.
 
 A Site Ops release installs the engine only. Workspace content has its own
-source and version. Acquire a compatible workspace from an approved content
-release through a [workspace pin](projects.md#run-project-pin), or use a local
-checkout. Installing the engine does not acquire or authorize that content.
+source and version. Select a compatible approved release directly with
+`--source SOURCE@RELEASE` in the [guided deployment](guided-inputs.md),
+use a [workspace pin](projects.md#run-project-pin) for repeatable fleets,
+or use a local checkout. Installing the engine does not acquire or authorize
+that content.
 
 A release without these assets uses the
 [linked Site Ops release](releasing.md#release-content-against-an-existing-engine)
@@ -36,9 +38,9 @@ exact approved release tag and its full source commit. The public release
 notes identify both. Do not use a floating branch or `latest` as installation
 authority. Both scripts disclose required tool changes and ask for consent.
 Use `--yes` on Ubuntu or `-Yes` on Windows only for an explicitly approved
-unattended installation. The bootstrap scripts and guided AIO workspace
-have not yet been published in official releases. Check each selected
-release's asset inventory before using these commands. Azure login and
+unattended installation. Use these routes with releases that contain the
+bootstrap and compatible workspace assets. Check the selected release's
+asset inventory before using these commands. Azure login and
 deployment are separate.
 
 | Route | First script trust | Requirements |
@@ -281,11 +283,15 @@ WinGet Python fallback and managed executables before running them.
 An otherwise private data root does not make an existing writable
 child directory or executable safe. Its fixed
 `ROOT_PATH`, `ROOT_ANCESTOR_*` and `ROOT_DATA_*` error categories
-distinguish a path, ancestor or data directory rejection; `TOOL_*`
+distinguish a path, ancestor or data directory rejection. `TOOL_*`
 identifies a selected executable or its parent. Neither prints the
 directory or account identity. Inspect the affected directory and
 its ACL locally. Select private user storage beneath trusted
 ancestors rather than relaxing permissions on shared storage.
+The exposed `siteops.exe` may be a pipx file symlink to the selected
+environment's executable. The bootstrap checks that exact target and
+its private path, then runs the checked target directly. It continues
+to reject redirected directories and unrelated launchers.
 
 The `Azure-Samples/explore-iot-operations` Codespace may use Ubuntu 24.04,
 but its base image can change. Check `/etc/os-release` and tool versions in

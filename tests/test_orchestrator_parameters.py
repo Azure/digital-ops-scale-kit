@@ -103,6 +103,39 @@ class TestTemplateResolution:
 
         assert result == ["test", "static", "eastus"]
 
+    @pytest.mark.parametrize("labels", [{}, {"environment": "prod", "country": "US"}])
+    def test_optional_label_mapping_values_omit_only_absent_labels(self, complete_workspace, labels):
+        orchestrator = Orchestrator(complete_workspace)
+        site = Site(name="one", subscription="sub", resource_group="rg", location="eastus", labels=labels)
+        value = {
+            "tags": {
+                "environment": "{{ site.labels.environment? }}",
+                "country": "{{ site.labels.country? }}",
+                "site": "{{ site.name }}",
+            },
+            "nullable": None,
+            "disabled": False,
+            "zero": 0,
+        }
+        assert orchestrator._resolve_template_strings(value, site) == {
+            "tags": {"site": "one", **labels}, "nullable": None, "disabled": False, "zero": 0,
+        }
+
+    def test_optional_label_reference_does_not_relax_required_or_other_contexts(self, complete_workspace):
+        orchestrator = Orchestrator(complete_workspace)
+        site = Site(name="one", subscription="sub", resource_group="rg", location="eastus")
+        required = "{{ site.labels.environment }}"
+        assert orchestrator._resolve_template_strings(required, site) == required
+        for value in (
+            "{{ site.labels.environment? }}",
+            "prefix-{{ site.labels.environment? }}",
+            ["{{ site.labels.environment? }}"],
+            {"{{ site.labels.environment? }}": "value"},
+            {"{{ site.labels.environment? }}": "{{ site.labels.country? }}"},
+        ):
+            with pytest.raises(ValueError, match="Optional label references"):
+                orchestrator._resolve_template_strings(value, site)
+
 
 class TestConditionEvaluationOnAMissingProperty:
     """How a gate behaves when the site does not carry the property at all.

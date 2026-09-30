@@ -23,8 +23,10 @@ from siteops.arm_resources import (
     ArmResourceRef,
     _validate_requested_facts,
     normalize_arm_resource_facts,
+    normalize_arm_resource_references,
     parse_arm_resource_id,
     validate_arm_observation,
+    validate_arm_reference_fields,
 )
 from siteops.compilation import VersionProvenance, resolve_tool_from_path
 from siteops.planning import CapabilityProviderIdentity
@@ -384,19 +386,22 @@ class AzureCliArmReader:
     )
 
     def read(
-        self, ref: ArmResourceRef, *, facts: frozenset[str] = frozenset()
+        self, ref: ArmResourceRef, *, facts: frozenset[str] = frozenset(),
+        references: frozenset[str] = frozenset(),
     ) -> ArmResourceObservation:
         try:
-            return self._read(ref, facts=facts)
+            return self._read(ref, facts=facts, references=references)
         except KeyboardInterrupt:
             raise ArmResourceError("CANCELLED") from None
 
     def _read(
-        self, ref: ArmResourceRef, *, facts: frozenset[str] = frozenset()
+        self, ref: ArmResourceRef, *, facts: frozenset[str] = frozenset(),
+        references: frozenset[str] = frozenset(),
     ) -> ArmResourceObservation:
         if not isinstance(ref, ArmResourceRef):
             raise ArmResourceError("INVALID_ID")
         _validate_requested_facts(ref, facts)
+        validate_arm_reference_fields(ref.resource_type, references)
         parsed = parse_arm_resource_id(
             ref.resource_id, expected_type=ref.resource_type, api_version=ref.api_version
         )
@@ -437,6 +442,7 @@ class AzureCliArmReader:
             location=document.get("location"),
             name=document.get("name"),
             facts=normalize_arm_resource_facts(ref, document, facts=facts),
+            references=normalize_arm_resource_references(ref, document, references=references),
         )
         validate_arm_observation(ref, observation)
         return observation

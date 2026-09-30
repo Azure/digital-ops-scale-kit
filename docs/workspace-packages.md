@@ -389,7 +389,11 @@ These integrity and materialization primitives are not a trusted acquisition
 command. Remote use requires consumer-owned provenance policy before
 materialization, a protected cache with atomic publication, and separate
 operator-owned Site configuration. Packaged example Sites must not silently
-become deployment targets.
+become deployment targets. A direct `--source SOURCE@RELEASE` command
+selects one verified package online but still requires explicit Site
+inputs unless `--project` supplies the operator's configured Sites.
+It does not change a project pin. A pin is the repeatable fleet and
+`--offline-content` route.
 
 Producer compilation is limited to the selected source snapshot, but Bicep
 does not expose an allowed-root switch or a complete file-read graph. The
@@ -408,6 +412,8 @@ fallback.
 Pass that binding to
 `Orchestrator(..., site_config_root=<project>, materialized_package=binding)`.
 The Site configuration root is required and must stay outside package content.
+For direct source use without a project, the CLI uses temporary private
+operator configuration for one explicit target, not packaged example Sites.
 Packaged example Sites therefore remain content rather than deployment
 targets. Runtime Site values, overlays, selection, and prior-operation outputs
 continue through the ordinary planner and executor.

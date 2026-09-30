@@ -22,6 +22,7 @@ _ERROR_TEXT = MappingProxyType(
         "INVALID_API_VERSION": "The ARM API version must be a pinned calendar date.",
         "INVALID_OBSERVATION": "The ARM resource response has invalid or mismatched data.",
         "UNSUPPORTED_FACT": "The requested ARM resource fact is not supported.",
+        "UNSUPPORTED_REFERENCE": "The requested ARM resource relationship is not supported.",
         "UNSUPPORTED_PROVIDER": "The selected ARM resource reader is not available.",
         "TOOL_MISSING": "The selected Azure CLI could not be started.",
         "TIMEOUT": "The ARM resource read exceeded its deadline.",
@@ -55,6 +56,12 @@ _CLUSTER_FACTS = frozenset(
         _CLUSTER_OIDC,
     }
 )
+_REFERENCE_FIELDS = MappingProxyType({
+    "extendedLocation": (None, ("extendedLocation", "name")),
+    "customLocations.hostResourceId": (
+        "microsoft.extendedlocation/customlocations", ("properties", "hostResourceId"),
+    ),
+})
 
 
 class ArmResourceError(ValueError):
@@ -116,13 +123,14 @@ class ArmResourceRef:
 
 @dataclass(frozen=True)
 class ArmResourceObservation:
-    """Only requested, closed boolean facts may leave the provider adapter."""
+    """Only requested facts and closed ARM references leave the provider adapter."""
 
     resource_id: str = field(repr=False)
     resource_type: str
     location: str
     name: str
     facts: Mapping[str, bool]
+    references: Mapping[str, str] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.facts, Mapping):
@@ -133,6 +141,16 @@ class ArmResourceObservation:
         ):
             raise ArmResourceError("INVALID_OBSERVATION")
         object.__setattr__(self, "facts", MappingProxyType(facts))
+        if not isinstance(self.references, Mapping):
+            raise ArmResourceError("INVALID_OBSERVATION")
+        references = dict(self.references)
+        for name, value in references.items():
+            if (
+                name not in _REFERENCE_FIELDS or not isinstance(value, str)
+                or len(value) > 512 or not _RESOURCE_ID.fullmatch(value)
+            ):
+                raise ArmResourceError("INVALID_OBSERVATION")
+        object.__setattr__(self, "references", MappingProxyType(references))
 
 
 @runtime_checkable
@@ -140,7 +158,8 @@ class ArmResourceReader(Protocol):
     identity: CapabilityProviderIdentity
 
     def read(
-        self, ref: ArmResourceRef, *, facts: frozenset[str] = frozenset()
+        self, ref: ArmResourceRef, *, facts: frozenset[str] = frozenset(),
+        references: frozenset[str] = frozenset(),
     ) -> ArmResourceObservation: ...
 
 
@@ -164,6 +183,40 @@ def _validate_requested_facts(ref: ArmResourceRef, facts: frozenset[str]) -> Non
         or (facts and ref.resource_type.casefold() != _CONNECTED_CLUSTER)
     ):
         raise ArmResourceError("UNSUPPORTED_FACT")
+
+
+def validate_arm_reference_fields(resource_type: str, references: frozenset[str]) -> None:
+    """Admit only closed relationship fields for their supported source resource."""
+    if not isinstance(resource_type, str) or not isinstance(references, frozenset):
+        raise ArmResourceError("UNSUPPORTED_REFERENCE")
+    for name in references:
+        if name not in _REFERENCE_FIELDS:
+            raise ArmResourceError("UNSUPPORTED_REFERENCE")
+        source_type, _ = _REFERENCE_FIELDS[name]
+        if source_type is not None and resource_type.casefold() != source_type:
+            raise ArmResourceError("UNSUPPORTED_REFERENCE")
+
+
+def normalize_arm_resource_references(
+    ref: ArmResourceRef, document: Mapping[str, object], *, references: frozenset[str],
+) -> dict[str, str]:
+    """Project selected ARM IDs without returning arbitrary provider properties."""
+    if not isinstance(ref, ArmResourceRef):
+        raise ArmResourceError("INVALID_ID")
+    validate_arm_reference_fields(ref.resource_type, references)
+    if not isinstance(document, Mapping):
+        raise ArmResourceError("INVALID_OBSERVATION")
+    result: dict[str, str] = {}
+    for name in sorted(references):
+        value: object = document
+        for part in _REFERENCE_FIELDS[name][1]:
+            if not isinstance(value, Mapping) or part not in value:
+                raise ArmResourceError("INVALID_OBSERVATION")
+            value = value[part]
+        if not isinstance(value, str) or len(value) > 512 or not _RESOURCE_ID.fullmatch(value):
+            raise ArmResourceError("INVALID_OBSERVATION")
+        result[name] = value
+    return result
 
 
 def normalize_arm_resource_facts(
@@ -236,6 +289,7 @@ def validate_arm_observation(ref: ArmResourceRef, observation: ArmResourceObserv
     ):
         raise ArmResourceError("INVALID_OBSERVATION")
     _validate_requested_facts(ref, frozenset(observation.facts))
+    validate_arm_reference_fields(ref.resource_type, frozenset(observation.references))
 
 
 def _azure_cli_reader() -> ArmResourceReader:

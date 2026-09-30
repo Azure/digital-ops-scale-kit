@@ -12,7 +12,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from siteops import cli, github_source, source_metadata_cache
+from siteops import cli, command_context, github_catalog, github_source, source_metadata_cache
 from siteops.browse import BrowseError
 from siteops.browse_output import render_browse_plain
 from siteops.github_catalog import inspect_github
@@ -165,7 +165,7 @@ def test_rate_limit_failure_preserves_cache_but_requires_explicit_offline_select
     failed = inspect(remote)
     assert failed.status == "invalid" and not failed.entries
     assert failed.diagnostics[0].code == "github.rate-limit"
-    assert "--offline" in failed.diagnostics[0].summary
+    assert "--offline-content" in failed.diagnostics[0].summary
     remote.routes.clear()
     offline = inspect(remote, offline=True)
     assert offline.entries == first.entries and offline.source.observation.stale
@@ -276,7 +276,7 @@ def test_actual_cli_cache_modes_are_parseable_and_do_not_load_sites(remote, monk
     monkeypatch.setattr(source_metadata_cache, "SourceMetadataCache", lambda: remote.cache)
     monkeypatch.setattr(cli, "Orchestrator", Mock(side_effect=AssertionError("Loaded Sites.")))
     monkeypatch.setattr(cli, "_auto_discover_workspace", Mock(side_effect=AssertionError("Local discovery.")))
-    for options, expected_reads in (([], 5), ([], 5), (["--offline"], 5), (["--refresh"], 7)):
+    for options, expected_reads in (([], 5), (["--offline-content"], 5), (["--refresh"], 7)):
         monkeypatch.setattr(sys, "argv", [
             "siteops", "browse", "storage", "--source", "github:example/kit", "--output", "json", *options,
         ])
@@ -286,12 +286,44 @@ def test_actual_cli_cache_modes_are_parseable_and_do_not_load_sites(remote, monk
         assert stopped.value.code == 0 and not output.err
         document = json.loads(output.out)
         assert document["entries"][0]["name"] == "storage"
-        assert document["source"]["observation"]["offline"] == ("--offline" in options)
+        assert document["source"]["observation"]["offline"] == ("--offline-content" in options)
         assert len(remote.routes) == expected_reads
     cli.Orchestrator.assert_not_called()
 
 
-@pytest.mark.parametrize("options", [["--offline"], ["--refresh"], ["--offline", "--refresh"]])
+def test_browse_source_alias_selects_metadata_without_loading_content(remote, monkeypatch, capsys):
+    monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "0")
+    selected = []
+
+    def profile(name, *, require_valid=True):
+        selected.append((name, require_valid))
+        return SimpleNamespace(reference="github:example/kit")
+
+    monkeypatch.setattr(command_context, "read_source", profile)
+    browse = Mock(return_value=inspect(remote))
+    monkeypatch.setattr(github_catalog, "inspect_github", browse)
+    monkeypatch.setattr(cli, "Orchestrator", Mock(side_effect=AssertionError("Loaded Sites")))
+    monkeypatch.setattr(
+        cli, "open_command_context", Mock(side_effect=AssertionError("Acquired package content")),
+    )
+    monkeypatch.setattr(
+        sys, "argv", ["siteops", "browse", "storage", "--source", "approved@main", "--output", "json"],
+    )
+
+    with pytest.raises(SystemExit) as stopped:
+        cli.main()
+
+    output = capsys.readouterr()
+    assert stopped.value.code == 0 and output.err == ""
+    assert selected == [("approved", False)]
+    assert json.loads(output.out)["source"]["verification"] == "not-performed"
+    assert browse.call_args.args == ("github:example/kit", "storage")
+    assert browse.call_args.kwargs["ref"] == "main"
+    cli.Orchestrator.assert_not_called()
+    cli.open_command_context.assert_not_called()
+
+
+@pytest.mark.parametrize("options", [["--offline-content"], ["--refresh"], ["--offline-content", "--refresh"]])
 def test_cli_cache_options_require_a_source_and_are_mutually_exclusive(
     tmp_path, monkeypatch, capsys, options,
 ):
@@ -309,7 +341,7 @@ def test_cli_redaction_precedes_cache_creation(tmp_path, monkeypatch, capsys):
     root = tmp_path / "cache"
     monkeypatch.setenv("SITEOPS_CACHE_DIR", str(root))
     monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1")
-    monkeypatch.setattr(sys, "argv", ["siteops", "browse", "--source", "github:private/kit", "--offline"])
+    monkeypatch.setattr(sys, "argv", ["siteops", "browse", "--source", "github:private/kit", "--offline-content"])
     with pytest.raises(SystemExit) as stopped:
         cli.main()
     output = capsys.readouterr()

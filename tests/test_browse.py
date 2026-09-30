@@ -230,7 +230,7 @@ def test_ambiguous_names_require_paths(tmp_path):
     assert selected.selected
 
 
-@pytest.mark.parametrize("command", [("browse",), ("validate",), ("plan", "--describe"), ("deploy",)])
+@pytest.mark.parametrize("command", [("browse",), ("validate",), ("plan", "--describe"), ("deploy", "--yes")])
 @pytest.mark.parametrize("token", ["choice", "choice.yaml"])
 def test_name_filename_ambiguity_has_the_same_paths_across_commands(
     tmp_path, monkeypatch, capsys, command, token,
@@ -241,7 +241,7 @@ def test_name_filename_ambiguity_has_the_same_paths_across_commands(
         pytest.fail("Prepared an ambiguous selection")
 
     monkeypatch.setattr(cli, "Orchestrator", lambda **k: SimpleNamespace(
-        build_plan=blocked, deploy=blocked, validate=blocked,
+        build_plan=blocked, execute_plan=blocked, validate=blocked,
     ))
     code, out, err = _cli(monkeypatch, capsys, tmp_path, *command, token)
     assert code == 1
@@ -733,18 +733,18 @@ def test_non_aio_browse_plan_deploy_uses_configured_site(tmp_path, monkeypatch, 
     assert "configuredstorage" not in out
     assert not submissions
     assert len(inventories) == int(by_name)
-    for command, option in (("validate", "--plan"), ("deploy", "--dry-run")):
-        inventories.clear()
-        code, out, _ = _cli(
-            monkeypatch, capsys, workspace, command, path, option,
-            "-l", "name=example", "--output", "json",
-        )
-        assert code == 0 and json.loads(out)["status"] == "planned"
-        assert not submissions
-        assert len(inventories) == int(by_name)
     inventories.clear()
     code, out, _ = _cli(
-        monkeypatch, capsys, workspace, "deploy", path, "-l", "name=example", "--output", "json"
+        monkeypatch, capsys, workspace, "plan", path, "--describe",
+        "-l", "name=example", "--output", "json",
+    )
+    assert code == 0 and json.loads(out)["status"] == "planned"
+    assert json.loads(out)["intent"] == "describe"
+    assert not submissions
+    assert len(inventories) == int(by_name)
+    inventories.clear()
+    code, out, _ = _cli(
+        monkeypatch, capsys, workspace, "deploy", path, "-l", "name=example", "--yes", "--output", "json"
     )
     assert code == 0 and json.loads(out)["status"] == "succeeded"
     assert len(inventories) == int(by_name)

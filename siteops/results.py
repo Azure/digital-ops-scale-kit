@@ -120,6 +120,7 @@ class ProgressEventKind(str, Enum):
     BATCH_STARTED = "batch-started"
     TARGET_STARTED = "target-started"
     OPERATION_STARTED = "operation-started"
+    OPERATION_WAITING = "operation-waiting"
     OPERATION_FINISHED = "operation-finished"
     TARGET_FINISHED = "target-finished"
     TARGET_BLOCKED = "target-blocked"
@@ -132,6 +133,10 @@ class ProgressPhase(str, Enum):
     SUBSCRIPTION = "subscription"
     RESOURCE_GROUP = "resource-group"
     TARGETS = "targets"
+    RESOLUTION = "resolution"
+    DOWNLOAD = "download"
+    VERIFICATION = "verification"
+    PREPARATION = "preparation"
 
 
 def _require_text(value: str, label: str) -> None:

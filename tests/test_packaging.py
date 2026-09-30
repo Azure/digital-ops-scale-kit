@@ -136,18 +136,22 @@ def test_installed_project_cache_and_offline_plan_surface(installed_engine):
     assert shown["content"]["package"]["sha256"] == identities["package"]
     sites = json.loads(app.run("--project", str(project), "sites", "--output", "json").stdout)
     assert sites[0]["subscription"] == "fixture-subscription"
-    preview = json.loads(app.run(*project_options, "browse", "storage", "--offline", "--output", "json").stdout)
+    preview = json.loads(app.run(*project_options, "browse", "storage", "--offline-content", "--output", "json").stdout)
     assert preview["source"]["verification"] == "verified"
-    app.run(*project_options, "validate", "storage", "--offline")
-    for command in (["plan", "storage"], ["deploy", "storage", "--dry-run"]):
-        result = json.loads(app.run(*project_options, *command, "--offline", "--output", "json").stdout)
+    app.run(*project_options, "validate", "storage", "--offline-content")
+    for command, intent in (
+        (("plan", "storage"), "executable"),
+        (("plan", "storage", "--describe"), "describe"),
+    ):
+        result = json.loads(app.run(*project_options, *command, "--offline-content", "--output", "json").stdout)
         assert result["status"] == "planned"
+        assert result["intent"] == intent
     assert (site.read_bytes(), (project / "siteops.pin").read_bytes()) == before
     inventory = json.loads(app.run("cache", "list", "--output", "json").stdout)
     assert {entry["kind"] for entry in inventory["entries"]} == {"package", "proof"}
     removed = json.loads(app.run("cache", "remove", "proof", identities["proof"], "--output", "json").stdout)
     assert removed["entry"]["storageState"] == "removed"
-    failed = app.run(*project_options, "plan", "storage", "--offline", expected=1)
+    failed = app.run(*project_options, "plan", "storage", "--offline-content", expected=1)
     assert "selected proof is not cached" in failed.stderr
     assert (site.read_bytes(), (project / "siteops.pin").read_bytes()) == before
 
@@ -176,7 +180,7 @@ def test_installed_engine_prepares_a_guided_aio_target(installed_engine):
     assert [target["name"] for target in planned["plan"]["targets"]] == ["plant-one"]
     invalid = app.run(
         *command, "plan", "aio-install", "--describe",
-        "--input", "cluster=not-an-arm-id", "--read-resources", "--output", "json",
+        "--input", "cluster=not-an-arm-id", "--output", "json",
         expected=1,
     )
     assert json.loads(invalid.stdout)["diagnostics"][0]["code"] == "inputs.resource.invalid-id"
@@ -231,20 +235,20 @@ def test_installed_acquired_aio_manual_inputs_and_configured_site(installed_acqu
         encoding="utf-8",
     )
     inspected = json.loads(app.run(
-        *options, "inputs", "aio-install", "--offline", "--output", "json",
+        *options, "inputs", "aio-install", "--offline-content", "--output", "json",
     ).stdout)
     assert {field["name"] for field in inspected["inputs"]} >= set(manual)
     app.run(
-        *options, "validate", "aio-install", "--input-file", str(answers), "--offline",
+        *options, "validate", "aio-install", "--input-file", str(answers), "--offline-content",
     )
     file_plan = json.loads(app.run(
         *options, "plan", "aio-install", "--describe", "--input-file", str(answers),
-        "--offline", "--output", "json",
+        "--offline-content", "--output", "json",
     ).stdout)
     inline = [item for name, value in manual.items() for item in ("--input", f"{name}={value}")]
     inline_plan = json.loads(app.run(
         *options, "plan", "aio-install", "--describe", *inline,
-        "--offline", "--output", "json",
+        "--offline-content", "--output", "json",
     ).stdout)
     assert file_plan["status"] == inline_plan["status"] == "planned"
     assert file_plan["plan"]["targets"] == inline_plan["plan"]["targets"]
@@ -252,7 +256,7 @@ def test_installed_acquired_aio_manual_inputs_and_configured_site(installed_acqu
     saved = project / "sites" / "plant-one.yaml"
     app.run(
         *options, "inputs", "aio-install", "--input-file", str(answers),
-        "--save-site", str(saved), "--offline",
+        "--save-site", str(saved), "--offline-content",
     )
     assert saved.is_file()
     for selection in (
@@ -261,7 +265,7 @@ def test_installed_acquired_aio_manual_inputs_and_configured_site(installed_acqu
     ):
         selected = json.loads(app.run(
             *options, "plan", "aio-install", "--describe", *selection,
-            "--offline", "--output", "json",
+            "--offline-content", "--output", "json",
         ).stdout)
         assert selected["status"] == "planned"
         assert [target["name"] for target in selected["plan"]["targets"]] == ["plant-one"]
@@ -277,25 +281,25 @@ def test_installed_acquired_aio_manual_inputs_and_configured_site(installed_acqu
         item for name, value in older.items() for item in ("--input", f"{name}={value}")
     ]
     preview = json.loads(app.run(
-        *options, "inputs", "aio-install", *inline_older, "--offline", "--output", "json",
+        *options, "inputs", "aio-install", *inline_older, "--offline-content", "--output", "json",
     ).stdout)
     assert preview["resolution"]["site"]["properties"]["aioRelease"] == "2607"
     older_plan = json.loads(app.run(
         *options, "plan", "aio-install", "--describe", *inline_older,
-        "--offline", "--output", "json",
+        "--offline-content", "--output", "json",
     ).stdout)
     assert older_plan["status"] == "planned"
     assert [target["name"] for target in older_plan["plan"]["targets"]] == ["plant-two"]
     saved_older = project / "sites" / "plant-two.yaml"
     app.run(
         *options, "inputs", "aio-install", *inline_older,
-        "--save-site", str(saved_older), "--offline",
+        "--save-site", str(saved_older), "--offline-content",
     )
     assert yaml.safe_load(saved.read_text(encoding="utf-8"))["properties"]["aioRelease"] == "2608"
     assert yaml.safe_load(saved_older.read_text(encoding="utf-8"))["properties"]["aioRelease"] == "2607"
     fleet = json.loads(app.run(
         *options, "plan", "aio-install", "--describe",
-        "-l", "environment=dev", "--offline", "--output", "json",
+        "-l", "environment=dev", "--offline-content", "--output", "json",
     ).stdout)
     assert fleet["status"] == "planned"
     assert fleet["summary"]["targetCount"] == 2
@@ -331,8 +335,8 @@ def test_installed_acquired_aio_manual_inputs_and_configured_site(installed_acqu
     }), encoding="utf-8")
     file_resource_plan = json.loads(app.run(
         *options, "plan", "aio-install", "--describe",
-        "--input-file", str(resource_answers), "--read-resources",
-        "--offline", "--output", "json",
+        "--input-file", str(resource_answers),
+        "--offline-content", "--output", "json",
     ).stdout)
     inline_resource = [
         item for name, value in resource_values.items()
@@ -340,7 +344,7 @@ def test_installed_acquired_aio_manual_inputs_and_configured_site(installed_acqu
     ]
     inline_resource_plan = json.loads(app.run(
         *options, "plan", "aio-install", "--describe", *inline_resource,
-        "--read-resources", "--offline", "--output", "json",
+        "--offline-content", "--output", "json",
     ).stdout)
     assert file_resource_plan["status"] == inline_resource_plan["status"] == "planned"
     assert file_resource_plan["plan"]["targets"] == inline_resource_plan["plan"]["targets"]

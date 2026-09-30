@@ -44,7 +44,12 @@ from siteops.browse import (
 )
 from siteops.browse_output import _text as _content_text
 from siteops.browse_output import render_browse_plain, serialize_browse_json
-from siteops.command_context import open_command_context, require_trust_inputs
+from siteops.command_context import (
+    acquire_release,
+    open_command_context,
+    require_trust_inputs,
+    resolve_source_request,
+)
 from siteops.composition import CompositionError, report_composition_error
 from siteops.guided_inputs import (
     GuidedInputError,
@@ -95,7 +100,13 @@ from siteops.reporting import (
     render_plain_run,
     serialize_run_json,
 )
-from siteops.results import RunResult, preparation_failure_result
+from siteops.results import (
+    ProgressEvent,
+    ProgressEventKind,
+    ProgressPhase,
+    RunResult,
+    preparation_failure_result,
+)
 from siteops.sanitize import (
     is_redaction_enabled,
     report_parameter_selection_error,
@@ -157,6 +168,14 @@ def _command_manifest(args: argparse.Namespace) -> Path | None:
     return path
 
 
+def _progress(args: argparse.Namespace) -> TextProgressReporter:
+    reporter = getattr(args, "_progress_reporter", None)
+    if reporter is None:
+        reporter = TextProgressReporter(sys.stderr, redacted=is_redaction_enabled())
+        args._progress_reporter = reporter
+    return reporter
+
+
 def _context_options(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "workspace": args.workspace,
@@ -167,6 +186,8 @@ def _context_options(args: argparse.Namespace) -> dict[str, Any]:
         "approved_source": getattr(args, "approved_source", None),
         "offline": getattr(args, "offline", False),
         "discover": _auto_discover_workspace,
+        "source": getattr(args, "content_source", None),
+        "progress": _progress(args),
     }
 
 
@@ -185,23 +206,17 @@ def cmd_project(args: argparse.Namespace) -> int:
             root = project_root(args.directory)
             pin = read_pin(root).pin
         else:
-            from siteops.github_source import GitHubClient, GitHubReference
-            from siteops.github_workspace_acquisition import GitHubWorkspaceAcquirer
-            from siteops.source_profiles import read_source
             from siteops.workspace_cache import WorkspaceCache, default_cache_root
 
-            profile = read_source(args.approved_source) if args.approved_source is not None else None
-            selected_source = args.source if args.source is not None else profile.reference if profile else None
-            if selected_source is None:
-                raise ProjectError("Project pin requires --source or --approved-source.")
-            reference = GitHubReference.parse(selected_source, ref=args.release)
-            if reference.ref is None:
+            request = resolve_source_request(
+                args.source, release=args.release, approved_source=args.approved_source,
+            )
+            if request.release is None:
                 raise ProjectError("Project pin requires an explicit published release with --release.")
             cache_root = default_cache_root()
             policy, trusted_root = require_trust_inputs(
                 cache_root, args.trust_policy, args.trusted_root,
-                approved_source=args.approved_source,
-                source_reference=f"github:{reference.owner}/{reference.repository}",
+                approved_source=request.approved_source, source_reference=request.reference,
             )
             require_separate_cache(Path(args.directory).absolute(), cache_root)
             root = project_root(args.directory, create=True)
@@ -213,10 +228,10 @@ def cmd_project(args: argparse.Namespace) -> int:
                 "fetching missing package bytes may take time.",
                 file=sys.stderr, flush=True,
             )
-            acquired = GitHubWorkspaceAcquirer(
-                cache, policy_file=policy, trusted_root=trusted_root,
-            ).acquire(GitHubClient(reference), workspace=args.release_workspace)
-            pin = WorkspacePin(acquired.resolved)
+            selected = acquire_release(
+                request, cache, policy, trusted_root, workspace=args.release_workspace,
+            )
+            pin = WorkspacePin(selected)
             write_pin(root, pin, expected_previous=previous.sha256 if previous else None)
         if args.output == "json":
             print(pin.serialized().decode("ascii"), end="")
@@ -364,8 +379,9 @@ def cmd_browse(args: argparse.Namespace) -> int:
                 raise ProjectError("Choose metadata --source browsing or project content, not both.")
             from siteops.github_catalog import inspect_github
 
+            request = resolve_source_request(args.source, release=args.ref, for_inspection=True)
             result = inspect_github(
-                args.source, args.name, ref=args.ref, workspace=args.workspace, auth=args.auth,
+                request.reference, args.name, ref=request.release, workspace=args.workspace, auth=args.auth,
                 search=args.search, tags=tuple(args.tag), category=args.category,
                 include_partials=args.include_partials, limit=args.limit,
                 refresh=args.refresh, offline=args.offline,
@@ -442,20 +458,12 @@ def cmd_index(args: argparse.Namespace) -> int:
 
 def _output_settings(
     args: argparse.Namespace,
-    *,
-    require_plan_flag: bool = False,
 ) -> tuple[bool, PlanProjection]:
     output_format = getattr(args, "output", "plain")
     requested_projection = getattr(args, "projection", None)
     json_output = output_format == "json"
     if requested_projection is not None and not json_output:
         raise ValueError("--projection requires --output json.")
-    if (
-        require_plan_flag
-        and json_output
-        and not getattr(args, "plan", False)
-    ):
-        raise ValueError("--output json requires --plan.")
     projection = (
         PlanProjection(requested_projection)
         if requested_projection is not None
@@ -686,16 +694,16 @@ def _resolve_typed_site(
         if getattr(args, "read_resources", False):
             raise ResourceReadError("nothing-to-read", "No active resource ID input was supplied.")
         return contract.build_site(bound), None
-    if not getattr(args, "read_resources", False):
+    if getattr(args, "command", None) not in {"plan", "deploy"} and not getattr(args, "read_resources", False):
         if getattr(args, "command", None) == "validate":
             raise ResourceReadError(
                 "read-required",
                 "Validation does not read Azure resources. Use "
-                "`siteops plan MANIFEST --describe --read-resources` "
+                "`siteops plan MANIFEST --describe` "
                 "with the same answers.",
             )
         raise ResourceReadError(
-            "read-required", "Resource ID inputs need --read-resources before planning."
+            "read-required", "Use inputs --read-resources to preview or save a Site from resource IDs."
         )
     orchestrator.load_manifest(manifest_path)
     try:
@@ -707,17 +715,32 @@ def _resolve_typed_site(
             "provider-unavailable", f"The selected resource reader is unavailable ({error.code})."
         ) from None
     observations = {}
-    for index, resource in enumerate(bound.resources, start=1):
-        name = resource.field.name
+    resource_fields = contract.resource_fields(bound)
+    for index, field in enumerate(resource_fields, start=1):
+        resource = contract.resource_request(field, bound, observations)
+        name = field.name
         print(
             f"Reading declared resource {_content_text(name)} "
-            f"{index}/{len(bound.resources)} using {_content_text(reader.identity.name)}.",
+            f"{index}/{len(resource_fields)} using {_content_text(reader.identity.name)}.",
             file=sys.stderr,
         )
         try:
-            observations[name] = reader.read(resource.ref, facts=resource.required_facts)
+            references = contract.reference_fields(field, bound)
+            observations[name] = (
+                reader.read(resource.ref, facts=resource.required_facts, references=references)
+                if references else reader.read(resource.ref, facts=resource.required_facts)
+            )
         except ArmResourceError as error:
             raise ResourceReadError(error.code.lower().replace("_", "-"), f"Input '{name}' read failed.") from None
+        contract.validate_resource_observation(resource, bound, observations[name])
+        if (
+            getattr(args, "command", None) == "deploy"
+            and not getattr(args, "yes", False) and not is_redaction_enabled()
+        ):
+            print(
+                f"Resource {_content_text(name)}: {_content_text(observations[name].resource_id)}",
+                file=sys.stderr,
+            )
     site = contract.build_site(bound, observations)
     return site, {
         "provider": {"name": reader.identity.name, "version": reader.identity.version},
@@ -824,20 +847,25 @@ def cmd_inputs(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
                 ]
                 example_values = contract.example()["values"]
                 for resource in description["inputs"]:
-                    derived = set(resource.get("derive", {}).values())
+                    derived = contract.resource_route_fields(resource["name"])
                     if not derived.intersection(required) or resource["name"] not in example_values:
                         continue
-                    supplied = [name for name in required if name not in derived] + [resource["name"]]
+                    supplied = [
+                        name for name in required if name not in derived and name != resource["name"]
+                    ] + [resource["name"]]
                     for line in _wrap(
                         f"Resource route: fill {_content_text(', '.join(supplied))}. "
                         f"Leave {_content_text(', '.join(name for name in required if name in derived))} "
-                        "empty. Use --read-resources to read the ID.",
+                        "empty. Use inputs --read-resources to preview or save a Site. "
+                        "plan and deploy read supplied IDs.",
                     ):
                         print(line)
                 for field in description["inputs"]:
                     status = field["status"]
                     if field.get("derivableFrom"):
                         status += " or derived from " + ", ".join(field["derivableFrom"])
+                    if field.get("defaultFromResource"):
+                        status = "generated from " + field["defaultFromResource"] + ", or supplied"
                     for line in _wrap(
                         f"{_content_text(field['name'])} "
                         f"({_content_text(field['type'])}, {_content_text(status)})"
@@ -856,10 +884,17 @@ def cmd_inputs(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
                         ):
                             print(line)
                     if "resource" in field:
+                        if field.get("fromResource"):
+                            link = field["fromResource"]
+                            for line in _wrap(
+                                f"Read from {link['input']} through {link['field']}. No separate answer needed.",
+                                indent="    ",
+                            ):
+                                print(line)
                         for line in _wrap(
                             "ARM type: "
                             + _content_text(field["resource"]["type"])
-                            + ". Read only with --read-resources.",
+                            + ". Read during plan or deploy, or with inputs --read-resources.",
                             indent="    ",
                         ):
                             print(line)
@@ -926,10 +961,9 @@ def cmd_plan(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         _announce_explicit_site(args, explicit_site)
     try:
         if intent is PlanIntent.EXECUTABLE:
-            print(
-                "Preparing executable deployment plan...",
-                file=sys.stderr,
-            )
+            _progress(args)(ProgressEvent(
+                kind=ProgressEventKind.PHASE_STARTED, phase=ProgressPhase.PREPARATION,
+            ))
         site_options = {"sites": [explicit_site]} if explicit_site is not None else {}
         result = orchestrator.build_plan(
             manifest_path,
@@ -1026,10 +1060,22 @@ def _install_stop_handler(
     return restore
 
 
+def _require_interactive_deployment(args: argparse.Namespace) -> None:
+    if getattr(args, "yes", False):
+        return
+    if (
+        getattr(args, "output", "plain") == "json"
+        or is_redaction_enabled()
+        or any(os.environ.get(name) for name in ("CI", "GITHUB_ACTIONS", "TF_BUILD"))
+        or not sys.stdin.isatty() or not sys.stderr.isatty()
+    ):
+        raise ValueError(
+            "Noninteractive deployment requires --yes. Use `plan` to inspect without deploying."
+        )
+
+
 def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
-    """Execute deployment."""
-    if getattr(args, "dry_run", False):
-        return cmd_plan(args, orchestrator)
+    """Prepare once, obtain deployment consent and execute that reviewed plan."""
     manifest_path = _command_manifest(args)
     if manifest_path is None:
         return 1
@@ -1061,25 +1107,50 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     if explicit_site is not None:
         _announce_explicit_site(args, explicit_site)
 
-    stop_requested = threading.Event()
-    restore_signal_handler = _install_stop_handler(stop_requested)
+    restore_signal_handler: Callable[[], None] | None = None
+    execution_started = False
     try:
-        print(
-            "Preparing executable deployment plan...",
-            file=sys.stderr,
-        )
+        _progress(args)(ProgressEvent(
+            kind=ProgressEventKind.PHASE_STARTED, phase=ProgressPhase.PREPARATION,
+        ))
         site_options = {"sites": [explicit_site]} if explicit_site is not None else {}
-        result = orchestrator.deploy(
+        prepared = orchestrator.build_plan(
             manifest_path,
             selector=getattr(args, "selector", None),
             parallel_override=getattr(args, "parallel", None),
-            progress=TextProgressReporter(
-                sys.stderr,
-                redacted=is_redaction_enabled(),
-            ),
-            stop_requested=stop_requested,
+            intent=PlanIntent.EXECUTABLE,
             **site_options,
         )
+        if not prepared.executable:
+            raise PlanNotExecutableError(prepared)
+        if not getattr(args, "yes", False) and prepared.plan.targets:
+            _require_interactive_deployment(args)
+            rendered = render_plain_plan(prepared, redacted=False)
+            print("\n".join(_content_text(line) for line in rendered.split("\n")), file=sys.stderr, end="")
+            print("Deploy this plan? [y/N] ", file=sys.stderr, end="", flush=True)
+            if sys.stdin.readline().strip().casefold() not in {"y", "yes"}:
+                print("Deployment cancelled. No operations were submitted.", file=sys.stderr)
+                return 130
+        else:
+            print(f"Prepared {len(prepared.plan.targets)} target(s) for deployment.", file=sys.stderr)
+        revalidate = getattr(args, "revalidate_content", None)
+        if revalidate is not None:
+            revalidate()
+        stop_requested = threading.Event()
+        restore_signal_handler = _install_stop_handler(stop_requested)
+        execution_started = True
+        result = orchestrator.execute_plan(
+            prepared,
+            progress=_progress(args),
+            stop_requested=stop_requested,
+        )
+    except KeyboardInterrupt:
+        print(
+            "Execution was interrupted. Inspect the targets before retrying."
+            if execution_started else "Deployment cancelled. No operations were submitted.",
+            file=sys.stderr,
+        )
+        return 130
     except (CompositionError, ParameterSelectionError) as e:
         detail = (
             report_composition_error(e)
@@ -1099,6 +1170,17 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
             file=sys.stderr,
         )
         return 1
+    except ArtifactError as error:
+        failed = PlanBuildResult(
+            status=PlanStatus.INVALID, executable=False, plan=None,
+            diagnostics=(PlanDiagnostic(
+                code=error.code, severity=DiagnosticSeverity.ERROR, summary=str(error),
+            ),),
+            intent=PlanIntent.EXECUTABLE,
+        )
+        result = preparation_failure_result(failed)
+        _write_run_result(result, json_output=json_output, projection=projection)
+        return result.exit_code
     except MultipleSubscriptionSitesError as e:
         detail = (
             "Only one subscription-level site per subscription is allowed."
@@ -1108,7 +1190,8 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         print(f"\nError: {detail}\n", file=sys.stderr)
         return 1
     finally:
-        restore_signal_handler()
+        if restore_signal_handler is not None:
+            restore_signal_handler()
 
     _write_run_result(result, json_output=json_output, projection=projection)
     return result.exit_code
@@ -1152,23 +1235,8 @@ def _note_superseded_verbose(
 
 
 def cmd_validate(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
-    """Validate manifest and optionally show deployment plan."""
+    """Validate manifest structure and static references without resource reads."""
     selector = getattr(args, "selector", None)
-    show_plan = getattr(args, "plan", False)
-    try:
-        json_output, projection = _output_settings(
-            args,
-            require_plan_flag=True,
-        )
-    except ValueError as error:
-        print(f"Error: {error}", file=sys.stderr)
-        return 1
-
-    _note_superseded_verbose(args, show_plan, "validate", "--plan", "the deployment plan")
-    if show_plan:
-        plan_args = argparse.Namespace(**vars(args))
-        plan_args.describe = True
-        return cmd_plan(plan_args, orchestrator)
 
     manifest_path = _command_manifest(args)
     if manifest_path is None:
@@ -1680,10 +1748,10 @@ Global options such as --project and --approved-source precede the command.
 
 Examples:
   siteops -w workspaces/iot-operations browse aio-install
+  siteops deploy aio-install --source official@RELEASE --input "cluster=<Arc-cluster-resource-ID>"
+  siteops -w workspaces/iot-operations plan aio-install --input "cluster=<Arc-cluster-resource-ID>"
+  # Optionally inspect inputs and generate an answer file.
   siteops -w workspaces/iot-operations inputs aio-install --example ./aio-inputs.yaml
-  # Fill siteName, environment, country and cluster in aio-inputs.yaml.
-  siteops -w workspaces/iot-operations plan aio-install --input-file ./aio-inputs.yaml --read-resources
-  siteops -w workspaces/iot-operations deploy aio-install --input-file ./aio-inputs.yaml --read-resources
   # After source enrollment, pin an identified release and select only new fleet Sites.
   siteops --approved-source NAME project pin ./factory --release RELEASE
   siteops --approved-source NAME --project ./factory plan aio-install -l name=plant-two,name=plant-three
@@ -1700,8 +1768,8 @@ Examples:
         default=None,
         help=(
             "Local content directory. Overrides project package content without "
-            "changing project Sites or its workspace pin. With browse --source, "
-            "selects a path inside that source instead. Without a project or -w, "
+            "changing project Sites or its workspace pin. With --source, "
+            "selects a workspace path inside that source instead. Without a project or -w, "
             "uses local workspace discovery from the current directory."
         ),
     )
@@ -1785,7 +1853,7 @@ Examples:
         "--refresh", action="store_true", help="Resolve the remote reference again before browsing",
     )
     cache_mode.add_argument(
-        "--offline", action="store_true",
+        "--offline-content", dest="offline", action="store_true",
         help="Make no source requests: use cached index metadata with --source, or a cached project package and proof",
     )
     p_inputs = subparsers.add_parser(
@@ -1820,10 +1888,10 @@ Examples:
     )
     p_inputs.add_argument(
         "--read-resources", action="store_true",
-        help="Read only supplied, declared ARM resource IDs with the selected Azure provider before previewing the Site",
+        help="Read supplied ARM IDs and declared related resources before previewing the Site. Related reads stay in the parent resource's subscription and resource group",
     )
     p_inputs.add_argument(
-        "--offline", action="store_true",
+        "--offline-content", dest="offline", action="store_true",
         help="Use the pinned package and proof already in cache, without source requests",
     )
 
@@ -1890,30 +1958,6 @@ Examples:
         metavar="KEY=VALUE",
         help=_SELECTOR_HELP,
     )
-    p_validate.add_argument(
-        "--plan",
-        action="store_true",
-        help=(
-            "Compatibility alias for `siteops plan --describe` "
-            "(default: false)"
-        ),
-    )
-    p_validate.add_argument(
-        "--output",
-        choices=("plain", "json"),
-        default="plain",
-        help="Plan output format. JSON requires --plan (default: plain).",
-    )
-    p_validate.add_argument(
-        "--projection",
-        choices=("local-private", "publishable"),
-        default=None,
-        help=(
-            "JSON plan projection, valid with --output json. Defaults to "
-            "publishable when output redaction is enabled, otherwise "
-            "local-private."
-        ),
-    )
 
     # plan command
     p_plan = subparsers.add_parser(
@@ -1976,18 +2020,19 @@ Examples:
         "deploy",
         help="Deploy manifest to target sites",
         description=(
-            "Execute deployment of a manifest to one or more sites. "
+            "Prepare and review deployment to one or more sites, then confirm "
+            "execution of that same plan. Use --yes for unattended deployment. "
             "Ctrl-C asks the run to stop and waits for the calls already in "
             "progress to return or reach their own timeout."
         ),
     )
     p_deploy.add_argument("manifest", help="Exact manifest name or explicit manifest path")
     p_deploy.add_argument(
-        "--dry-run",
+        "--yes",
         action="store_true",
         help=(
-            "Compatibility alias for executable planning. Prepares and shows "
-            "the plan without executing it (default: false)."
+            "Approve deployment without an interactive prompt. Validation, "
+            "source approval and target prerequisites still apply."
         ),
     )
     p_deploy.add_argument(
@@ -2014,7 +2059,7 @@ Examples:
         "--output",
         choices=("plain", "json"),
         default="plain",
-        help="Final result format. A dry run emits a plan instead (default: plain).",
+        help="Final result format. JSON requires --yes (default: plain).",
     )
     p_deploy.add_argument(
         "--projection",
@@ -2039,13 +2084,13 @@ Examples:
             help="Typed non-secret answer (repeatable, overrides --input-file)",
         )
         command.add_argument(
-            "--offline", action="store_true",
+            "--offline-content", dest="offline", action="store_true",
             help="Use the pinned package and proof already in cache, without source requests",
         )
-    for command in (p_plan, p_deploy):
+    for command in (p_plan, p_deploy, p_validate, p_inputs):
         command.add_argument(
-            "--read-resources", action="store_true",
-            help="Read only supplied, declared ARM resource IDs with the selected Azure provider before preparing the Site",
+            "--source", dest="content_source", action=_SingleValueOption, metavar="SOURCE@RELEASE",
+            help="Use a verified published release directly, from an approved source name or provider locator",
         )
 
     p_project = subparsers.add_parser("project", help="Inspect or explicitly pin a project's workspace source")
@@ -2140,6 +2185,17 @@ Examples:
     args = parser.parse_args()
     if hasattr(args, "_single_values_seen"):
         del args._single_values_seen
+    if args.command == "deploy":
+        try:
+            _require_interactive_deployment(args)
+        except ValueError as error:
+            parser.error(str(error))
+    if (
+        getattr(args, "content_source", None) is not None
+        and args.command in {"plan", "deploy", "validate"} and args.project is None
+        and not (args.site_file or args.input_file or args.input_values)
+    ):
+        parser.error("Direct content requires explicit Site inputs or --project for configured targets.")
 
     # Flatten repeatable -l/--selector (action="append" gives a list) into
     # a single comma-joined string. Joining is safe because parse_selector
@@ -2171,22 +2227,24 @@ Examples:
         "inputs": cmd_inputs,
         "sites": cmd_sites,
     }
-    if args.command in {"plan", "deploy", "validate"}:
+    if args.command in {"plan", "deploy"}:
         try:
-            _output_settings(args, require_plan_flag=args.command == "validate")
+            _output_settings(args)
         except ValueError as error:
             print(f"Error: {error}", file=sys.stderr)
             sys.exit(1)
+    command_invoked = False
     try:
         with open_command_context(**_context_options(args)) as context:
             args.workspace = context.workspace
             binding = context.package.bind(args.manifest) if context.package is not None else None
             args.package_binding = binding
-            if context.project is not None and args.command != "sites":
-                if context.pin is not None:
-                    selected = context.pin.selection
+            args.revalidate_content = context.revalidate
+            if (context.project is not None or context.source is not None) and args.command != "sites":
+                selected = context.source or (context.pin.selection if context.pin is not None else None)
+                if selected is not None:
                     if is_redaction_enabled():
-                        print("Source: verified pinned workspace.", file=sys.stderr)
+                        print("Source: verified workspace.", file=sys.stderr)
                     else:
                         print(
                             f"Source: {_content_text(selected.source.reference)} "
@@ -2201,15 +2259,24 @@ Examples:
                     print("Source: local workspace override. Operator configuration comes from the project.",
                           file=sys.stderr)
             options: dict[str, Any] = {}
-            if context.project is not None:
+            if context.project is not None or context.package is not None:
                 options["site_config_root"] = context.site_root
             if binding is not None:
                 options["materialized_package"] = binding
             orchestrator = Orchestrator(
-                workspace=context.workspace, dry_run=getattr(args, "dry_run", False),
+                workspace=context.workspace,
                 extra_trusted_sites_dirs=extra_sites_dirs, **options,
             )
+            command_invoked = True
             exit_code = commands[args.command](args, orchestrator)
+    except KeyboardInterrupt:
+        print(
+            "Deployment cancelled. No operations were submitted."
+            if args.command == "deploy" and not command_invoked
+            else "Command interrupted. Inspect any changes before retrying.",
+            file=sys.stderr,
+        )
+        exit_code = 130
     except (FileNotFoundError, ValueError) as error:
         detail = str(error) if isinstance(error, ArtifactError) or not is_redaction_enabled() else "Command preparation failed."
         print(f"Error: {detail}", file=sys.stderr)

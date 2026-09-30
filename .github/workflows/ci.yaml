@@ -222,6 +222,85 @@ jobs:
           path: coverage.xml
           retention-days: 7
 
+  windows-bootstrap:
+    name: Windows Bootstrap
+    if: github.event_name != 'workflow_dispatch' || inputs.run-mode == 'ci-only'
+    runs-on: windows-2025
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      PIP_INDEX_URL: https://packagefeedproxy.microsoft.io/pypi/simple/
+      PIP_CONFIG_FILE: NUL
+      PIP_EXTRA_INDEX_URL: ""
+      PIP_FIND_LINKS: ""
+      PIP_TRUSTED_HOST: ""
+      PIP_NO_INPUT: "1"
+      PIP_KEYRING_PROVIDER: disabled
+      SITEOPS_REQUIRE_WINDOWS_LINK: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        shell: powershell
+        run: |
+          python -m pip install --no-cache-dir -e '.[dev]'
+          if ($LASTEXITCODE -ne 0) { throw 'Windows test dependencies could not be installed.' }
+
+      - name: Prepare private test state
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $profileHome = [Environment]::GetFolderPath('UserProfile')
+          if (-not [IO.Path]::IsPathRooted($profileHome) -or
+              $env:GITHUB_RUN_ID -notmatch '^[0-9]+$' -or
+              $env:GITHUB_RUN_ATTEMPT -notmatch '^[0-9]+$') {
+              throw 'The Windows runner needs a bounded private test location.'
+          }
+          $private = Join-Path $profileHome (
+              "siteops-windows-tests-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          )
+          if (Test-Path -LiteralPath $private) {
+              throw 'The Windows test area must be fresh.'
+          }
+          New-Item -ItemType Directory -Path $private -ErrorAction Stop | Out-Null
+          $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+          $previousPreference = $ErrorActionPreference
+          try {
+              $ErrorActionPreference = 'Continue'
+              & icacls.exe $private /setowner "*$sid" *> $null
+              $owned = $LASTEXITCODE -eq 0
+              if ($owned) {
+                  & icacls.exe $private /inheritance:r /grant:r "*${sid}:(OI)(CI)F" *> $null
+                  $protected = $LASTEXITCODE -eq 0
+              }
+          } finally {
+              $ErrorActionPreference = $previousPreference
+          }
+          if (-not $owned -or -not $protected) {
+              throw 'The Windows test area could not be protected.'
+          }
+          [IO.File]::AppendAllText(
+              $env:GITHUB_ENV,
+              "SITEOPS_WINDOWS_TEST_TEMP=$(Join-Path $private 'pytest')`n",
+              [Text.UTF8Encoding]::new($false)
+          )
+
+      - name: Windows bootstrap tests
+        shell: powershell
+        run: |
+          python -B -m pytest tests\test_bootstrap_scripts.py -k windows_bootstrap -q `
+              --basetemp="$env:SITEOPS_WINDOWS_TEST_TEMP"
+          if ($LASTEXITCODE -ne 0) { throw 'Native Windows bootstrap tests failed.' }
+          python -B tests\fixtures\windows-pipx-launcher.py
+          if ($LASTEXITCODE -ne 0) { throw 'The real Windows pipx launcher test failed.' }
+
   validate:
     name: Validate Manifests
     runs-on: ubuntu-latest
@@ -318,7 +397,7 @@ jobs:
 
   overview:
     name: Overview
-    needs: [lint, test, validate, release-runner, installer-check, release-preview, attestation-check]
+    needs: [lint, test, windows-bootstrap, validate, release-runner, installer-check, release-preview, attestation-check]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -331,6 +410,7 @@ jobs:
           SOURCE_SHA: ${{ github.sha }}
           LINT_RESULT: ${{ needs.lint.result }}
           TEST_RESULT: ${{ needs.test.result }}
+          WINDOWS_RESULT: ${{ needs.windows-bootstrap.result }}
           VALIDATE_RESULT: ${{ needs.validate.result }}
           RUNNER_RESULT: ${{ needs.release-runner.result }}
           INSTALLER_RESULT: ${{ needs.installer-check.result }}
@@ -364,7 +444,12 @@ jobs:
           if mode is None or not re.fullmatch("[0-9a-f]{40}", source):
               raise SystemExit("::error::The CI summary requires a supported mode and source commit.")
           title, extra, scope = mode
-          rows = (("Lint", "LINT_RESULT"), ("Unit tests", "TEST_RESULT"), ("Manifests", "VALIDATE_RESULT"), *extra)
+          windows = (
+              (("Windows bootstrap", "WINDOWS_RESULT"),)
+              if os.environ["CI_MODE"] == "ci-only" else ()
+          )
+          rows = (("Lint", "LINT_RESULT"), ("Unit tests", "TEST_RESULT"), *windows,
+                  ("Manifests", "VALIDATE_RESULT"), *extra)
           results = {"success": "Passed", "failure": "Failed", "cancelled": "Cancelled", "skipped": "Skipped"}
           lines = ["## CI: " + title, "", "Source: `" + source + "`", "", "| Check | Result |", "|---|---|"]
           for label, key in rows:

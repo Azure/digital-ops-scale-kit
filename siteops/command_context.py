@@ -5,12 +5,16 @@
 
 from __future__ import annotations
 
+import logging
+import shutil
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import ContextManager, Protocol
 
+from siteops.artifacts import hash_file
 from siteops.cache_filesystem import CacheError
 from siteops.github_workspace_acquisition import GitHubWorkspaceAcquirer
 from siteops.project import (
@@ -21,9 +25,69 @@ from siteops.project import (
     read_pin,
     require_separate_cache,
 )
+from siteops.results import ProgressCallback, ProgressEvent, ProgressEventKind, ProgressPhase
+from siteops.runtime import (
+    RuntimePaths,
+    bounded_runtime_path,
+    create_private_directory,
+    describe_os_error,
+)
 from siteops.source_profiles import read_source
 from siteops.workspace_cache import CachedWorkspace, WorkspaceCache, default_cache_root
 from siteops.workspace_source import ResolvedWorkspaceSource
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class SourceRequest:
+    reference: str
+    release: str | None
+    approved_source: str | None
+
+
+def resolve_source_request(
+    value: str | None, *, release: str | None = None, approved_source: str | None = None,
+    for_inspection: bool = False,
+) -> SourceRequest:
+    """Resolve an explicit locator or consumer source name without source requests."""
+    from siteops.github_source import GitHubReference
+
+    if value is None:
+        if approved_source is None:
+            raise ProjectError("Select --source or an approved source.")
+        value = read_source(approved_source, require_valid=not for_inspection).reference
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ProjectError("Source selection must be a locator or approved source name.")
+    if "@" in value:
+        if release is not None:
+            raise ProjectError("The source release was specified more than once.")
+        value, _, release = value.rpartition("@")
+        if not value or not release:
+            raise ProjectError("Source selection must include a nonempty source and release.")
+    if not value.startswith(("github:", "https://")):
+        if approved_source is not None:
+            raise ProjectError("Choose one source approval, not both an alias and --approved-source.")
+        approved_source = value
+        value = read_source(value, require_valid=not for_inspection).reference
+    reference = GitHubReference.parse(value, ref=release)
+    return SourceRequest(
+        f"github:{reference.owner}/{reference.repository}", reference.ref, approved_source,
+    )
+
+
+def acquire_release(
+    request: SourceRequest, cache: WorkspaceCache, policy: Path, trusted_root: Path,
+    *, workspace: str | None = None, progress: ProgressCallback | None = None,
+) -> ResolvedWorkspaceSource:
+    """Resolve one published source through the currently supported adapter."""
+    from siteops.github_source import GitHubClient, GitHubReference
+    from siteops.github_workspace_acquisition import GitHubWorkspaceAcquirer
+
+    reference = GitHubReference.parse(request.reference, ref=request.release)
+    return GitHubWorkspaceAcquirer(
+        cache, policy_file=policy, trusted_root=trusted_root, progress=progress,
+    ).acquire(GitHubClient(reference), workspace=workspace).resolved
 
 
 class ProjectAcquirer(Protocol):
@@ -44,7 +108,7 @@ def require_trust_inputs(
         policy, trusted_root = profile.policy, profile.trusted_root
     if policy is None or trusted_root is None:
         raise ProjectError(
-            "Pinned package use requires --approved-source or independent --trust-policy and --trusted-root.",
+            "Verified content requires an approved source or independent --trust-policy and --trusted-root.",
             code="project.trust-required",
         )
     for path in (policy, trusted_root):
@@ -55,10 +119,13 @@ def require_trust_inputs(
 
 def project_acquirer(
     source: ResolvedWorkspaceSource, cache: WorkspaceCache, policy: Path, trusted_root: Path,
+    *, progress: ProgressCallback | None = None,
 ) -> ProjectAcquirer:
     if source.source.provider != "github-release/v1":
         raise ProjectError("The pinned source provider is not supported by this installation.")
-    return GitHubWorkspaceAcquirer(cache, policy_file=policy, trusted_root=trusted_root)
+    return GitHubWorkspaceAcquirer(
+        cache, policy_file=policy, trusted_root=trusted_root, progress=progress,
+    )
 
 
 @dataclass(frozen=True)
@@ -68,6 +135,18 @@ class CommandContext:
     project: Path | None = None
     pin: WorkspacePin | None = None
     package: CachedWorkspace | None = None
+    source: ResolvedWorkspaceSource | None = None
+    revalidate: Callable[[], None] | None = field(default=None, repr=False, compare=False)
+
+
+def _remove_temporary_configuration(path: Path) -> None:
+    try:
+        shutil.rmtree(path)
+    except OSError as error:
+        logger.warning(
+            "Temporary Site configuration %s could not be removed: %s",
+            bounded_runtime_path(path), describe_os_error(error),
+        )
 
 
 @contextmanager
@@ -76,17 +155,21 @@ def open_command_context(
     policy: Path | None, trusted_root: Path | None, offline: bool,
     approved_source: str | None = None,
     discover: Callable[[Path], Path | None],
+    source: str | None = None,
+    progress: ProgressCallback | None = None,
 ) -> Iterator[CommandContext]:
     """Resolve paths from the invocation directory and hold any package lease through use."""
     current = Path.cwd()
-    selected_project = project if project is not None else (current if pin_exists(current) else None)
+    selected_project = project if project is not None else (
+        current if source is None and pin_exists(current) else None
+    )
     root = project_root(selected_project) if selected_project is not None else None
     if command == "sites" and root is not None:
         if policy is not None or trusted_root is not None or approved_source is not None:
             raise ProjectError("Trust options apply to package use, not Site inspection.")
         yield CommandContext(root, root, project=root)
         return
-    if workspace is not None or root is None:
+    if source is None and (workspace is not None or root is None):
         if policy is not None or trusted_root is not None or approved_source is not None or offline:
             raise ValueError("Trust and offline options apply only when using a workspace pin.")
         selected = workspace if workspace is not None else (discover(current) or current)
@@ -95,24 +178,74 @@ def open_command_context(
             raise ProjectError("Workspace directory not found.")
         yield CommandContext(selected, root if root is not None else selected, project=root)
         return
-    selection = read_pin(root).pin
+    if source is not None and offline:
+        raise ProjectError("Direct release selection needs source access. Use a project pin for --offline-content.")
+    request = resolve_source_request(source, approved_source=approved_source) if source is not None else None
+    if request is not None and request.release is None:
+        raise ProjectError("Direct source use requires an explicit published release: --source SOURCE@RELEASE.")
+    if request is not None and workspace is not None and (
+        workspace.is_absolute() or ".." in workspace.parts
+    ):
+        raise ProjectError("A source workspace must be a relative published workspace path.")
+    selection = read_pin(root).pin if request is None else None
     cache_root = default_cache_root()
-    require_separate_cache(root, cache_root)
-    policy, trusted_root = require_trust_inputs(
+    approval = request.approved_source if request is not None else approved_source
+    reference = request.reference if request is not None else selection.selection.source.reference
+    policy_file, root_file = require_trust_inputs(
         cache_root, policy, trusted_root,
-        approved_source=approved_source, source_reference=selection.selection.source.reference,
+        approved_source=approval, source_reference=reference,
     )
-    cache = WorkspaceCache(cache_root)
-    acquirer = project_acquirer(selection.selection, cache, policy, trusted_root)
     with ExitStack() as stack:
+        configuration = root
+        if configuration is None:
+            configuration = create_private_directory(
+                RuntimePaths.resolve().temp_root, prefix="siteops-target-",
+            )
+            stack.callback(_remove_temporary_configuration, configuration)
+        require_separate_cache(configuration, cache_root)
+        cache = WorkspaceCache(cache_root)
+        selected = (
+            acquire_release(
+                request, cache, policy_file, root_file,
+                workspace=workspace.as_posix() if workspace is not None else None,
+                **({"progress": progress} if progress is not None else {}),
+            )
+            if request is not None else selection.selection
+        )
+        acquirer = project_acquirer(
+            selected, cache, policy_file, root_file,
+            **({"progress": progress} if progress is not None else {}),
+        )
         try:
-            package = stack.enter_context(acquirer.lease(selection.selection))
+            package = stack.enter_context(acquirer.lease(selected))
         except CacheError as error:
             if offline or error.code not in {"cache.missing", "cache.proof-missing"}:
                 raise
-            acquirer.restore(selection.selection)
-            package = stack.enter_context(acquirer.lease(selection.selection))
+            acquirer.restore(selected)
+            package = stack.enter_context(acquirer.lease(selected))
         content = package.package_root
-        if selection.selection.entry.workspace != ".":
-            content = content.joinpath(*selection.selection.entry.workspace.split("/"))
-        yield CommandContext(content, root, project=root, pin=selection, package=package)
+        if selected.entry.workspace != ".":
+            content = content.joinpath(*selected.entry.workspace.split("/"))
+
+        def revalidate() -> None:
+            if progress is not None:
+                progress(ProgressEvent(
+                    kind=ProgressEventKind.PHASE_STARTED, phase=ProgressPhase.VERIFICATION,
+                ))
+            current_policy, current_root = require_trust_inputs(
+                cache_root, policy, trusted_root,
+                approved_source=approval, source_reference=selected.source.reference,
+            )
+            receipt = package.verification
+            if datetime.now(timezone.utc) >= receipt.valid_until:
+                raise ProjectError("Source verification expired during preparation. Renew approval and review again.")
+            if (
+                hash_file(current_policy, limit=8 * 1024 * 1024)[1] != receipt.policy_sha256
+                or hash_file(current_root, limit=8 * 1024 * 1024)[1] != receipt.root_sha256
+            ):
+                raise ProjectError("Source approval changed during preparation. Review a new plan.")
+
+        yield CommandContext(
+            content, configuration, project=root, pin=selection, package=package,
+            source=selected, revalidate=revalidate,
+        )

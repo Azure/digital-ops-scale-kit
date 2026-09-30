@@ -78,13 +78,13 @@ never silently repairs or merges content into an existing entry.
 ## Restore after removal
 
 For a package or proof, repeat `browse`, `validate`, `plan` or `deploy` for
-the selected project without `--offline`. Site Ops restores only the exact
+the selected project without `--offline-content`. Site Ops restores only the exact
 selection recorded by the workspace pin under current consumer policy. If the
 release no longer matches or the bytes are unavailable, restoration fails
 rather than choosing different content.
 
 For descriptive metadata, repeat the corresponding source browse without
-`--offline`. Removing a record does not change any workspace pin.
+`--offline-content`. Removing a record does not change any workspace pin.
 
 Removal can make a previously usable offline project require source access.
 Keep needed entries when their source may be unavailable, and avoid removing

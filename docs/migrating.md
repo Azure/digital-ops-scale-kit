@@ -33,6 +33,8 @@ Start with the changes that affect your workflow:
 
 | If you... | What to change |
 |---|---|
+| Deploy one AIO target from a release | Use the [direct reviewed deployment](#direct-deployment-and-source-selection). A project pin, answer file and separate plan are optional. |
+| Use typed AIO installation answers | Review [optional naming and labels](#typed-aio-targets) before omitting an existing name. |
 | Reference shipped workspace paths | Update [entry and resource-set paths](#workspace-content-paths). |
 | Select a manifest by a bare filename | Review [name and path selection](#manifest-names-and-paths). |
 | Browse a published source | Use [reference refresh and offline controls](#remote-source-observations) when choosing source freshness. |
@@ -45,6 +47,95 @@ Start with the changes that affect your workflow:
 | Capture output in scripts or CI | Use [structured results and explicit projections](#results-and-ci-output). |
 | Manage temporary files | Review the [new location and cleanup behavior](#temporary-files). |
 | Call the engine from Python | Update the [internal result consumers](#internal-python-callers). |
+
+### Direct deployment and source selection
+
+The supported preview path for one existing Arc-connected cluster is:
+
+```text
+siteops deploy aio-install --source "official@<release>" --input "cluster=<Arc-cluster-resource-ID>"
+```
+
+Use the exact published release selected by its release instructions.
+`official` must already be independently enrolled with reviewed policy
+and roots. Acquired bytes cannot approve their own source. Deploy builds
+one executable plan, displays its private scope and asks for confirmation
+before executing that same plan. A prior `plan` is optional and never
+authorizes a later deploy. To install with Secret Sync, add
+`--input enableSecretSync=true` after verifying prerequisites. On an
+existing AIO 2607/2608 instance, use the
+[standalone Secret Sync route](guided-inputs.md#enable-secret-sync-on-an-existing-instance)
+with its `instance` resource ID. It does not reinstall AIO.
+
+For noninteractive, CI or JSON deployment, add `--yes`. Without it,
+`deploy` exits with argparse usage error 2 (`Noninteractive deployment
+requires --yes`) before reading content or contacting Azure. `--yes`
+does not bypass validation, approval or target prerequisites and does
+not print a private plan to stderr. Capture JSON stdout as one document
+and keep stderr separate and private.
+
+Direct `--source SOURCE@RELEASE` selects a release online each time,
+even when previously verified bytes can be reused. An unversioned direct
+source reports `Direct source use requires an explicit published release:
+--source SOURCE@RELEASE.` Direct `plan`, `deploy` and `validate` without a
+project require `--input`, `--input-file` or `--site-file`. Otherwise they
+fail with `Direct content requires explicit Site inputs or --project for
+configured targets.` Global `-w` with `--source` selects a relative
+workspace path inside that release. `--project` adds operator
+configuration without changing its pin. Local `-w` and saved project
+Sites remain supported.
+
+If an approved alias expires, the error is `source.profile-expired`.
+Inspect it privately with `siteops source show NAME`, then remove and
+re-enroll that name with reviewed policy and trusted-root files. There
+is no automatic renewal. Passive metadata `browse --source NAME` may
+still resolve the repository, but cannot restore execution trust.
+
+`--offline-content` replaces the Site Ops CLI's `--offline`. The old
+spelling is an unrecognized argument (usage error 2). This option
+limits content acquisition, not target reads or deployment writes.
+It works with cached metadata or a project pin, not direct executable
+`--source`, which must resolve its release online. Scripts or other tools
+with their own offline switches are unaffected.
+
+### Typed AIO targets
+
+The resource route accepts a cluster ID without a Site name, environment
+or country. An omitted Site name now generates an identity from the full
+cluster ID. Keep your previous explicit `siteName` when targeting resources
+created under that name. Existing configured or saved Sites keep their names.
+
+Typed AIO names must be lowercase DNS labels of at most 59 characters.
+Invalid values report `must be a lowercase DNS label` or
+`exceeds its 59-character limit`. The manual route still requires an
+explicit Site name and target fields.
+
+Omit optional labels rather than leaving them null or empty. Supplied labels
+still feed the corresponding resource tags. Without an environment label,
+a saved Site does not match `environment=dev`. Select its explicit name or
+assign intentional labels before including it in a fleet.
+
+Use an engine release supporting `nameFromResource`, string constraints and
+optional label mapping values with this workspace. Workspace producers must
+declare and qualify that compatible engine selection.
+Input sidecars are recognized by `kind: SiteInputContract` or an
+`apiVersion` in the `siteops.inputs/` namespace. Unrelated sample wiring
+is not a typed contract, but a malformed declared contract still fails.
+
+### Guided Secret Sync resource reads
+
+The standalone `secretsync` typed route accepts an AIO instance ID for the
+API used by releases 2607 and 2608. It resolves the actual instance name and
+associated cluster instead of assuming a Site naming convention. Existing
+configured-Site commands and their release selections remain available.
+
+For `plan` and `deploy`, supplied resource-ID inputs authorize bounded
+reads of the declared ID and its `fromResource` relationships without
+`--read-resources`. That option now belongs only to `inputs`, for
+optional Site preview or save. `validate` stays read-free. Related
+targets stay in the source subscription and resource group. The operator
+cannot override a derived resource input. Use a compatible engine release
+and workspace.
 
 ### Workspace content paths
 
@@ -95,7 +186,7 @@ Browsing remains confined to inspectable paths inside its selected workspace.
 
 `browse --source` reuses branch, tag and default branch observations for up to
 five minutes. Use `--refresh` to resolve the reference again immediately, or
-`--offline` to select retained metadata explicitly. Offline output identifies
+`--offline-content` to select retained metadata explicitly. Offline output identifies
 an overdue observation rather than presenting it as the current branch head.
 
 Remote browsing now uses the protected Site Ops cache. Its default location
@@ -159,15 +250,27 @@ guarantee. See [inspection output details](site-configuration.md#inspection-outp
 deployment without executing it. For a faster compile-free description, use
 `plan --describe`.
 
-The compatibility spellings still work:
+The preview spellings were removed, not aliased:
 
-- `validate --plan` means `plan --describe`.
-- `deploy --dry-run` means executable `plan`, not simulated deployment.
+| Removed invocation | Replacement |
+|---|---|
+| `validate <manifest> --plan` | `plan <manifest> --describe` (requires a target) |
+| `deploy <manifest> --dry-run` | `plan <manifest>` (executable preparation, no deployment) |
+| `validate <manifest> --output json [--projection ...]` | `plan <manifest> --describe --output json [--projection ...]` |
+| `plan` or `deploy` with `--read-resources` | Supply the declared resource-ID input without this option |
+
+Each removed option produces `unrecognized arguments` (argparse usage
+error 2). Bare `validate` prints a structural result in plain text and
+has no plan-only `--output` or `--projection`. `inputs --read-resources`
+remains the opt-in for inspection or save. `plan` and `plan --describe`
+are read-only with respect to deployment writes, but resource-ID inputs
+still perform their bounded setup reads.
 
 `-v` controls logging only. To inspect operation and dependency metadata
 locally, use `plan --output json --projection local-private` with redaction
 disabled. This projection omits parameter values and full value-bearing
-command lines.
+command lines. Local plain plans display authored multiline descriptions
+as separate lines, not as a source of execution authority.
 
 ### Preparation checks
 
@@ -176,7 +279,7 @@ Structurally invalid inputs produce an invalid plan, not a partial target plan.
 Check these areas when existing content is rejected:
 
 - **Targets:** every plan form requires targets, including describe mode
-  and `validate --plan`. Use bare `validate` for a reusable manifest without
+  (but not bare `validate`). Use bare `validate` for a reusable manifest without
   targets. A selector matching no sites exits nonzero.
 - **Parameter files:** use a mapping. Empty documents remain empty mappings.
   Scalars and arrays report `must contain a mapping`.
@@ -193,7 +296,7 @@ Check these areas when existing content is rejected:
 
 ### Results and CI output
 
-`siteops deploy` prints a plain summary by default. `deploy --output json`
+`siteops deploy` prints a plain summary by default. `deploy --yes --output json`
 writes one `DeploymentRun` document to stdout. Progress and logs use stderr.
 The final result accounts for every prepared operation, including skipped,
 unstarted, and unconfirmed work.
@@ -205,8 +308,11 @@ unstarted, and unconfirmed work.
 | `130` | Interrupted, with `summary.interrupted` set, regardless of observed successes. |
 
 For CI artifacts, use `--output json --projection publishable` with
-`plan` or `deploy`. Capture stdout separately and keep diagnostic stderr
-private. Redacted plain plans use the same allowlisted fields: aggregate
+`plan`, or with `deploy --yes`. Capture stdout separately and keep diagnostic
+stderr private. Direct source progress names fixed resolution, download,
+verification and preparation phases. Waiting operations report elapsed
+time roughly once per minute, not a percentage or workload readiness.
+Redacted plain plans use the same allowlisted fields: aggregate
 activity and generic diagnostics, not private identities or prepared values.
 
 See [plan output](plan-output.md), [run output](run-output.md), and the
@@ -217,9 +323,9 @@ See [plan output](plan-output.md), [run output](run-output.md), and the
 - **During execution:** Ctrl-C stops new work and wakes waiting loops.
   Active child processes return or reach their own timeout before the
   final result is printed.
-- **During preparation:** preparation finishes, including remaining
-  compilations, before execution is prevented. Preparation failures still
-  report failure.
+- **During preparation or review:** Ctrl-C cancels before deployment
+  submission and exits `130`. Local tool cleanup may delay the return.
+  An interrupted review does not produce a completed deployment result.
 
 Stopping locally does not cancel work Azure already accepted.
 

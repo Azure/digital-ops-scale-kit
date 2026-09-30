@@ -238,14 +238,25 @@ function Require-PrivateDataRoot([string]$Path) {
             Reject 'ROOT_DATA_CREATE'
         }
         $previousPreference = $ErrorActionPreference
+        $phase = 'ROOT_DATA_OWNER'
+        $owned = $false
+        $protected = $false
         try {
             $ErrorActionPreference = 'Continue'
-            & icacls.exe $Path /inheritance:r /grant:r "*${sid}:(OI)(CI)F" *> $null
-            $protected = $LASTEXITCODE -eq 0
+            & icacls.exe $Path /setowner "*$sid" *> $null
+            $owned = $LASTEXITCODE -eq 0
+            if ($owned) {
+                $phase = 'ROOT_DATA_ACL'
+                & icacls.exe $Path /inheritance:r /grant:r "*${sid}:(OI)(CI)F" *> $null
+                $protected = $LASTEXITCODE -eq 0
+            }
         } catch {
-            Reject 'ROOT_DATA_ACL'
+            Reject $phase
         } finally {
             $ErrorActionPreference = $previousPreference
+        }
+        if (-not $owned) {
+            Reject 'ROOT_DATA_OWNER'
         }
         if (-not $protected) {
             Reject 'ROOT_DATA_ACL'
@@ -269,9 +280,9 @@ function Require-PrivateDataRoot([string]$Path) {
         }
     }
 }
-function Require-PrivateExecutablePath([string]$Path, [string]$PrivateRoot) {
+function Require-PrivateExecutablePath([string]$Path, [string]$PrivateRoot, [string]$ExpectedLinkTarget = '', [string]$ExpectedTargetRoot = '') {
     function Reject([string]$Code) {
-        Fail "Choose a private Windows tool location. $Code Use trusted, non-symlinked directories and executables."
+        Fail "Choose a private Windows tool location. $Code Use trusted directories and the selected executable."
     }
     if ($Path -cnotmatch '^[A-Za-z]:\\' -or $PrivateRoot -cnotmatch '^[A-Za-z]:\\') {
         Reject 'TOOL_PATH'
@@ -302,6 +313,7 @@ function Require-PrivateExecutablePath([string]$Path, [string]$PrivateRoot) {
     }
     $nodes.Reverse()
     $nodes.Add($Path)
+    $linked = $false
     foreach ($nodePath in $nodes) {
         $isFile = $nodePath -ceq $Path
         try {
@@ -310,9 +322,37 @@ function Require-PrivateExecutablePath([string]$Path, [string]$PrivateRoot) {
             Reject 'TOOL_TYPE'
         }
         if (($isFile -and $node.PSIsContainer) -or
-            (-not $isFile -and -not $node.PSIsContainer) -or
-            ($node.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            (-not $isFile -and -not $node.PSIsContainer)) {
             Reject 'TOOL_TYPE'
+        }
+        if ($node.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            if (-not $isFile -or -not $ExpectedLinkTarget -or -not $ExpectedTargetRoot -or
+                $node.LinkType -cne 'SymbolicLink') {
+                Reject 'TOOL_TYPE'
+            }
+            $targets = @($node.Target)
+            if ($targets.Count -ne 1 -or $targets[0] -isnot [string] -or
+                [string]::IsNullOrWhiteSpace($targets[0])) {
+                Reject 'TOOL_TYPE'
+            }
+            try {
+                if ($targets[0] -cmatch '^[A-Za-z]:\\') {
+                    $actualTarget = [IO.Path]::GetFullPath($targets[0])
+                } elseif (-not [IO.Path]::IsPathRooted($targets[0]) -and
+                          $targets[0] -cnotmatch '^[A-Za-z]:') {
+                    $actualTarget = [IO.Path]::GetFullPath(
+                        [IO.Path]::Combine((Split-Path -Parent $Path), $targets[0])
+                    )
+                } else {
+                    Reject 'TOOL_TYPE'
+                }
+            } catch {
+                Reject 'TOOL_TYPE'
+            }
+            if ($actualTarget -ine $ExpectedLinkTarget) {
+                Reject 'TOOL_TYPE'
+            }
+            $linked = $true
         }
         try {
             $acl = if ($isFile) {
@@ -341,6 +381,10 @@ function Require-PrivateExecutablePath([string]$Path, [string]$PrivateRoot) {
                 Reject 'TOOL_ACL'
             }
         }
+    }
+    if ($linked) {
+        $null = Require-PrivateExecutablePath $ExpectedLinkTarget $ExpectedTargetRoot
+        return $ExpectedLinkTarget
     }
 }
 function WinGetPackage([string]$Id, [bool]$UserScope = $true) {
@@ -686,18 +730,25 @@ try {
     }
     $binDir = InvokePipx @('environment', '--value', 'PIPX_BIN_DIR') `
         'The pipx command directory could not be resolved.'
-    if ($binDir -isnot [string] -or -not [IO.Path]::IsPathRooted($binDir)) {
-        Fail 'The pipx command directory could not be resolved.'
+    $pipxHome = InvokePipx @('environment', '--value', 'PIPX_HOME') `
+        'The pipx environment directory could not be resolved.'
+    if ($binDir -isnot [string] -or -not [IO.Path]::IsPathRooted($binDir) -or
+        $pipxHome -isnot [string] -or -not [IO.Path]::IsPathRooted($pipxHome)) {
+        Fail 'The pipx command or environment directory could not be resolved.'
     }
     $expectedCommand = Join-Path $binDir 'siteops.exe'
+    $expectedTarget = Join-Path $pipxHome 'venvs\siteops\Scripts\siteops.exe'
     if (-not (Test-Path -LiteralPath $expectedCommand -PathType Leaf)) {
         Fail 'pipx did not expose the selected siteops command.'
     }
-    Require-PrivateExecutablePath $expectedCommand $binDir
+    $validatedTarget = Require-PrivateExecutablePath $expectedCommand $binDir $expectedTarget $pipxHome
     $env:PATH = $binDir + ';' + $env:PATH
     $siteops = Native 'siteops.exe'
-    if (-not $siteops -or $siteops -ine $expectedCommand -or
-        (& $siteops --version) -cne "siteops $version") {
+    if (-not $siteops -or $siteops -ine $expectedCommand) {
+        Fail 'The exposed siteops command does not match the selected build.'
+    }
+    if ($validatedTarget) { $siteops = $validatedTarget }
+    if ((& $siteops --version) -cne "siteops $version") {
         Fail 'The exposed siteops command does not match the selected build.'
     }
     Stage "Command directory: $binDir. Add it to your current PATH or open a new shell."

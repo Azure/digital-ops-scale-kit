@@ -1,9 +1,10 @@
 # Use a project with packaged or local content
 
-A project keeps your Site configuration separate from the deployment content
-you use with it. Run `project pin` to select one complete workspace package,
-then choose a manifest with ordinary `browse`, `validate`, `plan` and `deploy`
-commands.
+A project keeps your Site configuration separate from deployment content.
+Pinning a complete workspace package is useful for repeatable configured-Site
+and fleet commands, not required for one typed target.
+[Guided inputs](guided-inputs.md) can use an independently approved published
+release directly. Its release instructions supply the source and version.
 
 ## Select configuration and content
 
@@ -11,13 +12,21 @@ commands.
 project name. Site Ops has no global project registry. The project supplies
 your configured Sites when you use them. [Guided inputs](guided-inputs.md)
 can construct one Site in memory instead. An explicit `-w PATH` selects local content.
-Otherwise, the project's workspace pin selects packaged content.
+Otherwise, the project's workspace pin selects packaged content. A command
+with `--source SOURCE@RELEASE` selects that release directly. Global
+`--project DIRECTORY` can still supply the operator's Site configuration
+without replacing its pin. Direct release selection requires online source
+resolution each invocation (valid cached package bytes can be reused).
+`-w` with `--source` selects a relative workspace path inside that release,
+not a local checkout.
 
 | Selection | Deployment content | Site configuration |
 |---|---|---|
 | `--project ./factory` | Package identified by `factory/siteops.pin` | `factory/sites` and overlays |
 | `--project ./factory -w ./clone` | Local content in `clone` | `factory/sites` and overlays |
 | `-w ./clone` without a selected project | Local content in `clone` | `clone/sites` and overlays |
+| `--project ./factory` with `--source official@<release>` | Verified selected release, pin unchanged | `factory/sites` and overlays |
+| `--source official@<release>` without a project | Verified selected release | Explicit inline, file or standalone Site only |
 
 Relative project and workspace paths resolve independently from the command's
 current directory. When `--project` is omitted, only `siteops.pin` in the exact
@@ -28,7 +37,7 @@ An explicit local `-w` leaves the workspace pin unchanged and retains project
 Sites. Omit package trust options in local authoring mode. This lets you
 develop content in a clone without moving your Site configuration into it.
 
-An explicit project with no workspace pin and no local `-w` reports:
+An explicit project with no workspace pin, local `-w` or direct `--source` reports:
 
 ```text
 Workspace pin not found. Use project pin to select a package, or -w to select local content.
@@ -69,9 +78,11 @@ Prepare these inputs:
 Configured Sites are optional for entries with a typed input contract. You
 can inspect `siteops inputs`, then supply one explicit target with
 `--input-file`, `--input`, or a complete `--site-file`.
-An explicitly selected `--read-resources` request reads only declared
-resource ID inputs using the configured Azure identity. Package
-verification and source trust do not authorize that Azure read.
+Resource-ID answers on `plan` and `deploy` authorize bounded reads of the
+declared ID and related resources using the configured Azure identity.
+`inputs` requires `--read-resources` for that optional inspection or save
+read. `validate` does not read resources. Package verification and source
+trust do not confer Azure read or deployment permission.
 
 The [content release workflow](releasing.md) can publish the workspace asset
 set from reviewed declarations after qualification and approval. Choose a
@@ -120,6 +131,11 @@ when `--approved-source NAME` is passed. It does not change a project's pin
 or select a deployment target. An explicit `--source` on `project pin` must
 match the approved source. Mixing an approved source with explicit trust
 files is rejected instead of silently overriding either.
+For direct commands, `--source official@<release>` selects the enrolled
+repository and that exact published release, without a pin. It does not
+automatically enroll `official`. Direct `plan`, `deploy` and `validate`
+without a project require explicit Site inputs rather than packaged example
+Sites. Source confirmation and Azure writes remain separate decisions.
 After browsing, [supply one explicit Site](guided-inputs.md) or use
 configured project Sites. To retire an enrollment deliberately, run
 `siteops source remove official`. This leaves the project pin intact,
@@ -127,10 +143,13 @@ but later package use requires another explicitly selected approval.
 
 Source records are private user configuration. Package use still checks
 current policy validity, trusted-root identity, source selection, package
-provenance and byte integrity. Expired enrollment can be inspected and
-removed. To change approved trust, remove the old name deliberately and
-enroll the reviewed replacement. Keep the explicit policy and root route
-above for environments that manage those files separately.
+provenance and byte integrity. An expired approval reports
+`source.profile-expired`: run `siteops source show NAME` privately, then
+remove and re-enroll that name using reviewed policy and trusted-root files.
+There is no automatic renewal. Metadata-only `browse --source NAME` may
+still resolve the enrolled repository when execution approval expires. It
+does not restore trust. Keep the explicit policy/root route above for
+environments managing those files separately.
 
 The bootstrap-generated approval lasts 30 days. Before it expires, review
 the publisher and a renewed policy and trusted root from independent,
@@ -183,10 +202,13 @@ pin. An altered release reports this error rather than updating the selection:
 The published source differs from the workspace pin. Repin explicitly to change the selection.
 ```
 
-Add `--offline` after `browse`, `inputs`, `validate`, `plan` or `deploy` to require the
-package and proof already in cache. Offline use still requires valid local
-policy and roots. Expired policy, corrupt objects and invalid source
-expectations fail without automatic repair.
+Add `--offline-content` after `browse`, `inputs`, `validate`, `plan` or
+`deploy` with a pinned project to require cached package and proof bytes.
+This limits content acquisition, not target resource reads or deployment
+writes. Direct `--source` does not support it: release resolution must be
+online, even when cached bytes can be reused. Pinned offline use still
+requires valid local policy and roots. Expired policy, corrupt objects and
+invalid source expectations fail without automatic repair.
 
 [Cache maintenance](cache.md) can remove a specific corrupt entry before its
 exact content is restored. This does not modify the workspace pin or Site

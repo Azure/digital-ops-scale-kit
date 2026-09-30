@@ -200,8 +200,12 @@ def test_expired_enrollment_can_be_inspected_and_removed(inputs):
     record = selected.document()
     record["policySha256"] = hashlib.sha256(updated).hexdigest()
     (selected.directory / "source.json").write_text(json.dumps(record), encoding="utf-8")
-    with pytest.raises(SourceProfileError, match="expired"):
+    with pytest.raises(SourceProfileError, match="expired") as error:
         read_source("approved")
+    assert error.value.code == "source.profile-expired"
+    assert "source show NAME" in str(error.value)
+    assert "remove" in str(error.value) and "enroll" in str(error.value)
+    assert selected.policy.read_bytes() == updated
     assert read_source("approved", require_valid=False).name == "approved"
     assert list_sources() == ("approved",)
     remove_source("approved")

@@ -9,6 +9,7 @@ Covers:
 
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -639,10 +640,8 @@ steps:
             ) as execute_target,
             patch(
                 "siteops.orchestrator.ThreadPoolExecutor",
-                side_effect=AssertionError(
-                    "single-site execution must stay sequential"
-                ),
-            ),
+                wraps=ThreadPoolExecutor,
+            ) as pool,
         ):
             orchestrator.deploy(
                 complete_workspace / "manifests" / "test-manifest.yaml",
@@ -650,6 +649,7 @@ steps:
             )
 
         execute_target.assert_called_once()
+        pool.assert_called_once_with(max_workers=1)
 
 
 class TestPlanParallelDisplay:

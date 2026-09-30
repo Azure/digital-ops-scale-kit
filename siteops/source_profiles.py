@@ -151,9 +151,14 @@ def read_source(name: str, *, require_valid: bool = True) -> ApprovedSource:
     if (
         policy.repository.casefold() != f"{reference.owner}/{reference.repository}".casefold()
         or policy.trusted_root_sha256 != result.root_sha256
-        or (require_valid and policy.valid_until <= datetime.now(timezone.utc))
     ):
-        raise SourceProfileError("The approved source policy is invalid or expired.")
+        raise SourceProfileError("The approved source policy does not match its enrollment.")
+    if require_valid and policy.valid_until <= datetime.now(timezone.utc):
+        raise SourceProfileError(
+            "The approved source policy has expired. Inspect it with `siteops source show NAME`, "
+            "then remove and enroll that name again with reviewed policy and trusted-root files.",
+            code="source.profile-expired",
+        )
     return result
 
 

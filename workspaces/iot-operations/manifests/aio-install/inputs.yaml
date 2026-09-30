@@ -1,5 +1,6 @@
 apiVersion: siteops.inputs/v1
 kind: SiteInputContract
+nameFromResource: cluster
 siteDefaults:
   properties:
     deployOptions:
@@ -10,8 +11,10 @@ siteDefaults:
 inputs:
   - name: siteName
     type: string
-    description: Name for this Site and its AIO resources.
+    description: Optional name override with a cluster ID. Required for manual targets.
     sitePath: name
+    format: dnsLabel
+    maxLength: 59
   - name: subscription
     type: string
     description: Subscription containing the existing Arc cluster and resource group.
@@ -30,11 +33,15 @@ inputs:
     sitePath: parameters.clusterName
   - name: environment
     type: string
-    description: Environment label applied to deployed resources, such as dev or prod.
+    required: false
+    format: nonEmpty
+    description: Optional environment label and resource tag, such as dev or prod.
     sitePath: labels.environment
   - name: country
     type: string
-    description: Country label applied to deployed resources.
+    required: false
+    format: nonEmpty
+    description: Optional country label and resource tag.
     sitePath: labels.country
   - name: enableSecretSync
     type: boolean

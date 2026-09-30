@@ -646,6 +646,7 @@ class TextProgressReporter:
         self._stream = stream
         self._redacted = redacted
         self._lock = threading.Lock()
+        self._last_phase: ProgressPhase | None = None
 
     def _target(self, event: ProgressEvent) -> str:
         if self._redacted:
@@ -666,15 +667,29 @@ class TextProgressReporter:
         )
 
     def __call__(self, event: ProgressEvent) -> None:
-        line = self._render(event)
-        if line is None:
-            return
         with self._lock:
+            if event.kind is ProgressEventKind.PHASE_STARTED and event.phase in {
+                ProgressPhase.RESOLUTION, ProgressPhase.DOWNLOAD, ProgressPhase.VERIFICATION,
+            }:
+                if self._last_phase is event.phase:
+                    return
+            self._last_phase = event.phase if event.kind is ProgressEventKind.PHASE_STARTED else None
+            line = self._render(event)
+            if line is None:
+                return
             self._stream.write(line)
             self._stream.flush()
 
     def _render(self, event: ProgressEvent) -> str | None:
         if event.kind is ProgressEventKind.PHASE_STARTED:
+            preparation = {
+                ProgressPhase.RESOLUTION: "Resolving the selected release...",
+                ProgressPhase.DOWNLOAD: "Downloading missing content...",
+                ProgressPhase.VERIFICATION: "Checking source approval and content integrity...",
+                ProgressPhase.PREPARATION: "Preparing executable deployment plan...",
+            }
+            if event.phase in preparation:
+                return preparation[event.phase] + "\n"
             label = {
                 ProgressPhase.SUBSCRIPTION: (
                     "[Phase 1] Subscription-scoped steps"
@@ -722,6 +737,11 @@ class TextProgressReporter:
             return (
                 f"[{self._target(event)}] {symbol} {self._step(event)}"
                 f"{suffix}\n"
+            )
+        if event.kind is ProgressEventKind.OPERATION_WAITING:
+            return (
+                f"[{self._target(event)}] {self._step(event)}: "
+                f"waiting, {(event.elapsed or 0):.0f}s elapsed\n"
             )
         if event.kind is ProgressEventKind.TARGET_BLOCKED:
             return (

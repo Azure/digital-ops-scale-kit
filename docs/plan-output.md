@@ -4,6 +4,9 @@ Site Ops can render a deployment plan for a person or emit one structured JSON
 document for automation.
 
 See [run-output.md](run-output.md) for what a completed deployment reports.
+Private plain plans identify each Site's subscription and resource group,
+or its subscription scope. Review those destinations before deployment.
+Publishable output omits their identities.
 
 ## Prepare an executable plan
 
@@ -16,9 +19,11 @@ siteops -w <workspace> plan <manifest>
 This command runs structural validation, resolves the selected operations,
 compiles executable templates, preflights required capabilities, and prints
 the canonical plan. It performs no Azure or Kubernetes mutation.
-Supplying `--read-resources` with declared resource-ID answers explicitly
-performs bounded Azure reads in a setup phase before that planner runs.
-Without this option, plan preparation makes no Azure resource reads.
+An explicit resource-ID answer authorizes bounded Azure reads of the
+declared resource and related resources while resolving the target, before
+the read-free planner runs. Without such an answer, planning makes no
+Azure target reads. `validate` remains read-free. Inspection-only `inputs`
+requires `--read-resources` to preview or save a Site from an ID.
 
 Ordinary local workspaces submit source Bicep, which Azure CLI may compile
 again. Their plans record observed compilation identity, not a guarantee that
@@ -32,11 +37,16 @@ integrity is checked again before execution. This binding is not a saved plan
 or a publisher-provenance decision. Plain output identifies this mode as
 `Submission: arm-json (package artifact)`.
 
-Public `plan` and `deploy` commands continue to operate on a local workspace,
-including one selected with `-w`. They do not select a package source.
+`plan` and `deploy` work with local content, pinned project packages, or an
+explicit published release selected by `--source SOURCE@RELEASE`.
+Direct source use resolves the release online and verifies it with
+consumer-owned trust, reusing valid cached bytes when available. It does
+not change a project pin. Without a project, provide explicit Site inputs,
+not packaged example Sites. With `--source`, global `-w` selects a relative
+workspace path inside that release.
 
 Planning does not establish deployment authorization, cluster connectivity,
-or workload health. A successful opted-in resource read proves only that the
+or workload health. A successful declared resource read proves only that the
 selected identity could read that resource when the command ran.
 
 Executable preparation may acquire the Bicep compiler or restore modules.
@@ -54,9 +64,10 @@ Use `--describe` for the faster compile-free shape:
 siteops -w <workspace> plan <manifest> --describe
 ```
 
-The existing `validate --plan` spelling remains a compatibility route to the
-describe view. `deploy --dry-run` remains a compatibility route to executable
-planning and stops after rendering the plan.
+`validate --plan` and `deploy --dry-run` are removed. Use `plan --describe`
+for the compile-free shape or `plan` for executable preparation without
+deployment. Bare `validate` remains a structural check for library
+manifests without targets. It has no plan-only `--output` or `--projection`.
 
 A library manifest without a target set can be checked with `validate`.
 Pass a selector to plan that library against specific sites.
@@ -71,6 +82,9 @@ siteops -w <workspace> plan <manifest> --output json
 
 JSON mode writes exactly one JSON document to stdout. Human guidance and
 logging use stderr so a caller can parse stdout directly.
+In a private terminal, `deploy` reviews and confirms its own fresh plan.
+A prior plan output does not authorize it. Noninteractive/CI/JSON deploy
+requires `--yes` before content access.
 
 Every document identifies its contract and projection:
 
@@ -126,7 +140,8 @@ When redaction is enabled, plain plans render the same allowlisted fields as
 the publishable JSON projection. They show status, intent, aggregate activity,
 and generic diagnostics rather than manifest names, descriptions, individual
 steps, paths, conditions, or target details. Authorized local plain output
-retains its detailed view when redaction is disabled.
+retains its detailed view when redaction is disabled, including authored
+multiline descriptions on separate lines.
 
 For CI publication, capture the explicit publishable JSON from stdout.
 Progress and diagnostic logs on stderr are a separate stream, not part of the

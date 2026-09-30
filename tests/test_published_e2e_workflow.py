@@ -4,6 +4,7 @@
 import json
 import os
 import re
+import runpy
 import shutil
 import stat
 import subprocess
@@ -19,6 +20,8 @@ from siteops.reporting import _KIND as DEPLOYMENT_KIND
 ROOT = Path(__file__).parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "e2e-test.yaml"
 ACTION = ROOT / ".github" / "actions" / "setup-published-siteops" / "action.yaml"
+CI = ROOT / ".github" / "workflows" / "ci.yaml"
+PIPX_PROBE = ROOT / "tests" / "fixtures" / "windows-pipx-launcher.py"
 
 
 def _workflow() -> str:
@@ -139,6 +142,198 @@ def test_published_mode_is_explicit_and_bounded():
         "Published E2E cannot keep the cluster alive.",
     ):
         assert value in workflow
+
+
+def test_windows_capability_probe_is_opt_in_without_azure_authority():
+    workflow = yaml.safe_load(_workflow())
+    inputs = workflow.get("on", workflow.get(True))["workflow_dispatch"]["inputs"]
+    assert inputs["scenario"]["type"] == "choice"
+    assert inputs["scenario"]["default"] == "aio"
+    assert inputs["scenario"]["options"] == [
+        "aio", "windows-installer-preflight", "windows-pipx-launcher",
+    ]
+
+    jobs = workflow["jobs"]
+    assert jobs["prep"]["if"] == "inputs.scenario == 'aio'"
+    assert jobs["e2e"]["needs"] == "prep"
+    probe = jobs["windows-installer-preflight"]
+    assert probe["if"] == "inputs.scenario == 'windows-installer-preflight'"
+    assert probe["runs-on"] == "windows-2025"
+    assert probe["permissions"] == {}
+    assert not probe.get("environment")
+    assert probe["timeout-minutes"] <= 10
+    steps = probe["steps"]
+    assert len(steps) == 1
+    assert steps[0]["shell"] == "powershell"
+    run = steps[0]["run"]
+    for capability in ("winget.exe", "python.exe", "gh.exe", "pipx.exe", "SymbolicLink"):
+        assert capability in run
+    assert "GITHUB_STEP_SUMMARY" in run
+    assert "throw" in run
+    assert "azure/login" not in str(probe)
+    assert "AZURE_" not in str(probe)
+    assert "actions/checkout" not in str(probe)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows PowerShell parser is needed.")
+def test_windows_capability_probe_parses_in_native_powershell(tmp_path):
+    workflow = yaml.safe_load(_workflow())
+    probe = workflow["jobs"]["windows-installer-preflight"]["steps"][0]["run"]
+    script = tmp_path / "windows-installer-preflight.ps1"
+    script.write_text(probe, encoding="utf-8")
+    parsed = subprocess.run(
+        [
+            "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+            "$tokens=$null;$errors=$null;"
+            "[Management.Automation.Language.Parser]::ParseFile("
+            "$env:TEST_SCRIPT,[ref]$tokens,[ref]$errors) | Out-Null;"
+            "if ($errors) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }",
+        ],
+        env={**os.environ, "TEST_SCRIPT": str(script)},
+        capture_output=True, text=True, timeout=20,
+    )
+    assert parsed.returncode == 0, parsed.stdout + parsed.stderr
+
+
+def test_windows_bootstrap_ci_requires_native_real_launcher_checks():
+    workflow = yaml.safe_load(CI.read_text(encoding="utf-8"))
+    job = workflow["jobs"]["windows-bootstrap"]
+    assert job["runs-on"] == "windows-2025"
+    assert job["permissions"] == {"contents": "read"}
+    assert "id-token" not in str(job)
+    assert not job.get("environment")
+    assert job["timeout-minutes"] <= 30
+    assert job["env"]["PIP_INDEX_URL"] == "https://packagefeedproxy.microsoft.io/pypi/simple/"
+    assert job["env"]["SITEOPS_REQUIRE_WINDOWS_LINK"] == "1"
+    assert any("actions/checkout@" in step.get("uses", "") for step in job["steps"])
+    assert any("actions/setup-python@" in step.get("uses", "") for step in job["steps"])
+    preparation = next(step["run"] for step in job["steps"] if step.get("name") == "Prepare private test state")
+    assert "icacls.exe" in preparation
+    assert "GITHUB_ENV" in preparation
+    test = next(step["run"] for step in job["steps"] if step.get("name") == "Windows bootstrap tests")
+    assert "test_bootstrap_scripts.py" in test
+    assert PIPX_PROBE.name in test
+    assert "windows_bootstrap" in test
+    assert "--basetemp" in test
+    assert "azure/login" not in str(job)
+
+
+def test_real_pipx_launcher_e2e_is_separate_and_has_no_azure_authority():
+    workflow = yaml.safe_load(_workflow())
+    inputs = workflow.get("on", workflow.get(True))["workflow_dispatch"]["inputs"]
+    assert "windows-pipx-launcher" in inputs["scenario"]["options"]
+    jobs = workflow["jobs"]
+    job = jobs["windows-pipx-launcher"]
+    assert job["runs-on"] == "windows-2025"
+    assert job["if"] == "inputs.scenario == 'windows-pipx-launcher'"
+    assert job["permissions"] == {"contents": "read"}
+    assert not job.get("environment")
+    assert job["timeout-minutes"] <= 30
+    assert job["env"]["PIP_INDEX_URL"] == "https://packagefeedproxy.microsoft.io/pypi/simple/"
+    assert job["env"]["SITEOPS_REQUIRE_WINDOWS_LINK"] == "1"
+    assert any("actions/checkout@" in step.get("uses", "") for step in job["steps"])
+    assert any("actions/setup-python@" in step.get("uses", "") for step in job["steps"])
+    assert any(PIPX_PROBE.name in step.get("run", "") for step in job["steps"])
+    assert "azure/login" not in str(job)
+    assert "AZURE_CLIENT" not in str(job)
+    assert "id-token" not in str(job)
+    assert PIPX_PROBE.is_file()
+    source = PIPX_PROBE.read_text(encoding="utf-8")
+    for piece in ("pipx==1.17.2", "PIPX_BIN_DIR", "pipx.exe", "Require-PrivateExecutablePath"):
+        assert piece in source
+    compile(source, str(PIPX_PROBE), "exec")
+    assert "siteops-pipx-probe-" in source
+    assert "GITHUB_STEP_SUMMARY" in source
+    assert "PIP_INDEX_URL" in source
+    assert "PIP_CONFIG_FILE" in source
+    assert "shutil.rmtree(root)" in source
+    assert "github.com" not in source
+    assert "az login" not in source
+
+
+def test_real_pipx_launcher_separates_root_admission_from_link_guard():
+    source = PIPX_PROBE.read_text(encoding="utf-8")
+    assert source.index('log=logs / "check-private-data-root.log"') < (
+        source.index('log=logs / "check-bootstrap-guard.log"')
+    )
+    assert 'log=logs / "protect-data-root.log"' in source
+    assert 'env["SITEOPS_PROBE_DATA"] = str(data)' in source
+    assert "ROOT_(?:PATH|ANCESTOR_" in source
+    assert "TOOL_(?:PATH|TYPE|OWNER|ACL)" in source
+    assert 'env["SITEOPS_PROBE_EXPECTED_TARGET"] = str(expected)' in source
+    assert 'env["SITEOPS_PROBE_TARGET_ROOT"] = str(venv.parent.parent)' in source
+    assert "$selected=Require-PrivateExecutablePath $env:SITEOPS_PROBE_APP " in source
+    assert '"$env:PIPX_BIN_DIR $env:SITEOPS_PROBE_EXPECTED_TARGET "' in source
+    assert '"$env:SITEOPS_PROBE_TARGET_ROOT\\n"' in source
+    assert '"$observed=& $selected --version\\n"' in source
+    assert "The bootstrap's selected executable guard admitted" in source
+
+
+@pytest.mark.parametrize(
+    ("log_name", "code", "reason"),
+    [
+        ("check-bootstrap-guard.log", "TOOL_TYPE", "rejected TOOL_TYPE"),
+        ("check-bootstrap-guard.log", "TOOL_UNKNOWN", "failed with exit code 7"),
+        ("check-private-data-root.log", "ROOT_DATA_OWNER", "rejected ROOT_DATA_OWNER"),
+        ("check-private-data-root.log", "ROOT_UNKNOWN", "failed with exit code 7"),
+    ],
+)
+def test_real_pipx_launcher_reports_only_bounded_guard_diagnostics(
+    tmp_path, log_name, code, reason,
+):
+    run = runpy.run_path(str(PIPX_PROBE))["run"]
+    marker = "PRIVATE_TARGET_MARKER"
+    log = tmp_path / log_name
+    context = (
+        "Choose a private Windows tool location."
+        if code.startswith("TOOL_")
+        else "Configure a private Site Ops data root."
+    )
+    diagnostic = (
+        f"{marker}: Site Ops installation: {context} "
+        f"{code} Use trusted directories."
+    )
+    with pytest.raises(RuntimeError, match=reason) as error:
+        run(
+            [sys.executable, "-c",
+             f"import sys;sys.stderr.write({diagnostic!r});sys.exit(7)"],
+            cwd=tmp_path, env=os.environ.copy(), log=log, timeout=10,
+        )
+    assert marker not in str(error.value)
+    assert marker in log.read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows PowerShell parser is needed.")
+@pytest.mark.parametrize(
+    ("workflow", "job", "step_name"),
+    [
+        (CI, "windows-bootstrap", "Install test dependencies"),
+        (CI, "windows-bootstrap", "Prepare private test state"),
+        (CI, "windows-bootstrap", "Windows bootstrap tests"),
+        (WORKFLOW, "windows-pipx-launcher", "Test the real pipx launcher without Azure"),
+    ],
+)
+def test_windows_automated_launcher_steps_parse_in_native_powershell(
+    tmp_path, workflow, job, step_name,
+):
+    steps = yaml.safe_load(workflow.read_text(encoding="utf-8"))["jobs"][job]["steps"]
+    script = tmp_path / "check-step.ps1"
+    script.write_text(
+        next(step["run"] for step in steps if step.get("name") == step_name),
+        encoding="utf-8",
+    )
+    parsed = subprocess.run(
+        [
+            "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+            "$tokens=$null;$errors=$null;"
+            "[Management.Automation.Language.Parser]::ParseFile("
+            "$env:TEST_SCRIPT,[ref]$tokens,[ref]$errors) | Out-Null;"
+            "if ($errors) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }",
+        ],
+        env={**os.environ, "TEST_SCRIPT": str(script)},
+        capture_output=True, text=True, timeout=20,
+    )
+    assert parsed.returncode == 0, parsed.stdout + parsed.stderr
 
 
 def test_operator_target_inputs_are_masked_before_step_headers():
@@ -551,12 +746,41 @@ def test_published_workspace_uses_project_pin_and_separate_sites():
     for value in (
         "--template tests/e2e/sites/e2e-published.yaml.tmpl",
         'mkdir \"$SITEOPS_E2E_PROJECT/sites\"',
-        "validate aio-install",
-        "--plan",
-        "--offline",
+        "plan aio-install",
+        "--describe",
+        "--offline-content",
         "Published package planning changed the operator Site.",
     ):
         assert value in plan_step
+    assert "--read-resources" not in plan_step
+    assert "raw.find" not in plan_step
+
+
+def test_configured_published_plan_requires_one_describe_document(tmp_path):
+    blocks = _embedded_python(_step_run("Render and plan the published-package operator Site"))
+    assert len(blocks) == 1
+    plan = tmp_path / "plan.json"
+    document = {
+        "apiVersion": "siteops/v1alpha1", "kind": "DeploymentPlan",
+        "projection": "publishable", "status": "planned",
+        "intent": "describe", "executable": False,
+        "engine": {"version": "1.0.0b1"},
+        "summary": {"targetCount": 1, "operationCount": 9},
+    }
+
+    def check():
+        return subprocess.run(
+            [sys.executable, "-c", blocks[0], str(plan), "1.0.0b1"],
+            capture_output=True, text=True, check=False,
+        )
+
+    plan.write_text(json.dumps(document), encoding="utf-8")
+    assert check().returncode == 0
+    plan.write_text("safe progress\n" + json.dumps(document), encoding="utf-8")
+    assert check().returncode != 0
+    document["intent"] = "executable"
+    plan.write_text(json.dumps(document), encoding="utf-8")
+    assert check().returncode != 0
 
 
 def test_guided_published_plan_waits_for_arc_and_keeps_private_data_local():
@@ -571,14 +795,14 @@ def test_guided_published_plan_waits_for_arc_and_keeps_private_data_local():
         "published-answers.json",
         "--project \"$SITEOPS_E2E_PROJECT\"",
         "--approved-source guided",
-        "--read-resources",
-        "--offline",
+        "--offline-content",
         "SITEOPS_REDACT_OUTPUT=0",
         "expected_steps",
         "read-required",
         "requirement-unmet",
     ):
         assert value in step
+    assert "--read-resources \\" not in step
     assert "cat \"$RUNNER_TEMP/" not in step
     assert " -w workspaces/" not in step
 
@@ -609,7 +833,7 @@ def test_guided_disabled_cell_checks_manual_inline_and_configured_site_without_r
         'published-manual-answers.json',
         '--input-file "$RUNNER_TEMP/published-manual-answers.json"',
         '--input "siteName=$E2E_SITE_NAME"',
-        'inputs aio-install --offline',
+        'inputs aio-install --offline-content',
         '--save-site "$site"',
         '-l "name=$E2E_SITE_NAME"',
         'SITEOPS_REDACT_OUTPUT=0 siteops',
@@ -784,7 +1008,8 @@ def test_guided_published_deploy_uses_answers_and_read_gate():
     step = _step_run("Deploy AIO through the published engine and package")
     assert 'PUBLISHED_JOURNEY' in step
     assert '--input-file "$RUNNER_TEMP/published-answers.json"' in step
-    assert "--read-resources" in step
+    assert "--read-resources" not in step
+    assert "--yes" in step
     assert 'name=$SITE_NAME' in step
     assert 'trust_args=(--approved-source guided)' in step
 
@@ -801,7 +1026,8 @@ def test_published_deploy_uses_only_the_pin_offline():
         '--trust-policy \"$SITEOPS_E2E_POLICY\"',
         '--trusted-root \"$SITEOPS_E2E_TRUSTED_ROOT\"',
         "deploy aio-install",
-        "--offline",
+        "--yes",
+        "--offline-content",
         '"apiVersion") != "siteops/v1alpha1"',
         f'"kind") != "{DEPLOYMENT_KIND}"',
         '"projection") != "publishable"',
@@ -810,6 +1036,7 @@ def test_published_deploy_uses_only_the_pin_offline():
     ):
         assert value in deploy
     assert "workspaces/iot-operations" not in deploy
+    assert "raw.find" not in deploy
 
 
 def test_published_deployment_receipt_accepts_the_real_run_envelope(tmp_path):
@@ -833,7 +1060,7 @@ def test_published_deployment_receipt_accepts_the_real_run_envelope(tmp_path):
             "operations": {"total": 5, "counts": {"succeeded": 5}},
         },
     }
-    raw.write_text("safe progress\n" + json.dumps(document), encoding="utf-8")
+    raw.write_text(json.dumps(document), encoding="utf-8")
 
     result = subprocess.run(
         [
@@ -864,6 +1091,15 @@ def test_published_deployment_receipt_accepts_the_real_run_envelope(tmp_path):
         "succeededOperations": 5,
         "status": "succeeded",
     }
+
+    raw.write_text("safe progress\n" + json.dumps(document), encoding="utf-8")
+    noisy = subprocess.run(
+        [sys.executable, "-c", blocks[0], str(raw), str(output),
+         "v-test", source, version],
+        capture_output=True, text=True, check=False,
+    )
+    assert noisy.returncode != 0
+    assert "JSONDecodeError" in noisy.stderr
 
     document["kind"] = "DeploymentResult"
     raw.write_text(json.dumps(document), encoding="utf-8")
@@ -902,6 +1138,22 @@ def test_default_source_e2e_remains_separate():
         in workflow
         and "always() && needs.prep.outputs.published-mode != 'true'" in workflow
     )
+
+
+@pytest.mark.parametrize(("path", "manifest"), [
+    (".github/workflows/_siteops-deploy.yaml", "$INPUT_MANIFEST"),
+    (".pipelines/templates/siteops-deploy.yaml", "$MANIFEST"),
+])
+def test_deployment_wrappers_approve_only_the_run_not_the_plan(path, manifest):
+    workflow = yaml.safe_load((ROOT / path).read_text(encoding="utf-8"))
+    text = (ROOT / path).read_text(encoding="utf-8")
+    assert workflow and f'plan "{manifest}"' in text
+    plan, deploy = text.split(f'deploy "{manifest}"', 1)
+    assert "--yes" not in plan
+    arguments = deploy.split(")", 1)[0]
+    assert re.search(r"(?m)^\s+--yes$", arguments)
+    assert "--output json" in arguments
+    assert "--projection publishable" in arguments
 
 
 def test_published_readiness_is_bounded_and_existing_teardown_is_retained():

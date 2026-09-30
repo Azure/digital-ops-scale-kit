@@ -99,7 +99,7 @@ def inspect_github(
     try:
         validate_browse_options(selection, search, tags, category, limit)
         if type(refresh) is not bool or type(offline) is not bool or (refresh and offline):
-            raise BrowseError("source.cache-options", "Choose either --refresh or --offline.")
+            raise BrowseError("source.cache-options", "Choose either --refresh or --offline-content.")
         requested_workspace = _workspace_name(workspace)
         if client is None:
             from siteops.github_metadata_cache import CachedGitHubClient

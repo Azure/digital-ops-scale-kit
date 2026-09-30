@@ -3,14 +3,16 @@
 Use this page to choose the shortest route for the task in front of you. New
 operators with a compatible published workspace can start with
 [guided inputs](guided-inputs.md). For a local checkout and reusable Site
-file, use the [configured-Site guide](getting-started.md). Both routes
-separate planning, deployment, and health verification.
+file, use the [configured-Site guide](getting-started.md). A separate plan
+is optional: an interactive deploy reviews and confirms its own prepared
+plan before execution. Health verification remains separate.
 
 ## Begin locally
 
 | Task | Guide |
 |---|---|
 | Deploy AIO to one explicit target | [Guided inputs](guided-inputs.md) |
+| Enable Secret Sync on an existing AIO instance | [Existing-instance inputs](guided-inputs.md#enable-secret-sync-on-an-existing-instance) |
 | Deploy AIO with a configured example Site | [Local checkout guide](getting-started.md) |
 | Install an identified Site Ops release | [Install Site Ops](install-siteops.md) |
 | Configure and inspect a deployment target | [Site configuration](site-configuration.md) |
@@ -22,30 +24,32 @@ separate planning, deployment, and health verification.
 | Inspect storage or remove a cached entry safely | [Cache maintenance](cache.md) |
 | Diagnose a failed command or provider operation | [Troubleshooting](troubleshooting.md) |
 
-Installing the CLI does not acquire a workspace. For local use, select the
-included IoT Operations workspace from a checkout. When a compatible
-approved release publishes a complete package, pin it in an operator
-project without cloning. Review the selected CLI and content source
-before deploying. The bootstrap scripts and typed AIO package are not yet
-published in official releases. Use the local checkout route until
-compatible assets are available.
+Installing the CLI does not acquire a workspace or approve a source. Follow
+the selected release's installation and source instructions. With a compatible
+published workspace and an independently approved consumer alias, begin
+without pinning a project or writing an answer file:
 
-When an approved source publishes a complete workspace package and detached
-proof, an [operator project](projects.md) can acquire and use that release.
-An authored input contract in that package also supports one explicit target
-without first saving a project Site.
+```text
+siteops deploy aio-install --source "official@<release>" --input "cluster=<Arc-cluster-resource-ID>"
+```
+
+This private interactive command prepares, reviews, confirms and executes
+one plan. Use `--yes` only for explicitly authorized unattended execution.
+The target read and deployment still require your Azure identity. A local
+checkout uses `-w`, while [operator projects](projects.md) add configured
+Sites, fleet selection and optional offline-content reuse.
 
 ## Prepare and run deployments
 
-Follow the command progression from read-only inspection to provider writes:
+Choose the guides appropriate to your task:
 
 1. Use [site configuration](site-configuration.md) to inspect inheritance and
    overlays.
 2. Use [site targeting](targeting.md) to select one site or a fleet.
 3. Use the [manifest reference](manifest-reference.md) to understand the
    ordered operations.
-4. Use [deployment plan output](plan-output.md) to review executable
-   preparation without Azure or Kubernetes mutation.
+4. Use [deployment plan output](plan-output.md) for a separate optional
+   executable preview without deployment writes.
 5. Use [deployment run output](run-output.md) to interpret results,
    interruption, temporary files, and publication-safe output.
 

@@ -13,6 +13,12 @@ resource settings.
 
 ## Configure the target
 
+For guided inputs, supply only the existing Arc cluster ID and authorize
+its read. Site Ops derives the target and generates a stable Site name.
+`siteName`, `environment` and `country` remain optional overrides on
+this resource route. Supplied labels become resource tags, while omitted
+labels are not invented. The manual route retains explicit target fields.
+
 Confirm the Site's subscription, resource group, location and
 `parameters.clusterName`. The cluster and resource group must already exist.
 Confirm the inherited `properties.aioRelease` and that the target meets its
@@ -20,7 +26,8 @@ Confirm the inherited `properties.aioRelease` and that the target meets its
 
 Shared naming defaults derive instance, custom-location, Schema Registry and
 ADR namespace names from the Site name. Ordinary Site parameters can override
-those defaults. IDs produced by earlier operations are supplied to their
+those defaults. Keep an existing explicit Site name when reusing configuration.
+IDs produced by earlier operations are supplied to their
 consuming steps, rather than entered by the operator.
 
 Optional `properties.deployOptions` settings include `enableEdgeSite`,

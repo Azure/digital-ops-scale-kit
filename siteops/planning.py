@@ -1383,7 +1383,7 @@ def render_plain_plan(
     lines.append(border)
 
     if plan.description:
-        lines.extend(("", f"  {plan.description}"))
+        lines.extend(("", *(f"  {line}" for line in plan.description.splitlines())))
 
     if plan.intent is PlanIntent.EXECUTABLE:
         binding_description = {
@@ -1418,10 +1418,13 @@ def render_plain_plan(
     if plan.target_selection == "explicit-site":
         lines.extend(("", "  Target selection: explicit Site (replaces manifest targeting)"))
     lines.extend(("", f"  Sites ({len(plan.targets)}):"))
-    lines.extend(
-        f"    • {target.name} ({target.location})"
-        for target in plan.targets
-    )
+    for target in plan.targets:
+        lines.extend((
+            f"    • {target.name} ({target.location})",
+            f"      Subscription: {target.subscription}",
+            f"      Resource group: {target.resource_group}"
+            if target.kind is TargetKind.RESOURCE_GROUP else "      Scope: subscription",
+        ))
 
     lines.extend(
         (

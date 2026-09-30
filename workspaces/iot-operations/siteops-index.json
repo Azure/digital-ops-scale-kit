@@ -143,9 +143,9 @@
             "type": "string"
           },
           {
-            "description": "Installation tags need environment and country labels. Configured Sites carry them, while typed answers ask for each. Optional Edge Site addressing also uses city.",
+            "description": "Supplied environment and country labels become resource tags. Omitted labels create no corresponding tags. Optional Edge Site addressing needs its own country and city values when selected.",
             "field": "labels",
-            "requirement": "required",
+            "requirement": "optional",
             "sensitivity": "unknown",
             "type": "mapping"
           },
@@ -357,7 +357,8 @@
         "outcome": "Enable workload-identity-backed Secret Sync on an existing AIO instance.",
         "prerequisites": [
           "An existing AIO instance and cluster with OIDC issuer and workload identity enabled.",
-          "A configured Site, instance name, release selection and permissions for identities, vault resources and role assignments as applicable."
+          "An instance resource ID for the guided 2607/2608 route, or a configured Site with the actual instance name and appropriate release selection.",
+          "Permissions for identities, vault resources and role assignments as applicable."
         ],
         "removal": [
           "Remove only the identities, permissions, data and synchronized resources you own. Configuration removal is not automatic cleanup."

@@ -1,5 +1,6 @@
 """Boundaries for declarative inputs that construct exactly one ordinary Site."""
 
+import hashlib
 import os
 import stat
 from dataclasses import FrozenInstanceError
@@ -62,7 +63,7 @@ def _manual_resource_fields():
     ]
 
 
-def _manifest_and_contract(tmp_path, *, fields=None, defaults=None):
+def _manifest_and_contract(tmp_path, *, fields=None, defaults=None, name_from_resource=None):
     target = tmp_path / "manifests" / "storage"
     target.mkdir(parents=True)
     manifest = target / "manifest.yaml"
@@ -88,6 +89,8 @@ def _manifest_and_contract(tmp_path, *, fields=None, defaults=None):
             ),
         ],
     }
+    if name_from_resource is not None:
+        document["nameFromResource"] = name_from_resource
     contract.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
     return manifest, contract
 
@@ -190,6 +193,373 @@ def test_pure_binding_and_site_construction_match_existing_resolution(tmp_path):
     assert contract.build_site(bound) == contract.resolve(inline=inline)
 
 
+def _named_resource_contract(tmp_path):
+    manifest, _ = _manifest_and_contract(
+        tmp_path,
+        fields=[
+            _field("siteName", "name", format="dnsLabel", maxLength=59),
+            *_manual_resource_fields(),
+            _resource_role(),
+        ],
+        defaults={},
+        name_from_resource="cluster",
+    )
+    return load_contract(manifest)
+
+
+@pytest.mark.parametrize("cluster_name", ["arc-first", "A_Very.Long_Cluster.Name_With_More_Characters"])
+def test_resource_name_default_is_stable_and_uses_full_identity(tmp_path, cluster_name):
+    contract = _named_resource_contract(tmp_path)
+    resource = (
+        "/subscriptions/00000000-0000-0000-0000-000000000001/"
+        f"resourceGroups/rg-first/providers/Microsoft.Kubernetes/connectedClusters/{cluster_name}"
+    )
+    names = []
+    for resource_id in (resource, resource.upper(), resource.replace("rg-first", "rg-second")):
+        bound = contract.bind(inline=[f"cluster={resource_id}"])
+        assert "siteName" not in bound.active_values
+        ref = bound.resources[0].ref
+        observation = ArmResourceObservation(
+            resource_id, ref.resource_type, "eastus", ref.name, {},
+        )
+        site = contract.build_site(bound, {"cluster": observation})
+        prefix = "arc-first" if cluster_name == "arc-first" else "a-very-long-cluste"
+        assert site.name == prefix + "-" + hashlib.sha256(
+            resource_id.casefold().encode("ascii"),
+        ).hexdigest()[:12]
+        assert len(site.name) <= 31
+        assert site.labels == {}
+        names.append(site.name)
+    assert names[0] == names[1]
+    assert names[0] != names[2]
+
+
+def test_resource_name_default_retains_overrides_and_manual_route(tmp_path):
+    contract = _named_resource_contract(tmp_path)
+    manual = [
+        "subscription=00000000-0000-0000-0000-000000000001",
+        "resourceGroup=rg-first", "location=eastus", "clusterName=arc-first",
+    ]
+    with pytest.raises(ValueError, match="Missing required input 'siteName'"):
+        contract.resolve(inline=manual)
+    assert contract.resolve(inline=["siteName=my-site", *manual]).name == "my-site"
+    resource = (
+        "/subscriptions/00000000-0000-0000-0000-000000000001/"
+        "resourceGroups/rg-first/providers/Microsoft.Kubernetes/connectedClusters/arc-first"
+    )
+    bound = contract.bind(inline=["siteName=my-site", f"cluster={resource}"])
+    with pytest.raises(ValueError, match="validated resource observations"):
+        contract.build_site(bound)
+    observation = ArmResourceObservation(
+        resource, "Microsoft.Kubernetes/connectedClusters", "eastus", "arc-first", {},
+    )
+    assert contract.build_site(bound, {"cluster": observation}).name == "my-site"
+    assert contract.example()["values"] == {"cluster": None}
+    assert contract.describe()["inputs"][0]["defaultFromResource"] == "cluster"
+
+
+@pytest.mark.parametrize("name", ["", "UPPER", "has space", "-start", "end-", "x" * 60])
+def test_declared_name_constraints_reject_unsupported_override_before_reads(tmp_path, name):
+    contract = _named_resource_contract(tmp_path)
+    with pytest.raises(ValueError, match="siteName"):
+        contract.bind(inline=[f"siteName={name}"])
+
+
+@pytest.mark.parametrize("role", ["missing", "siteName", True])
+def test_name_default_requires_an_unconditional_declared_resource(tmp_path, role):
+    manifest, _ = _manifest_and_contract(
+        tmp_path,
+        fields=[_field("siteName", "name"), *_manual_resource_fields(), _resource_role()],
+        name_from_resource=role,
+    )
+    with pytest.raises(ValueError, match="nameFromResource"):
+        load_contract(manifest)
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"format": "expression"},
+        {"format": None},
+        {"maxLength": True},
+        {"maxLength": 0},
+        {"maxLength": 65537},
+        {"type": "boolean", "format": "dnsLabel"},
+        {"type": "boolean", "maxLength": 5},
+    ],
+)
+def test_input_string_constraints_fail_closed(tmp_path, override):
+    manifest, _ = _manifest_and_contract(
+        tmp_path, fields=[_field("name", "name", **override)],
+    )
+    with pytest.raises(ValueError, match="format|maxLength"):
+        load_contract(manifest)
+
+
+@pytest.mark.parametrize("name_override", [{"required": False}, {"default": "fixed"}])
+def test_resource_default_rejects_ambiguous_name_policy(tmp_path, name_override):
+    manifest, _ = _manifest_and_contract(
+        tmp_path,
+        fields=[_field("name", "name", **name_override), *_manual_resource_fields(), _resource_role()],
+        name_from_resource="cluster",
+    )
+    with pytest.raises(ValueError, match="nameFromResource"):
+        load_contract(manifest)
+
+
+def test_resource_name_default_is_generic_and_rejects_conflicting_name_derivation(tmp_path):
+    fields = [
+        _field("siteName", "name"),
+        *_manual_resource_fields(),
+        _resource_role(
+            name="storage",
+            resource={"type": "Microsoft.Storage/storageAccounts", "apiVersion": "2024-01-01"},
+        ),
+    ]
+    manifest, path = _manifest_and_contract(
+        tmp_path, fields=fields, name_from_resource="storage",
+    )
+    contract = load_contract(manifest)
+    resource = (
+        "/subscriptions/00000000-0000-0000-0000-000000000001/"
+        "resourceGroups/rg-first/providers/Microsoft.Storage/storageAccounts/example"
+    )
+    bound = contract.bind(inline=[f"storage={resource}"])
+    site = contract.build_site(bound, {
+        "storage": ArmResourceObservation(resource, "Microsoft.Storage/storageAccounts", "eastus", "example", {}),
+    })
+    assert site.name.startswith("example-")
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    document["inputs"][-1]["derive"]["name"] = "siteName"
+    path.write_text(yaml.safe_dump(document), encoding="utf-8")
+    with pytest.raises(ValueError, match="nameFromResource"):
+        load_contract(manifest)
+
+
+def test_resource_name_default_validates_observation_before_generating_name(tmp_path):
+    contract = _named_resource_contract(tmp_path)
+    resource = (
+        "/subscriptions/00000000-0000-0000-0000-000000000001/"
+        "resourceGroups/rg-first/providers/Microsoft.Kubernetes/connectedClusters/arc-first"
+    )
+    bound = contract.bind(inline=[f"cluster={resource}"])
+    with pytest.raises(ValueError, match="invalid-observation"):
+        contract.build_site(bound, {
+            "cluster": ArmResourceObservation(
+                resource.replace("arc-first", "other"),
+                "Microsoft.Kubernetes/connectedClusters", "eastus", "other", {},
+            ),
+        })
+
+
+_LINKED_INSTANCE_ID = (
+    "/subscriptions/00000000-0000-0000-0000-000000000001/"
+    "resourceGroups/rg-first/providers/Microsoft.HybridCompute/machines/machine-one"
+)
+_LINKED_LOCATION_ID = _LINKED_INSTANCE_ID.replace(
+    "Microsoft.HybridCompute/machines/machine-one",
+    "Microsoft.ExtendedLocation/customLocations/location-one",
+)
+_LINKED_CLUSTER_ID = _LINKED_INSTANCE_ID.replace(
+    "Microsoft.HybridCompute/machines/machine-one",
+    "Microsoft.Kubernetes/connectedClusters/cluster-one",
+)
+
+
+def _linked_contract(tmp_path):
+    fields = [
+        _field("siteName", "name"), *_manual_resource_fields(),
+        _field("instanceName", "parameters.instanceName"),
+        _resource_role(
+            name="instance",
+            resource={"type": "Microsoft.HybridCompute/machines", "apiVersion": "2024-07-10"},
+            derive={"subscription": "subscription", "resourceGroup": "resourceGroup",
+                    "location": "location", "name": "instanceName"},
+        ),
+        _resource_role(
+            name="customLocation", derive={},
+            resource={"type": "Microsoft.ExtendedLocation/customLocations", "apiVersion": "2021-08-31-preview"},
+            fromResource={"input": "instance", "field": "extendedLocation"},
+        ),
+        _resource_role(
+            name="cluster", derive={"name": "clusterName"},
+            resource={"type": "Microsoft.Kubernetes/connectedClusters", "apiVersion": "2024-07-15-preview"},
+            fromResource={"input": "customLocation", "field": "customLocations.hostResourceId"},
+            requires=[{
+                "fact": "connectedClusters.workloadIdentityEnabled",
+                "description": "Workload identity is enabled.",
+            }],
+        ),
+    ]
+    manifest, path = _manifest_and_contract(
+        tmp_path, fields=fields, defaults={}, name_from_resource="instance",
+    )
+    return manifest, path
+
+
+def _linked_observations():
+    return {
+        "instance": ArmResourceObservation(
+            _LINKED_INSTANCE_ID, "Microsoft.HybridCompute/machines", "eastus", "machine-one", {},
+            {"extendedLocation": _LINKED_LOCATION_ID},
+        ),
+        "customLocation": ArmResourceObservation(
+            _LINKED_LOCATION_ID, "Microsoft.ExtendedLocation/customLocations", "eastus", "location-one", {},
+            {"customLocations.hostResourceId": _LINKED_CLUSTER_ID},
+        ),
+        "cluster": ArmResourceObservation(
+            _LINKED_CLUSTER_ID, "Microsoft.Kubernetes/connectedClusters", "eastus", "cluster-one",
+            {"connectedClusters.workloadIdentityEnabled": True},
+        ),
+    }
+
+
+def test_declared_links_build_one_site_without_asking_for_related_ids(tmp_path):
+    manifest, _ = _linked_contract(tmp_path)
+    contract = load_contract(manifest)
+    bound = contract.bind(inline=[f"instance={_LINKED_INSTANCE_ID}"])
+    assert [field.name for field in contract.resource_fields(bound)] == [
+        "instance", "customLocation", "cluster",
+    ]
+    site = contract.build_site(bound, _linked_observations())
+    assert site.parameters == {"instanceName": "machine-one", "clusterName": "cluster-one"}
+    assert site.name.startswith("machine-one-")
+    assert "customLocation" not in contract.example()["values"]
+    assert "cluster" not in contract.example()["values"]
+
+
+@pytest.mark.parametrize("name", ["customLocation", "cluster"])
+def test_related_resource_inputs_cannot_be_overridden(tmp_path, name):
+    manifest, _ = _linked_contract(tmp_path)
+    contract = load_contract(manifest)
+    with pytest.raises(ValueError, match="derived.*cannot be supplied"):
+        contract.bind(inline=[f"instance={_LINKED_INSTANCE_ID}", f"{name}={_LINKED_CLUSTER_ID}"])
+    answers = _values(tmp_path, {"instance": _LINKED_INSTANCE_ID, name: None})
+    with pytest.raises(ValueError, match="derived.*cannot be supplied"):
+        contract.bind(values_file=answers)
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "message"),
+    [
+        ("input", "cluster", "earlier"),
+        ("input", "siteName", "resource"),
+        ("field", "properties.arbitrary", "relationship"),
+    ],
+)
+def test_related_resource_declarations_fail_before_any_read(tmp_path, field, replacement, message):
+    manifest, path = _linked_contract(tmp_path)
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    document["inputs"][-2]["fromResource"][field] = replacement
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    with pytest.raises(ValueError, match=message):
+        load_contract(manifest)
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "category"),
+    [
+        ("rg-first", "another-rg", "resource-group-mismatch"),
+        ("00000000-0000-0000-0000-000000000001",
+         "00000000-0000-0000-0000-000000000002", "subscription-mismatch"),
+        ("Microsoft.ExtendedLocation/customLocations", "Microsoft.HybridCompute/machines", "type-mismatch"),
+    ],
+)
+def test_related_resource_scope_is_checked_before_request(tmp_path, old, new, category):
+    manifest, _ = _linked_contract(tmp_path)
+    contract = load_contract(manifest)
+    bound = contract.bind(inline=[f"instance={_LINKED_INSTANCE_ID}"])
+    observations = _linked_observations()
+    observations["instance"] = ArmResourceObservation(
+        _LINKED_INSTANCE_ID, "Microsoft.HybridCompute/machines", "eastus", "machine-one", {},
+        {"extendedLocation": _LINKED_LOCATION_ID.replace(old, new)},
+    )
+    field = next(field for field in contract.resource_fields(bound) if field.name == "customLocation")
+    with pytest.raises(ValueError, match=category) as error:
+        contract.resource_request(field, bound, observations)
+    assert "another-rg" not in str(error.value)
+
+
+def test_related_resource_name_uses_cluster_identity_and_example_uses_root_input(tmp_path):
+    manifest, path = _linked_contract(tmp_path)
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    document["nameFromResource"] = "cluster"
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    contract = load_contract(manifest)
+    assert contract.example()["values"] == {"instance": None}
+    bound = contract.bind(inline=[f"instance={_LINKED_INSTANCE_ID}"])
+    site = contract.build_site(bound, _linked_observations())
+    assert site.name == "cluster-one-" + hashlib.sha256(
+        _LINKED_CLUSTER_ID.casefold().encode("ascii"),
+    ).hexdigest()[:12]
+
+
+@pytest.mark.parametrize("bad_source", ["missing", "identity", "extra-reference"])
+def test_invalid_source_observation_cannot_supply_a_related_request(tmp_path, bad_source):
+    manifest, _ = _linked_contract(tmp_path)
+    contract = load_contract(manifest)
+    bound = contract.bind(inline=[f"instance={_LINKED_INSTANCE_ID}"])
+    observations = _linked_observations()
+    if bad_source == "missing":
+        observations["instance"] = ArmResourceObservation(
+            _LINKED_INSTANCE_ID, "Microsoft.HybridCompute/machines", "eastus", "machine-one", {},
+        )
+    elif bad_source == "identity":
+        observations["instance"] = ArmResourceObservation(
+            _LINKED_INSTANCE_ID.replace("machine-one", "private-other"),
+            "Microsoft.HybridCompute/machines", "eastus", "private-other", {},
+            {"extendedLocation": _LINKED_LOCATION_ID},
+        )
+    else:
+        observations["instance"] = ArmResourceObservation(
+            _LINKED_INSTANCE_ID, "Microsoft.HybridCompute/machines", "eastus", "machine-one", {},
+            {"extendedLocation": _LINKED_LOCATION_ID, "customLocations.hostResourceId": _LINKED_CLUSTER_ID},
+        )
+    field = next(field for field in contract.resource_fields(bound) if field.name == "customLocation")
+    with pytest.raises(ValueError, match="invalid-observation") as error:
+        contract.resource_request(field, bound, observations)
+    assert "private-other" not in str(error.value)
+
+
+def test_related_resource_prerequisites_are_checked_before_site_construction(tmp_path):
+    manifest, _ = _linked_contract(tmp_path)
+    contract = load_contract(manifest)
+    bound = contract.bind(inline=[f"instance={_LINKED_INSTANCE_ID}"])
+    observations = _linked_observations()
+    observations["cluster"] = ArmResourceObservation(
+        _LINKED_CLUSTER_ID, "Microsoft.Kubernetes/connectedClusters", "eastus", "cluster-one",
+        {"connectedClusters.workloadIdentityEnabled": False},
+    )
+    with pytest.raises(ValueError, match="requirement-unmet"):
+        contract.build_site(bound, observations)
+
+
+def test_manual_answers_cannot_bypass_active_related_resource_prerequisite(tmp_path):
+    manifest, _ = _linked_contract(tmp_path)
+    contract = load_contract(manifest)
+    with pytest.raises(ValueError, match="requirement-unverified.*'instance'"):
+        contract.resolve(inline=[
+            "siteName=manual", "subscription=00000000-0000-0000-0000-000000000001",
+            "resourceGroup=rg-first", "location=eastus", "clusterName=cluster-one",
+            "instanceName=machine-one",
+        ])
+
+
+def test_inactive_related_prerequisite_preserves_manual_route(tmp_path):
+    manifest, path = _linked_contract(tmp_path)
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    document["inputs"].insert(0, _field("verify", "properties.verify", type="boolean", default=False))
+    document["inputs"][-1]["requires"][0]["when"] = {"input": "verify", "equals": True}
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    site = load_contract(manifest).resolve(inline=[
+        "siteName=manual", "subscription=00000000-0000-0000-0000-000000000001",
+        "resourceGroup=rg-first", "location=eastus", "clusterName=cluster-one",
+        "instanceName=machine-one",
+    ])
+    assert site.name == "manual"
+    assert site.properties["verify"] is False
+
+
 def test_optional_cluster_reference_preserves_manual_answer_route(tmp_path):
     fields = [*_manual_resource_fields(), _resource_role()]
     manifest, _ = _manifest_and_contract(tmp_path, fields=fields)
@@ -230,7 +600,7 @@ def test_resource_answer_requires_explicit_read_even_with_complete_manual_values
         "resourceGroups/rg-first/providers/Microsoft.Kubernetes/"
         "connectedClusters/arc-first"
     )
-    with pytest.raises(ValueError, match="read-resources"):
+    with pytest.raises(ValueError, match="validated resource observations"):
         load_contract(manifest).resolve(inline=[
             "subscription=00000000-0000-0000-0000-000000000001",
             "resourceGroup=rg-first",
@@ -1028,6 +1398,27 @@ def test_contract_missing_is_optional_but_not_derived_from_advisory_inputs(tmp_p
     manifest, path = _manifest_and_contract(tmp_path)
     path.unlink()
     assert load_contract(manifest) is None
+
+
+@pytest.mark.parametrize("entry", ["opc-ua-solution", "secretsync-sample"])
+def test_sample_parameter_wiring_is_not_a_typed_contract(entry):
+    workspace = Path(__file__).resolve().parents[1] / "workspaces" / "iot-operations"
+    assert load_contract(workspace / "samples" / entry / "manifest.yaml") is None
+
+
+def test_unrelated_input_document_is_distinct_from_malformed_declared_contract(tmp_path):
+    manifest, path = _manifest_and_contract(tmp_path)
+    path.write_text("apiVersion: example.parameters/v1\nkind: Parameters\nvalues: {}\n", encoding="utf-8")
+    assert load_contract(manifest) is None
+    for document in (
+        "apiVersion: siteops.inputs/v2\nkind: Other\ninputs: []\n",
+        "apiVersion: other/v1\nkind: SiteInputContract\ninputs: []\n",
+        "kind: SiteInputContract\ninputs: []\n",
+        "apiVersion: siteops.inputs/v1\ninputs: []\n",
+    ):
+        path.write_text(document, encoding="utf-8")
+        with pytest.raises(ValueError):
+            load_contract(manifest)
 
 
 def test_contract_and_answers_are_bounded_and_reject_links(tmp_path):

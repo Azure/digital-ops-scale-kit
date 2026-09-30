@@ -435,10 +435,9 @@ def test_parallel_interrupt_stops_new_operations_before_cleanup(
             with lock:
                 active -= 1
 
-    def interrupting_completion(_futures):
+    def interrupting_completion(_futures, **kwargs):
         assert started.wait(timeout=5)
         raise KeyboardInterrupt("operator stopped the rollout")
-        yield
 
     def close():
         with lock:
@@ -451,7 +450,7 @@ def test_parallel_interrupt_stops_new_operations_before_cleanup(
             side_effect=deploy,
         ),
         patch(
-            "siteops.orchestrator.as_completed",
+            "siteops.orchestrator.wait",
             side_effect=interrupting_completion,
         ),
         patch.object(orchestrator.executor, "close", side_effect=close),
