@@ -1,29 +1,14 @@
 # Install Site Ops from a release
 
-Install an identified Site Ops build without cloning this repository. The
-native installation assets carry the same application bytes:
+Install an identified Site Ops build without cloning this repository.
+If uv is available, use the release's exact wheel command. Otherwise, use
+its generated Windows or Linux bootstrap. Both routes use
+stock [uv](https://docs.astral.sh/uv/) and its normal tool and Python locations.
 
-| Asset | Contents | Use it for |
-|---|---|---|
-| `siteops-<version>-py3-none-any.whl` | The Site Ops engine wheel | Ordinary installation from a release you already trust |
-| `siteops-install.zip` | That identical wheel, pinned runtime dependency wheels, `pylock.toml`, the shared `siteops-install.py` helper, the bundle inventory, and license notices | Verified, index-free installation with a recorded dependency set |
-
-Each asset has its own detached proof, `<asset>.attestation.jsonl`, and the
-publishing pipeline signs and cross-checks both. As an operator you use one
-asset: install the wheel directly, or download the archive with its proof and
-install from the authenticated bundle. Both routes install with
-stock [uv](https://docs.astral.sh/uv/), using its normal tool and Python
-locations and native removal command.
-Releases that publish
-`siteops-bootstrap.sh` and `siteops-bootstrap.ps1` also provide a detached
-proof for each script. Both script entry routes run the same platform script
-and install from the authenticated archive. Site Ops has no private package
-store.
-
-Use bootstrap scripts and the engine ZIP from the same release. Current
-scripts require the helper in that ZIP. They verify the archive's provenance
-before extracting the helper to fresh protected storage and running it.
-The helper does not select the publisher or authorize its own archive.
+The wheel route uses your approved dependency feed. The bootstrap
+authenticates an archive containing the same engine wheel and its complete
+recorded dependencies. Choose the route whose requirements and provenance
+guarantees match your environment.
 
 A Site Ops release installs the engine only. Workspace content has its own
 source and version. Select a compatible approved release directly with
@@ -53,9 +38,9 @@ deployment are separate.
 
 | Route | First script trust | Requirements |
 |---|---|---|
+| [Release wheel](#install-the-release-wheel) | Approved release channel and dependency feed. Native uv does not verify the detached proof. | uv from an approved channel and a configured package feed. |
 | [HTTPS bootstrap](#bootstrap-from-https) | Official HTTPS delivery. The script has not been independently authenticated before it starts. | Supported shell and HTTPS downloader. Missing tools may require an approved package channel and administrator consent. |
 | [Verify the bootstrap script](#verify-the-bootstrap-script) | Detached proof, exact publisher, source commit, signing workflow, caller and runner checked before execution. | GitHub CLI 2.95 or newer in version 2 from an approved channel. No GitHub login. |
-| [Release wheel](#install-the-release-wheel) | Approved release channel and dependency feed. Native uv does not verify the detached proof. | uv from an approved channel and a configured package feed. |
 
 Managed environments can [provision approved tools first](#before-you-start),
 then use the same verified bootstrap. This keeps one bundle verification
@@ -80,6 +65,9 @@ The command removes its temporary script when it finishes.
 Run it from a trusted user shell with the normal protected temporary
 directory. The generated command installs the engine only. It asks before
 tool changes and leaves Azure authentication and source enrollment separate.
+
+<details>
+<summary>Assemble an approved selection manually</summary>
 
 For an approved selection assembled manually, the following templates also
 request Azure CLI and explicitly enroll the official content source. Replace
@@ -126,6 +114,7 @@ Windows PowerShell:
   if ($LASTEXITCODE -ne 0) { throw "The bootstrap script could not be downloaded." }
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script `
     -Release $tag -SourceCommit $sha -WithAzureCli -EnrollSource official
+  if ($LASTEXITCODE -ne 0) { throw "Site Ops installation did not complete." }
 }
 ```
 
@@ -136,6 +125,8 @@ it, or remove only the private directory you created when finished. The
 scripts do not run `gh auth login` or `az login`. They download public assets
 anonymously, verify the engine archive and offer source enrollment only
 because the command above selects `official`.
+
+</details>
 
 Repeating the same selected installation checks the retained bundle before
 skipping native tool changes. The script retains the authenticated ZIP and proof
@@ -260,6 +251,7 @@ foreach ($item in $observations) {
 }
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script `
   -Release $tag -SourceCommit $sha -WithAzureCli -EnrollSource official
+if ($LASTEXITCODE -ne 0) { throw "Site Ops installation did not complete." }
 }
 ```
 
@@ -430,6 +422,22 @@ against its detached proof before extracting the installer helper. For
 provenance before the first script runs, choose
 [Verify the bootstrap script](#verify-the-bootstrap-script).
 An environment with centrally provisioned tools uses that same entry.
+
+### Release assets
+
+| Asset | Contents | Use it for |
+|---|---|---|
+| `siteops-<version>-py3-none-any.whl` | The Site Ops engine wheel | Ordinary installation from a release you already trust |
+| `siteops-install.zip` | That identical wheel, pinned runtime dependency wheels, `pylock.toml`, `siteops-install.py`, the bundle inventory and license notices | Verified installation with a recorded dependency set and no package index |
+
+Each asset has its own detached proof, `<asset>.attestation.jsonl`.
+Releases with `siteops-bootstrap.sh` and `siteops-bootstrap.ps1` also provide
+a proof for each script. Both bootstrap entry routes run the same platform
+script and consume the authenticated archive.
+
+Use the script and engine ZIP from the same release. The script verifies
+archive provenance before extracting the helper to fresh protected storage.
+The helper cannot select the publisher or authorize its own archive.
 
 The ZIP contains the engine wheel, all recorded runtime dependency wheels,
 `pylock.toml` and the shared installer helper. The helper checks the complete

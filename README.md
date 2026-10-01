@@ -7,13 +7,6 @@
 
 Deploy Azure IoT Operations, or any Azure infrastructure, across dozens of sites with a single command. Per-site customization, parallel execution, and failure isolation built in.
 
-With a configured Site inventory in a local checkout, review the production
-fleet before deploying:
-
-```bash
-siteops -w workspaces/iot-operations plan manifests/aio-install/manifest.yaml -l "environment=prod"
-```
-
 ---
 
 ## Why Scale Kit?
@@ -50,12 +43,33 @@ from environment-specific configuration.
 
 ## Quick start
 
-Start with a compatible installed Site Ops release, an existing Arc-connected
-cluster, an authorized Azure CLI identity, and a release that includes the
-complete IoT Operations workspace. Use the source and version identified by
-your selected release instructions. `official` is a consumer source alias you
-must approve independently. Downloaded content cannot enroll it.
-Replace the cluster ID with the full ARM resource ID:
+Start with one existing Arc-connected cluster. You do not need a repository
+clone, saved Site or project pin.
+
+### Install Site Ops
+
+Follow the selected release's generated installation instructions, using a
+compatible engine and complete IoT Operations workspace.
+
+| Your environment | Installation route |
+|---|---|
+| uv is already available | Use the exact [release-wheel command](docs/install-siteops.md#install-the-release-wheel). Dependencies come from your approved uv package feed. |
+| You need installation tooling | Use the generated [Windows or Linux bootstrap](docs/install-siteops.md#bootstrap-from-https). It proposes tool changes and verifies the installation archive. |
+
+For independent script provenance before any installer code runs, use the
+[verified bootstrap entry](docs/install-siteops.md#verify-the-bootstrap-script).
+When choosing the bootstrap, add `--enroll-source official` or
+`-EnrollSource official` to approve the official content source explicitly.
+It can also provision Azure CLI with `--with-azure-cli` or `-WithAzureCli`.
+Other installation routes use [independent source enrollment](docs/projects.md#use-an-approved-source).
+Installing the CLI alone does not acquire or approve workspace content.
+
+### Deploy AIO
+
+Use an authorized Azure CLI identity and the source/version identified by
+your release instructions. `official` is an independently approved consumer
+alias, not authority supplied by downloaded content. Replace the cluster
+placeholder with its full ARM resource ID:
 
 ```text
 siteops deploy aio-install --source "official@<release>" --input "cluster=<Arc-cluster-resource-ID>"
@@ -70,13 +84,6 @@ explicitly. It does not bypass validation or source approval. The command
 does not sign you in, and deployment can incur charges. Follow the
 [outcome check](docs/guided-inputs.md#check-the-result) after deployment.
 
-Follow the selected release's generated installation instructions for its
-actual assets. The [installation guide](docs/install-siteops.md) has the
-currently supported manual and bootstrap routes, including releases that
-contain bootstrap scripts. Installation does not acquire workspace content.
-Source enrollment requires an explicit choice. [Operator projects](docs/projects.md#use-an-approved-source)
-explains independent source enrollment.
-
 To install AIO and enable Secret Sync together, add
 `--input enableSecretSync=true` after confirming the cluster prerequisites.
 To enable Secret Sync on an existing AIO 2607 or 2608 instance without
@@ -86,7 +93,9 @@ reinstalling, use the instance ID with the
 answer files, manual targets and all three routes. `plan` is available
 when you want a separate preview. It is not a prerequisite for deployment.
 
-**Scale out on the same model.** Save Sites for repeatable fleet selection
+### Scale out on the same model
+
+Save Sites for repeatable fleet selection
 and optionally pin a release in an operator project. Review only the new
 targets before deploying them:
 

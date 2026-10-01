@@ -11,6 +11,12 @@ Independent `--trust-policy` and `--trusted-root` files can select a
 provider locator instead. Source approval does not sign in to Azure or
 approve deployment.
 
+| Your goal | Start here |
+|---|---|
+| Install AIO on an existing Arc cluster | [AIO installation](#install-aio-from-an-existing-cluster) |
+| Install AIO and enable Secret Sync together | [Combined installation](#install-aio-with-secret-sync) |
+| Enable Secret Sync without reinstalling AIO | [Existing-instance enablement](#enable-secret-sync-on-an-existing-instance) |
+
 Existing local `-w` workspaces and configured Sites remain supported. There
 is no required migration to a project pin or typed answers. Use
 `siteops inputs` when a manifest declares a typed contract and you want one
@@ -121,6 +127,8 @@ previous plan's observation as current.
 `--offline-content` on a pinned project restricts source content acquisition,
 not Azure target reads or deployment. Direct `--source` instead requires
 online release resolution, even if its verified content is already cached.
+
+### Install AIO with Secret Sync
 
 To enable Secret Sync during that same AIO deployment, set
 `enableSecretSync: true` in the answer file, or add

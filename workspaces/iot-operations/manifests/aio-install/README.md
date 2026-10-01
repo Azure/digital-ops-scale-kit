@@ -42,7 +42,20 @@ cluster before enabling Secret Sync across a fleet.
 
 ## Review and deploy
 
-Run from the repository root and replace `<site>` with the configured Site:
+With a compatible published workspace and an independently approved
+`official` source, supply the existing Arc cluster ID:
+
+```text
+siteops deploy aio-install --source "official@<release>" --input "cluster=<Arc-cluster-resource-ID>"
+```
+
+Use the release identified by its instructions. Deploy prepares, displays
+and confirms one plan in a private terminal. Add `--yes` only for explicitly
+authorized unattended execution. The resource ID authorizes bounded target
+reads, not additional Azure permissions.
+
+For a local checkout and configured Sites, run from the repository root
+and replace `<site>` with the configured Site:
 
 ```bash
 siteops -w workspaces/iot-operations plan manifests/aio-install/manifest.yaml -l name=<site>

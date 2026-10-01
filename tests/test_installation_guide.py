@@ -22,6 +22,8 @@ def test_root_quickstart_connects_install_to_aio_without_hiding_fleet_use():
     journey = readme.split("## Quick start\n", 1)[1].split("\n## Browse deployment choices", 1)[0]
     for phrase in (
         "docs/install-siteops.md",
+        "docs/install-siteops.md#install-the-release-wheel",
+        "docs/install-siteops.md#bootstrap-from-https",
         "selected release's generated installation instructions",
         "independently",
         "private terminal",
@@ -41,11 +43,26 @@ def test_root_quickstart_connects_install_to_aio_without_hiding_fleet_use():
         "siteops", "deploy", "aio-install", "--source", "official@<release>",
         "--input", "cluster=<Arc-cluster-resource-ID>",
     ]
-    assert journey.index(first) < journey.index("project pin")
+    assert journey.index(first) < journey.index("siteops --approved-source official project pin")
+    assert journey.index("#install-the-release-wheel") < journey.index(first)
+    assert journey.index("#bootstrap-from-https") < journey.index(first)
     assert "plan aio-install -l name=plant-two,name=plant-three" in journey
     assert "siteops inputs aio-install --example" not in journey
     assert "--read-resources" not in journey
     assert "siteops-bootstrap.sh" not in journey
+
+
+def test_workspace_guides_begin_with_the_installed_deployment_route():
+    workspace = GUIDE.parent.parent / "workspaces" / "iot-operations"
+    for path in (workspace / "README.md", workspace / "manifests" / "aio-install" / "README.md"):
+        text = path.read_text(encoding="utf-8")
+        commands = [line for line in text.splitlines() if line.startswith("siteops ")]
+        assert shlex.split(commands[0]) == [
+            "siteops", "deploy", "aio-install", "--source", "official@<release>",
+            "--input", "cluster=<Arc-cluster-resource-ID>",
+        ]
+        assert "local checkout" in text
+        assert any(" -w workspaces/iot-operations " in line for line in commands)
 
 
 def test_quickstart_separates_release_installation_and_checkout_browsing():
@@ -288,9 +305,17 @@ printf '%s\\n' "$TEST_VERIFIED"
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="PowerShell 5.1 is available on Windows.")
-@pytest.mark.parametrize("verified", [False, True])
-def test_verified_bootstrap_windows_requires_the_certificate_before_execution(tmp_path, verified):
-    section = _section("### Verify the bootstrap script")
+@pytest.mark.parametrize(("heading", "verified", "install_exit"), [
+    ("### Bootstrap from HTTPS", True, 0),
+    ("### Bootstrap from HTTPS", True, 7),
+    ("### Verify the bootstrap script", False, 0),
+    ("### Verify the bootstrap script", True, 0),
+    ("### Verify the bootstrap script", True, 7),
+])
+def test_windows_bootstrap_guide_stops_on_proof_or_installation_failure(
+    tmp_path, heading, verified, install_exit,
+):
+    section = _section(heading)
     body = _block(section, "powershell").replace(
         "<approved-release-tag>", "siteops/v1.0.0b1",
     ).replace("<full-source-commit>", "c" * 40)
@@ -314,15 +339,18 @@ function gh.exe {
     Get-Content -LiteralPath $env:TEST_EVIDENCE -Raw
     $global:LASTEXITCODE = 0
 }
-function powershell.exe { 'SCRIPT_RAN'; $global:LASTEXITCODE = 0 }
+function powershell.exe { 'SCRIPT_RAN'; $global:LASTEXITCODE = [int]$env:TEST_INSTALL_EXIT }
 """ + body, encoding="utf-8",
     )
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
-        env={**os.environ, "TEMP": str(tmp_path), "TEST_EVIDENCE": str(evidence)},
+        env={
+            **os.environ, "TEMP": str(tmp_path), "TEST_EVIDENCE": str(evidence),
+            "TEST_INSTALL_EXIT": str(install_exit),
+        },
         cwd=tmp_path, capture_output=True, text=True, timeout=30,
     )
-    assert (result.returncode == 0) is verified, result.stdout + result.stderr
+    assert (result.returncode == 0) is (verified and install_exit == 0), result.stdout + result.stderr
     assert ("SCRIPT_RAN" in result.stdout) is verified
     assert "PRIVATE_WRONG" not in result.stdout + result.stderr
 

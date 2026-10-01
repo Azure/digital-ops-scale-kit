@@ -37,8 +37,8 @@ diagnostic runs without Azure credentials, a cluster, source checkout or
 package installation. It reports only whether WinGet is callable,
 whether Python and GitHub CLI are on PATH, and whether the runner
 can create a private copied file and file symlink. Missing WinGet or
-file-link capability fails the job; CI uses file links for the
-manager-neutral symlink rejection controls.
+file-link capability fails the job. CI uses file links to exercise symlink
+rejection independently of the installation manager.
 
 The default `scenario=aio` keeps the existing Azure E2E behavior.
 The Windows diagnostic does not verify a signed script, install tools
