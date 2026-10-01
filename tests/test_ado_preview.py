@@ -4,8 +4,11 @@ import importlib.util
 import io
 import json
 import sys
+from email.message import Message
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.request import BaseHandler
+from urllib.response import addinfourl
 
 import pytest
 import yaml
@@ -200,6 +203,79 @@ def test_http_failures_never_queue_a_run_or_publish_private_diagnostics(preview,
     assert "private-diagnostic" not in str(caught.value)
     assert "synthetic-token" not in str(caught.value)
     assert len(calls) == 1 and "/preview?" in calls[0].full_url
+
+
+@pytest.mark.parametrize("destination", [
+    "https://other.invalid/private-diagnostic",
+    "https://dev.azure.com/example/project/_apis/pipelines/10/runs",
+])
+def test_real_opener_refuses_redirects_before_forwarding_credentials(preview, destination):
+    client = preview.AdoClient("https://dev.azure.com/example", "project", "synthetic-token")
+    calls = []
+
+    class ClosedHTTPS(BaseHandler):
+        handler_order = 100
+
+        def https_open(self, request):
+            calls.append(request.full_url)
+            headers = Message()
+            headers["Location"] = destination
+            response = addinfourl(io.BytesIO(b"private-diagnostic"), headers, request.full_url, 302)
+            response.msg = "Found"
+            return response
+
+    client.opener.add_handler(ClosedHTTPS())
+    with pytest.raises(preview.PreviewError) as caught:
+        client.request(10, preview={"previewRun": True})
+    assert calls == ["https://dev.azure.com/example/project/_apis/pipelines/10/preview?api-version=7.1"]
+    assert "unexpected redirect" in str(caught.value)
+    assert "private-diagnostic" not in str(caught.value)
+
+
+@pytest.mark.parametrize("fault", ["none", "missing-yaml", "existing-output", "malformed-config"])
+def test_preview_command_publishes_a_receipt_only_after_all_cases_pass(
+    preview, tmp_path, monkeypatch, capsys, fault,
+):
+    output = tmp_path / "receipt.json"
+    environment = {
+        "SYSTEM_COLLECTIONURI": "https://dev.azure.com/example",
+        "SYSTEM_TEAMPROJECTID": "project",
+        "SYSTEM_ACCESSTOKEN": "synthetic-token",
+        "ADO_PREVIEW_PIPELINE_IDS": json.dumps(IDS),
+        "BUILD_REPOSITORY_URI": REPOSITORY,
+        "BUILD_SOURCEBRANCH": REF,
+        "BUILD_SOURCEVERSION": SOURCE,
+        "ADO_PREVIEW_CONNECTIONS": json.dumps(CONNECTIONS),
+        "ADO_PREVIEW_GROUPS": json.dumps(GROUPS),
+    }
+    if fault == "malformed-config":
+        environment["ADO_PREVIEW_PIPELINE_IDS"] = "private-malformed-configuration"
+    if fault == "existing-output":
+        output.write_text("existing-receipt", encoding="utf-8")
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(sys, "argv", ["preview-ado-pipelines.py", "--output", str(output)])
+    client = _client(preview, fault)
+    monkeypatch.setattr(preview, "AdoClient", lambda *args: client)
+
+    assert preview.main() == (0 if fault == "none" else 1)
+    captured = capsys.readouterr()
+    assert "private-" not in captured.out + captured.err
+    assert "synthetic-token" not in captured.out + captured.err
+    if fault == "none":
+        report = json.loads(output.read_text(encoding="utf-8"))
+        assert report["status"] == "passed" and report["sourceCommit"] == SOURCE
+        assert len(report["cases"]) == len(preview.cases())
+        assert "finalYaml" not in output.read_text(encoding="utf-8")
+    elif fault == "existing-output":
+        assert output.read_text(encoding="utf-8") == "existing-receipt"
+        assert client.calls == []
+    else:
+        assert not output.exists()
+        if fault == "malformed-config":
+            assert client.calls == []
+        else:
+            assert len(client.calls) == 4
 
 
 @pytest.mark.parametrize("collection", ["http://dev.azure.com/example", "https://other.invalid/example",
