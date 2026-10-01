@@ -4,6 +4,7 @@ import importlib.util
 import json
 import shlex
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -364,7 +365,10 @@ def test_reusable_template_separates_the_callers_workspace_from_pinned_tooling(t
     assert not (caller / "scripts").exists()
 
 
-@pytest.mark.parametrize("spec", ["", "https://example.invalid/siteops.whl"])
+@pytest.mark.parametrize("spec", [
+    "", "https://example.invalid/siteops.whl",
+    "siteops @ git+https://example.invalid/scalekit.git@v0.0.0",
+])
 def test_setup_retains_local_and_external_consumer_installation_routes(tmp_path, spec):
     step = _step(SETUP, "Install Site Ops")
     assert step["workingDirectory"] == "${{ parameters.sourceDirectory }}"
@@ -374,15 +378,45 @@ def test_setup_retains_local_and_external_consumer_installation_routes(tmp_path,
     assert defaults["siteopsSource"] == ""
     (tmp_path / "bin").mkdir()
     write_executable(tmp_path / "bin" / "pip", """#!/usr/bin/env bash
-case "$*" in
-  'install --upgrade pip') exit 0 ;;
-  'install -e .'|'install https://example.invalid/siteops.whl') printf '%s\\n' "$*" > installed ;;
-  *) exit 98 ;;
-esac
+if [[ "$#" == 3 && "$1" == install && "$2" == --upgrade && "$3" == pip ]]; then
+  exit 0
+fi
+if [[ "$#" == 3 && "$1" == install && "$2" == -e && "$3" == . ]] ||
+   [[ "$#" == 2 && "$1" == install && "$2" == "$EXPECTED_SOURCE" && -n "$2" ]]; then
+  printf '%s\\n' "$@" > installed
+else
+  exit 98
+fi
 """)
-    result = run_script(step["script"], tmp_path, {"SITEOPS_SOURCE": spec, "INSTALL_DEV": "False"},
-                        shell_options=())
-    assert result.returncode == 0
-    assert (tmp_path / "installed").read_text().strip() == (
-        "install " + spec if spec else "install -e ."
+    result = run_script(
+        step["script"], tmp_path,
+        {"SITEOPS_SOURCE": spec, "INSTALL_DEV": "False", "EXPECTED_SOURCE": spec},
+        shell_options=(),
     )
+    assert result.returncode == 0
+    assert (tmp_path / "installed").read_text().splitlines() == (
+        ["install", spec] if spec else ["install", "-e", "."]
+    )
+
+
+@pytest.mark.parametrize("legacy_verbose", [False, True])
+def test_consumer_ci_validation_uses_global_verbosity_without_provider_calls(
+    complete_workspace, monkeypatch, legacy_verbose,
+):
+    from siteops.cli import main
+    from siteops.orchestrator import Orchestrator
+
+    def reject_execution(*args, **kwargs):
+        pytest.fail("Structural consumer validation must not prepare or execute provider operations.")
+
+    monkeypatch.setattr(Orchestrator, "build_plan", reject_execution)
+    monkeypatch.setattr(subprocess, "Popen", reject_execution)
+    arguments = ["siteops", "-w", str(complete_workspace), "validate", "manifests/test-manifest.yaml"]
+    if legacy_verbose:
+        arguments.append("-v")
+    else:
+        arguments.insert(1, "-v")
+    monkeypatch.setattr(sys, "argv", arguments)
+    with pytest.raises(SystemExit) as caught:
+        main()
+    assert caught.value.code == (2 if legacy_verbose else 0)

@@ -191,6 +191,9 @@ def _run_delivery_plan_script(
     deploy_exit: int = 0,
     run_document_mode: str = "valid",
     auxiliary_failure: str = "",
+    workspace: str = "workspace",
+    manifest: str = "manifests/install.yaml",
+    selector: str = "",
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path]:
     script, redaction = _delivery_plan_case(platform, run_step=run_step)
     bin_dir, invocation_log = _install_fake_delivery_tools(tmp_path)
@@ -218,15 +221,15 @@ def _run_delivery_plan_script(
         "FAKE_DEPLOY_EXIT": str(deploy_exit),
         "FAKE_RUN_DOCUMENT_MODE": run_document_mode,
         "SITEOPS_REDACT_OUTPUT": redaction,
-        "INPUT_WORKSPACE": "workspace",
-        "INPUT_MANIFEST": "manifests/install.yaml",
-        "INPUT_SELECTOR": "",
+        "INPUT_WORKSPACE": workspace,
+        "INPUT_MANIFEST": manifest,
+        "INPUT_SELECTOR": selector,
         "INPUT_DRY_RUN": "true" if dry_run else "false",
         "RUNNER_TEMP": _bash_path(temp_dir),
         "GITHUB_STEP_SUMMARY": _bash_path(github_summary),
-        "WORKSPACE": "workspace",
-        "MANIFEST": "manifests/install.yaml",
-        "SELECTOR": "",
+        "WORKSPACE": workspace,
+        "MANIFEST": manifest,
+        "SELECTOR": selector,
         "DRY_RUN": "True" if dry_run else "False",
         "PLAN_TEMP_DIRECTORY": _bash_path(temp_dir),
         "PLAN_SUMMARY_DIRECTORY": _bash_path(summary_dir),
@@ -634,3 +637,27 @@ class TestDeployDropdownRegistration:
         assert "PRIVATE" not in result.stdout + result.stderr
         if auxiliary_failure == "report":
             assert not list(temp_dir.iterdir())
+
+    @pytest.mark.parametrize("dry_run", [False, True])
+    def test_ado_consumer_preserves_caller_workspace_manifest_and_target_selection(
+        self, tmp_path, dry_run,
+    ):
+        workspace = "workspaces/operator-workspace"
+        manifest = "manifests/custom-resources.yaml"
+        selector = "environment=prod,name=target-one"
+        result, _, _, invocation_log = _run_delivery_plan_script(
+            "azure-pipelines", tmp_path, plan_exit=0, valid_document=True, dry_run=dry_run,
+            workspace=workspace, manifest=manifest, selector=selector,
+        )
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        observed = [shlex.split(line)[1:] for line in invocation_log.read_text().splitlines()]
+        expected = [[
+            "-w", workspace, "plan", manifest, "--output", "json",
+            "--projection", "publishable", "-l", selector,
+        ]]
+        if not dry_run:
+            expected.append([
+                "-w", workspace, "deploy", manifest, "--yes", "--output", "json",
+                "--projection", "publishable", "-l", selector,
+            ])
+        assert observed == expected

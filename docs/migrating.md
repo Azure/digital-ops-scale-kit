@@ -354,6 +354,19 @@ Stopping locally does not cancel work Azure already accepted.
 
 ### Consumer pipelines
 
+Put the global verbosity flag before the command:
+
+```bash
+siteops -v -w workspaces/example-workspace validate manifests/custom-resources.yaml
+```
+
+The former trailing form, `validate <manifest> -v`, reports
+`unrecognized arguments: -v`. Structural `validate` remains suitable for
+consumer CI without Azure authentication. It does not produce an executable
+deployment plan. Use `plan` for executable preparation. Updated templates
+implement their `dryRun` input with `plan`, rather than the removed
+`deploy --dry-run`, and pass `--yes` for unattended deployment.
+
 ADO setup, cache lookup and override generation preserve command failures.
 Reporting and private-file cleanup also fail the task when unsuccessful,
 without replacing an earlier Site Ops failure or interruption. Fix the
@@ -368,6 +381,12 @@ alias. Your workspace remains in the caller's checkout and helpers come
 from the separate tooling checkout. Existing `self` and `siteopsSource`
 defaults are unchanged. See the [consumer template example](ci-cd-setup.md#reference-the-deployment-template-from-another-repository)
 before selecting a template revision that contains this parameter.
+
+If you maintain copied templates, update their scripts and helper files
+together with the selected engine. The copy has no external repository
+resource from which to infer a release. Keep its engine selection explicit.
+Include pipeline and version-pin files in CI path filters so an installation
+change is validated even when workspace files are unchanged.
 
 CI override logs retain counts and fixed diagnostics rather than Site names.
 Keep detailed validation output in a private local session. These ADO
