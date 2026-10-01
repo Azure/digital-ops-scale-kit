@@ -26,7 +26,7 @@ on:
       scenario:
         description: Select AIO E2E or a Windows installer check without Azure.
         type: choice
-        options: [aio, windows-installer-preflight, windows-pipx-launcher]
+        options: [aio, windows-installer-preflight]
         default: aio
       aio-releases:
         description: Comma-separated AIO releases to fan out over (e.g. "2607,2608").
@@ -110,7 +110,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $available = [ordered]@{}
-          foreach ($name in @('winget.exe', 'python.exe', 'gh.exe', 'pipx.exe')) {
+          foreach ($name in @('winget.exe', 'python.exe', 'gh.exe')) {
               $available[$name] = $null -ne (
                   Get-Command $name -CommandType Application -ErrorAction SilentlyContinue |
                   Select-Object -First 1
@@ -173,7 +173,6 @@ jobs:
                   "| WinGet callable | $wingetUsable |"
                   "| Python on PATH | $($available['python.exe']) |"
                   "| GitHub CLI on PATH | $($available['gh.exe']) |"
-                  "| pipx on PATH | $($available['pipx.exe']) |"
                   "| Private copied file | $copyValid |"
                   "| Private file symlink | $linkValid |"
                   ''
@@ -185,36 +184,6 @@ jobs:
           } finally {
               Remove-Item -LiteralPath $fixture -Recurse -Force -ErrorAction Stop
           }
-
-  windows-pipx-launcher:
-    if: inputs.scenario == 'windows-pipx-launcher'
-    runs-on: windows-2025
-    timeout-minutes: 25
-    permissions:
-      contents: read
-    env:
-      PIP_INDEX_URL: https://packagefeedproxy.microsoft.io/pypi/simple/
-      PIP_CONFIG_FILE: NUL
-      PIP_EXTRA_INDEX_URL: ""
-      PIP_FIND_LINKS: ""
-      PIP_TRUSTED_HOST: ""
-      PIP_NO_INPUT: "1"
-      PIP_KEYRING_PROVIDER: disabled
-      SITEOPS_REQUIRE_WINDOWS_LINK: "1"
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.11"
-
-      - name: Test the real pipx launcher without Azure
-        shell: powershell
-        run: |
-          python -B tests\fixtures\windows-pipx-launcher.py
-          if ($LASTEXITCODE -ne 0) { throw 'The Windows pipx launcher check failed.' }
 
   prep:
     if: inputs.scenario == 'aio'

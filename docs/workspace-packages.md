@@ -241,8 +241,8 @@ plans, deploy resources, or evaluate workload health. The final matrix gate
 requires every declared target's result to name the same frozen engine,
 workspace inventory, and release plan.
 
-Direct `pip install <wheel-url>` and `pipx install <wheel-url>` remain
-available through the [installation guide](install-siteops.md). The isolated
+Native `uv tool install <wheel-url>` and the verified bootstrap are
+described in the [installation guide](install-siteops.md). The isolated
 qualification environment is release tooling, not another operator installer.
 The final candidate payload includes the qualified workspaces and any engine
 assets built for that release. After approval, the publisher rechecks those

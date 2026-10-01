@@ -33,6 +33,7 @@ Start with the changes that affect your workflow:
 
 | If you... | What to change |
 |---|---|
+| Install or maintain Site Ops | Use [native uv installation](#site-ops-installation) and the matching maintenance route. |
 | Deploy one AIO target from a release | Use the [direct reviewed deployment](#direct-deployment-and-source-selection). A project pin, answer file and separate plan are optional. |
 | Use typed AIO installation answers | Review [optional naming and labels](#typed-aio-targets) before omitting an existing name. |
 | Reference shipped workspace paths | Update [entry and resource-set paths](#workspace-content-paths). |
@@ -47,6 +48,27 @@ Start with the changes that affect your workflow:
 | Capture output in scripts or CI | Use [structured results and explicit projections](#results-and-ci-output). |
 | Manage temporary files | Review the [new location and cleanup behavior](#temporary-files). |
 | Call the engine from Python | Update the [internal result consumers](#internal-python-callers). |
+
+### Site Ops installation
+
+Use the complete command from the selected engine release: native
+`uv tool install` for an online wheel installation, or the platform bootstrap
+for independent archive provenance and complete payload verification.
+The bootstrap can provision uv and managed Python without a system Python
+installation. Both routes use normal uv tool storage.
+
+For a local installation owned by pipx, inspect it and remove only Site Ops
+with `pipx uninstall siteops` before selecting the new route. Preserve other
+pipx tools and shared state. An unrelated exposed command is reported as
+`The exposed command belongs to another installation. Remove it with its
+original manager.` The bootstrap does not take over another manager's command.
+
+Verified replacement and repair use the selected bootstrap with `--replace`
+or `-Replace`. Online replacement uses the exact wheel command with
+`--reinstall`. Ordinary removal is `uv tool uninstall siteops`.
+A raw uv upgrade does not perform the bootstrap's provenance and payload
+checks. Use the [installation guide](install-siteops.md) for storage,
+source enrollment and the distinction between these routes.
 
 ### Direct deployment and source selection
 

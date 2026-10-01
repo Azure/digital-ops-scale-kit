@@ -144,7 +144,7 @@ jobs:
 
   test:
     name: Unit Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     permissions:
       contents: read
@@ -159,6 +159,36 @@ jobs:
         uses: ./.github/actions/setup-siteops
         with:
           install-dev: "true"
+
+      - name: Prepare native Linux uv fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          command -v openssl >/dev/null
+          fixtures="$RUNNER_TEMP/siteops-uv-fixtures"
+          mkdir -m 700 "$fixtures"
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --tlsv1.2 --max-redirs 3 --max-time 180 --max-filesize 19827214 \
+            --output "$fixtures/uv.tar.gz" \
+            https://github.com/astral-sh/uv/releases/download/0.12.20/uv-x86_64-unknown-linux-gnu.tar.gz
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --tlsv1.2 --max-redirs 3 --max-time 180 --max-filesize 30778566 \
+            --output "$fixtures/cpython.tar.gz" \
+            https://github.com/astral-sh/python-build-standalone/releases/download/20260924/cpython-3.11.16%2B20260924-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz
+          printf '%s  %s\n' \
+            6590717592ace991ff83a63fef799e3ad9d33ecc8f96c5d6bdd732496e79337f "$fixtures/uv.tar.gz" \
+            68c6739376b65258dee5058ccf6777232fe38d31a578965ae8bda327ec7da3a8 "$fixtures/cpython.tar.gz" |
+            sha256sum --check --status
+          mkdir -m 700 "$fixtures/native"
+          tar -xzf "$fixtures/uv.tar.gz" -C "$fixtures/native" --strip-components=1 \
+            uv-x86_64-unknown-linux-gnu/uv
+          {
+            echo "SITEOPS_TEST_UV=$fixtures/native/uv"
+            echo "SITEOPS_TEST_UV_ARCHIVE=$fixtures/uv.tar.gz"
+            echo "SITEOPS_TEST_UV_PYTHON_ARCHIVE=$fixtures/cpython.tar.gz"
+            echo "SITEOPS_REQUIRE_LINUX_UV=1"
+          } >> "$GITHUB_ENV"
 
       - name: Run unit tests
         # Includes bounded executable-plan coverage in tests/workspace/
@@ -237,7 +267,7 @@ jobs:
       PIP_TRUSTED_HOST: ""
       PIP_NO_INPUT: "1"
       PIP_KEYRING_PROVIDER: disabled
-      SITEOPS_REQUIRE_WINDOWS_LINK: "1"
+      SITEOPS_REQUIRE_WINDOWS_SYMLINK_REJECTION: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -292,14 +322,68 @@ jobs:
               [Text.UTF8Encoding]::new($false)
           )
 
+      - name: Prepare native uv fixtures
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $parent = Split-Path -Parent $env:SITEOPS_WINDOWS_TEST_TEMP
+          $fixtures = Join-Path $parent 'uv-fixtures'
+          if (Test-Path -LiteralPath $fixtures) { throw 'The uv fixture area must be fresh.' }
+          New-Item -ItemType Directory -Path $fixtures -ErrorAction Stop | Out-Null
+          $archive = Join-Path $fixtures 'uv-windows.zip'
+          & curl.exe --fail --silent --show-error --location --proto '=https' --proto-redir '=https' `
+              --tlsv1.2 --max-redirs 3 --max-time 180 --max-filesize 18039150 `
+              --output $archive 'https://github.com/astral-sh/uv/releases/download/0.12.20/uv-x86_64-pc-windows-msvc.zip'
+          if ($LASTEXITCODE -ne 0 -or
+              (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+                  '95f9bc30fbb3574d276e28ac4a6de932d25153645853d13da8c21eec3bc88d06') {
+              throw 'The native uv fixture archive could not be verified.'
+          }
+          $native = Join-Path $fixtures 'native'
+          Expand-Archive -LiteralPath $archive -DestinationPath $native
+          $uv = Join-Path $native 'uv.exe'
+          Get-ChildItem Env: | Where-Object { $_.Name -like 'UV_*' -or $_.Name -like 'PYTHON*' } |
+              ForEach-Object { [Environment]::SetEnvironmentVariable($_.Name, $null) }
+          $env:UV_PYTHON_INSTALL_DIR = Join-Path $fixtures 'python'
+          $env:UV_TOOL_DIR = Join-Path $fixtures 'tools'
+          $env:UV_TOOL_BIN_DIR = Join-Path $fixtures 'bin'
+          $env:UV_CACHE_DIR = Join-Path $fixtures 'cache'
+          $previousPreference = $ErrorActionPreference
+          try {
+              $ErrorActionPreference = 'Continue'
+              & $uv python install 3.11.16 --no-bin --no-registry --no-config --system-certs --no-progress `
+                  > (Join-Path $fixtures 'runtime.log') 2>&1
+              $runtimeExit = $LASTEXITCODE
+          } finally { $ErrorActionPreference = $previousPreference }
+          if ($runtimeExit -ne 0 -or -not (Test-Path -LiteralPath (
+              Join-Path $env:UV_PYTHON_INSTALL_DIR 'cpython-3.11.16-windows-x86_64-none\python.exe'
+          ) -PathType Leaf)) { throw 'The qualified uv-managed runtime fixture is unavailable.' }
+          $settings = @(
+              "SITEOPS_TEST_UV=$uv",
+              "SITEOPS_TEST_UV_ARCHIVE=$archive",
+              "SITEOPS_TEST_UV_PYTHON_DIR=$env:UV_PYTHON_INSTALL_DIR",
+              'SITEOPS_REQUIRE_WINDOWS_UV=1'
+          )
+          [IO.File]::AppendAllText(
+              $env:GITHUB_ENV, ($settings -join "`n") + "`n", [Text.UTF8Encoding]::new($false)
+          )
+
       - name: Windows bootstrap tests
         shell: powershell
         run: |
-          python -B -m pytest tests\test_bootstrap_scripts.py -k windows_bootstrap -q `
+          python -B -m pytest tests\test_bootstrap_scripts.py tests\test_uv_bootstrap_windows.py `
+              -k 'windows_bootstrap or test_uv_bootstrap_windows' -q `
               --basetemp="$env:SITEOPS_WINDOWS_TEST_TEMP"
           if ($LASTEXITCODE -ne 0) { throw 'Native Windows bootstrap tests failed.' }
-          python -B tests\fixtures\windows-pipx-launcher.py
-          if ($LASTEXITCODE -ne 0) { throw 'The real Windows pipx launcher test failed.' }
+
+      - name: Windows installation consumers
+        shell: powershell
+        run: |
+          python -B -m pytest tests\test_uv_installation.py tests\test_distribution_workflows.py `
+              tests\test_release_workflow.py `
+              -k 'test_uv_installation or native_qualification or matrix_runtime_admission or native_verified_installation_step or native_online_installation_step or native_installation_steps or generated_powershell_bootstrap or required_native_consumer_fixtures or windows_qualification' -q `
+              --basetemp="$env:SITEOPS_WINDOWS_TEST_TEMP-consumers"
+          if ($LASTEXITCODE -ne 0) { throw 'Native Windows installation consumer tests failed.' }
 
   validate:
     name: Validate Manifests

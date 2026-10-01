@@ -1,4 +1,4 @@
-"""Build synthetic wheels with producer metadata and run pipx in isolated state."""
+"""Build synthetic wheels and published bundle fixtures with producer metadata."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ import os
 import subprocess
 import sys
 import zipfile
-from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -39,7 +38,7 @@ native_only = pytest.mark.skipif(
 
 
 def pinned_backend() -> tuple[str, str]:
-    """Return the pip version and hash the repository pins for the pipx backend."""
+    """Return the pip version and hash the repository pins for build tooling."""
     text = BUILD_REQUIREMENTS.read_text(encoding="utf-8")
     for block in text.replace("\\\n", " ").splitlines():
         name, _, remainder = block.partition("==")
@@ -48,7 +47,7 @@ def pinned_backend() -> tuple[str, str]:
         version, _, hashes = remainder.partition(" ")
         digest = hashes.strip().removeprefix("--hash=sha256:")
         return version.strip(), digest
-    raise AssertionError("The committed build requirements must pin the pipx backend pip.")
+    raise AssertionError("The committed build requirements must pin the build-tool pip.")
 
 
 def _record(contents: dict[str, bytes], prefix: str) -> bytes:
@@ -151,6 +150,7 @@ def bundle_factory(tmp_path, monkeypatch):
         builder._write_pylock(root, targets)
         for notice in ("LICENSE", "ThirdPartyNotices.txt"):
             (root / notice).write_text("Synthetic fixture notice.\n", encoding="utf-8")
+        (root / "siteops-install.py").write_bytes((SCRIPTS / "siteops_distribution.py").read_bytes())
         files = tuple(
             PayloadFile(
                 path=path.relative_to(root).as_posix(),
@@ -179,14 +179,6 @@ def bundle_factory(tmp_path, monkeypatch):
         return root, manifest
 
     return create
-
-
-def pipx_program() -> Path:
-    """Resolve the pipx installed beside the running interpreter."""
-    program = Path(sys.executable).parent / ("pipx.exe" if os.name == "nt" else "pipx")
-    if not program.is_file():
-        pytest.skip("Native lifecycle coverage requires the pinned pipx development tool.")
-    return program
 
 
 def _backend_wheelhouse(destination: Path) -> Path:
@@ -222,170 +214,6 @@ def _backend_wheelhouse(destination: Path) -> Path:
             f"{BACKEND_WHEELHOUSE_VARIABLE} to a directory holding it for offline runs.",
         )
     return destination
-
-
-@dataclass(frozen=True)
-class PipxState:
-    """One isolated pipx installation area owned by a single test."""
-
-    root: Path
-    program: Path
-    environment: dict[str, str]
-    logs: Path
-
-    @property
-    def command(self) -> Path:
-        return self.root / "bin" / ("siteops.exe" if os.name == "nt" else "siteops")
-
-    def run(self, *arguments, expect: int = 0, label: str | None = None, env_overrides=None):
-        name = label or f"step-{len(list(self.logs.glob('*.log'))) + 1}"
-        environment = dict(self.environment)
-        environment.update(env_overrides or {})
-        result = subprocess.run(
-            [str(self.program), *(str(value) for value in arguments)],
-            cwd=self.root / "unrelated",
-            env=environment,
-            capture_output=True,
-            text=True,
-            timeout=600,
-            check=False,
-        )
-        (self.logs / f"{name}.log").write_text(
-            result.stdout + "\n--- stderr ---\n" + result.stderr, encoding="utf-8",
-        )
-        if expect is not None:
-            excerpt = "\n".join((result.stdout + result.stderr).strip().splitlines()[-12:])
-            assert result.returncode == expect, f"{name} exited {result.returncode}\n{excerpt}"
-        return result
-
-    def install_locked(
-        self, bundle: Path, *arguments, expect: int = 0, label: str | None = None,
-        env_overrides=None,
-    ):
-        """Install the verified lock with the qualified strict policy."""
-        return self.run(
-            "install", "siteops",
-            "--lock", bundle / "pylock.toml",
-            "--backend", "pip",
-            "--fetch-python", "never",
-            "--skip-maintenance",
-            "--app", "siteops",
-            "--pip-args", "--isolated --require-hashes --no-index --only-binary=:all: --no-cache-dir",
-            *arguments,
-            expect=expect,
-            label=label,
-            env_overrides=env_overrides,
-        )
-
-    def install_wheel(self, wheel: Path, *arguments, expect: int = 0, label: str | None = None):
-        """Install one wheel the way the online path does, from a local feed."""
-        return self.run(
-            "install", wheel,
-            "--backend", "pip",
-            "--fetch-python", "never",
-            "--skip-maintenance",
-            "--app", "siteops",
-            "--pip-args",
-            "--no-cache-dir --no-index --only-binary=:all: --find-links="
-            + wheel.parent.as_uri(),
-            *arguments,
-            expect=expect,
-            label=label,
-        )
-
-    def version(self) -> str:
-        observed = subprocess.run(
-            [str(self.command), "--version"],
-            env=self.environment,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-        )
-        assert observed.returncode == 0, observed.stdout + observed.stderr
-        return observed.stdout.strip()
-
-    def metadata(self) -> dict:
-        listed = self.run("list", "--output", "json", label="list")
-        return json.loads(listed.stdout)["venvs"]["siteops"]["metadata"]
-
-
-def pipx_environment(root: Path, shared: Path) -> dict[str, str]:
-    """Return an environment whose pipx, pip, and profile state stays in `root`."""
-    environment = {
-        key: value
-        for key, value in os.environ.items()
-        if not key.startswith(("PIP_", "PIPX_"))
-        and key not in {"PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV"}
-    }
-    environment.update(NETWORK_BLOCK)
-    environment.update(
-        {
-            "HOME": str(root / "home"),
-            "PIPX_HOME": str(root / "pipx"),
-            "PIPX_BIN_DIR": str(root / "bin"),
-            "PIPX_MAN_DIR": str(root / "man"),
-            "PIPX_COMPLETION_DIR": str(root / "completions"),
-            "PIPX_SHARED_LIBS": str(shared),
-            "PIPX_DEFAULT_PYTHON": sys._base_executable,
-            "PIPX_DEFAULT_BACKEND": "pip",
-            "PIPX_FETCH_PYTHON": "never",
-            "PIPX_USE_EMOJI": "0",
-            "PIP_CONFIG_FILE": os.devnull,
-            "PIP_NO_INPUT": "1",
-            "PIP_KEYRING_PROVIDER": "disabled",
-            "PIP_DISABLE_PIP_VERSION_CHECK": "1",
-            "PIP_CACHE_DIR": str(root / "pip-cache"),
-            "PYTHONDONTWRITEBYTECODE": "1",
-        }
-    )
-    return environment
-
-
-def _owned_state(program: Path, root: Path, shared: Path) -> PipxState:
-    """Create the directories one isolated pipx area needs and return its state."""
-    logs = root / "logs"
-    for directory in (logs, root / "unrelated", root / "home"):
-        directory.mkdir(parents=True, exist_ok=True)
-    return PipxState(
-        root=root,
-        program=program,
-        environment=pipx_environment(root, shared),
-        logs=logs,
-    )
-
-
-@pytest.fixture(scope="session")
-def backend_wheelhouse(tmp_path_factory) -> Path:
-    """Return a directory holding only the pinned, hash-checked backend wheel."""
-    return _backend_wheelhouse(tmp_path_factory.mktemp("native-backend-wheels"))
-
-
-def provision_shared_backend(program: Path, root: Path, shared: Path, wheelhouse: Path) -> PipxState:
-    """Install the pinned backend into one pipx shared library location."""
-    state = _owned_state(program, root, shared)
-    state.run(
-        "upgrade-shared",
-        "--pip-args",
-        "--no-index --only-binary=:all: --no-cache-dir --force-reinstall --find-links=" + wheelhouse.as_uri(),
-        label="upgrade-shared",
-    )
-    return state
-
-
-@pytest.fixture(scope="session")
-def shared_backend(tmp_path_factory, backend_wheelhouse) -> Path:
-    """Provision pipx's shared backend once from the pinned, hash-checked wheel."""
-    root = tmp_path_factory.mktemp("native-backend")
-    shared = root / "shared"
-    provision_shared_backend(pipx_program(), root, shared, backend_wheelhouse)
-    return shared
-
-
-@pytest.fixture
-def pipx_state(tmp_path, shared_backend) -> PipxState:
-    """Return an owned pipx area that reuses the provisioned shared backend."""
-    return _owned_state(pipx_program(), tmp_path / "installation area", shared_backend)
 
 
 def publish_assets(root: Path, manifest, destination: Path) -> tuple[Path, Path]:

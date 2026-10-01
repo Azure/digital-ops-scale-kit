@@ -17,7 +17,7 @@ manifest can overwrite operator-managed instance settings and child resources.
 
 You need:
 
-- Git and the Python/pipx prerequisites in [Install Site Ops](install-siteops.md).
+- Git and an installed Site Ops from one of the [supported routes](install-siteops.md).
 - Azure CLI available as `az`.
 - An existing resource group and Arc-connected Kubernetes cluster that meet
   [Azure IoT Operations requirements](https://learn.microsoft.com/azure/iot-operations/).

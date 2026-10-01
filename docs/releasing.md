@@ -236,9 +236,13 @@ title.
 
 Write the changes and release-specific guidance in `notes.md`. The workflow
 adds **Install Site Ops** automatically. It includes the exact versioned wheel
-URL for the simple online pipx path, the configured package index policy, the
-four release asset links, and the verified installation guide pinned to the
-source commit. A content release that references an existing engine links to
+URL for native uv, the configured package index policy, and complete Bash
+and PowerShell bootstrap commands bound to the frozen script bytes and
+source identities. It includes the release asset links and verified
+installation guide pinned to the source commit. The HTTPS entry checks
+the script against the reviewed instructions. Independent script provenance
+verification remains a separate entry with its own tooling prerequisite.
+A content release that references an existing engine links to
 that independently published release. There is no need to copy installation
 commands, source hashes, or download URLs into the authored notes.
 
@@ -278,7 +282,8 @@ scheduled releases.
 The version must exactly match `siteops.__version__` in the selected source
 commit. The workflow builds the engine wheel once with that source version. It
 publishes the identical standalone wheel and includes those same bytes in a ZIP
-with the pinned runtime wheels, `pylock.toml`, metadata, and notices. Scale Kit
+with the pinned runtime wheels, `pylock.toml`, the frozen source's
+`siteops-install.py` helper, metadata, and notices. Scale Kit
 content does not need a version change.
 
 The current beta policy still keeps the source package at `1.0.0b1`.

@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -25,17 +26,12 @@ import yaml
 from tests.native_bundle import (
     NETWORK_BLOCK,
     native_only,
-    pinned_backend,
-    pipx_program,
-    provision_shared_backend,
     publish_assets,
-)
-from tests.native_bundle import (
-    backend_wheelhouse as backend_wheelhouse,
 )
 from tests.native_bundle import (
     bundle_factory as bundle_factory,
 )
+from tests.native_uv_consumers import managed_python, native_uv
 from tests.shell_helpers import (
     bash_path as _bash_path,
 )
@@ -423,6 +419,75 @@ def test_qualification_runs_on_hosted_windows_and_linux_without_write_access():
     assert qualify["needs"] == ["build", "attest"]
 
 
+def test_qualification_uses_the_cell_runtime_and_packaged_uv_helper():
+    qualify = REUSABLE["jobs"]["qualify"]
+    tooling = _script(qualify, "Install the external qualification tooling")
+    verified = _script(qualify, "Install Site Ops from the verified lock")
+    online = _script(qualify, "Install Site Ops from the standalone wheel")
+    assert qualify["env"]["MATRIX_PYTHON"] == "${{ matrix.python }}"
+    assert '"$uv" python install "$MATRIX_PYTHON"' in tooling
+    assert "UV_PYTHON_INSTALL_DIR" in tooling
+    assert "sys._base_executable" in tooling
+    assert "siteops-install.py" in verified
+    assert '"$APP_PYTHON" -I -S -B "$helper" "$mode"' in verified
+    assert 'install_locked install install "$extract"' in verified
+    assert 'install_locked repair replace "$extract"' in verified
+    assert '"$SITEOPS_UV" tool uninstall siteops' in verified
+    assert '"$SITEOPS_UV" tool install "$wheel"' in online
+    assert "--no-python-downloads" in online
+    assert "pipx" not in tooling + verified + online
+
+
+def test_qualification_keeps_windows_state_under_one_private_user_profile_root():
+    qualify = REUSABLE["jobs"]["qualify"]
+    tooling = _script(qualify, "Install the external qualification tooling")
+    assert '[Environment]::GetFolderPath("UserProfile")' in tooling
+    assert "SITEOPS_QUALIFICATION_ROOT=$native_root" in tooling
+    assert "GITHUB_RUN_ID" in tooling and "GITHUB_RUN_ATTEMPT" in tooling
+    assert "ROOT_ANCESTOR_ACL" in tooling
+    assert 'owned="$temp/siteops-qualification"' in tooling
+    for name in (
+        "Install with the signed Bash bootstrap",
+        "Install Site Ops from the verified lock",
+        "Install Site Ops from the standalone wheel",
+    ):
+        script = _script(qualify, name)
+        assert 'owned="${SITEOPS_QUALIFICATION_ROOT//\\\\//}"' in script
+        assert 'owned="$temp/siteops-qualification"' not in script
+        assert (
+            'download="$temp/siteops-download"' in script
+            or 'archive="$temp/siteops-download/' in script
+            or 'wheel="$temp/siteops-download/' in script
+        )
+    windows = _script(qualify, "Install with the signed PowerShell bootstrap")
+    assert "$owned = $env:SITEOPS_QUALIFICATION_ROOT" in windows
+    assert "Join-Path $env:RUNNER_TEMP 'siteops-qualification'" not in windows
+    for directory in ("home", "bootstrap-profile", "bootstrap-temp", "python", "cache", "tooling"):
+        assert directory in windows
+    assert "$download = Join-Path $env:RUNNER_TEMP 'siteops-download'" in windows
+
+
+def test_windows_native_scratch_and_retained_bundle_use_the_selected_root():
+    qualify = REUSABLE["jobs"]["qualify"]
+    tooling = _script(qualify, "Install the external qualification tooling")
+    verified = _script(qualify, "Install Site Ops from the verified lock")
+    online = _script(qualify, "Install Site Ops from the standalone wheel")
+    assert 'mkdir "$owned/temp"' in tooling
+    for script in (tooling, verified, online):
+        assert 'export TEMP="$owned/temp" TMP="$owned/temp" TMPDIR="$owned/temp"' in script
+        assert 'export LOCALAPPDATA="$owned/home"' in script
+        assert 'if [[ "$RUNNER_OS" == "Windows" ]]; then' in script
+    assert 'cp -R "$extract" "$owned/verified-bundle"' in verified
+    assert 'extract="$owned/verified-bundle"' in verified
+    assert verified.index('extract="$owned/verified-bundle"') < verified.index(
+        'install_locked install install "$extract"',
+    )
+    assert 'wheel="$temp/siteops-download/$WHEEL_NAME"' in online
+    windows = _script(qualify, "Install with the signed PowerShell bootstrap")
+    assert "$env:TMP = $env:TEMP" in windows
+    assert "$env:TMPDIR = $env:TEMP" in windows
+
+
 def test_qualification_verifies_before_it_extracts():
     names = _step_names(REUSABLE["jobs"]["qualify"])
     assert names.index(    "Verify installation assets before use") < names.index(
@@ -465,7 +530,7 @@ def test_qualification_runs_both_signed_scripts_with_private_preseeded_assets():
         assert argument in script
         assert "install-downloads" in script and "Rechecking the retained release" in script
         assert "SOURCE_SHA" in script and "SOURCE_REF" in script
-        assert "GH_CONFIG_DIR" in script and "PIPX_HOME" in script
+        assert "GH_CONFIG_DIR" in script and "UV_TOOL_DIR" in script
         assert "siteops" in script and "PACKAGE_VERSION" in script
         assert "GH_TOKEN" in script and "GITHUB_TOKEN" in script
         assert "az login" not in script and "--with-azure-cli" not in script
@@ -473,6 +538,22 @@ def test_qualification_runs_both_signed_scripts_with_private_preseeded_assets():
     assert 'bash "$download/$BOOTSTRAP_SH"' in bash_step
     windows_step = _script(qualify, "Install with the signed PowerShell bootstrap")
     assert "powershell.exe -NoProfile -ExecutionPolicy Bypass -File" in windows_step
+
+
+def test_every_qualification_consumer_checks_the_matrix_app_runtime():
+    qualify = REUSABLE["jobs"]["qualify"]
+    for name in (
+        "Install with the signed Bash bootstrap",
+        "Install with the signed PowerShell bootstrap",
+        "Install Site Ops from the standalone wheel",
+    ):
+        script = _script(qualify, name)
+        assert "pyvenv.cfg" in script and "MATRIX_PYTHON" in script
+        assert script.index("pyvenv.cfg") < script.index("--version")
+        assert "APP_PYTHON" in script and "version_info" in script
+    verified = _script(qualify, "Install Site Ops from the verified lock")
+    assert '"$APP_PYTHON" -I -S -B "$helper"' in verified
+    assert '"$SITEOPS_UV" tool uninstall siteops' in verified
 
 
 @pytest.mark.parametrize(("caller", "source_ref", "accepted"), [
@@ -509,10 +590,13 @@ def test_windows_bootstrap_qualification_captures_native_stderr_then_checks_exit
 
 
 def test_windows_bootstrap_qualification_selects_private_user_profile_before_cache():
+    tooling = _script(REUSABLE["jobs"]["qualify"], "Install the external qualification tooling")
+    assert '[Environment]::GetFolderPath("UserProfile")' in tooling
+    assert "SITEOPS_QUALIFICATION_ROOT=$native_root" in tooling
     script = _script(REUSABLE["jobs"]["qualify"], "Install with the signed PowerShell bootstrap")
-    profile = "$profileHome = [Environment]::GetFolderPath('UserProfile')"
-    selection = "$env:LOCALAPPDATA = Join-Path $profileHome 'siteops-qualification-bootstrap'"
-    assert profile in script and selection in script
+    assert "$owned = $env:SITEOPS_QUALIFICATION_ROOT" in script
+    selection = "$env:LOCALAPPDATA = Join-Path $owned 'bootstrap-profile'"
+    assert selection in script
     assert script.index(selection) < script.index('$cache = Join-Path $env:LOCALAPPDATA')
     assert script.index("$bootstrapData = Join-Path $env:LOCALAPPDATA 'siteops'") < script.index(
         '$cache = Join-Path $env:LOCALAPPDATA',
@@ -523,15 +607,54 @@ def test_windows_bootstrap_qualification_selects_private_user_profile_before_cac
     assert script.index("& icacls.exe $directory /setowner") < script.index(
         '$cache = Join-Path $env:LOCALAPPDATA',
     )
-    assert "$env:LOCALAPPDATA = Join-Path $owned 'bootstrap-user'" not in script
+    assert "$env:UV_PYTHON_INSTALL_DIR = Join-Path $owned 'python'" in script
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows ACL ancestry needs PowerShell.")
+def test_windows_qualification_profile_ancestry_before_tool_selection(tmp_path):
+    source = (REPO_ROOT / "scripts" / "bootstrap" / "siteops-bootstrap.ps1").read_text(
+        encoding="utf-8",
+    )
+    helper = re.search(r"(?ms)^function Require-PrivateDataRoot\([^\n]*\) \{.*?^\}", source)
+    assert helper is not None
+    boundary = "\n    try {\n        $exists = Test-Path -LiteralPath $Path"
+    assert boundary in helper.group(0)
+    ancestor_guard = helper.group(0).split(boundary, 1)[0]
+    wrapper = tmp_path / "runner-ancestry.ps1"
+    wrapper.write_text(
+        "$ErrorActionPreference='Stop'\n"
+        "function Fail([string]$message) { throw $message }\n"
+        + ancestor_guard
+        + "\n    'RUNNER_ANCESTRY_ADMITTED'\n}\n"
+        "Require-PrivateDataRoot $env:TEST_QUALIFICATION_ROOT -Managed\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [
+            "powershell.exe", "-NoProfile", "-NonInteractive",
+            "-ExecutionPolicy", "Bypass", "-File", str(wrapper),
+        ],
+        env={
+            **os.environ,
+            "TEST_QUALIFICATION_ROOT": str(tmp_path / "siteops-qualification-42-1"),
+        },
+        cwd=tmp_path, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "RUNNER_ANCESTRY_ADMITTED" in result.stdout
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows ACL rules need Windows PowerShell 5.1.")
-@pytest.mark.parametrize("preexisting", [False, True])
-def test_windows_bootstrap_qualification_protects_preseeded_data_root(tmp_path, preexisting):
+@pytest.mark.parametrize(
+    ("preexisting", "parent_rights"),
+    [(False, "RX"), (True, "RX"), (False, "M")],
+)
+def test_windows_bootstrap_qualification_protects_data_root_and_ancestry(
+    tmp_path, preexisting, parent_rights,
+):
     script = _script(REUSABLE["jobs"]["qualify"], "Install with the signed PowerShell bootstrap")
     setup = script.split(
-        "$profileHome = [Environment]::GetFolderPath('UserProfile')\n", 1,
+        "$env:HOME = Join-Path $owned 'home'\n", 1,
     )[1].split("if ($env:BUILDER_IDENTITY -notmatch", 1)[0]
     source = (REPO_ROOT / "scripts" / "bootstrap" / "siteops-bootstrap.ps1").read_text(
         encoding="utf-8",
@@ -541,24 +664,24 @@ def test_windows_bootstrap_qualification_protects_preseeded_data_root(tmp_path, 
     profile = tmp_path / "profile"
     profile.mkdir()
     grant = subprocess.run(
-        ["icacls.exe", str(profile), "/grant", "*S-1-5-32-545:(OI)(CI)RX"],
+        ["icacls.exe", str(profile), "/grant", f"*S-1-5-32-545:(OI)(CI){parent_rights}"],
         capture_output=True, text=True, timeout=20,
     )
     if grant.returncode:
         pytest.skip("The local test user cannot set the fixture ACL.")
     try:
-        existing = profile / "siteops-qualification-bootstrap"
+        owned = profile / "owned"
+        owned.mkdir()
+        existing = owned / "bootstrap-profile"
         if preexisting:
             existing.mkdir()
             (existing / "sentinel").write_text("keep", encoding="utf-8")
-        owned = tmp_path / "owned"
-        owned.mkdir()
         wrapper = tmp_path / "qualify-root.ps1"
         wrapper.write_text(
             "$ErrorActionPreference='Stop'\n"
             "$owned=$env:TEST_OWNED\n"
             "$profileHome=$env:TEST_PROFILE_HOME\n"
-            + setup
+            + "$env:HOME = Join-Path $owned 'home'\n" + setup
             + "\nfunction Fail([string]$message) { throw \"Site Ops installation: $message\" }\n"
             + helper.group(0)
             + "\n$cache=Join-Path $env:LOCALAPPDATA 'siteops\\install-downloads\\fixture'\n"
@@ -582,6 +705,9 @@ def test_windows_bootstrap_qualification_protects_preseeded_data_root(tmp_path, 
             assert result.returncode != 0
             assert "The Windows qualification data root was not fresh." in result.stderr
             assert (existing / "sentinel").read_text(encoding="utf-8") == "keep"
+        elif parent_rights == "M":
+            assert result.returncode != 0
+            assert "ROOT_ANCESTOR_ACL" in result.stderr
         else:
             assert result.returncode == 0, "The preseeded qualification root was not private."
             assert "PRIVATE_ROOT_ACCEPTED" in result.stdout
@@ -651,10 +777,6 @@ def _run_windows_bootstrap_qualifier(
         (
             "Configure a private Site Ops data root. PRIVATE_PATH",
             "The signed PowerShell bootstrap rejected the isolated data root.",
-        ),
-        (
-            "Configure one approved HTTPS Python index. PRIVATE_URL",
-            "The signed PowerShell bootstrap rejected the configured Python feed.",
         ),
     ],
 )
@@ -790,7 +912,7 @@ def test_qualification_requires_the_runner_verifier_capabilities():
     assert "curl" not in script and "install" not in script
 
 
-def test_qualification_isolates_tooling_state_under_the_runner_temporary_path():
+def test_qualification_isolates_tooling_state_under_the_selected_root():
     for name in (
         "Install Site Ops from the verified lock",
         "Install Site Ops from the standalone wheel",
@@ -798,97 +920,246 @@ def test_qualification_isolates_tooling_state_under_the_runner_temporary_path():
         script = _script(REUSABLE["jobs"]["qualify"], name)
         for variable in (
             "HOME",
-            "PIPX_HOME",
-            "PIPX_BIN_DIR",
-            "PIPX_MAN_DIR",
-            "PIPX_COMPLETION_DIR",
-            "PIPX_SHARED_LIBS",
-            "PIPX_DEFAULT_PYTHON",
-            "PIP_CACHE_DIR",
-            "PIP_CONFIG_FILE",
+            "UV_TOOL_DIR",
+            "UV_TOOL_BIN_DIR",
+            "UV_PYTHON_INSTALL_DIR",
+            "UV_CACHE_DIR",
         ):
             assert f'export {variable}="$' in script
-        assert 'owned="$temp/siteops-qualification"' in script
+        assert 'owned="${SITEOPS_QUALIFICATION_ROOT//\\\\//}"' in script
         assert "unset PYTHONPATH PYTHONHOME" in script
         # Raw tool output stays in private run files, never in the job log.
         assert '> "$logs/' in script
-        checked = [line for line in script.splitlines() if "siteops --version" in line]
+        checked = [line for line in script.splitlines() if "--version" in line and "observed=" in line]
         assert checked, name
-        assert any('observed="$(siteops --version' in line for line in checked), name
         for line in checked:
-            if "pipx runpip siteops --version" in line:
-                assert '> "$logs/backend-version.log" 2>&1' in line, line
-            else:
-                assert 'observed="$(siteops --version' in line, line
-                assert '2> "$logs/' in line, line
+            assert 'observed="$("$command_bin/$command_name" --version' in line, line
+            assert '2> "$logs/' in line, line
 
 
-def test_qualification_installs_both_supported_paths_with_stock_pipx():
+def test_qualification_installs_both_supported_paths_with_native_uv():
     verified = _script(REUSABLE["jobs"]["qualify"], "Install Site Ops from the verified lock")
-    assert "pipx install siteops" in verified
-    for flag in (
-        '--lock "$lock"',
-        "--backend pip",
-        "--fetch-python never",
-        "--skip-maintenance",
-        "--app siteops",
-        '--pip-args "--isolated --require-hashes --no-index --only-binary=:all: --no-cache-dir"',
-    ):
-        assert flag in verified
-    # Install, repeat, guarded forced repair, rejected tamper, and removal.
+    assert 'with zipfile.ZipFile(sys.argv[1]) as archive' in verified
+    assert 'siteops-install.py").open("xb")' in verified
     for label in ("install", "repeat", "repair", "tampered", "uninstall"):
         assert label in verified
-    assert 'install_locked repair "$extract/pylock.toml" --force' in verified
-    assert "if install_locked tampered" in verified
-    assert 'pipx uninstall siteops' in verified
+    assert 'install_locked repair replace "$extract"' in verified
+    assert 'if install_locked tampered replace "$owned/tampered"' in verified
+    assert '"$SITEOPS_UV" tool uninstall siteops --no-config --offline' in verified
     assert 'siteops $PACKAGE_VERSION' in verified
     assert '"$command_bin/siteops"*' in verified
 
     online = _script(REUSABLE["jobs"]["qualify"], "Install Site Ops from the standalone wheel")
-    assert 'pipx install "$wheel"' in online
-    assert '--pip-args "--only-binary=:all: --no-cache-dir"' in online
+    assert '"$SITEOPS_UV" tool install "$wheel"' in online
+    assert '--default-index "$index" --no-config --no-build --no-cache' in online
+    assert "--no-python-downloads --link-mode copy" in online
     assert 'wheel="$temp/siteops-download/$WHEEL_NAME"' in online
     assert 'siteops $PACKAGE_VERSION' in online
-    assert "--no-index" not in online
+    assert online.index("unset \"$name\"") < online.index('export UV_TOOL_DIR=')
 
 
-def test_the_qualification_tooling_pins_pipx_and_its_lock_reading_backend():
-    project = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    assert f'"pipx=={REUSABLE["env"]["PIPX_VERSION"]}"' in project
-    version, digest = pinned_backend()
-    assert REUSABLE["env"]["SHARED_PIP_SPEC"] == f"pip=={version}"
-    assert REUSABLE["env"]["SHARED_PIP_SHA256"] == digest
-
+def test_the_qualification_tooling_pins_native_uv_and_each_managed_runtime():
     script = _script(REUSABLE["jobs"]["qualify"], "Install the external qualification tooling")
-    assert '"pipx==$PIPX_VERSION"' in script
-    assert "--require-hashes" in script
-    assert '"$SHARED_PIP_SPEC"' in script and '"$SHARED_PIP_SHA256"' in script
-    assert "upgrade-shared" in script
-    # Qualification provisions tooling separately from the application bundle.
-    assert "venv" in script and "install.py" not in script
+    for value in (
+        "95f9bc30fbb3574d276e28ac4a6de932d25153645853d13da8c21eec3bc88d06",
+        "6590717592ace991ff83a63fef799e3ad9d33ecc8f96c5d6bdd732496e79337f",
+        "a0d2742d49564a32488753b02e76276e7b5ef1b1ea8cf30bcbf06ee28f60cd73",
+        "b8299463da6fa7da3b94464444d252d0afca8ac6c96cb229f1baf4012f365246",
+        "sys._base_executable",
+        "APP_PYTHON=$app_python",
+    ):
+        assert value in script
+    assert "pip install" not in script and "pipx" not in script
+    assert "packagefeedproxy" not in script
 
-    # The guide must name the same qualified baseline, with no wider promise.
-    guide = _guide_text()
-    assert f"Version {REUSABLE['env']['PIPX_VERSION']}" in guide
-    assert f"Version {version}" in guide
-    assert f'"pip=={version}"' in guide
-    for wider in (f"Version {REUSABLE['env']['PIPX_VERSION']}, or", "compatible newer 1.x"):
-        assert wider not in guide, wider
+
+@native_only
+def test_required_native_consumer_fixtures_fail_instead_of_skipping(tmp_path, monkeypatch):
+    gate = "SITEOPS_REQUIRE_WINDOWS_UV" if os.name == "nt" else "SITEOPS_REQUIRE_LINUX_UV"
+    python_input = (
+        "SITEOPS_TEST_UV_PYTHON_DIR" if os.name == "nt"
+        else "SITEOPS_TEST_UV_PYTHON_ARCHIVE"
+    )
+    monkeypatch.setenv(gate, "1")
+    monkeypatch.delenv("SITEOPS_TEST_UV", raising=False)
+    monkeypatch.delenv(python_input, raising=False)
+    monkeypatch.setenv("SITEOPS_TEST_PYTHON_ROOT", str(tmp_path / "unselected"))
+    with pytest.raises(pytest.fail.Exception, match="SITEOPS_TEST_UV"):
+        native_uv()
+    with pytest.raises(pytest.fail.Exception, match=python_input):
+        managed_python(tmp_path / "missing")
+
+    wrong = tmp_path / "invalid-native"
+    wrong.write_bytes(b"not a native tool or managed runtime")
+    monkeypatch.setenv("SITEOPS_TEST_UV", str(wrong))
+    monkeypatch.setenv(python_input, str(wrong))
+    with pytest.raises(pytest.fail.Exception, match="qualified native uv"):
+        native_uv()
+    with pytest.raises(pytest.fail.Exception, match=python_input):
+        managed_python(tmp_path / "invalid")
+    assert not (tmp_path / "invalid" / "python").exists()
+
+
+@native_only
+@pytest.mark.parametrize("minor", QUALIFIED_PYTHONS)
+def test_matrix_runtime_admission_uses_the_actual_managed_interpreter(native_runtime, minor):
+    tooling = _script(REUSABLE["jobs"]["qualify"], "Install the external qualification tooling")
+    blocks = re.findall(r"<<'PY'\n(.*?)\n\s*PY(?:\n|$)", tooling, re.S)
+    assert len(blocks) == 2
+    for number, block in enumerate(blocks, start=1):
+        compile(block, f"qualification tooling block {number}", "exec")
+    runtime = blocks[-1]
+    owned = native_runtime.parents[2] if os.name == "nt" else native_runtime.parents[3]
+    result = subprocess.run(
+        [
+            sys.executable, "-I", "-S", "-B", "-", str(owned), minor,
+            "Windows" if os.name == "nt" else "Linux",
+        ],
+        input=runtime, capture_output=True, text=True, timeout=40,
+    )
+    if minor == "3.11":
+        assert result.returncode == 0, result.stderr
+        assert Path(result.stdout.strip()) == native_runtime
+    else:
+        assert result.returncode != 0
+        assert "inventory is ambiguous" in result.stderr
+
+
+@pytest.mark.skipif(os.name != "nt", reason="The pinned Windows archive needs native Windows.")
+@pytest.mark.parametrize("case", ["valid", "tampered", "occupied", "unsafe-parent"])
+def test_native_qualification_prepares_a_pinned_uv_and_cell_runtime(
+    tmp_path, native_runtime, case,
+):
+    archive = os.environ.get("SITEOPS_TEST_UV_ARCHIVE")
+    if not archive:
+        if os.environ.get("CI") or os.environ.get("SITEOPS_REQUIRE_WINDOWS_UV") == "1":
+            pytest.fail("SITEOPS_TEST_UV_ARCHIVE must name the pinned Windows uv release.")
+        pytest.skip("A readonly pinned Windows uv release archive is required.")
+    selected = Path(archive)
+    assert selected.is_file()
+    supplied = tmp_path / "uv-windows.zip"
+    supplied.write_bytes(selected.read_bytes() + (b"changed" if case == "tampered" else b""))
+    temp = tmp_path / "runner temp"
+    temp.mkdir()
+    profile = tmp_path / "p"
+    profile.mkdir()
+    owned = profile / "siteops-qualification-42-1"
+    if case == "occupied":
+        owned.mkdir()
+        (owned / "keep").write_text("not this run", encoding="utf-8")
+    if case == "unsafe-parent":
+        grant = subprocess.run(
+            ["icacls.exe", str(profile), "/grant", "*S-1-5-32-545:(OI)(CI)M"],
+            capture_output=True, text=True, timeout=20,
+        )
+        if grant.returncode:
+            pytest.fail("The unsafe profile fixture ACL could not be set.")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_executable(
+        bin_dir / "curl",
+        """#!/usr/bin/env bash
+set -euo pipefail
+output=""
+while (($#)); do
+  if [[ "$1" == --output ]]; then output="$2"; shift 2; continue; fi
+  shift
+done
+[[ "$output" == "$TEST_NATIVE_ROOT/uv-windows.zip" ]] || exit 91
+cp "$TEST_UV_ARCHIVE" "$output"
+cp -R "$TEST_MANAGED_RUNTIME" "$TEST_NATIVE_ROOT/python/"
+""",
+    )
+    environment = {
+        "RUNNER_TEMP": _bash_path(temp),
+        "RUNNER_OS": "Windows",
+        "MATRIX_PYTHON": "3.11",
+        "PYTHON": str(Path(sys.executable)),
+        "GITHUB_ENV": _bash_path(tmp_path / "github-env"),
+        "GITHUB_RUN_ID": "42",
+        "GITHUB_RUN_ATTEMPT": "1",
+        "TEST_PROFILE_HOME": str(profile),
+        "TEST_NATIVE_ROOT": str(owned).replace("\\", "/"),
+        "TEST_UV_ARCHIVE": _bash_path(supplied),
+        "TEST_MANAGED_RUNTIME": _bash_path(native_runtime.parent),
+        **NETWORK_BLOCK,
+    }
+    script = _script(REUSABLE["jobs"]["qualify"], "Install the external qualification tooling")
+    discovery = '[Environment]::GetFolderPath("UserProfile")'
+    assert script.count(discovery) == 1
+    script = script.replace(discovery, "$env:TEST_PROFILE_HOME")
+    wrapper = tmp_path / "qualification-tooling.sh"
+    exports = [
+        f'export PATH={shlex.quote(_bash_path(bin_dir))}:"$PATH"',
+        *(f"export {name}={shlex.quote(value)}" for name, value in environment.items()),
+    ]
+    _write_executable(wrapper, "\n".join([*exports, script]))
+    private_log = tmp_path / "qualification-tooling.log"
+    try:
+        with private_log.open("w", encoding="utf-8") as log:
+            result = subprocess.run(
+                [
+                    str(_required_bash()), "--noprofile", "--norc",
+                    "-e", "-o", "pipefail", _bash_path(wrapper),
+                ],
+                cwd=tmp_path, stdout=log, stderr=subprocess.STDOUT, timeout=180,
+            )
+    finally:
+        if case == "unsafe-parent":
+            subprocess.run(
+                ["icacls.exe", str(profile), "/remove:g", "*S-1-5-32-545"],
+                capture_output=True, text=True, timeout=20, check=True,
+            )
+    output = private_log.read_text(encoding="utf-8")
+    if case == "tampered":
+        assert result.returncode != 0
+        assert "native uv archive differs" in output
+        assert not (owned / "tooling" / "uv.exe").exists()
+        assert not (tmp_path / "github-env").exists()
+    elif case in {"occupied", "unsafe-parent"}:
+        assert result.returncode != 0
+        assert "qualification profile root could not be admitted" in output
+        assert not (tmp_path / "github-env").exists()
+        assert not (owned / "uv-windows.zip").exists()
+        if case == "occupied":
+            assert (owned / "keep").read_text(encoding="utf-8") == "not this run"
+        else:
+            assert not owned.exists()
+    else:
+        assert result.returncode == 0, output
+        assert (owned / "temp").is_dir()
+        values = dict(line.split("=", 1) for line in (
+            tmp_path / "github-env"
+        ).read_text(encoding="utf-8").splitlines())
+        app_python = Path(values["APP_PYTHON"])
+        assert app_python.is_relative_to(owned / "python")
+        assert values["SITEOPS_QUALIFICATION_ROOT"] == str(owned)
+        assert values["SITEOPS_UV"] == str(owned / "tooling" / "uv.exe").replace("\\", "/")
+        observed = subprocess.run(
+            [str(app_python), "-I", "-S", "-B", "-c",
+             "import sys; print(*sys.version_info[:2], sys._base_executable)"],
+            capture_output=True, text=True, timeout=20,
+        )
+        assert observed.returncode == 0
+        assert observed.stdout.strip() == f"3 11 {app_python}"
 
 
 def test_the_bundle_keeps_native_installation_separate_from_bootstrap_scripts():
-    """The authenticated bundle uses stock pipx, not an embedded installer."""
+    """The authenticated bundle carries the shared native install helper."""
     scripts = REPO_ROOT / "scripts"
     assert not (scripts / "install-siteops.py").exists()
     assert not list(scripts.glob("install*.py"))
     assert (scripts / "bootstrap" / BOOTSTRAP_PS1).is_file()
     assert (scripts / "bootstrap" / BOOTSTRAP_SH).is_file()
-    retired = ("install.py", "siteops_distribution", "--store-dir", "SiteOpsInstallationResult")
+    retired = ("`install.py`", "siteops_distribution", "--store-dir", "SiteOpsInstallationResult")
     for path in (REUSABLE_PATH, GUIDE_PATH):
         text = path.read_text(encoding="utf-8")
         for name in retired:
             assert name not in text, f"{path.name}: {name}"
-    assert "pipx install" in _guide_text()
+    assert 'siteops-install.py' in _script(REUSABLE["jobs"]["qualify"], "Install Site Ops from the verified lock")
+    guide = _guide_text()
+    assert "siteops-install.py" in guide
+    assert "pipx install" not in guide and "pipx upgrade-shared" not in guide
 
 
 def test_qualification_consumes_only_the_retained_bundle_payload():
@@ -901,7 +1172,8 @@ def test_qualification_consumes_only_the_retained_bundle_payload():
         match.rstrip('"\\').split("/")[-1]
         for match in re.findall(r"\$extract/[^\s\"']*", qualify)
     }
-    assert referenced == {"pylock.toml"}, referenced
+    assert referenced == set(), referenced
+    assert '"$helper" "$mode" "$archive" "$bundle"' in qualify
 
 
 def _guide_text() -> str:
@@ -963,17 +1235,17 @@ def test_package_downloads_use_the_configured_feed_without_a_public_fallback():
     for job, step in (
         ("build", "Install the pinned build requirements"),
         ("build", "Build the installation bundle"),
-        ("qualify", "Install the external qualification tooling"),
     ):
         environment = _step(REUSABLE["jobs"][job], step)["env"]
         assert environment["PIP_INDEX_URL"] == "${{ env.PACKAGE_INDEX_URL }}"
         assert environment["PIP_KEYRING_PROVIDER"] == "disabled"
         assert environment["PIP_NO_INPUT"] == "1"
         assert environment["PIP_EXTRA_INDEX_URL"] == ""
-        if job == "build":
-            assert environment["PIP_CONFIG_FILE"] == "/dev/null"
-        else:
-            assert "export PIP_CONFIG_FILE=" in _script(REUSABLE["jobs"][job], step)
+        assert environment["PIP_CONFIG_FILE"] == "/dev/null"
+    online = _step(REUSABLE["jobs"]["qualify"], "Install Site Ops from the standalone wheel")
+    assert online["env"]["UV_DEFAULT_INDEX"] == "${{ env.PACKAGE_INDEX_URL }}"
+    assert '--default-index "$index" --no-config' in online["run"]
+    assert "pypi.org" not in online["run"]
 
 
 def test_the_signer_identity_confirmation_is_recorded():
@@ -1495,15 +1767,33 @@ printf 'extracted\\n' > "$5/bundle.json"
         },
     )
 
+    assert result.returncode != 0
+    assert "extraction directory must be fresh" in result.stdout
+    assert (stale / "operator-file").read_text(encoding="utf-8") == "stale"
+    assert not log.exists()
+
+    fresh = tmp_path / "fresh"
+    (fresh / "siteops-download").mkdir(parents=True)
+    shutil.copy2(download / ARCHIVE_NAME, fresh / "siteops-download" / ARCHIVE_NAME)
+    result = _run_script(
+        script,
+        tmp_path,
+        {
+            "FAKE_PYTHON_LOG": _bash_path(log),
+            "PYTHON": _bash_path(bin_dir / "fake-python"),
+            "RUNNER_TEMP": _bash_path(fresh),
+            "ARCHIVE_NAME": ARCHIVE_NAME,
+        },
+    )
     assert result.returncode == 0, result.stdout + result.stderr
     assert log.read_text(encoding="utf-8").splitlines() == [
         "-m",
         "zipfile",
         "-e",
-        _bash_path(download / ARCHIVE_NAME),
-        _bash_path(stale),
+        _bash_path(fresh / "siteops-download" / ARCHIVE_NAME),
+        _bash_path(fresh / "siteops-verified"),
     ]
-    assert not (stale / "operator-file").exists()
+    assert (fresh / "siteops-verified" / "bundle.json").is_file()
 
 
 def _bundle_document(**overrides) -> dict:
@@ -1651,42 +1941,75 @@ def _python_executable_path() -> str:
     return _bash_path(Path(sys.executable))
 
 
-def _native_exports(temp: Path, version: str) -> dict[str, str]:
+def _qualification_root(temp: Path) -> Path:
+    if os.name == "nt":
+        return temp.parent / "p" / "q"
+    return temp / "siteops-qualification"
+
+
+def _native_exports(temp: Path, version: str, app_python: Path, uv: Path) -> dict[str, str]:
+    owned = _qualification_root(temp)
     return {
         "RUNNER_TEMP": str(temp),
         "RUNNER_OS": "Windows" if os.name == "nt" else "Linux",
-        "PYTHON": str(Path(sys._base_executable)),
-        "WHEEL_NAME": "",
+        "SITEOPS_QUALIFICATION_ROOT": str(owned),
+        "ARCHIVE_NAME": ARCHIVE_NAME,
+        "PYTHON": str(Path(sys.executable)),
+        "APP_PYTHON": str(app_python),
+        "SITEOPS_UV": str(uv),
+        "UV_TOOL_DIR": str(owned / "verified-tools"),
+        "UV_TOOL_BIN_DIR": str(owned / "verified-bin"),
+        "UV_PYTHON_INSTALL_DIR": str(owned / "python"),
+        "UV_CACHE_DIR": str(owned / "cache"),
+        "SOURCE_REPOSITORY": "example/publisher",
+        "SOURCE_SHA": "a" * 40,
+        "SOURCE_REF": "refs/heads/main",
+        "MATRIX_PYTHON": "3.11",
         "PACKAGE_VERSION": version,
-        "SHARED_PIP_SPEC": REUSABLE["env"]["SHARED_PIP_SPEC"],
         "PYTHONPATH": str(REPO_ROOT),
         "PYTHONDONTWRITEBYTECODE": "1",
         **NETWORK_BLOCK,
     }
 
 
-def _prepared_runner_area(tmp_path: Path, backend_wheelhouse: Path, bundle: Path) -> Path:
-    """Lay out the runner paths the tooling step creates, with a real pipx."""
+@pytest.fixture(scope="session")
+def native_runtime(tmp_path_factory):
+    owned = tmp_path_factory.mktemp("native-uv-runtime")
+    return managed_python(owned)
+
+
+def _prepared_runner_area(
+    tmp_path: Path, bundle: Path, manifest, app_python: Path,
+) -> tuple[Path, Path, Path]:
+    """Copy native prerequisites into the same private directories as the workflow."""
     temp = tmp_path / "runner temporary"
-    owned = temp / "siteops-qualification"
+    temp.mkdir()
+    owned = _qualification_root(temp)
     (owned / "logs").mkdir(parents=True)
     (owned / "home").mkdir()
+    for name in ("verified-tools", "verified-bin", "online-tools", "online-bin", "cache"):
+        (owned / name).mkdir()
+    if os.name == "nt":
+        (owned / "temp").mkdir()
     shutil.copytree(bundle, temp / "siteops-verified")
-    tooling = owned / "tooling" / ("Scripts" if os.name == "nt" else "bin")
-    tooling.mkdir(parents=True)
-    program = pipx_program()
-    shutil.copy2(program, tooling / program.name)
-    provision_shared_backend(
-        program, owned / "backend-provisioning", owned / "pipx-shared", backend_wheelhouse,
-    )
-    return temp
+    publish_assets(bundle, manifest, temp / "siteops-download")
+    concrete = app_python.parent if os.name == "nt" else app_python.parent.parent
+    copied = owned / "python" / concrete.name
+    shutil.copytree(concrete, copied, symlinks=True)
+    app_python = copied / ("python.exe" if os.name == "nt" else "bin/python3.11")
+    tooling = owned / "tooling"
+    tooling.mkdir()
+    selected = native_uv()
+    uv = tooling / selected.name
+    shutil.copy2(selected, uv)
+    return temp, app_python, uv
 
 
-def _native_step_run(tmp_path: Path, bundle_factory, backend_wheelhouse: Path, number: int):
+def _native_step_run(tmp_path: Path, bundle_factory, native_runtime: Path, number: int):
     """Return one built bundle, its prepared runner area, and the step's inputs."""
     root, manifest = bundle_factory(number)
-    temp = _prepared_runner_area(tmp_path, backend_wheelhouse, root)
-    exports = _native_exports(temp, manifest.version)
+    temp, app_python, uv = _prepared_runner_area(tmp_path, root, manifest, native_runtime)
+    exports = _native_exports(temp, manifest.version, app_python, uv)
     exports["WHEEL_NAME"] = Path(manifest.application_wheel).name
     return root, manifest, temp, exports
 
@@ -1695,9 +2018,11 @@ def _native_step_run(tmp_path: Path, bundle_factory, backend_wheelhouse: Path, n
 def test_native_verified_installation_step_runs_the_published_recipe(
     tmp_path,
     bundle_factory,
-    backend_wheelhouse,
+    native_runtime,
 ):
-    _, _, temp, exports = _native_step_run(tmp_path, bundle_factory, backend_wheelhouse, 81)
+    _, _, temp, exports = _native_step_run(tmp_path, bundle_factory, native_runtime, 81)
+    assert Path(exports["APP_PYTHON"]).resolve() != Path(sys._base_executable).resolve()
+    assert Path(exports["APP_PYTHON"]).is_relative_to(_qualification_root(temp) / "python")
 
     result = _run_script(
         _script(REUSABLE["jobs"]["qualify"], "Install Site Ops from the verified lock"),
@@ -1706,26 +2031,29 @@ def test_native_verified_installation_step_runs_the_published_recipe(
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    command = temp / "siteops-qualification" / "pipx-bin" / (
+    command = _qualification_root(temp) / "verified-bin" / (
         "siteops.exe" if os.name == "nt" else "siteops"
     )
     assert not command.exists()
-    assert not (temp / "siteops-qualification" / "tampered").exists()
-    logs = temp / "siteops-qualification" / "logs"
-    assert {"install.log", "repeat.log", "repair.log", "tampered.log", "uninstall.log"} <= {
+    assert (_qualification_root(temp) / "tampered").exists()
+    if os.name == "nt":
+        assert (_qualification_root(temp) / "verified-bundle" / "bundle.json").is_file()
+    logs = _qualification_root(temp) / "logs"
+    assert {"install.log", "repeat.log", "repair.log", "tampered.log", "uninstall.log",
+            "install.json", "repeat.json", "repair.json"} <= {
         path.name for path in logs.iterdir()
     }
     # Raw tool output stays in the private run files.
-    assert "Fatal error from pip" not in result.stdout
+    assert "changed after the producer" not in result.stdout
 
 
 @native_only
 def test_native_verified_installation_step_fails_on_a_changed_payload(
     tmp_path,
     bundle_factory,
-    backend_wheelhouse,
+    native_runtime,
 ):
-    _, manifest, temp, exports = _native_step_run(tmp_path, bundle_factory, backend_wheelhouse, 82)
+    _, manifest, temp, exports = _native_step_run(tmp_path, bundle_factory, native_runtime, 82)
     wheel = temp / "siteops-verified" / manifest.application_wheel
     with wheel.open("ab") as stream:
         stream.write(b"changed before the step installed anything")
@@ -1737,7 +2065,8 @@ def test_native_verified_installation_step_fails_on_a_changed_payload(
     )
 
     assert result.returncode != 0
-    assert "could not be installed with stock pipx" in result.stdout + result.stderr
+    assert "authenticated verified bundle could not be installed" in result.stdout + result.stderr
+    assert not (_qualification_root(temp) / "verified-tools" / "siteops").exists()
 
 
 @native_only
@@ -1745,23 +2074,30 @@ def test_native_verified_installation_step_fails_on_a_changed_payload(
 def test_native_online_installation_step_installs_the_standalone_wheel(
     tmp_path,
     bundle_factory,
-    backend_wheelhouse,
+    native_runtime,
     command_exit,
 ):
     root, manifest, temp, exports = _native_step_run(
-        tmp_path, bundle_factory, backend_wheelhouse, 83
+        tmp_path, bundle_factory, native_runtime, 83,
     )
     download = temp / "siteops-download"
-    download.mkdir()
-    shutil.copy2(root / manifest.application_wheel, download / exports["WHEEL_NAME"])
-    # The step takes dependencies from the configured feed. This run substitutes
-    # a local wheelhouse for that feed instead of reaching any index.
-    exports["PIP_NO_INDEX"] = "1"
-    exports["PIP_FIND_LINKS"] = (root / "wheels").as_uri()
+    assert (download / exports["WHEEL_NAME"]).is_file()
+    index = tmp_path / "index"
+    dependency = index / "siteops-fixture-dependency"
+    dependency.mkdir(parents=True)
+    wheel = next((root / "wheels").glob("siteops_fixture_dependency-*.whl"))
+    shutil.copy2(wheel, dependency / wheel.name)
+    (dependency / "index.html").write_text(
+        f'<a href="{wheel.name}">{wheel.name}</a>\n', encoding="utf-8",
+    )
+    exports["UV_DEFAULT_INDEX"] = index.as_uri()
 
     script = _script(REUSABLE["jobs"]["qualify"], "Install Site Ops from the standalone wheel")
     if command_exit:
-        script = f"siteops() {{ echo 'private online diagnostic' >&2; return {command_exit}; }}\n" + script
+        script = script.replace(
+            'if ! observed="$("$command_bin/$command_name" --version',
+            'command_name=absent\nif ! observed="$("$command_bin/$command_name" --version',
+        )
     result = _run_script(
         script,
         tmp_path,
@@ -1771,35 +2107,36 @@ def test_native_online_installation_step_installs_the_standalone_wheel(
     if command_exit:
         assert result.returncode != 0
         assert "online command could not be executed" in result.stdout
-        assert "private online diagnostic" not in result.stdout + result.stderr
-        assert "private online diagnostic" in (
-            temp / "siteops-qualification" / "logs" / "online-version.log"
+        assert "No such file" not in result.stdout + result.stderr
+        assert (
+            _qualification_root(temp) / "logs" / "online-version.log"
         ).read_text()
         return
     assert result.returncode == 0, result.stdout + result.stderr
-    command = temp / "siteops-qualification" / "online-pipx-bin" / (
+    command = _qualification_root(temp) / "online-bin" / (
         "siteops.exe" if os.name == "nt" else "siteops"
     )
     assert not command.exists()
 
 
 @native_only
-@pytest.mark.parametrize("fault", ["version", "execution", "backend"])
+@pytest.mark.parametrize("fault", ["version", "execution"])
 def test_native_installation_steps_reject_an_unexpected_exposed_version(
     tmp_path,
     bundle_factory,
-    backend_wheelhouse,
+    native_runtime,
     fault,
 ):
-    _, manifest, temp, exports = _native_step_run(tmp_path, bundle_factory, backend_wheelhouse, 84)
-    if fault == "backend":
-        exports["SHARED_PIP_SPEC"] = "pip==0"
-    else:
+    _, manifest, temp, exports = _native_step_run(tmp_path, bundle_factory, native_runtime, 84)
+    if fault == "version":
         exports["PACKAGE_VERSION"] = manifest.version + ".unexpected"
 
     script = _script(REUSABLE["jobs"]["qualify"], "Install Site Ops from the verified lock")
     if fault == "execution":
-        script = "siteops() { echo 'private command diagnostic' >&2; return 43; }\n" + script
+        script = script.replace(
+            'expect_working_command "installation"',
+            'command_name=absent\nexpect_working_command "installation"',
+        )
     result = _run_script(
         script,
         tmp_path,
@@ -1810,13 +2147,11 @@ def test_native_installation_steps_reject_an_unexpected_exposed_version(
     expected = {
         "version": "reported an unexpected version",
         "execution": "could not be executed",
-        "backend": "not using the qualified pip backend",
     }[fault]
     assert expected in result.stdout + result.stderr
-    assert "private command diagnostic" not in result.stdout + result.stderr
     if fault == "execution":
-        assert "private command diagnostic" in (
-            temp / "siteops-qualification" / "logs" / "version-installation.log"
+        assert (
+            _qualification_root(temp) / "logs" / "version-installation.log"
         ).read_text()
 
 

@@ -35,9 +35,10 @@ Choose `scenario=windows-installer-preflight` in a separately approved
 **E2E Tests** dispatch to check a fresh `windows-2025` runner. This
 diagnostic runs without Azure credentials, a cluster, source checkout or
 package installation. It reports only whether WinGet is callable,
-whether Python, GitHub CLI and pipx are on PATH, and whether the runner
+whether Python and GitHub CLI are on PATH, and whether the runner
 can create a private copied file and file symlink. Missing WinGet or
-file-link capability fails the job rather than qualifying installation.
+file-link capability fails the job; CI uses file links for the
+manager-neutral symlink rejection controls.
 
 The default `scenario=aio` keeps the existing Azure E2E behavior.
 The Windows diagnostic does not verify a signed script, install tools
@@ -46,17 +47,9 @@ installation coverage and approval. GitHub-hosted Windows Server runners
 run as administrators without UAC, so they do not establish the Windows
 desktop experience for a standard user.
 
-The separate opt-in `scenario=windows-pipx-launcher` uses a new
-`windows-2025` runner, installs pipx 1.17.2 through the configured
-Microsoft Python feed and asks it to install its own CLI into
-isolated state. The job requires a real pipx file symlink to that
-installed application and checks its launcher against the PowerShell
-bootstrap's path guard and the selected installed target. The regular
-PR CI job also runs native copied/link and unsafe-path controls plus
-this real launcher test. Both jobs fail when their required Windows
-link or installation checks cannot run.
-
-Neither Windows job builds a Site Ops release or claims a verified
+The regular PR CI job runs native copied-command, symlink-rejection and
+unsafe-path controls, with required symlink capability. Neither Windows check
+builds a Site Ops release or claims a verified
 engine installation, a WinGet package installation, Azure deployment,
 or a normal Windows desktop session. Signed bundle and actual WinGet
 provisioning remain distinct qualification gates.
@@ -201,9 +194,11 @@ The workflow:
 3. Verifies the exact `_siteops-distribution.yaml` signer, `release.yaml`
    caller, source/signer/caller commit, GitHub OIDC issuer, `main` ref and
    `self-hosted` runner class with stock GitHub CLI.
-4. Provisions pipx 1.17.2 and its hash-pinned pip 26.2.1 backend, installs the
-   authenticated `pylock.toml` with no index or source build, then rejects any
-   Site Ops import rooted in checkout.
+4. Acquires pinned native uv and a separate managed CPython 3.11.16 runtime.
+   Controller Python performs verification and preparation only. The
+   authenticated bundle helper admits the complete payload, installs without
+   an index or source build, and checks the installed bytes. Command and
+   module checks require the selected installed engine rather than checkout.
 5. Creates an independent workspace signer policy and trusted-root snapshot.
 6. Before Azure provisioning, renders a self-contained operator Site outside
    the package, anonymously pins the published IoT Operations workspace into

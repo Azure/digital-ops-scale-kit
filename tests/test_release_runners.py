@@ -22,6 +22,64 @@ def workflow(name):
     return yaml.safe_load((WORKFLOWS / name).read_text(encoding="utf-8"))
 
 
+def test_windows_uv_gate_requires_qualified_native_fixtures_before_tests():
+    job = workflow("ci.yaml")["jobs"]["windows-bootstrap"]
+    steps = job["steps"]
+    names = [step.get("name") for step in steps]
+    assert names.index("Prepare private test state") < names.index("Prepare native uv fixtures")
+    setup = next(step["run"] for step in steps if step.get("name") == "Prepare native uv fixtures")
+    run = next(step["run"] for step in steps if step.get("name") == "Windows bootstrap tests")
+    assert setup.index("Get-FileHash") < setup.index("Expand-Archive") < setup.index("python install")
+    assert "95f9bc30fbb3574d276e28ac4a6de932d25153645853d13da8c21eec3bc88d06" in setup
+    assert "3.11.16" in setup and "--no-bin --no-registry" in setup
+    for variable in (
+        "SITEOPS_TEST_UV", "SITEOPS_TEST_UV_ARCHIVE", "SITEOPS_TEST_UV_PYTHON_DIR",
+        "SITEOPS_REQUIRE_WINDOWS_UV",
+    ):
+        assert variable in setup
+    assert "tests\\test_uv_bootstrap_windows.py" in run
+    assert job["permissions"] == {"contents": "read"}
+
+
+def test_linux_unit_gate_requires_native_archives_on_the_supported_host():
+    job = workflow("ci.yaml")["jobs"]["test"]
+    assert job["runs-on"] == "ubuntu-24.04"
+    names = [step.get("name") for step in job["steps"]]
+    assert names.index("Prepare native Linux uv fixtures") < names.index("Run unit tests")
+    setup = next(
+        step["run"] for step in job["steps"]
+        if step.get("name") == "Prepare native Linux uv fixtures"
+    )
+    for variable in (
+        "SITEOPS_TEST_UV", "SITEOPS_TEST_UV_ARCHIVE",
+        "SITEOPS_TEST_UV_PYTHON_ARCHIVE", "SITEOPS_REQUIRE_LINUX_UV",
+    ):
+        assert variable in setup
+    assert "6590717592ace991ff83a63fef799e3ad9d33ecc8f96c5d6bdd732496e79337f" in setup
+    assert "68c6739376b65258dee5058ccf6777232fe38d31a578965ae8bda327ec7da3a8" in setup
+    assert setup.index("sha256sum --check") < setup.index("tar -xzf")
+    assert "command -v openssl" in setup
+
+
+def test_windows_gate_runs_native_consumers_and_generated_entries():
+    steps = workflow("ci.yaml")["jobs"]["windows-bootstrap"]["steps"]
+    names = [step.get("name") for step in steps]
+    assert "Windows installation consumers" in names
+    assert names.index("Prepare native uv fixtures") < names.index("Windows installation consumers")
+    run = next(step["run"] for step in steps if step.get("name") == "Windows installation consumers")
+    for module in ("test_uv_installation.py", "test_distribution_workflows.py", "test_release_workflow.py"):
+        assert f"tests\\{module}" in run
+    for selection in (
+        "test_uv_installation", "native_qualification", "matrix_runtime_admission",
+        "native_verified_installation_step", "native_online_installation_step",
+        "native_installation_steps", "generated_powershell_bootstrap",
+        "required_native_consumer_fixtures", "windows_qualification",
+    ):
+        assert selection in run.split("-k ", 1)[1]
+    assert '--basetemp="$env:SITEOPS_WINDOWS_TEST_TEMP-consumers"' in run
+    assert "$LASTEXITCODE -ne 0" in run
+
+
 ADMISSION = workflow("_release-runner.yaml")
 SELECT = ADMISSION["jobs"]["select"]
 STEP = SELECT["steps"][0]

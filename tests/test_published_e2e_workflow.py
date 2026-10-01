@@ -1,10 +1,11 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+import hashlib
 import json
 import os
 import re
-import runpy
+import shlex
 import shutil
 import stat
 import subprocess
@@ -16,12 +17,14 @@ import pytest
 import yaml
 
 from siteops.reporting import _KIND as DEPLOYMENT_KIND
+from tests.native_bundle import NETWORK_BLOCK, publish_assets
+from tests.native_bundle import bundle_factory as bundle_factory
+from tests.native_uv_consumers import linux_archives
 
 ROOT = Path(__file__).parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "e2e-test.yaml"
 ACTION = ROOT / ".github" / "actions" / "setup-published-siteops" / "action.yaml"
 CI = ROOT / ".github" / "workflows" / "ci.yaml"
-PIPX_PROBE = ROOT / "tests" / "fixtures" / "windows-pipx-launcher.py"
 
 
 def _workflow() -> str:
@@ -150,7 +153,7 @@ def test_windows_capability_probe_is_opt_in_without_azure_authority():
     assert inputs["scenario"]["type"] == "choice"
     assert inputs["scenario"]["default"] == "aio"
     assert inputs["scenario"]["options"] == [
-        "aio", "windows-installer-preflight", "windows-pipx-launcher",
+        "aio", "windows-installer-preflight",
     ]
 
     jobs = workflow["jobs"]
@@ -166,7 +169,7 @@ def test_windows_capability_probe_is_opt_in_without_azure_authority():
     assert len(steps) == 1
     assert steps[0]["shell"] == "powershell"
     run = steps[0]["run"]
-    for capability in ("winget.exe", "python.exe", "gh.exe", "pipx.exe", "SymbolicLink"):
+    for capability in ("winget.exe", "python.exe", "gh.exe", "SymbolicLink"):
         assert capability in run
     assert "GITHUB_STEP_SUMMARY" in run
     assert "throw" in run
@@ -195,7 +198,7 @@ def test_windows_capability_probe_parses_in_native_powershell(tmp_path):
     assert parsed.returncode == 0, parsed.stdout + parsed.stderr
 
 
-def test_windows_bootstrap_ci_requires_native_real_launcher_checks():
+def test_windows_bootstrap_ci_requires_native_symlink_rejection_checks():
     workflow = yaml.safe_load(CI.read_text(encoding="utf-8"))
     job = workflow["jobs"]["windows-bootstrap"]
     assert job["runs-on"] == "windows-2025"
@@ -204,7 +207,7 @@ def test_windows_bootstrap_ci_requires_native_real_launcher_checks():
     assert not job.get("environment")
     assert job["timeout-minutes"] <= 30
     assert job["env"]["PIP_INDEX_URL"] == "https://packagefeedproxy.microsoft.io/pypi/simple/"
-    assert job["env"]["SITEOPS_REQUIRE_WINDOWS_LINK"] == "1"
+    assert job["env"]["SITEOPS_REQUIRE_WINDOWS_SYMLINK_REJECTION"] == "1"
     assert any("actions/checkout@" in step.get("uses", "") for step in job["steps"])
     assert any("actions/setup-python@" in step.get("uses", "") for step in job["steps"])
     preparation = next(step["run"] for step in job["steps"] if step.get("name") == "Prepare private test state")
@@ -212,95 +215,11 @@ def test_windows_bootstrap_ci_requires_native_real_launcher_checks():
     assert "GITHUB_ENV" in preparation
     test = next(step["run"] for step in job["steps"] if step.get("name") == "Windows bootstrap tests")
     assert "test_bootstrap_scripts.py" in test
-    assert PIPX_PROBE.name in test
+    assert "test_uv_bootstrap_windows.py" in test
+    assert "windows-pipx-launcher.py" not in test
     assert "windows_bootstrap" in test
     assert "--basetemp" in test
     assert "azure/login" not in str(job)
-
-
-def test_real_pipx_launcher_e2e_is_separate_and_has_no_azure_authority():
-    workflow = yaml.safe_load(_workflow())
-    inputs = workflow.get("on", workflow.get(True))["workflow_dispatch"]["inputs"]
-    assert "windows-pipx-launcher" in inputs["scenario"]["options"]
-    jobs = workflow["jobs"]
-    job = jobs["windows-pipx-launcher"]
-    assert job["runs-on"] == "windows-2025"
-    assert job["if"] == "inputs.scenario == 'windows-pipx-launcher'"
-    assert job["permissions"] == {"contents": "read"}
-    assert not job.get("environment")
-    assert job["timeout-minutes"] <= 30
-    assert job["env"]["PIP_INDEX_URL"] == "https://packagefeedproxy.microsoft.io/pypi/simple/"
-    assert job["env"]["SITEOPS_REQUIRE_WINDOWS_LINK"] == "1"
-    assert any("actions/checkout@" in step.get("uses", "") for step in job["steps"])
-    assert any("actions/setup-python@" in step.get("uses", "") for step in job["steps"])
-    assert any(PIPX_PROBE.name in step.get("run", "") for step in job["steps"])
-    assert "azure/login" not in str(job)
-    assert "AZURE_CLIENT" not in str(job)
-    assert "id-token" not in str(job)
-    assert PIPX_PROBE.is_file()
-    source = PIPX_PROBE.read_text(encoding="utf-8")
-    for piece in ("pipx==1.17.2", "PIPX_BIN_DIR", "pipx.exe", "Require-PrivateExecutablePath"):
-        assert piece in source
-    compile(source, str(PIPX_PROBE), "exec")
-    assert "siteops-pipx-probe-" in source
-    assert "GITHUB_STEP_SUMMARY" in source
-    assert "PIP_INDEX_URL" in source
-    assert "PIP_CONFIG_FILE" in source
-    assert "shutil.rmtree(root)" in source
-    assert "github.com" not in source
-    assert "az login" not in source
-
-
-def test_real_pipx_launcher_separates_root_admission_from_link_guard():
-    source = PIPX_PROBE.read_text(encoding="utf-8")
-    assert source.index('log=logs / "check-private-data-root.log"') < (
-        source.index('log=logs / "check-bootstrap-guard.log"')
-    )
-    assert 'log=logs / "protect-data-root.log"' in source
-    assert 'env["SITEOPS_PROBE_DATA"] = str(data)' in source
-    assert "ROOT_(?:PATH|ANCESTOR_" in source
-    assert "TOOL_(?:PATH|TYPE|OWNER|ACL)" in source
-    assert 'env["SITEOPS_PROBE_EXPECTED_TARGET"] = str(expected)' in source
-    assert 'env["SITEOPS_PROBE_TARGET_ROOT"] = str(venv.parent.parent)' in source
-    assert "$selected=Require-PrivateExecutablePath $env:SITEOPS_PROBE_APP " in source
-    assert '"$env:PIPX_BIN_DIR $env:SITEOPS_PROBE_EXPECTED_TARGET "' in source
-    assert '"$env:SITEOPS_PROBE_TARGET_ROOT\\n"' in source
-    assert '"$observed=& $selected --version\\n"' in source
-    assert "The bootstrap's selected executable guard admitted" in source
-
-
-@pytest.mark.parametrize(
-    ("log_name", "code", "reason"),
-    [
-        ("check-bootstrap-guard.log", "TOOL_TYPE", "rejected TOOL_TYPE"),
-        ("check-bootstrap-guard.log", "TOOL_UNKNOWN", "failed with exit code 7"),
-        ("check-private-data-root.log", "ROOT_DATA_OWNER", "rejected ROOT_DATA_OWNER"),
-        ("check-private-data-root.log", "ROOT_UNKNOWN", "failed with exit code 7"),
-    ],
-)
-def test_real_pipx_launcher_reports_only_bounded_guard_diagnostics(
-    tmp_path, log_name, code, reason,
-):
-    run = runpy.run_path(str(PIPX_PROBE))["run"]
-    marker = "PRIVATE_TARGET_MARKER"
-    log = tmp_path / log_name
-    context = (
-        "Choose a private Windows tool location."
-        if code.startswith("TOOL_")
-        else "Configure a private Site Ops data root."
-    )
-    diagnostic = (
-        f"{marker}: Site Ops installation: {context} "
-        f"{code} Use trusted directories."
-    )
-    with pytest.raises(RuntimeError, match=reason) as error:
-        run(
-            [sys.executable, "-c",
-             f"import sys;sys.stderr.write({diagnostic!r});sys.exit(7)"],
-            cwd=tmp_path, env=os.environ.copy(), log=log, timeout=10,
-        )
-    assert marker not in str(error.value)
-    assert marker in log.read_text(encoding="utf-8")
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows PowerShell parser is needed.")
@@ -310,7 +229,6 @@ def test_real_pipx_launcher_reports_only_bounded_guard_diagnostics(
         (CI, "windows-bootstrap", "Install test dependencies"),
         (CI, "windows-bootstrap", "Prepare private test state"),
         (CI, "windows-bootstrap", "Windows bootstrap tests"),
-        (WORKFLOW, "windows-pipx-launcher", "Test the real pipx launcher without Azure"),
     ],
 )
 def test_windows_automated_launcher_steps_parse_in_native_powershell(
@@ -684,16 +602,282 @@ def test_published_engine_is_authenticated_and_cannot_come_from_checkout():
         '\"runnerEnvironment\": \"self-hosted\"',
         "--source-digest \"$EXPECTED_SOURCE_SHA\"",
         "--signer-digest \"$EXPECTED_SOURCE_SHA\"",
-        "--require-hashes",
-        "--no-index",
-        "$STATE/bundle/pylock.toml",
-        "pipx==$PIPX_VERSION",
-        "pipx\" install siteops",
-        "pipx\" upgrade-shared",
+        '"$app_python" -I -S -B "$STATE/helper/siteops-install.py" install',
+        '"$STATE/download/siteops-install.zip" "$STATE/bundle"',
+        '"$UV_TOOL_DIR" "$UV_TOOL_BIN_DIR"',
         "Published E2E imported Site Ops from checkout.",
     ):
         assert value in action
     assert "pip install -e" not in action
+
+
+def test_published_setup_uses_a_pinned_uv_and_fresh_packaged_helper():
+    action = _action()
+    install = yaml.safe_load(action)["runs"]["steps"][-1]["run"]
+    parsed = subprocess.run(
+        [str(_bash_executable()), "-n"], input=install,
+        capture_output=True, text=True, timeout=15, check=False,
+    )
+    assert parsed.returncode == 0, parsed.stderr
+    assert "6590717592ace991ff83a63fef799e3ad9d33ecc8f96c5d6bdd732496e79337f" in action
+    assert '"$STATE/uv" python install 3.11.16' in action
+    assert "UV_TOOL_DIR" in action and "UV_TOOL_BIN_DIR" in action
+    assert '"$app_python" -I -S -B "$STATE/helper/siteops-install.py" install' in action
+    assert "siteops-install.zip" in action
+    assert "pipx" not in action.lower()
+    assert "pip install" not in action
+
+
+def _bind_controller_python(bin_dir):
+    python = bin_dir / "python"
+    python.write_text(
+        f"#!/usr/bin/env bash\nexec {shlex.quote(Path(sys.executable).as_posix())} \"$@\"\n",
+        encoding="utf-8", newline="\n",
+    )
+    python.chmod(python.stat().st_mode | stat.S_IXUSR)
+
+
+def test_published_setup_rejects_foreign_release_before_tool_acquisition(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _bind_controller_python(bin_dir)
+    gh = bin_dir / "gh"
+    gh.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"$1 $2\" == 'api repos/example/publisher/releases/tags/test-v1' ]]; then\n"
+        "  printf '%s\\n' '{\"tag_name\":\"test-v1\",\"draft\":true,\"assets\":[]}'\n"
+        "elif [[ \"$1 $2\" == 'api repos/example/publisher/git/ref/tags/test-v1' ]]; then\n"
+        "  printf '%s\\n' '{\"object\":{\"type\":\"commit\","
+        "\"sha\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}}'\n"
+        "else\n"
+        "  printf 'unexpected gh call\\n' > \"$TEST_ESCAPE\"\n"
+        "  exit 91\n"
+        "fi\n",
+        encoding="utf-8", newline="\n",
+    )
+    curl = bin_dir / "curl"
+    curl.write_text(
+        "#!/usr/bin/env bash\nprintf 'unexpected curl call\\n' > \"$TEST_ESCAPE\"\nexit 92\n",
+        encoding="utf-8", newline="\n",
+    )
+    gh.chmod(gh.stat().st_mode | stat.S_IXUSR)
+    curl.chmod(curl.stat().st_mode | stat.S_IXUSR)
+    action = yaml.safe_load(_action())["runs"]["steps"][-1]["run"]
+    script = tmp_path / "published.sh"
+    script.write_text(action, encoding="utf-8", newline="\n")
+    environment = {
+        key: value for key, value in os.environ.items()
+        if key not in {"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"}
+    }
+    environment.update({
+        "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+        "TEST_ESCAPE": str(tmp_path / "unexpected-call"),
+        "STATE": str(tmp_path / "state"),
+        "RUNNER_TEMP": str(tmp_path),
+        "EXPECTED_REPOSITORY": "example/publisher",
+        "GITHUB_REPOSITORY": "example/publisher",
+        "EXPECTED_RELEASE": "test-v1",
+        "EXPECTED_SOURCE_SHA": "a" * 40,
+        "GH_TOKEN": "fixture",
+    })
+    result = subprocess.run(
+        [str(_bash_executable()), str(script)],
+        env=environment, cwd=tmp_path, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode != 0
+    assert "published release does not target the expected commit" in result.stderr
+    assert not (tmp_path / "unexpected-call").exists()
+    assert not (tmp_path / "state" / "bundle").exists()
+
+
+@pytest.fixture(scope="module")
+def published_native_archives():
+    return linux_archives()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="The published action uses native Linux uv.")
+@pytest.mark.parametrize("missing", ["SITEOPS_TEST_UV_ARCHIVE", "SITEOPS_TEST_UV_PYTHON_ARCHIVE"])
+def test_native_published_setup_required_archives_fail_closed(
+    published_native_archives, monkeypatch, missing,
+):
+    assert all(path.is_file() for path in published_native_archives)
+    monkeypatch.setenv("SITEOPS_REQUIRE_LINUX_UV", "1")
+    monkeypatch.delenv(missing)
+    with pytest.raises(pytest.fail.Exception, match=missing):
+        linux_archives()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="The published action uses native Linux uv.")
+@pytest.mark.parametrize("foreign_command", [False, True])
+def test_native_published_setup_installs_only_with_an_unoccupied_command(
+    tmp_path, bundle_factory, published_native_archives, foreign_command,
+):
+    uv_archive, python_archive = published_native_archives
+    root, manifest = bundle_factory(92)
+    archive, _ = publish_assets(root, manifest, tmp_path / "assets")
+    proof = archive.with_name(archive.name + ".attestation.jsonl")
+    proof.write_text('{"fixture":"proof"}\n', encoding="utf-8")
+    state = tmp_path / "published-state"
+    release = {
+        "tag_name": "test-v1",
+        "draft": False,
+        "assets": [
+            {
+                "name": asset.name,
+                "size": asset.stat().st_size,
+                "digest": "sha256:" + hashlib.sha256(asset.read_bytes()).hexdigest(),
+            }
+            for asset in (archive, proof)
+        ],
+    }
+    (tmp_path / "release.json").write_text(json.dumps(release), encoding="utf-8")
+    (tmp_path / "tag.json").write_text(
+        json.dumps({"object": {"type": "commit", "sha": manifest.source_sha}}),
+        encoding="utf-8",
+    )
+    certificate = {
+        "subjectAlternativeName": (
+            "https://github.com/example/publisher/.github/workflows/"
+            "_siteops-distribution.yaml@refs/heads/main"
+        ),
+        "issuer": "https://token.actions.githubusercontent.com",
+        "sourceRepositoryURI": "https://github.com/example/publisher",
+        "sourceRepositoryDigest": manifest.source_sha,
+        "sourceRepositoryRef": "refs/heads/main",
+        "buildSignerDigest": manifest.source_sha,
+        "buildConfigURI": "https://github.com/example/publisher/.github/workflows/release.yaml@refs/heads/main",
+        "buildConfigDigest": manifest.source_sha,
+        "runnerEnvironment": "self-hosted",
+    }
+    (tmp_path / "verification.json").write_text(
+        json.dumps([{
+            "verificationResult": {
+                "mediaType": "application/vnd.dev.sigstore.verificationresult+json;version=0.1",
+                "signature": {"certificate": certificate},
+            },
+        }]),
+        encoding="utf-8",
+    )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _bind_controller_python(bin_dir)
+    gh = bin_dir / "gh"
+    gh.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+case "$1 ${2:-}" in
+  "api repos/example/publisher/releases/tags/test-v1")
+    cat "$TEST_RELEASE" ;;
+  "api repos/example/publisher/git/ref/tags/test-v1")
+    cat "$TEST_TAG" ;;
+  "release download")
+    [[ "$3" == test-v1 ]] || exit 91
+    while (($#)); do
+      if [[ "$1" == --dir ]]; then
+        [[ "$2" == "$STATE/download" ]] || exit 92
+        cp "$TEST_BUNDLE" "$TEST_PROOF" "$2/"
+        exit 0
+      fi
+      shift
+    done
+    exit 93 ;;
+  "attestation verify")
+    [[ "$3" == "$STATE/download/siteops-install.zip" ]] || exit 94
+    cat "$TEST_VERIFICATION" ;;
+  "attestation trusted-root")
+    printf '{"trusted":"fixture"}\\n' ;;
+  *) printf 'unexpected gh call\\n' > "$TEST_ESCAPE"; exit 95 ;;
+esac
+""",
+        encoding="utf-8", newline="\n",
+    )
+    curl = bin_dir / "curl"
+    curl.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+[[ " $* " == *"https://github.com/astral-sh/uv/releases/download/0.12.20/uv-x86_64-unknown-linux-gnu.tar.gz"* ]] || exit 96
+output=""
+while (($#)); do
+  if [[ "$1" == --output ]]; then output="$2"; shift 2; continue; fi
+  shift
+done
+[[ "$output" == "$STATE/uv.tar.gz" ]] || exit 97
+cp "$TEST_UV_ARCHIVE" "$output"
+tar -xzf "$TEST_PYTHON_ARCHIVE" -C "$STATE/python"
+mv "$STATE/python/python" "$STATE/python/cpython-3.11.16-linux-x86_64-gnu"
+if [[ "${TEST_FOREIGN_COMMAND:-0}" == 1 ]]; then
+  printf '#!/usr/bin/env bash\\nprintf "FOREIGN_EXECUTED" >> "$TEST_ESCAPE"\\nexit 99\\n' > "$STATE/bin/siteops"
+  chmod 700 "$STATE/bin/siteops"
+fi
+""",
+        encoding="utf-8", newline="\n",
+    )
+    for tool in (gh, curl):
+        tool.chmod(tool.stat().st_mode | stat.S_IXUSR)
+    script = tmp_path / "published.sh"
+    script.write_text(
+        yaml.safe_load(_action())["runs"]["steps"][-1]["run"],
+        encoding="utf-8", newline="\n",
+    )
+    checkout = tmp_path / "source-checkout"
+    checkout.mkdir()
+    environment = {
+        key: value for key, value in os.environ.items()
+        if key not in {"GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"}
+    }
+    environment.update({
+        **NETWORK_BLOCK,
+        "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+        "EXPECTED_REPOSITORY": manifest.repository,
+        "GITHUB_REPOSITORY": manifest.repository,
+        "EXPECTED_RELEASE": "test-v1",
+        "EXPECTED_SOURCE_SHA": manifest.source_sha,
+        "RUNNER_TEMP": str(tmp_path),
+        "STATE": str(state),
+        "GH_TOKEN": "fixture",
+        "GITHUB_WORKSPACE": str(checkout),
+        "GITHUB_ENV": str(tmp_path / "github-env"),
+        "GITHUB_PATH": str(tmp_path / "github-path"),
+        "GITHUB_OUTPUT": str(tmp_path / "github-output"),
+        "TEST_RELEASE": str(tmp_path / "release.json"),
+        "TEST_TAG": str(tmp_path / "tag.json"),
+        "TEST_VERIFICATION": str(tmp_path / "verification.json"),
+        "TEST_BUNDLE": str(archive),
+        "TEST_PROOF": str(proof),
+        "TEST_UV_ARCHIVE": str(uv_archive),
+        "TEST_PYTHON_ARCHIVE": str(python_archive),
+        "TEST_ESCAPE": str(tmp_path / "foreign-executed"),
+        "TEST_FOREIGN_COMMAND": "1" if foreign_command else "0",
+    })
+    result = subprocess.run(
+        [str(_bash_executable()), "--noprofile", "--norc", str(script)],
+        cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=300,
+    )
+    assert not (tmp_path / "foreign-executed").exists()
+    assert str(tmp_path) not in result.stdout + result.stderr
+    if foreign_command:
+        assert result.returncode != 0
+        assert "authenticated published bundle could not be installed" in result.stdout
+        assert (state / "bin/siteops").read_text(encoding="utf-8").startswith("#!/usr/bin/env bash")
+        assert not (state / "tools/siteops").exists()
+        assert not (tmp_path / "github-output").exists()
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (tmp_path / "github-output").read_text(encoding="utf-8") == (
+            f"version={manifest.version}\n"
+        )
+        assert (state / "installed.json").is_file()
+        assert json.loads((state / "installed.json").read_text(encoding="utf-8")) == {
+            "version": manifest.version,
+            "wheel": manifest.application_wheel,
+        }
+        assert "version_info = 3.11.16" in (
+            state / "tools/siteops/pyvenv.cfg"
+        ).read_text(encoding="utf-8")
+        assert (tmp_path / "github-path").read_text(encoding="utf-8") == str(state / "bin") + "\n"
+        assert f"SITEOPS_E2E_ENGINE_VERSION={manifest.version}\n" in (
+            tmp_path / "github-env"
+        ).read_text(encoding="utf-8")
 
 
 def test_published_setup_finishes_before_azure_provisioning():

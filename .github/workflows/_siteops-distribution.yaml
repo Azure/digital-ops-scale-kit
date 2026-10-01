@@ -7,7 +7,7 @@
 # attestation job receives the staged bytes, executes no repository source, and
 # signs each published asset independently. Qualification verifies the same
 # attested bytes with the runner's GitHub CLI before anything is extracted or
-# installed, then exercises both platform scripts and both native pipx paths.
+# installed, then exercises both platform scripts and both native uv paths.
 #
 # Callers reference this workflow locally as
 # `./.github/workflows/_siteops-distribution.yaml`, which GitHub binds to the
@@ -86,12 +86,6 @@ env:
   PREDICATE_TYPE: https://slsa.dev/provenance/v1
   # Package downloads use the configured feed with no public fallback.
   PACKAGE_INDEX_URL: https://packagefeedproxy.microsoft.io/pypi/simple/
-  PIPX_VERSION: 1.17.2
-  # pipx installs its backend into shared libraries. The pylock reader that the
-  # verified path depends on is present, and still explicitly experimental, in
-  # this pinned pip. It matches the committed build lock.
-  SHARED_PIP_SPEC: pip==26.2.1
-  SHARED_PIP_SHA256: 71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
   PYTHONUNBUFFERED: "1"
   # CI results and progress use publication-safe output.
@@ -519,6 +513,7 @@ jobs:
       BUILD_ATTEMPT: ${{ github.run_attempt }}
       WHEEL_NAME: ${{ needs.build.outputs.wheel-name }}
       PACKAGE_VERSION: ${{ needs.build.outputs.package-version }}
+      MATRIX_PYTHON: ${{ matrix.python }}
 
     steps:
       - name: Confirm the GitHub CLI verification capabilities
@@ -629,8 +624,11 @@ jobs:
           temp="${RUNNER_TEMP//\\//}"
           archive="$temp/siteops-download/$ARCHIVE_NAME"
           extract="$temp/siteops-verified"
-          rm -rf "$extract"
-          mkdir -p "$extract"
+          if [[ -e "$extract" ]]; then
+            echo "::error::The extraction directory must be fresh."
+            exit 1
+          fi
+          mkdir "$extract"
           shopt -s dotglob nullglob
           existing=("$extract"/*)
           if [[ ${#existing[@]} -ne 0 ]]; then
@@ -700,93 +698,278 @@ jobs:
       - name: Install the external qualification tooling
         env:
           PYTHON: ${{ steps.python.outputs.python-path }}
-          PIP_INDEX_URL: ${{ env.PACKAGE_INDEX_URL }}
-          PIP_NO_INPUT: "1"
-          PIP_KEYRING_PROVIDER: disabled
-          PIP_EXTRA_INDEX_URL: ""
         run: |
           set -euo pipefail
           temp="${RUNNER_TEMP//\\//}"
           unset PYTHONPATH PYTHONHOME
-          export PIP_CONFIG_FILE="$("$PYTHON" -c 'import os; print(os.devnull)')"
-          owned="$temp/siteops-qualification"
-          rm -rf "$owned"
           umask 077
-          mkdir -p "$owned/logs" "$owned/home" "$owned/tool-wheels"
-          tooling="$owned/tooling"
-          "$PYTHON" -m venv "$tooling"
           if [[ "$RUNNER_OS" == "Windows" ]]; then
-            bin="$tooling/Scripts"
+            native_root="$(powershell.exe -NoProfile -NonInteractive -Command '
+              $ErrorActionPreference = "Stop"
+              function Reject([string]$code) {
+                  throw "The qualification profile root was not admitted ($code)."
+              }
+              $profileHome = [Environment]::GetFolderPath("UserProfile")
+              if ($profileHome -cnotmatch "^[A-Za-z]:\\" -or
+                  [IO.Path]::GetFullPath($profileHome) -cne $profileHome -or
+                  $env:GITHUB_RUN_ID -cnotmatch "^[0-9]{1,20}$" -or
+                  $env:GITHUB_RUN_ATTEMPT -cnotmatch "^[0-9]{1,5}$") {
+                  Reject "ROOT_PATH"
+              }
+              $root = Join-Path $profileHome (
+                  "siteops-qualification-{0}-{1}" -f $env:GITHUB_RUN_ID, $env:GITHUB_RUN_ATTEMPT
+              )
+              if ($root.Length -gt 192 -or (Test-Path -LiteralPath $root)) {
+                  Reject "ROOT_PATH"
+              }
+              $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+              $trusted = @($sid, "S-1-5-18", "S-1-5-32-544", "S-1-3-4")
+              $owners = $trusted + "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+              $ancestors = [Collections.Generic.List[string]]::new()
+              $current = $profileHome
+              while ($current) {
+                  $ancestors.Add($current)
+                  $parent = Split-Path -Parent $current
+                  if (-not $parent -or $parent -eq $current) { break }
+                  $current = $parent
+              }
+              $ancestors.Reverse()
+              foreach ($path in $ancestors) {
+                  $node = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+                  if (-not $node.PSIsContainer -or
+                      ($node.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                      Reject "ROOT_ANCESTOR_TYPE"
+                  }
+                  $acl = [IO.Directory]::GetAccessControl($path)
+                  if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -notin $owners) {
+                      Reject "ROOT_ANCESTOR_OWNER"
+                  }
+                  foreach ($rule in $acl.GetAccessRules(
+                      $true, $true, [Security.Principal.SecurityIdentifier]
+                  )) {
+                      if ($rule.AccessControlType -eq "Allow" -and
+                          $rule.IdentityReference.Value -notin $trusted -and
+                          -not ($rule.PropagationFlags -band
+                              [Security.AccessControl.PropagationFlags]::InheritOnly) -and
+                          ([int]$rule.FileSystemRights -band 0x500D0140)) {
+                          Reject "ROOT_ANCESTOR_ACL"
+                      }
+                  }
+              }
+              New-Item -ItemType Directory -Path $root -ErrorAction Stop | Out-Null
+              $previousPreference = $ErrorActionPreference
+              try {
+                  $ErrorActionPreference = "Continue"
+                  & icacls.exe $root /setowner "*$sid" *> $null
+                  $ownedByUser = $LASTEXITCODE -eq 0
+                  if ($ownedByUser) {
+                      & icacls.exe $root /inheritance:r /grant:r "*${sid}:(OI)(CI)F" *> $null
+                      $protected = $LASTEXITCODE -eq 0
+                  }
+              } finally {
+                  $ErrorActionPreference = $previousPreference
+              }
+              if (-not $ownedByUser -or -not $protected) { Reject "ROOT_DATA_ACL" }
+              $acl = [IO.Directory]::GetAccessControl($root)
+              if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -cne $sid) {
+                  Reject "ROOT_DATA_OWNER"
+              }
+              foreach ($rule in $acl.GetAccessRules(
+                  $true, $true, [Security.Principal.SecurityIdentifier]
+              )) {
+                  if ($rule.AccessControlType -eq "Allow" -and
+                      $rule.IdentityReference.Value -notin $trusted) {
+                      Reject "ROOT_DATA_ACL"
+                  }
+              }
+              [Console]::Out.WriteLine($root)
+            ' 2> /dev/null)" ||
+              { echo "::error::The qualification profile root could not be admitted."; exit 1; }
+            native_root="${native_root%$'\r'}"
+            if [[ -z "$native_root" || "$native_root" == *$'\r'* ||
+                  "$native_root" == *$'\n'* || ${#native_root} -gt 192 ]]; then
+              echo "::error::The qualification profile root is invalid."
+              exit 1
+            fi
+            owned="${native_root//\\//}"
           else
-            bin="$tooling/bin"
+            owned="$temp/siteops-qualification"
+            if [[ -e "$owned" ]]; then
+              echo "::error::The qualification state must be fresh."
+              exit 1
+            fi
+            mkdir -m 700 "$owned"
+            native_root="$owned"
           fi
-          if ! "$bin/python" -m pip install --no-cache-dir --disable-pip-version-check \
-            "pipx==$PIPX_VERSION" > "$owned/logs/tooling.log" 2>&1; then
-            echo "::error::Qualification tooling could not be installed from the configured feed."
+          mkdir "$owned/logs" "$owned/home" "$owned/tooling" "$owned/python" \
+            "$owned/cache" "$owned/verified-tools" "$owned/verified-bin" \
+            "$owned/online-tools" "$owned/online-bin"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            mkdir "$owned/temp"
+            export TEMP="$owned/temp" TMP="$owned/temp" TMPDIR="$owned/temp"
+            export LOCALAPPDATA="$owned/home"
+          fi
+          for name in UV_INSECURE_HOST UV_PYTHON_DOWNLOADS_JSON_URL UV_PYTHON_INSTALL_MIRROR; do
+            if [[ -n "${!name:-}" ]]; then
+              echo "::error::The managed Python source is not admitted."
+              exit 1
+            fi
+          done
+          if [[ -n "${UV_INSECURE_NO_ZIP_VALIDATION:-}" &&
+                "${UV_INSECURE_NO_ZIP_VALIDATION}" != "0" &&
+                "${UV_INSECURE_NO_ZIP_VALIDATION}" != "false" ]]; then
+            echo "::error::The managed Python source is not admitted."
             exit 1
           fi
+          while IFS= read -r name; do
+            case "$name" in UV_*|PIP_*|PYTHONPATH|PYTHONHOME) unset "$name" ;; esac
+          done < <(compgen -e)
+          export HOME="$owned/home" XDG_DATA_HOME="$owned/home" XDG_CONFIG_HOME="$owned/home"
+          export UV_TOOL_DIR="$owned/verified-tools" UV_TOOL_BIN_DIR="$owned/verified-bin"
+          export UV_PYTHON_INSTALL_DIR="$owned/python" UV_CACHE_DIR="$owned/cache"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            name=uv-windows.zip
+            url=https://github.com/astral-sh/uv/releases/download/0.12.20/uv-x86_64-pc-windows-msvc.zip
+            size=18039150
+            digest=95f9bc30fbb3574d276e28ac4a6de932d25153645853d13da8c21eec3bc88d06
+            uv="$owned/tooling/uv.exe"
+          else
+            name=uv-linux.tar.gz
+            url=https://github.com/astral-sh/uv/releases/download/0.12.20/uv-x86_64-unknown-linux-gnu.tar.gz
+            size=19827214
+            digest=6590717592ace991ff83a63fef799e3ad9d33ecc8f96c5d6bdd732496e79337f
+            uv="$owned/tooling/uv"
+          fi
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --tlsv1.2 --max-redirs 3 --max-time 180 --max-filesize "$size" \
+            --output "$owned/$name" "$url" > "$owned/logs/uv-download.log" 2>&1 ||
+            { echo "::error::The pinned native uv archive could not be acquired."; exit 1; }
+          "$PYTHON" -I -S -B - "$owned/$name" "$uv" "$size" "$digest" "$RUNNER_OS" <<'PY'
+          import hashlib
+          import os
+          import sys
+          import tarfile
+          import zipfile
+          from pathlib import Path
 
-          # The lock reader that matters belongs to pipx's shared backend, not to
-          # the interpreter's own pip. Provision the tested pinned release from a
-          # hash-verified wheel with the supported pipx command.
-          printf '%s \\\n    --hash=sha256:%s\n' "$SHARED_PIP_SPEC" "$SHARED_PIP_SHA256" \
-            > "$owned/shared-backend.txt"
-          if ! "$bin/python" -m pip download --no-cache-dir --disable-pip-version-check \
-            --require-hashes --only-binary=:all: --no-deps --dest "$owned/tool-wheels" \
-            --requirement "$owned/shared-backend.txt" \
-            > "$owned/logs/backend-download.log" 2>&1; then
-            echo "::error::The pinned pipx backend wheel could not be obtained from the configured feed."
+          archive, output = map(Path, sys.argv[1:3])
+          if (archive.stat().st_size != int(sys.argv[3])
+                  or hashlib.sha256(archive.read_bytes()).hexdigest() != sys.argv[4]):
+              raise SystemExit("::error::The native uv archive differs from the selected release.")
+          if sys.argv[5] == "Windows":
+              expected = {"uv.exe": 42547504, "uvx.exe": 348976, "uvw.exe": 348976}
+              with zipfile.ZipFile(archive) as source:
+                  members = source.infolist()
+                  if len(members) != 3 or {m.filename: m.file_size for m in members} != expected:
+                      raise SystemExit("::error::The native uv archive inventory is invalid.")
+                  with source.open("uv.exe") as stream, output.open("xb") as target:
+                      target.write(stream.read(42547505))
+              size, digest = 42547504, "a0d2742d49564a32488753b02e76276e7b5ef1b1ea8cf30bcbf06ee28f60cd73"
+          else:
+              with tarfile.open(archive, "r:gz") as source:
+                  member = source.getmember("uv-x86_64-unknown-linux-gnu/uv")
+                  if not member.isfile() or member.size != 50437584:
+                      raise SystemExit("::error::The native uv archive inventory is invalid.")
+                  with source.extractfile(member) as stream, output.open("xb") as target:
+                      target.write(stream.read(50437585))
+              size, digest = 50437584, "b8299463da6fa7da3b94464444d252d0afca8ac6c96cb229f1baf4012f365246"
+          if output.stat().st_size != size or hashlib.sha256(output.read_bytes()).hexdigest() != digest:
+              raise SystemExit("::error::The native uv executable differs from the selected release.")
+          output.chmod(0o700)
+          PY
+          if ! "$uv" python install "$MATRIX_PYTHON" --no-bin --no-registry \
+            --no-config --no-progress --system-certs > "$owned/logs/python-install.log" 2>&1; then
+            echo "::error::The matrix-managed Python could not be provisioned."
             exit 1
           fi
+          app_python="$("$PYTHON" -I -S -B - "$owned" "$MATRIX_PYTHON" "$RUNNER_OS" <<'PY'
+          import os
+          import re
+          import stat
+          import subprocess
+          import sys
+          from pathlib import Path
 
-          export PIPX_HOME="$owned/pipx"
-          export PIPX_BIN_DIR="$owned/pipx-bin"
-          export PIPX_MAN_DIR="$owned/pipx-man"
-          export PIPX_COMPLETION_DIR="$owned/pipx-completions"
-          export PIPX_SHARED_LIBS="$owned/pipx-shared"
-          export PIPX_DEFAULT_PYTHON="$PYTHON"
-          export PIPX_USE_EMOJI=0
-          export PIP_CACHE_DIR="$owned/pip-cache"
-          # pipx splits pip arguments on whitespace, so the wheelhouse is a URI.
-          wheelhouse="$("$PYTHON" -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).as_uri())' "$owned/tool-wheels")"
-          if ! "$bin/pipx" upgrade-shared \
-            --pip-args "--no-index --only-binary=:all: --no-cache-dir --force-reinstall --find-links=$wheelhouse" \
-            > "$owned/logs/backend-provision.log" 2>&1; then
-            echo "::error::pipx could not provision its pinned backend from the verified wheel."
-            exit 1
-          fi
-          "$bin/python" -c 'from importlib.metadata import version; print("pipx " + version("pipx"))'
-          echo "Provisioned the pipx backend $SHARED_PIP_SPEC from a hash-verified wheel."
+          owned, minor, platform = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+          root = owned / "python"
+          if not re.fullmatch(r"3\.(10|11|12|13|14)", minor):
+              raise SystemExit("::error::The qualification cell has an invalid Python version.")
+          pattern = re.compile(
+              r"cpython-" + re.escape(minor) + r"\.[0-9]+-"
+              + ("windows-x86_64-none" if platform == "Windows" else "linux-x86_64-gnu")
+          )
+          candidates = [entry for entry in root.iterdir() if pattern.fullmatch(entry.name)]
+          if len(candidates) != 1 or candidates[0].is_symlink():
+              raise SystemExit("::error::The matrix-managed runtime inventory is ambiguous.")
+          concrete = candidates[0]
+          count = 0
+          for directory, folders, files in os.walk(concrete, followlinks=False):
+              for name in folders + files:
+                  count += 1
+                  path = Path(directory) / name
+                  info = path.lstat()
+                  if (count > 16384 or (platform == "Windows" and
+                          info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+                          or (platform != "Windows" and (
+                              not stat.S_ISLNK(info.st_mode) and
+                              (info.st_uid not in {0, os.getuid()} or info.st_mode & 0o022)
+                              or stat.S_ISLNK(info.st_mode) and
+                              not path.resolve(strict=True).is_relative_to(concrete)))):
+                      raise SystemExit("::error::The matrix-managed runtime is not admitted.")
+          executable = concrete / (
+              "python.exe" if platform == "Windows" else f"bin/python{minor}"
+          )
+          if not executable.is_file() or executable.is_symlink():
+              raise SystemExit("::error::The matrix-managed runtime is incomplete.")
+          try:
+              identity = subprocess.run(
+                  [str(executable), "-I", "-S", "-B", "-c",
+                   "import sys;print(sys.implementation.name, *sys.version_info[:3], "
+                   "sys.maxsize > 2**32, sys._base_executable)"],
+                  capture_output=True, text=True, timeout=20, check=False,
+              )
+          except (OSError, subprocess.TimeoutExpired):
+              raise SystemExit("::error::The matrix-managed runtime could not be inspected.") from None
+          patch = concrete.name.split("-")[1].split(".")[2]
+          if identity.returncode or identity.stdout.strip() != (
+              f"cpython {minor.replace('.', ' ')} {patch} True {executable}"
+          ):
+              raise SystemExit("::error::The matrix-managed runtime has another identity.")
+          print(executable)
+          PY
+          )"
+          {
+            echo "SITEOPS_QUALIFICATION_ROOT=$native_root"
+            echo "SITEOPS_UV=$uv"
+            echo "APP_PYTHON=$app_python"
+            echo "UV_TOOL_DIR=$UV_TOOL_DIR"
+            echo "UV_TOOL_BIN_DIR=$UV_TOOL_BIN_DIR"
+            echo "UV_PYTHON_INSTALL_DIR=$UV_PYTHON_INSTALL_DIR"
+            echo "UV_CACHE_DIR=$UV_CACHE_DIR"
+          } >> "$GITHUB_ENV"
+          echo "Admitted pinned uv and managed Python $MATRIX_PYTHON for this qualification cell."
 
       - name: Install with the signed Bash bootstrap
         if: matrix.os == 'ubuntu-24.04'
-        env:
-          PYTHON: ${{ steps.python.outputs.python-path }}
-          PIP_INDEX_URL: ${{ env.PACKAGE_INDEX_URL }}
-          PIP_NO_INPUT: "1"
-          PIP_KEYRING_PROVIDER: disabled
-          PIP_EXTRA_INDEX_URL: ""
         run: |
           set -euo pipefail
           umask 077
           unset PYTHONPATH PYTHONHOME GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
           temp="${RUNNER_TEMP//\\//}"
-          owned="$temp/siteops-qualification"
+          owned="${SITEOPS_QUALIFICATION_ROOT//\\//}"
           download="$temp/siteops-download"
-          export HOME="$owned"
+          export HOME="$owned/home"
           export XDG_DATA_HOME="$owned/bootstrap-data"
           export XDG_CONFIG_HOME="$owned/bootstrap-config"
           export TMPDIR="$owned/tmp"
           export GH_CONFIG_DIR="$owned/gh-config"
-          export PIP_CONFIG_FILE=/dev/null
-          export PIPX_HOME="$owned/bootstrap-pipx"
-          export PIPX_BIN_DIR="$owned/bootstrap-pipx-bin"
-          export PIPX_MAN_DIR="$owned/bootstrap-pipx-man"
-          export PIPX_COMPLETION_DIR="$owned/bootstrap-pipx-completions"
-          export PIPX_SHARED_LIBS="$owned/pipx-shared"
-          export PIPX_DEFAULT_PYTHON="$PYTHON"
-          export PATH="$owned/tooling/bin:$PATH"
-          mkdir -p "$HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$TMPDIR" "$GH_CONFIG_DIR"
+          export UV_TOOL_DIR="$owned/bootstrap-tools"
+          export UV_TOOL_BIN_DIR="$owned/bootstrap-bin"
+          export UV_PYTHON_INSTALL_DIR="$owned/python"
+          export UV_CACHE_DIR="$owned/cache"
+          export PATH="$owned/tooling:$PATH"
+          mkdir -p "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$TMPDIR" "$GH_CONFIG_DIR" \
+            "$UV_TOOL_DIR" "$UV_TOOL_BIN_DIR"
           caller="${BUILDER_IDENTITY#*/.github/workflows/}"
           caller="${caller%%@*}"
           [[ "$caller" == ci.yaml || "$caller" == release.yaml ]] ||
@@ -811,7 +994,18 @@ jobs:
             echo "::error::The signed Bash bootstrap did not consume the private verified cache."
             exit 1
           fi
-          if [[ "$("$PIPX_BIN_DIR/siteops" --version)" != "siteops $PACKAGE_VERSION" ]]; then
+          "$APP_PYTHON" -I -S -B - "$UV_TOOL_DIR/siteops/pyvenv.cfg" \
+            "$APP_PYTHON" "$MATRIX_PYTHON" <<'PY'
+          import sys
+          from pathlib import Path
+
+          configuration = Path(sys.argv[1]).read_text(encoding="utf-8")
+          settings = dict(line.split(" = ", 1) for line in configuration.splitlines())
+          if (settings.get("home") != str(Path(sys.argv[2]).parent)
+                  or not settings.get("version_info", "").startswith(sys.argv[3] + ".")):
+              raise SystemExit("::error::The signed Bash bootstrap used another matrix runtime.")
+          PY
+          if [[ "$("$UV_TOOL_BIN_DIR/siteops" --version)" != "siteops $PACKAGE_VERSION" ]]; then
             echo "::error::The signed Bash bootstrap exposed another Site Ops build."
             exit 1
           fi
@@ -820,38 +1014,25 @@ jobs:
       - name: Install with the signed PowerShell bootstrap
         if: matrix.os == 'windows-2025'
         shell: powershell
-        env:
-          PYTHON: ${{ steps.python.outputs.python-path }}
-          PIP_INDEX_URL: ${{ env.PACKAGE_INDEX_URL }}
-          PIP_NO_INPUT: "1"
-          PIP_KEYRING_PROVIDER: disabled
-          PIP_EXTRA_INDEX_URL: ""
         run: |
           $ErrorActionPreference = 'Stop'
-          $owned = Join-Path $env:RUNNER_TEMP 'siteops-qualification'
+          $owned = $env:SITEOPS_QUALIFICATION_ROOT
           $download = Join-Path $env:RUNNER_TEMP 'siteops-download'
           foreach ($name in @('GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN',
                               'PYTHONPATH', 'PYTHONHOME')) {
               [Environment]::SetEnvironmentVariable($name, $null, 'Process')
           }
-          $profileHome = [Environment]::GetFolderPath('UserProfile')
-          if (-not [IO.Path]::IsPathRooted($profileHome)) {
-              throw 'The Windows qualification runner has no private user profile.'
-          }
-          # Keep retained bootstrap executables under the user's private profile.
-          $env:HOME = $owned
-          $env:LOCALAPPDATA = Join-Path $profileHome 'siteops-qualification-bootstrap'
+          $env:HOME = Join-Path $owned 'home'
+          $env:LOCALAPPDATA = Join-Path $owned 'bootstrap-profile'
           $env:TEMP = Join-Path $owned 'bootstrap-temp'
+          $env:TMP = $env:TEMP
+          $env:TMPDIR = $env:TEMP
           $env:GH_CONFIG_DIR = Join-Path $owned 'gh-config'
-          $env:PIP_CONFIG_FILE = 'NUL'
-          $env:PIPX_HOME = Join-Path $owned 'bootstrap-pipx'
-          $env:PIPX_BIN_DIR = Join-Path $owned 'bootstrap-pipx-bin'
-          $env:PIPX_MAN_DIR = Join-Path $owned 'bootstrap-pipx-man'
-          $env:PIPX_COMPLETION_DIR = Join-Path $owned 'bootstrap-pipx-completions'
-          $env:PIPX_SHARED_LIBS = Join-Path $owned 'bootstrap-pipx-shared'
-          $env:PIPX_DEFAULT_PYTHON = $env:PYTHON
-          $env:PATH = (Split-Path -Parent $env:PYTHON) + ';' +
-              (Join-Path $owned 'tooling\Scripts') + ';' + $env:PATH
+          $env:UV_TOOL_DIR = Join-Path $owned 'bootstrap-tools'
+          $env:UV_TOOL_BIN_DIR = Join-Path $owned 'bootstrap-bin'
+          $env:UV_PYTHON_INSTALL_DIR = Join-Path $owned 'python'
+          $env:UV_CACHE_DIR = Join-Path $owned 'cache'
+          $env:PATH = (Join-Path $owned 'tooling') + ';' + $env:PATH
           if (Test-Path -LiteralPath $env:LOCALAPPDATA) {
               throw 'The Windows qualification data root was not fresh.'
           }
@@ -881,7 +1062,8 @@ jobs:
                   throw 'The Windows qualification data root could not be protected.'
               }
           }
-          foreach ($directory in @($env:TEMP, $env:GH_CONFIG_DIR)) {
+          foreach ($directory in @($env:TEMP, $env:GH_CONFIG_DIR,
+                                  $env:UV_TOOL_DIR, $env:UV_TOOL_BIN_DIR)) {
               New-Item -ItemType Directory -Path $directory -Force | Out-Null
           }
           if ($env:BUILDER_IDENTITY -notmatch '/(ci|release)\.yaml@') {
@@ -929,9 +1111,6 @@ jobs:
                   if ($privateLog -and $privateLog.Contains('Configure a private Site Ops data root')) {
                       throw 'The signed PowerShell bootstrap rejected the isolated data root.'
                   }
-                  if ($privateLog -and $privateLog.Contains('Configure one approved HTTPS Python index')) {
-                      throw 'The signed PowerShell bootstrap rejected the configured Python feed.'
-                  }
               }
               throw 'The signed PowerShell bootstrap did not install the verified build.'
           }
@@ -939,7 +1118,18 @@ jobs:
               'Rechecking the retained release without downloading') {
               throw 'The signed PowerShell bootstrap did not consume the private verified cache.'
           }
-          $command = Join-Path $env:PIPX_BIN_DIR 'siteops.exe'
+          $configuration = Join-Path $env:UV_TOOL_DIR 'siteops\pyvenv.cfg'
+          if ((Get-Item -LiteralPath $configuration).Length -gt 65536) {
+              throw 'The signed PowerShell bootstrap has an invalid matrix runtime.'
+          }
+          $settings = Get-Content -LiteralPath $configuration -Raw
+          $version = [regex]::Escape($env:MATRIX_PYTHON)
+          $runtimeHome = [regex]::Escape((Split-Path -Parent $env:APP_PYTHON))
+          if ($settings -cnotmatch "(?m)^version_info = $version\.[0-9]+\r?$" -or
+              $settings -notmatch "(?m)^home = $runtimeHome\r?$") {
+              throw 'The signed PowerShell bootstrap used another matrix runtime.'
+          }
+          $command = Join-Path $env:UV_TOOL_BIN_DIR 'siteops.exe'
           if ((& $command --version) -cne "siteops $env:PACKAGE_VERSION") {
               throw 'The signed PowerShell bootstrap exposed another Site Ops build.'
           }
@@ -954,53 +1144,80 @@ jobs:
           unset PYTHONPATH PYTHONHOME
           temp="${RUNNER_TEMP//\\//}"
           extract="$temp/siteops-verified"
-          owned="$temp/siteops-qualification"
+          owned="${SITEOPS_QUALIFICATION_ROOT//\\//}"
           logs="$owned/logs"
+          archive="$temp/siteops-download/$ARCHIVE_NAME"
           if [[ "$RUNNER_OS" == "Windows" ]]; then
-            tooling_bin="$owned/tooling/Scripts"
+            if [[ -e "$owned/verified-bundle" ]]; then
+              echo "::error::The retained qualification bundle must be fresh."
+              exit 1
+            fi
+            if ! cp -R "$extract" "$owned/verified-bundle" \
+              > "$logs/bundle-copy.log" 2>&1; then
+              echo "::error::The verified bundle could not be retained in protected storage."
+              exit 1
+            fi
+            extract="$owned/verified-bundle"
+            export TEMP="$owned/temp" TMP="$owned/temp" TMPDIR="$owned/temp"
+            export LOCALAPPDATA="$owned/home"
+          fi
+          mkdir "$owned/helper"
+          "$PYTHON" -I -S -B - "$archive" "$owned/helper" <<'PY'
+          import stat
+          import sys
+          import zipfile
+          from pathlib import Path
+
+          with zipfile.ZipFile(sys.argv[1]) as archive:
+              entries = [member for member in archive.infolist()
+                         if member.filename.casefold() == "siteops-install.py"]
+              if (len(entries) != 1 or entries[0].filename != "siteops-install.py"
+                      or not 0 < entries[0].file_size <= 1048576
+                      or stat.S_IFMT(entries[0].external_attr >> 16) not in (0, stat.S_IFREG)):
+                  raise SystemExit("::error::The authenticated bundle has no valid installer helper.")
+              with archive.open(entries[0]) as stream:
+                  content = stream.read(1048577)
+              if len(content) != entries[0].file_size:
+                  raise SystemExit("::error::The authenticated installer helper is incomplete.")
+          with (Path(sys.argv[2]) / "siteops-install.py").open("xb") as output:
+              output.write(content)
+          PY
+          helper="$owned/helper/siteops-install.py"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
             command_name="siteops.exe"
           else
-            tooling_bin="$owned/tooling/bin"
             command_name="siteops"
           fi
-
-          # Every pipx, pip, and profile location stays inside this run, so the
-          # runner's own tools and user profile are unchanged.
           export HOME="$owned/home"
-          export PIPX_HOME="$owned/pipx"
-          export PIPX_BIN_DIR="$owned/pipx-bin"
-          export PIPX_MAN_DIR="$owned/pipx-man"
-          export PIPX_COMPLETION_DIR="$owned/pipx-completions"
-          export PIPX_SHARED_LIBS="$owned/pipx-shared"
-          export PIPX_DEFAULT_PYTHON="$PYTHON"
-          export PIPX_USE_EMOJI=0
-          export PIP_CACHE_DIR="$owned/pip-cache"
-          export PIP_CONFIG_FILE="$("$PYTHON" -c 'import os; print(os.devnull)')"
-          command_bin="$PIPX_BIN_DIR"
+          export UV_TOOL_DIR="$owned/verified-tools"
+          export UV_TOOL_BIN_DIR="$owned/verified-bin"
+          export UV_PYTHON_INSTALL_DIR="$owned/python"
+          export UV_CACHE_DIR="$owned/cache"
+          export UV_PYTHON_DOWNLOADS=never
+          command_bin="$UV_TOOL_BIN_DIR"
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             command_bin="$(cygpath -u "$command_bin")"
-            tooling_bin="$(cygpath -u "$tooling_bin")"
           fi
-          export PATH="$command_bin:$tooling_bin:$PATH"
-          # A source directory must never reach the installed application.
+          export PATH="$command_bin:$PATH"
           cd "$owned"
 
           install_locked() {
             label="$1"
-            lock="$2"
-            shift 2
-            pipx install siteops \
-              --lock "$lock" \
-              --backend pip \
-              --fetch-python never \
-              --skip-maintenance \
-              --app siteops \
-              --pip-args "--isolated --require-hashes --no-index --only-binary=:all: --no-cache-dir" \
-              "$@" > "$logs/$label.log" 2>&1
+            mode="$2"
+            bundle="$3"
+            "$APP_PYTHON" -I -S -B "$helper" "$mode" "$archive" "$bundle" \
+              "$SOURCE_REPOSITORY" "$SOURCE_SHA" "$SOURCE_REF" \
+              "$SITEOPS_UV" "$UV_TOOL_DIR" "$UV_TOOL_BIN_DIR" \
+              > "$logs/$label.json" 2> "$logs/$label.log"
           }
 
           expect_working_command() {
-            if ! observed="$(siteops --version 2> "$logs/version-$1.log")"; then
+            resolved="$(command -v siteops || true)"
+            if [[ "$resolved" != "$command_bin/siteops"* ]]; then
+              echo "::error::The exposed command does not resolve inside this run's command directory."
+              exit 1
+            fi
+            if ! observed="$("$command_bin/$command_name" --version 2> "$logs/version-$1.log")"; then
               echo "::error::The exposed command could not be executed after $1. Inspect the private version log."
               exit 1
             fi
@@ -1008,121 +1225,109 @@ jobs:
               echo "::error::The exposed command reported an unexpected version after $1."
               exit 1
             fi
-            resolved="$(command -v siteops)"
-            if [[ "$resolved" != "$command_bin/siteops"* ]]; then
-              echo "::error::The exposed command does not resolve inside this run's command directory."
-              exit 1
-            fi
           }
 
-          if ! install_locked install "$extract/pylock.toml"; then
-            echo "::error::The verified lock could not be installed with stock pipx."
+          if ! install_locked install install "$extract"; then
+            echo "::error::The authenticated verified bundle could not be installed with native uv."
             exit 1
           fi
           expect_working_command "installation"
 
-          if ! pipx runpip siteops --version > "$logs/backend-version.log" 2>&1; then
-            echo "::error::The installed application's pip backend could not be inspected."
-            exit 1
-          fi
-          backend_version="$(cat "$logs/backend-version.log")"
-          if [[ "${backend_version%% from *}" != "pip ${SHARED_PIP_SPEC#pip==}" ]]; then
-            echo "::error::The installed application is not using the qualified pip backend."
-            exit 1
-          fi
-
-          if ! install_locked repeat "$extract/pylock.toml"; then
+          if ! install_locked repeat install "$extract"; then
             echo "::error::Repeating the same verified installation request failed."
             exit 1
           fi
           expect_working_command "a repeated request"
 
-          if ! install_locked repair "$extract/pylock.toml" --force; then
-            echo "::error::The guarded forced repair of the selected build failed."
+          if ! install_locked repair replace "$extract"; then
+            echo "::error::The guarded replacement of the selected build failed."
             exit 1
           fi
-          expect_working_command "a forced repair"
+          expect_working_command "a replacement"
 
-          # A changed payload byte must fail without losing the working command.
-          rm -rf "$owned/tampered"
           cp -R "$extract" "$owned/tampered"
           printf 'changed after the producer recorded this wheel' >> "$owned/tampered/wheels/$WHEEL_NAME"
-          if install_locked tampered "$owned/tampered/pylock.toml" --force; then
+          if install_locked tampered replace "$owned/tampered"; then
             echo "::error::A tampered wheel was accepted by the verified installation policy."
             exit 1
           fi
           expect_working_command "a rejected replacement"
-          rm -rf "$owned/tampered"
 
-          if ! pipx uninstall siteops > "$logs/uninstall.log" 2>&1; then
+          if ! "$SITEOPS_UV" tool uninstall siteops --no-config --offline \
+            --no-python-downloads --no-progress > "$logs/uninstall.log" 2>&1; then
             echo "::error::Removal of the installed application failed."
             exit 1
           fi
-          # Only this run's command directory may expose the application, and a
-          # shell cache entry must not stand in for a removed file.
           hash -r
           remaining="$(command -v siteops || true)"
-          if [[ -e "$PIPX_BIN_DIR/$command_name" || "$remaining" == "$command_bin/siteops"* ]]; then
+          if [[ -e "$UV_TOOL_BIN_DIR/$command_name" || "$remaining" == "$command_bin/siteops"* ]]; then
             echo "::error::Removal left the exposed Site Ops command in place."
             exit 1
           fi
-          echo "The verified lock installed, repeated, repaired, rejected a tampered replacement, and removed cleanly."
+          echo "The authenticated bundle installed, repeated, replaced, rejected tampering, and removed cleanly."
 
       - name: Install Site Ops from the standalone wheel
         env:
-          PYTHON: ${{ steps.python.outputs.python-path }}
-          PIP_INDEX_URL: ${{ env.PACKAGE_INDEX_URL }}
-          PIP_NO_INPUT: "1"
-          PIP_KEYRING_PROVIDER: disabled
-          PIP_EXTRA_INDEX_URL: ""
+          UV_DEFAULT_INDEX: ${{ env.PACKAGE_INDEX_URL }}
         run: |
           set -euo pipefail
           umask 077
           unset PYTHONPATH PYTHONHOME
           temp="${RUNNER_TEMP//\\//}"
-          owned="$temp/siteops-qualification"
+          owned="${SITEOPS_QUALIFICATION_ROOT//\\//}"
           logs="$owned/logs"
           wheel="$temp/siteops-download/$WHEEL_NAME"
           if [[ "$RUNNER_OS" == "Windows" ]]; then
-            tooling_bin="$owned/tooling/Scripts"
+            export TEMP="$owned/temp" TMP="$owned/temp" TMPDIR="$owned/temp"
+            export LOCALAPPDATA="$owned/home"
             command_name="siteops.exe"
           else
-            tooling_bin="$owned/tooling/bin"
             command_name="siteops"
           fi
 
-          # The online path keeps its own application state and takes runtime
-          # dependencies from the configured feed with no public fallback.
+          # Only this independent wheel path may contact the approved index.
+          index="$UV_DEFAULT_INDEX"
+          while IFS= read -r name; do
+            case "$name" in UV_*) unset "$name" ;; esac
+          done < <(compgen -e)
           export HOME="$owned/home"
-          export PIPX_HOME="$owned/online-pipx"
-          export PIPX_BIN_DIR="$owned/online-pipx-bin"
-          export PIPX_MAN_DIR="$owned/online-pipx-man"
-          export PIPX_COMPLETION_DIR="$owned/online-pipx-completions"
-          export PIPX_SHARED_LIBS="$owned/pipx-shared"
-          export PIPX_DEFAULT_PYTHON="$PYTHON"
-          export PIPX_USE_EMOJI=0
-          export PIP_CACHE_DIR="$owned/pip-cache"
-          export PIP_CONFIG_FILE="$("$PYTHON" -c 'import os; print(os.devnull)')"
-          command_bin="$PIPX_BIN_DIR"
+          export UV_TOOL_DIR="$owned/online-tools"
+          export UV_TOOL_BIN_DIR="$owned/online-bin"
+          export UV_PYTHON_INSTALL_DIR="$owned/python"
+          export UV_CACHE_DIR="$owned/cache"
+          export UV_PYTHON_DOWNLOADS=never
+          command_bin="$UV_TOOL_BIN_DIR"
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             command_bin="$(cygpath -u "$command_bin")"
-            tooling_bin="$(cygpath -u "$tooling_bin")"
           fi
-          export PATH="$command_bin:$tooling_bin:$PATH"
+          export PATH="$command_bin:$PATH"
           cd "$owned"
 
-          if ! pipx install "$wheel" \
-            --backend pip \
-            --fetch-python never \
-            --skip-maintenance \
-            --app siteops \
-            --pip-args "--only-binary=:all: --no-cache-dir" \
+          if ! "$SITEOPS_UV" tool install "$wheel" --python "$APP_PYTHON" \
+            --default-index "$index" --no-config --no-build --no-cache \
+            --no-python-downloads --link-mode copy --no-progress --system-certs \
             > "$logs/online-install.log" 2>&1; then
             echo "::error::The standalone wheel could not be installed from the configured feed."
             exit 1
           fi
 
-          if ! observed="$(siteops --version 2> "$logs/online-version.log")"; then
+          "$APP_PYTHON" -I -S -B - "$UV_TOOL_DIR/siteops/pyvenv.cfg" \
+            "$APP_PYTHON" "$MATRIX_PYTHON" <<'PY'
+          import sys
+          from pathlib import Path
+
+          configuration = Path(sys.argv[1]).read_text(encoding="utf-8")
+          settings = dict(line.split(" = ", 1) for line in configuration.splitlines())
+          if (Path(settings.get("home", "")) != Path(sys.argv[2]).parent
+                  or not settings.get("version_info", "").startswith(sys.argv[3] + ".")):
+              raise SystemExit("::error::The standalone wheel used another matrix runtime.")
+          PY
+          resolved="$(command -v siteops || true)"
+          if [[ "$resolved" != "$command_bin/siteops"* ]]; then
+            echo "::error::The online command does not resolve inside this run's command directory."
+            exit 1
+          fi
+          if ! observed="$("$command_bin/$command_name" --version 2> "$logs/online-version.log")"; then
             echo "::error::The online command could not be executed. Inspect the private version log."
             exit 1
           fi
@@ -1130,21 +1335,15 @@ jobs:
             echo "::error::The online installation exposed an unexpected version."
             exit 1
           fi
-          resolved="$(command -v siteops)"
-          if [[ "$resolved" != "$command_bin/siteops"* ]]; then
-            echo "::error::The online command does not resolve inside this run's command directory."
-            exit 1
-          fi
 
-          if ! pipx uninstall siteops > "$logs/online-uninstall.log" 2>&1; then
+          if ! "$SITEOPS_UV" tool uninstall siteops --no-config --offline \
+            --no-python-downloads --no-progress > "$logs/online-uninstall.log" 2>&1; then
             echo "::error::Removal of the online installation failed."
             exit 1
           fi
-          # Only this run's command directory may expose the application, and a
-          # shell cache entry must not stand in for a removed file.
           hash -r
           remaining="$(command -v siteops || true)"
-          if [[ -e "$PIPX_BIN_DIR/$command_name" || "$remaining" == "$command_bin/siteops"* ]]; then
+          if [[ -e "$UV_TOOL_BIN_DIR/$command_name" || "$remaining" == "$command_bin/siteops"* ]]; then
             echo "::error::Removal left the exposed Site Ops command in place."
             exit 1
           fi

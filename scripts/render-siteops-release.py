@@ -19,6 +19,7 @@ from typing import Any
 
 from siteops_release_assets import (
     FrozenReleaseAssets,
+    ReleaseAsset,
     native_engine_wheel,
     publication_assets,
 )
@@ -26,6 +27,81 @@ from siteops_release_assets import (
 
 class RenderingError(ValueError):
     """Candidate presentation metadata is incomplete or invalid."""
+
+
+def bootstrap_commands(
+    tag: str, source: dict[str, str], scripts: dict[str, ReleaseAsset], downloads: str, caller: str,
+) -> list[str]:
+    """Render complete downloads bound to the reviewed script bytes and source."""
+    if re.fullmatch(r"(?:siteops/)?v[0-9][0-9A-Za-z._-]{0,100}", tag) is None:
+        raise RenderingError("The bootstrap requires a supported exact release tag.")
+    if not source["ref"].startswith("refs/heads/"):
+        raise RenderingError("The bootstrap requires an exact source branch.")
+    repository, commit, source_ref = source["repository"], source["commit"], source["ref"]
+    bash, powershell = scripts["siteops-bootstrap.sh"], scripts["siteops-bootstrap.ps1"]
+    return [
+        "Ubuntu 24.04 or managed Azure Linux 3, x64:",
+        f"""```bash
+(
+  set -euo pipefail
+  umask 077
+  download="$(mktemp -d)"
+  script="$download/siteops-bootstrap.sh"
+  trap 'rm -f -- "$script"; rmdir -- "$download"' EXIT
+  curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \\
+    --tlsv1.2 --max-redirs 3 --max-time 120 --max-filesize {bash.size} \\
+    --output "$script" '{downloads}{bash.name}'
+  [[ "$(wc -c < "$script")" -eq {bash.size} &&
+     "$(sha256sum < "$script" | cut -d ' ' -f 1)" == '{bash.sha256}' ]] ||
+    {{ echo "The bootstrap script differs from the reviewed release." >&2; exit 1; }}
+  bash "$script" --release '{tag}' --source-commit '{commit}' \\
+    --repository '{repository}' --source-ref '{source_ref}' --caller '{caller}'
+)
+```""",
+        "Windows x64, PowerShell:",
+        f"""```powershell
+& {{
+  $ErrorActionPreference = 'Stop'
+  Import-Module (Join-Path $PSHOME 'Modules\\Microsoft.PowerShell.Utility\\Microsoft.PowerShell.Utility.psd1')
+  $download = Join-Path $env:TEMP ('siteops-bootstrap-' + [guid]::NewGuid())
+  New-Item -ItemType Directory -Path $download | Out-Null
+  $script = Join-Path $download 'siteops-bootstrap.ps1'
+  try {{
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    icacls $download /inheritance:r /grant:r "*${{sid}}:(OI)(CI)F" | Out-Null
+    if ($LASTEXITCODE -ne 0) {{ throw 'The download directory could not be protected.' }}
+    & curl.exe --fail --silent --show-error --location --proto '=https' --proto-redir '=https' `
+      --tlsv1.2 --max-redirs 3 --max-time 120 --max-filesize {powershell.size} `
+      --output $script '{downloads}{powershell.name}'
+    if ($LASTEXITCODE -ne 0) {{ throw 'The bootstrap script could not be downloaded.' }}
+    if ((Get-Item -LiteralPath $script).Length -ne {powershell.size} -or
+        (Get-FileHash -LiteralPath $script -Algorithm SHA256).Hash -ine '{powershell.sha256}') {{
+      throw 'The bootstrap script differs from the reviewed release.'
+    }}
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script `
+      -Release '{tag}' -SourceCommit '{commit}' `
+      -Repository '{repository}' -SourceRef '{source_ref}' -Caller '{caller}'
+    if ($LASTEXITCODE -ne 0) {{ throw 'Site Ops installation did not complete.' }}
+  }} finally {{
+    if (Test-Path -LiteralPath $script) {{ Remove-Item -LiteralPath $script }}
+    [IO.Directory]::Delete($download)
+  }}
+}}
+```""",
+        "These commands download the complete script into a fresh private directory and "
+        "check its size and digest before execution. The digest binds the script to these "
+        "reviewed instructions. It is not independent publisher authentication. "
+        "The initial script trusts this release's HTTPS delivery. "
+        "The script separately authenticates the engine ZIP before extracting its installer helper.",
+        "Review the proposed tool changes when prompted. These commands install the engine only. "
+        "To include Azure CLI, add `--with-azure-cli` to the final Bash invocation or "
+        "`-WithAzureCli` to the PowerShell invocation. Source enrollment is a separate choice: "
+        "add `--enroll-source NAME` or `-EnrollSource NAME` only for an approved source. "
+        "For the official Azure/digital-ops-scale-kit publisher, the guided examples use `official`. "
+        "Azure authentication and deployment remain separate.",
+        "The PowerShell execution policy setting applies only to the child process. "
+        "An organization policy may require an approved managed installation instead.",
+    ]
 
 
 def render_notes(
@@ -37,6 +113,7 @@ def render_notes(
     archive_name: str,
     attestation_suffix: str,
     runner_environment: str,
+    builder_identity: str,
 ) -> str:
     """Append installation guidance for this release to the authored notes."""
     if runner_environment not in ("github-hosted", "self-hosted"):
@@ -93,46 +170,73 @@ def render_notes(
         ) + "."
         if all(name in native_names for name in scripts) else ""
     )
-    guide = home + "/blob/" + source["commit"] + "/docs/install-siteops.md#install-the-verified-bundle"
+    guide = home + "/blob/" + source["commit"] + "/docs/install-siteops.md#choose-an-installation-route"
     script_guide = (
         home + "/blob/" + source["commit"]
         + "/docs/install-siteops.md#verify-the-bootstrap-script"
     )
     command = (
-        f'pipx install "{downloads}{wheel}" --backend pip --fetch-python never '
-        '--skip-maintenance --app siteops --pip-args "--only-binary=:all: --no-cache-dir"'
+        f'uv tool install "{downloads}{wheel}" '
+        '--python 3.11.16 --managed-python --no-build --system-certs'
     )
+    bootstrap = []
+    if all(name in native_names for name in scripts):
+        callers = [
+            name for name in ("release.yaml", "ci.yaml")
+            if builder_identity == f"{home}/.github/workflows/{name}@{source['ref']}"
+        ]
+        if len(callers) != 1:
+            raise RenderingError("The release calling workflow does not match the selected source.")
+        bootstrap = [
+            "### Bootstrap without uv",
+            f"Expected calling workflow: `{callers[0]}`.",
+        ]
+        if runner_environment == "self-hosted":
+            bootstrap.extend(bootstrap_commands(
+                plan["release"]["tag"], source,
+                {asset.name: asset for asset in native if asset.name in scripts},
+                downloads, callers[0],
+            ))
+        else:
+            bootstrap.append(
+                "The bootstrap requires the approved `self-hosted` provenance policy. "
+                "Use the release wheel with approved tooling for this runner class.",
+            )
     paragraphs = [
         f"Package version: `{engine_version}`.",
-        "**Prerequisites:** standard 64-bit CPython 3.10-3.14 and pipx 1.17.2. "
-        "Use Windows x64 or Linux x64 with glibc 2.17 or newer. "
+        "### Already have uv",
+        "**Prerequisite:** uv 0.12.20 from an approved channel. "
+        "The command uses uv-managed CPython and can provision it when needed. "
+        "Use a supported Windows x64 or Linux x64 host. "
         "Configure an approved package index that serves the runtime dependencies as wheels.",
         "Install the versioned wheel from this release. Runtime dependencies come from your configured package index as wheels. "
-        "To name it explicitly, add `--index-url <your approved index>` inside `--pip-args`.",
+        "To name it explicitly, add `--default-index <your approved index>`. "
+        "uv does not read pip configuration.",
         f"```console\n{command}\n```",
-        "To replace an existing online installation, review any pipx pin and rerun the command with `--force`. "
+        "To replace or repair an existing online installation, review the selection and rerun with `--reinstall`. "
         "Confirm the result with `siteops --version` and `siteops --help`.",
         "The installation ZIP and standalone wheel each have a detached attestation proof "
-        "containing signed provenance evidence. pipx does not automatically verify GitHub "
+        "containing signed provenance evidence. uv does not automatically verify GitHub "
         "attestations for the online command. "
         "For external verification before extraction and a native installation locked to hashes "
         "from stable private storage, "
         f"follow the [verified installation guide]({guide}). "
-        "That path downloads only the ZIP and its detached proof, authenticates the ZIP before extraction, "
-        "then installs from the authenticated `pylock.toml` with stock pipx.",
+        "The engine path downloads the ZIP and its detached proof, authenticates the ZIP before extraction, "
+        "then invokes native uv only after independent payload admission.",
         f"Expected publisher: `{repository}`. Source commit: `{source['commit']}`. "
         f"Source ref: `{source['ref']}`. Use these values with the guide verification policy. "
-        "The guide also describes switching between online and locked installations.",
-        "For a bootstrap installation, review this release tag, publisher, source commit and "
-        "source ref against your approved selection. "
+        "The guide also describes switching between online and verified installations.",
+        f"Expected provenance runner class: `{runner_environment}`. "
+        "The runner class does not identify a particular pool.",
+        *bootstrap,
+        "For publisher provenance before any installer code runs, review this release tag, "
+        "publisher, source commit and source ref against your approved selection. "
         f"[Verify the versioned script and its detached proof]({script_guide}) "
         "with those identities before running it. HTTPS download alone does not authenticate "
         "the publisher. If the guide's example publisher, source ref, workflows or runner "
         "differ from this release, use this release's reviewed provenance values instead.",
-        f"Expected provenance runner class: `{runner_environment}`. "
-        "The runner class does not identify a particular pool.",
-        "The locked path is qualified with pipx 1.17.2 and its shared pip 26.2.1. "
-        "pip support for `pylock.toml` remains experimental.",
+        "The bootstrap owns provenance and complete payload validation. "
+        "Native uv owns the tool environment and ordinary installation lifecycle.",
         f"Release assets: [{wheel}]({downloads}{wheel}), "
         f"[{wheel}{attestation_suffix}]({downloads}{wheel}{attestation_suffix}), "
         f"[{archive_name}]({downloads}{archive_name}), and "
@@ -141,7 +245,7 @@ def render_notes(
         "Installing the CLI does not authenticate to Azure or deploy resources.",
         "Existing local `-w` workspaces and configured-Site fleet selectors remain supported. "
         "`siteops inputs` and explicit typed answers are optional for manifests with a typed "
-        "input contract; a project pin selects content, not operator Site configuration.",
+        "input contract. A project pin selects content, not operator Site configuration.",
     ]
     return notes + "\n\n".join(paragraphs) + "\n" + workspace_notes
 
@@ -279,8 +383,9 @@ def render_summary(plan: dict[str, Any], notes: str, values: Mapping[str, str]) 
         ])
     if engine["bundle"]:
         lines.append(
-            "\nThe installation guidance below is for the published release. To try a candidate before publication, "
-            "use the Actions download above and the installation guide for manually downloaded files.",
+            "\nThe installation guidance below requires published release assets at the selected tag. "
+            "Before publication, use the Actions download above for artifact inspection and "
+            "the installation qualification evidence for this exact candidate.",
         )
     lines.append("\n## Release notes\n\n" + embedded_notes(notes))
     return "\n".join(lines) + "\n"
@@ -307,6 +412,7 @@ def main(argv: list[str] | None = None) -> int:
                 plan, authored, assets, engine_version=os.environ.get("ENGINE_VERSION", ""),
                 archive_name=os.environ["ARCHIVE_NAME"], attestation_suffix=os.environ["ATTESTATION_SUFFIX"],
                 runner_environment=os.environ["EXPECTED_RUNNER_ENVIRONMENT"],
+                builder_identity=os.environ["BUILDER_IDENTITY"],
             ).encode("utf-8")
             (root / "publish-notes.md").write_bytes(raw)
             print("sha256=" + hashlib.sha256(raw).hexdigest())

@@ -26,6 +26,7 @@ from siteops_distribution import (  # noqa: E402
 def _write_bundle(root: Path) -> BundleManifest:
     payload = {
         "pylock.toml": b'lock-version = "1.0"\n',
+        "siteops-install.py": b"# Controlled shared installer fixture.\n",
         "LICENSE": b"license\n",
         "ThirdPartyNotices.txt": b"notices\n",
         "wheels/siteops-1.0.0-py3-none-any.whl": b"application wheel\n",
@@ -205,7 +206,7 @@ def test_manifest_requires_application_wheel_in_every_target(tmp_path):
         BundleManifest.from_dict(document)
 
 
-@pytest.mark.parametrize("required", ["ThirdPartyNotices.txt", "pylock.toml"])
+@pytest.mark.parametrize("required", ["ThirdPartyNotices.txt", "pylock.toml", "siteops-install.py"])
 def test_manifest_requires_all_named_payloads(tmp_path, required):
     manifest = _write_bundle(tmp_path)
     document = manifest.to_dict()

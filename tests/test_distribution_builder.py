@@ -51,6 +51,7 @@ def _copy_build_source(destination: Path) -> Path:
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
     )
     (destination / "scripts").mkdir()
+    shutil.copyfile(SCRIPTS / "siteops_distribution.py", destination / "scripts" / "siteops_distribution.py")
     return destination
 
 
@@ -363,6 +364,7 @@ def test_bundle_assembly_is_reproducible_and_has_no_workspace_leakage(
         assert names == sorted(names)
         assert "bundle.json" in names
         assert "pylock.toml" in names
+        assert archive.read("siteops-install.py") == (source / "scripts" / "siteops_distribution.py").read_bytes()
         assert "install.py" not in names
         assert "siteops_distribution.py" not in names
         assert not any("workspace" in name for name in names)
