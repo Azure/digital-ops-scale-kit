@@ -1,5 +1,10 @@
 """Execute Azure Pipelines steps with their native Bash error semantics."""
 
+import importlib.util
+import json
+import shlex
+import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -19,7 +24,7 @@ NATIVE_FIXTURES = ROOT / "tests" / "fixtures" / "prepare-native-uv.sh"
 def _step(path: Path, name: str) -> dict:
     def walk(node):
         if isinstance(node, dict):
-            if node.get("displayName") == name:
+            if node.get("displayName", node.get("name")) == name:
                 yield node
             for value in node.values():
                 yield from walk(value)
@@ -84,31 +89,32 @@ def test_override_preparation_preserves_failures_and_empty_values(
     binary = tmp_path / "bin"
     binary.mkdir()
     write_executable(binary / "python3", """#!/usr/bin/env bash
-[[ "$*" == 'scripts/generate-site-overrides.py workspace' ]] || exit 98
-echo generator >> calls
-exit "$GENERATOR_EXIT"
-""")
-    write_executable(binary / "jq", """#!/usr/bin/env bash
-[[ "$*" == '-r .. | strings' ]] || exit 98
-echo masker >> calls
-printf '%s\\n' "$MASK_VALUE"
-exit "$MASK_EXIT"
+case "$*" in
+  './scripts/generate-site-overrides.py workspace') echo generator >> calls; exit "$GENERATOR_EXIT" ;;
+  './scripts/mask-site-overrides.py azure-pipelines') echo masker >> calls; exit "$MASK_EXIT" ;;
+  *) exit 98 ;;
+esac
 """)
     result = run_script(
         _step(DEPLOY, "Setup site overrides")["script"], tmp_path,
-        {"WORKSPACE": "workspace", "SITE_OVERRIDES": '{"site":{}}',
+        {"WORKSPACE": "workspace", "TEMPLATE_ROOT": ".", "SITE_OVERRIDES": '{"site":{}}',
          "GENERATOR_EXIT": str(generator), "MASK_EXIT": str(masker), "MASK_VALUE": value},
         shell_options=(),
     )
     assert result.returncode == expected, result.stdout + result.stderr
-    if generator:
-        assert (tmp_path / "calls").read_text().splitlines() == ["generator"]
+    assert (tmp_path / "calls").read_text().splitlines() == (
+        ["masker"] if masker else ["masker", "generator"]
+    )
 
 
 def test_integration_masking_accepts_an_empty_string_value(tmp_path):
     binary = tmp_path / "bin"
     binary.mkdir()
-    write_executable(binary / "jq", "#!/usr/bin/env bash\nprintf '\\n'\n")
+    (tmp_path / "scripts").mkdir()
+    shutil.copyfile(ROOT / "scripts" / "mask-site-overrides.py",
+                    tmp_path / "scripts" / "mask-site-overrides.py")
+    python = shlex.quote(Path(sys.executable).absolute().as_posix())
+    write_executable(binary / "python3", f'#!/usr/bin/env bash\nexec {python} "$@"\n')
     result = run_script(
         _step(INTEGRATION, "Mask secret values")["script"], tmp_path,
         {"SITE_OVERRIDES": '{"site":{"optional":""}}'}, shell_options=(),
@@ -194,4 +200,189 @@ exit "$EXTRACT_EXIT"
         ["download"] if download else
         ["download", "download", "digest"] if digest else
         ["download", "download", "digest", "extract"]
+    )
+
+
+@pytest.mark.parametrize("platform", ["github", "ado"])
+@pytest.mark.parametrize("case", ["valid", "empty", "missing-directory", "discovery-failure"])
+def test_manifest_discovery_requires_a_complete_nonempty_inventory(tmp_path, platform, case):
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    workspace = tmp_path / "workspaces" / "iot-operations"
+    (workspace / "manifests" / "first").mkdir(parents=True)
+    (workspace / "samples" / "second").mkdir(parents=True)
+    if case != "empty":
+        (workspace / "samples" / "second" / "manifest.yaml").write_text("kind: Manifest\n")
+    if case == "missing-directory":
+        (workspace / "manifests" / "first").rmdir()
+        (workspace / "manifests").rmdir()
+    if case == "discovery-failure":
+        write_executable(binary / "find", "#!/usr/bin/env bash\nexit 37\n")
+    write_executable(binary / "siteops", "#!/usr/bin/env bash\necho called >> calls\n")
+    summary = tmp_path / "summary.md"
+    github = ROOT / ".github" / "workflows" / "ci.yaml"
+    script = _step(github if platform == "github" else CI,
+                   "Find manifests" if platform == "github" else "Validate manifest structure")
+    body = script.get("run", script.get("script"))
+    body = body.replace("$(Build.ArtifactStagingDirectory)", bash_path(tmp_path))
+    result = run_script(
+        body, tmp_path,
+        {"WORKSPACE_DIR": "workspaces/iot-operations", "GITHUB_OUTPUT": bash_path(summary)},
+        shell_options=("-e", "-o", "pipefail") if platform == "github" else (),
+    )
+    assert (result.returncode == 0) is (case == "valid"), (result.stdout, result.stderr)
+    if case != "valid":
+        assert not (tmp_path / "calls").exists()
+
+
+@pytest.mark.parametrize("platform", ["github", "ado"])
+@pytest.mark.parametrize("integration", [False, True])
+def test_override_masks_encode_values_as_single_logging_commands(tmp_path, platform, integration):
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    for name in ("generate-site-overrides.py", "mask-site-overrides.py"):
+        source = ROOT / "scripts" / name
+        if source.exists():
+            shutil.copyfile(source, scripts / name)
+    python = shlex.quote(Path(sys.executable).absolute().as_posix())
+    write_executable(binary / "python3", f'#!/usr/bin/env bash\nexec {python} "$@"\n')
+    value = "secret%0A\r\n##vso[task.complete result=Succeeded;]marker"
+    event = tmp_path / "event.json"
+    event.write_text('{"inputs":{"selector":""}}')
+    if platform == "ado":
+        path = INTEGRATION if integration else DEPLOY
+    else:
+        path = ROOT / ".github" / "workflows" / (
+            "integration-test.yaml" if integration else "_siteops-deploy.yaml"
+        )
+    step = _step(path, "Mask secret values" if integration else "Setup site overrides")
+    result = run_script(
+        step.get("run", step.get("script")), tmp_path,
+        {"SITE_OVERRIDES": json.dumps({"test-site": {"parameters.secret": value}}),
+         "WORKSPACE": "workspace", "INPUT_WORKSPACE": "workspace", "SITEOPS_REDACT_OUTPUT": "1",
+         "TEMPLATE_ROOT": ".",
+         "GITHUB_EVENT_PATH": event.as_posix()},
+        shell_options=("-e", "-o", "pipefail") if platform == "github" else (),
+    )
+    assert result.returncode == 0, result.stderr
+    prefix = "::add-mask::" if platform == "github" else "##vso[task.setsecret]"
+    encoded = value.replace("%", "%25" if platform == "github" else "%AZP25")
+    encoded = encoded.replace("\r", "%0D").replace("\n", "%0A")
+    assert prefix + encoded in result.stdout.splitlines()
+    assert not any(line.startswith("##vso[task.complete") for line in result.stdout.splitlines())
+    assert "\r" not in result.stdout
+    assert result.stderr == ""
+
+
+@pytest.fixture
+def masking():
+    spec = importlib.util.spec_from_file_location("masking", ROOT / "scripts" / "mask-site-overrides.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("raw", ["", "  ", "{}", '{"site":{"empty":"","values":[]}}'])
+def test_masking_preserves_empty_optional_input(masking, raw):
+    commands = masking.mask_commands(raw, "azure-pipelines")
+    assert commands == (["##vso[task.setsecret]site"] if '"site"' in raw else [])
+
+
+@pytest.mark.parametrize("raw", [
+    "private-input", '["private-input"]', '{"site":"private-input"}',
+    '{"site":{"value":"private-input\\u0000"}}',
+])
+def test_masking_rejects_invalid_input_without_emitting_it(masking, monkeypatch, capsys, raw):
+    monkeypatch.setenv("SITE_OVERRIDES", raw)
+    monkeypatch.setattr(sys, "argv", ["mask-site-overrides.py", "azure-pipelines"])
+    assert masking.main() == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "could not be masked" in captured.err
+    assert "private-input" not in captured.err
+
+
+@pytest.mark.parametrize("path", [ROOT / ".pipelines" / "deploy.yaml", INTEGRATION])
+def test_optional_overrides_default_precedes_the_selected_secret_group(path):
+    variables = yaml.safe_load(path.read_text())["variables"]
+    index = next(i for i, value in enumerate(variables) if value.get("name") == "SITE_OVERRIDES")
+    group = next(i for i, value in enumerate(variables) if "group" in value)
+    assert index < group
+    assert variables[index]["value"] == ""
+
+
+def test_reusable_template_separates_the_callers_workspace_from_pinned_tooling(tmp_path):
+    data = yaml.safe_load(DEPLOY.read_text())
+    defaults = {parameter["name"]: parameter.get("default") for parameter in data["parameters"]}
+    assert defaults["templateRepository"] == "self"
+    stage = data["stages"][0]
+    variables = stage["variables"]
+    assert variables["${{ if eq(parameters.templateRepository, 'self') }}"] == {
+        "SITEOPS_TEMPLATE_ROOT": "$(Build.SourcesDirectory)",
+        "SITEOPS_WORKSPACE_ROOT": "$(Build.SourcesDirectory)",
+    }
+    assert variables["${{ else }}"] == {
+        "SITEOPS_TEMPLATE_ROOT": "$(Pipeline.Workspace)/s/siteops-automation",
+        "SITEOPS_WORKSPACE_ROOT": "$(Pipeline.Workspace)/s/siteops-inputs",
+    }
+    steps = stage["jobs"][0]["strategy"]["runOnce"]["deploy"]["steps"]
+    assert steps[0]["checkout"] == "self"
+    assert steps[0]["${{ if ne(parameters.templateRepository, 'self') }}"]["path"] == "s/siteops-inputs"
+    checkout = steps[1]["${{ if ne(parameters.templateRepository, 'self') }}"][0]
+    assert checkout["checkout"] == "${{ parameters.templateRepository }}"
+    assert checkout["path"] == "s/siteops-automation"
+    assert checkout["persistCredentials"] is False
+    setup = next(step for step in steps if step.get("template") == "setup-siteops.yaml")
+    assert setup["parameters"]["sourceDirectory"] == "$(SITEOPS_TEMPLATE_ROOT)"
+    for name in ("Validate inputs", "Setup site overrides"):
+        assert _step(DEPLOY, name)["workingDirectory"] == "$(SITEOPS_WORKSPACE_ROOT)"
+    assert _step(DEPLOY, "Prepare executable plan and deploy")["inputs"]["workingDirectory"] == (
+        "$(SITEOPS_WORKSPACE_ROOT)"
+    )
+
+    caller = tmp_path / "customer workspace"
+    tooling = tmp_path / "pinned tooling"
+    (caller / "deployment").mkdir(parents=True)
+    (caller / "bin").mkdir()
+    (tooling / "scripts").mkdir(parents=True)
+    for name in ("mask-site-overrides.py", "generate-site-overrides.py"):
+        shutil.copyfile(ROOT / "scripts" / name, tooling / "scripts" / name)
+    python = shlex.quote(Path(sys.executable).absolute().as_posix())
+    write_executable(caller / "bin" / "python3", f'#!/usr/bin/env bash\nexec {python} "$@"\n')
+    result = run_script(
+        _step(DEPLOY, "Setup site overrides")["script"], caller,
+        {"TEMPLATE_ROOT": bash_path(tooling), "WORKSPACE": "deployment", "SITEOPS_REDACT_OUTPUT": "1",
+         "SITE_OVERRIDES": '{"customer-site":{"parameters.clusterName":"cluster"}}'},
+        shell_options=(),
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    generated = caller / "deployment" / "sites.local" / "customer-site.yaml"
+    assert yaml.safe_load(generated.read_text()) == {"parameters": {"clusterName": "cluster"}}
+    assert not (tooling / "deployment").exists()
+    assert not (caller / "scripts").exists()
+
+
+@pytest.mark.parametrize("spec", ["", "https://example.invalid/siteops.whl"])
+def test_setup_retains_local_and_external_consumer_installation_routes(tmp_path, spec):
+    step = _step(SETUP, "Install Site Ops")
+    assert step["workingDirectory"] == "${{ parameters.sourceDirectory }}"
+    data = yaml.safe_load(SETUP.read_text())
+    defaults = {parameter["name"]: parameter.get("default") for parameter in data["parameters"]}
+    assert defaults["sourceDirectory"] == "$(Build.SourcesDirectory)"
+    assert defaults["siteopsSource"] == ""
+    (tmp_path / "bin").mkdir()
+    write_executable(tmp_path / "bin" / "pip", """#!/usr/bin/env bash
+case "$*" in
+  'install --upgrade pip') exit 0 ;;
+  'install -e .'|'install https://example.invalid/siteops.whl') printf '%s\\n' "$*" > installed ;;
+  *) exit 98 ;;
+esac
+""")
+    result = run_script(step["script"], tmp_path, {"SITEOPS_SOURCE": spec, "INSTALL_DEV": "False"},
+                        shell_options=())
+    assert result.returncode == 0
+    assert (tmp_path / "installed").read_text().strip() == (
+        "install " + spec if spec else "install -e ."
     )

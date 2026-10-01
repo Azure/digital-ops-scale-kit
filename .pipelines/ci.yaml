@@ -123,24 +123,25 @@ jobs:
         displayName: Verify generated host launchers
 
       - script: |
-          # set -o pipefail so `siteops ... | tee` returns siteops's exit
-          # code, not tee's. ADO `script:` does not set pipefail by default.
-          set -o pipefail
+          set -euo pipefail
           WORKSPACE_DIR="workspaces/iot-operations"
           # Discover standalone Manifest YAML across the standard top-level dirs.
           # Excludes partials (filename prefixed `_`) and non-manifest YAML
           # under samples/ (inputs.yaml, outputs.yaml, etc.).
-          MANIFESTS=$(
-            { find "$WORKSPACE_DIR/manifests" -mindepth 2 -maxdepth 2 \
-                \( -name "manifest.yaml" -o -name "manifest.yml" \) 2>/dev/null
-              find "$WORKSPACE_DIR/samples" -mindepth 2 -maxdepth 2 \
-                \( -name "manifest.yaml" -o -name "manifest.yml" \) 2>/dev/null
-            } | tr '\n' ' '
-          )
+          if MANIFESTS=$(
+            find "$WORKSPACE_DIR/manifests" "$WORKSPACE_DIR/samples" -mindepth 2 -maxdepth 2 \
+              \( -name "manifest.yaml" -o -name "manifest.yml" \) 2>/dev/null | tr '\n' ' '
+          ); then
+            :
+          else
+            code=$?
+            echo "##vso[task.logissue type=error]Manifest discovery failed."
+            exit "$code"
+          fi
 
           if [[ -z "$MANIFESTS" ]]; then
-            echo "##vso[task.logissue type=warning]No standalone manifests found in $WORKSPACE_DIR"
-            exit 0
+            echo "##vso[task.logissue type=error]The workspace has no standalone manifests to validate."
+            exit 1
           fi
 
           echo "Found manifests: $MANIFESTS"

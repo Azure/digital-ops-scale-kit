@@ -32,6 +32,10 @@ parameters:
     displayName: Stage id (override when including this template more than once)
     type: string
     default: deploy
+  - name: templateRepository
+    displayName: Repository resource alias containing these templates
+    type: string
+    default: self
 
 stages:
   - stage: ${{ parameters.stageName }}
@@ -39,6 +43,12 @@ stages:
       PYTHONUNBUFFERED: '1'
       SITEOPS_REDACT_OUTPUT: '1'
       AZURE_CORE_OUTPUT: none
+      ${{ if eq(parameters.templateRepository, 'self') }}:
+        SITEOPS_TEMPLATE_ROOT: $(Build.SourcesDirectory)
+        SITEOPS_WORKSPACE_ROOT: $(Build.SourcesDirectory)
+      ${{ else }}:
+        SITEOPS_TEMPLATE_ROOT: $(Pipeline.Workspace)/s/siteops-automation
+        SITEOPS_WORKSPACE_ROOT: $(Pipeline.Workspace)/s/siteops-inputs
     jobs:
       - deployment: siteops_deploy
         displayName: Deploy
@@ -48,13 +58,22 @@ stages:
             deploy:
               steps:
                 - checkout: self
+                  ${{ if ne(parameters.templateRepository, 'self') }}:
+                    path: s/siteops-inputs
                   fetchDepth: 1
                   persistCredentials: false
+
+                - ${{ if ne(parameters.templateRepository, 'self') }}:
+                    - checkout: ${{ parameters.templateRepository }}
+                      path: s/siteops-automation
+                      fetchDepth: 1
+                      persistCredentials: false
 
                 - template: setup-siteops.yaml
                   parameters:
                     siteopsSource: ${{ parameters.siteopsSource }}
                     enableCache: false
+                    sourceDirectory: $(SITEOPS_TEMPLATE_ROOT)
 
                 - script: |
                     set -euo pipefail
@@ -76,6 +95,7 @@ stages:
 
                     echo "✓ Inputs validated"
                   displayName: Validate inputs
+                  workingDirectory: $(SITEOPS_WORKSPACE_ROOT)
                   env:
                     WORKSPACE: ${{ parameters.workspace }}
                     MANIFEST: ${{ parameters.manifest }}
@@ -88,18 +108,15 @@ stages:
                       exit 0
                     fi
 
-                    echo "$SITE_OVERRIDES" | python3 scripts/generate-site-overrides.py "$WORKSPACE"
-
-                    # Mask override values in ADO logs
-                    echo "$SITE_OVERRIDES" | jq -r '.. | strings' | while IFS= read -r val; do
-                      if [[ -n "$val" ]]; then
-                        echo "##vso[task.setvariable variable=masked;issecret=true]${val}"
-                      fi
-                    done
+                    python3 "$TEMPLATE_ROOT/scripts/mask-site-overrides.py" azure-pipelines
+                    printf '%s' "$SITE_OVERRIDES" |
+                      python3 "$TEMPLATE_ROOT/scripts/generate-site-overrides.py" "$WORKSPACE"
                   displayName: Setup site overrides
+                  workingDirectory: $(SITEOPS_WORKSPACE_ROOT)
                   env:
                     WORKSPACE: ${{ parameters.workspace }}
                     SITE_OVERRIDES: $(SITE_OVERRIDES)
+                    TEMPLATE_ROOT: $(SITEOPS_TEMPLATE_ROOT)
 
                 - task: AzureCLI@2
                   displayName: Prepare executable plan and deploy
@@ -107,6 +124,7 @@ stages:
                     azureSubscription: ${{ parameters.serviceConnection }}
                     scriptType: bash
                     scriptLocation: inlineScript
+                    workingDirectory: $(SITEOPS_WORKSPACE_ROOT)
                     inlineScript: |
                       set -euo pipefail
                       # Bicep compiler acquisition and module restore run inside

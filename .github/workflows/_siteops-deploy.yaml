@@ -120,14 +120,8 @@ jobs:
             exit 0
           fi
 
-          echo "$SITE_OVERRIDES" | python3 scripts/generate-site-overrides.py "$INPUT_WORKSPACE"
-
-          # Mask override values in GitHub Actions logs
-          echo "$SITE_OVERRIDES" | jq -r '.. | strings' | while IFS= read -r val; do
-            if [[ -n "$val" ]]; then
-              echo "::add-mask::${val}"
-            fi
-          done
+          python3 scripts/mask-site-overrides.py github
+          printf '%s' "$SITE_OVERRIDES" | python3 scripts/generate-site-overrides.py "$INPUT_WORKSPACE"
 
       - name: Azure Login (OIDC)
         uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1

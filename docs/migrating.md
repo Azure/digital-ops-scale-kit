@@ -46,6 +46,7 @@ Start with the changes that affect your workflow:
 | Preview a deployment | Use [`siteops plan`](#plan-and-validate). |
 | Author manifests or parameters | Review the [preparation checks](#preparation-checks). |
 | Capture output in scripts or CI | Use [structured results and explicit projections](#results-and-ci-output). |
+| Reference the ADO deployment template | Review [consumer pipeline checks and checkout paths](#consumer-pipelines). |
 | Manage temporary files | Review the [new location and cleanup behavior](#temporary-files). |
 | Call the engine from Python | Update the [internal result consumers](#internal-python-callers). |
 
@@ -350,6 +351,27 @@ See [plan output](plan-output.md), [run output](run-output.md), and the
   An interrupted review does not produce a completed deployment result.
 
 Stopping locally does not cancel work Azure already accepted.
+
+### Consumer pipelines
+
+ADO setup, cache lookup and override generation preserve command failures.
+Reporting and private-file cleanup also fail the task when unsuccessful,
+without replacing an earlier Site Ops failure or interruption. Fix the
+reported step rather than relying on a later successful command.
+Manifest validation requires a complete, nonempty inventory. The error
+`The workspace has no standalone manifests to validate.` means the
+expected entry directories contain no manifests.
+
+For templates referenced from another repository, the optional
+`templateRepository` parameter selects your pinned repository resource
+alias. Your workspace remains in the caller's checkout and helpers come
+from the separate tooling checkout. Existing `self` and `siteopsSource`
+defaults are unchanged. See the [consumer template example](ci-cd-setup.md#reference-the-deployment-template-from-another-repository)
+before selecting a template revision that contains this parameter.
+
+CI override logs retain counts and fixed diagnostics rather than Site names.
+Keep detailed validation output in a private local session. These ADO
+consumer changes do not introduce package production or release publication.
 
 ### Temporary files
 

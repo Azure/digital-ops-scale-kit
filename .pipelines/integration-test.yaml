@@ -52,6 +52,8 @@ parameters:
       prod: siteops-secrets
 
 variables:
+  - name: SITE_OVERRIDES
+    value: ''
   - group: ${{ parameters.secretGroups[parameters.environment] }}
   - name: PYTHONUNBUFFERED
     value: '1'
@@ -78,16 +80,11 @@ jobs:
             - template: templates/setup-siteops.yaml
               parameters:
                 installDev: true
+                enableCache: false
 
             - script: |
                 set -euo pipefail
-                if [[ -n "$SITE_OVERRIDES" ]]; then
-                  echo "$SITE_OVERRIDES" | jq -r '.. | strings' | while IFS= read -r val; do
-                    if [[ -n "$val" ]]; then
-                      echo "##vso[task.setvariable variable=masked;issecret=true]${val}"
-                    fi
-                  done
-                fi
+                python3 scripts/mask-site-overrides.py azure-pipelines
               displayName: Mask secret values
               env:
                 SITE_OVERRIDES: $(SITE_OVERRIDES)
@@ -109,12 +106,13 @@ jobs:
                   pytest $PYTEST_ARGS \
                     -v --tb=long \
                     -m integration \
-                    --junitxml=$(Build.ArtifactStagingDirectory)/integration-results.xml
+                    --junitxml="$RESULTS_DIRECTORY/integration-results.xml"
               env:
                 MANIFEST: ${{ parameters.manifest }}
                 SITE_OVERRIDES: $(SITE_OVERRIDES)
                 INTEGRATION_SKIP_CLEANUP: ${{ parameters.skipCleanup }}
                 INTEGRATION_SELECTOR: ${{ parameters.selector }}
+                RESULTS_DIRECTORY: $(Build.ArtifactStagingDirectory)
 
             - task: PublishTestResults@2
               displayName: Publish test results

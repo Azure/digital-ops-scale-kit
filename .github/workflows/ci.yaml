@@ -419,20 +419,23 @@ jobs:
         #   - parameters files in samples (inputs.yaml, outputs.yaml, etc.),
         #     which are not manifests.
         run: |
-          MANIFESTS=$(
-            { find "$WORKSPACE_DIR/manifests" -mindepth 2 -maxdepth 2 \
-                \( -name "manifest.yaml" -o -name "manifest.yml" \) 2>/dev/null
-              find "$WORKSPACE_DIR/samples" -mindepth 2 -maxdepth 2 \
-                \( -name "manifest.yaml" -o -name "manifest.yml" \) 2>/dev/null
-            } | tr '\n' ' '
-          )
-          echo "manifests=$MANIFESTS" >> $GITHUB_OUTPUT
+          if MANIFESTS=$(
+            find "$WORKSPACE_DIR/manifests" "$WORKSPACE_DIR/samples" -mindepth 2 -maxdepth 2 \
+              \( -name "manifest.yaml" -o -name "manifest.yml" \) 2>/dev/null | tr '\n' ' '
+          ); then
+            :
+          else
+            code=$?
+            echo "::error::Manifest discovery failed."
+            exit "$code"
+          fi
 
           if [[ -z "$MANIFESTS" ]]; then
-            echo "::warning::No manifests found in $WORKSPACE_DIR"
-          else
-            echo "Found manifests: $MANIFESTS"
+            echo "::error::The workspace has no standalone manifests to validate."
+            exit 1
           fi
+          echo "manifests=$MANIFESTS" >> "$GITHUB_OUTPUT"
+          echo "Found manifests: $MANIFESTS"
 
       - name: Validate manifest structure
         if: steps.find.outputs.manifests != ''

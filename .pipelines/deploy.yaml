@@ -75,6 +75,8 @@ parameters:
       prod: siteops-secrets
 
 variables:
+  - name: SITE_OVERRIDES
+    value: ''
   - group: ${{ parameters.secretGroups[parameters.environment] }}
   - name: PYTHONUNBUFFERED
     value: '1'
@@ -99,6 +101,7 @@ stages:
           - template: templates/setup-siteops.yaml
 
           - script: |
+              set -euo pipefail
               MANIFEST_PATH="workspaces/${{ parameters.workspace }}/${{ parameters.manifest }}"
               if [[ ! -f "$MANIFEST_PATH" ]]; then
                 echo "##vso[task.logissue type=error]Manifest not found: $MANIFEST_PATH"
@@ -115,6 +118,7 @@ stages:
             displayName: Validate manifest exists
 
           - script: |
+              set -euo pipefail
               case "$MANIFEST_REL" in
                 samples/resource-set-basic/manifest.yaml|samples/resource-set-composition/manifest.yaml)
                   if [[ "$ENV" != "dev" ]]; then

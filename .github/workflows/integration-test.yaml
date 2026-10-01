@@ -92,10 +92,6 @@ jobs:
         env:
           MANIFEST: ${{ inputs.manifest }}
           SITE_OVERRIDES: ${{ secrets.SITE_OVERRIDES }}
-        # `set -o pipefail` so a jq failure on malformed input fails the step.
-        # Without it the exit status comes from the `while` loop, which reports
-        # success having masked nothing, and the next step runs with values that
-        # any diagnostic could write to the log.
         run: |
           set -euo pipefail
           SELECTOR="$(
@@ -109,13 +105,7 @@ jobs:
             echo "::add-mask::${SELECTOR}"
             echo "INTEGRATION_SELECTOR=$SELECTOR" >> "$GITHUB_ENV"
           fi
-          if [[ -n "$SITE_OVERRIDES" ]]; then
-            echo "$SITE_OVERRIDES" | jq -r '.. | strings' | while IFS= read -r val; do
-              if [[ -n "$val" ]]; then
-                echo "::add-mask::${val}"
-              fi
-            done
-          fi
+          python3 scripts/mask-site-overrides.py github
 
       - name: Run integration tests
         env:

@@ -18,6 +18,10 @@ parameters:
     displayName: Enable pip caching (disable for deployment jobs which lack caching scopes)
     type: boolean
     default: true
+  - name: sourceDirectory
+    displayName: Source directory for a local installation
+    type: string
+    default: $(Build.SourcesDirectory)
 
 steps:
   - task: UsePythonVersion@0
@@ -40,7 +44,7 @@ steps:
       displayName: Cache pip packages
       inputs:
         ${{ if eq(parameters.siteopsSource, '') }}:
-          key: pip | "$(Agent.OS)" | ${{ parameters.installDev }} | pyproject.toml
+          key: pip | "$(Agent.OS)" | ${{ parameters.installDev }} | ${{ parameters.sourceDirectory }}/pyproject.toml
         ${{ else }}:
           key: pip | "$(Agent.OS)" | "${{ parameters.siteopsSource }}"
         path: $(PIP_CACHE_DIR)
@@ -58,6 +62,7 @@ steps:
         pip install -e .
       fi
     displayName: Install Site Ops
+    workingDirectory: ${{ parameters.sourceDirectory }}
     env:
       INSTALL_DEV: ${{ parameters.installDev }}
       SITEOPS_SOURCE: ${{ parameters.siteopsSource }}
