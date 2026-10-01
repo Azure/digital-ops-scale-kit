@@ -14,6 +14,10 @@ siteops browse --source github:<owner>/<repository> --category sample --tag mqtt
 A root GitHub repository URL also works. Use `--ref` to select a branch, tag
 or commit, or append `@<ref>` to the `github:` locator. Without a ref, Site Ops
 resolves the repository's default branch rather than assuming its name.
+`--source NAME` also accepts an independently enrolled consumer alias for
+metadata browsing, optionally with `@<ref>`. Its repository reference may
+be resolved even after its execution approval expires. This passive read
+does not renew trust or approve use of a workspace package.
 
 ```bash
 siteops browse --source https://github.com/<owner>/<repository> --ref <branch-or-tag>
@@ -49,20 +53,20 @@ private Site Ops cache. Repeat the same browse command to reuse them.
 Branch, tag and default branch observations can be reused for five minutes.
 After that interval, an ordinary browse resolves the reference again.
 
-Use `--refresh` to resolve it immediately, or `--offline` to select retained
-metadata without contacting the source:
+Use `--refresh` to resolve it immediately, or `--offline-content` to
+select retained metadata without contacting the source:
 
 ```bash
 siteops browse --source github:<owner>/<repository>
 siteops browse --source github:<owner>/<repository> --refresh
-siteops browse --source github:<owner>/<repository> --offline
+siteops browse --source github:<owner>/<repository> --offline-content
 ```
 
 Keep the same `--ref`, `--auth` and source workspace selection across these
 commands. A fully cached commit can also be selected directly:
 
 ```bash
-siteops browse --source github:<owner>/<repository> --ref <full-commit-sha> --offline
+siteops browse --source github:<owner>/<repository> --ref <full-commit-sha> --offline-content
 ```
 
 Selecting the complete commit displayed by an earlier browse reuses that
@@ -77,13 +81,13 @@ refresh. Offline mode may use an expired reference observation and labels it
 as overdue. Its index is still checked against that exact cached revision.
 The displayed revision is not a claim about the branch's current head.
 
-For `browse --source`, `--refresh` and `--offline` are mutually exclusive.
-Refreshing a reference reuses unchanged immutable trees and
+For `browse --source`, `--refresh` and `--offline-content` are mutually
+exclusive. Refreshing a reference reuses unchanged immutable trees and
 blobs. A network, authorization or quota failure is reported rather than
 silently selecting old data or another access mode. Offline cache misses
 report `cache.metadata-missing`. Fetch that source/workspace without
-`--offline` first. Inconsistent cache records and observations later than the
-system clock fail explicitly. Use [targeted cache maintenance](cache.md) to
+`--offline-content` first. Inconsistent cache records and observations
+later than the system clock fail explicitly. Use [targeted cache maintenance](cache.md) to
 remove an inconsistent record before fetching it again.
 
 Metadata is stored separately from workspace packages and verification
@@ -96,9 +100,15 @@ workspace pins.
 
 With `--source`, these options control descriptive browsing and do not acquire
 an executable workspace. With a selected [project](projects.md),
-`browse --offline` instead requires its package and proof already in cache.
+`browse --offline-content` instead requires its package and proof already
+in cache.
 Neither mode relaxes provenance policy expiry for package use. `--refresh`
 applies only to source index browsing and never changes a workspace pin.
+The `--offline-content` switch limits source content acquisition, not Azure
+resource reads or deployment operations in other commands. Direct executable
+`--source SOURCE@RELEASE` resolves a published release online on each
+invocation and cannot be combined with this switch. A project pin is the
+offline-content and repeatable fleet route.
 
 ## Public and authorized source access
 
@@ -143,10 +153,11 @@ They report that targeting is unavailable rather than claiming no targets
 were declared. They also omit executable plan/deploy suggestions because this
 command has not acquired a complete deployable workspace.
 
-Read the operator guide at the displayed revision. Use an
-[operator project](projects.md) to acquire an approved complete workspace
-package and execute it with configured Sites or, where the verified package
-contains a declared input contract, [guided inputs](guided-inputs.md).
+Read the operator guide at the displayed revision. With an independently
+approved source and a published release, [guided inputs](guided-inputs.md)
+can use direct `--source SOURCE@RELEASE` for one explicit target. An
+[operator project](projects.md) can instead pin the verified package for
+configured Sites and repeat use.
 You can also select a reviewed local workspace. Descriptive index browsing
 remains separate from acquisition and execution.
 

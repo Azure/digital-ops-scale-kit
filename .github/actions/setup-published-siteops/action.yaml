@@ -40,20 +40,11 @@ runs:
         EXPECTED_SOURCE_SHA: ${{ inputs.source-sha }}
         GH_TOKEN: ${{ inputs.github-token }}
         STATE: ${{ inputs.state }}
-        PACKAGE_INDEX_URL: https://packagefeedproxy.microsoft.io/pypi/simple/
-        PIPX_VERSION: 1.17.2
-        SHARED_PIP_SPEC: pip==26.2.1
-        SHARED_PIP_SHA256: 71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e
-        PIP_DISABLE_PIP_VERSION_CHECK: "1"
-        PIP_NO_INPUT: "1"
-        PIP_KEYRING_PROVIDER: disabled
-        PIP_EXTRA_INDEX_URL: ""
         PYTHONSAFEPATH: "1"
       run: |
         set -euo pipefail
         umask 077
         unset PYTHONPATH PYTHONHOME
-        export PIP_CONFIG_FILE=/dev/null
 
         python - "$STATE" "$RUNNER_TEMP" "$EXPECTED_REPOSITORY" \
           "$GITHUB_REPOSITORY" "$EXPECTED_RELEASE" "$EXPECTED_SOURCE_SHA" <<'PY'
@@ -207,99 +198,152 @@ runs:
         PY
 
         gh attestation trusted-root > "$STATE/trust/trusted-root.json"
-        python - "$STATE/download/siteops-install.zip" "$STATE/bundle" <<'PY'
+        unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
+        if [[ -n "${UV_INSECURE_HOST:-}${UV_PYTHON_DOWNLOADS_JSON_URL:-}${UV_PYTHON_INSTALL_MIRROR:-}" ||
+              -n "${UV_INSECURE_NO_ZIP_VALIDATION:-}" &&
+              "${UV_INSECURE_NO_ZIP_VALIDATION}" != "0" &&
+              "${UV_INSECURE_NO_ZIP_VALIDATION}" != "false" ]]; then
+          echo "::error::The published E2E runtime source is not admitted."
+          exit 1
+        fi
+        while IFS= read -r name; do
+          case "$name" in UV_*|PIP_*|PYTHON*) unset "$name" ;; esac
+        done < <(compgen -e)
+        mkdir "$STATE/tools" "$STATE/bin" "$STATE/python" "$STATE/cache" "$STATE/home" "$STATE/helper"
+        export HOME="$STATE/home"
+        export XDG_DATA_HOME="$STATE/home"
+        export XDG_CONFIG_HOME="$STATE/home"
+        export UV_TOOL_DIR="$STATE/tools"
+        export UV_TOOL_BIN_DIR="$STATE/bin"
+        export UV_PYTHON_INSTALL_DIR="$STATE/python"
+        export UV_CACHE_DIR="$STATE/cache"
+        export UV_PYTHON_DOWNLOADS=never
+        curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+          --tlsv1.2 --max-redirs 3 --max-time 180 --max-filesize 19827214 \
+          --output "$STATE/uv.tar.gz" \
+          https://github.com/astral-sh/uv/releases/download/0.12.20/uv-x86_64-unknown-linux-gnu.tar.gz \
+          2> "$STATE/uv-download.log" ||
+          { echo "::error::Pinned native uv could not be acquired."; exit 1; }
+        if [[ "$(wc -c < "$STATE/uv.tar.gz")" -ne 19827214 ||
+              "$(sha256sum "$STATE/uv.tar.gz" | cut -d ' ' -f 1)" != 6590717592ace991ff83a63fef799e3ad9d33ecc8f96c5d6bdd732496e79337f ]]; then
+          echo "::error::The native uv archive differs from the selected release."
+          exit 1
+        fi
+        tar -xzOf "$STATE/uv.tar.gz" uv-x86_64-unknown-linux-gnu/uv > "$STATE/uv" \
+          2> "$STATE/uv-extract.log" ||
+          { echo "::error::Pinned native uv could not be extracted."; exit 1; }
+        if [[ "$(wc -c < "$STATE/uv")" -ne 50437584 ||
+              "$(sha256sum "$STATE/uv" | cut -d ' ' -f 1)" != b8299463da6fa7da3b94464444d252d0afca8ac6c96cb229f1baf4012f365246 ]]; then
+          echo "::error::The native uv executable differs from the selected release."
+          exit 1
+        fi
+        chmod 700 "$STATE/uv"
+        UV_PYTHON_DOWNLOADS=automatic "$STATE/uv" python install 3.11.16 \
+          --no-bin --no-registry --no-config --no-progress --system-certs \
+          > "$STATE/python-install.log" 2>&1 ||
+          { echo "::error::The published E2E managed Python could not be provisioned."; exit 1; }
+        app_python="$STATE/python/cpython-3.11.16-linux-x86_64-gnu/bin/python3.11"
+        python -I -S -B - "$STATE" "$app_python" <<'PY'
+        import os
+        import stat
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        state, executable = map(Path, sys.argv[1:])
+        concrete = state / "python/cpython-3.11.16-linux-x86_64-gnu"
+        if (state.is_symlink() or state.stat().st_uid != os.getuid()
+                or state.stat().st_mode & 0o077 or not concrete.is_dir()
+                or concrete.is_symlink()):
+            raise SystemExit("The published E2E tool and runtime storage is not private.")
+        count = 0
+        for directory, folders, files in os.walk(concrete, followlinks=False):
+            for name in folders + files:
+                count += 1
+                path = Path(directory) / name
+                info = path.lstat()
+                if (count > 16384 or (not stat.S_ISLNK(info.st_mode)
+                        and (info.st_uid not in {0, os.getuid()} or info.st_mode & 0o022))
+                        or (stat.S_ISLNK(info.st_mode)
+                            and not path.resolve(strict=True).is_relative_to(concrete))):
+                    raise SystemExit("The published E2E managed runtime is not admitted.")
+        if not executable.is_file() or executable.is_symlink():
+            raise SystemExit("The published E2E managed runtime is incomplete.")
+        identity = subprocess.run(
+            [str(executable), "-I", "-S", "-B", "-c",
+             "import sys;print(sys.implementation.name, *sys.version_info[:3], "
+             "sys.maxsize > 2**32, sys._base_executable)"],
+            capture_output=True, text=True, timeout=20, check=True,
+        )
+        if identity.stdout.strip() != f"cpython 3 11 16 True {executable}":
+            raise SystemExit("The published E2E managed runtime has another identity.")
+        PY
+        python -I -S -B - "$STATE/download/siteops-install.zip" "$STATE/helper" <<'PY'
         import stat
         import sys
         import zipfile
-        from pathlib import Path, PurePosixPath
+        from pathlib import Path
 
-        archive, output = Path(sys.argv[1]), Path(sys.argv[2])
-        output.mkdir()
-        with zipfile.ZipFile(archive) as package:
-            members = package.infolist()
-            if not 1 <= len(members) <= 4096:
-                raise SystemExit("The installation archive inventory is invalid.")
-            seen = set()
-            total = 0
-            for member in members:
-                name = member.filename
-                path = PurePosixPath(name)
-                mode = member.external_attr >> 16
-                key = name.casefold()
-                total += member.file_size
-                if (
-                    not name
-                    or "\\" in name
-                    or path.is_absolute()
-                    or ".." in path.parts
-                    or stat.S_ISLNK(mode)
-                    or key in seen
-                    or total > 256 * 1024 * 1024
-                ):
-                    raise SystemExit("The installation archive contains an unsafe member.")
-                seen.add(key)
-            package.extractall(output)
+        with zipfile.ZipFile(sys.argv[1]) as archive:
+            entries = [member for member in archive.infolist()
+                       if member.filename.casefold() == "siteops-install.py"]
+            if (len(entries) != 1 or entries[0].filename != "siteops-install.py"
+                    or not 0 < entries[0].file_size <= 1048576
+                    or stat.S_IFMT(entries[0].external_attr >> 16) not in (0, stat.S_IFREG)):
+                raise SystemExit("The authenticated bundle has no valid installer helper.")
+            with archive.open(entries[0]) as stream:
+                content = stream.read(1048577)
+            if len(content) != entries[0].file_size:
+                raise SystemExit("The authenticated installer helper is incomplete.")
+        with (Path(sys.argv[2]) / "siteops-install.py").open("xb") as output:
+            output.write(content)
         PY
+        python -I -S -B - "$STATE/uv" "$STATE/helper/siteops-install.py" <<'PY'
+        import os
+        import stat
+        import sys
+        from pathlib import Path
 
-        python -m venv "$STATE/tooling"
-        PIP_INDEX_URL="$PACKAGE_INDEX_URL" "$STATE/tooling/bin/python" -m pip install \
-          --no-cache-dir \
-          "pipx==$PIPX_VERSION"
-        mkdir "$STATE/tool-wheels"
-        printf '%s \\\n    --hash=sha256:%s\n' \
-          "$SHARED_PIP_SPEC" "$SHARED_PIP_SHA256" > "$STATE/pip-requirements.txt"
-        PIP_INDEX_URL="$PACKAGE_INDEX_URL" "$STATE/tooling/bin/python" -m pip download \
-          --no-cache-dir \
-          --require-hashes \
-          --only-binary=:all: \
-          --no-deps \
-          --dest "$STATE/tool-wheels" \
-          --requirement "$STATE/pip-requirements.txt"
-        export PIPX_HOME="$STATE/pipx"
-        export PIPX_BIN_DIR="$STATE/pipx-bin"
-        export PIPX_MAN_DIR="$STATE/pipx-man"
-        export PIPX_COMPLETION_DIR="$STATE/pipx-completions"
-        export PIPX_SHARED_LIBS="$STATE/pipx-shared"
-        export PIPX_DEFAULT_PYTHON="$(command -v python)"
-        export PIPX_USE_EMOJI=0
-        export PIP_CACHE_DIR="$STATE/pip-cache"
-        wheelhouse="$(python -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).as_uri())' "$STATE/tool-wheels")"
-        "$STATE/tooling/bin/pipx" upgrade-shared \
-          --pip-args "--no-index --only-binary=:all: --no-cache-dir --force-reinstall --find-links=$wheelhouse"
-        "$STATE/tooling/bin/pipx" install siteops \
-          --lock "$STATE/bundle/pylock.toml" \
-          --backend pip \
-          --fetch-python never \
-          --skip-maintenance \
-          --app siteops \
-          --pip-args "--isolated --require-hashes --no-index --only-binary=:all: --no-cache-dir"
-        export PATH="$PIPX_BIN_DIR:$PATH"
-        backend_version="$("$STATE/tooling/bin/pipx" runpip siteops --version)"
-        if [[ "${backend_version%% from *}" != "pip ${SHARED_PIP_SPEC#pip==}" ]]; then
-          echo "::error::The published E2E application uses an unexpected pip backend."
+        for name in sys.argv[1:]:
+            path = Path(name)
+            info = path.lstat()
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                    or info.st_mode & 0o022 or path.is_symlink()):
+                raise SystemExit("The published E2E executable storage is not admitted.")
+        PY
+        "$app_python" -I -S -B "$STATE/helper/siteops-install.py" install \
+          "$STATE/download/siteops-install.zip" "$STATE/bundle" "$EXPECTED_REPOSITORY" \
+          "$EXPECTED_SOURCE_SHA" "$source_ref" "$STATE/uv" "$UV_TOOL_DIR" "$UV_TOOL_BIN_DIR" \
+          > "$STATE/installed.json" 2> "$STATE/install.log" ||
+          { echo "::error::The authenticated published bundle could not be installed."; exit 1; }
+        if [[ ! -s "$STATE/installed.json" ||
+              "$(wc -c < "$STATE/installed.json")" -gt 4096 ]]; then
+          echo "::error::The authenticated installer returned an invalid receipt."
           exit 1
         fi
-
-        package_version="$(python - "$STATE/bundle/bundle.json" <<'PY'
+        package_version="$(python -I -S -B - "$STATE/installed.json" <<'PY'
         import json
         import sys
         from pathlib import Path
 
-        document = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-        package = document.get("package")
-        version = package.get("version") if isinstance(package, dict) else None
-        if not isinstance(version, str) or not version:
+        result = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+        version = result.get("version")
+        if (not isinstance(version, str) or not version
+                or not isinstance(result.get("wheel"), str)
+                or not result["wheel"].startswith("wheels/")):
             raise SystemExit("The authenticated bundle has no package version.")
         print(version)
         PY
         )"
-        observed="$(cd "$STATE" && siteops --version)"
+        observed="$(cd "$STATE" && "$UV_TOOL_BIN_DIR/siteops" --version 2> "$STATE/version.log")" ||
+          { echo "::error::The installed published command could not be executed."; exit 1; }
         if [[ "$observed" != "siteops $package_version" ]]; then
           echo "::error::The installed command does not match the authenticated bundle."
           exit 1
         fi
-        "$PIPX_HOME/venvs/siteops/bin/python" -I - \
-          "$GITHUB_WORKSPACE" "$package_version" <<'PY'
+        if ! "$UV_TOOL_DIR/siteops/bin/python" -I - \
+          "$GITHUB_WORKSPACE" "$UV_TOOL_DIR" "$package_version" \
+          > "$STATE/origin.log" 2>&1 <<'PY'
         import importlib.metadata
         import sys
         from pathlib import Path
@@ -308,11 +352,15 @@ runs:
         import siteops
 
         module = Path(siteops.__file__).resolve()
-        if module.is_relative_to(source):
+        if module.is_relative_to(source) or not module.is_relative_to(Path(sys.argv[2]).resolve()):
             raise SystemExit("Published E2E imported Site Ops from checkout.")
-        if importlib.metadata.version("siteops") != sys.argv[2]:
+        if importlib.metadata.version("siteops") != sys.argv[3]:
             raise SystemExit("The installed Site Ops package version changed.")
         PY
+        then
+          echo "::error::The installed published package has an unexpected origin or version."
+          exit 1
+        fi
 
         root_digest="$(sha256sum "$STATE/trust/trusted-root.json" | cut -d ' ' -f 1)"
         root_size="$(wc -c < "$STATE/trust/trusted-root.json")"
@@ -356,5 +404,5 @@ runs:
           echo "SITEOPS_E2E_ENGINE_VERSION=$package_version"
           echo "PYTHONSAFEPATH=1"
         } >> "$GITHUB_ENV"
-        echo "$PIPX_BIN_DIR" >> "$GITHUB_PATH"
+        echo "$UV_TOOL_BIN_DIR" >> "$GITHUB_PATH"
         echo "version=$package_version" >> "$GITHUB_OUTPUT"

@@ -26,6 +26,7 @@ from siteops.github_workspace_source import (
     download_release_asset,
     resolve_workspace_release,
 )
+from siteops.results import ProgressCallback, ProgressEvent, ProgressEventKind, ProgressPhase
 from siteops.workspace_acquisition import WorkspaceAcquisition
 from siteops.workspace_cache import CachedWorkspace, WorkspaceCache
 from siteops.workspace_source import ResolvedWorkspaceSource, SourceResolutionError
@@ -40,18 +41,29 @@ class GitHubWorkspaceAcquirer:
     cached package and proof bytes.
     """
 
-    def __init__(self, cache: WorkspaceCache, *, policy_file: Path, trusted_root: Path):
+    def __init__(
+        self, cache: WorkspaceCache, *, policy_file: Path, trusted_root: Path,
+        progress: ProgressCallback | None = None,
+    ):
         self.cache = cache
         self.policy_file = Path(policy_file).absolute()
         self.trusted_root = Path(trusted_root).absolute()
         self._acquisition = WorkspaceAcquisition(cache, verify=self._verify)
+        self._progress = progress
+
+    def _phase(self, phase: ProgressPhase) -> None:
+        if self._progress is not None:
+            self._progress(ProgressEvent(kind=ProgressEventKind.PHASE_STARTED, phase=phase))
 
     def _policy_for(self, reference: str) -> GitHubArtifactPolicy:
         policy = load_github_policy(self.policy_file)
         if reference.casefold() != f"github:{policy.repository}".casefold():
             raise VerificationError("The selected source differs from the consumer policy repository.")
         if datetime.now(timezone.utc) >= policy.valid_until:
-            raise VerificationError("The artifact verification policy has expired. Refresh it explicitly.")
+            raise VerificationError(
+                "The artifact verification policy has expired. Supply independently reviewed, "
+                "renewed policy and trusted-root files."
+            )
         if hash_file(self.trusted_root, limit=MAX_EVIDENCE_BYTES)[1] != policy.trusted_root_sha256:
             raise VerificationError("The trusted-root snapshot does not match consumer policy.")
         return policy
@@ -62,6 +74,7 @@ class GitHubWorkspaceAcquirer:
         if source.source.provider != "github-release/v1":
             raise VerificationError("This acquisition adapter requires a GitHub release source.")
         policy = self._policy_for(source.source.reference)
+        self._phase(ProgressPhase.VERIFICATION)
         result = verify_github_artifact(
             artifact, proof, self.trusted_root, self.policy_file,
             expected_sha256=source.entry.package.sha256,
@@ -91,6 +104,7 @@ class GitHubWorkspaceAcquirer:
         """Resolve the explicit release and acquire only missing package and proof bytes."""
         reference = client.reference
         self._policy_for(f"github:{reference.owner}/{reference.repository}")
+        self._phase(ProgressPhase.RESOLUTION)
         selected = resolve_workspace_release(
             client, staging_parent=self.cache.root / "staging", workspace=workspace,
         )
@@ -107,6 +121,7 @@ class GitHubWorkspaceAcquirer:
             if error.code not in {"cache.missing", "cache.proof-missing"}:
                 raise
             missing = error.code
+        self._phase(ProgressPhase.DOWNLOAD)
         self._retain_proof(selected)
         if missing == "cache.proof-missing":
             with self._acquisition.lease(selected.resolved):

@@ -214,6 +214,24 @@ def test_fact_mapping_is_closed_boolean_and_not_mutable():
         assert_safe(error, ISSUER, RESOURCE_ID)
 
 
+def test_related_resource_ids_are_private_closed_and_immutable():
+    related = RESOURCE_ID.replace(
+        "Microsoft.Kubernetes/connectedClusters/cluster-1",
+        "Microsoft.ExtendedLocation/customLocations/location-1",
+    )
+    references = {"extendedLocation": related}
+    observation = ArmResourceObservation(RESOURCE_ID, TYPE, "eastus", "cluster-1", {}, references)
+    references["extendedLocation"] = RESOURCE_ID
+    assert observation.references["extendedLocation"] == related
+    assert related not in repr(observation)
+    with pytest.raises(TypeError):
+        observation.references["extendedLocation"] = RESOURCE_ID
+    for invalid in ({"unknown": related}, {"extendedLocation": ISSUER}):
+        with pytest.raises(ArmResourceError) as error:
+            ArmResourceObservation(RESOURCE_ID, TYPE, "eastus", "cluster-1", {}, invalid)
+        assert_safe(error, ISSUER, related)
+
+
 class FakeProcess:
     def __init__(self, stdout=b"", stderr=b"", returncode=0, running=False):
         self.stdout = io.BytesIO(stdout)
@@ -353,6 +371,68 @@ def test_each_cli_read_selects_its_own_subscription(controlled_process):
                 "--only-show-errors",
             ]
         )
+
+
+@pytest.mark.parametrize(
+    ("resource_type", "requested", "body"),
+    [
+        (
+            "Microsoft.HybridCompute/machines",
+            "extendedLocation",
+            {"extendedLocation": {"name": RESOURCE_ID.replace(
+                "Microsoft.Kubernetes/connectedClusters/cluster-1",
+                "Microsoft.ExtendedLocation/customLocations/location-1",
+            )}},
+        ),
+        (
+            "Microsoft.ExtendedLocation/customLocations",
+            "customLocations.hostResourceId",
+            {"properties": {"hostResourceId": RESOURCE_ID}},
+        ),
+    ],
+)
+def test_cli_projects_only_requested_standard_resource_links(controlled_process, resource_type, requested, body):
+    run, calls, _, _ = controlled_process
+    ref = reference(
+        RESOURCE_ID.replace("Microsoft.Kubernetes/connectedClusters", resource_type),
+        resource_type,
+    )
+    run(FakeProcess(response(ref, **body, secret=ISSUER)))
+    observation = arm_resources_azure_cli.AzureCliArmReader().read(
+        ref, references=frozenset({requested}),
+    )
+    assert set(observation.references) == {requested}
+    assert len(calls) == 1
+    assert ISSUER not in repr(observation)
+    assert observation.facts == {}
+
+
+def test_cli_rejects_unsupported_related_field_before_starting_a_process(controlled_process):
+    _, calls, _, _ = controlled_process
+    with pytest.raises(ArmResourceError) as error:
+        arm_resources_azure_cli.AzureCliArmReader().read(
+            reference(), references=frozenset({"customLocations.hostResourceId"}),
+        )
+    assert_safe(error, RESOURCE_ID)
+    assert calls == []
+
+
+@pytest.mark.parametrize("body", [
+    {},
+    {"extendedLocation": None},
+    {"extendedLocation": {"name": ISSUER}},
+    {"extendedLocation": {"name": [RESOURCE_ID]}},
+])
+def test_cli_rejects_missing_or_malformed_related_ids(controlled_process, body):
+    run, calls, _, _ = controlled_process
+    run(FakeProcess(response(**body)))
+    with pytest.raises(ArmResourceError) as error:
+        arm_resources_azure_cli.AzureCliArmReader().read(
+            reference(), references=frozenset({"extendedLocation"}),
+        )
+    assert error.value.code == "INVALID_OBSERVATION"
+    assert_safe(error, ISSUER, RESOURCE_ID)
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize(
@@ -863,7 +943,7 @@ class FakeFutureArmReader:
     def __init__(self, private_document):
         self._document = private_document
 
-    def read(self, ref, *, facts=frozenset()):
+    def read(self, ref, *, facts=frozenset(), references=frozenset()):
         document = self._document
         observation = ArmResourceObservation(
             resource_id=document["id"],
@@ -871,10 +951,26 @@ class FakeFutureArmReader:
             location=document["location"],
             name=document["name"],
             facts=arm_resources.normalize_arm_resource_facts(ref, document, facts=facts),
+            references=arm_resources.normalize_arm_resource_references(ref, document, references=references),
         )
         validate_arm_observation(ref, observation)
         return observation
 
+
+def test_cli_and_future_provider_use_identical_reference_projection(controlled_process):
+    run, _, _, _ = controlled_process
+    related = RESOURCE_ID.replace(
+        "Microsoft.Kubernetes/connectedClusters/cluster-1",
+        "Microsoft.ExtendedLocation/customLocations/location-1",
+    )
+    document = json.loads(response(extendedLocation={"name": related}, privateValue=ISSUER))
+    requested = frozenset({"extendedLocation"})
+    run(FakeProcess(json.dumps(document).encode("utf-8")))
+    cli = arm_resources_azure_cli.AzureCliArmReader().read(reference(), references=requested)
+    alternative = FakeFutureArmReader(document).read(reference(), references=requested)
+    assert cli == alternative
+    assert cli.references == {"extendedLocation": related}
+    assert related not in repr(cli) and ISSUER not in repr(cli)
 
 @pytest.mark.parametrize(
     ("properties", "expected"),

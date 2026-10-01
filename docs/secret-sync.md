@@ -106,6 +106,11 @@ Both steps are gated by a `when` condition and only run for sites that have `ena
 
 ### Option 2: Standalone day-2 enablement (existing instances)
 
+For AIO 2607 or 2608, the [guided instance-ID route](guided-inputs.md#enable-secret-sync-on-an-existing-instance)
+needs only the existing instance resource ID and explicit read permission.
+It resolves the related cluster and checks identity prerequisites before
+deployment. Optional answers select an existing vault or override Site labels.
+
 Use the standalone manifest to enable secret sync on instances that are already deployed:
 
 ```bash

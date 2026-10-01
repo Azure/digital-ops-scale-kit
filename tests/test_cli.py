@@ -15,6 +15,7 @@ import sys
 import threading
 from argparse import Namespace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -47,6 +48,14 @@ from siteops.results import (
     RunResult,
     SiteResult,
 )
+
+
+def _prepared_plan():
+    return SimpleNamespace(
+        executable=True,
+        status=PlanStatus.PLANNED,
+        plan=SimpleNamespace(targets=(object(),)),
+    )
 
 
 class TestResolveManifestPath:
@@ -194,13 +203,8 @@ class TestCmdValidate:
         assert captured.out == ""
         assert "Template not found" in captured.err
 
-    def test_validate_plan_shows_the_deployment_plan(self, complete_workspace, capsys):
-        """`validate --plan` shows the deployment plan after validation.
-
-        This asked for `verbose` and got a plan, because a mock argument bag
-        returns a truthy child for an attribute the test never set. The flag
-        that renders a plan is `plan`.
-        """
+    def test_plan_describe_shows_the_deployment_plan(self, complete_workspace, capsys):
+        """A compile-free description still names the selected plan shape."""
         from siteops.orchestrator import Orchestrator
 
         orchestrator = Orchestrator(complete_workspace)
@@ -210,9 +214,9 @@ class TestCmdValidate:
         args.manifest = manifest_path
         args.workspace = complete_workspace
         args.selector = None
-        args.plan = True
+        args.describe = True
 
-        exit_code = cmd_validate(args, orchestrator)
+        exit_code = cmd_plan(args, orchestrator)
 
         assert exit_code == 0
         captured = capsys.readouterr()
@@ -221,7 +225,7 @@ class TestCmdValidate:
         assert "Sites" in captured.out
         assert "Steps" in captured.out
 
-    def test_validate_plan_json_emits_one_document(
+    def test_plan_describe_json_emits_one_document(
         self,
         complete_workspace,
         capsys,
@@ -235,13 +239,13 @@ class TestCmdValidate:
             manifest=manifest_path,
             workspace=complete_workspace,
             selector=None,
-            plan=True,
+            describe=True,
             output="json",
             projection="local-private",
             verbose=False,
         )
 
-        exit_code = cmd_validate(
+        exit_code = cmd_plan(
             args,
             Orchestrator(complete_workspace),
         )
@@ -256,7 +260,7 @@ class TestCmdValidate:
         assert document["status"] == "planned"
         assert "Manifest is valid" not in captured.out
 
-    def test_validate_plan_json_defaults_to_publishable_in_ci(
+    def test_plan_describe_json_defaults_to_publishable_in_ci(
         self,
         complete_workspace,
         capsys,
@@ -272,13 +276,13 @@ class TestCmdValidate:
             manifest=manifest_path,
             workspace=complete_workspace,
             selector=None,
-            plan=True,
+            describe=True,
             output="json",
             projection=None,
             verbose=False,
         )
 
-        exit_code = cmd_validate(
+        exit_code = cmd_plan(
             args,
             Orchestrator(complete_workspace),
         )
@@ -346,7 +350,7 @@ class TestCmdValidate:
                 "publishable" if redacted else "local-private"
             )
 
-    def test_validate_failure_json_uses_typed_envelope(
+    def test_plan_failure_json_uses_typed_envelope(
         self,
         complete_workspace,
         capsys,
@@ -375,13 +379,13 @@ class TestCmdValidate:
             manifest=manifest_path,
             workspace=complete_workspace,
             selector=None,
-            plan=True,
+            describe=True,
             output="json",
             projection=None,
             verbose=False,
         )
 
-        exit_code = cmd_validate(
+        exit_code = cmd_plan(
             args,
             Orchestrator(complete_workspace),
         )
@@ -415,13 +419,13 @@ class TestCmdValidate:
             manifest=manifest_path,
             workspace=complete_workspace,
             selector=None,
-            plan=True,
+            describe=True,
             output="json",
             projection="local-private",
             verbose=False,
         )
 
-        exit_code = cmd_validate(
+        exit_code = cmd_plan(
             args,
             Orchestrator(complete_workspace),
         )
@@ -430,36 +434,6 @@ class TestCmdValidate:
         assert exit_code == 1
         assert captured.out == ""
         assert "local-private" in captured.err
-
-    def test_json_output_requires_plan(
-        self,
-        complete_workspace,
-        capsys,
-    ):
-        from siteops.orchestrator import Orchestrator
-
-        manifest_path = (
-            complete_workspace / "manifests" / "test-manifest.yaml"
-        )
-        args = Namespace(
-            manifest=manifest_path,
-            workspace=complete_workspace,
-            selector=None,
-            plan=False,
-            output="json",
-            projection=None,
-            verbose=False,
-        )
-
-        exit_code = cmd_validate(
-            args,
-            Orchestrator(complete_workspace),
-        )
-
-        captured = capsys.readouterr()
-        assert exit_code == 1
-        assert captured.out == ""
-        assert "--output json requires --plan" in captured.err
 
     def test_validate_library_manifest_prints_note(self, complete_workspace, capsys):
         """A library/partial manifest (no `sites:` and no `selector:`)
@@ -537,9 +511,11 @@ class TestCmdValidate:
         args.manifest = manifest_path
         args.workspace = complete_workspace
         args.selector = None
-        args.plan = request_plan
-
-        exit_code = cmd_validate(args, orchestrator)
+        if request_plan:
+            args.describe = True
+            exit_code = cmd_plan(args, orchestrator)
+        else:
+            exit_code = cmd_validate(args, orchestrator)
 
         assert exit_code == (1 if request_plan else 0)
         captured = capsys.readouterr()
@@ -573,9 +549,9 @@ class TestCmdValidate:
         args.manifest = manifest_path
         args.workspace = complete_workspace
         args.selector = None
-        args.plan = True
+        args.describe = True
 
-        exit_code = cmd_validate(args, orchestrator)
+        exit_code = cmd_plan(args, orchestrator)
 
         assert exit_code == 1
         captured = capsys.readouterr()
@@ -837,7 +813,7 @@ class TestCmdDeploy:
     """Tests for the deploy command."""
 
     def test_deploy_success(self, complete_workspace):
-        """Test successful deployment returns exit code 0."""
+        """Deploy executes the plan it prepared, rather than rebuilding it."""
         from siteops.orchestrator import Orchestrator
 
         orchestrator = Orchestrator(complete_workspace)
@@ -848,16 +824,24 @@ class TestCmdDeploy:
         args.workspace = complete_workspace
         args.selector = None
         args.parallel = None
+        args.yes = True
+        prepared = _prepared_plan()
 
         with (
-            patch.object(orchestrator, "deploy") as mock_deploy,
+            patch.object(orchestrator, "build_plan", return_value=prepared) as build,
+            patch.object(orchestrator, "execute_plan") as execute,
             patch("siteops.cli._write_run_result"),
         ):
-            mock_deploy.return_value = MagicMock(spec=RunResult, exit_code=0)
+            execute.return_value = MagicMock(spec=RunResult, exit_code=0)
 
             exit_code = cmd_deploy(args, orchestrator)
 
         assert exit_code == 0
+        build.assert_called_once_with(
+            manifest_path, selector=None, parallel_override=None,
+            intent=PlanIntent.EXECUTABLE,
+        )
+        assert execute.call_args.args[0] is prepared
 
     def test_deploy_manifest_not_found(self, complete_workspace, capsys):
         """Test deploy with missing manifest returns exit code 1."""
@@ -1182,16 +1166,21 @@ class TestCmdDeploy:
         args.workspace = complete_workspace
         args.selector = None
         args.parallel = None
+        args.yes = True
+        prepared = _prepared_plan()
 
         with (
-            patch.object(orchestrator, "deploy") as mock_deploy,
+            patch.object(orchestrator, "build_plan", return_value=prepared) as build,
+            patch.object(orchestrator, "execute_plan") as execute,
             patch("siteops.cli._write_run_result"),
         ):
-            mock_deploy.return_value = MagicMock(spec=RunResult, exit_code=1)
+            execute.return_value = MagicMock(spec=RunResult, exit_code=1)
 
             exit_code = cmd_deploy(args, orchestrator)
 
         assert exit_code == 1
+        build.assert_called_once()
+        assert execute.call_args.args[0] is prepared
 
     def test_deploy_with_parallel_override(self, complete_workspace):
         """Test deploy passes parallel override to orchestrator."""
@@ -1205,17 +1194,21 @@ class TestCmdDeploy:
         args.workspace = complete_workspace
         args.selector = None
         args.parallel = 3
+        args.yes = True
+        prepared = _prepared_plan()
 
         with (
-            patch.object(orchestrator, "deploy") as mock_deploy,
+            patch.object(orchestrator, "build_plan", return_value=prepared) as build,
+            patch.object(orchestrator, "execute_plan") as execute,
             patch("siteops.cli._write_run_result"),
         ):
-            mock_deploy.return_value = MagicMock(spec=RunResult, exit_code=0)
+            execute.return_value = MagicMock(spec=RunResult, exit_code=0)
 
             cmd_deploy(args, orchestrator)
 
-            call_kwargs = mock_deploy.call_args.kwargs
+            call_kwargs = build.call_args.kwargs
             assert call_kwargs["parallel_override"] == 3
+            assert execute.call_args.args[0] is prepared
 
     def test_deploy_negative_parallel_rejected(self, complete_workspace, capsys):
         """Negative --parallel value is rejected at argparse time."""
@@ -1226,7 +1219,7 @@ class TestCmdDeploy:
                 "siteops",
                 "-w",
                 str(complete_workspace),
-                "deploy",
+                "deploy", "--yes",
                 "manifests/test-manifest.yaml",
                 "--parallel",
                 "-1",
@@ -1247,7 +1240,7 @@ class TestCmdDeploy:
                     "siteops",
                     "-w",
                     str(complete_workspace),
-                    "deploy",
+                    "deploy", "--yes",
                     "manifests/test-manifest.yaml",
                     "--parallel",
                     alias,
@@ -1269,7 +1262,7 @@ class TestCmdDeploy:
                 "siteops",
                 "-w",
                 str(complete_workspace),
-                "deploy",
+                "deploy", "--yes",
                 "manifests/test-manifest.yaml",
                 "--parallel",
                 "bogus",
@@ -1291,17 +1284,21 @@ class TestCmdDeploy:
         args.workspace = complete_workspace
         args.selector = "environment=dev"
         args.parallel = None
+        args.yes = True
+        prepared = _prepared_plan()
 
         with (
-            patch.object(orchestrator, "deploy") as mock_deploy,
+            patch.object(orchestrator, "build_plan", return_value=prepared) as build,
+            patch.object(orchestrator, "execute_plan") as execute,
             patch("siteops.cli._write_run_result"),
         ):
-            mock_deploy.return_value = MagicMock(spec=RunResult, exit_code=0)
+            execute.return_value = MagicMock(spec=RunResult, exit_code=0)
 
             cmd_deploy(args, orchestrator)
 
-            call_kwargs = mock_deploy.call_args.kwargs
+            call_kwargs = build.call_args.kwargs
             assert call_kwargs["selector"] == "environment=dev"
+            assert execute.call_args.args[0] is prepared
 
 
 class TestMainArgumentParsing:
@@ -1463,7 +1460,7 @@ class TestMainArgumentParsing:
         with patch.object(
             sys,
             "argv",
-            ["siteops", "-w", str(complete_workspace), "deploy"],
+            ["siteops", "-w", str(complete_workspace), "deploy", "--yes"],
         ):
             with pytest.raises(SystemExit) as exc_info:
                 main()
@@ -1480,34 +1477,31 @@ class TestMainArgumentParsing:
                 main()
             assert exc_info.value.code != 0
 
-    def test_deploy_dry_run_flag(self, complete_workspace):
-        """Test --dry-run flag is parsed correctly."""
-        manifest_path = complete_workspace / "manifests" / "test-manifest.yaml"
-
-        with patch.object(
-            sys,
-            "argv",
-            [
-                "siteops",
-                "-w",
-                str(complete_workspace),
-                "deploy",
-                str(manifest_path),
-                "--dry-run",
-            ],
+    @pytest.mark.parametrize("arguments", [
+        ["validate", "aio-install", "--plan"],
+        ["validate", "aio-install", "--output", "json"],
+        ["validate", "aio-install", "--projection", "publishable"],
+        ["validate", "aio-install", "--read-resources"],
+        ["deploy", "aio-install", "--dry-run"],
+        ["deploy", "aio-install", "--dry-run=true"],
+        ["plan", "aio-install", "--read-resources"],
+        ["deploy", "aio-install", "--read-resources"],
+        *[[command, "aio-install", "--offline"]
+          for command in ("inputs", "validate", "plan", "deploy")],
+        ["browse", "--offline"],
+    ])
+    def test_removed_preview_options_fail_before_content_access(self, capsys, arguments):
+        with (
+            patch.object(sys, "argv", ["siteops", *arguments]),
+            patch("siteops.cli.open_command_context", side_effect=AssertionError("No content read")),
         ):
-            with patch("siteops.cli.Orchestrator") as MockOrchestrator:
-                mock_instance = MagicMock()
-                mock_instance.resolve_sites.return_value = []
-                MockOrchestrator.return_value = mock_instance
-
-                with pytest.raises(SystemExit):
-                    main()
-
-                # Verify Orchestrator was created with dry_run=True
-                MockOrchestrator.assert_called_once()
-                call_kwargs = MockOrchestrator.call_args.kwargs
-                assert call_kwargs["dry_run"] is True
+            with pytest.raises(SystemExit) as stopped:
+                main()
+        assert stopped.value.code == 2
+        output = capsys.readouterr()
+        assert output.out == ""
+        assert "unrecognized arguments:" in output.err
+        assert arguments[-1].split("=")[0] in output.err or "--dry-run" in output.err
 
     def test_deploy_parallel_flag(self, complete_workspace):
         """Test -p/--parallel flag is parsed correctly."""
@@ -1520,7 +1514,7 @@ class TestMainArgumentParsing:
                 "siteops",
                 "-w",
                 str(complete_workspace),
-                "deploy",
+                "deploy", "--yes",
                 str(manifest_path),
                 "-p",
                 "5",
@@ -1545,7 +1539,7 @@ class TestMainArgumentParsing:
                 "siteops",
                 "-w",
                 str(complete_workspace),
-                "deploy",
+                "deploy", "--yes",
                 str(manifest_path),
                 "-l",
                 "env=prod",
@@ -1570,7 +1564,7 @@ class TestMainArgumentParsing:
                 "siteops",
                 "-w",
                 str(complete_workspace),
-                "deploy",
+                "deploy", "--yes",
                 str(manifest_path),
                 "-l",
                 "name=a",
@@ -1590,9 +1584,8 @@ class TestMainArgumentParsing:
                 # name-OR and non-name-error rules.
                 assert args.selector == "name=a,name=b,env=prod"
 
-    def test_validate_plan_flag(self, complete_workspace):
-        """`--plan` asks for the deployment plan. It used to be `-v`, which
-        also raised log verbosity, so one flag meant two unrelated things."""
+    def test_plan_describe_flag(self, complete_workspace):
+        """Plan description is independent of global log verbosity."""
         manifest_path = complete_workspace / "manifests" / "test-manifest.yaml"
 
         with patch.object(
@@ -1602,19 +1595,18 @@ class TestMainArgumentParsing:
                 "siteops",
                 "-w",
                 str(complete_workspace),
-                "validate",
+                "plan",
                 str(manifest_path),
-                "--plan",
+                "--describe",
             ],
         ):
-            with patch("siteops.cli.cmd_validate") as mock_cmd:
+            with patch("siteops.cli.cmd_plan") as mock_cmd:
                 mock_cmd.return_value = 0
                 with pytest.raises(SystemExit):
                     main()
 
                 args = mock_cmd.call_args[0][0]
-                assert args.plan is True
-                # Asking for the plan does not turn on debug logging.
+                assert args.describe is True
                 assert args.verbose is False
 
     def test_plan_command_defaults_to_executable_preflight(
@@ -1653,8 +1645,7 @@ class TestMainArgumentParsing:
                 assert args.projection == "publishable"
 
     def test_verbose_is_global_and_reaches_every_subcommand(self, complete_workspace):
-        """`-v` is global, so `deploy` can have it. Without that, a dry run
-        could not show the commands it would have run."""
+        """Global verbosity does not change the plan's preparation intent."""
         manifest_path = complete_workspace / "manifests" / "test-manifest.yaml"
 
         with patch.object(
@@ -1665,19 +1656,18 @@ class TestMainArgumentParsing:
                 "-v",
                 "-w",
                 str(complete_workspace),
-                "deploy",
+                "plan",
                 str(manifest_path),
-                "--dry-run",
             ],
         ):
-            with patch("siteops.cli.cmd_deploy") as mock_cmd:
+            with patch("siteops.cli.cmd_plan") as mock_cmd:
                 mock_cmd.return_value = 0
                 with pytest.raises(SystemExit):
                     main()
 
                 args = mock_cmd.call_args[0][0]
                 assert args.verbose is True
-                assert args.dry_run is True
+                assert args.describe is False
 
     def test_sites_show_sources_flag(self, complete_workspace):
         """`--show-sources` names what it does. It used to be spelled `-v`."""
@@ -2215,14 +2205,7 @@ location: eastus
 
 
 class TestPlanOutputIsSeparateFromLogVerbosity:
-    """Asking for a plan and asking for debug logs are different requests.
-
-    They used to be one flag, which meant a plan on a published surface also
-    raised log verbosity there, and `deploy` could ask for neither. These use a
-    real `Namespace` rather than a mock argument bag, because an unset
-    attribute on a mock is a truthy child mock, so a mock cannot tell the
-    difference between a flag that was passed and one that was not.
-    """
+    """Planning and log verbosity are independent command choices."""
 
     def _args(self, workspace, manifest, **overrides):
         from argparse import Namespace
@@ -2231,51 +2214,43 @@ class TestPlanOutputIsSeparateFromLogVerbosity:
             "manifest": manifest,
             "workspace": workspace,
             "selector": None,
-            "plan": False,
             "verbose": False,
         }
         values.update(overrides)
         return Namespace(**values)
 
-    @pytest.mark.parametrize(
-        ("plan", "verbose", "expect_plan"),
-        [(False, False, False), (True, False, True), (False, True, False), (True, True, True)],
-        ids=["neither", "plan-only", "verbose-only", "both"],
-    )
-    def test_validate_shows_a_plan_for_plan_not_for_verbose(
-        self, complete_workspace, plan, verbose, expect_plan
+    @pytest.mark.parametrize("verbose", [False, True])
+    def test_validate_never_builds_a_plan(
+        self, complete_workspace, verbose
     ):
         from siteops.orchestrator import Orchestrator
 
         orchestrator = Orchestrator(complete_workspace)
         manifest = complete_workspace / "manifests" / "test-manifest.yaml"
-        args = self._args(complete_workspace, manifest, plan=plan, verbose=verbose)
+        args = self._args(complete_workspace, manifest, verbose=verbose)
 
         with patch.object(
             orchestrator,
             "build_plan",
-            wraps=orchestrator.build_plan,
+            side_effect=AssertionError("Validate must remain compile-free"),
         ) as build_plan:
             exit_code = cmd_validate(args, orchestrator)
 
         assert exit_code == 0
-        assert build_plan.called is expect_plan
+        build_plan.assert_not_called()
 
-    @pytest.mark.parametrize("dry_run", [True, False], ids=["dry-run", "real-run"])
-    def test_deploy_shows_a_plan_only_on_a_dry_run(self, complete_workspace, dry_run):
-        """A dry run reports what a real run would do, so it shows the plan
-        without being asked. A real run does the thing instead of describing
-        it, and its own output covers what happened."""
+    def test_deploy_prepares_once_and_executes_that_plan(self, complete_workspace):
         from siteops.orchestrator import Orchestrator
 
         orchestrator = Orchestrator(complete_workspace)
         manifest = complete_workspace / "manifests" / "test-manifest.yaml"
-        args = self._args(complete_workspace, manifest, dry_run=dry_run, parallel=None)
+        args = self._args(
+            complete_workspace, manifest, yes=True, parallel=None,
+            output="plain",
+        )
 
         completed_run = MagicMock(spec=RunResult, exit_code=0)
-        prepared = MagicMock()
-        prepared.executable = True
-        prepared.status = PlanStatus.PLANNED
+        prepared = _prepared_plan()
         with (
             patch.object(
                 orchestrator,
@@ -2284,29 +2259,27 @@ class TestPlanOutputIsSeparateFromLogVerbosity:
             ) as build_plan,
             patch(
                 "siteops.cli.render_plain_plan",
-                return_value="plan\n",
+                side_effect=AssertionError("Unattended approval must not reveal a private plan"),
             ) as render_plan,
             patch.object(
                 orchestrator,
-                "deploy",
+                "execute_plan",
                 return_value=completed_run,
-            ) as deploy,
+            ) as execute,
             patch("siteops.cli._write_run_result") as write_result,
         ):
             exit_code = cmd_deploy(args, orchestrator)
 
         assert exit_code == 0
-        assert build_plan.called is dry_run
-        assert render_plan.called is dry_run
-        assert write_result.called is not dry_run
-        if dry_run:
-            deploy.assert_not_called()
-        else:
-            deploy.assert_called_once()
-            assert deploy.call_args.args == (manifest,)
-            assert deploy.call_args.kwargs["selector"] is None
-            assert deploy.call_args.kwargs["parallel_override"] is None
-            assert callable(deploy.call_args.kwargs["progress"])
+        build_plan.assert_called_once_with(
+            manifest, selector=None, parallel_override=None,
+            intent=PlanIntent.EXECUTABLE,
+        )
+        render_plan.assert_not_called()
+        write_result.assert_called_once()
+        execute.assert_called_once()
+        assert execute.call_args.args[0] is prepared
+        assert callable(execute.call_args.kwargs["progress"])
 
     @pytest.mark.parametrize(
         ("describe", "intent"),
@@ -2367,7 +2340,7 @@ class TestPlanOutputIsSeparateFromLogVerbosity:
         args = self._args(
             complete_workspace,
             manifest,
-            dry_run=False,
+            yes=True,
             parallel=None,
         )
         from siteops.orchestrator import Orchestrator
@@ -2476,7 +2449,7 @@ steps:
         ]
         assert "bad-site" not in json.dumps(document)
 
-    def test_dry_run_reports_composition_error_without_traceback(
+    def test_plan_reports_composition_error_without_traceback(
         self,
         complete_workspace,
         capsys,
@@ -2489,7 +2462,7 @@ steps:
         args = self._args(
             complete_workspace,
             manifest,
-            dry_run=True,
+            describe=False,
             parallel=None,
         )
 
@@ -2499,17 +2472,17 @@ steps:
                 "build_plan",
                 side_effect=CompositionError("reference does not resolve"),
             ),
-            patch.object(orchestrator, "deploy") as deploy,
+            patch.object(orchestrator, "execute_plan") as execute,
         ):
-            exit_code = cmd_deploy(args, orchestrator)
+            exit_code = cmd_plan(args, orchestrator)
 
         captured = capsys.readouterr()
         assert exit_code == 1
         assert "Error: reference does not resolve" in captured.err
         assert "Traceback" not in captured.err
-        deploy.assert_not_called()
+        execute.assert_not_called()
 
-    def test_redacted_dry_run_suppresses_composition_details(
+    def test_redacted_plan_suppresses_composition_details(
         self,
         complete_workspace,
         capsys,
@@ -2524,7 +2497,7 @@ steps:
         args = self._args(
             complete_workspace,
             manifest,
-            dry_run=True,
+            describe=False,
             parallel=None,
         )
         detail = "private-set references private-resource"
@@ -2535,17 +2508,17 @@ steps:
                 "build_plan",
                 side_effect=CompositionError(detail),
             ),
-            patch.object(orchestrator, "deploy") as deploy,
+            patch.object(orchestrator, "execute_plan") as execute,
         ):
-            exit_code = cmd_deploy(args, orchestrator)
+            exit_code = cmd_plan(args, orchestrator)
 
         captured = capsys.readouterr()
         assert exit_code == 1
         assert detail not in captured.err
         assert "Resource composition failed" in captured.err
-        deploy.assert_not_called()
+        execute.assert_not_called()
 
-    def test_redacted_dry_run_suppresses_parameter_selection_details(
+    def test_redacted_plan_suppresses_parameter_selection_details(
         self,
         complete_workspace,
         capsys,
@@ -2560,7 +2533,7 @@ steps:
         args = self._args(
             complete_workspace,
             manifest,
-            dry_run=True,
+            describe=False,
             parallel=None,
         )
         detail = "private-site selected private-set"
@@ -2571,54 +2544,19 @@ steps:
                 "build_plan",
                 side_effect=ParameterSelectionError(detail),
             ),
-            patch.object(orchestrator, "deploy") as deploy,
+            patch.object(orchestrator, "execute_plan") as execute,
         ):
-            exit_code = cmd_deploy(args, orchestrator)
+            exit_code = cmd_plan(args, orchestrator)
 
         captured = capsys.readouterr()
         assert exit_code == 1
         assert detail not in captured.err
         assert "Parameter file selection failed" in captured.err
-        deploy.assert_not_called()
+        execute.assert_not_called()
 
 
 class TestVerboseSaysWhereTheOutputMoved:
-    """`-v` sets log verbosity and nothing else.
-
-    It used to select the deployment plan on `validate` and the source
-    annotations on `sites`. The obvious retry after the old spelling is
-    rejected is to move `-v` earlier, which succeeds and prints nothing, so a
-    job that existed to print a plan passes while emitting none. The note goes
-    to stderr so a pipeline reading stdout is unaffected.
-    """
-
-    def _validate_args(self, workspace, manifest, *, verbose, plan):
-        args = Namespace()
-        args.manifest = manifest
-        args.workspace = workspace
-        args.selector = None
-        args.verbose = verbose
-        args.plan = plan
-        return args
-
-    @pytest.mark.parametrize(
-        ("verbose", "plan", "expected"),
-        [(True, False, True), (True, True, False), (False, False, False)],
-        ids=["verbose-without-plan", "verbose-with-plan", "neither"],
-    )
-    def test_validate_names_the_flag_that_prints_a_plan(
-        self, complete_workspace, capsys, verbose, plan, expected
-    ):
-        from siteops.orchestrator import Orchestrator
-
-        orchestrator = Orchestrator(complete_workspace)
-        manifest = complete_workspace / "manifests" / "test-manifest.yaml"
-        args = self._validate_args(complete_workspace, manifest, verbose=verbose, plan=plan)
-
-        with patch.object(orchestrator, "show_plan"):
-            cmd_validate(args, orchestrator)
-
-        assert ("--plan" in capsys.readouterr().err) is expected
+    """`-v` changes logging, not Site provenance or plan preparation."""
 
     @pytest.mark.parametrize(
         ("verbose", "show_sources", "expected"),
@@ -2788,7 +2726,7 @@ class TestDeployResultOutput:
             "workspace": workspace,
             "selector": None,
             "parallel": None,
-            "dry_run": False,
+            "yes": True,
             "verbose": False,
             "output": "json",
             "projection": None,
@@ -2832,11 +2770,11 @@ class TestDeployResultOutput:
             projection="publishable",
         )
 
-        with patch.object(
-            orchestrator,
-            "deploy",
-            return_value=self._run(),
-        ) as deploy:
+        prepared = _prepared_plan()
+        with (
+            patch.object(orchestrator, "build_plan", return_value=prepared) as build,
+            patch.object(orchestrator, "execute_plan", return_value=self._run()) as execute,
+        ):
             exit_code = cmd_deploy(args, orchestrator)
 
         captured = capsys.readouterr()
@@ -2850,8 +2788,11 @@ class TestDeployResultOutput:
         assert "private-site" not in captured.out
         assert "private-deployment" not in captured.out
         assert "Preparing executable deployment plan" in captured.err
+        assert "private-site" not in captured.err
+        build.assert_called_once()
+        assert execute.call_args.args[0] is prepared
         assert isinstance(
-            deploy.call_args.kwargs["stop_requested"],
+            execute.call_args.kwargs["stop_requested"],
             threading.Event,
         )
 
@@ -2874,7 +2815,10 @@ class TestDeployResultOutput:
             )
             return self._run()
 
-        with patch.object(orchestrator, "deploy", side_effect=emit_progress):
+        with (
+            patch.object(orchestrator, "build_plan", return_value=_prepared_plan()),
+            patch.object(orchestrator, "execute_plan", side_effect=emit_progress),
+        ):
             exit_code = cmd_deploy(args, orchestrator)
 
         captured = capsys.readouterr()
@@ -2895,7 +2839,10 @@ class TestDeployResultOutput:
         manifest = complete_workspace / "manifests" / "test-manifest.yaml"
         args = self._args(complete_workspace, manifest)
 
-        with patch.object(orchestrator, "deploy", return_value=self._run()):
+        with (
+            patch.object(orchestrator, "build_plan", return_value=_prepared_plan()),
+            patch.object(orchestrator, "execute_plan", return_value=self._run()),
+        ):
             exit_code = cmd_deploy(args, orchestrator)
 
         captured = capsys.readouterr()
@@ -2918,14 +2865,18 @@ class TestDeployResultOutput:
             projection="local-private",
         )
 
-        with patch.object(orchestrator, "deploy") as deploy:
+        with (
+            patch.object(orchestrator, "build_plan") as build,
+            patch.object(orchestrator, "execute_plan") as execute,
+        ):
             exit_code = cmd_deploy(args, orchestrator)
 
         captured = capsys.readouterr()
         assert exit_code == 1
         assert captured.out == ""
         assert "local-private output is unavailable" in captured.err
-        deploy.assert_not_called()
+        build.assert_not_called()
+        execute.assert_not_called()
 
     def _preparation_failure(self):
         return PlanNotExecutableError(
@@ -2958,10 +2909,9 @@ class TestDeployResultOutput:
             projection="publishable",
         )
 
-        with patch.object(
-            orchestrator,
-            "deploy",
-            side_effect=self._preparation_failure(),
+        with (
+            patch.object(orchestrator, "build_plan", return_value=self._preparation_failure().result),
+            patch.object(orchestrator, "execute_plan") as execute,
         ):
             exit_code = cmd_deploy(args, orchestrator)
 
@@ -2980,6 +2930,7 @@ class TestDeployResultOutput:
         ]
         assert "private-site" not in captured.out
         assert "private/path" not in captured.out
+        execute.assert_not_called()
 
     def test_real_preparation_failure_emits_invalid_json_before_compilation(
         self, complete_workspace, capsys
@@ -3023,14 +2974,18 @@ class TestDeployResultOutput:
             complete_workspace,
             complete_workspace / "manifests" / "missing.yaml",
         )
-        with patch.object(orchestrator, "deploy") as deploy:
+        with (
+            patch.object(orchestrator, "build_plan") as build,
+            patch.object(orchestrator, "execute_plan") as execute,
+        ):
             exit_code = cmd_deploy(args, orchestrator)
 
         captured = capsys.readouterr()
         assert exit_code == 1
         assert captured.out == ""
         assert "Manifest not found" in captured.err
-        deploy.assert_not_called()
+        build.assert_not_called()
+        execute.assert_not_called()
 
     def test_plain_preparation_failure_keeps_its_local_message(
         self, complete_workspace, capsys
@@ -3041,10 +2996,9 @@ class TestDeployResultOutput:
         manifest = complete_workspace / "manifests" / "test-manifest.yaml"
         args = self._args(complete_workspace, manifest, output="plain")
 
-        with patch.object(
-            orchestrator,
-            "deploy",
-            side_effect=self._preparation_failure(),
+        with (
+            patch.object(orchestrator, "build_plan", return_value=self._preparation_failure().result),
+            patch.object(orchestrator, "execute_plan") as execute,
         ):
             exit_code = cmd_deploy(args, orchestrator)
 
@@ -3052,6 +3006,7 @@ class TestDeployResultOutput:
         assert exit_code == 1
         assert captured.out == ""
         assert "private-site is missing private/path" in captured.err
+        execute.assert_not_called()
 
     def test_an_unexpected_internal_failure_writes_no_run_document(
         self, complete_workspace, capsys
@@ -3062,17 +3017,17 @@ class TestDeployResultOutput:
         manifest = complete_workspace / "manifests" / "test-manifest.yaml"
         args = self._args(complete_workspace, manifest)
 
-        with patch.object(
-            orchestrator,
-            "deploy",
-            side_effect=RuntimeError("internal invariant"),
+        with (
+            patch.object(orchestrator, "build_plan", side_effect=RuntimeError("internal invariant")),
+            patch.object(orchestrator, "execute_plan") as execute,
         ):
             with pytest.raises(RuntimeError):
                 cmd_deploy(args, orchestrator)
 
         assert capsys.readouterr().out == ""
+        execute.assert_not_called()
 
-    def test_a_dry_run_emits_a_plan_document_and_never_executes(
+    def test_an_invalid_plan_emits_a_plan_document_and_never_executes(
         self, complete_workspace, capsys
     ):
         from siteops.orchestrator import Orchestrator
@@ -3089,22 +3044,22 @@ class TestDeployResultOutput:
             }
         )
         manifest.write_text(yaml.safe_dump(document), encoding="utf-8")
-        orchestrator = Orchestrator(complete_workspace, dry_run=True)
+        orchestrator = Orchestrator(complete_workspace)
         args = self._args(
             complete_workspace,
             manifest,
-            dry_run=True,
+            describe=True,
             projection="publishable",
         )
 
         with (
             patch(
                 "siteops.orchestrator.TemplateCompilationSession",
-                side_effect=AssertionError("A dry run must not compile"),
+                side_effect=AssertionError("Describe must not compile"),
             ),
             patch.object(orchestrator, "execute_plan") as execute,
         ):
-            exit_code = cmd_deploy(args, orchestrator)
+            exit_code = cmd_plan(args, orchestrator)
 
         captured = capsys.readouterr()
         plan_document = json.loads(captured.out)
@@ -3121,7 +3076,10 @@ class TestDeployResultOutput:
         manifest = complete_workspace / "manifests" / "test-manifest.yaml"
         args = self._args(complete_workspace, manifest, output="plain")
 
-        with patch.object(orchestrator, "deploy", return_value=self._run()):
+        with (
+            patch.object(orchestrator, "build_plan", return_value=_prepared_plan()),
+            patch.object(orchestrator, "execute_plan", return_value=self._run()),
+        ):
             exit_code = cmd_deploy(args, orchestrator)
 
         captured = capsys.readouterr()
@@ -3144,7 +3102,7 @@ class TestCooperativeInterruption:
             workspace=workspace,
             selector=None,
             parallel=None,
-            dry_run=False,
+            yes=True,
             verbose=False,
             output="plain",
             projection=None,
@@ -3184,10 +3142,9 @@ class TestCooperativeInterruption:
             observed["set_after"] = stop_requested.is_set()
             return self._interrupted_run()
 
-        with patch.object(
-            orchestrator,
-            "deploy",
-            side_effect=interrupt_during_run,
+        with (
+            patch.object(orchestrator, "build_plan", return_value=_prepared_plan()),
+            patch.object(orchestrator, "execute_plan", side_effect=interrupt_during_run),
         ):
             exit_code = cmd_deploy(args, orchestrator)
 
@@ -3220,10 +3177,9 @@ class TestCooperativeInterruption:
             assert kwargs["stop_requested"].is_set()
             return self._interrupted_run()
 
-        with patch.object(
-            orchestrator,
-            "deploy",
-            side_effect=interrupt_twice,
+        with (
+            patch.object(orchestrator, "build_plan", return_value=_prepared_plan()),
+            patch.object(orchestrator, "execute_plan", side_effect=interrupt_twice),
         ):
             exit_code = cmd_deploy(args, orchestrator)
 
@@ -3241,10 +3197,9 @@ class TestCooperativeInterruption:
         args = self._args(complete_workspace, manifest)
         previous = signal.getsignal(signal.SIGINT)
 
-        with patch.object(
-            orchestrator,
-            "deploy",
-            side_effect=RuntimeError("internal invariant"),
+        with (
+            patch.object(orchestrator, "build_plan", return_value=_prepared_plan()),
+            patch.object(orchestrator, "execute_plan", side_effect=RuntimeError("internal invariant")),
         ):
             with pytest.raises(RuntimeError):
                 cmd_deploy(args, orchestrator)
@@ -3268,10 +3223,9 @@ class TestCooperativeInterruption:
             return self._interrupted_run()
 
         def run_off_main_thread():
-            with patch.object(
-                orchestrator,
-                "deploy",
-                side_effect=record_disposition,
+            with (
+                patch.object(orchestrator, "build_plan", return_value=_prepared_plan()),
+                patch.object(orchestrator, "execute_plan", side_effect=record_disposition),
             ):
                 observed["exit_code"] = cmd_deploy(args, orchestrator)
 

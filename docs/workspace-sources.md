@@ -1,10 +1,14 @@
 # Workspace release sources
 
-Run `siteops project pin` with `--release` to select one complete workspace
-package from a content release. Supply a trust policy and trusted roots
-independently. The release descriptor cannot select them. See
+Select one complete workspace package from a published release either
+directly with `siteops deploy <manifest> --source SOURCE@RELEASE` and
+explicit Site inputs, or with `siteops project pin --release` for
+repeatable configured Sites. Both routes require independently supplied
+consumer trust policy and trusted roots (or a separately enrolled approval).
+The release descriptor cannot select them. See
+[guided inputs](guided-inputs.md) and
 [workspace pins and configured Site execution](projects.md#run-project-pin)
-for the complete command.
+for operator commands.
 
 `siteops-workspaces.json` routes the selected package and its detached
 attestation proof. A proof is a separate file containing signed provenance
@@ -150,6 +154,13 @@ cached bytes or downloads the missing proof and package by observed asset ID.
 The package must pass the existing detached provenance verifier before
 extraction. Source revision, workspace, kit identity and version must agree
 with the selection before cache publication.
+Direct `--source SOURCE@RELEASE` performs this source resolution online on
+every invocation, including when valid package bytes are cached. It does
+not create or replace a project pin. With `--source`, global `-w` selects a
+relative workspace inside that release. `--project` supplies operator
+configuration without changing its pin. Without a project, direct
+`plan`, `deploy` and `validate` require explicit Site inputs rather than
+acquired example Sites.
 
 `lease` accepts an already resolved selection. It checks the retained proof,
 current local policy and roots, package bytes and materialized content without
@@ -161,6 +172,7 @@ planner and executor with separate operator Sites.
 |---|---|---|
 | First acquisition | Resolve release and descriptor | Acquire missing identified bytes |
 | Explicit acquisition again | Resolve release and descriptor again | Reuse valid cached bytes |
+| Direct CLI `--source SOURCE@RELEASE` | Resolve release and descriptor each invocation | Reuse valid bytes or acquire missing identified bytes |
 | Use an existing workspace pin | None | None |
 | Internal lease with missing proof | None, returns `cache.proof-missing` | Caller decides whether to restore |
 | Corrupt entry during workspace pin reuse | None | Reject without automatic repair |
@@ -171,7 +183,10 @@ changed roots or a source outside the approved repository fail explicitly.
 Stored receipts are records of evaluation, never permission to bypass it.
 
 Ordinary commands for a selected project restore missing objects identified
-by the workspace pin unless `--offline` was requested. Restoration requires
+by the workspace pin unless `--offline-content` was requested. That option
+restricts content acquisition, not declared Azure target reads or execution.
+Direct `--source` requires online resolution and rejects `--offline-content`.
+Restoration requires
 the fresh release selection to equal the workspace pin before package and
 proof transfer. The internal `lease` itself remains local and never performs
 that restoration.

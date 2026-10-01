@@ -4,53 +4,242 @@ umask 077
 
 fail() { printf 'Site Ops installation: %s\n' "$1" >&2; exit 1; }
 stage() { printf 'Site Ops installation: %s\n' "$1"; }
-private_dir() {
-  local owner mode
-  [[ -d "$1" && ! -L "$1" ]] ||
-    fail "A retained installation directory must be private."
-  owner="$(stat -c %u -- "$1")"
-  mode="$(stat -c %a -- "$1")"
-  [[ "$owner" == "$(id -u)" ]] && (( (8#$mode & 077) == 0 )) ||
-    fail "A retained installation directory must be owned by the current user and private."
-}
-require_private_data_root() {
-  if ! python3 - "$1" >/dev/null 2>&1 <<'PY'
-import os
+command -v bash >/dev/null || fail "Bash is required."
+
+extract_installer_helper() {
+  "$python" -I -S -B - "$archive" "$staging" <<'PY'
+import pathlib
 import stat
 import sys
+import zipfile
 
-path = sys.argv[1]
-parts = path.split("/")[1:]
-if not os.path.isabs(path) or not parts or any(part in {".", ".."} for part in parts):
-    raise SystemExit(1)
-uid = os.getuid()
-directory = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
 try:
-    for part in (part for part in parts if part):
-        parent = os.fstat(directory)
-        trusted_owner = parent.st_uid in {0, uid}
-        writable = stat.S_IMODE(parent.st_mode) & 0o022
-        # A sticky shared parent cannot replace another user's private child.
-        if not trusted_owner or (writable and not parent.st_mode & stat.S_ISVTX):
-            raise SystemExit(1)
-        try:
-            os.mkdir(part, mode=0o700, dir_fd=directory)
-        except FileExistsError:
-            pass
-        child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
-        os.close(directory)
-        directory = child
-    root = os.fstat(directory)
-    if root.st_uid != uid or stat.S_IMODE(root.st_mode) & 0o077:
-        raise SystemExit(1)
-finally:
-    os.close(directory)
+    with zipfile.ZipFile(sys.argv[1]) as archive:
+        entries = [item for item in archive.infolist()
+                   if item.filename.casefold() == "siteops-install.py"]
+        if (len(entries) != 1 or entries[0].filename != "siteops-install.py"
+                or not 0 < entries[0].file_size <= 1048576
+                or stat.S_IFMT(entries[0].external_attr >> 16) not in {0, stat.S_IFREG}):
+            raise ValueError()
+        with archive.open(entries[0]) as stream:
+            content = stream.read(1048577)
+        if len(content) != entries[0].file_size:
+            raise ValueError()
+    helper = pathlib.Path(sys.argv[2]) / "siteops-install.py"
+    with helper.open("xb") as output:
+        output.write(content)
+    print(helper)
+except (OSError, ValueError, zipfile.BadZipFile):
+    sys.exit("The authenticated release has no valid installer helper.")
 PY
-  then
-    fail "Configure a private Site Ops data root under trusted, non-symlinked directories."
+}
+check_payload() {
+  "$python" -I -S -B "$installer_helper" "$@"
+}
+
+# An existing directory on a trusted path belongs to root or this user and
+# excludes other writers unless a sticky bit protects this user's child.
+trusted_parent() {
+  local info mode
+  [[ -d "$1" && ! -L "$1" ]] || return 1
+  info="$(stat -c '%u %a' -- "$1")" || return 1
+  mode=$((8#${info#* }))
+  [[ "${info% *}" == "$uid" || "${info% *}" == 0 ]] &&
+    (( (mode & 8#022) == 0 || (mode & 8#1000) ))
+}
+# Walk an absolute path from the root without following links. Missing
+# directories are created privately unless the caller requires an existing
+# path. Private Site Ops data must be owned by this user and closed to others.
+# Native uv storage only excludes other writers. Sets admitted to the
+# lexically normalized path.
+admit_directory() {
+  local path="$1" kind="$2" create="${3:-create}" current="" part info
+  local -a parts
+  admitted=""
+  [[ "$path" == /?* && "$path" != *//* && ! "$path" =~ [[:cntrl:]] ]] || return 1
+  IFS=/ read -r -a parts <<< "${path#/}"
+  trusted_parent / || return 1
+  for part in "${parts[@]}"; do
+    case "$part" in
+      .) return 1 ;;
+      ..) [[ -n "$current" ]] || return 1; current="${current%/*}"; continue ;;
+    esac
+    current="$current/$part"
+    if [[ ! -e "$current" && ! -L "$current" ]]; then
+      [[ "$create" == create ]] || return 1
+      mkdir -m 0700 -- "$current" 2>/dev/null || true
+    fi
+    trusted_parent "$current" || return 1
+  done
+  [[ -n "$current" ]] || return 1
+  info="$(stat -c '%u %a' -- "$current")" || return 1
+  if [[ "$kind" == private ]]; then
+    [[ "${info% *}" == "$uid" ]] && (( (8#${info#* } & 8#077) == 0 )) || return 1
+  else
+    (( (8#${info#* } & 8#022) == 0 )) || return 1
+  fi
+  admitted="$current"
+}
+# A selected file is a regular file owned by root or this user, without other
+# writers, inside admitted existing directories.
+admit_file() {
+  local name="${1##*/}" file info
+  [[ "$1" == /*/* || "$1" == /?* ]] && [[ -n "$name" && "$name" != . && "$name" != .. ]] ||
+    return 1
+  admit_directory "${1%/*}" "${2:-shared}" existing || return 1
+  file="$admitted/$name"
+  admitted=""
+  [[ -f "$file" && ! -L "$file" ]] || return 1
+  info="$(stat -c '%u %a' -- "$file")" || return 1
+  [[ "${info% *}" == "$uid" || "${info% *}" == 0 ]] &&
+    (( (8#${info#* } & 8#022) == 0 )) || return 1
+  admitted="$file"
+}
+pinned_uv() {
+  [[ "$(stat -c %s -- "$1")" == 50437584 &&
+     "$(sha256sum < "$1" | cut -d ' ' -f 1)" == b8299463da6fa7da3b94464444d252d0afca8ac6c96cb229f1baf4012f365246 ]]
+}
+run_uv() {
+  env "${uv_unset[@]}" UV_CACHE_DIR="$staging/uv-cache" \
+    timeout --kill-after=5 600 "$uv" "$@" --no-config --no-progress --system-certs
+}
+# Admit one of uv's standard locations. These uv commands only compute paths.
+uv_directory() {
+  local value
+  value="$(run_uv "$@" 2>/dev/null | head -c 4097)" || return 1
+  (( ${#value} <= 4096 )) && admit_directory "$value" shared
+}
+select_uv() {
+  local target tooling cached
+  path_uv="$(command -v uv || true)"
+  if [[ -n "$path_uv" ]]; then
+    # Run the admitted target, never the link that selected it.
+    if [[ "$path_uv" == /* ]] && target="$(readlink -e -- "$path_uv")" &&
+       admit_file "$target" && pinned_uv "$admitted"; then
+      uv="$admitted"
+      stage "Keep: the selected qualified uv installation."
+      return
+    fi
+    stage "Keep: the other uv installation unchanged. Use a pinned Site Ops tooling copy."
+  fi
+  admit_directory "$data/tools/uv/0.12.20" private ||
+    fail "The native uv tooling cache must be private. Inspect it before repair."
+  tooling="$admitted"
+  cached="$tooling/uv"
+  if [[ -e "$cached" || -L "$cached" ]]; then
+    [[ "$(find "$tooling" -mindepth 1 -maxdepth 1 -printf x | wc -c)" == 1 ]] &&
+      admit_file "$cached" private && pinned_uv "$cached" ||
+      fail "The retained native uv copy differs from the selected release. Inspect it before repair."
+  else
+    stage "Downloading pinned native uv 0.12.20."
+    curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+      --tlsv1.2 --max-redirs 3 --max-time 180 --max-filesize 19827214 -o "$staging/uv.tar.gz" \
+      https://github.com/astral-sh/uv/releases/download/0.12.20/uv-x86_64-unknown-linux-gnu.tar.gz ||
+      fail "The native uv archive could not be downloaded."
+    [[ "$(stat -c %s -- "$staging/uv.tar.gz")" == 19827214 &&
+       "$(sha256sum < "$staging/uv.tar.gz" | cut -d ' ' -f 1)" == 6590717592ace991ff83a63fef799e3ad9d33ecc8f96c5d6bdd732496e79337f ]] ||
+      fail "The native uv archive differs from the selected release."
+    tar -xzOf "$staging/uv.tar.gz" uv-x86_64-unknown-linux-gnu/uv > "$staging/uv" 2>/dev/null &&
+      pinned_uv "$staging/uv" || fail "The native uv executable differs from the selected release."
+    (set -C; cat -- "$staging/uv" > "$cached") && chmod 0700 -- "$cached" &&
+      admit_file "$cached" private && pinned_uv "$cached" ||
+      fail "The pinned uv tooling copy could not be retained."
+  fi
+  uv="$cached"
+}
+# Make the pinned copy available for ordinary maintenance when no uv exists.
+expose_uv() {
+  local maintenance="$bin/uv"
+  [[ -z "$path_uv" ]] || return 0
+  if [[ -e "$maintenance" || -L "$maintenance" ]]; then
+    admit_file "$maintenance" && pinned_uv "$maintenance" ||
+      fail "An unrelated uv command occupies the native maintenance location. Inspect it before installation."
+    return 0
+  fi
+  (set -C; cat -- "$uv" > "$maintenance") && chmod 0755 -- "$maintenance" &&
+    admit_file "$maintenance" && pinned_uv "$maintenance" ||
+    fail "The uv maintenance command could not be exposed."
+  stage "uv maintenance directory: $bin. Add it to your PATH if needed."
+}
+# Admit a whole concrete runtime tree before any of its files execute.
+admit_runtime_tree() {
+  local concrete="$1" minor="$2" unsafe link target
+  admit_directory "$concrete" shared existing ||
+    fail "The uv-managed Python must use trusted, non-symlinked directories."
+  [[ -f "$concrete/bin/python$minor" && ! -L "$concrete/bin/python$minor" ]] ||
+    fail "The uv-managed Python installation is incomplete. Inspect it before repair."
+  unsafe="$(find "$concrete" \( ! -uid "$uid" ! -uid 0 -o ! -type l -perm /022 \) \
+    -print -quit 2>/dev/null)" && [[ -z "$unsafe" ]] ||
+    fail "The uv-managed Python has files other users can change. Inspect it before repair."
+  while IFS= read -r -d '' link; do
+    target="$(readlink -e -- "$link")" && [[ "$target" == "$concrete"/* ]] ||
+      fail "The uv-managed Python links outside its concrete installation."
+  done < <(find "$concrete" -type l -print0)
+}
+# Enumerate concrete keys natively. uv discovery runs every listed interpreter.
+select_runtime() {
+  local selected="" existing="" home="" line candidate minor patch identity
+  local best_minor=-1 best_patch=-1
+  local key='^cpython-(3\.(1[0-4])\.(0|[1-9][0-9]{0,2}))-linux-x86_64-gnu$'
+  if [[ -e "$tools/siteops" || -L "$tools/siteops" ]]; then
+    admit_file "$tools/siteops/pyvenv.cfg" && (( $(stat -c %s -- "$admitted") <= 65536 )) ||
+      fail "The current Site Ops tool needs inspection. Use uv tool uninstall siteops after review."
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      case "$line" in
+        "version_info = "*) existing="${line#version_info = }" ;;
+        "home = "*) home="${line#home = }" ;;
+      esac
+    done < "$tools/siteops/pyvenv.cfg"
+    if [[ "cpython-$existing-linux-x86_64-gnu" =~ $key &&
+          "$home" == "$pydir/cpython-$existing-linux-x86_64-gnu/bin" &&
+          -e "$pydir/cpython-$existing-linux-x86_64-gnu" ]]; then
+      selected="$existing"
+    else
+      fail "The existing Site Ops runtime is not an available uv-managed Python. Inspect it or run uv tool uninstall siteops after review, then retry."
+    fi
+  fi
+  if [[ -z "$selected" ]]; then
+    for candidate in "$pydir"/cpython-3.*-linux-x86_64-gnu; do
+      [[ "${candidate##*/}" =~ $key ]] || continue
+      if [[ "${BASH_REMATCH[1]}" == 3.11.16 ]]; then
+        selected=3.11.16
+        break
+      fi
+      minor="${BASH_REMATCH[2]}"
+      patch="${BASH_REMATCH[3]}"
+      if (( minor > best_minor || (minor == best_minor && patch > best_patch) )); then
+        best_minor="$minor"
+        best_patch="$patch"
+        selected="${BASH_REMATCH[1]}"
+      fi
+    done
+  fi
+  if [[ -z "$selected" ]]; then
+    stage "Provisioning uv-managed CPython 3.11.16 without command aliases."
+    run_uv python install 3.11.16 --no-bin --no-registry > /dev/null 2>&1 ||
+      fail "The uv-managed Python could not be provisioned. Check the approved runtime source."
+    selected=3.11.16
+  fi
+  minor="${selected%.*}"
+  admit_runtime_tree "$pydir/cpython-$selected-linux-x86_64-gnu" "$minor"
+  python="$pydir/cpython-$selected-linux-x86_64-gnu/bin/python$minor"
+  identity="$("$python" -I -S -B -c 'import sys; print(sys.implementation.name, *sys.version_info[:3], sys.maxsize > 2**32, sys._base_executable)' 2>/dev/null)" ||
+    identity=""
+  [[ "$identity" == "cpython ${selected//./ } True $python" ]] ||
+    fail "The selected concrete uv-managed Python differs from the installed runtime."
+}
+# Native replacement queries the current tool interpreter before reinstalling.
+admit_bound_runtime() {
+  local bound="" layout='^(cpython-3\.(1[0-4])\.(0|[1-9][0-9]{0,2})-linux-x86_64-gnu)/bin/python3\.(1[0-4])$'
+  [[ -e "$tools/siteops" || -L "$tools/siteops" ]] || return 0
+  bound="$(readlink -e -- "$tools/siteops/bin/python")" || bound=""
+  if [[ -n "$bound" && "$bound" == "$pydir"/* && "${bound#"$pydir"/}" =~ $layout &&
+        "${BASH_REMATCH[2]}" == "${BASH_REMATCH[4]}" ]]; then
+    admit_runtime_tree "$pydir/${BASH_REMATCH[1]}" "3.${BASH_REMATCH[2]}"
+  elif [[ -z "$bound" ]] || ! admit_file "$bound"; then
+    fail "The current Site Ops tool uses an unsafe runtime. Inspect it before using uv tool uninstall siteops."
   fi
 }
-command -v bash >/dev/null || fail "Bash is required."
 
 release=""
 commit=""
@@ -103,27 +292,18 @@ stage "Release: $release ($commit) from $repository."
 if [[ "$platform" == azurelinux ]]; then
   stage "Managed Azure Linux uses existing OS tools without sudo or package manager changes."
 else
-  stage "Tool changes use approved apt channels and your configured Python package feed."
+  stage "Missing OS tools use approved Ubuntu package channels."
 fi
-stage "GitHub CLI, Python with a pip-equipped venv or virtualenv, pipx 1.17.2, and pip 26.2.1 are needed."
-stage "Changes to a pipx shared backend affect its selected home. Managed pipx homes are isolated."
-stage "This script does not sign in or deploy."
-stage "Python downloads, when needed, require a configured approved HTTPS package index."
-stage "pipx may add its application directory to your user PATH."
+stage "GitHub CLI 2.95+, checksum-pinned uv 0.12.20, and uv-managed Python are needed."
+stage "Existing uv and Python installations are not upgraded. No account is signed in."
+stage "Managed Python downloads use uv's HTTPS runtime source or an approved HTTPS mirror."
+stage "Shell profiles are not edited. Add the reported command directory to PATH if needed."
 if command -v curl >/dev/null; then
   stage "Keep: installed HTTPS downloader."
 elif [[ "$platform" == azurelinux ]]; then
   stage "Required: HTTPS downloader supplied by the managed environment."
 else
   stage "Add: curl and certificate authorities from Ubuntu."
-fi
-if command -v python3 >/dev/null &&
-    python3 -c 'import sys; raise SystemExit(not ((3, 10) <= sys.version_info[:2] <= (3, 14) and sys.maxsize > 2**32))' 2>/dev/null; then
-  stage "Keep: supported 64-bit Python. Check pip-equipped venv support before installation."
-elif [[ "$platform" == azurelinux ]]; then
-  stage "Required: supported 64-bit Python supplied by the managed environment."
-else
-  stage "Add: supported 64-bit Python and venv from Ubuntu."
 fi
 if command -v gh >/dev/null; then
   stage "Check: installed GitHub CLI version before changing tools."
@@ -132,11 +312,12 @@ elif [[ "$platform" == azurelinux ]]; then
 else
   stage "Add: GitHub CLI from its signed Ubuntu package channel."
 fi
-if command -v pipx >/dev/null || [[ -x "$data/tools/pipx/bin/pipx" ]]; then
-  stage "Check: installed pipx and its shared backend before changing tools."
+if command -v uv >/dev/null; then
+  stage "Check: the existing uv executable. Preserve it if another version is installed."
 else
-  stage "Add: pipx 1.17.2 through the configured Python feed."
+  stage "Add: pinned native uv in protected tooling storage and expose it for maintenance."
 fi
+stage "Check: ordinary uv tool, command, and managed Python storage."
 if $replace; then
   stage "The selected build will explicitly replace or repair an existing Site Ops installation."
 fi
@@ -170,9 +351,17 @@ if [[ -n "$enroll_name" ]] && ! $approve; then
   [[ "$answer" == y || "$answer" == Y ]] || fail "Source enrollment was not approved."
 fi
 
+for tool in cut env find head id mktemp readlink sha256sum stat tar timeout wc; do
+  command -v "$tool" >/dev/null || fail "The base system tool $tool is required."
+done
+uid="$(id -u)"
+admit_directory "$data" private ||
+  fail "Configure a private Site Ops data root under trusted, non-symlinked directories."
+data="$admitted"
+
 require_sudo() {
   [[ "$platform" == ubuntu ]] ||
-    fail "Managed Azure Linux requires compatible OS tools. Use a provisioned session with curl, Python, GitHub CLI, and Azure CLI when selected."
+    fail "Managed Azure Linux requires compatible OS tools. Use a provisioned session with curl, GitHub CLI, and Azure CLI when selected."
   command -v sudo >/dev/null || fail "An approved administrator is needed to install missing OS tools."
   sudo -n true 2>/dev/null || {
     [[ -t 0 ]] || fail "Missing OS tools require administrator authorization."
@@ -184,77 +373,6 @@ if ! command -v curl >/dev/null; then
   sudo apt-get update -qq
   sudo apt-get install -y curl ca-certificates
 fi
-if ! command -v python3 >/dev/null ||
-    ! python3 -c 'import sys; raise SystemExit(not ((3, 10) <= sys.version_info[:2] <= (3, 14) and sys.maxsize > 2**32))' 2>/dev/null; then
-  require_sudo
-  sudo apt-get update -qq
-  sudo apt-get install -y python3 python3-venv
-fi
-python3 -c 'import sys; raise SystemExit(not ((3, 10) <= sys.version_info[:2] <= (3, 14) and sys.maxsize > 2**32))' 2>/dev/null ||
-  fail "The available Python must be a supported 64-bit interpreter."
-require_private_data_root "$data"
-venv_check="$(mktemp -d)"
-trap 'rm -rf -- "$venv_check"' EXIT
-venv_tool=(python3 -m venv)
-if ! "${venv_tool[@]}" "$venv_check/check" >/dev/null 2>&1 ||
-   ! "$venv_check/check/bin/python" -m pip --version >/dev/null 2>&1; then
-  rm -rf -- "$venv_check/check"
-  if python3 -m virtualenv --no-periodic-update "$venv_check/check" >/dev/null 2>&1 &&
-     "$venv_check/check/bin/python" -m pip --version >/dev/null 2>&1; then
-    venv_tool=(python3 -m virtualenv --no-periodic-update)
-  else
-    rm -rf -- "$venv_check/check"
-    [[ "$platform" == ubuntu ]] ||
-      fail "Managed Azure Linux needs a pip-equipped venv or an installed Python virtualenv."
-    require_sudo
-    sudo apt-get update -qq
-    sudo apt-get install -y python3-venv
-    "${venv_tool[@]}" "$venv_check/check" ||
-      fail "Python venv is unavailable."
-  fi
-  "$venv_check/check/bin/python" -m pip --version >/dev/null 2>&1 ||
-    fail "The Python environment must include pip."
-fi
-rm -rf -- "$venv_check"
-trap - EXIT
-
-require_approved_python_index() {
-  [[ "$2" == install || "$2" == download ]] ||
-    fail "The Python package command has an unsupported index policy."
-  local pip_configuration
-  pip_configuration="$("$1" -m pip config list 2>/dev/null)" ||
-    fail "The selected Python environment's package settings could not be inspected."
-  printf '%s\n' "$pip_configuration" | python3 -c '
-import ast
-import sys
-from urllib.parse import urlsplit
-
-settings = {}
-for line in sys.stdin:
-    key, separator, raw = line.partition("=")
-    if not separator:
-        continue
-    try:
-        value = ast.literal_eval(raw.strip())
-    except (SyntaxError, ValueError):
-        raise SystemExit(1)
-    if not isinstance(value, str):
-        raise SystemExit(1)
-    settings[key.strip()] = value
-if any(value for key, value in settings.items()
-       if key.endswith((".extra-index-url", ".find-links", ".trusted-host"))):
-    raise SystemExit(1)
-index = next((settings[key] for key in
-              (":env:.index-url", f"{sys.argv[1]}.index-url", "global.index-url")
-              if settings.get(key)), "")
-try:
-    parsed = urlsplit(index)
-    if parsed.scheme != "https" or not parsed.hostname:
-        raise SystemExit(1)
-except ValueError:
-    raise SystemExit(1)
-' "$2" || fail "Configure one approved HTTPS Python index in pip settings or PIP_INDEX_URL, without extra indexes, find-links, or trusted hosts."
-}
 
 gh_ready=false
 if command -v gh >/dev/null; then
@@ -327,74 +445,21 @@ if $with_azure_cli && ! command -v az >/dev/null; then
   command -v az >/dev/null || fail "Azure CLI was not installed."
 fi
 
-pipx_bin="$(command -v pipx || true)"
-if [[ -x "$data/tools/pipx/bin/pipx" ]]; then
-  pipx_bin="$data/tools/pipx/bin/pipx"
-fi
-if [[ -z "$pipx_bin" || "$("$pipx_bin" --version 2>/dev/null)" != 1.17.2 ]]; then
-  tools="$data/tools"
-  mkdir -p "$tools"
-  if [[ -e "$tools/pipx" ]]; then
-    [[ -d "$tools/pipx" && ! -L "$tools/pipx" &&
-       -f "$tools/pipx/pyvenv.cfg" && -x "$tools/pipx/bin/python" ]] ||
-      fail "Existing Site Ops pipx tooling differs. Inspect it before repair."
-  else
-    "${venv_tool[@]}" "$tools/pipx" || fail "The user pipx environment could not be created."
-  fi
-  require_approved_python_index "$tools/pipx/bin/python" install
-  pip_install_log="$(mktemp)"
-  trap 'rm -f -- "$pip_install_log"' EXIT
-  "$tools/pipx/bin/python" -m pip install --only-binary=:all: --no-cache-dir 'pipx==1.17.2' \
-    > "$pip_install_log" 2>&1 ||
-    fail "pipx could not be installed from the configured Python index."
-  rm -f -- "$pip_install_log"
-  trap - EXIT
-  pipx_bin="$tools/pipx/bin/pipx"
-fi
-[[ "$("$pipx_bin" --version)" == 1.17.2 ]] || fail "pipx 1.17.2 is required."
-
-allowed_home="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' "$HOME")"
-allowed_data="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' "$data")"
-isolate_pipx=false
-for setting in PIPX_HOME PIPX_BIN_DIR PIPX_SHARED_LIBS; do
-  location="$("$pipx_bin" environment --value "$setting")" ||
-    fail "The pipx installation locations could not be inspected."
-  [[ "$location" == /* ]] || fail "The pipx installation locations must be absolute."
-  resolved="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' "$location")" ||
-    fail "The pipx installation locations could not be resolved."
-  case "$resolved" in
-    "$allowed_home"|"$allowed_home"/*|"$allowed_data"|"$allowed_data"/*) ;;
-    *) isolate_pipx=true ;;
-  esac
-done
-if $isolate_pipx; then
-  mkdir -p "$data/pipx" "$data/bin" "$data/man" "$data/completions" ||
-    fail "Private pipx storage could not be created."
-  private_dir "$data/pipx"
-  private_dir "$data/bin"
-  private_dir "$data/man"
-  private_dir "$data/completions"
-  PIPX_HOME="$data/pipx"
-  PIPX_BIN_DIR="$data/bin"
-  PIPX_SHARED_LIBS="$data/pipx/shared"
-  PIPX_MAN_DIR="$data/man"
-  PIPX_COMPLETION_DIR="$data/completions"
-  export PIPX_HOME PIPX_BIN_DIR PIPX_SHARED_LIBS PIPX_MAN_DIR PIPX_COMPLETION_DIR
-  stage "Using private Site Ops pipx storage instead of the managed pipx home."
-fi
-
 staging="$(mktemp -d)"
 trap 'rm -rf -- "$staging"' EXIT
+admit_directory "$staging" private existing || fail "Use a private temporary directory."
+staging="$admitted"
 selection_id="$(printf '%s\0' "$repository" "$release" "$commit" "$source_ref" "$caller" |
   sha256sum | cut -d ' ' -f 1)"
-cache="$data/install-downloads/$selection_id"
+admit_directory "$data/install-downloads" private ||
+  fail "The authenticated release cache must be private. Inspect it before retrying."
+cache="$admitted/$selection_id"
 encoded_release="${release//\//%2F}"
 url="https://github.com/$repository/releases/download/$encoded_release/"
 assets="$staging"
 if [[ -e "$cache" || -L "$cache" ]]; then
-  private_dir "$cache"
-  entries=("$cache"/*)
-  [[ ${#entries[@]} -eq 2 ]] ||
+  admit_directory "$cache" private existing &&
+    [[ "$(find "$cache" -mindepth 1 -maxdepth 1 -printf x | wc -c)" == 2 ]] ||
     fail "Retained release bytes are incomplete. Inspect them before retrying."
   assets="$cache"
   stage "Rechecking the retained release without downloading its assets."
@@ -410,12 +475,13 @@ else
       fail "A required release asset is empty or exceeds its byte limit."
   done
 fi
-[[ -f "$assets/siteops-install.zip" && ! -L "$assets/siteops-install.zip" &&
-   -f "$assets/siteops-install.zip.attestation.jsonl" &&
-   ! -L "$assets/siteops-install.zip.attestation.jsonl" &&
-   $(wc -c < "$assets/siteops-install.zip") -le 536870912 &&
-   $(wc -c < "$assets/siteops-install.zip.attestation.jsonl") -le 2097152 ]] ||
-  fail "Retained release bytes are invalid or oversized."
+for asset in siteops-install.zip siteops-install.zip.attestation.jsonl; do
+  limit=536870912
+  if [[ "$asset" == *.attestation.jsonl ]]; then limit=2097152; fi
+  admit_file "$assets/$asset" private && [[ -s "$assets/$asset" ]] &&
+    (( $(wc -c < "$assets/$asset") <= limit )) ||
+    fail "Retained release bytes are invalid or oversized."
+done
 signer="https://github.com/$repository/.github/workflows/_siteops-distribution.yaml@$source_ref"
 builder="https://github.com/$repository/.github/workflows/$caller@$source_ref"
 query="length > 0 and all(.[]; .verificationResult.mediaType == \"application/vnd.dev.sigstore.verificationresult+json;version=0.1\" and (.verificationResult.signature.certificate | .subjectAlternativeName == \"$signer\" and .issuer == \"https://token.actions.githubusercontent.com\" and .sourceRepositoryURI == \"https://github.com/$repository\" and .sourceRepositoryDigest == \"$commit\" and .sourceRepositoryRef == \"$source_ref\" and .buildSignerDigest == \"$commit\" and .buildConfigURI == \"$builder\" and .buildConfigDigest == \"$commit\" and .runnerEnvironment == \"self-hosted\"))"
@@ -430,175 +496,95 @@ verified="$(timeout --kill-after=5 120 gh attestation verify "$assets/siteops-in
 [[ "$verified" == true ]] || fail "The bundle certificate does not match the selected release."
 
 archive="$assets/siteops-install.zip"
-bundle_id="$(sha256sum "$archive" | cut -d ' ' -f 1)"
-bundle="$data/bundles/$bundle_id"
-mkdir -p "$data/bundles"
-recorded="$("$pipx_bin" list --output json | python3 -c '
-import json, sys
-apps = json.load(sys.stdin)["venvs"]
-app = apps.get("siteops")
-if app:
-    lock = app["metadata"]["main_package"].get("lock_file")
-    print(lock["__Path__"] if lock else "unlocked")
-' 2>/dev/null)" || fail "The current pipx installation cannot be inspected."
-if [[ -n "$recorded" && "$recorded" != "$bundle/pylock.toml" ]] && ! $replace; then
-  fail "Another Site Ops build is installed. Select --replace after reviewing the native pipx transition."
+bundle_id="$(sha256sum < "$archive" | cut -d ' ' -f 1)"
+admit_directory "$data/bundles" private ||
+  fail "The retained bundle store must be private. Inspect it before repair."
+bundle="$admitted/$bundle_id"
+if [[ -e "$bundle" || -L "$bundle" ]]; then
+  admit_directory "$bundle" private existing ||
+    fail "A retained installation directory must be owned by the current user and private."
 fi
-repeat=false
-if [[ -e "$bundle" ]]; then
-  private_dir "$bundle"
-  [[ -f "$bundle/bundle.json" && -f "$bundle/pylock.toml" ]] ||
-    fail "The retained bundle is incomplete. Inspect it before repair."
-  if ! python3 - "$archive" "$bundle/bundle.json" <<'PY'
-import sys
-import zipfile
 
-with zipfile.ZipFile(sys.argv[1]) as archive:
-    if archive.namelist().count("bundle.json") != 1:
-        raise SystemExit(1)
-    member = archive.getinfo("bundle.json")
-    if member.file_size > 1048576:
-        raise SystemExit(1)
-    with archive.open(member) as stream:
-        expected = stream.read(1048577)
-with open(sys.argv[2], "rb") as stream:
-    actual = stream.read(1048577)
-if expected != actual:
-    raise SystemExit(1)
-PY
-  then
-    fail "The retained bundle manifest differs from the authenticated archive."
+disabled='^(0|false)?$'
+mirror='^https://([^/?#@[:space:]]+@)?[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?([/?#][^[:space:]]*)?$'
+[[ -z "${UV_INSECURE_HOST:-}" && -z "${UV_PYTHON_DOWNLOADS_JSON_URL:-}" &&
+   "${UV_INSECURE_NO_ZIP_VALIDATION:-}" =~ $disabled ]] ||
+  fail "Remove insecure uv settings and custom runtime catalogs before verified installation."
+[[ -z "${UV_PYTHON_INSTALL_MIRROR:-}" || "$UV_PYTHON_INSTALL_MIRROR" =~ $mirror ]] ||
+  fail "Select an approved HTTPS Python runtime mirror."
+uv_unset=()
+python_unset=()
+while IFS= read -r name; do
+  case "$name" in
+    PYTHON*|VIRTUAL_ENV|CONDA_PREFIX) python_unset+=(-u "$name"); uv_unset+=(-u "$name") ;;
+    UV_TOOL_DIR|UV_TOOL_BIN_DIR|UV_PYTHON_INSTALL_DIR|UV_PYTHON_INSTALL_MIRROR)
+      [[ -n "${!name}" ]] || uv_unset+=(-u "$name") ;;
+    UV_*) uv_unset+=(-u "$name") ;;
+  esac
+done < <(compgen -e)
+for name in UV_TOOL_DIR UV_TOOL_BIN_DIR UV_PYTHON_INSTALL_DIR; do
+  if [[ -n "${!name:-}" ]]; then
+    admit_directory "${!name}" shared ||
+      fail "Select uv tool, command, and Python directories under trusted, non-symlinked directories."
   fi
-  if ! python3 - "$bundle" <<'PY'
-import hashlib
-import json
-import pathlib
-import stat
-import sys
-
-root = pathlib.Path(sys.argv[1])
-manifest = json.loads((root / "bundle.json").read_bytes())
-entries = manifest.get("files")
-if not isinstance(entries, list) or not 1 <= len(entries) <= 1024:
-    raise SystemExit(1)
-expected = {"bundle.json"}
-for entry in entries:
-    name, size, digest = entry["path"], entry["size"], entry["sha256"]
-    parts = pathlib.PurePosixPath(name).parts
-    if (not parts or any(part in {".", ".."} for part in parts)
-            or name.startswith("/") or "\\" in name or name in expected
-            or not isinstance(size, int) or size < 0 or size > 1073741824):
-        raise SystemExit(1)
-    path = root.joinpath(*parts)
-    if not stat.S_ISREG(path.lstat().st_mode) or path.stat().st_size != size:
-        raise SystemExit(1)
-    observed = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1048576), b""):
-            observed.update(block)
-    if observed.hexdigest() != digest:
-        raise SystemExit(1)
-    expected.add(name)
-directories = set()
-for name in expected:
-    parent = pathlib.PurePosixPath(name).parent
-    while parent.as_posix() != ".":
-        directories.add(parent.as_posix())
-        parent = parent.parent
-actual = set()
-for path in root.rglob("*"):
-    if path.is_symlink():
-        raise SystemExit(1)
-    relative = path.relative_to(root).as_posix()
-    if path.is_file():
-        actual.add(relative)
-    elif not path.is_dir() or relative not in directories:
-        raise SystemExit(1)
-if actual != expected:
-    raise SystemExit(1)
-PY
-  then
-    fail "The retained bundle contents differ from the authenticated archive."
-  fi
-  if [[ "$recorded" == "$bundle/pylock.toml" ]] && ! $replace; then
-    backend_version="$("$pipx_bin" runpip siteops --version)" ||
-      fail "The installed pipx backend could not be inspected."
-    [[ "$backend_version" == "pip 26.2.1 "* ]] ||
-      fail "The installed pipx backend differs from the verified lock reader."
-    repeat=true
-  fi
-else
-  mkdir "$bundle"
-  python3 -m zipfile -e "$archive" "$bundle" || fail "The verified bundle could not be extracted."
+done
+select_uv
+uv_directory tool dir ||
+  fail "Select uv tool, command, and Python directories under trusted, non-symlinked directories."
+tools="$admitted"
+uv_directory tool dir --bin ||
+  fail "Select uv tool, command, and Python directories under trusted, non-symlinked directories."
+bin="$admitted"
+uv_directory python dir ||
+  fail "Select uv tool, command, and Python directories under trusted, non-symlinked directories."
+pydir="$admitted"
+expose_uv
+if [[ ( -e "$bin/siteops" || -L "$bin/siteops" ) && ! -e "$tools/siteops" && ! -L "$tools/siteops" ]]; then
+  fail "The exposed command belongs to another installation. Remove it with its original manager."
 fi
-version="$(python3 -c '
-import json, sys
-with open(sys.argv[1], encoding="utf-8") as source:
-    document = json.load(source)
-if document.get("source") != {
-    "repository": sys.argv[2], "commit": sys.argv[3], "ref": sys.argv[4]
-} or document.get("apiVersion") != "siteops.install/v1":
-    raise SystemExit("The verified bundle describes another source.")
-print(document["package"]["version"])
-' "$bundle/bundle.json" "$repository" "$commit" "$source_ref")" ||
-  fail "The verified bundle manifest is invalid."
-[[ "$version" =~ ^[A-Za-z0-9][A-Za-z0-9.!+_-]{0,127}$ ]] ||
-  fail "The verified bundle has an unsupported version."
-if ! $repeat; then
-shared_home="$("$pipx_bin" environment --value PIPX_SHARED_LIBS)" ||
-  fail "The pipx shared backend location could not be inspected."
-if [[ -x "$shared_home/bin/python" &&
-      "$("$shared_home/bin/python" -m pip --version 2>/dev/null)" == "pip 26.2.1 "* ]]; then
-  stage "Keeping the compatible pipx shared backend."
-else
-  wheelhouse="$(mktemp -d)"
-  trap 'rm -rf -- "$staging" "$wheelhouse"' EXIT
-  "${venv_tool[@]}" "$staging/backend-tools" || fail "Python venv is unavailable."
-  require_approved_python_index "$staging/backend-tools/bin/python" download
-  "$staging/backend-tools/bin/python" -m pip download 'pip==26.2.1' \
-    --no-deps --only-binary=:all: --dest "$wheelhouse" > "$staging/pip-download.log" 2>&1 ||
-    fail "The shared backend could not be downloaded from the configured Python index."
-  pip_wheels=("$wheelhouse"/pip-26.2.1-*.whl)
-  [[ ${#pip_wheels[@]} -eq 1 && -f "${pip_wheels[0]}" ]] || fail "The approved backend wheel is unavailable."
-  printf '%s  %s\n' '71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e' "${pip_wheels[0]}" |
-    sha256sum --check --status || fail "The selected backend wheel differs from its reviewed hash."
-  wheelhouse_uri="$(python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).as_uri())' "$wheelhouse")"
-  export PIPX_DEFAULT_PYTHON="$(python3 -c 'import sys; print(sys.executable)')"
-  "$pipx_bin" upgrade-shared --pip-args "--no-index --only-binary=:all: --no-cache-dir --force-reinstall --find-links=$wheelhouse_uri" ||
-    fail "The pipx shared backend could not be provisioned."
-fi
-export PIPX_DEFAULT_PYTHON="$(python3 -c 'import sys; print(sys.executable)')"
-force_args=()
-if $replace && [[ -n "$recorded" ]]; then force_args=(--force); fi
-"$pipx_bin" install siteops --lock "$bundle/pylock.toml" \
-  --backend pip --fetch-python never --skip-maintenance --app siteops \
-  --pip-args "--isolated --require-hashes --no-index --only-binary=:all: --no-cache-dir" \
-  "${force_args[@]}" ||
-  fail "Site Ops could not be installed from the verified lock."
-backend_version="$("$pipx_bin" runpip siteops --version)" ||
-  fail "The installed pipx backend could not be inspected."
-[[ "$backend_version" == "pip 26.2.1 "* ]] ||
-  fail "The installed pipx backend differs from the verified lock reader."
-"$pipx_bin" ensurepath >/dev/null ||
-  fail "pipx could not make its command directory available to future shells."
-fi
-bin_dir="$("$pipx_bin" environment --value PIPX_BIN_DIR)" ||
-  fail "The pipx command directory could not be resolved."
-[[ "$bin_dir" == /* && -x "$bin_dir/siteops" ]] ||
-  fail "pipx did not expose the selected siteops command."
-export PATH="$bin_dir:$PATH"
-[[ "$(command -v siteops)" == "$bin_dir/siteops" && "$(siteops --version)" == "siteops $version" ]] ||
+if $replace; then admit_bound_runtime; fi
+select_runtime
+installer_helper="$(extract_installer_helper)" ||
+  fail "The authenticated installer helper could not be prepared."
+admit_file "$installer_helper" private ||
+  fail "The authenticated installer helper could not be prepared."
+mode=install
+if $replace; then mode=replace; fi
+helper_status=0
+check_payload "$mode" "$archive" "$bundle" "$repository" "$commit" "$source_ref" \
+  "$uv" "$tools" "$bin" > "$staging/installed.json" 2>/dev/null || helper_status=$?
+case "$helper_status" in
+  0) ;;
+  2) fail "Another Site Ops selection is installed. Use --replace after review." ;;
+  3) fail "The exposed command belongs to another installation. Remove it with its original manager." ;;
+  4) fail "The tool has unrecognized Python startup files. Inspect it before using uv tool uninstall siteops." ;;
+  *) fail "The bundle or installed payload failed validation." ;;
+esac
+(( $(wc -c < "$staging/installed.json") <= 4096 )) ||
+  fail "The installer helper returned oversized results."
+installed="$(< "$staging/installed.json")"
+result='^\{"version": "([A-Za-z0-9][A-Za-z0-9.!+_-]{0,127})", "wheel": "wheels/[^/"]+\.whl"\}$'
+[[ "$installed" =~ $result ]] || fail "The installer helper returned unsupported results."
+version="${BASH_REMATCH[1]}"
+siteops="$tools/siteops/bin/siteops"
+[[ -L "$bin/siteops" && "$(readlink -- "$bin/siteops")" == "$siteops" ]] && admit_file "$siteops" ||
   fail "The exposed siteops command does not match the selected build."
-stage "Command directory: $bin_dir. Add it to your current PATH or open a new shell."
+export PATH="$bin:$PATH"
+hash -r
+[[ "$(command -v siteops)" == "$bin/siteops" &&
+   "$(env "${python_unset[@]}" "$siteops" --version 2>/dev/null)" == "siteops $version" ]] ||
+  fail "The exposed siteops command does not match the selected build."
+stage "Command directory: $bin. Add it to your current PATH or open a new shell."
+stage "For native removal, run uv tool uninstall siteops."
 if [[ -n "$enroll_name" ]]; then
   trusted_root="$staging/trusted-root.jsonl"
   timeout --kill-after=5 120 gh attestation trusted-root | head -c 2097153 > "$trusted_root" ||
     fail "The GitHub trusted-root snapshot could not be obtained."
   [[ -s "$trusted_root" && $(wc -c < "$trusted_root") -le 2097152 ]] ||
     fail "The trusted-root snapshot is empty or oversized."
-  root_digest="$(sha256sum "$trusted_root" | cut -d ' ' -f 1)"
+  root_digest="$(sha256sum < "$trusted_root" | cut -d ' ' -f 1)"
   policy_file="$staging/source-policy.json"
-  python3 - "$policy_file" "$root_digest" "$repository" "$source_ref" "$caller" <<'PY'
+  "$python" -I -S -B - "$policy_file" "$root_digest" "$repository" "$source_ref" "$caller" <<'PY'
 import datetime
 import json
 import pathlib
@@ -624,17 +610,16 @@ policy = {
 }
 pathlib.Path(destination).write_text(json.dumps(policy), encoding="utf-8")
 PY
-  siteops --trust-policy "$policy_file" --trusted-root "$trusted_root" \
+  env "${python_unset[@]}" "$siteops" --trust-policy "$policy_file" --trusted-root "$trusted_root" \
     source enroll "$enroll_name" --source "github:$repository" ||
     fail "The approved source could not be enrolled."
 fi
 if [[ "$assets" == "$staging" ]]; then
-  mkdir -p "$data/install-downloads"
   mkdir "$cache" || fail "The authenticated release cache could not be reserved."
   for asset in siteops-install.zip siteops-install.zip.attestation.jsonl; do
-    cp -- "$staging/$asset" "$cache/$asset" ||
+    (set -C; cat -- "$staging/$asset" > "$cache/$asset") ||
       fail "Authenticated release bytes could not be retained after installation."
-    [[ "$(sha256sum "$staging/$asset" | cut -d ' ' -f 1)" == "$(sha256sum "$cache/$asset" | cut -d ' ' -f 1)" ]] ||
+    [[ "$(sha256sum < "$staging/$asset")" == "$(sha256sum < "$cache/$asset")" ]] ||
       fail "The retained release bytes differ from the authenticated download."
   done
 fi

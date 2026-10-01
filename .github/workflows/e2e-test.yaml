@@ -23,6 +23,11 @@ name: E2E Tests
 on:
   workflow_dispatch:
     inputs:
+      scenario:
+        description: Select AIO E2E or a Windows installer check without Azure.
+        type: choice
+        options: [aio, windows-installer-preflight]
+        default: aio
       aio-releases:
         description: Comma-separated AIO releases to fan out over (e.g. "2607,2608").
         type: string
@@ -94,7 +99,94 @@ env:
   AZURE_CORE_OUTPUT: none
 
 jobs:
+  windows-installer-preflight:
+    if: inputs.scenario == 'windows-installer-preflight'
+    runs-on: windows-2025
+    timeout-minutes: 10
+    permissions: {}
+    steps:
+      - name: Inspect Windows installer capabilities
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $available = [ordered]@{}
+          foreach ($name in @('winget.exe', 'python.exe', 'gh.exe')) {
+              $available[$name] = $null -ne (
+                  Get-Command $name -CommandType Application -ErrorAction SilentlyContinue |
+                  Select-Object -First 1
+              )
+          }
+
+          $wingetUsable = $false
+          if ($available['winget.exe']) {
+              $winget = Get-Command 'winget.exe' -CommandType Application |
+                  Select-Object -First 1
+              $previousPreference = $ErrorActionPreference
+              try {
+                  $ErrorActionPreference = 'Continue'
+                  $version = & $winget.Source --version 2>$null
+                  $wingetUsable = $LASTEXITCODE -eq 0 -and
+                      $version -is [string] -and
+                      $version -cmatch '^v[0-9]+(\.[0-9]+){1,3}$'
+              } catch {
+                  $wingetUsable = $false
+              } finally {
+                  $ErrorActionPreference = $previousPreference
+              }
+          }
+
+          if ($env:GITHUB_RUN_ID -notmatch '^[0-9]+$' -or
+              $env:GITHUB_RUN_ATTEMPT -notmatch '^[0-9]+$') {
+              throw 'The Windows capability probe has no bounded run identity.'
+          }
+          $fixture = Join-Path $env:RUNNER_TEMP (
+              "siteops-win-preflight-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          )
+          if (Test-Path -LiteralPath $fixture) {
+              throw 'The Windows capability area must be fresh.'
+          }
+          New-Item -ItemType Directory -Path $fixture -ErrorAction Stop | Out-Null
+          try {
+              $target = Join-Path $fixture 'target.txt'
+              $copy = Join-Path $fixture 'copy.txt'
+              $link = Join-Path $fixture 'link.txt'
+              [IO.File]::WriteAllText($target, 'siteops-preflight')
+              Copy-Item -LiteralPath $target -Destination $copy -ErrorAction Stop
+              $copyValid = [IO.File]::ReadAllText($copy) -ceq 'siteops-preflight'
+              $linkValid = $false
+              try {
+                  New-Item -ItemType SymbolicLink -Path $link -Target $target `
+                      -ErrorAction Stop | Out-Null
+                  $node = Get-Item -LiteralPath $link -Force -ErrorAction Stop
+                  $linkValid = ($node.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -and
+                      [IO.File]::ReadAllText($link) -ceq 'siteops-preflight'
+              } catch {
+                  $linkValid = $false
+              }
+
+              @(
+                  '## Windows installer capability check'
+                  ''
+                  '| Capability | Available |'
+                  '|---|---|'
+                  "| WinGet on PATH | $($available['winget.exe']) |"
+                  "| WinGet callable | $wingetUsable |"
+                  "| Python on PATH | $($available['python.exe']) |"
+                  "| GitHub CLI on PATH | $($available['gh.exe']) |"
+                  "| Private copied file | $copyValid |"
+                  "| Private file symlink | $linkValid |"
+                  ''
+                  'No tool was installed, no release asset was consumed, and no Azure operation ran.'
+              ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding UTF8
+              if (-not $wingetUsable -or -not $copyValid -or -not $linkValid) {
+                  throw 'A required Windows installer capability is unavailable. Inspect the bounded summary.'
+              }
+          } finally {
+              Remove-Item -LiteralPath $fixture -Recurse -Force -ErrorAction Stop
+          }
+
   prep:
+    if: inputs.scenario == 'aio'
     runs-on: ubuntu-latest
     outputs:
       versions: ${{ steps.v.outputs.versions }}
@@ -718,14 +810,14 @@ jobs:
             --project "$SITEOPS_E2E_PROJECT" \
             --trust-policy "$SITEOPS_E2E_POLICY" \
             --trusted-root "$SITEOPS_E2E_TRUSTED_ROOT" \
-            validate aio-install \
-            --plan \
-            --offline \
+            plan aio-install \
+            --describe \
+            --offline-content \
             -l "name=$E2E_SITE_NAME" \
             --output json \
             > "$RUNNER_TEMP/published-plan-output.txt" \
             2> "$RUNNER_TEMP/published-plan.err"; then
-            echo "::error::The published package cannot prepare the selected AIO install."
+            echo "::error::The published package cannot describe the selected AIO install."
             cat "$RUNNER_TEMP/published-plan.err"
             exit 1
           fi
@@ -741,15 +833,14 @@ jobs:
           from pathlib import Path
 
           raw = Path(sys.argv[1]).read_text(encoding="utf-8")
-          start = raw.find("{")
-          if start < 0:
-              raise SystemExit("The published package returned no plan result.")
-          result = json.loads(raw[start:])
+          result = json.loads(raw)
           summary = result.get("summary", {})
           if (
               result.get("apiVersion") != "siteops/v1alpha1"
               or result.get("kind") != "DeploymentPlan"
+              or result.get("projection") != "publishable"
               or result.get("status") != "planned"
+              or result.get("intent") != "describe"
               or result.get("executable") is not False
               or result.get("engine", {}).get("version") != sys.argv[2]
               or summary.get("targetCount") != 1
@@ -848,7 +939,7 @@ jobs:
           if ! siteops \
             --project "$SITEOPS_E2E_PROJECT" \
             --approved-source guided \
-            inputs aio-install --offline --example "$RUNNER_TEMP/published-example.yaml" \
+            inputs aio-install --offline-content --example "$RUNNER_TEMP/published-example.yaml" \
             --output json > "$RUNNER_TEMP/published-inspection.json" \
             2> "$RUNNER_TEMP/published-inspection.err"; then
             echo "::error::Guided input inspection failed."
@@ -857,10 +948,10 @@ jobs:
           if siteops \
             --project "$SITEOPS_E2E_PROJECT" \
             --approved-source guided \
-            plan aio-install --offline --input-file "$RUNNER_TEMP/published-answers.json" \
+            inputs aio-install --offline-content --input-file "$RUNNER_TEMP/published-answers.json" \
             --output json > "$RUNNER_TEMP/published-no-read.json" \
             2> "$RUNNER_TEMP/published-no-read.err"; then
-            echo "::error::A resource ID was accepted without --read-resources."
+            echo "::error::Input inspection read a resource ID without --read-resources."
             exit 1
           fi
           python3 - <<'PY'
@@ -871,15 +962,16 @@ jobs:
           root = Path(os.environ["RUNNER_TEMP"])
           inspection = json.loads((root / "published-inspection.json").read_text(encoding="utf-8"))
           example = (root / "published-example.yaml").read_text(encoding="utf-8")
-          rejected = json.loads((root / "published-no-read.json").read_text(encoding="utf-8"))
+          rejected = (root / "published-no-read.err").read_text(encoding="utf-8")
           fields = {row["name"]: row for row in inspection["inputs"]}
           if (
               inspection.get("kind") != "SiteInputContract"
               or fields.get("cluster", {}).get("type") != "azureResourceId"
               or fields.get("location", {}).get("derivableFrom") != ["cluster"]
-              or "siteName: null" not in example
-              or rejected.get("status") != "invalid"
-              or rejected.get("diagnostics", [{}])[0].get("code") != "inputs.resource.read-required"
+              or "cluster: null" not in example
+              or "siteName: null" in example
+              or (root / "published-no-read.json").read_text(encoding="utf-8").strip()
+              or "inputs.resource.read-required" not in rejected
           ):
               raise SystemExit("Guided input inspection or no-read admission failed.")
           PY
@@ -901,9 +993,10 @@ jobs:
             if siteops \
               --project "$SITEOPS_E2E_PROJECT" \
               --approved-source guided \
-              deploy aio-install --offline \
+              deploy aio-install --offline-content \
+              --yes \
               --input-file "$RUNNER_TEMP/published-unready-answers.json" \
-              --read-resources --output json \
+              --output json \
               > "$RUNNER_TEMP/published-unready-run.json" \
               2> "$RUNNER_TEMP/published-unready-run.err"; then
               echo "::error::Guided Secret Sync ran without the cluster prerequisites."
@@ -929,9 +1022,9 @@ jobs:
           if ! SITEOPS_REDACT_OUTPUT=0 siteops \
             --project "$SITEOPS_E2E_PROJECT" \
             --approved-source guided \
-            plan aio-install --offline \
+            plan aio-install --offline-content \
             --input-file "$RUNNER_TEMP/published-answers.json" \
-            --read-resources --output json --projection local-private \
+            --output json --projection local-private \
             > "$RUNNER_TEMP/published-guided-plan.json" \
             2> "$RUNNER_TEMP/published-guided-plan.err"; then
             echo "::error::The installed engine could not prepare guided AIO."
@@ -1018,7 +1111,7 @@ jobs:
           PY
           if ! SITEOPS_REDACT_OUTPUT=0 siteops \
             --project "$SITEOPS_E2E_PROJECT" --approved-source guided \
-            plan aio-install --offline \
+            plan aio-install --offline-content \
             --input-file "$RUNNER_TEMP/published-manual-answers.json" \
             --output json --projection local-private \
             > "$RUNNER_TEMP/published-manual-plan.json" \
@@ -1028,7 +1121,7 @@ jobs:
           fi
           if ! SITEOPS_REDACT_OUTPUT=0 siteops \
             --project "$SITEOPS_E2E_PROJECT" --approved-source guided \
-            plan aio-install --offline \
+            plan aio-install --offline-content \
             --input "siteName=$E2E_SITE_NAME" \
             --input "subscription=$E2E_SUBSCRIPTION" \
             --input "resourceGroup=$E2E_RESOURCE_GROUP" \
@@ -1047,7 +1140,7 @@ jobs:
           site="$SITEOPS_E2E_PROJECT/sites/$E2E_SITE_NAME.yaml"
           if ! siteops \
             --project "$SITEOPS_E2E_PROJECT" --approved-source guided \
-            inputs aio-install --offline \
+            inputs aio-install --offline-content \
             --input-file "$RUNNER_TEMP/published-manual-answers.json" \
             --save-site "$site" \
             > "$RUNNER_TEMP/published-saved-site.txt" \
@@ -1058,7 +1151,7 @@ jobs:
           site_before="$(sha256sum "$site" | cut -d ' ' -f 1)"
           if ! SITEOPS_REDACT_OUTPUT=0 siteops \
             --project "$SITEOPS_E2E_PROJECT" --approved-source guided \
-            plan aio-install --offline -l "name=$E2E_SITE_NAME" \
+            plan aio-install --offline-content -l "name=$E2E_SITE_NAME" \
             --output json --projection local-private \
             > "$RUNNER_TEMP/published-configured-plan.json" \
             2> "$RUNNER_TEMP/published-configured-plan.err"; then
@@ -1281,14 +1374,15 @@ jobs:
           target_args=(-l "name=$SITE_NAME")
           trust_args=(--trust-policy "$SITEOPS_E2E_POLICY" --trusted-root "$SITEOPS_E2E_TRUSTED_ROOT")
           if [[ "$PUBLISHED_JOURNEY" == "guided" ]]; then
-            target_args=(--input-file "$RUNNER_TEMP/published-answers.json" --read-resources)
+            target_args=(--input-file "$RUNNER_TEMP/published-answers.json")
             trust_args=(--approved-source guided)
           fi
           if ! siteops \
             --project "$SITEOPS_E2E_PROJECT" \
             "${trust_args[@]}" \
             deploy aio-install \
-            --offline \
+            --yes \
+            --offline-content \
             "${target_args[@]}" \
             --output json \
             > "$RUNNER_TEMP/published-deploy-output.txt" \
@@ -1305,10 +1399,7 @@ jobs:
           from pathlib import Path
 
           raw = Path(sys.argv[1]).read_text(encoding="utf-8")
-          start = raw.find("{")
-          if start < 0:
-              raise SystemExit("The published deployment returned no JSON result.")
-          result = json.loads(raw[start:])
+          result = json.loads(raw)
           summary = result.get("summary", {})
           sites = summary.get("sites", {})
           operations = summary.get("operations", {})

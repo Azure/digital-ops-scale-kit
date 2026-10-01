@@ -1008,7 +1008,7 @@ def test_missing_required_parameter_blocks_dependent_consumer(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "command", ["validate", "plan", "describe", "validate-plan", "deploy", "dry-run"]
+    "command", ["validate", "plan", "describe", "deploy"]
 )
 def test_commands_load_and_validate_inputs_once(tmp_path, command):
     from siteops.cli import cmd_deploy, cmd_plan, cmd_validate
@@ -1031,14 +1031,13 @@ def test_commands_load_and_validate_inputs_once(tmp_path, command):
         projection=None,
         verbose=False,
         describe=command == "describe",
-        dry_run=command == "dry-run",
-        plan=command == "validate-plan",
+        yes=command == "deploy",
     )
     handler = (
         cmd_validate
-        if command in {"validate", "validate-plan"}
+        if command == "validate"
         else cmd_deploy
-        if command in {"deploy", "dry-run"}
+        if command == "deploy"
         else cmd_plan
     )
     with (

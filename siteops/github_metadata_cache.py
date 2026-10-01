@@ -30,7 +30,7 @@ class CachedGitHubClient:
         refresh: bool = False, offline: bool = False,
     ):
         if type(refresh) is not bool or type(offline) is not bool or (refresh and offline):
-            raise BrowseError("source.cache-options", "Choose either --refresh or --offline.")
+            raise BrowseError("source.cache-options", "Choose either --refresh or --offline-content.")
         self.client = client
         self.reference = client.reference
         self.cache = cache
@@ -60,7 +60,7 @@ class CachedGitHubClient:
             if error.diagnostic.code in {"github.rate-limit", "github.network", "github.timeout"}:
                 raise BrowseError(
                     error.diagnostic.code,
-                    error.diagnostic.summary + " Use --offline to request a previously cached snapshot.",
+                    error.diagnostic.summary + " Use --offline-content to request a previously cached snapshot.",
                 ) from None
             raise
         try:

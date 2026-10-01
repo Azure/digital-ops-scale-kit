@@ -176,9 +176,6 @@ siteops -w workspaces/iot-operations plan manifests/aio-install/manifest.yaml
 # Emit one publishable JSON plan document
 siteops -w workspaces/iot-operations plan manifests/aio-install/manifest.yaml --output json --projection publishable
 
-# Emit one publishable JSON run result
-siteops -w workspaces/iot-operations deploy manifests/aio-install/manifest.yaml --output json --projection publishable
-
 # Show the faster compile-free plan shape
 siteops -w workspaces/iot-operations plan manifests/aio-install/manifest.yaml --describe
 
@@ -191,3 +188,7 @@ siteops -w workspaces/iot-operations sites <name> --output yaml
 # Check Azure CLI authentication
 az account show
 ```
+
+For an explicitly approved deployment, follow the
+[run output guide](run-output.md). Deployment changes the selected targets,
+so use a bounded selector and review its plan before unattended execution.

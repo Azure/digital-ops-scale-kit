@@ -1,0 +1,87 @@
+apiVersion: siteops.inputs/v1
+kind: SiteInputContract
+nameFromResource: cluster
+siteDefaults:
+  properties:
+    # Selects the shared API profile, not an observed or requested extension version.
+    aioRelease: "2608"
+inputs:
+  - name: instance
+    type: azureResourceId
+    description: Existing AIO instance resource ID for the API used by releases 2607 and 2608.
+    resource:
+      type: Microsoft.IoTOperations/instances
+      apiVersion: "2026-07-01"
+    derive:
+      subscription: subscription
+      resourceGroup: resourceGroup
+      location: location
+      name: aioInstanceName
+  - name: siteName
+    type: string
+    description: Optional Site name override. The default comes from the associated cluster identity.
+    sitePath: name
+    format: dnsLabel
+    maxLength: 59
+  - name: subscription
+    type: string
+    description: Subscription derived from the existing instance.
+    sitePath: subscription
+  - name: resourceGroup
+    type: string
+    description: Resource group derived from the existing instance.
+    sitePath: resourceGroup
+  - name: location
+    type: string
+    description: Region read from the existing instance.
+    sitePath: location
+  - name: aioInstanceName
+    type: string
+    description: Actual instance name derived from its resource ID.
+    sitePath: parameters.aioInstanceName
+  - name: clusterName
+    type: string
+    description: Cluster name derived through the instance's custom location.
+    sitePath: parameters.clusterName
+  - name: customLocation
+    type: azureResourceId
+    description: Custom location referenced by the existing instance.
+    fromResource: {input: instance, field: extendedLocation}
+    resource:
+      type: Microsoft.ExtendedLocation/customLocations
+      apiVersion: "2021-08-31-preview"
+  - name: cluster
+    type: azureResourceId
+    description: Existing Arc cluster referenced by the custom location.
+    fromResource: {input: customLocation, field: customLocations.hostResourceId}
+    resource:
+      type: Microsoft.Kubernetes/connectedClusters
+      apiVersion: "2024-07-15-preview"
+    derive:
+      name: clusterName
+    requires:
+      - fact: connectedClusters.workloadIdentityEnabled
+        description: The existing cluster must report workload identity enabled.
+      - fact: connectedClusters.oidcIssuerAvailable
+        description: The existing cluster must report an OIDC issuer.
+  - name: existingVault
+    type: azureResourceId
+    required: false
+    description: Optional existing Key Vault ID. Omit to create the enablement's default vault.
+    sitePath: parameters.existingKeyVaultResourceId
+    resource:
+      type: Microsoft.KeyVault/vaults
+      apiVersion: "2023-07-01"
+      subscription: site
+  - name: environment
+    type: string
+    required: false
+    format: nonEmpty
+    description: Optional environment label and tag for enablement resources.
+    sitePath: labels.environment
+  - name: country
+    type: string
+    required: false
+    format: nonEmpty
+    description: Optional country label and tag for enablement resources.
+    sitePath: labels.country

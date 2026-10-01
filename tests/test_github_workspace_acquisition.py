@@ -28,6 +28,7 @@ from siteops.github_source import (
     GitHubReleaseAsset,
     GitHubReleaseSnapshot,
 )
+from siteops.results import ProgressPhase
 from siteops.workspace_source import WORKSPACE_RELEASE_NAME
 from tests.workspace_acquisition_helpers import make_source
 
@@ -154,6 +155,26 @@ def test_acquisition_binds_real_verifier_inputs_and_publishes_complete_cache(git
     assert receipt["policy"]["sha256"] == hashlib.sha256(github.policy.read_bytes()).hexdigest()
     assert receipt["trustedRootSha256"] == hashlib.sha256(github.roots.read_bytes()).hexdigest()
     assert not list((github.fixture.cache.root / "staging").iterdir())
+
+
+def test_acquisition_phases_follow_actual_cold_and_warm_work_without_identifiers(github):
+    events = []
+    flow = acquisition.GitHubWorkspaceAcquirer(
+        github.fixture.cache, policy_file=github.policy, trusted_root=github.roots,
+        progress=events.append,
+    )
+    selected = flow.acquire(github.client)
+    assert [event.phase for event in events] == [
+        ProgressPhase.RESOLUTION, ProgressPhase.DOWNLOAD, ProgressPhase.VERIFICATION,
+    ]
+    assert all(event.target is None and event.operation is None for event in events)
+    events.clear()
+    assert flow.acquire(github.client) == selected
+    assert [event.phase for event in events] == [
+        ProgressPhase.RESOLUTION, ProgressPhase.VERIFICATION,
+    ]
+    assert "example/content" not in repr(events)
+    assert str(github.fixture.cache.root) not in repr(events)
 
 
 def test_pinned_lease_never_resolves_source_or_downloads(github, monkeypatch):
@@ -409,15 +430,15 @@ def test_public_project_pin_and_plan_use_existing_site_configuration(project_cli
     assert (state.root / "sites" / "one.yaml").read_bytes() == site_before
 
 
-@pytest.mark.parametrize("command", ["validate", "describe", "dry-run", "deploy"])
+@pytest.mark.parametrize("command", ["validate", "describe", "plan", "deploy"])
 def test_public_project_commands_share_binding_and_keep_the_lease(project_cli, monkeypatch, capsys, command):
     state = project_cli
     pin_project(state, monkeypatch, capsys)
     forms = {
         "validate": ["validate", "storage"],
         "describe": ["plan", "storage", "--describe", "--output", "json"],
-        "dry-run": ["deploy", "storage", "--dry-run", "--output", "json"],
-        "deploy": ["deploy", "storage", "--output", "json"],
+        "plan": ["plan", "storage", "--output", "json"],
+        "deploy": ["deploy", "storage", "--yes", "--output", "json"],
     }
     code, output = invoke(monkeypatch, capsys, [
         "--project", str(state.root), *state.trust, *forms[command],
@@ -501,7 +522,7 @@ def test_missing_package_restores_exact_pin_but_offline_never_fetches(project_cl
     remove_cached_package(state)
     downloads = len(state.github.downloads)
     code, _ = invoke(monkeypatch, capsys, [
-        "--project", str(state.root), *state.trust, "plan", "storage", "--offline",
+        "--project", str(state.root), *state.trust, "plan", "storage", "--offline-content",
     ])
     assert code == 1 and len(state.github.downloads) == downloads
     code, output = invoke(monkeypatch, capsys, [
@@ -510,6 +531,25 @@ def test_missing_package_restores_exact_pin_but_offline_never_fetches(project_cl
     assert code == 0, output
     assert state.github.downloads[downloads:] == [WORKSPACE_RELEASE_NAME, "workspace.zip"]
     assert (state.root / "siteops.pin").read_bytes() == before
+
+
+def test_direct_release_deploy_uses_the_normal_verified_lease_without_a_pin(
+    project_cli, monkeypatch, capsys, tmp_path,
+):
+    state = project_cli
+    monkeypatch.setenv("SITEOPS_TEMP_DIR", str(tmp_path / "runtime"))
+    code, output = invoke(monkeypatch, capsys, [
+        *state.trust, "deploy", "storage",
+        "--source", "github:example/content@release-7",
+        "--site-file", str(state.root / "sites" / "one.yaml"), "--yes", "--output", "json",
+    ])
+    assert code == 0, output
+    document = json.loads(output.out)
+    assert document["status"] == "succeeded"
+    assert state.executor.deploy_resource_group.call_count == 1
+    assert state.executor.deploy_resource_group.call_args.kwargs["subscription"] == "operator-sub"
+    assert not (state.root / "siteops.pin").exists()
+    assert not state.engines[-1]["site_config_root"].exists()
 
 
 def test_changed_release_does_not_restore_or_rewrite_the_pin(project_cli, monkeypatch, capsys):

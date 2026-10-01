@@ -12,12 +12,22 @@ Plain output is the default:
 siteops -w <workspace> deploy <manifest>
 ```
 
-The command prepares an executable plan, runs it, and prints a final summary
-with one row per site. Progress lines and logs go to stderr while the run is in
-flight. The final summary is the record of what happened, not a prediction.
+In a private interactive terminal, the command prepares one executable plan,
+displays its targets and operations, asks for confirmation, then executes
+that same plan and prints a final summary with one row per site. A declined
+review submits no operations. `--yes` explicitly approves unattended, CI or
+JSON execution without printing the full private plan or bypassing
+validation, source trust or target prerequisites. Without `--yes`, a
+noninteractive invocation exits with argparse usage error 2 before content
+or Azure access. For preparation without execution, use `plan`. The former
+`deploy --dry-run` spelling is removed.
 
-`deploy --dry-run` remains a compatibility route to executable planning. It
-prints a plan and executes nothing.
+Progress lines and logs go to stderr while the run is in flight. For a direct
+published source, fixed messages name release resolution, missing-content
+download, verification and plan preparation phases. They do not expose a
+percentage or turn stderr into publishable output. Waiting operations report
+elapsed time at most once per minute, not invented completion progress.
+The final summary is the record of what happened, not a prediction.
 
 ## Read the summary
 
@@ -98,7 +108,7 @@ says so explicitly rather than implying that work was performed.
 Choose a compact JSON result suitable for publication:
 
 ```bash
-siteops -w <workspace> deploy <manifest> --output json --projection publishable
+siteops -w <workspace> deploy <manifest> --yes --output json --projection publishable
 ```
 
 For execution results and expected preparation failures, JSON mode writes
@@ -147,7 +157,7 @@ Two projections are available, matching the plan surface:
 | `publishable` | CI logs, summaries, artifacts, and reports | Aggregate counts, run status, exit code, generic typed diagnostics |
 
 ```bash
-siteops -w <workspace> deploy <manifest> --output json \
+siteops -w <workspace> deploy <manifest> --yes --output json \
   --projection local-private
 ```
 
@@ -172,13 +182,13 @@ text and unconfirmed deployment names.
 
 ## Interrupt a run
 
-Ctrl-C records a stop request and prints what to expect.
+During preparation or interactive review, Ctrl-C cancels before deployment
+submission and exits `130`. Local tool cleanup may delay the return.
+Declining the confirmation also exits `130`, without submitting operations
+or producing a completed deployment result.
 
-During preparation, the request lets preparation finish, including any
-remaining template compilations. If preparation succeeds, no deployment
-operation starts. If preparation fails, the command reports that failure.
-
-During execution, the request stops new work and wakes polling loops and
+During execution, Ctrl-C records a stop request, prints what to expect,
+stops new work and wakes polling loops and
 backoff sleeps. A call already running in a child process is not interrupted.
 It returns on its own or reaches its existing timeout first. The current
 bounds are 60 seconds for one deployment state read, 5 minutes for a

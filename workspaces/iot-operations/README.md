@@ -5,15 +5,29 @@ This workspace applies the generic Site Ops engine to
 It contains executable manifests, Bicep templates, release pins, site
 conventions, reusable resource definitions, and samples.
 
-Installing Site Ops does not install this workspace. Select a local
-checkout with `-w workspaces/iot-operations`, or pin a complete package
-from an approved release when one is published. The latter uses
-the same generic Site Ops planner without requiring a clone.
+Installing Site Ops does not acquire this workspace. Select a complete
+approved release directly with `--source SOURCE@RELEASE`, or retain a
+workspace pin in an operator project for repeatable use. Both use the
+ordinary Site Ops planner without requiring a clone. A local checkout
+remains available with `-w workspaces/iot-operations`.
 
 ## Start with one target
 
 For an approved package and one explicit target, follow
-[guided inputs](../../docs/guided-inputs.md). For a checkout with a
+[guided inputs](../../docs/guided-inputs.md). With the source enrolled
+independently and an authorized Azure CLI identity, supply the existing
+Arc cluster ID and the release selected by its instructions:
+
+```text
+siteops deploy aio-install --source "official@<release>" --input "cluster=<Arc-cluster-resource-ID>"
+```
+
+Deploy prepares a plan and asks for confirmation in a private terminal.
+A project pin and separate plan are optional. Add
+`--input enableSecretSync=true` only after confirming the cluster's OIDC
+and workload-identity prerequisites.
+
+For a local checkout with a
 reusable Site, follow the [configured-Site guide](../../docs/getting-started.md).
 It prepares a `sites.local/` overlay for one existing Arc-connected cluster,
 inspects the target, validates the manifest, reviews an executable plan,
@@ -27,7 +41,7 @@ health.
 
 ## Choose the operation
 
-Browse the same operations and examples locally, without loading Site values:
+The following commands browse a local checkout without loading Site values:
 
 ```bash
 siteops -w workspaces/iot-operations browse
@@ -60,7 +74,7 @@ instance settings and child resources.
 
 ## Inspect, prepare, and deploy
 
-Run commands from the repository root:
+For configured Sites in a local checkout, run from the repository root:
 
 ```bash
 siteops -w workspaces/iot-operations sites <site> --output yaml

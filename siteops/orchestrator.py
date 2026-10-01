@@ -17,7 +17,7 @@ import logging
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, fields, is_dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -215,6 +215,9 @@ SITE_PROPERTIES_PATTERN = re.compile(r"\{\{\s*site\.properties\.([a-zA-Z0-9_.\[\
 # Supports nested paths like: site.parameters.brokerConfig.memoryProfile
 SITE_PARAMETERS_PATTERN = re.compile(r"\{\{\s*site\.parameters\.([a-zA-Z0-9_.\[\]]+)\s*\}\}")
 UNRESOLVED_SITE_TEMPLATE_PATTERN = re.compile(r"\{\{\s*site\.")
+OPTIONAL_LABEL_VALUE_PATTERN = re.compile(
+    r"\{\{\s*site\.labels\.([A-Za-z_][A-Za-z0-9_-]*)\?\s*\}\}"
+)
 FOR_EACH_SITE_PROPERTY_PATTERN = re.compile(
     r"^\{\{\s*site\.properties\.([a-zA-Z0-9_.\[\]-]+)\s*\}\}$"
 )
@@ -367,10 +370,25 @@ def _exception_detail(error: Exception) -> str:
 class _ProgressOwner:
     """Serialize all worker progress through one callback owner."""
 
-    def __init__(self, callback: ProgressCallback | None):
+    def __init__(self, callback: ProgressCallback | None, *, clock: Callable[[], float] | None = None):
         self._callback = callback
         self._lock = threading.Lock()
         self._failure: Exception | None = None
+        self._clock = clock or time.monotonic
+        self._active: dict[OperationIdentity, tuple[float, float]] = {}
+
+    def _notify(self, event: ProgressEvent) -> None:
+        if self._callback is None:
+            return
+        try:
+            self._callback(event)
+        except Exception as error:
+            self._failure = error
+            self._callback = None
+            logger.error(
+                "Progress reporting failed. Deployment execution "
+                "continues without further progress output."
+            )
 
     def emit(self, event: ProgressEvent) -> None:
         if self._callback is None:
@@ -378,15 +396,36 @@ class _ProgressOwner:
         with self._lock:
             if self._callback is None:
                 return
-            try:
-                self._callback(event)
-            except Exception as error:
-                self._failure = error
-                self._callback = None
-                logger.error(
-                    "Progress reporting failed. Deployment execution "
-                    "continues without further progress output."
-                )
+            if event.operation is not None:
+                if event.kind is ProgressEventKind.OPERATION_STARTED:
+                    now = self._clock()
+                    self._active[event.operation] = (now, now + 60)
+                elif event.kind is ProgressEventKind.OPERATION_FINISHED:
+                    self._active.pop(event.operation, None)
+            self._notify(event)
+
+    def waiting(self) -> None:
+        """Report at most one elapsed update per active operation per minute."""
+        with self._lock:
+            if self._callback is None:
+                return
+            now = self._clock()
+            for operation, (started, due) in list(self._active.items()):
+                if now < due:
+                    continue
+                self._notify(ProgressEvent(
+                    kind=ProgressEventKind.OPERATION_WAITING,
+                    operation=operation, elapsed=now - started,
+                ))
+                self._active[operation] = (started, now + 60)
+
+    def finish_target(self, target: str) -> None:
+        """Discard any progress state left by an interrupted or failed worker."""
+        with self._lock:
+            self._active = {
+                operation: times for operation, times in self._active.items()
+                if operation.target != target
+            }
 
     @property
     def failure(self) -> Exception | None:
@@ -1992,6 +2031,8 @@ class Orchestrator:
             Value with all site templates resolved
         """
         if isinstance(value, str):
+            if OPTIONAL_LABEL_VALUE_PATTERN.search(value):
+                raise ValueError("Optional label references require a complete parameter mapping value.")
             # Simple replacements
             result = value
             result = result.replace("{{ site.name }}", site.name)
@@ -2014,8 +2055,19 @@ class Orchestrator:
             return result
 
         elif isinstance(value, dict):
+            selected: dict[Any, Any] = {}
+            for key, item in value.items():
+                if isinstance(key, str) and OPTIONAL_LABEL_VALUE_PATTERN.search(key):
+                    raise ValueError("Optional label references cannot be parameter mapping names.")
+                optional = OPTIONAL_LABEL_VALUE_PATTERN.fullmatch(item.strip()) if isinstance(item, str) else None
+                if optional is not None:
+                    label = optional.group(1)
+                    if label not in site.labels:
+                        continue
+                    item = str(site.labels[label])
+                selected[key] = item
             return _resolve_parameter_mapping(
-                value, lambda v: self._resolve_template_strings(v, site, step_outputs)
+                selected, lambda v: self._resolve_template_strings(v, site, step_outputs)
             )
         elif isinstance(value, list):
             return [self._resolve_template_strings(v, site, step_outputs) for v in value]
@@ -5825,67 +5877,19 @@ class Orchestrator:
         stop_requested = stop_requested if stop_requested is not None else threading.Event()
 
         parallel = ParallelConfig(sites=plan.max_parallel_sites)
-        if parallel.is_sequential or len(targets) == 1:
-            results: list[SiteResult] = []
-            produced: dict[OperationIdentity, dict[str, Any]] = {}
-            for index, target in enumerate(targets):
-                if stop_requested.is_set():
-                    results.extend(_cancelled_target_result(t) for t in targets[index:])
-                    return results, produced, True
-                state = _TargetExecutionState(target)
-                try:
-                    execution = self._execute_prepared_target(
-                        plan,
-                        target,
-                        timestamp,
-                        inherited_outputs,
-                        execution_mode=execution_mode,
-                        progress=progress,
-                        state=state,
-                        stop_requested=stop_requested,
-                    )
-                except KeyboardInterrupt:
-                    stop_requested.set()
-                    snapshot = state.snapshot_interrupted()
-                    results.append(snapshot.site)
-                    produced.update(snapshot.outputs)
-                    results.extend(
-                        _cancelled_target_result(remaining)
-                        for remaining in targets[index + 1 :]
-                    )
-                    progress.emit(
-                        ProgressEvent(
-                            kind=ProgressEventKind.RUN_INTERRUPTED,
-                        )
-                    )
-                    return results, produced, True
-                except Exception as error:
-                    reportable = self._reportable_deploy_error(
-                        error,
-                        target.name,
-                    )
-                    logger.error(
-                        "Unexpected error deploying to "
-                        f"{site_name_for_output(target.name)}: {reportable}"
-                    )
-                    execution = state.snapshot_failed(error)
-                results.append(execution.site)
-                produced.update(execution.outputs)
-            return results, produced, stop_requested.is_set()
-
         max_workers = parallel.max_workers
         worker_count = (
-            len(targets)
-            if max_workers is None
-            else min(len(targets), max_workers)
+            1 if parallel.is_sequential else
+            len(targets) if max_workers is None else min(len(targets), max_workers)
         )
-        progress.emit(
-            ProgressEvent(
-                kind=ProgressEventKind.BATCH_STARTED,
-                target_count=len(targets),
-                worker_count=worker_count,
+        if worker_count > 1:
+            progress.emit(
+                ProgressEvent(
+                    kind=ProgressEventKind.BATCH_STARTED,
+                    target_count=len(targets),
+                    worker_count=worker_count,
+                )
             )
-        )
         results_by_target: dict[str, SiteResult] = {}
         outputs_by_target: dict[
             str,
@@ -5913,32 +5917,32 @@ class Orchestrator:
                 )
                 future_to_target[future] = target
             try:
-                for future in as_completed(future_to_target):
-                    target = future_to_target[future]
-                    try:
-                        execution = future.result()
-                    except KeyboardInterrupt:
-                        interrupted = True
-                        stop_requested.set()
-                        execution = states[
-                            target.name
-                        ].snapshot_interrupted()
-                    except Exception as error:
-                        reportable = self._reportable_deploy_error(
-                            error,
-                            target.name,
-                        )
-                        logger.error(
-                            "Unexpected error deploying to "
-                            f"{site_name_for_output(target.name)}: "
-                            f"{reportable}"
-                        )
-                        execution = states[target.name].snapshot_failed(error)
-                    results_by_target[target.name] = execution.site
-                    outputs_by_target[target.name] = execution.outputs
-                    if interrupted or stop_requested.is_set():
+                pending = set(future_to_target)
+                while pending:
+                    if stop_requested.is_set():
                         interrupted = True
                         break
+                    completed, pending = wait(pending, timeout=1, return_when=FIRST_COMPLETED)
+                    for future in completed:
+                        target = future_to_target[future]
+                        try:
+                            execution = future.result()
+                        except KeyboardInterrupt:
+                            interrupted = True
+                            stop_requested.set()
+                            execution = states[target.name].snapshot_interrupted()
+                        except Exception as error:
+                            reportable = self._reportable_deploy_error(error, target.name)
+                            logger.error(
+                                "Unexpected error deploying to "
+                                f"{site_name_for_output(target.name)}: {reportable}"
+                            )
+                            execution = states[target.name].snapshot_failed(error)
+                        progress.finish_target(target.name)
+                        results_by_target[target.name] = execution.site
+                        outputs_by_target[target.name] = execution.outputs
+                    if not stop_requested.is_set():
+                        progress.waiting()
             except KeyboardInterrupt:
                 interrupted = True
                 stop_requested.set()

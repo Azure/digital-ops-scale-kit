@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from siteops_distribution import (
+    INSTALLER_NAME,
     BundleManifest,
     BundleTarget,
     DistributionError,
@@ -813,6 +814,7 @@ def _assemble_bundle(
     for source_path, destination in (
         (source / "LICENSE", bundle_root / "LICENSE"),
         (source / "ThirdPartyNotices.txt", bundle_root / "ThirdPartyNotices.txt"),
+        (source / "scripts" / "siteops_distribution.py", bundle_root / INSTALLER_NAME),
     ):
         _copy_regular(source_path, destination, "required bundle source file")
     app_destination = bundle_root / "wheels" / application_wheel.name

@@ -249,6 +249,7 @@ jobs:
           CMD_ARGS=(
             -w "$INPUT_WORKSPACE"
             deploy "$INPUT_MANIFEST"
+            --yes
             --output json
             --projection publishable
           )

@@ -144,7 +144,7 @@ jobs:
 
   test:
     name: Unit Tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     permissions:
       contents: read
@@ -159,6 +159,36 @@ jobs:
         uses: ./.github/actions/setup-siteops
         with:
           install-dev: "true"
+
+      - name: Prepare native Linux uv fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          command -v openssl >/dev/null
+          fixtures="$RUNNER_TEMP/siteops-uv-fixtures"
+          mkdir -m 700 "$fixtures"
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --tlsv1.2 --max-redirs 3 --max-time 180 --max-filesize 19827214 \
+            --output "$fixtures/uv.tar.gz" \
+            https://github.com/astral-sh/uv/releases/download/0.12.20/uv-x86_64-unknown-linux-gnu.tar.gz
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --tlsv1.2 --max-redirs 3 --max-time 180 --max-filesize 30778566 \
+            --output "$fixtures/cpython.tar.gz" \
+            https://github.com/astral-sh/python-build-standalone/releases/download/20260924/cpython-3.11.16%2B20260924-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz
+          printf '%s  %s\n' \
+            6590717592ace991ff83a63fef799e3ad9d33ecc8f96c5d6bdd732496e79337f "$fixtures/uv.tar.gz" \
+            68c6739376b65258dee5058ccf6777232fe38d31a578965ae8bda327ec7da3a8 "$fixtures/cpython.tar.gz" |
+            sha256sum --check --status
+          mkdir -m 700 "$fixtures/native"
+          tar -xzf "$fixtures/uv.tar.gz" -C "$fixtures/native" --strip-components=1 \
+            uv-x86_64-unknown-linux-gnu/uv
+          {
+            echo "SITEOPS_TEST_UV=$fixtures/native/uv"
+            echo "SITEOPS_TEST_UV_ARCHIVE=$fixtures/uv.tar.gz"
+            echo "SITEOPS_TEST_UV_PYTHON_ARCHIVE=$fixtures/cpython.tar.gz"
+            echo "SITEOPS_REQUIRE_LINUX_UV=1"
+          } >> "$GITHUB_ENV"
 
       - name: Run unit tests
         # Includes bounded executable-plan coverage in tests/workspace/
@@ -221,6 +251,139 @@ jobs:
           name: coverage-report
           path: coverage.xml
           retention-days: 7
+
+  windows-bootstrap:
+    name: Windows Bootstrap
+    if: github.event_name != 'workflow_dispatch' || inputs.run-mode == 'ci-only'
+    runs-on: windows-2025
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      PIP_INDEX_URL: https://packagefeedproxy.microsoft.io/pypi/simple/
+      PIP_CONFIG_FILE: NUL
+      PIP_EXTRA_INDEX_URL: ""
+      PIP_FIND_LINKS: ""
+      PIP_TRUSTED_HOST: ""
+      PIP_NO_INPUT: "1"
+      PIP_KEYRING_PROVIDER: disabled
+      SITEOPS_REQUIRE_WINDOWS_SYMLINK_REJECTION: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        shell: powershell
+        run: |
+          python -m pip install --no-cache-dir -e '.[dev]'
+          if ($LASTEXITCODE -ne 0) { throw 'Windows test dependencies could not be installed.' }
+
+      - name: Prepare private test state
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $profileHome = [Environment]::GetFolderPath('UserProfile')
+          if (-not [IO.Path]::IsPathRooted($profileHome) -or
+              $env:GITHUB_RUN_ID -notmatch '^[0-9]+$' -or
+              $env:GITHUB_RUN_ATTEMPT -notmatch '^[0-9]+$') {
+              throw 'The Windows runner needs a bounded private test location.'
+          }
+          $private = Join-Path $profileHome (
+              "siteops-windows-tests-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          )
+          if (Test-Path -LiteralPath $private) {
+              throw 'The Windows test area must be fresh.'
+          }
+          New-Item -ItemType Directory -Path $private -ErrorAction Stop | Out-Null
+          $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+          $previousPreference = $ErrorActionPreference
+          try {
+              $ErrorActionPreference = 'Continue'
+              & icacls.exe $private /setowner "*$sid" *> $null
+              $owned = $LASTEXITCODE -eq 0
+              if ($owned) {
+                  & icacls.exe $private /inheritance:r /grant:r "*${sid}:(OI)(CI)F" *> $null
+                  $protected = $LASTEXITCODE -eq 0
+              }
+          } finally {
+              $ErrorActionPreference = $previousPreference
+          }
+          if (-not $owned -or -not $protected) {
+              throw 'The Windows test area could not be protected.'
+          }
+          [IO.File]::AppendAllText(
+              $env:GITHUB_ENV,
+              "SITEOPS_WINDOWS_TEST_TEMP=$(Join-Path $private 'pytest')`n",
+              [Text.UTF8Encoding]::new($false)
+          )
+
+      - name: Prepare native uv fixtures
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $parent = Split-Path -Parent $env:SITEOPS_WINDOWS_TEST_TEMP
+          $fixtures = Join-Path $parent 'uv-fixtures'
+          if (Test-Path -LiteralPath $fixtures) { throw 'The uv fixture area must be fresh.' }
+          New-Item -ItemType Directory -Path $fixtures -ErrorAction Stop | Out-Null
+          $archive = Join-Path $fixtures 'uv-windows.zip'
+          & curl.exe --fail --silent --show-error --location --proto '=https' --proto-redir '=https' `
+              --tlsv1.2 --max-redirs 3 --max-time 180 --max-filesize 18039150 `
+              --output $archive 'https://github.com/astral-sh/uv/releases/download/0.12.20/uv-x86_64-pc-windows-msvc.zip'
+          if ($LASTEXITCODE -ne 0 -or
+              (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+                  '95f9bc30fbb3574d276e28ac4a6de932d25153645853d13da8c21eec3bc88d06') {
+              throw 'The native uv fixture archive could not be verified.'
+          }
+          $native = Join-Path $fixtures 'native'
+          Expand-Archive -LiteralPath $archive -DestinationPath $native
+          $uv = Join-Path $native 'uv.exe'
+          Get-ChildItem Env: | Where-Object { $_.Name -like 'UV_*' -or $_.Name -like 'PYTHON*' } |
+              ForEach-Object { [Environment]::SetEnvironmentVariable($_.Name, $null) }
+          $env:UV_PYTHON_INSTALL_DIR = Join-Path $fixtures 'python'
+          $env:UV_TOOL_DIR = Join-Path $fixtures 'tools'
+          $env:UV_TOOL_BIN_DIR = Join-Path $fixtures 'bin'
+          $env:UV_CACHE_DIR = Join-Path $fixtures 'cache'
+          $previousPreference = $ErrorActionPreference
+          try {
+              $ErrorActionPreference = 'Continue'
+              & $uv python install 3.11.16 --no-bin --no-registry --no-config --system-certs --no-progress `
+                  > (Join-Path $fixtures 'runtime.log') 2>&1
+              $runtimeExit = $LASTEXITCODE
+          } finally { $ErrorActionPreference = $previousPreference }
+          if ($runtimeExit -ne 0 -or -not (Test-Path -LiteralPath (
+              Join-Path $env:UV_PYTHON_INSTALL_DIR 'cpython-3.11.16-windows-x86_64-none\python.exe'
+          ) -PathType Leaf)) { throw 'The qualified uv-managed runtime fixture is unavailable.' }
+          $settings = @(
+              "SITEOPS_TEST_UV=$uv",
+              "SITEOPS_TEST_UV_ARCHIVE=$archive",
+              "SITEOPS_TEST_UV_PYTHON_DIR=$env:UV_PYTHON_INSTALL_DIR",
+              'SITEOPS_REQUIRE_WINDOWS_UV=1'
+          )
+          [IO.File]::AppendAllText(
+              $env:GITHUB_ENV, ($settings -join "`n") + "`n", [Text.UTF8Encoding]::new($false)
+          )
+
+      - name: Windows bootstrap tests
+        shell: powershell
+        run: |
+          python -B -m pytest tests\test_bootstrap_scripts.py tests\test_uv_bootstrap_windows.py `
+              -k 'windows_bootstrap or test_uv_bootstrap_windows' -q `
+              --basetemp="$env:SITEOPS_WINDOWS_TEST_TEMP"
+          if ($LASTEXITCODE -ne 0) { throw 'Native Windows bootstrap tests failed.' }
+
+      - name: Windows installation consumers
+        shell: powershell
+        run: |
+          python -B -m pytest tests\test_uv_installation.py tests\test_distribution_workflows.py `
+              tests\test_release_workflow.py `
+              -k 'test_uv_installation or native_qualification or matrix_runtime_admission or native_verified_installation_step or native_online_installation_step or native_installation_steps or generated_powershell_bootstrap or required_native_consumer_fixtures or windows_qualification' -q `
+              --basetemp="$env:SITEOPS_WINDOWS_TEST_TEMP-consumers"
+          if ($LASTEXITCODE -ne 0) { throw 'Native Windows installation consumer tests failed.' }
 
   validate:
     name: Validate Manifests
@@ -318,7 +481,7 @@ jobs:
 
   overview:
     name: Overview
-    needs: [lint, test, validate, release-runner, installer-check, release-preview, attestation-check]
+    needs: [lint, test, windows-bootstrap, validate, release-runner, installer-check, release-preview, attestation-check]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -331,6 +494,7 @@ jobs:
           SOURCE_SHA: ${{ github.sha }}
           LINT_RESULT: ${{ needs.lint.result }}
           TEST_RESULT: ${{ needs.test.result }}
+          WINDOWS_RESULT: ${{ needs.windows-bootstrap.result }}
           VALIDATE_RESULT: ${{ needs.validate.result }}
           RUNNER_RESULT: ${{ needs.release-runner.result }}
           INSTALLER_RESULT: ${{ needs.installer-check.result }}
@@ -364,7 +528,12 @@ jobs:
           if mode is None or not re.fullmatch("[0-9a-f]{40}", source):
               raise SystemExit("::error::The CI summary requires a supported mode and source commit.")
           title, extra, scope = mode
-          rows = (("Lint", "LINT_RESULT"), ("Unit tests", "TEST_RESULT"), ("Manifests", "VALIDATE_RESULT"), *extra)
+          windows = (
+              (("Windows bootstrap", "WINDOWS_RESULT"),)
+              if os.environ["CI_MODE"] == "ci-only" else ()
+          )
+          rows = (("Lint", "LINT_RESULT"), ("Unit tests", "TEST_RESULT"), *windows,
+                  ("Manifests", "VALIDATE_RESULT"), *extra)
           results = {"success": "Passed", "failure": "Failed", "cancelled": "Cancelled", "skipped": "Skipped"}
           lines = ["## CI: " + title, "", "Source: `" + source + "`", "", "| Check | Result |", "|---|---|"]
           for label, key in rows:

@@ -19,189 +19,59 @@ SCRIPTS = ROOT / "scripts" / "bootstrap"
 SOURCE_SHA = "c" * 40
 
 
-def test_private_pipx_venvs_are_created_at_their_retained_paths():
-    bash = (SCRIPTS / "siteops-bootstrap.sh").read_text(encoding="utf-8")
-    powershell = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
-    assert '"${venv_tool[@]}" "$tools/pipx"' in bash
-    assert "$tools/pipx-stage" not in bash
-    assert "& $python -m venv $installed" in powershell
-    assert "Move-Item -LiteralPath $staged" not in powershell
-
-
 def test_managed_azure_linux_uses_existing_os_tools_without_sudo():
     bash = (SCRIPTS / "siteops-bootstrap.sh").read_text(encoding="utf-8")
     assert "azurelinux:3.0" in bash
     assert 'if [[ "$platform" == azurelinux ]]; then' in bash
     assert "Managed Azure Linux" in bash
-    assert "python3 -m virtualenv" in bash
-    assert '"${venv_tool[@]}" "$staging/backend-tools"' in bash
-
-
-def test_pipx_managed_directories_are_isolated_before_package_operations():
-    bash = (SCRIPTS / "siteops-bootstrap.sh").read_text(encoding="utf-8")
-    assert 'PIPX_HOME="$data/pipx"' in bash
-    assert 'PIPX_BIN_DIR="$data/bin"' in bash
-    assert 'PIPX_SHARED_LIBS="$data/pipx/shared"' in bash
-    assert 'PIPX_MAN_DIR="$data/man"' in bash
-    assert 'PIPX_COMPLETION_DIR="$data/completions"' in bash
-    assert bash.index('export PIPX_HOME PIPX_BIN_DIR PIPX_SHARED_LIBS PIPX_MAN_DIR') < bash.index(
-        '"$pipx_bin" list --output json',
-    )
-
-
-def test_bootstrap_requires_configured_secure_index_before_python_download():
-    bash = (SCRIPTS / "siteops-bootstrap.sh").read_text(encoding="utf-8")
-    assert 'pip_configuration="$("$1" -m pip config list 2>/dev/null)"' in bash
-    assert "parsed.scheme != \"https\"" in bash
-    assert bash.index('  require_approved_python_index "$tools/pipx/bin/python" install\n') < bash.index(
-        '"$tools/pipx/bin/python" -m pip install',
-    )
-    assert bash.rindex(
-        '  require_approved_python_index "$staging/backend-tools/bin/python" download\n',
-    ) < bash.index(
-        '"$staging/backend-tools/bin/python" -m pip download',
-    )
-    assert '> "$staging/pip-download.log" 2>&1' in bash
-
-
-def test_windows_bootstrap_checks_python_index_before_tool_downloads():
-    powershell = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
-    assert "function Require-ApprovedPythonIndex(" in powershell
-    assert powershell.index("Require-ApprovedPythonIndex $toolPython install") < powershell.index(
-        "& $toolPython -m pip install",
-    )
-    assert powershell.index("Require-ApprovedPythonIndex $backendPython download") < powershell.index(
-        "& $backendPython -m pip download",
-    )
-
-
-def _windows_python_index_wrapper(tmp_path: Path) -> Path:
-    source = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
-    helper = re.search(r"(?ms)^function Require-ApprovedPythonIndex\([^\n]*\) \{.*?^\}", source)
-    assert helper, "The Windows Python feed admission helper is missing."
-    wrapper = tmp_path / "check-index.ps1"
-    wrapper.write_text(
-        'function Fail([string]$message) { throw "Site Ops installation: $message" }\n'
-        + helper.group(0) + "\n"
-        "$ErrorActionPreference = 'Stop'\n"
-        "Require-ApprovedPythonIndex $env:TEST_PYTHON $env:TEST_COMMAND\n"
-        "'INDEX_ACCEPTED'\n",
-        encoding="utf-8",
-    )
-    return wrapper
-
-
-@pytest.mark.skipif(sys.platform != "win32", reason="Native pip config requires Windows PowerShell 5.1.")
-@pytest.mark.parametrize(
-    ("index", "extra", "find_links", "trusted_host", "accepted"),
-    [
-        ("https://packages.example.invalid/simple/", "", "", "", True),
-        ("", "", "", "", False),
-        ("http://packages.example.invalid/simple/", "", "", "", False),
-        ("https://packages.example.invalid/simple/", "https://other.example.invalid/simple/", "", "", False),
-        ("https://packages.example.invalid/simple/", "", "https://wheels.example.invalid/", "", False),
-        ("https://packages.example.invalid/simple/", "", "", "packages.example.invalid", False),
-    ],
-)
-def test_windows_bootstrap_python_index_check(
-    tmp_path, index, extra, find_links, trusted_host, accepted,
-):
-    wrapper = _windows_python_index_wrapper(tmp_path)
-    env = {
-        **os.environ,
-        "PIP_CONFIG_FILE": os.devnull,
-        "PIP_INDEX_URL": index,
-        "PIP_EXTRA_INDEX_URL": extra,
-        "PIP_FIND_LINKS": find_links,
-        "PIP_TRUSTED_HOST": trusted_host,
-        "TEST_PYTHON": sys.executable,
-        "TEST_COMMAND": "install",
-    }
-    result = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
-        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30,
-    )
-    assert (result.returncode == 0) is accepted, result.stdout + result.stderr
-    assert ("INDEX_ACCEPTED" in result.stdout) is accepted
-    assert "packages.example.invalid" not in result.stdout + result.stderr
-
-
-@pytest.mark.skipif(sys.platform != "win32", reason="Native pip config requires Windows PowerShell 5.1.")
-@pytest.mark.parametrize(
-    ("command", "global_index", "install_index", "download_index", "accepted"),
-    [
-        ("download", "https://approved.example.invalid/simple", "https://approved.example.invalid/simple",
-         "http://other.example.invalid/simple", False),
-        ("download", "http://other.example.invalid/simple", "https://approved.example.invalid/simple",
-         None, False),
-        ("download", "http://other.example.invalid/simple", "http://other.example.invalid/simple",
-         "https://approved.example.invalid/simple", True),
-        ("install", "https://approved.example.invalid/simple", "https://approved.example.invalid/simple",
-         "http://other.example.invalid/simple", True),
-        ("install", "https://approved.example.invalid/simple", "http://other.example.invalid/simple",
-         "https://approved.example.invalid/simple", False),
-    ],
-)
-def test_windows_bootstrap_index_check_uses_effective_command_section(
-    tmp_path, command, global_index, install_index, download_index, accepted,
-):
-    wrapper = _windows_python_index_wrapper(tmp_path)
-    config = tmp_path / "pip.ini"
-    config.write_text(
-        "[global]\nindex-url = " + global_index + "\n"
-        "[install]\nindex-url = " + install_index + "\n"
-        + ("[download]\nindex-url = " + download_index + "\n" if download_index else ""),
-        encoding="utf-8",
-    )
-    env = {
-        **os.environ, "PIP_CONFIG_FILE": str(config),
-        "TEST_PYTHON": sys.executable, "TEST_COMMAND": command,
-    }
-    for name in ("PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_FIND_LINKS", "PIP_TRUSTED_HOST"):
-        env.pop(name, None)
-    result = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
-        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30,
-    )
-    assert (result.returncode == 0) is accepted, "The command-specific index check disagreed."
-    assert ("INDEX_ACCEPTED" in result.stdout) is accepted
-    assert "example.invalid" not in result.stdout + result.stderr
 
 
 def test_bash_bootstrap_admits_private_data_root_before_retained_tool_use():
     bash = (SCRIPTS / "siteops-bootstrap.sh").read_text(encoding="utf-8")
-    assert bash.index('require_private_data_root "$data"') < bash.index(
-        'pipx_bin="$(command -v pipx || true)"',
-    )
+    assert bash.index('admit_directory "$data" private') < bash.index("\nselect_uv\n")
 
 
 def test_windows_bootstrap_admits_private_data_root_before_retained_tool_use():
     powershell = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
     assert "function Require-PrivateDataRoot(" in powershell
     assert powershell.index("Require-PrivateDataRoot $data") < powershell.index(
-        "$candidate = Join-Path $env:LOCALAPPDATA 'Programs\\Python\\Python312\\python.exe'",
+        "$uv = Select-Uv $data $download $curl",
     )
-    assert powershell.index("Require-PrivateDataRoot $data") < powershell.index(
-        "if (Test-Path -LiteralPath $privatePipx -PathType Leaf)",
+
+
+def test_windows_bootstrap_owns_new_data_root_before_private_acl_and_admission():
+    powershell = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
+    create = powershell.split("function Require-PrivateDataRoot(", 1)[1].split(
+        "function Require-PrivateExecutablePath(", 1,
+    )[0].split("if (-not $exists)", 1)[1]
+    assert '& icacls.exe $Path /setowner "*$sid"' in create
+    assert create.index('& icacls.exe $Path /setowner "*$sid"') < create.index(
+        '& icacls.exe $Path /inheritance:r /grant:r "*${sid}:(OI)(CI)F"',
     )
+    assert "if (-not $owned) {" in create
+    assert "Reject 'ROOT_DATA_OWNER'" in create
 
 
 def test_windows_bootstrap_checks_managed_executables_before_running_them():
     powershell = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
-    assert powershell.index("Require-PrivateExecutablePath $candidate $env:LOCALAPPDATA") < (
-        powershell.index("$candidateVersion = & $candidate -c")
+    assert powershell.index("Require-PrivateExecutablePath $available (Split-Path -Parent $available) -Optional") < (
+        powershell.index("Stage 'Keep: the other uv installation unchanged.")
     )
-    assert powershell.index("Require-PrivateExecutablePath $pipx $data") < (
-        powershell.index("$pipxVersion = if ($pipx)")
+    runtime = powershell.split("function Select-ManagedPython(", 1)[1].split("\n}\n", 1)[0]
+    assert runtime.index("Require-PrivateRuntimeTree (Split-Path -Parent $python) $Directory $python") < (
+        runtime.index("& $python -I -S -B")
     )
-    assert powershell.index("Require-PrivateExecutablePath $toolPython $data") < (
-        powershell.index("Require-ApprovedPythonIndex $toolPython install")
+    assert "python', 'list'" not in runtime
+    assert powershell.index("Require-PrivateRuntimeTree $toolHome $toolDirectory") < powershell.index(
+        "$installed = Check-Payload @($mode",
     )
-    assert powershell.index("Require-PrivateExecutablePath $backendPython $download") < (
-        powershell.index("Require-ApprovedPythonIndex $backendPython download")
-    )
-    assert powershell.index("Require-PrivateExecutablePath $expectedCommand $binDir") < (
+    assert powershell.index("Require-PrivateExecutablePath $expectedCommand $commandDirectory") < (
         powershell.index("$siteops = Native 'siteops.exe'")
+    )
+    assert "Join-Path $toolHome 'Scripts\\siteops.exe'" in powershell
+    assert "$validatedTarget" not in powershell
+    assert powershell.index("Require-PrivateExecutablePath $expectedCommand $commandDirectory") < (
+        powershell.index("& $siteops --version")
     )
 
 
@@ -217,45 +87,6 @@ def _windows_private_root_wrapper(tmp_path: Path, setup: str = "") -> Path:
         "$ErrorActionPreference = 'Stop'\n"
         "Require-PrivateDataRoot $env:TEST_DATA_ROOT\n"
         "'PRIVATE_ROOT_ACCEPTED'\n",
-        encoding="utf-8",
-    )
-    return wrapper
-
-
-def _windows_selected_tool_wrapper(tmp_path: Path, kind: str) -> Path:
-    source = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
-    root = re.search(r"(?ms)^function Require-PrivateDataRoot\([^\n]*\) \{.*?^\}", source)
-    tool = re.search(r"(?ms)^function Require-PrivateExecutablePath\([^\n]*\) \{.*?^\}", source)
-    assert root
-    if kind == "pipx":
-        selection = source.split("$pipx = Native 'pipx.exe'\n", 1)[1].split(
-            "if ($pipxVersion -cne '1.17.2')", 1,
-        )[0]
-        setup = (
-            "function Native([string]$name) { return $null }\n"
-            "$data=$env:TEST_DATA_ROOT\n"
-            "Require-PrivateDataRoot $data\n"
-        )
-    else:
-        candidate = "        $candidate = Join-Path $env:LOCALAPPDATA 'Programs\\Python\\Python312\\python.exe'"
-        selection = candidate + source.split(candidate, 1)[1].split(
-            "\n    }\n    if (-not $python)", 1,
-        )[0]
-        setup = (
-            "$env:LOCALAPPDATA=$env:TEST_LOCALAPPDATA\n"
-            "Require-PrivateDataRoot $env:TEST_DATA_ROOT\n"
-            "$python=$null\n"
-        )
-    wrapper = tmp_path / f"select-{kind}.ps1"
-    wrapper.write_text(
-        'function Fail([string]$message) { throw "Site Ops installation: $message" }\n'
-        + root.group(0) + "\n"
-        + (tool.group(0) + "\n" if tool else "")
-        + "$ErrorActionPreference='Stop'\n"
-        + setup
-        + "$ErrorActionPreference='Continue'\n"
-        + selection + "\n"
-        + "'TOOL_SELECTION_COMPLETED'\n",
         encoding="utf-8",
     )
     return wrapper
@@ -299,8 +130,19 @@ def _windows_tool_path_wrapper(tmp_path: Path) -> Path:
     return wrapper
 
 
+def _windows_file_link(path: Path, target: Path) -> None:
+    try:
+        path.symlink_to(target)
+    except OSError as error:
+        if error.winerror == 1314:
+            if os.environ.get("SITEOPS_REQUIRE_WINDOWS_SYMLINK_REJECTION") == "1":
+                pytest.fail("Required Windows file symlink capability is unavailable.")
+            pytest.skip("This local host cannot create a Windows file symlink.")
+        raise
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Native Windows ACL admission needs Windows.")
-@pytest.mark.parametrize("kind", ["pipx", "python"])
+@pytest.mark.parametrize("kind", ["uv", "runtime"])
 def test_windows_bootstrap_rejects_untrusted_selected_executable_path(tmp_path, kind):
     local_appdata = tmp_path / "LocalAppData"
     local_appdata.mkdir()
@@ -308,14 +150,14 @@ def test_windows_bootstrap_rejects_untrusted_selected_executable_path(tmp_path, 
     initial = _windows_tool_probe(_windows_private_root_wrapper(tmp_path), root, local_appdata)
     assert initial.returncode == 0, initial.stdout + initial.stderr
 
-    if kind == "pipx":
+    if kind == "uv":
         shared = root / "tools"
-        executable = shared / "pipx" / "Scripts" / "pipx.exe"
+        executable = shared / "uv" / "0.12.20" / "uv.exe"
         executable.parent.mkdir(parents=True)
         rights = "(OI)(CI)M"
     else:
         shared = local_appdata
-        executable = shared / "Programs" / "Python" / "Python312" / "python.exe"
+        executable = shared / "uv" / "python" / "cpython-3.11.16-windows-x86_64-none" / "python.exe"
         rights = "(OI)(CI)(WD,AD)"
     grant = subprocess.run(
         ["icacls.exe", str(shared), "/grant", f"*S-1-5-32-545:{rights}"],
@@ -326,10 +168,13 @@ def test_windows_bootstrap_rejects_untrusted_selected_executable_path(tmp_path, 
     try:
         executable.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(shutil.which("where.exe"), executable)
-        selected = _windows_tool_probe(_windows_selected_tool_wrapper(tmp_path, kind), root, local_appdata)
+        selected = _windows_tool_probe(
+            _windows_tool_path_wrapper(tmp_path), root, local_appdata,
+            executable, root if kind == "uv" else shared / "uv" / "python",
+        )
         assert selected.returncode != 0
         assert "TOOL_ACL" in selected.stderr
-        assert "TOOL_SELECTION_COMPLETED" not in selected.stdout
+        assert "TOOL_ADMITTED" not in selected.stdout
     finally:
         subprocess.run(
             ["icacls.exe", str(shared), "/remove:g", "*S-1-5-32-545"],
@@ -338,22 +183,155 @@ def test_windows_bootstrap_rejects_untrusted_selected_executable_path(tmp_path, 
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Native Windows ACL admission needs Windows.")
-@pytest.mark.parametrize("kind", ["pipx", "python"])
+@pytest.mark.parametrize("kind", ["uv", "runtime"])
 def test_windows_bootstrap_accepts_private_selected_executable_path(tmp_path, kind):
     local_appdata = tmp_path / "LocalAppData"
     local_appdata.mkdir()
     root = local_appdata / "siteops"
     initial = _windows_tool_probe(_windows_private_root_wrapper(tmp_path), root, local_appdata)
     assert initial.returncode == 0, initial.stdout + initial.stderr
-    if kind == "pipx":
-        executable = root / "tools" / "pipx" / "Scripts" / "pipx.exe"
+    if kind == "uv":
+        executable = root / "tools" / "uv" / "0.12.20" / "uv.exe"
+        private_root = root
     else:
-        executable = local_appdata / "Programs" / "Python" / "Python312" / "python.exe"
+        private_root = local_appdata / "uv" / "python"
+        executable = private_root / "cpython-3.11.16-windows-x86_64-none" / "python.exe"
     executable.parent.mkdir(parents=True)
     shutil.copy2(shutil.which("where.exe"), executable)
-    selected = _windows_tool_probe(_windows_selected_tool_wrapper(tmp_path, kind), root, local_appdata)
+    selected = _windows_tool_probe(
+        _windows_tool_path_wrapper(tmp_path), root, local_appdata, executable, private_root,
+    )
     assert selected.returncode == 0, selected.stdout + selected.stderr
-    assert "TOOL_SELECTION_COMPLETED" in selected.stdout
+    assert "TOOL_ADMITTED" in selected.stdout
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Native Windows launcher admission needs Windows.")
+def test_windows_bootstrap_accepts_private_copied_siteops_launcher(tmp_path):
+    local_appdata = tmp_path / "LocalAppData"
+    local_appdata.mkdir()
+    root = local_appdata / "siteops"
+    initial = _windows_tool_probe(_windows_private_root_wrapper(tmp_path), root, local_appdata)
+    assert initial.returncode == 0, initial.stdout + initial.stderr
+    bin_dir = root / "bin"
+    bin_dir.mkdir()
+    launcher = bin_dir / "siteops.exe"
+    shutil.copy2(shutil.which("where.exe"), launcher)
+
+    accepted = _windows_tool_probe(
+        _windows_tool_path_wrapper(tmp_path), root, local_appdata, launcher, bin_dir,
+    )
+    assert accepted.returncode == 0, accepted.stdout + accepted.stderr
+    assert "TOOL_ADMITTED" in accepted.stdout
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Native Windows launcher admission needs Windows.")
+def test_windows_bootstrap_rejects_file_link_to_foreign_command(tmp_path):
+    local_appdata = tmp_path / "LocalAppData"
+    local_appdata.mkdir()
+    root = local_appdata / "siteops"
+    initial = _windows_tool_probe(_windows_private_root_wrapper(tmp_path), root, local_appdata)
+    assert initial.returncode == 0, initial.stdout + initial.stderr
+
+    unrelated = root / "tools" / "other" / "Scripts" / "siteops.exe"
+    unrelated.parent.mkdir(parents=True)
+    shutil.copy2(shutil.which("where.exe"), unrelated)
+    bin_dir = root / "bin"
+    bin_dir.mkdir()
+    launcher = bin_dir / "siteops.exe"
+    _windows_file_link(launcher, unrelated)
+
+    rejected = _windows_tool_probe(
+        _windows_tool_path_wrapper(tmp_path), root, local_appdata, launcher, bin_dir,
+    )
+    assert rejected.returncode != 0
+    assert "TOOL_TYPE" in rejected.stderr
+    assert "TOOL_ADMITTED" not in rejected.stdout
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Native Windows launcher admission needs Windows.")
+def test_windows_bootstrap_rejects_copied_launcher_with_writable_ancestor(tmp_path):
+    local_appdata = tmp_path / "LocalAppData"
+    local_appdata.mkdir()
+    root = local_appdata / "siteops"
+    initial = _windows_tool_probe(_windows_private_root_wrapper(tmp_path), root, local_appdata)
+    assert initial.returncode == 0, initial.stdout + initial.stderr
+    bin_dir = root / "bin"
+    bin_dir.mkdir()
+    launcher = bin_dir / "siteops.exe"
+    shutil.copy2(shutil.which("where.exe"), launcher)
+    grant = subprocess.run(
+        ["icacls.exe", str(bin_dir), "/grant", "*S-1-5-32-545:(OI)(CI)M"],
+        capture_output=True, text=True, timeout=20,
+    )
+    if grant.returncode:
+        pytest.skip("The local test user cannot change the synthetic target ACL.")
+    try:
+        rejected = _windows_tool_probe(
+            _windows_tool_path_wrapper(tmp_path), root, local_appdata, launcher, bin_dir,
+        )
+        assert rejected.returncode != 0
+        assert "TOOL_ACL" in rejected.stderr
+        assert "TOOL_ADMITTED" not in rejected.stdout
+    finally:
+        subprocess.run(
+            ["icacls.exe", str(bin_dir), "/remove:g", "*S-1-5-32-545"],
+            capture_output=True, text=True, check=True, timeout=20,
+        )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Native Windows launcher admission needs Windows.")
+def test_windows_bootstrap_rejects_file_link_even_to_private_tool(tmp_path):
+    local_appdata = tmp_path / "LocalAppData"
+    local_appdata.mkdir()
+    root = local_appdata / "siteops"
+    initial = _windows_tool_probe(_windows_private_root_wrapper(tmp_path), root, local_appdata)
+    assert initial.returncode == 0, initial.stdout + initial.stderr
+    target = root / "tools" / "siteops" / "Scripts" / "siteops.exe"
+    target.parent.mkdir(parents=True)
+    shutil.copy2(shutil.which("where.exe"), target)
+    bin_dir = root / "bin"
+    bin_dir.mkdir()
+    launcher = bin_dir / "siteops.exe"
+    _windows_file_link(launcher, target)
+    rejected = _windows_tool_probe(
+        _windows_tool_path_wrapper(tmp_path), root, local_appdata, launcher, bin_dir,
+    )
+    assert rejected.returncode != 0
+    assert "TOOL_TYPE" in rejected.stderr
+    assert "TOOL_ADMITTED" not in rejected.stdout
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Native Windows launcher admission needs Windows.")
+def test_windows_bootstrap_rejects_reparse_command_directory_ancestor(tmp_path):
+    local_appdata = tmp_path / "LocalAppData"
+    local_appdata.mkdir()
+    root = local_appdata / "siteops"
+    initial = _windows_tool_probe(_windows_private_root_wrapper(tmp_path), root, local_appdata)
+    assert initial.returncode == 0, initial.stdout + initial.stderr
+    target_directory = root / "tools" / "other" / "Scripts"
+    target_directory.mkdir(parents=True)
+    shutil.copy2(shutil.which("where.exe"), target_directory / "siteops.exe")
+    alias = root / "tools" / "siteops"
+    try:
+        alias.symlink_to(target_directory.parent, target_is_directory=True)
+    except OSError:
+        junction = subprocess.run(
+            [
+                "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+                "New-Item -ItemType Junction -Path $env:TEST_ALIAS -Target $env:TEST_TARGET | Out-Null",
+            ],
+            env={**os.environ, "TEST_ALIAS": str(alias), "TEST_TARGET": str(target_directory.parent)},
+            capture_output=True, text=True, timeout=20,
+        )
+        if junction.returncode:
+            pytest.skip("Creating a test reparse point is unavailable on this host.")
+    launcher = alias / "Scripts" / "siteops.exe"
+    rejected = _windows_tool_probe(
+        _windows_tool_path_wrapper(tmp_path), root, local_appdata, launcher, root / "tools",
+    )
+    assert rejected.returncode != 0
+    assert "TOOL_TYPE" in rejected.stderr
+    assert "TOOL_ADMITTED" not in rejected.stdout
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Native Windows ACL admission needs Windows.")
@@ -364,7 +342,7 @@ def test_windows_bootstrap_rejects_untrusted_executable_file_even_under_private_
     wrapper = _windows_tool_path_wrapper(tmp_path)
     initial = _windows_tool_probe(_windows_private_root_wrapper(tmp_path), root, local_appdata)
     assert initial.returncode == 0, initial.stdout + initial.stderr
-    executable = root / "tools" / "pipx" / "Scripts" / "pipx.exe"
+    executable = root / "tools" / "other" / "Scripts" / "siteops.exe"
     executable.parent.mkdir(parents=True)
     shutil.copy2(shutil.which("where.exe"), executable)
     grant = subprocess.run(
@@ -394,7 +372,7 @@ def test_windows_bootstrap_rejects_linked_executable_ancestor(tmp_path):
     initial = _windows_tool_probe(_windows_private_root_wrapper(tmp_path), root, local_appdata)
     assert initial.returncode == 0, initial.stdout + initial.stderr
     external = tmp_path / "elsewhere"
-    (external / "pipx" / "Scripts").mkdir(parents=True)
+    (external / "other" / "Scripts").mkdir(parents=True)
     alias = root / "tools"
     try:
         alias.symlink_to(external, target_is_directory=True)
@@ -409,7 +387,7 @@ def test_windows_bootstrap_rejects_linked_executable_ancestor(tmp_path):
         )
         if junction.returncode:
             pytest.skip("Creating a test reparse point is unavailable on this host.")
-    executable = alias / "pipx" / "Scripts" / "pipx.exe"
+    executable = alias / "other" / "Scripts" / "siteops.exe"
     shutil.copy2(shutil.which("where.exe"), executable)
     rejected = _windows_tool_probe(wrapper, root, local_appdata, executable, root)
     assert rejected.returncode != 0
@@ -424,7 +402,7 @@ def test_windows_bootstrap_accepts_create_only_ancestor_above_private_tool_root(
     root = local_appdata / "siteops"
     initial = _windows_tool_probe(_windows_private_root_wrapper(tmp_path), root, local_appdata)
     assert initial.returncode == 0, initial.stdout + initial.stderr
-    executable = root / "tools" / "pipx" / "Scripts" / "pipx.exe"
+    executable = root / "tools" / "other" / "Scripts" / "siteops.exe"
     executable.parent.mkdir(parents=True)
     shutil.copy2(shutil.which("where.exe"), executable)
     grant = subprocess.run(
@@ -532,6 +510,7 @@ def test_windows_bootstrap_rejects_symlinked_data_ancestor(tmp_path):
         ("ancestor-error", "ROOT_ANCESTOR_TYPE"),
         ("root-probe-error", "ROOT_DATA_TYPE"),
         ("creation-error", "ROOT_DATA_CREATE"),
+        ("owner-error", "ROOT_DATA_OWNER"),
         ("protection-error", "ROOT_DATA_ACL"),
     ],
 )
@@ -549,10 +528,16 @@ def test_windows_bootstrap_root_filesystem_errors_are_bounded(tmp_path, case, ca
         setup = f"function Test-Path {{ throw '{marker}' }}\n"
     elif case == "creation-error":
         setup = f"function New-Item {{ throw '{marker}' }}\n"
-    else:
+    elif case == "owner-error":
         setup = (
             f"function icacls.exe {{ Write-Error '{marker}'; "
             "$global:LASTEXITCODE = 5 }\n"
+        )
+    else:
+        setup = (
+            "function icacls.exe { if ($args -contains '/setowner') { "
+            "$global:LASTEXITCODE = 0; return }; "
+            f"Write-Error '{marker}'; $global:LASTEXITCODE = 5 }}\n"
         )
     wrapper = _windows_private_root_wrapper(tmp_path, setup)
     result = subprocess.run(
@@ -569,13 +554,11 @@ def test_windows_bootstrap_root_filesystem_errors_are_bounded(tmp_path, case, ca
 def test_existing_siteops_build_is_rejected_before_any_shared_backend_change():
     bash = (SCRIPTS / "siteops-bootstrap.sh").read_text(encoding="utf-8")
     powershell = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
-    assert bash.index('if [[ -n "$recorded"') < bash.index('"$pipx_bin" upgrade-shared')
-    assert powershell.index('if ($recorded -and $recorded -ine') < powershell.index(
-        "'upgrade-shared', '--pip-args'",
-    )
-    assert 'if $replace && [[ -n "$recorded" ]]' in bash
-    assert 'if ($Replace -and $recorded) { $install += \'--force\' }' in powershell
-    assert 'siteops --version' in bash and "siteops.exe" in powershell
+    assert "mode=replace" in bash and 'check_payload "$mode" "$archive" "$bundle"' in bash
+    assert '2) fail "Another Site Ops selection is installed. Use --replace after review." ;;' in bash
+    assert "$mode = if ($Replace) { 'replace' } else { 'install' }" in powershell
+    assert "Check-Payload @($mode, $archive, $bundle" in powershell
+    assert '"$siteops" --version' in bash and "siteops.exe" in powershell
 
 
 def test_windows_native_verification_parses_json_without_powershell_51_jq_quoting():
@@ -662,99 +645,6 @@ def test_windows_retained_release_key_binds_exact_selection(tmp_path):
     assert result.stdout.strip() == expected
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="Native stderr handling needs PowerShell 5.1.")
-@pytest.mark.parametrize("list_exit", [0, 7])
-def test_windows_bootstrap_inspects_empty_pipx_without_ignoring_real_failure(
-    tmp_path, list_exit,
-):
-    source = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
-    block = source.split("    $root = Join-Path $data 'bundles'\n", 1)[1].split(
-        "    $mainPackage =", 1,
-    )[0]
-    helper = re.search(r"(?ms)^function InvokePipx\([^\n]*\) \{.*?^\}", source)
-    assert helper
-    fake = tmp_path / "pipx.cmd"
-    fake.write_text(
-        '@echo off\n'
-        'echo {"venvs":{}}\n'
-        'echo nothing has been installed with pipx 1>&2\n'
-        f'exit /b {list_exit}\n',
-        encoding="ascii",
-    )
-    wrapper = tmp_path / "inspect-pipx.ps1"
-    wrapper.write_text(
-        "function Fail([string]$message) { throw \"Site Ops installation: $message\" }\n"
-        + helper.group(0) + "\n"
-        "$ErrorActionPreference = 'Stop'\n"
-        "$pipx = $env:TEST_PIPX\n"
-        + block + "\n'EMPTY_HOME_ACCEPTED'\n",
-        encoding="utf-8",
-    )
-    result = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
-        cwd=tmp_path, env={**os.environ, "TEST_PIPX": str(fake)},
-        capture_output=True, text=True, timeout=20,
-    )
-    assert (result.returncode == 0) is (list_exit == 0), result.stdout + result.stderr
-    if list_exit:
-        assert "current pipx installation could not be inspected" in result.stderr
-    else:
-        assert "EMPTY_HOME_ACCEPTED" in result.stdout
-        assert "nothing has been installed" not in result.stdout + result.stderr
-
-
-@pytest.mark.skipif(sys.platform != "win32", reason="Native pipx messages need PowerShell 5.1.")
-@pytest.mark.parametrize("failing", ["", "install"])
-def test_windows_pipx_operations_check_exit_without_emitting_native_warnings(
-    tmp_path, failing,
-):
-    source = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
-    helper = re.search(r"(?ms)^function InvokePipx\([^\n]*\) \{.*?^\}", source)
-    assert helper, "The pipx native exit and output gate is missing."
-    fake = tmp_path / "pipx.cmd"
-    fake.write_text(
-        "@echo off\n"
-        "if \"%1\"==\"--version\" echo 1.17.2\n"
-        "if \"%1\"==\"list\" echo {\"venvs\":{}}\n"
-        "if \"%1\"==\"runpip\" echo pip 26.2.1 from controlled fixture\n"
-        "if \"%1\"==\"environment\" echo C:\\private\\bin\n"
-        "echo controlled benign pipx warning 1>&2\n"
-        "if \"%TEST_FAIL_PIPX%\"==\"%1\" exit /b 7\n"
-        "exit /b 0\n",
-        encoding="ascii",
-    )
-    wrapper = tmp_path / "pipx-operations.ps1"
-    wrapper.write_text(
-        "function Fail([string]$message) { throw \"Site Ops installation: $message\" }\n"
-        + helper.group(0) + "\n"
-        "$ErrorActionPreference = 'Stop';$pipx = $env:TEST_PIPX\n"
-        "$version = InvokePipx @('--version') 'Version check failed.'\n"
-        "$listing = InvokePipx @('list', '--output', 'json') 'Inspection failed.'\n"
-        "$null = InvokePipx @('upgrade-shared') 'Backend failed.'\n"
-        "$null = InvokePipx @('install', 'siteops') 'Installation failed.'\n"
-        "$backend = InvokePipx @('runpip', 'siteops', '--version') 'Reader failed.'\n"
-        "$null = InvokePipx @('ensurepath') 'Path failed.'\n"
-        "$binDir = InvokePipx @('environment', '--value', 'PIPX_BIN_DIR') 'Location failed.'\n"
-        "if ($version -ne '1.17.2' -or $listing -notmatch 'venvs' -or "
-        "$backend -notmatch '^pip 26\\.2\\.1 ' -or $binDir -ne 'C:\\private\\bin') { throw 'Unexpected result' }\n"
-        "'PIPX_OPERATIONS_ACCEPTED'\n",
-        encoding="utf-8",
-    )
-    result = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
-        cwd=tmp_path,
-        env={**os.environ, "TEST_PIPX": str(fake), "TEST_FAIL_PIPX": failing},
-        capture_output=True, text=True, timeout=30,
-    )
-    assert (result.returncode == 0) is (not failing), result.stdout + result.stderr
-    if failing:
-        assert "Installation failed." in result.stderr
-        assert "PIPX_OPERATIONS_ACCEPTED" not in result.stdout
-    else:
-        assert "PIPX_OPERATIONS_ACCEPTED" in result.stdout
-        assert "controlled benign pipx warning" not in result.stdout + result.stderr
-
-
 def test_bash_is_portable_lf_and_parses():
     script = SCRIPTS / "siteops-bootstrap.sh"
     content = script.read_bytes()
@@ -765,44 +655,6 @@ def test_bash_is_portable_lf_and_parses():
         capture_output=True, timeout=20,
     )
     assert result.returncode == 0, result.stderr.decode(errors="replace")
-
-
-def test_retained_bundle_accepts_matching_files_but_rejects_tampering(tmp_path):
-    script = (SCRIPTS / "siteops-bootstrap.sh").read_text(encoding="utf-8")
-    found = re.search(
-        r'if ! python3 - "\$bundle" <<\'PY\'\n'
-        r"(.*?)\nPY\n  then\n"
-        r'    fail "The retained bundle contents differ from the authenticated archive\."\n'
-        r"  fi", script, flags=re.DOTALL,
-    )
-    assert found, "The retained bundle verifier is missing."
-    bundle = tmp_path / "bundle"
-    (bundle / "wheels").mkdir(parents=True)
-    files = {"pylock.toml": b"locked bytes\n", "wheels/fixture.whl": b"wheel bytes"}
-    entries = []
-    for name, data in files.items():
-        destination = bundle / name
-        destination.write_bytes(data)
-        entries.append({
-            "path": name, "size": len(data),
-            "sha256": hashlib.sha256(data).hexdigest(),
-        })
-    (bundle / "bundle.json").write_text(json.dumps({"files": entries}), encoding="utf-8")
-
-    def verify():
-        return subprocess.run(
-            [sys.executable, "-c", found.group(1), str(bundle)],
-            cwd=tmp_path, capture_output=True, text=True, timeout=20,
-        )
-
-    assert verify().returncode == 0
-    (bundle / "pylock.toml").write_bytes(b"altered bytes\n")
-    assert verify().returncode != 0
-    (bundle / "pylock.toml").write_bytes(files["pylock.toml"])
-    (bundle / "unexpected").write_bytes(b"operator file")
-    assert verify().returncode != 0
-    (bundle / "unexpected").unlink()
-    assert verify().returncode == 0
 
 
 def test_both_scripts_keep_the_azure_and_source_boundaries_explicit():
@@ -816,7 +668,10 @@ def test_both_scripts_keep_the_azure_and_source_boundaries_explicit():
         assert "--cert-identity" in script and "--source-digest" in script
         assert "--tlsv1.2" in script
         assert "buildConfigURI" in script and "runnerEnvironment" in script
-        assert script.index("attestation verify") < script.index("--lock")
+        if script is bash:
+            assert script.index("attestation verify") < script.index('check_payload "$mode"')
+        else:
+            assert script.index("attestation verify") < script.index("Check-Payload @($mode")
 
 
 def test_bootstrap_preview_keeps_source_names_private_in_redacted_output():
@@ -860,73 +715,6 @@ def test_bash_preview_and_unattended_refusal_do_not_acquire_tools(tmp_path):
     assert denied.returncode != 0
     assert "pass --yes" in denied.stderr
     assert not (tmp_path / "state").exists()
-
-
-@pytest.mark.skipif(sys.platform != "linux", reason="The Ubuntu runner exercises the script journey.")
-@pytest.mark.parametrize("venv_without_pip", [False, True])
-def test_ubuntu_bootstrap_recovers_and_requires_explicit_replacement(tmp_path, venv_without_pip):
-    os_release = Path("/etc/os-release").read_text(encoding="utf-8")
-    if "ID=ubuntu" not in os_release or 'VERSION_ID="24.04"' not in os_release:
-        pytest.skip("Requires Ubuntu 24.04.")
-    harness = ROOT / "tests" / "fixtures" / "bootstrap-harness.sh"
-    script = SCRIPTS / "siteops-bootstrap.sh"
-    result = subprocess.run(
-        [str(required_bash()), bash_path(harness), bash_path(script)],
-        cwd=tmp_path, env={
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "HOME": str(tmp_path), "TMPDIR": str(tmp_path),
-            "PYTHONDONTWRITEBYTECODE": "1", "LC_ALL": "C",
-            "TEST_NO_PIP_IN_VENV": "1" if venv_without_pip else "0",
-        }, capture_output=True, text=True, timeout=180,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "no network" in result.stdout
-
-
-@pytest.mark.skipif(sys.platform != "linux", reason="The Ubuntu runner exercises the script journey.")
-def test_ubuntu_bootstrap_keeps_a_compatible_pipx_backend(tmp_path):
-    os_release = Path("/etc/os-release").read_text(encoding="utf-8")
-    if "ID=ubuntu" not in os_release or 'VERSION_ID="24.04"' not in os_release:
-        pytest.skip("Requires Ubuntu 24.04.")
-    harness = ROOT / "tests" / "fixtures" / "bootstrap-harness.sh"
-    script = SCRIPTS / "siteops-bootstrap.sh"
-    result = subprocess.run(
-        [str(required_bash()), bash_path(harness), bash_path(script)],
-        cwd=tmp_path, env={
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "HOME": str(tmp_path), "TMPDIR": str(tmp_path),
-            "PYTHONDONTWRITEBYTECODE": "1", "LC_ALL": "C",
-            "TEST_HARNESS_SHARED_OK": "1",
-        }, capture_output=True, text=True, timeout=180,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "backend was preserved" in result.stdout
-
-
-@pytest.mark.skipif(sys.platform != "linux", reason="The Ubuntu runner exercises managed-host flow.")
-@pytest.mark.parametrize(("existing_pipx", "venv_without_pip"), [(False, False), (True, True)])
-def test_managed_azure_linux_bootstrap_isolates_pipx_and_uses_virtualenv(
-    tmp_path, existing_pipx, venv_without_pip,
-):
-    source = (SCRIPTS / "siteops-bootstrap.sh").read_text(encoding="utf-8")
-    assert source.count(". /etc/os-release\n") == 1
-    fixture = ROOT / "tests" / "fixtures" / "bootstrap-azurelinux3-os-release"
-    bootstrap = tmp_path / "bootstrap.sh"
-    bootstrap.write_text(source.replace(". /etc/os-release\n", f'. "{fixture}"\n'), encoding="utf-8")
-    harness = ROOT / "tests" / "fixtures" / "bootstrap-harness.sh"
-    result = subprocess.run(
-        [str(required_bash()), bash_path(harness), bash_path(bootstrap)],
-        cwd=tmp_path, env={
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "HOME": str(tmp_path), "TMPDIR": str(tmp_path),
-            "PYTHONDONTWRITEBYTECODE": "1", "LC_ALL": "C",
-            "TEST_HARNESS_MANAGED": "1",
-            "TEST_HARNESS_NO_PIPX": "0" if existing_pipx else "1",
-            "TEST_NO_PIP_IN_VENV": "1" if venv_without_pip else "0",
-        }, capture_output=True, text=True, timeout=180,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "no network" in result.stdout
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="PowerShell preview runs on Windows.")

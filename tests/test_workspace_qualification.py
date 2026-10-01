@@ -71,6 +71,7 @@ def qualification_inputs(tmp_path_factory):
     builder._write_pylock(bundle, (target,))
     for name in ("LICENSE", "ThirdPartyNotices.txt"):
         (bundle / name).write_bytes(b"Fixture notices")
+    shutil.copyfile(SCRIPTS / "siteops_distribution.py", bundle / "siteops-install.py")
     files = tuple(
         PayloadFile(path.relative_to(bundle).as_posix(), hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_size)
         for path in sorted(bundle.rglob("*")) if path.is_file()

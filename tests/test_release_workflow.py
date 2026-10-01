@@ -4,6 +4,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -1333,23 +1334,20 @@ def test_install_notes_bind_downloads_and_commands_to_the_selected_release(candi
     for name in ENGINE_ASSETS:
         assert base + name in notes
     assert (
-        f"https://github.com/{REPO}/blob/{SHA}/docs/install-siteops.md#install-the-verified-bundle"
+        f"https://github.com/{REPO}/blob/{SHA}/docs/install-siteops.md#choose-an-installation-route"
         in notes
     )
     block = _installation_block(notes)
-    assert block.startswith(f'pipx install "{base}{WHEEL}"')
-    assert "--backend pip" in block
-    assert "--fetch-python never" in block
-    assert "--skip-maintenance" in block
-    assert "--app siteops" in block
-    assert "--only-binary=:all:" in block
-    assert "--no-cache-dir" in block
-    assert "--isolated" not in block and "--index-url" not in block
+    assert block.startswith(f'uv tool install "{base}{WHEEL}"')
+    assert "--python 3.11.16" in block
+    assert "--managed-python" in block
+    assert "--no-build" in block
+    assert "--no-config" not in block and "--default-index" not in block
     assert "--force" not in block
     assert "Runtime dependencies come from your configured package index as wheels" in notes
-    assert "`--index-url <your approved index>`" in notes
+    assert "`--default-index <your approved index>`" in notes
     assert "packagefeedproxy.microsoft.io" not in notes
-    assert "pipx does not automatically verify GitHub attestations" in notes
+    assert "uv does not automatically verify GitHub attestations" in notes
     assert (
         f"https://github.com/{REPO}/blob/{SHA}/docs/install-siteops.md#verify-the-bootstrap-script"
         in notes
@@ -1358,25 +1356,23 @@ def test_install_notes_bind_downloads_and_commands_to_the_selected_release(candi
     assert "HTTPS download alone does not authenticate the publisher" in notes
     assert "use this release's reviewed provenance values instead" in notes
     assert "configured-Site fleet selectors remain supported" in notes
-    assert "a project pin selects content, not operator Site configuration" in notes
-    assert "`--force`" in notes
-    assert "downloads only the ZIP and its detached proof, authenticates the ZIP before extraction" in notes
+    assert "A project pin selects content, not operator Site configuration" in notes
+    assert "`--reinstall`" in notes
+    assert "downloads the ZIP and its detached proof, authenticates the ZIP before extraction" in notes
     assert f"Expected publisher: `{REPO}`" in notes
     assert f"Source commit: `{SHA}`" in notes
     assert f'Source ref: `{candidate["plan"]["source"]["ref"]}`' in notes
     assert "Expected provenance runner class: `self-hosted`" in notes
     assert "runner class does not identify a particular pool" in notes
-    assert "switching between online and locked installations" in notes
-    assert "authenticated `pylock.toml` with stock pipx" in notes
-    assert "shared pip 26.2.1" in notes and "experimental" in notes
-    assert "install.py" not in notes and "siteops_distribution.py" not in notes
+    assert "switching between online and verified installations" in notes
+    assert "native uv only after independent payload admission" in notes
+    assert "`install.py`" not in notes and "siteops_distribution.py" not in notes
     assert "Invoke-WebRequest" not in notes and "urllib.request" not in notes
-    assert "pipx 1.17.2" in notes
-    assert "CPython 3.10-3.14" in notes and "glibc 2.17" in notes
+    assert "uv 0.12.20" in notes
+    assert "uv-managed CPython" in notes
     guide = (ROOT / "docs" / "install-siteops.md").read_text(encoding="utf-8")
     for argument in (
-        "--backend pip", "--fetch-python never", "--skip-maintenance",
-        "--app siteops", '--pip-args "--only-binary=:all: --no-cache-dir"',
+        "--python 3.11.16", "--managed-python", "--no-build",
     ):
         assert argument in block and argument in guide
     assert "packagefeedproxy.microsoft.io" not in guide
@@ -1394,37 +1390,196 @@ def test_content_only_install_notes_link_to_the_engine_release_without_wrong_sou
     notes = _render_install_notes(candidate, runner)
     assert f"https://github.com/{REPO}/releases/tag/siteops%2Fv1.0.0" in notes
     assert "own source commit and native installation assets" in notes
-    assert "pipx install" not in notes and "releases/download/" not in notes
+    assert "uv tool install" not in notes and "releases/download/" not in notes
 
 
-@pytest.mark.parametrize("pipx_exit", [0, 7])
+@pytest.mark.parametrize("uv_exit", [0, 7])
 def test_generated_online_install_command_runs_from_an_unrelated_directory(
-    candidate, runner, tmp_path, pipx_exit,
+    candidate, runner, tmp_path, uv_exit,
 ):
     command = _installation_block(_render_install_notes(candidate, runner))
-    arguments = tmp_path / "pipx-args.log"
+    arguments = tmp_path / "uv-args.log"
     script = """
-pipx() {
-    printf '%s\n' "$@" > "$PIPX_ARGS"
-    return "$PIPX_EXIT"
+uv() {
+    printf '%s\n' "$@" > "$UV_ARGS"
+    return "$UV_EXIT"
 }
+pipx() { echo 'Unexpected legacy manager invocation.' >&2; return 98; }
 """ + command
     result = _run_script(
         script,
         tmp_path,
-        {"PIPX_ARGS": bash_path(arguments), "PIPX_EXIT": str(pipx_exit)},
+        {"UV_ARGS": bash_path(arguments), "UV_EXIT": str(uv_exit)},
     )
-    assert result.returncode == pipx_exit
+    assert result.returncode == uv_exit
     assert arguments.read_text().splitlines() == [
-        "install",
+        "tool", "install",
         downloads_url("v1.0.0b8").removesuffix(ARCHIVE) + WHEEL,
-        "--backend", "pip",
-        "--fetch-python", "never",
-        "--skip-maintenance",
-        "--app", "siteops",
-        "--pip-args",
-        "--only-binary=:all: --no-cache-dir",
+        "--python", "3.11.16", "--managed-python", "--no-build", "--system-certs",
     ]
+
+
+def _bootstrap_block(notes, language):
+    match = re.search(rf"```{language}\n(.*?)\n```", notes, re.DOTALL)
+    assert match is not None, f"Missing complete {language} bootstrap command."
+    return match[1]
+
+
+@pytest.mark.parametrize("caller", ["release.yaml", "ci.yaml"])
+def test_generated_bootstrap_entries_bind_the_full_selection(candidate, runner, caller):
+    tag = "siteops/v1.1.0"
+    candidate["plan"]["release"]["tag"] = tag
+    result, _, _ = runner("review", "Render the final release notes", extra={
+        "ENGINE_VERSION": "1.0.0b1",
+        "BUILDER_IDENTITY": f"https://github.com/{REPO}/.github/workflows/{caller}@refs/heads/main",
+    })
+    assert result.returncode == 0, result.stdout + result.stderr
+    notes = (candidate["root"] / "publish-notes.md").read_text(encoding="utf-8")
+    for language, filename in (("bash", "siteops-bootstrap.sh"), ("powershell", "siteops-bootstrap.ps1")):
+        block = _bootstrap_block(notes, language)
+        payload = (candidate["root"] / "release-bundle" / filename).read_bytes()
+        assert downloads_url(tag).removesuffix(ARCHIVE) + filename in block
+        assert digest(payload) in block and str(len(payload)) in block
+        for identity in (REPO, SHA, tag, "refs/heads/main", caller):
+            assert identity in block
+        assert "<approved" not in block and "<full" not in block and "latest" not in block
+        assert "--yes" not in block and "-Yes" not in block
+        assert "enroll-source" not in block and "-EnrollSource" not in block
+        assert "az login" not in block and "gh auth" not in block
+    assert "not independent publisher authentication" in notes
+    assert "before any installer code runs" in notes
+
+
+@pytest.mark.parametrize("builder", [
+    "", "https://github.com/other/publisher/.github/workflows/release.yaml@refs/heads/main",
+    f"https://github.com/{REPO}/.github/workflows/unknown.yaml@refs/heads/main",
+    f"https://github.com/{REPO}/.github/workflows/release.yaml@refs/heads/other",
+])
+def test_generated_bootstrap_rejects_unsupported_caller_identity(candidate, runner, builder):
+    result, _, _ = runner("review", "Render the final release notes", extra={
+        "ENGINE_VERSION": "1.0.0b1", "BUILDER_IDENTITY": builder,
+    })
+    assert result.returncode != 0
+    assert "calling workflow" in result.stderr
+    assert not (candidate["root"] / "publish-notes.md").exists()
+
+
+def test_hosted_runner_notes_do_not_offer_incompatible_bootstrap(candidate, runner):
+    result, _, _ = runner("review", "Render the final release notes", extra={
+        "ENGINE_VERSION": "1.0.0b1", "EXPECTED_RUNNER_ENVIRONMENT": "github-hosted",
+    })
+    assert result.returncode == 0, result.stdout + result.stderr
+    notes = (candidate["root"] / "publish-notes.md").read_text(encoding="utf-8")
+    assert "uv tool install" in notes
+    assert "```bash" not in notes and "```powershell" not in notes
+    assert "bootstrap requires the approved `self-hosted` provenance policy" in notes
+
+
+@pytest.mark.parametrize("case", [
+    "success", "download-failed", "truncated", "changed", "installer-failed",
+])
+def test_generated_bash_bootstrap_downloads_and_checks_before_execution(candidate, runner, tmp_path, case):
+    command = _bootstrap_block(_render_install_notes(candidate, runner), "bash")
+    arguments, downloads = tmp_path / "bootstrap-args.txt", tmp_path / "download-args.txt"
+    script = r"""
+curl() {
+    printf '%s\n' "$@" > "$DOWNLOAD_ARGS"
+    while [[ "$1" != --output ]]; do shift; done
+    cp "$SCRIPT_BYTES" "$2"
+    case "$CASE" in
+      download-failed) return 22 ;;
+      truncated) head -c -1 "$SCRIPT_BYTES" > "$2" ;;
+      changed) printf X | dd of="$2" bs=1 count=1 conv=notrunc 2>/dev/null ;;
+    esac
+}
+bash() {
+    printf '%s\n' "$@" > "$BOOTSTRAP_ARGS"
+    [[ "$CASE" != installer-failed ]]
+}
+uv() { echo 'Unexpected manager invocation.' >&2; return 98; }
+pipx() { echo 'Unexpected legacy manager invocation.' >&2; return 98; }
+gh() { echo 'Unexpected authentication operation.' >&2; return 98; }
+""" + command
+    result = _run_script(script, tmp_path, {
+        "CASE": case, "TMPDIR": bash_path(tmp_path),
+        "SCRIPT_BYTES": bash_path(candidate["root"] / "release-bundle" / "siteops-bootstrap.sh"),
+        "BOOTSTRAP_ARGS": bash_path(arguments), "DOWNLOAD_ARGS": bash_path(downloads),
+    })
+    assert (result.returncode == 0) is (case == "success"), result.stdout + result.stderr
+    assert arguments.exists() is (case in {"success", "installer-failed"})
+    if arguments.exists():
+        assert arguments.read_text().splitlines()[1:] == [
+            "--release", "v1.0.0b8", "--source-commit", SHA,
+            "--repository", REPO, "--source-ref", "refs/heads/main", "--caller", "release.yaml",
+        ]
+    download_args = downloads.read_text().splitlines()
+    assert download_args[-1] == downloads_url("v1.0.0b8").removesuffix(ARCHIVE) + "siteops-bootstrap.sh"
+    for option, value in (("--proto", "=https"), ("--proto-redir", "=https"),
+                          ("--max-redirs", "3"), ("--max-time", "120")):
+        assert download_args[download_args.index(option) + 1] == value
+    assert "--tlsv1.2" in download_args and "--max-filesize" in download_args
+    assert not list(tmp_path.glob("tmp.*/siteops-bootstrap.sh"))
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Native Windows PowerShell command handling.")
+@pytest.mark.parametrize("case", [
+    "success", "download-failed", "truncated", "changed", "installer-failed", "acl-failed",
+])
+def test_generated_powershell_bootstrap_downloads_and_checks_before_execution(
+    candidate, runner, tmp_path, case,
+):
+    command = _bootstrap_block(_render_install_notes(candidate, runner), "powershell")
+    arguments, downloads = tmp_path / "bootstrap-args.json", tmp_path / "download-args.json"
+    wrapper = tmp_path / "entry.ps1"
+    wrapper.write_text(r"""
+function curl.exe {
+    ConvertTo-Json -InputObject @($args | ForEach-Object { [string]$_ }) |
+        Set-Content -LiteralPath $env:DOWNLOAD_ARGS
+    $destination = $args[[Array]::IndexOf($args, '--output') + 1]
+    $bytes = [IO.File]::ReadAllBytes($env:SCRIPT_BYTES)
+    if ($env:CASE -eq 'truncated') { $bytes = $bytes[0..($bytes.Length - 2)] }
+    if ($env:CASE -eq 'changed') { $bytes[0] = 88 }
+    [IO.File]::WriteAllBytes($destination, $bytes)
+    $global:LASTEXITCODE = if ($env:CASE -eq 'download-failed') { 22 } else { 0 }
+}
+function powershell.exe {
+    ConvertTo-Json -InputObject @($args | ForEach-Object { [string]$_ }) |
+        Set-Content -LiteralPath $env:BOOTSTRAP_ARGS
+    $global:LASTEXITCODE = if ($env:CASE -eq 'installer-failed') { 7 } else { 0 }
+}
+function uv { throw 'Unexpected manager invocation.' }
+function pipx { throw 'Unexpected legacy manager invocation.' }
+function gh { throw 'Unexpected authentication operation.' }
+if ($env:CASE -eq 'acl-failed') {
+    function icacls { $global:LASTEXITCODE = 5 }
+}
+""" + command, encoding="utf-8")
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
+        cwd=tmp_path, env={
+            **os.environ, "CASE": case, "TEMP": str(tmp_path),
+            "SCRIPT_BYTES": str(candidate["root"] / "release-bundle" / "siteops-bootstrap.ps1"),
+            "BOOTSTRAP_ARGS": str(arguments), "DOWNLOAD_ARGS": str(downloads),
+        }, capture_output=True, text=True, timeout=30,
+    )
+    assert (result.returncode == 0) is (case == "success"), result.stdout + result.stderr
+    assert arguments.exists() is (case in {"success", "installer-failed"})
+    if arguments.exists():
+        invoked = json.loads(arguments.read_text(encoding="utf-8-sig"))
+        assert invoked[:5] == ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", invoked[4]]
+        assert invoked[5:] == [
+            "-Release", "v1.0.0b8", "-SourceCommit", SHA,
+            "-Repository", REPO, "-SourceRef", "refs/heads/main", "-Caller", "release.yaml",
+        ]
+    assert downloads.exists() is (case != "acl-failed")
+    if downloads.exists():
+        download_args = json.loads(downloads.read_text(encoding="utf-8-sig"))
+        assert download_args[-1] == downloads_url("v1.0.0b8").removesuffix(ARCHIVE) + "siteops-bootstrap.ps1"
+        for option, value in (("--proto", "=https"), ("--proto-redir", "=https"),
+                              ("--max-redirs", "3"), ("--max-time", "120")):
+            assert download_args[download_args.index(option) + 1] == value
+        assert "--tlsv1.2" in download_args and "--max-filesize" in download_args
+    assert not list(tmp_path.glob("siteops-bootstrap-*/siteops-bootstrap.ps1"))
 
 
 @pytest.mark.parametrize(

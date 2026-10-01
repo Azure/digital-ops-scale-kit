@@ -51,6 +51,20 @@ When a manifest pulls in others via `include:` (see [manifest-includes.md](manif
 | `{{ site.properties.X[0] }}` | Array indexing |
 | `{{ steps.X.outputs.Y }}` | Output from step X |
 
+An optional label can be the complete value of a parameter mapping member:
+
+```yaml
+tags:
+  environment: "{{ site.labels.environment? }}"
+  site: "{{ site.name }}"
+```
+
+When the label is absent, that member is omitted. When present, it uses the
+same string conversion as an ordinary label reference. This syntax applies
+only to complete mapping values, not names, list elements, embedded strings
+or conditions. An ordinary `{{ site.labels.environment }}` remains required
+during preparation. Unrelated null, false and zero values retain their meaning.
+
 ### Dynamic parameter paths
 
 A parameter file path containing a site template is site-selected:

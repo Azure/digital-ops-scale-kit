@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -34,7 +35,7 @@ _ROOT_FIELDS = {"name", "subscription", "resourceGroup", "location"}
 _MAPPING_FIELDS = {"labels", "parameters", "properties"}
 _FIELD_KEYS = {
     "name", "type", "description", "sitePath", "required", "default", "sensitive",
-    "when", "resource", "derive", "requires",
+    "when", "resource", "derive", "requires", "format", "maxLength", "fromResource",
 }
 _MISSING = object()
 _RESOURCE_FACTS = {
@@ -55,7 +56,7 @@ class ResourceInputError(GuidedInputError):
 
     def __init__(self, category: str, message: str):
         if category not in {
-            "invalid-id", "type-mismatch", "subscription-mismatch",
+            "invalid-id", "type-mismatch", "subscription-mismatch", "resource-group-mismatch",
             "conflict", "requirement-unmet", "requirement-unverified",
             "invalid-observation",
         }:
@@ -173,12 +174,21 @@ class ResourceRequirement:
 
 
 @dataclass(frozen=True)
+class ResourceLink:
+    """A closed relationship from one earlier resource input."""
+
+    input: str
+    field: str
+
+
+@dataclass(frozen=True)
 class ResourceBinding:
     resource_type: str
     api_version: str
     derive: tuple[tuple[str, str], ...]
     subscription: str | None = None
     requires: tuple[ResourceRequirement, ...] = ()
+    from_resource: ResourceLink | None = None
 
 
 @dataclass(frozen=True)
@@ -192,10 +202,29 @@ class InputField:
     default: str | bool | object = _MISSING
     when: InputCondition | None = None
     resource: ResourceBinding | None = None
+    format: str | None = None
+    max_length: int | None = None
 
     @property
     def has_default(self) -> bool:
         return self.default is not _MISSING
+
+    def validate(self, value: Any, label: str) -> None:
+        """Check the declared scalar type and closed string constraints."""
+        _typed_value(value, self.type, label, required=self.required)
+        if self.type != "string":
+            return
+        if self.format == "nonEmpty" and not value.strip():
+            raise GuidedInputError(f"{label} must be a nonempty string.")
+        if self.format == "dnsLabel" and (
+            len(value) > 63 or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", value, re.ASCII)
+        ):
+            raise GuidedInputError(
+                f"{label} must be a lowercase DNS label, starting and ending "
+                "with a letter or digit, with at most 63 characters."
+            )
+        if self.max_length is not None and len(value) > self.max_length:
+            raise GuidedInputError(f"{label} exceeds its {self.max_length}-character limit.")
 
 
 def _condition(
@@ -215,6 +244,7 @@ def _condition(
 
 def _resource_binding(
     row: dict[str, Any], label: str, earlier: dict[str, InputField],
+    *, activation: InputCondition | None = None,
 ) -> ResourceBinding:
     resource = _mapping(row["resource"], f"{label} resource")
     _shape(
@@ -242,6 +272,30 @@ def _resource_binding(
     subscription = resource.get("subscription")
     if subscription is not None and subscription != "site":
         raise GuidedInputError(f"{label} resource subscription must be `site` when supplied.")
+    link = None
+    if "fromResource" in row:
+        from siteops.arm_resources import ArmResourceError, validate_arm_reference_fields
+
+        source = _mapping(row["fromResource"], f"{label} fromResource")
+        _shape(
+            source, allowed={"input", "field"}, required={"input", "field"},
+            label=f"{label} fromResource",
+        )
+        name, reference = source["input"], source["field"]
+        if not isinstance(name, str) or name not in earlier:
+            raise GuidedInputError(f"{label} fromResource must name an earlier resource input.")
+        parent = earlier[name]
+        if parent.resource is None:
+            raise GuidedInputError(f"{label} fromResource must select a resource input.")
+        if parent.when != activation:
+            raise GuidedInputError(f"{label} fromResource must have the same condition as its source.")
+        if not isinstance(reference, str):
+            raise GuidedInputError(f"{label} fromResource needs a supported relationship field.")
+        try:
+            validate_arm_reference_fields(parent.resource.resource_type, frozenset({reference}))
+        except ArmResourceError:
+            raise GuidedInputError(f"{label} fromResource names an unsupported relationship.") from None
+        link = ResourceLink(name, reference)
     derive = _mapping(row.get("derive", {}), f"{label} derive")
     if derive.keys() - _OBSERVED_FIELDS or any(
         not isinstance(target, str) or not _IDENTIFIER.fullmatch(target)
@@ -282,6 +336,7 @@ def _resource_binding(
         requirements.append(ResourceRequirement(fact, description, when))
     return ResourceBinding(
         resource_type, api_version, tuple(derive.items()), subscription, tuple(requirements),
+        link,
     )
 
 
@@ -312,13 +367,13 @@ def _parse_fields(value: Any) -> tuple[InputField, ...]:
             raise GuidedInputError(f"{label} description must be nonempty text.")
         resource_role = kind == "azureResourceId"
         if not resource_role and (
-            "sitePath" not in row or any(key in row for key in ("resource", "derive", "requires"))
+            "sitePath" not in row or any(key in row for key in ("resource", "derive", "requires", "fromResource"))
         ):
             raise GuidedInputError(f"{label} requires sitePath and cannot declare a resource read.")
         if resource_role and ("resource" not in row or "default" in row):
             raise GuidedInputError(f"{label} requires resource and cannot declare a default.")
         path = _site_path(row["sitePath"]) if "sitePath" in row else None
-        if resource_role and path is None and not row.get("derive"):
+        if resource_role and path is None and not row.get("derive") and not row.get("fromResource"):
             raise GuidedInputError(f"{label} requires sitePath or derived input fields.")
         if resource_role and path is not None and path[0] not in {"parameters", "properties"}:
             raise GuidedInputError(f"{label} resource ID sitePath must be a parameter or property.")
@@ -331,21 +386,36 @@ def _parse_fields(value: Any) -> tuple[InputField, ...]:
         ):
             raise GuidedInputError(f"{label} sitePath overlaps another input writer path.")
         default = row.get("default", _MISSING)
-        required = row.get("required", default is _MISSING)
+        required = row.get("required", default is _MISSING and "fromResource" not in row)
         sensitive = row.get("sensitive", False)
         if type(required) is not bool:
             raise GuidedInputError(f"{label} required must be a boolean.")
+        if required and "fromResource" in row:
+            raise GuidedInputError(f"{label} derived resource cannot require an operator answer.")
         if type(sensitive) is not bool:
             raise GuidedInputError(f"{label} sensitive must be a boolean.")
         if sensitive:
             raise GuidedInputError(
                 f"{label} sensitive inputs are unsupported until protected Site output is available."
             )
-        if default is not _MISSING:
-            _typed_value(default, kind, f"{label} default", required=required)
+        value_format = row.get("format")
+        max_length = row.get("maxLength")
+        if "format" in row and (
+            kind != "string" or value_format not in ("nonEmpty", "dnsLabel")
+        ):
+            raise GuidedInputError(f"{label} format must be nonEmpty or dnsLabel on a string.")
+        if "maxLength" in row and (
+            kind != "string" or type(max_length) is not int or not 1 <= max_length <= 65536
+        ):
+            raise GuidedInputError(f"{label} maxLength must be a string limit from 1 to 65536.")
         when = _condition(row["when"], f"{label} when", by_name) if "when" in row else None
-        resource = _resource_binding(row, label, by_name) if resource_role else None
-        field = InputField(name, kind, description, path, required, sensitive, default, when, resource)
+        resource = _resource_binding(row, label, by_name, activation=when) if resource_role else None
+        field = InputField(
+            name, kind, description, path, required, sensitive, default, when, resource,
+            value_format, max_length,
+        )
+        if default is not _MISSING:
+            field.validate(default, f"{label} default")
         fields.append(field)
         by_name[name] = field
     roles = [field for field in fields if field.resource is not None]
@@ -357,6 +427,15 @@ def _parse_fields(value: Any) -> tuple[InputField, ...]:
         raise GuidedInputError(
             "A resource requiring the Site subscription needs a declared Site subscription input."
         )
+    for role in roles:
+        if (
+            role.site_path is None and not role.resource.derive and not role.resource.requires
+            and not any(
+                child.resource.from_resource is not None
+                and child.resource.from_resource.input == role.name for child in roles
+            )
+        ):
+            raise GuidedInputError(f"Resource input '{role.name}' has no mapping, prerequisite or dependent read.")
     controllers = {
         field.when.input for field in fields if field.when is not None
     } | {
@@ -434,9 +513,36 @@ class InputContract:
 
     fields: tuple[InputField, ...]
     _site_defaults: dict[str, Any]
+    name_from_resource: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "_site_defaults", copy.deepcopy(self._site_defaults))
+        if self.name_from_resource is not None:
+            resource = next(
+                (field for field in self.fields if field.name == self.name_from_resource), None,
+            )
+            name = next((field for field in self.fields if field.site_path == ("name",)), None)
+            controllers = {
+                field.when.input for field in self.fields if field.when is not None
+            } | {
+                check.when.input for field in self.fields if field.resource is not None
+                for check in field.resource.requires if check.when is not None
+            }
+            if (
+                not isinstance(self.name_from_resource, str)
+                or resource is None or resource.resource is None or resource.when is not None
+                or name is None or name.type != "string" or name.when is not None
+                or not name.required or name.has_default or name.name in controllers
+                or any(
+                    target == name.name for field in self.fields if field.resource is not None
+                    for _, target in field.resource.derive
+                )
+            ):
+                raise GuidedInputError(
+                    "nameFromResource needs an unconditional resource input and a "
+                    "required unconditional string name input without another default, "
+                    "derivation or conditional readers."
+                )
 
     @property
     def inputs(self) -> tuple[InputField, ...]:
@@ -453,6 +559,7 @@ class InputContract:
         rows = []
         for field in self.fields:
             status = (
+                "derived" if field.resource is not None and field.resource.from_resource is not None else
                 "conditional" if field.when else
                 "defaulted" if field.has_default else
                 "required" if field.required else "optional"
@@ -467,6 +574,12 @@ class InputContract:
             }
             if field.site_path is not None:
                 row["sitePath"] = ".".join(field.site_path)
+            if self.name_from_resource is not None and field.site_path == ("name",):
+                row["defaultFromResource"] = self.name_from_resource
+            if field.format is not None:
+                row["format"] = field.format
+            if field.max_length is not None:
+                row["maxLength"] = field.max_length
             if field.name in derivations:
                 row["derivableFrom"] = derivations[field.name]
             if field.resource is not None:
@@ -476,6 +589,11 @@ class InputContract:
                 }
                 if field.resource.subscription is not None:
                     row["resource"]["subscription"] = field.resource.subscription
+                if field.resource.from_resource is not None:
+                    row["fromResource"] = {
+                        "input": field.resource.from_resource.input,
+                        "field": field.resource.from_resource.field,
+                    }
                 if field.resource.derive:
                     row["derive"] = dict(field.resource.derive)
                 if field.resource.requires:
@@ -505,6 +623,15 @@ class InputContract:
             field.name for field in self.fields
             if field.required and not field.has_default and field.when is None
         }
+        if self.name_from_resource is not None:
+            resource = next(field for field in self.fields if field.name == self.name_from_resource)
+            resource = self._source_input(resource)
+            names = (required - self.resource_route_fields(resource.name)) | {resource.name}
+            return {
+                "apiVersion": _VERSION,
+                "kind": "SiteInputValues",
+                "values": {field.name: None for field in self.fields if field.name in names},
+            }
         return {
             "apiVersion": _VERSION,
             "kind": "SiteInputValues",
@@ -512,12 +639,18 @@ class InputContract:
                 field.name: None for field in self.fields
                 if field.name in required
                 or (
-                    field.resource is not None and not field.required
+                    field.resource is not None and field.resource.from_resource is None and not field.required
                     and field.when is None
                     and any(target in required for _, target in field.resource.derive)
                 )
             },
         }
+
+    def _source_input(self, field: InputField) -> InputField:
+        while field.resource is not None and field.resource.from_resource is not None:
+            source_name = field.resource.from_resource.input
+            field = next(item for item in self.fields if item.name == source_name)
+        return field
 
     def bind(
         self, values_file: Path | None = None, inline: list[str] | None = None,
@@ -534,6 +667,11 @@ class InputContract:
             if name in inline_values:
                 raise GuidedInputError(f"Duplicate inline input '{name}'.")
             field = fields[name]
+            if field.resource is not None and field.resource.from_resource is not None:
+                raise GuidedInputError(
+                    f"Input '{name}' is derived from '{self._source_input(field).name}' "
+                    "and cannot be supplied."
+                )
             if field.sensitive:
                 raise GuidedInputError(f"Sensitive input '{name}' cannot be supplied inline.")
             if field.type == "boolean":
@@ -541,7 +679,10 @@ class InputContract:
                     raise GuidedInputError(f"Input '{name}' must be a boolean (true or false).")
                 inline_values[name] = value == "true"
             else:
-                _typed_value(value, "string", f"Input '{name}'", required=field.required)
+                if field.resource is None:
+                    field.validate(value, f"Input '{name}'")
+                else:
+                    _typed_value(value, "string", f"Input '{name}'", required=field.required)
                 inline_values[name] = value
 
         file_values: dict[str, Any] = {}
@@ -562,11 +703,16 @@ class InputContract:
                 if name not in fields:
                     raise GuidedInputError("Input values contain an unknown input name.")
                 field = fields[name]
+                if field.resource is not None and field.resource.from_resource is not None:
+                    raise GuidedInputError(
+                        f"Input '{name}' is derived from '{self._source_input(field).name}' "
+                        "and cannot be supplied."
+                    )
                 if value is None and (
                     field.required or (field.resource is not None and field.when is None)
                 ):
                     continue
-                _typed_value(value, field.type, f"Input '{name}'", required=field.required)
+                field.validate(value, f"Input '{name}'")
 
         effective = {
             field.name: field.default for field in self.fields if field.has_default
@@ -642,31 +788,20 @@ class InputContract:
                 or active_values.get(check.when.input) == check.when.equals
             )
             resource_refs.append(BoundResource(field, ref, required_facts))
-        site_subscription_field = next(
-            (field for field in self.fields if field.site_path == ("subscription",)),
-            None,
+        bound = BoundInputs(
+            MappingProxyType(active_values), MappingProxyType(sources), tuple(resource_refs),
         )
         for resource in resource_refs:
-            binding = resource.field.resource
-            if binding is None or binding.subscription != "site":
-                continue
-            if site_subscription_field is None:
-                raise GuidedInputError("A Site subscription input is required by this contract.")
-            site_subscription = active_values.get(site_subscription_field.name)
-            if not isinstance(site_subscription, str):
-                raise GuidedInputError(
-                    f"Resource input '{resource.field.name}' requires a Site subscription."
-                )
-            if site_subscription.casefold() != resource.ref.subscription.casefold():
-                raise ResourceInputError(
-                    "subscription-mismatch",
-                    f"Resource input '{resource.field.name}' conflicts with the Site subscription.",
-                )
+            self._require_resource_scope(resource, bound)
+        resource_fields = self.resource_fields(bound)
         derivable = {
-            target for bound_resource in resource_refs
-            for _, target in bound_resource.field.resource.derive
+            target for field in resource_fields for _, target in field.resource.derive
         }
-        selected_roles = {resource.field.name for resource in resource_refs}
+        selected_roles = {field.name for field in resource_fields}
+        if self.name_from_resource in selected_roles:
+            derivable.update(
+                field.name for field in self.fields if field.site_path == ("name",)
+            )
         for field in self.fields:
             if field.resource is None:
                 continue
@@ -682,16 +817,122 @@ class InputContract:
                 ) and field.name not in selected_roles:
                     raise ResourceInputError(
                         "requirement-unverified",
-                        f"Resource input '{field.name}' must be read for '{check.fact}'.",
+                        f"Resource input '{self._source_input(field).name}' must be read for '{check.fact}'.",
                     )
         for name in missing_required:
             if name not in active_values and name not in derivable:
                 raise GuidedInputError(f"Missing required input '{name}'.")
-        return BoundInputs(
-            MappingProxyType(active_values),
-            MappingProxyType(sources),
-            tuple(resource_refs),
+        return bound
+
+    def resource_fields(self, bound: BoundInputs) -> tuple[InputField, ...]:
+        """Select explicit resource inputs and their declared related reads in order."""
+        return self._selected_resource_fields({resource.field.name for resource in bound.resources})
+
+    def _selected_resource_fields(self, selected: set[str]) -> tuple[InputField, ...]:
+        fields = []
+        for field in self.fields:
+            if field.resource is None:
+                continue
+            link = field.resource.from_resource
+            if field.name in selected or (link is not None and link.input in selected):
+                selected.add(field.name)
+                fields.append(field)
+        return tuple(fields)
+
+    def resource_route_fields(self, resource_name: str) -> set[str]:
+        """Describe answers supplied by one explicit resource and its declared relationships."""
+        fields = self._selected_resource_fields({resource_name})
+        names = {target for field in fields for _, target in field.resource.derive}
+        if self.name_from_resource in {field.name for field in fields}:
+            names.update(field.name for field in self.fields if field.site_path == ("name",))
+        return names
+
+    def reference_fields(self, field: InputField, bound: BoundInputs) -> frozenset[str]:
+        """Select only the relationship fields needed by active dependent reads."""
+        return frozenset(
+            child.resource.from_resource.field for child in self.resource_fields(bound)
+            if child.resource.from_resource is not None and child.resource.from_resource.input == field.name
         )
+
+    def _require_resource_scope(self, resource: BoundResource, bound: BoundInputs) -> None:
+        binding = resource.field.resource
+        if binding is None:
+            raise GuidedInputError("A resource read needs a resource declaration.")
+        if binding.subscription != "site":
+            return
+        target = next((field for field in self.fields if field.site_path == ("subscription",)), None)
+        value = bound.active_values.get(target.name) if target is not None else None
+        if not isinstance(value, str):
+            raise GuidedInputError(f"Resource input '{resource.field.name}' requires a Site subscription.")
+        if value.casefold() != resource.ref.subscription.casefold():
+            raise ResourceInputError(
+                "subscription-mismatch", f"Resource input '{resource.field.name}' conflicts with the Site subscription.",
+            )
+
+    def resource_request(
+        self, field: InputField, bound: BoundInputs, observations: Mapping[str, ArmResourceObservation],
+    ) -> BoundResource:
+        """Bind a related ID only after validating its source and target scope."""
+        from siteops.arm_resources import ArmResourceError, parse_arm_resource_id
+
+        fixed = next((resource for resource in bound.resources if resource.field == field), None)
+        if fixed is not None:
+            return fixed
+        binding = field.resource
+        if field not in self.resource_fields(bound) or binding is None or binding.from_resource is None:
+            raise GuidedInputError("The resource read is not part of the selected input contract.")
+        link = binding.from_resource
+        parent_field = next(item for item in self.fields if item.name == link.input)
+        if link.input not in observations:
+            raise GuidedInputError("A required source resource observation is unavailable.")
+        parent = self.resource_request(parent_field, bound, observations)
+        observation = observations[link.input]
+        self.validate_resource_observation(parent, bound, observation)
+        try:
+            ref = parse_arm_resource_id(
+                observation.references[link.field],
+                expected_type=binding.resource_type, api_version=binding.api_version,
+            )
+        except ArmResourceError as error:
+            category = "type-mismatch" if error.code == "TYPE_MISMATCH" else "invalid-id"
+            raise ResourceInputError(category, f"Resource input '{field.name}' has an invalid related ID.") from None
+        if ref.subscription.casefold() != parent.ref.subscription.casefold():
+            raise ResourceInputError(
+                "subscription-mismatch", f"Related resource '{field.name}' must stay in its parent subscription.",
+            )
+        if ref.resource_group.casefold() != parent.ref.resource_group.casefold():
+            raise ResourceInputError(
+                "resource-group-mismatch", f"Related resource '{field.name}' must stay in its parent resource group.",
+            )
+        facts = frozenset(
+            check.fact for check in binding.requires
+            if check.when is None or bound.active_values.get(check.when.input) == check.when.equals
+        )
+        resource = BoundResource(field, ref, facts)
+        self._require_resource_scope(resource, bound)
+        return resource
+
+    def validate_resource_observation(
+        self, resource: BoundResource, bound: BoundInputs, observation: ArmResourceObservation,
+    ) -> None:
+        """Validate identity, requested relationships and prerequisites before following links."""
+        from siteops.arm_resources import ArmResourceError, validate_arm_observation
+
+        field = resource.field
+        try:
+            validate_arm_observation(resource.ref, observation)
+            if set(observation.references) != self.reference_fields(field, bound):
+                raise ArmResourceError("INVALID_OBSERVATION")
+        except ArmResourceError as error:
+            raise ResourceInputError(
+                "invalid-observation", f"Resource input '{field.name}' returned invalid metadata ({error.code}).",
+            ) from None
+        for requirement in field.resource.requires:
+            if requirement.fact in resource.required_facts and observation.facts.get(requirement.fact) is not True:
+                raise ResourceInputError(
+                    "requirement-unmet",
+                    f"Resource input '{field.name}' requirement '{requirement.fact}' was not reported by Azure.",
+                )
 
     def build_site(
         self,
@@ -699,37 +940,21 @@ class InputContract:
         observations: Mapping[str, ArmResourceObservation] | None = None,
     ) -> Site:
         """Construct one ordinary Site after all selected resource reads succeed."""
-        resource_names = {resource.field.name for resource in bound.resources}
+        fields = self.resource_fields(bound)
+        resource_names = {field.name for field in fields}
         if resource_names and observations is None:
             raise GuidedInputError(
-                "Resource ID inputs require `--read-resources` on inputs, plan or deploy."
+                "Resource ID inputs require validated resource observations before Site construction."
             )
         if set(observations or {}) != resource_names:
             raise GuidedInputError("The selected resource observations are incomplete or unexpected.")
         values = dict(bound.active_values)
         sources = dict(bound.sources)
         data = copy.deepcopy(self._site_defaults)
-        for resource in bound.resources:
-            from siteops.arm_resources import ArmResourceError, validate_arm_observation
-
-            field = resource.field
+        for field in fields:
+            resource = self.resource_request(field, bound, observations)
             observation = observations[field.name]
-            try:
-                validate_arm_observation(resource.ref, observation)
-            except ArmResourceError as error:
-                raise ResourceInputError(
-                    "invalid-observation",
-                    f"Resource input '{field.name}' returned invalid metadata ({error.code}).",
-                ) from None
-            for requirement in field.resource.requires:
-                if requirement.fact in resource.required_facts and (
-                    observation.facts.get(requirement.fact) is not True
-                ):
-                    raise ResourceInputError(
-                        "requirement-unmet",
-                        f"Resource input '{field.name}' requirement "
-                        f"'{requirement.fact}' was not reported by Azure.",
-                    )
+            self.validate_resource_observation(resource, bound, observation)
             for fact, target_name in field.resource.derive:
                 observed = (
                     observation.location if fact == "location"
@@ -752,6 +977,18 @@ class InputContract:
                     sources[target_name] = f"resource '{field.name}'"
             if field.site_path is not None:
                 _assign(data, field.site_path, observation.resource_id)
+            if field.name == self.name_from_resource:
+                name_field = next(
+                    item for item in self.fields if item.site_path == ("name",)
+                )
+                if name_field.name not in values:
+                    prefix = re.sub(r"[^a-z0-9]+", "-", resource.ref.name.casefold()).strip("-")
+                    prefix = prefix[:18].rstrip("-")
+                    suffix = hashlib.sha256(
+                        resource.ref.resource_id.casefold().encode("ascii"),
+                    ).hexdigest()[:12]
+                    values[name_field.name] = f"{prefix}-{suffix}"
+                    sources[name_field.name] = f"resource '{field.name}'"
         for field in self.fields:
             if field.resource is not None:
                 continue
@@ -764,6 +1001,7 @@ class InputContract:
                 continue
             if field.site_path is None:
                 raise GuidedInputError("A mapped input needs a Site field.")
+            field.validate(values[field.name], f"Input '{field.name}'")
             _assign(data, field.site_path, values[field.name])
         return Site.from_data(data, source="guided inputs", default_name="guided-site")
 
@@ -804,9 +1042,14 @@ def load_contract(
     document = _mapping(_read_yaml(verified, label="Input contract"), "Input contract")
     if binding is not None:
         binding.require_workspace_file(path)
+    version = document.get("apiVersion")
+    if document.get("kind") != "SiteInputContract" and not (
+        isinstance(version, str) and version.startswith("siteops.inputs/")
+    ):
+        return None
     _shape(
         document,
-        allowed={"apiVersion", "kind", "siteDefaults", "inputs"},
+        allowed={"apiVersion", "kind", "siteDefaults", "inputs", "nameFromResource"},
         required={"apiVersion", "kind", "inputs"},
         label="Input contract",
     )
@@ -817,7 +1060,9 @@ def load_contract(
     defaults = _site_defaults(document.get("siteDefaults", {}))
     fields = _parse_fields(document["inputs"])
     _validate_default_writers(defaults, fields)
-    return InputContract(fields, defaults)
+    if "nameFromResource" in document and document["nameFromResource"] is None:
+        raise GuidedInputError("nameFromResource must name a declared resource input.")
+    return InputContract(fields, defaults, document.get("nameFromResource"))
 
 
 def load_direct_site(path: Path) -> Site:

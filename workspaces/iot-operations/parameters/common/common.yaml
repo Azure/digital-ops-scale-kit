@@ -47,7 +47,7 @@ enableCertManager: "{{ site.properties.deployOptions.enableCertManager }}"
 # Resource Metadata (auto-filtered per template)
 # ─────────────────────────────────────────────────────────────
 tags:
-  environment: "{{ site.labels.environment }}"
+  environment: "{{ site.labels.environment? }}"
   site: "{{ site.name }}"
-  country: "{{ site.labels.country }}"
+  country: "{{ site.labels.country? }}"
   managedBy: siteops

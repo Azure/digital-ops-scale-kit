@@ -65,9 +65,13 @@ the workspace and checked against the acquired package's file inventory
 before Site Ops reads it. It is not a manifest, a browsing card, or a source
 of permission to deploy. Without a sibling `manifest.yaml` or `manifest.yml`,
 a nested `manifests/.../inputs.yaml` is itself conventionally discoverable as
-a manifest; if an actual manifest uses that name alongside a sibling
+a manifest. If an actual manifest uses that name alongside a sibling
 `manifest.yaml` or `manifest.yml`, list it explicitly in `content.yaml`.
-Existing entry guidance remains descriptive.
+Existing entry guidance remains descriptive. A parseable sibling is treated
+as a typed contract when it declares `kind: SiteInputContract` or an
+`apiVersion` in the `siteops.inputs/` namespace. Unrelated sample wiring
+does not become a contract. A declared contract with invalid kind, version
+or fields fails rather than being ignored.
 
 ```yaml
 apiVersion: siteops.inputs/v1
@@ -110,6 +114,11 @@ values can be preserved across planning and reporting without disclosure.
 Author only mappings that ordinary Site parsing and actual deployment
 preparation accept. Do not map two inputs onto the same Site field.
 
+String inputs may declare `format: nonEmpty` or `format: dnsLabel`.
+The DNS label format accepts lowercase letters, digits and interior hyphens,
+with at most 63 characters. `maxLength` supplies a further string limit.
+These constraints apply to defaults, file values and inline overrides.
+
 A named `azureResourceId` input can instead derive values for existing
 semantic inputs. This is an optional read, not a source of Azure
 credentials or arbitrary provider commands. For example, after declaring
@@ -134,14 +143,65 @@ inputs:
 When an optional resource ID derives required fields, `inputs --example`
 includes `cluster: null` alongside required fields left null. Leave the
 resource null for manual answers, or fill its ID and use
-`--read-resources` to derive the matching target facts. A null optional
+`--read-resources` with `inputs` to preview or save the resolved Site.
+For `plan` and `deploy`, supplying the ID itself authorizes its bounded
+read and derives the matching target facts. A null optional
 ID does not trigger an Azure read. The example remains incomplete until
 the operator supplies every requirement through one route.
 
+An optional top-level `nameFromResource: cluster` selects an unconditional
+declared resource to generate the Site name after its authorized read.
+The contract must also declare a required unconditional string input mapped
+to `name`, without another default, derivation or conditional readers.
+An explicit name overrides generation. Without the resource, that name
+remains required for the manual route.
+
+The generated name combines a lowercase sanitized resource-name prefix of
+at most 18 characters with a hyphen and 12 hexadecimal SHA-256 characters
+from the full case-normalized resource ID. Identical IDs retain their names
+across case variations, while different resource groups or subscriptions
+contribute to the hash. With this declaration, `inputs --example` prefers
+the resource route and omits the fields it supplies. The AIO example
+therefore contains only `cluster: null`.
+
+A resource role can follow an earlier role through a declared relationship:
+
+```yaml
+- name: customLocation
+  type: azureResourceId
+  description: Custom location referenced by the selected resource.
+  fromResource: {input: instance, field: extendedLocation}
+  resource:
+    type: Microsoft.ExtendedLocation/customLocations
+    apiVersion: "2021-08-31-preview"
+```
+
+The closed fields are `extendedLocation` for the ARM extended-location
+reference and `customLocations.hostResourceId` for a custom location's host.
+The source must be an earlier resource role with the same activation
+condition. Related roles cannot require or accept separate operator answers.
+They must contribute a mapping, prerequisite or dependent read, and count
+toward the four-resource limit.
+
+For `inputs`, `--read-resources` also authorizes these declared reads.
+`plan` and `deploy` authorize them with the supplied ID. Site Ops validates
+each source observation, related ID and declared target type before the
+next read. Related resources must stay in the source's subscription and
+resource group. This restriction is enforced by the engine, not selectable
+by content. No arbitrary property paths, URLs, code or subscription searches
+are supported. Explicit independent resources, such as a supplied vault,
+keep their declared scope rules.
+
+`nameFromResource` may select a related role. The example then asks for its
+explicit source input, while naming waits for the related resource's validated
+observation. This lets an instance input resolve its associated cluster and
+retain the same Site naming as a directly supplied cluster.
+
 An operator provides `cluster` through the same `--input NAME=VALUE`
-or answer file used for strings, and explicitly adds `--read-resources`
-to `inputs`, `plan` or `deploy`. If the role is omitted, ordinary manual
-answers remain required and no Azure read occurs. The derived values
+or answer file used for strings. Add `--read-resources` only to `inputs`
+when previewing or saving. `plan` and `deploy` read declared IDs without
+that option, while `validate` stays read-free. If the role is omitted,
+ordinary manual answers remain required and no Azure read occurs. The derived values
 fill missing answers. Any manually supplied answer must agree with the
 resource ID or the read response. A role may also use `sitePath` to bind
 its verified ID to one Site parameter, and `resource.subscription: site`
@@ -293,7 +353,8 @@ Behavior notes:
 - The wait checks the condition once before sleeping, so an already-satisfied condition returns on the first poll.
 - A permanent error (authorization failure, resource not found, malformed `resourceId`) fails the step fast rather than polling for the full timeout. Transient errors (throttling, 5xx, network) keep polling.
 - A timeout or failure message reports the last observed tag value and the last underlying error.
-- `siteops plan` and `deploy --dry-run` never poll. Fully resolved values use
+- `siteops plan` never polls. `deploy` waits only during execution, after
+  preparing and confirming the plan. Fully resolved values use
   the same scalar and success-versus-failure-pattern checks as execution.
   Prior-operation outputs remain deferred until execution.
 

@@ -35,8 +35,8 @@ inputs:
     source: sites/base-site.yaml
   - field: labels
     type: mapping
-    requirement: required
-    description: Installation tags need environment and country labels. Configured Sites carry them, while typed answers ask for each. Optional Edge Site addressing also uses city.
+    requirement: optional
+    description: Supplied environment and country labels become resource tags. Omitted labels create no corresponding tags. Optional Edge Site addressing needs its own country and city values when selected.
     source: parameters/common/common.yaml
   - field: parameters.aioInstanceName
     type: string

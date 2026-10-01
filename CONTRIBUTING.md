@@ -59,18 +59,35 @@ architecture and directory responsibilities.
 Packaging tests require the development dependencies because they build a
 wheel with package-index access disabled.
 
-Native installation tests use pipx in isolated temporary directories. On
+Native installation tests use uv in isolated temporary directories. On
 Windows, select a short owned `pytest --basetemp` path so generated executable
-paths remain within the platform limit. For offline tests, set
-`SITEOPS_TEST_BACKEND_WHEELHOUSE` to a directory containing the pip wheel
-pinned in `scripts/siteops-build-requirements.txt`.
+paths remain within the platform limit. Offline build qualification can use
+`SITEOPS_TEST_BACKEND_WHEELHOUSE` with the pip wheel pinned in
+`scripts/siteops-build-requirements.txt`.
 
 The bootstrap harness under `tests/fixtures/` uses controlled tools and
 no cloud credentials. Its pinned Ubuntu 24.04 image installs only Python
 and venv for testing. Run the harness without network access as an
-unprivileged user, with a read-only root and only the two required
-files mounted read only. Passing doubles does not qualify a signed
+unprivileged user, with a read-only root and the platform script, harness
+and shared installer source mounted read only. Passing doubles does not qualify a signed
 published asset or a fresh Windows WinGet installation.
+
+The engine ZIP carries its shared installer helper as `siteops-install.py`,
+copied from `scripts/siteops_distribution.py` in the frozen source.
+Platform scripts verify the ZIP's provenance before extracting that helper
+to fresh protected storage and executing it. Keep helper extraction separate
+from authority selection and never execute a retained helper before checking
+its bytes against the authenticated archive.
+
+Native uv tests accept `SITEOPS_TEST_UV` as the path to the qualified
+uv 0.12.20 executable. Acquire the native tool through an approved channel.
+The tests use local fixture wheels and isolated tool, runtime and cache
+directories rather than changing the user's installation.
+Platform bootstrap tests also require `SITEOPS_TEST_UV_ARCHIVE` for the
+matching platform. Windows uses `SITEOPS_TEST_UV_PYTHON_DIR` for an admitted
+managed Python fixture. Linux uses `SITEOPS_TEST_UV_PYTHON_ARCHIVE` and
+OpenSSL to serve that runtime from a local HTTPS mirror. CI requires these
+fixtures rather than silently skipping the native installation cases.
 
 Installed engine command coverage builds the real wheel, installs it into an
 isolated environment and invokes its commands from an unrelated directory.

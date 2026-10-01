@@ -13,6 +13,12 @@ resource settings.
 
 ## Configure the target
 
+For guided inputs, supply only the existing Arc cluster ID and authorize
+its read. Site Ops derives the target and generates a stable Site name.
+`siteName`, `environment` and `country` remain optional overrides on
+this resource route. Supplied labels become resource tags, while omitted
+labels are not invented. The manual route retains explicit target fields.
+
 Confirm the Site's subscription, resource group, location and
 `parameters.clusterName`. The cluster and resource group must already exist.
 Confirm the inherited `properties.aioRelease` and that the target meets its
@@ -20,7 +26,8 @@ Confirm the inherited `properties.aioRelease` and that the target meets its
 
 Shared naming defaults derive instance, custom-location, Schema Registry and
 ADR namespace names from the Site name. Ordinary Site parameters can override
-those defaults. IDs produced by earlier operations are supplied to their
+those defaults. Keep an existing explicit Site name when reusing configuration.
+IDs produced by earlier operations are supplied to their
 consuming steps, rather than entered by the operator.
 
 Optional `properties.deployOptions` settings include `enableEdgeSite`,
@@ -35,7 +42,20 @@ cluster before enabling Secret Sync across a fleet.
 
 ## Review and deploy
 
-Run from the repository root and replace `<site>` with the configured Site:
+With a compatible published workspace and an independently approved
+`official` source, supply the existing Arc cluster ID:
+
+```text
+siteops deploy aio-install --source "official@<release>" --input "cluster=<Arc-cluster-resource-ID>"
+```
+
+Use the release identified by its instructions. Deploy prepares, displays
+and confirms one plan in a private terminal. Add `--yes` only for explicitly
+authorized unattended execution. The resource ID authorizes bounded target
+reads, not additional Azure permissions.
+
+For a local checkout and configured Sites, run from the repository root
+and replace `<site>` with the configured Site:
 
 ```bash
 siteops -w workspaces/iot-operations plan manifests/aio-install/manifest.yaml -l name=<site>

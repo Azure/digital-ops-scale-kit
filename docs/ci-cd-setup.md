@@ -245,7 +245,7 @@ Can also be triggered manually from **Actions → CI → Run workflow** (GHA) or
    - **Manifest**: Path to manifest, relative to the workspace root (default: `manifests/aio-install/manifest.yaml`)
    - **Environment**: `dev`, `staging`, or `prod`
    - **Selector**: Additional site filter (optional, e.g., `region=eastus`)
-   - **Dry run**: Prepare the executable plan without deployment
+   - **Dry run**: Have the wrapper prepare an executable plan without invoking `deploy`
 5. Click **"Run workflow"**
 
 ### Deploy via GitHub CLI
@@ -363,10 +363,19 @@ module restore may use the network and may need the workflow identity. Planning
 does not submit Azure deployments or contact Kubernetes clusters. The workflow
 sets private file permissions, publishes only a supported executable
 `publishable` JSON plan, and removes runner-local stdout and stderr files when
-the step finishes. Dry run stops here and publishes no deployment result.
+the step finishes. The workflow's **Dry run** input stops here and publishes
+no deployment result. It does not call the removed CLI `deploy --dry-run`.
 
-The deploy step requests `--output json --projection publishable` and captures
-stdout separately from stderr. It validates the `DeploymentRun` envelope before
+The deploy step explicitly requests `--yes`, `--output json` and
+`--projection publishable`: noninteractive or JSON deployment without
+`--yes` is a usage
+error before content or Azure access. The workflow's environment approval
+and Azure OIDC identity remain separate from Site Ops consumer source
+approval. `--yes` authorizes execution without bypassing source trust or
+target prerequisites, and does not print the private plan to stderr.
+The deploy command prepares its own fresh executable plan rather than
+executing the separately published preview as a saved plan.
+The step captures stdout separately from stderr. It validates the `DeploymentRun` envelope before
 publishing anything, including that the reported exit code matches the process
 exit code and that exit code `130` appears only with `summary.interrupted`. An
 unsupported document is reported as unavailable rather than published, and the

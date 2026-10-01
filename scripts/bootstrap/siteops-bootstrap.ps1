@@ -12,8 +12,61 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+Import-Module (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop
 function Fail([string]$Message) { throw "Site Ops installation: $Message" }
 function Stage([string]$Message) { Write-Host "Site Ops installation: $Message" }
+
+function Get-InstallerHelper([string]$Archive, [string]$Directory) {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [IO.Compression.ZipFile]::OpenRead($Archive)
+    try {
+        $entries = @($zip.Entries | Where-Object { $_.FullName -ieq 'siteops-install.py' })
+        if ($entries.Count -ne 1 -or $entries[0].FullName -cne 'siteops-install.py' -or
+            $entries[0].Length -lt 1 -or $entries[0].Length -gt 1048576 -or
+            (($entries[0].ExternalAttributes -shr 16) -band 0xF000) -notin @(0, 0x8000)) {
+            Fail 'The authenticated release has no valid installer helper.'
+        }
+        $helper = Join-Path $Directory 'siteops-install.py'
+        $incoming = $entries[0].Open()
+        try {
+            $output = [IO.File]::Open($helper, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
+            try {
+                $buffer = New-Object byte[] 65536
+                $total = 0
+                while (($read = $incoming.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                    $total += $read
+                    if ($total -gt 1048576) { Fail 'The installer helper exceeds its byte limit.' }
+                    $output.Write($buffer, 0, $read)
+                }
+                if ($total -ne $entries[0].Length) { Fail 'The installer helper is incomplete.' }
+            } finally { $output.Dispose() }
+        } finally { $incoming.Dispose() }
+        return $helper
+    } finally { $zip.Dispose() }
+}
+function Check-Payload([string[]]$Arguments) {
+    $previousPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = & $python -I -S -B $installerHelper @Arguments 2>$null
+        $codeExit = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $previousPreference }
+    if ($codeExit -eq 2) { Fail 'Another Site Ops selection is installed. Use -Replace after review.' }
+    if ($codeExit -eq 3) { Fail 'The exposed command belongs to another installation. Remove it with its original manager.' }
+    if ($codeExit -eq 4) { Fail 'The tool has unrecognized Python startup files. Inspect it before using uv tool uninstall siteops.' }
+    if ($codeExit -ne 0) { Fail 'The bundle or installed payload failed validation.' }
+    $text = $output -join "`n"
+    if ([Text.Encoding]::UTF8.GetByteCount($text) -gt 4096) {
+        Fail 'The installer helper returned oversized results.'
+    }
+    $result = $text | ConvertFrom-Json
+    if ($result.version -isnot [string] -or
+        $result.version -cnotmatch '^[A-Za-z0-9][A-Za-z0-9.!+_-]{0,127}$' -or
+        $result.wheel -isnot [string] -or $result.wheel -cnotmatch '^wheels/[^/]+\.whl$') {
+        Fail 'The installer helper returned unsupported results.'
+    }
+    return $result
+}
 
 if ($Release -cnotmatch '^(siteops/)?v[0-9][0-9A-Za-z._-]{0,100}$' -or
     $SourceCommit -cnotmatch '^[0-9a-f]{40}$' -or
@@ -30,19 +83,12 @@ if (-not [Environment]::Is64BitOperatingSystem -or
     Fail 'A supported Windows x64 machine is required.'
 }
 Stage "Release: $Release ($SourceCommit) from $Repository."
-Stage 'Missing tools use approved WinGet or your configured Python feed.'
-Stage 'GitHub CLI 2.95+, Python with venv, pipx 1.17.2, and shared pip 26.2.1 are needed.'
-Stage 'Changing the shared pipx backend may affect other applications. No account is signed in.'
-Stage 'pipx may add its application directory to your user PATH.'
-$existingPython = Get-Command 'python.exe' -CommandType Application -ErrorAction SilentlyContinue |
-    Select-Object -First 1
-if ($existingPython -and $existingPython.Source -notlike '*\WindowsApps\*') {
-    $pythonCheck = & $existingPython.Source -c 'import sys;print(sys.version_info[0],sys.version_info[1],sys.maxsize>4294967296)' 2>$null
-} else { $pythonCheck = '' }
-if ($pythonCheck -match '^3 (10|11|12|13|14) True$') {
-    Stage "Keep: supported 64-bit Python ($pythonCheck)."
+Stage 'GitHub CLI 2.95+, checksum-pinned uv 0.12.20, and uv-managed Python are needed.'
+Stage 'Existing uv and Python installations are not upgraded. No account is signed in.'
+if (Get-Command 'uv.exe' -CommandType Application -ErrorAction SilentlyContinue) {
+    Stage 'Check: the existing uv executable. Preserve it if another version is installed.'
 } else {
-    Stage 'Add: supported 64-bit Python through WinGet or a managed channel.'
+    Stage 'Add: pinned native uv in protected tooling storage and expose it for maintenance.'
 }
 $existingGh = Get-Command 'gh.exe' -CommandType Application -ErrorAction SilentlyContinue |
     Select-Object -First 1
@@ -57,9 +103,7 @@ if ($ghCheck -match '^2\.([0-9]+)\.' -and [int]$Matches[1] -ge 95) {
 if (Get-Command 'curl.exe' -CommandType Application -ErrorAction SilentlyContinue) {
     Stage 'Keep: Windows HTTPS downloader.'
 } else { Stage 'Requires Windows curl.exe for anonymous HTTPS downloads.' }
-if (Get-Command 'pipx.exe' -CommandType Application -ErrorAction SilentlyContinue) {
-    Stage 'Check: existing pipx and its shared backend.'
-} else { Stage 'Add: pipx 1.17.2 from the configured Python feed.' }
+Stage 'Check: ordinary uv tool, command, and managed Python storage.'
 if ($Replace) { Stage 'The selected build will explicitly replace or repair an existing Site Ops installation.' }
 if ($WithAzureCli) {
     if (Get-Command 'az.cmd', 'az.exe' -CommandType Application -ErrorAction SilentlyContinue) {
@@ -104,65 +148,7 @@ function AzureCli {
     if ($launcher -and $launcher.Source -like '*.cmd') { return $launcher.Source }
     return $null
 }
-function Require-ApprovedPythonIndex([string]$Python, [ValidateSet('install', 'download')][string]$Command) {
-    $check = @'
-import ast
-import subprocess
-import sys
-from urllib.parse import urlsplit
-
-try:
-    config = subprocess.run(
-        [sys.executable, "-m", "pip", "config", "list"],
-        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL, timeout=20,
-    )
-except (OSError, subprocess.TimeoutExpired):
-    raise SystemExit(1)
-if config.returncode or len(config.stdout) > 65536:
-    raise SystemExit(1)
-try:
-    lines = config.stdout.decode("utf-8").splitlines()
-except UnicodeError:
-    raise SystemExit(1)
-settings = {}
-for line in lines:
-    key, separator, raw = line.partition("=")
-    if not separator:
-        continue
-    try:
-        value = ast.literal_eval(raw.strip())
-    except (SyntaxError, ValueError):
-        raise SystemExit(1)
-    if not isinstance(value, str):
-        raise SystemExit(1)
-    settings[key.strip()] = value
-if any(value for key, value in settings.items()
-       if key.endswith((".extra-index-url", ".find-links", ".trusted-host"))):
-    raise SystemExit(1)
-index = next((settings[key] for key in
-              (":env:.index-url", f"{sys.argv[1]}.index-url", "global.index-url")
-              if settings.get(key)), "")
-try:
-    parsed = urlsplit(index)
-    if parsed.scheme != "https" or not parsed.hostname:
-        raise SystemExit(1)
-except ValueError:
-    raise SystemExit(1)
-'@
-    $previousPreference = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = 'Continue'
-        $check | & $Python - $Command >$null 2>$null
-        $checkExit = $LASTEXITCODE
-    } finally {
-        $ErrorActionPreference = $previousPreference
-    }
-    if ($checkExit -ne 0) {
-        Fail 'Configure one approved HTTPS Python index in pip settings or PIP_INDEX_URL, without extra indexes, find-links, or trusted hosts.'
-    }
-}
-function Require-PrivateDataRoot([string]$Path) {
+function Require-PrivateDataRoot([string]$Path, [switch]$Managed) {
     function Reject([string]$Code) {
         Fail "Configure a private Site Ops data root. $Code Use trusted, non-symlinked directories."
     }
@@ -238,14 +224,25 @@ function Require-PrivateDataRoot([string]$Path) {
             Reject 'ROOT_DATA_CREATE'
         }
         $previousPreference = $ErrorActionPreference
+        $phase = 'ROOT_DATA_OWNER'
+        $owned = $false
+        $protected = $false
         try {
             $ErrorActionPreference = 'Continue'
-            & icacls.exe $Path /inheritance:r /grant:r "*${sid}:(OI)(CI)F" *> $null
-            $protected = $LASTEXITCODE -eq 0
+            & icacls.exe $Path /setowner "*$sid" *> $null
+            $owned = $LASTEXITCODE -eq 0
+            if ($owned) {
+                $phase = 'ROOT_DATA_ACL'
+                & icacls.exe $Path /inheritance:r /grant:r "*${sid}:(OI)(CI)F" *> $null
+                $protected = $LASTEXITCODE -eq 0
+            }
         } catch {
-            Reject 'ROOT_DATA_ACL'
+            Reject $phase
         } finally {
             $ErrorActionPreference = $previousPreference
+        }
+        if (-not $owned) {
+            Reject 'ROOT_DATA_OWNER'
         }
         if (-not $protected) {
             Reject 'ROOT_DATA_ACL'
@@ -260,18 +257,90 @@ function Require-PrivateDataRoot([string]$Path) {
         Reject 'ROOT_DATA_TYPE'
     }
     $access = Read-DirectoryAcl $Path 'ROOT_DATA_ACL'
-    if ($access.Owner -cne $sid) {
+    if (($Managed -and $access.Owner -notin $trustedOwners) -or
+        (-not $Managed -and $access.Owner -cne $sid)) {
         Reject 'ROOT_DATA_OWNER'
     }
     foreach ($rule in $access.Rules) {
-        if ($rule.AccessControlType -eq 'Allow' -and $rule.IdentityReference.Value -notin $trusted) {
+        if ($rule.AccessControlType -eq 'Allow' -and $rule.IdentityReference.Value -notin $trusted -and
+            (-not $Managed -or ([int]$rule.FileSystemRights -band 0x500D0156))) {
             Reject 'ROOT_DATA_ACL'
         }
     }
 }
-function Require-PrivateExecutablePath([string]$Path, [string]$PrivateRoot) {
+function Ensure-UvStorage([string]$Path) {
+    if ($Path -cnotmatch '^[A-Za-z]:\\' -or [IO.Path]::GetFullPath($Path) -cne $Path) {
+        Fail 'Select an absolute canonical uv storage directory.'
+    }
+    $missing = [Collections.Generic.List[string]]::new()
+    $current = $Path
+    while (-not (Test-Path -LiteralPath $current)) {
+        $missing.Add($current)
+        $parent = Split-Path -Parent $current
+        if (-not $parent -or $parent -eq $current) { Fail 'The uv storage ancestry is unavailable.' }
+        $current = $parent
+    }
+    $missing.Reverse()
+    foreach ($directory in $missing) { Require-PrivateDataRoot $directory -Managed }
+    Require-PrivateDataRoot $Path -Managed
+}
+function Invoke-Uv([string]$Executable, [string[]]$Arguments) {
+    if ($env:UV_INSECURE_HOST -or $env:UV_PYTHON_DOWNLOADS_JSON_URL -or
+        ($env:UV_INSECURE_NO_ZIP_VALIDATION -and
+         $env:UV_INSECURE_NO_ZIP_VALIDATION -notin @('0', 'false'))) {
+        Fail 'Remove insecure uv settings and custom runtime catalogs before verified installation.'
+    }
+    if ($env:UV_PYTHON_INSTALL_MIRROR) {
+        $mirror = $null
+        if (-not [uri]::TryCreate($env:UV_PYTHON_INSTALL_MIRROR, [UriKind]::Absolute, [ref]$mirror) -or
+            $mirror.Scheme -cne 'https' -or -not $mirror.Host) {
+            Fail 'Select an approved HTTPS Python runtime mirror.'
+        }
+    }
+    $retained = @(
+        'UV_TOOL_DIR', 'UV_TOOL_BIN_DIR', 'UV_PYTHON_INSTALL_DIR', 'UV_PYTHON_INSTALL_MIRROR'
+    )
+    $saved = @{}
+    foreach ($item in Get-ChildItem Env:) {
+        if ($item.Name -like 'UV_*' -or $item.Name -like 'PYTHON*' -or
+            $item.Name -in @('VIRTUAL_ENV', 'CONDA_PREFIX')) {
+            $saved[$item.Name] = $item.Value
+        }
+    }
+    $previousPreference = $ErrorActionPreference
+    try {
+        foreach ($name in $saved.Keys) {
+            if ($name -notin $retained) { [Environment]::SetEnvironmentVariable($name, $null) }
+        }
+        if ($script:UvCacheDir) { $env:UV_CACHE_DIR = $script:UvCacheDir }
+        $ErrorActionPreference = 'Continue'
+        $global:LASTEXITCODE = 1
+        $lines = [Collections.Generic.List[string]]::new()
+        $bytes = 0
+        & $Executable @Arguments --no-config --system-certs --no-progress 2>$null |
+            ForEach-Object {
+                $bytes += [Text.Encoding]::UTF8.GetByteCount($_) + 1
+                if ($bytes -gt 1048576) { Fail 'The uv observation exceeds its byte limit.' }
+                $lines.Add($_)
+            }
+        $code = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousPreference
+        foreach ($name in $saved.Keys) {
+            [Environment]::SetEnvironmentVariable($name, $saved[$name])
+        }
+        if (-not $saved.ContainsKey('UV_CACHE_DIR')) {
+            [Environment]::SetEnvironmentVariable('UV_CACHE_DIR', $null)
+        }
+    }
+    if ($code -ne 0) { Fail 'The selected uv operation failed. Inspect the approved tool and runtime source.' }
+    return ($lines -join "`n")
+}
+function Require-PrivateExecutablePath([string]$Path, [string]$PrivateRoot, [switch]$Optional) {
     function Reject([string]$Code) {
-        Fail "Choose a private Windows tool location. $Code Use trusted, non-symlinked directories and executables."
+        $message = "Choose a private Windows tool location. $Code Use trusted directories and the selected executable."
+        if ($Optional) { throw [Security.SecurityException]::new($message) }
+        Fail $message
     }
     if ($Path -cnotmatch '^[A-Za-z]:\\' -or $PrivateRoot -cnotmatch '^[A-Za-z]:\\') {
         Reject 'TOOL_PATH'
@@ -310,8 +379,10 @@ function Require-PrivateExecutablePath([string]$Path, [string]$PrivateRoot) {
             Reject 'TOOL_TYPE'
         }
         if (($isFile -and $node.PSIsContainer) -or
-            (-not $isFile -and -not $node.PSIsContainer) -or
-            ($node.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            (-not $isFile -and -not $node.PSIsContainer)) {
+            Reject 'TOOL_TYPE'
+        }
+        if ($node.Attributes -band [IO.FileAttributes]::ReparsePoint) {
             Reject 'TOOL_TYPE'
         }
         try {
@@ -343,6 +414,64 @@ function Require-PrivateExecutablePath([string]$Path, [string]$PrivateRoot) {
         }
     }
 }
+function Require-PrivateRuntimeTree([string]$Root, [string]$Storage, [string]$Interpreter) {
+    $null = Require-PrivateExecutablePath $Interpreter $Storage
+    Require-PrivateDataRoot $Root -Managed
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $trusted = @($sid, 'S-1-5-18', 'S-1-5-32-544', 'S-1-3-4')
+    $trustedOwners = $trusted + 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+    $pending = [Collections.Generic.Queue[object]]::new()
+    $pending.Enqueue([pscustomobject]@{ Path = $Root; Depth = 0 })
+    $count = 0
+    while ($pending.Count) {
+        $directory = $pending.Dequeue()
+        try {
+            foreach ($path in [IO.Directory]::EnumerateFileSystemEntries($directory.Path)) {
+                $count++
+                if ($count -gt 16384 -or $directory.Depth -ge 32) {
+                    Fail 'The selected Python runtime exceeds its safe traversal limits.'
+                }
+                try {
+                    $attributes = [IO.File]::GetAttributes($path)
+                    if ($attributes -band [IO.FileAttributes]::ReparsePoint) {
+                        Fail 'RUNTIME_TYPE: A selected Python runtime contains a redirected entry.'
+                    }
+                    $isDirectory = ($attributes -band [IO.FileAttributes]::Directory) -ne 0
+                    $acl = if ($isDirectory) {
+                        [IO.Directory]::GetAccessControl($path)
+                    } else {
+                        [IO.File]::GetAccessControl($path)
+                    }
+                    $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+                    $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+                } catch [UnauthorizedAccessException] {
+                    Fail 'RUNTIME_ACL: A selected Python runtime cannot be inspected.'
+                } catch [IO.IOException] {
+                    Fail 'RUNTIME_TYPE: A selected Python runtime cannot be inspected.'
+                }
+                if ($owner -notin $trustedOwners) {
+                    Fail 'RUNTIME_OWNER: A selected Python runtime has an untrusted owner.'
+                }
+                foreach ($rule in $rules) {
+                    if ($rule.AccessControlType -ne 'Allow' -or $rule.IdentityReference.Value -in $trusted -or
+                        ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly)) {
+                        continue
+                    }
+                    if ([int]$rule.FileSystemRights -band 0x500D0156) {
+                        Fail 'RUNTIME_ACL: A selected Python runtime is writable by another user.'
+                    }
+                }
+                if ($isDirectory) {
+                    $pending.Enqueue([pscustomobject]@{ Path = $path; Depth = $directory.Depth + 1 })
+                }
+            }
+        } catch [UnauthorizedAccessException] {
+            Fail 'RUNTIME_ACL: A selected Python runtime cannot be enumerated.'
+        } catch [IO.IOException] {
+            Fail 'RUNTIME_TYPE: A selected Python runtime cannot be enumerated.'
+        }
+    }
+}
 function WinGetPackage([string]$Id, [bool]$UserScope = $true) {
     $winget = Native 'winget.exe'
     if (-not $winget) { Fail "Use an approved software channel to install $Id. WinGet is unavailable." }
@@ -358,33 +487,221 @@ function WinGetPackage([string]$Id, [bool]$UserScope = $true) {
     $env:PATH = [Environment]::GetEnvironmentVariable('PATH', 'Machine') + ';' +
         [Environment]::GetEnvironmentVariable('PATH', 'User') + ';' + $env:PATH
 }
-function PythonCommand {
-    $candidate = Native 'python.exe'
-    if (-not $candidate -or $candidate -like '*\WindowsApps\*') { return $null }
-    $version = & $candidate -c 'import sys;print(sys.version_info[0],sys.version_info[1],sys.maxsize>4294967296)' 2>$null
-    if ($LASTEXITCODE -ne 0 -or $version -notmatch '^3 (10|11|12|13|14) True$') {
-        return $null
+function Assert-UvArchive([string]$Archive, [string]$Executable = '') {
+    if ((Get-Item -LiteralPath $Archive -Force).Length -ne 18039150 -or
+        (Get-FileHash -LiteralPath $Archive -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+            '95f9bc30fbb3574d276e28ac4a6de932d25153645853d13da8c21eec3bc88d06') {
+        Fail 'The native uv archive differs from the selected release.'
     }
-    return $candidate
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [IO.Compression.ZipFile]::OpenRead($Archive)
+    try {
+        $expected = @{ 'uv.exe' = 42547504; 'uvx.exe' = 348976; 'uvw.exe' = 348976 }
+        $members = @($zip.Entries)
+        if ($members.Count -ne 3 -or
+            @($members | Where-Object {
+                -not $expected.ContainsKey($_.FullName) -or
+                $_.Length -ne $expected[$_.FullName] -or
+                (($($_.ExternalAttributes) -shr 16) -band 0xF000) -notin @(0, 0x8000)
+            }).Count -ne 0 -or
+            @($members | Select-Object -ExpandProperty FullName -Unique).Count -ne 3) {
+            Fail 'The native uv archive has an unexpected inventory.'
+        }
+        if ($Executable) {
+            $inputStream = ($members | Where-Object { $_.FullName -ceq 'uv.exe' })[0].Open()
+            try {
+                $output = [IO.File]::Open($Executable, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
+                try {
+                    $buffer = New-Object byte[] 65536
+                    $size = 0
+                    while (($read = $inputStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+                        $size += $read
+                        if ($size -gt 42547504) { Fail 'The native uv executable exceeds its byte limit.' }
+                        $output.Write($buffer, 0, $read)
+                    }
+                    if ($size -ne 42547504) { Fail 'The native uv executable is incomplete.' }
+                } finally { $output.Dispose() }
+            } finally { $inputStream.Dispose() }
+        }
+    } finally { $zip.Dispose() }
+}
+function Assert-PinnedUv([string]$Executable, [string]$Root) {
+    Require-PrivateExecutablePath $Executable $Root
+    if ((Get-Item -LiteralPath $Executable -Force).Length -ne 42547504 -or
+        (Get-FileHash -LiteralPath $Executable -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+            'a0d2742d49564a32488753b02e76276e7b5ef1b1ea8cf30bcbf06ee28f60cd73') {
+        Fail 'The retained native uv executable differs from the selected release.'
+    }
+}
+function Select-Uv([string]$Data, [string]$Downloads, [string]$Curl) {
+    $available = Native 'uv.exe'
+    if ($available) {
+        $admitted = $false
+        try {
+            Require-PrivateExecutablePath $available (Split-Path -Parent $available) -Optional
+            $admitted = $true
+        } catch [Security.SecurityException] {
+            Stage 'Keep: the other uv installation unchanged. Use a pinned Site Ops tooling copy.'
+        }
+        if ($admitted) {
+            if ((Get-Item -LiteralPath $available -Force).Length -eq 42547504 -and
+                (Get-FileHash -LiteralPath $available -Algorithm SHA256).Hash.ToLowerInvariant() -ceq
+                    'a0d2742d49564a32488753b02e76276e7b5ef1b1ea8cf30bcbf06ee28f60cd73') {
+                Stage 'Keep: the selected qualified uv installation.'
+                return $available
+            }
+            Stage 'Keep: the other uv installation unchanged. Use a pinned Site Ops tooling copy.'
+        }
+    }
+    if (-not $available) {
+        $commandHome = if ($env:UV_TOOL_BIN_DIR) {
+            $env:UV_TOOL_BIN_DIR
+        } else {
+            Join-Path $env:USERPROFILE '.local\bin'
+        }
+        Ensure-UvStorage $commandHome
+        $maintenance = Join-Path $commandHome 'uv.exe'
+        if (Test-Path -LiteralPath $maintenance) {
+            Assert-PinnedUv $maintenance $commandHome
+            Stage 'Keep: the selected qualified uv maintenance command.'
+            return $maintenance
+        }
+    }
+    $parent = Join-Path $Data 'tools\uv'
+    Ensure-UvStorage $parent
+    $cache = Join-Path $parent '0.12.20'
+    $archive = Join-Path $cache 'uv-windows.zip'
+    $uv = Join-Path $cache 'uv.exe'
+    if (Test-Path -LiteralPath $cache) {
+        Require-PrivateDataRoot $cache
+        if (@(Get-ChildItem -LiteralPath $cache -Force).Count -ne 2) {
+            Fail 'The native uv tooling cache has an unexpected inventory. Inspect it before repair.'
+        }
+        Require-PrivateExecutablePath $archive $cache
+        Assert-UvArchive $archive
+        Assert-PinnedUv $uv $cache
+    } else {
+        $incoming = Join-Path $Downloads 'uv-windows.zip'
+        & $Curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' `
+            --tlsv1.2 --max-redirs 3 --max-time 180 --max-filesize 18039150 `
+            --output $incoming 'https://github.com/astral-sh/uv/releases/download/0.12.20/uv-x86_64-pc-windows-msvc.zip'
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $incoming -PathType Leaf)) {
+            Fail 'The native uv archive could not be downloaded.'
+        }
+        Assert-UvArchive $incoming (Join-Path $Downloads 'uv.exe')
+        Assert-PinnedUv (Join-Path $Downloads 'uv.exe') $Downloads
+        Require-PrivateDataRoot $cache
+        Copy-Item -LiteralPath $incoming -Destination $archive -ErrorAction Stop
+        Copy-Item -LiteralPath (Join-Path $Downloads 'uv.exe') -Destination $uv -ErrorAction Stop
+        Require-PrivateExecutablePath $archive $cache
+        Assert-UvArchive $archive
+        Assert-PinnedUv $uv $cache
+    }
+    if (-not $available) {
+        try {
+            [IO.File]::Copy($uv, $maintenance, $false)
+        } catch [IO.IOException] {
+            Fail 'An unrelated uv command occupies the native maintenance location. Inspect it before installation.'
+        }
+        Assert-PinnedUv $maintenance $commandHome
+        Stage "uv maintenance directory: $commandHome. Add it to your PATH if needed."
+    }
+    return $uv
+}
+function Get-ManagedPythonCandidates([string]$Directory) {
+    Require-PrivateDataRoot $Directory -Managed
+    $count = 0
+    try {
+        foreach ($path in [IO.Directory]::EnumerateFileSystemEntries($Directory)) {
+            $count++
+            if ($count -gt 1024) {
+                Fail 'The uv-managed Python directory exceeds its safe inventory limit.'
+            }
+            $name = [IO.Path]::GetFileName($path)
+            if ($name -cnotmatch '^cpython-(3\.(?:10|11|12|13|14)\.[0-9]+)-windows-x86_64-none$') {
+                continue
+            }
+            $version = $Matches[1]
+            $python = Join-Path $path 'python.exe'
+            [pscustomobject]@{ Version = $version; Python = $python }
+        }
+    } catch [UnauthorizedAccessException] {
+        Fail 'The uv-managed Python inventory cannot be inspected.'
+    } catch [IO.IOException] {
+        Fail 'The uv-managed Python inventory cannot be inspected.'
+    }
+}
+function Select-ManagedPython([string]$Uv, [string]$Directory, [string]$Tools) {
+    $siteopsHome = Join-Path $Tools 'siteops'
+    $existingVersion = ''
+    $existingHome = ''
+    if (Test-Path -LiteralPath $siteopsHome) {
+        Require-PrivateDataRoot $siteopsHome -Managed
+        $configuration = Join-Path $siteopsHome 'pyvenv.cfg'
+        Require-PrivateExecutablePath $configuration $Tools
+        if ((Get-Item -LiteralPath $configuration).Length -gt 65536) {
+            Fail 'The current Site Ops runtime configuration exceeds its byte limit.'
+        }
+        $text = [IO.File]::ReadAllText($configuration)
+        $versionMatch = [regex]::Match($text, '(?m)^version_info\s*=\s*(3\.(?:10|11|12|13|14)\.[0-9]+)\s*$')
+        $homeMatch = [regex]::Match($text, '(?m)^home\s*=\s*(.+?)\s*$')
+        if (-not $versionMatch.Success -or -not $homeMatch.Success) {
+            Fail 'The current Site Ops runtime configuration needs inspection.'
+        }
+        $existingVersion = $versionMatch.Groups[1].Value
+        $existingHome = $homeMatch.Groups[1].Value
+    }
+    $records = @(Get-ManagedPythonCandidates $Directory)
+    $selected = $null
+    if ($existingVersion) {
+        $selected = @($records | Where-Object {
+            $_.Version -ceq $existingVersion -and
+            (Split-Path -Parent $_.Python) -ieq $existingHome
+        } | Select-Object -First 1)
+        if ($selected.Count -ne 1) {
+            Fail 'The existing Site Ops runtime is not an available uv-managed Python. Inspect it or run uv tool uninstall siteops after review, then retry.'
+        } else { $selected = $selected[0] }
+    }
+    if (-not $selected -and $records.Count) {
+        $selected = $records | Sort-Object `
+            @{ Expression = { if ($_.Version -ceq '3.11.16') { 0 } else { 1 } } }, `
+            @{ Expression = { [version]$_.Version }; Descending = $true } |
+            Select-Object -First 1
+    }
+    if (-not $selected) {
+        $concrete = Join-Path $Directory 'cpython-3.11.16-windows-x86_64-none'
+        if (Test-Path -LiteralPath $concrete) {
+            Fail 'The uv-managed Python installation is incomplete. Inspect it before repair.'
+        }
+        Stage 'Provisioning uv-managed CPython 3.11.16 without command aliases or registry changes.'
+        $null = Invoke-Uv $Uv @('python', 'install', '3.11.16', '--no-bin', '--no-registry')
+        $matches = @(Get-ManagedPythonCandidates $Directory | Where-Object {
+            $_.Version -ceq '3.11.16' -and $_.Python -ieq (Join-Path $concrete 'python.exe')
+        })
+        if ($matches.Count -ne 1) { Fail 'The selected uv-managed Python is unavailable.' }
+        $selected = $matches[0]
+    }
+    $python = $selected.Python
+    Require-PrivateDataRoot (Split-Path -Parent $python) -Managed
+    if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
+        Fail 'The uv-managed Python installation is incomplete. Inspect it before repair.'
+    }
+    Require-PrivateRuntimeTree (Split-Path -Parent $python) $Directory $python
+    $parts = $selected.Version.Split('.')
+    $previousPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $identity = & $python -I -S -B -c 'import sys;print(sys.implementation.name,sys.version_info[0],sys.version_info[1],sys.version_info[2],sys.maxsize>4294967296,sys._base_executable)' 2>$null
+        $code = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $previousPreference }
+    if ($code -ne 0 -or $identity -cne
+        "cpython $($parts[0]) $($parts[1]) $($parts[2]) True $python") {
+        Fail 'The selected concrete uv-managed Python differs from the installed runtime.'
+    }
+    return $python
 }
 $data = Join-Path $env:LOCALAPPDATA 'siteops'
 Require-PrivateDataRoot $data
-$python = PythonCommand
-if (-not $python) {
-    WinGetPackage 'Python.Python.3.12'
-    $python = PythonCommand
-    if (-not $python) {
-        $candidate = Join-Path $env:LOCALAPPDATA 'Programs\Python\Python312\python.exe'
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-            Require-PrivateExecutablePath $candidate $env:LOCALAPPDATA
-            $candidateVersion = & $candidate -c 'import sys;print(sys.version_info[0],sys.version_info[1],sys.maxsize>4294967296)'
-            if ($LASTEXITCODE -eq 0 -and $candidateVersion -match '^3 12 True$') {
-                $python = $candidate
-            }
-        }
-    }
-    if (-not $python) { Fail 'Python 3.12 was installed but is not available. Open a new shell and retry.' }
-}
 $curl = Native 'curl.exe'
 if (-not $curl) { Fail 'Windows curl.exe is required for anonymous HTTPS downloads.' }
 $gh = Native 'gh.exe'
@@ -405,54 +722,10 @@ if ($WithAzureCli -and -not (AzureCli)) {
     }
 }
 
-$pipx = Native 'pipx.exe'
-$privatePipx = Join-Path $data 'tools\pipx\Scripts\pipx.exe'
-if (Test-Path -LiteralPath $privatePipx -PathType Leaf) { $pipx = $privatePipx }
-if ($pipx -ieq $privatePipx) { Require-PrivateExecutablePath $pipx $data }
-$pipxVersion = if ($pipx) { & $pipx --version 2>$null } else { '' }
-if ($pipxVersion -cne '1.17.2') {
-    $tools = Join-Path $data 'tools'
-    New-Item -ItemType Directory -Path $tools -Force | Out-Null
-    $installed = Join-Path $tools 'pipx'
-    if (Test-Path -LiteralPath $installed) {
-        if ((Get-Item -LiteralPath $installed).Attributes -band [IO.FileAttributes]::ReparsePoint -or
-            -not (Test-Path -LiteralPath (Join-Path $installed 'pyvenv.cfg') -PathType Leaf) -or
-            -not (Test-Path -LiteralPath (Join-Path $installed 'Scripts\python.exe') -PathType Leaf)) {
-            Fail 'Existing Site Ops pipx tooling differs. Inspect it before repair.'
-        }
-    } else {
-        & $python -m venv $installed
-        if ($LASTEXITCODE -ne 0) { Fail 'The user pipx environment could not be created.' }
-    }
-    $toolPython = Join-Path $installed 'Scripts\python.exe'
-    Require-PrivateExecutablePath $toolPython $data
-    Require-ApprovedPythonIndex $toolPython install
-    & $toolPython -m pip install --only-binary=:all: --no-cache-dir 'pipx==1.17.2'
-    if ($LASTEXITCODE -ne 0) { Fail 'pipx could not be installed from the configured feed.' }
-    $pipx = Join-Path $installed 'Scripts\pipx.exe'
-}
-if ($pipx -ieq $privatePipx) { Require-PrivateExecutablePath $pipx $data }
-if ((& $pipx --version) -cne '1.17.2') { Fail 'pipx 1.17.2 is required.' }
-
-function InvokePipx([string[]]$Arguments, [string]$FailureMessage) {
-    $previousPreference = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = 'Continue'
-        $output = & $pipx @Arguments 2>$null
-        $exitCode = $LASTEXITCODE
-    } finally {
-        $ErrorActionPreference = $previousPreference
-    }
-    if ($exitCode -ne 0) { Fail $FailureMessage }
-    return $output
-}
-
+Ensure-UvStorage $env:TEMP
 $download = Join-Path $env:TEMP ('siteops-download-' + [guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path $download | Out-Null
+Require-PrivateDataRoot $download
 try {
-    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    & icacls.exe $download /inheritance:r /grant:r "*${sid}:(OI)(CI)F" | Out-Null
-    if ($LASTEXITCODE -ne 0) { Fail 'The download directory could not be protected.' }
     $base = 'https://github.com/' + $Repository + '/releases/download/' +
         [uri]::EscapeDataString($Release) + '/'
     $identity = (@($Repository, $Release, $SourceCommit, $SourceRef, $Caller) -join [char]0) + [char]0
@@ -463,8 +736,11 @@ try {
         ).Replace('-', '').ToLowerInvariant()
     } finally { $hasher.Dispose() }
     $cache = Join-Path $data ("install-downloads\" + $cacheId)
+    $cacheRoot = Join-Path $data 'install-downloads'
+    Require-PrivateDataRoot $cacheRoot
     $assets = $download
     if (Test-Path -LiteralPath $cache) {
+        Require-PrivateDataRoot $cache
         $node = Get-Item -LiteralPath $cache -Force
         if (-not $node.PSIsContainer -or
             ($node.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
@@ -495,6 +771,7 @@ try {
             ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
             Fail 'The retained release bytes are unavailable or oversized.'
         }
+        Require-PrivateExecutablePath $asset $assets
     }
     $signer = "https://github.com/$Repository/.github/workflows/_siteops-distribution.yaml@$SourceRef"
     $builder = "https://github.com/$Repository/.github/workflows/$Caller@$SourceRef"
@@ -554,153 +831,61 @@ try {
         }
     }
     $bundleId = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+    $installerHelper = Get-InstallerHelper $archive $download
+    Require-PrivateExecutablePath $installerHelper $download
     $root = Join-Path $data 'bundles'
-    $listing = InvokePipx @('list', '--output', 'json') `
-        'The current pipx installation could not be inspected.'
-    if (-not $listing) {
-        Fail 'The current pipx installation could not be inspected.'
-    }
-    $installation = ($listing -join "`n") | ConvertFrom-Json
-    if ($null -eq $installation.venvs) {
-        Fail 'The current pipx installation could not be inspected.'
-    }
-    $mainPackage = $installation.venvs.siteops.metadata.main_package
-    $recorded = if ($mainPackage) {
-        if ($mainPackage.lock_file.__Path__) { $mainPackage.lock_file.__Path__ } else { 'unlocked' }
-    } else { $null }
+    Require-PrivateDataRoot $root
     $bundle = Join-Path $root $bundleId
-    if ($recorded -and $recorded -ine (Join-Path $bundle 'pylock.toml') -and -not $Replace) {
-        Fail 'Another Site Ops build is installed. Select -Replace after reviewing the native pipx transition.'
+    if (Test-Path -LiteralPath $bundle) { Require-PrivateDataRoot $bundle }
+    $script:UvCacheDir = Join-Path $download 'uv-cache'
+    Ensure-UvStorage $script:UvCacheDir
+    foreach ($name in @('UV_TOOL_DIR', 'UV_TOOL_BIN_DIR', 'UV_PYTHON_INSTALL_DIR')) {
+        $override = [Environment]::GetEnvironmentVariable($name)
+        if ($override) { Ensure-UvStorage $override }
     }
-    New-Item -ItemType Directory -Path $root -Force | Out-Null
-    $repeat = $false
-    if (Test-Path -LiteralPath $bundle) {
-        $node = Get-Item -LiteralPath $bundle -Force
-        if (-not $node.PSIsContainer -or
-            ($node.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-            -not (Test-Path -LiteralPath (Join-Path $bundle 'bundle.json') -PathType Leaf) -or
-            -not (Test-Path -LiteralPath (Join-Path $bundle 'pylock.toml') -PathType Leaf)) {
-            Fail 'The retained bundle is incomplete. Inspect it before repair.'
+    $uv = Select-Uv $data $download $curl
+    $toolDirectory = Invoke-Uv $uv @('tool', 'dir')
+    $commandDirectory = Invoke-Uv $uv @('tool', 'dir', '--bin')
+    $pythonDirectory = Invoke-Uv $uv @('python', 'dir')
+    Ensure-UvStorage $toolDirectory
+    Ensure-UvStorage $commandDirectory
+    Ensure-UvStorage $pythonDirectory
+    $expectedCommand = Join-Path $commandDirectory 'siteops.exe'
+    $toolHome = Join-Path $toolDirectory 'siteops'
+    if (Test-Path -LiteralPath $expectedCommand) {
+        Require-PrivateExecutablePath $expectedCommand $commandDirectory
+        if (-not (Test-Path -LiteralPath $toolHome)) {
+            Fail 'The exposed command belongs to another installation. Remove it with its original manager.'
         }
-        Add-Type -AssemblyName System.IO.Compression.FileSystem
-        $zip = [IO.Compression.ZipFile]::OpenRead($archive)
-        try {
-            $members = @($zip.Entries | Where-Object { $_.FullName -ceq 'bundle.json' })
-            if ($members.Count -ne 1 -or $members[0].Length -gt 1048576) {
-                Fail 'The authenticated bundle manifest inventory is invalid.'
-            }
-            $stream = $members[0].Open()
-            $reader = [IO.StreamReader]::new($stream, [Text.Encoding]::UTF8)
-            try { $expectedManifest = $reader.ReadToEnd() } finally { $reader.Dispose() }
-            $manifestPath = Join-Path $bundle 'bundle.json'
-            if ((Get-Item -LiteralPath $manifestPath).Length -gt 1048576 -or
-                [IO.File]::ReadAllText($manifestPath, [Text.Encoding]::UTF8) -cne $expectedManifest) {
-                Fail 'The retained bundle manifest differs from the authenticated archive.'
-            }
-        }
-        finally { $zip.Dispose() }
-        $check = Join-Path $download 'bundle-compare'
-        Expand-Archive -LiteralPath $archive -DestinationPath $check
-        $dirs = @(Get-ChildItem -LiteralPath $bundle -Directory -Force)
-        if ($dirs.Count -ne 1 -or $dirs[0].Name -cne 'wheels' -or
-            ($dirs[0].Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-            @(Get-ChildItem -LiteralPath $dirs[0].FullName -Directory -Force).Count -ne 0) {
-            Fail 'The retained bundle directory differs from the authenticated archive.'
-        }
-        $expectedFiles = @(Get-ChildItem -LiteralPath $check -Recurse -File -Force)
-        $existingFiles = @(Get-ChildItem -LiteralPath $bundle -Recurse -File -Force)
-        if ($expectedFiles.Count -ne $existingFiles.Count) {
-            Fail 'The retained bundle contents differ from the authenticated archive.'
-        }
-        foreach ($file in $existingFiles) {
-            $relative = $file.FullName.Substring($bundle.Length + 1)
-            $expectedFile = Join-Path $check $relative
-            if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-                -not (Test-Path -LiteralPath $expectedFile -PathType Leaf) -or
-                (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash -cne
-                    (Get-FileHash -LiteralPath $expectedFile -Algorithm SHA256).Hash) {
-                Fail 'The retained bundle contents differ from the authenticated archive.'
-            }
-        }
-        if ($recorded -ieq (Join-Path $bundle 'pylock.toml') -and -not $Replace) {
-            $backendVersion = InvokePipx @('runpip', 'siteops', '--version') `
-                'The installed pipx backend could not be inspected.'
-            if ($backendVersion -cnotmatch '^pip 26\.2\.1 ') {
-                Fail 'The installed pipx backend differs from the verified lock reader.'
-            }
-            $repeat = $true
-        }
-    } else {
-        New-Item -ItemType Directory -Path $bundle | Out-Null
-        & icacls.exe $bundle /inheritance:r /grant:r "*${sid}:(OI)(CI)F" | Out-Null
-        if ($LASTEXITCODE -ne 0) { Fail 'The bundle directory could not be protected.' }
-        Expand-Archive -LiteralPath $archive -DestinationPath $bundle
     }
-    $manifest = Get-Content -LiteralPath (Join-Path $bundle 'bundle.json') -Raw | ConvertFrom-Json
-    if ($manifest.apiVersion -cne 'siteops.install/v1' -or
-        $manifest.source.repository -cne $Repository -or
-        $manifest.source.commit -cne $SourceCommit -or
-        $manifest.source.ref -cne $SourceRef) {
-        Fail 'The verified bundle describes another source.'
+    $python = Select-ManagedPython $uv $pythonDirectory $toolDirectory
+    if (Test-Path -LiteralPath $toolHome) {
+        Require-PrivateRuntimeTree $toolHome $toolDirectory (Join-Path $toolHome 'Scripts\python.exe')
     }
-    $version = $manifest.package.version
-    if ($version -isnot [string] -or $version -cnotmatch '^[A-Za-z0-9][A-Za-z0-9.!+_-]{0,127}$') {
-        Fail 'The verified bundle has an unsupported version.'
-    }
-    if (-not $repeat) {
-        $wheelhouse = Join-Path $download 'backend'
-        New-Item -ItemType Directory -Path $wheelhouse | Out-Null
-        $backendTools = Join-Path $download 'backend-tools'
-        & $python -m venv $backendTools
-        if ($LASTEXITCODE -ne 0) { Fail 'Python venv is unavailable.' }
-        $backendPython = Join-Path $backendTools 'Scripts\python.exe'
-        Require-PrivateExecutablePath $backendPython $download
-        Require-ApprovedPythonIndex $backendPython download
-        & $backendPython -m pip download 'pip==26.2.1' `
-            --no-deps --only-binary=:all: --dest $wheelhouse
-        if ($LASTEXITCODE -ne 0) { Fail 'The approved pip backend is unavailable.' }
-        $wheels = @(Get-ChildItem -LiteralPath $wheelhouse -Filter 'pip-26.2.1-*.whl' -File)
-        if ($wheels.Count -ne 1 -or
-            (Get-FileHash -LiteralPath $wheels[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant() -cne
-                '71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e') {
-            Fail 'The pip backend does not match its reviewed hash.'
-        }
-        $wheelUri = ([UriBuilder]::new('file', '', -1, $wheelhouse)).Uri.AbsoluteUri
-        $env:PIPX_DEFAULT_PYTHON = $python
-        $null = InvokePipx @(
-            'upgrade-shared', '--pip-args',
-            "--no-index --only-binary=:all: --no-cache-dir --force-reinstall --find-links=$wheelUri"
-        ) 'The pipx shared backend could not be provisioned.'
-        $install = @('install', 'siteops', '--lock', (Join-Path $bundle 'pylock.toml'),
-                     '--backend', 'pip', '--fetch-python', 'never', '--skip-maintenance',
-                     '--app', 'siteops', '--pip-args',
-                     '--isolated --require-hashes --no-index --only-binary=:all: --no-cache-dir')
-        if ($Replace -and $recorded) { $install += '--force' }
-        $null = InvokePipx $install 'Site Ops could not be installed from the verified lock.'
-        $backendVersion = InvokePipx @('runpip', 'siteops', '--version') `
-            'The installed pipx backend could not be inspected.'
-        if ($backendVersion -cnotmatch '^pip 26\.2\.1 ') {
-            Fail 'The installed pipx backend differs from the verified lock reader.'
-        }
-        $null = InvokePipx @('ensurepath') 'pipx could not update the user command path.'
-    }
-    $binDir = InvokePipx @('environment', '--value', 'PIPX_BIN_DIR') `
-        'The pipx command directory could not be resolved.'
-    if ($binDir -isnot [string] -or -not [IO.Path]::IsPathRooted($binDir)) {
-        Fail 'The pipx command directory could not be resolved.'
-    }
-    $expectedCommand = Join-Path $binDir 'siteops.exe'
-    if (-not (Test-Path -LiteralPath $expectedCommand -PathType Leaf)) {
-        Fail 'pipx did not expose the selected siteops command.'
-    }
-    Require-PrivateExecutablePath $expectedCommand $binDir
-    $env:PATH = $binDir + ';' + $env:PATH
+    $mode = if ($Replace) { 'replace' } else { 'install' }
+    $installed = Check-Payload @($mode, $archive, $bundle, $Repository, $SourceCommit,
+        $SourceRef, $uv, $toolDirectory, $commandDirectory)
+    $version = $installed.version
+    Require-PrivateDataRoot $bundle
+    $expectedTarget = Join-Path $toolHome 'Scripts\siteops.exe'
+    Require-PrivateExecutablePath $expectedTarget $toolDirectory
+    Require-PrivateExecutablePath $expectedCommand $commandDirectory
+    $env:PATH = $commandDirectory + ';' + $env:PATH
     $siteops = Native 'siteops.exe'
-    if (-not $siteops -or $siteops -ine $expectedCommand -or
-        (& $siteops --version) -cne "siteops $version") {
+    if (-not $siteops -or $siteops -ine $expectedCommand) {
         Fail 'The exposed siteops command does not match the selected build.'
     }
-    Stage "Command directory: $binDir. Add it to your current PATH or open a new shell."
+    $previousPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $observed = & $siteops --version 2>$null
+        $versionExit = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $previousPreference }
+    if ($versionExit -ne 0 -or $observed -cne "siteops $version") {
+        Fail 'The exposed siteops command does not match the selected build.'
+    }
+    Stage "Command directory: $commandDirectory. Add it to your current PATH or open a new shell."
+    Stage 'For native removal, run uv tool uninstall siteops.'
     if ($EnrollSource) {
         $lines = [Collections.Generic.List[string]]::new()
         $bytes = 0
@@ -748,15 +933,18 @@ try {
         if ($LASTEXITCODE -ne 0) { Fail 'The approved source could not be enrolled.' }
     }
     if ($assets -eq $download) {
-        $cacheRoot = Join-Path $data 'install-downloads'
-        New-Item -ItemType Directory -Path $cacheRoot -Force | Out-Null
-        New-Item -ItemType Directory -Path $cache | Out-Null
-        & icacls.exe $cache /inheritance:r /grant:r "*${sid}:(OI)(CI)F" | Out-Null
-        if ($LASTEXITCODE -ne 0) { Fail 'The retained release location could not be protected.' }
+        if (Test-Path -LiteralPath $cache) {
+            Fail 'The retained release location changed during installation. Inspect it before retrying.'
+        }
+        Require-PrivateDataRoot $cache
         foreach ($name in @('siteops-install.zip', 'siteops-install.zip.attestation.jsonl')) {
             $source = Join-Path $download $name
             $target = Join-Path $cache $name
-            Copy-Item -LiteralPath $source -Destination $target -ErrorAction Stop
+            try {
+                [IO.File]::Copy($source, $target, $false)
+            } catch [IO.IOException] {
+                Fail 'The retained release bytes could not be copied without replacing existing files.'
+            }
             if ((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -cne
                 (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash) {
                 Fail 'The retained release bytes differ from the authenticated download.'
