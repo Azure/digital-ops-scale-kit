@@ -16,7 +16,7 @@ from tests import native_bundle
 from tests.installed_runtime import isolated_environment
 from tests.native_bundle import DEPENDENCY_NAME, publish_assets
 from tests.native_bundle import bundle_factory as bundle_factory
-from tests.native_uv_consumers import native_uv
+from tests.native_uv_consumers import native_uv, run_windows_installer
 from tests.shell_helpers import bash_path, run_script
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
@@ -577,20 +577,23 @@ def test_packaged_native_install_and_replacement_use_the_verified_path(
         if powershell is None:
             pytest.skip("Native Windows PowerShell is unavailable.")
         wrapper = tmp_path / "install.ps1"
+        phase = helper_dir / "phase.txt"
         wrapper.write_text(
             "$ErrorActionPreference = 'Stop'\n"
             "function Fail([string]$message) { throw $message }\n"
             "$python = $env:TEST_PYTHON\n" + body
+            + "\n[IO.File]::WriteAllText($env:TEST_PHASE, 'extracting-helper')\n"
             + "\n$installerHelper = Get-InstallerHelper $env:TEST_ARCHIVE $env:TEST_HELPER_DIR\n"
+            + "\n[IO.File]::WriteAllText($env:TEST_PHASE, 'checking-payload')\n"
             + "\nCheck-Payload @(" + ",".join(
                 "'" + value.replace("'", "''") + "'" for value in arguments
-            ) + ")\n", encoding="utf-8",
+            ) + ")\n[IO.File]::WriteAllText($env:TEST_PHASE, 'complete')\n", encoding="utf-8",
         )
-        return subprocess.run(
+        return run_windows_installer(
             [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
-            env={**environment, "TEST_PYTHON": sys.executable, "TEST_ARCHIVE": str(archive),
-                 "TEST_HELPER_DIR": str(helper_dir)}, cwd=tmp_path,
-            capture_output=True, text=True, timeout=60,
+            environment={**environment, "TEST_PYTHON": sys.executable, "TEST_ARCHIVE": str(archive),
+                         "TEST_HELPER_DIR": str(helper_dir), "TEST_PHASE": str(phase)},
+            cwd=tmp_path, phase=phase,
         )
 
     first = invoke(bundle)
@@ -603,3 +606,43 @@ def test_packaged_native_install_and_replacement_use_the_verified_path(
     replaced = invoke((newer, manifest, archive), replace=True)
     assert replaced.returncode == 0, replaced.stdout + replaced.stderr
     assert manifest.version in replaced.stdout
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Native Windows process supervision.")
+@pytest.mark.parametrize("private_phase", [False, True])
+def test_windows_installer_timeout_reports_only_fixed_phases_and_owned_processes(
+    tmp_path, private_phase,
+):
+    phase = tmp_path / "phase.txt"
+    phase.write_bytes(b"private-identity-marker" if private_phase else b"checking-payload")
+    child = "import time; time.sleep(60)"
+    script = (
+        "import subprocess,sys,time; "
+        f"subprocess.Popen([sys.executable, '-I', '-S', '-c', {child!r}]); "
+        "time.sleep(60)"
+    )
+    with pytest.raises(pytest.fail.Exception) as caught:
+        run_windows_installer(
+            [sys.executable, "-I", "-S", "-c", script],
+            environment=isolated_environment(tmp_path / "state"),
+            cwd=tmp_path, phase=phase, timeout=3,
+        )
+    message = str(caught.value)
+    assert ("phase=invalid-phase" if private_phase else "phase=checking-payload") in message
+    assert "processes=python.exe,python.exe" in message
+    assert "private-identity-marker" not in message
+    assert str(tmp_path) not in message
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Native Windows process supervision.")
+@pytest.mark.parametrize("exit_code", [0, 9])
+def test_windows_installer_preserves_completed_output_and_exit_status(tmp_path, exit_code):
+    result = run_windows_installer(
+        [sys.executable, "-I", "-S", "-c",
+         f"import sys; print('out'); print('err',file=sys.stderr); sys.exit({exit_code})"],
+        environment=isolated_environment(tmp_path / "state"), cwd=tmp_path,
+        phase=tmp_path / "unused-phase",
+    )
+    assert result.returncode == exit_code
+    assert result.stdout == "out\n"
+    assert result.stderr == "err\n"
