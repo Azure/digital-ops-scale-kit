@@ -1195,10 +1195,6 @@ $SourceRef = 'refs/heads/main'
 def test_native_maintenance_copy_is_reused_only_when_pinned(tmp_path, override, tamper):
     executable, archive = _native_fixture()
     data = tmp_path / "siteops"
-    cache = data / "tools" / "uv" / "0.12.20"
-    cache.mkdir(parents=True)
-    shutil.copy2(archive, cache / "uv-windows.zip")
-    shutil.copy2(executable, cache / "uv.exe")
     profile = tmp_path / "profile"
     profile.mkdir()
     bin_directory = tmp_path / "override-bin" if override else profile / ".local" / "bin"
@@ -1217,6 +1213,10 @@ function Stage([string]$message) { Write-Host $message }
 $env:USERPROFILE = $env:TEST_PROFILE
 $data = $env:TEST_DATA
 Require-PrivateDataRoot $data
+$cache = Join-Path $data 'tools\\uv\\0.12.20'
+Ensure-UvStorage $cache
+Copy-Item -LiteralPath $env:TEST_ARCHIVE -Destination (Join-Path $cache 'uv-windows.zip')
+Copy-Item -LiteralPath $env:TEST_QUALIFIED -Destination (Join-Path $cache 'uv.exe')
 $selected = Select-Uv $data $env:TEST_DATA $null
 if ($selected -cne $env:TEST_MAINTENANCE) { throw 'Wrong maintenance command selected.' }
 'MAINTENANCE_REUSED'
@@ -1229,6 +1229,8 @@ if ($selected -cne $env:TEST_MAINTENANCE) { throw 'Wrong maintenance command sel
         TEST_PROFILE=profile,
         TEST_DATA=data,
         TEST_MAINTENANCE=maintenance,
+        TEST_ARCHIVE=archive,
+        TEST_QUALIFIED=executable,
         **({"UV_TOOL_BIN_DIR": bin_directory} if override else {}),
     )
     if tamper:
@@ -1243,10 +1245,6 @@ if ($selected -cne $env:TEST_MAINTENANCE) { throw 'Wrong maintenance command sel
 def test_native_first_exposure_honors_explicit_uv_tool_bin_dir(tmp_path):
     executable, archive = _native_fixture()
     data = tmp_path / "siteops"
-    cache = data / "tools" / "uv" / "0.12.20"
-    cache.mkdir(parents=True)
-    shutil.copy2(archive, cache / "uv-windows.zip")
-    shutil.copy2(executable, cache / "uv.exe")
     profile = tmp_path / "profile"
     profile.mkdir()
     bin_directory = tmp_path / "override-bin"
@@ -1262,6 +1260,10 @@ function Stage([string]$message) { Write-Host $message }
 $env:USERPROFILE = $env:TEST_PROFILE
 $data = $env:TEST_DATA
 Require-PrivateDataRoot $data
+$cache = Join-Path $data 'tools\\uv\\0.12.20'
+Ensure-UvStorage $cache
+Copy-Item -LiteralPath $env:TEST_ARCHIVE -Destination (Join-Path $cache 'uv-windows.zip')
+Copy-Item -LiteralPath $env:TEST_QUALIFIED -Destination (Join-Path $cache 'uv.exe')
 $selected = Select-Uv $data $env:TEST_DATA $null
 if ($selected -cne (Join-Path $data 'tools\\uv\\0.12.20\\uv.exe')) {
     throw 'Wrong native uv selected.'
@@ -1271,7 +1273,8 @@ if ($selected -cne (Join-Path $data 'tools\\uv\\0.12.20\\uv.exe')) {
         encoding="utf-8",
     )
     result = _run(
-        wrapper, tmp_path, TEST_PROFILE=profile, TEST_DATA=data, UV_TOOL_BIN_DIR=bin_directory
+        wrapper, tmp_path, TEST_PROFILE=profile, TEST_DATA=data, UV_TOOL_BIN_DIR=bin_directory,
+        TEST_ARCHIVE=archive, TEST_QUALIFIED=executable,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "EXPOSURE_ACCEPTED" in result.stdout

@@ -680,6 +680,8 @@ class TestPlanParallelDisplay:
             "\n"
             "  Sites (1):\n"
             "    • test-site (eastus)\n"
+            "      Subscription: 00000000-0000-0000-0000-000000000000\n"
+            "      Resource group: rg-test\n"
             "\n"
             "  Parallel: sequential\n"
             "\n"

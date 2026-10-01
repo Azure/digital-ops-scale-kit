@@ -1159,7 +1159,7 @@ def test_the_bundle_keeps_native_installation_separate_from_bootstrap_scripts():
     assert 'siteops-install.py' in _script(REUSABLE["jobs"]["qualify"], "Install Site Ops from the verified lock")
     guide = _guide_text()
     assert "siteops-install.py" in guide
-    assert "pipx install" not in guide and "pipx upgrade-shared" not in guide
+    assert not re.search(r"\bpipx\s+(?:install|upgrade-shared)\b", guide)
 
 
 def test_qualification_consumes_only_the_retained_bundle_payload():
