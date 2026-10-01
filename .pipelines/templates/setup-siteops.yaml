@@ -26,7 +26,14 @@ steps:
       versionSpec: ${{ parameters.pythonVersion }}
 
   - ${{ if eq(parameters.enableCache, true) }}:
-    - script: echo "##vso[task.setvariable variable=PIP_CACHE_DIR]$(pip cache dir)"
+    - script: |
+        set -euo pipefail
+        PIP_CACHE_DIR="$(pip cache dir)"
+        if [[ -z "$PIP_CACHE_DIR" ]]; then
+          echo "##vso[task.logissue type=error]Pip returned an empty cache directory."
+          exit 1
+        fi
+        echo "##vso[task.setvariable variable=PIP_CACHE_DIR]$PIP_CACHE_DIR"
       displayName: Resolve pip cache directory
 
     - task: Cache@2
@@ -41,6 +48,7 @@ steps:
           pip | "$(Agent.OS)"
 
   - script: |
+      set -euo pipefail
       pip install --upgrade pip
       if [ -n "$SITEOPS_SOURCE" ]; then
         pip install "$SITEOPS_SOURCE"

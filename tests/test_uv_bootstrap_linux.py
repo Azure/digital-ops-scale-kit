@@ -15,6 +15,7 @@ import pytest
 from tests import native_bundle
 from tests.native_bundle import bundle_factory as bundle_factory
 from tests.native_bundle import publish_assets
+from tests.native_uv_consumers import _unavailable
 from tests.shell_helpers import bash_path, required_bash
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -52,12 +53,6 @@ def main():
     if arguments == ["--version"]:
         print("siteops " + __version__)
 """
-
-
-def _unavailable(message: str):
-    if os.environ.get("CI") or os.environ.get("SITEOPS_REQUIRE_LINUX_UV") == "1":
-        pytest.fail(message)
-    pytest.skip(message)
 
 
 @pytest.fixture(scope="module")

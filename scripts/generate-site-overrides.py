@@ -29,6 +29,8 @@ from pathlib import Path
 
 import yaml
 
+from siteops.sanitize import is_redaction_enabled
+
 SITE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 
 
@@ -124,17 +126,22 @@ def main() -> None:
     try:
         generated, skipped = generate_overlays(overrides, sites_local)
     except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
+        detail = (
+            "Site overrides are invalid. Run the generator locally with private output for details."
+            if is_redaction_enabled() else str(e)
+        )
+        print(f"Error: {detail}", file=sys.stderr)
         sys.exit(1)
 
-    for path in generated:
-        print(f"  {path.name}")
+    if not is_redaction_enabled():
+        for path in generated:
+            print(f"  {path.name}")
     print(f"Generated {len(generated)} site override(s)")
     if skipped:
+        names = "" if is_redaction_enabled() else f": {', '.join(sorted(skipped))}"
         print(
-            f"Skipped {len(skipped)} site(s) with pre-existing overlays in "
-            f"sites.local/: {', '.join(sorted(skipped))} "
-            f"(hand-authored overlays are never overwritten)"
+            f"Skipped {len(skipped)} site(s) with existing overlays in "
+            f"sites.local/{names} (existing overlays are preserved)"
         )
 
 

@@ -384,6 +384,11 @@ status line and the allowlisted JSON document. Run stdout and stderr files are
 removed when the step finishes. See [run-output.md](run-output.md) for the
 result contract.
 
+Reporting and file cleanup preserve a failed or interrupted Site Ops exit
+code. If the operation succeeded but its summary or private file cleanup
+fails, the task fails too. A warning on stderr alone does not determine the
+deployment result.
+
 See [ADO architecture](#ado-architecture) for the Azure DevOps equivalent.
 
 ## Security
@@ -414,6 +419,10 @@ Redaction follows the destination. Local plain output retains detailed
 reasons, while redacted plain output renders the allowed run fields.
 `GITHUB_ACTIONS` and `TF_BUILD` enable redaction automatically, and the
 shipped workflows also set `SITEOPS_REDACT_OUTPUT=1` explicitly.
+
+Site override generation follows the same setting. CI reports generated
+and preserved overlay counts, while private local output includes Site
+names and detailed validation errors.
 
 Diagnostic logging also scrubs recognized identifiers and credential
 patterns. That heuristic is separate from the publication allowlist and
@@ -727,6 +736,49 @@ authentication, plan-time compiler or module access, deployment, token
 lifecycle, and cleanup in one task. No separate login, token refresh, or
 logout steps are needed. The deployment result is validated and uploaded as a
 second summary using the same envelope rules as the GitHub workflow.
+
+Setup and override steps stop on the first failed command. Empty optional
+override values remain valid. Unit and integration result publication
+requires a results file and reports failed tests as task failures.
+
+### Automated pipeline validation
+
+Use complementary checks for different parts of the pipeline contract:
+
+| Check | What it establishes |
+|---|---|
+| Repository regression tests | Actual YAML script bodies preserve command failures, interruption, output validation, summary errors and cleanup outcomes. Controlled tools keep these checks independent of Azure. |
+| Azure DevOps YAML preview | The service parses templates and parameters for the selected repository revision. This checks Azure expression expansion rather than approximating it with a local YAML parser. |
+| Hosted CI and deployment qualification | Real tasks, agent images, cache and result publication work in the selected project. Authenticated planning and deployment require separately scoped service connections and targets. |
+
+Run the local pipeline regressions with:
+
+```text
+python -B -m pytest tests/test_ado_pipelines.py tests/workspace/test_deploy_registration.py tests/test_site_overrides_script.py
+```
+
+These tests run in normal CI, including GitHub PRs that change only
+`.pipelines/`. Azure Pipelines and GitHub Actions provision the same pinned
+Linux installation fixtures before their unit suites. Required native
+inputs fail explicitly when unavailable.
+
+For service validation, the
+[Run Pipeline API](https://learn.microsoft.com/en-us/rest/api/azure/devops/pipelines/runs/run-pipeline?view=azure-devops-rest-7.1)
+accepts `previewRun: true` and returns `finalYaml` without creating a run.
+Bind `resources.repositories.self.refName` and `version` to the chosen
+branch and commit. Exercise the default parameters, deployment versus dry
+run, each environment mapping, sample selectors and setup template options.
+`yamlOverride` replaces the entry document, so bind referenced templates
+to the same candidate too. Treat a rejected request or absent final YAML
+as a failed check. Keep expanded YAML private.
+
+Use a dedicated validation project or explicitly authorized pipeline
+definitions. Preview is a separate operation from queueing a build and
+does not establish script behavior, runtime authentication, environment
+approval or deployment success. A hosted CI run needs no Azure deployment
+identity. A deployment dry run still authenticates and can perform planning
+reads or compiler acquisition. Qualify that boundary and actual deployment
+only with the corresponding approval and scoped targets.
 
 ### Per-environment migration
 

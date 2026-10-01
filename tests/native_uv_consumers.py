@@ -111,7 +111,7 @@ def run_windows_installer(
 
 def _required() -> bool:
     gate = "SITEOPS_REQUIRE_WINDOWS_UV" if os.name == "nt" else "SITEOPS_REQUIRE_LINUX_UV"
-    return bool(os.environ.get("CI") or os.environ.get(gate) == "1")
+    return bool(os.environ.get("CI") or os.environ.get("TF_BUILD") or os.environ.get(gate) == "1")
 
 
 def _unavailable(message: str) -> None:

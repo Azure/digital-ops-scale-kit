@@ -124,7 +124,9 @@ jobs:
 
           # Mask override values in GitHub Actions logs
           echo "$SITE_OVERRIDES" | jq -r '.. | strings' | while IFS= read -r val; do
-            [[ -n "$val" ]] && echo "::add-mask::${val}"
+            if [[ -n "$val" ]]; then
+              echo "::add-mask::${val}"
+            fi
           done
 
       - name: Azure Login (OIDC)
@@ -183,7 +185,16 @@ jobs:
           PLAN_STDOUT="$RUNNER_TEMP/siteops-plan.json"
           PLAN_STDERR="$RUNNER_TEMP/siteops-plan.stderr"
           cleanup_plan_files() {
-            rm -f "$PLAN_STDOUT" "$PLAN_STDERR"
+            local status=$?
+            if [[ ${PLAN_EXIT_CODE:-0} -ne 0 ]]; then status=$PLAN_EXIT_CODE; fi
+            if rm -f "$PLAN_STDOUT" "$PLAN_STDERR" 2>/dev/null; then
+              :
+            else
+              local cleanup_status=$?
+              echo "::error::Private plan files could not be removed."
+              if [[ $status -eq 0 ]]; then status=$cleanup_status; fi
+            fi
+            exit "$status"
           }
           trap cleanup_plan_files EXIT
 
@@ -258,7 +269,16 @@ jobs:
           RUN_STDOUT="$RUNNER_TEMP/siteops-run.json"
           RUN_STDERR="$RUNNER_TEMP/siteops-run.stderr"
           cleanup_run_files() {
-            rm -f "$RUN_STDOUT" "$RUN_STDERR"
+            local status=$?
+            if [[ ${DEPLOY_EXIT_CODE:-0} -ne 0 ]]; then status=$DEPLOY_EXIT_CODE; fi
+            if rm -f "$RUN_STDOUT" "$RUN_STDERR" 2>/dev/null; then
+              :
+            else
+              local cleanup_status=$?
+              echo "::error::Private deployment files could not be removed."
+              if [[ $status -eq 0 ]]; then status=$cleanup_status; fi
+            fi
+            exit "$status"
           }
           trap cleanup_run_files EXIT
 

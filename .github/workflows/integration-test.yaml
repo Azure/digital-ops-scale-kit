@@ -111,7 +111,9 @@ jobs:
           fi
           if [[ -n "$SITE_OVERRIDES" ]]; then
             echo "$SITE_OVERRIDES" | jq -r '.. | strings' | while IFS= read -r val; do
-              [[ -n "$val" ]] && echo "::add-mask::${val}"
+              if [[ -n "$val" ]]; then
+                echo "::add-mask::${val}"
+              fi
             done
           fi
 
