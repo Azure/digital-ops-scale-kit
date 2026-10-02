@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from fleet_process import run  # noqa: E402
+from fleet_process import FleetProcessError, run  # noqa: E402
 from fleet_workflow import CoordinationError, FleetBudget, FleetCandidate, scope_for  # noqa: E402
 from release_fleet import AzureGroups, expected_document, validate_ownership  # noqa: E402
 from release_verification import ReleaseVerifier  # noqa: E402
@@ -258,8 +258,8 @@ def main() -> int:
             "workloadFunctionality": "not-checked",
         }
     except (ValueError, OSError, KeyError, TypeError, AttributeError) as error:
-        code = error.code if isinstance(error, FleetRunError) else 1
-        detail = str(error) if isinstance(error, (FleetRunError, CoordinationError)) else "Controller inputs or observations were invalid."
+        code = error.code if isinstance(error, (FleetRunError, FleetProcessError)) else 1
+        detail = str(error) if isinstance(error, (FleetRunError, FleetProcessError, CoordinationError)) else "Controller inputs or observations were invalid."
         print(f"Fleet deployment acceptance failed: {detail}", file=sys.stderr)
         report = {"apiVersion": "siteops.release.fleet/v1", "kind": "FleetDeployment",
                   "status": "failed", "operationExit": code}

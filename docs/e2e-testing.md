@@ -79,7 +79,9 @@ finish and release resources as soon as their assertions pass. The deployment
 command retains its 150-minute maximum, bounded further by the remaining
 shared time. Phase timings appear as fixed, identity-free messages.
 Long waits poll every 30 seconds and retain only their latest metadata
-diagnostics. Child-process output and execution are bounded.
+diagnostics. Child-process output and execution are bounded. If shutdown
+cannot be confirmed within its cleanup deadline, the phase stops with an
+explicit failure rather than retrying the command or reporting success.
 
 The controller has a 275-minute job cap, cleanup a separate 45-minute cap,
 and host jobs a 330-minute cap, below the six-hour hosted-job ceiling.

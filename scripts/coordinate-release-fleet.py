@@ -12,6 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from fleet_process import FleetProcessError  # noqa: E402
 from fleet_process import run as run_private  # noqa: E402
 from fleet_workflow import (  # noqa: E402
     CoordinationError,
@@ -209,6 +210,9 @@ def main() -> int:
             validate_ownership(scope, ownership)
             raw = (json.dumps(ownership, sort_keys=True) + "\n").encode("utf-8")
             output({"ownership-id": matches[0]["id"], "ownership-sha": hashlib.sha256(raw).hexdigest()})
+    except FleetProcessError as error:
+        print(str(error), file=sys.stderr)
+        return error.code
     except (ValueError, OSError, KeyError, TypeError, AttributeError) as error:
         message = str(error) if isinstance(error, CoordinationError) else "Fleet coordination inputs or metadata were invalid."
         print(message, file=sys.stderr)

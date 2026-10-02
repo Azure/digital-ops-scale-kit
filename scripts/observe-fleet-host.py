@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from fleet_process import run  # noqa: E402
+from fleet_process import FleetProcessError, run  # noqa: E402
 from fleet_workflow import FleetBudget, FleetCandidate, scope_for  # noqa: E402
 
 from siteops.artifacts import load_artifact_json  # noqa: E402
@@ -106,6 +106,9 @@ def main() -> int:
                   "workloadFunctionality": "not-checked"}
         with args.output.open("x", encoding="utf-8") as stream:
             stream.write(json.dumps(report, sort_keys=True) + "\n")
+    except FleetProcessError as error:
+        print(f"Fleet host readiness failed: {error}", file=sys.stderr)
+        return error.code
     except (ValueError, OSError, KeyError, TypeError, AttributeError):
         print("Fleet host readiness failed. Inspect private host diagnostics.", file=sys.stderr)
         return 1

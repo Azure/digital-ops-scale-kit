@@ -16,6 +16,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from fleet_process import FleetProcessError  # noqa: E402
 from fleet_workflow import FleetCandidate  # noqa: E402
 from release_fleet import FleetScope  # noqa: E402
 
@@ -184,8 +185,12 @@ def test_aggregator_rejects_missing_ambiguous_or_unbound_evidence(receipts, faul
         assert report["workloadFunctionality"] == "not-checked"
 
 
-@pytest.mark.parametrize("failed", [False, True])
-def test_controller_saves_two_sites_and_runs_exactly_one_deployment(tmp_path, monkeypatch, capsys, failed):
+@pytest.mark.parametrize(("failure", "expected"), [
+    ("none", 0), ("command", 23), ("shutdown-timeout", 124), ("shutdown-output", 125),
+])
+def test_controller_saves_two_sites_and_runs_exactly_one_deployment(
+    tmp_path, monkeypatch, capsys, failure, expected,
+):
     helper = module("deploy-release-fleet")
     inputs, state = tmp_path / "inputs", tmp_path / "state"
     (inputs / "admission").mkdir(parents=True)
@@ -290,7 +295,9 @@ def test_controller_saves_two_sites_and_runs_exactly_one_deployment(tmp_path, mo
             assert "--yes" in arguments and "--offline-content" in arguments
             assert environment["SITEOPS_REDACT_OUTPUT"] == "0"
             (logs / "deploy.out").write_text(json.dumps(deployment_run()))
-            if failed:
+            if failure.startswith("shutdown-"):
+                raise FleetProcessError(expected)
+            if failure == "command":
                 return 23
         return 0
 
@@ -304,18 +311,24 @@ def test_controller_saves_two_sites_and_runs_exactly_one_deployment(tmp_path, mo
         "--expected-ownership-sha", hashlib.sha256(ownership.read_bytes()).hexdigest(),
         "--output", str(output),
     ])
-    assert helper.main() == (23 if failed else 0)
+    assert helper.main() == expected
     assert [name for name, _ in calls] == ["save-one", "save-two", "inspect-plan", "deploy"]
-    assert bool(observed) is not failed
+    assert bool(observed) is (failure == "none")
     report = json.loads(output.read_text())
-    assert report["status"] == ("failed" if failed else "succeeded")
+    assert report["status"] == ("succeeded" if failure == "none" else "failed")
+    if failure != "none":
+        assert report["operationExit"] == expected
     captured = capsys.readouterr()
     assert subscription not in captured.out + captured.err + output.read_text()
+    if failure.startswith("shutdown-"):
+        assert "cleanup deadline" in captured.err
 
 
-@pytest.mark.parametrize("overrun", [False, True])
+@pytest.mark.parametrize(("outcome", "expected"), [
+    ("ready", 0), ("deadline", 1), ("shutdown-timeout", 124), ("shutdown-output", 125),
+])
 def test_host_observation_obeys_its_deadline_and_retains_only_latest_private_logs(
-    receipts, monkeypatch, capsys, overrun,
+    receipts, monkeypatch, capsys, outcome, expected,
 ):
     selected, root, _ = receipts
     helper = module("observe-fleet-host")
@@ -345,7 +358,9 @@ def test_host_observation_obeys_its_deadline_and_retains_only_latest_private_log
     def run(arguments, *, cwd, logs, name, timeout):
         calls.append(arguments)
         assert 0 < timeout <= 30
-        if overrun:
+        if outcome.startswith("shutdown-"):
+            raise FleetProcessError(expected)
+        if outcome == "deadline":
             elapsed[0] = 121
         if arguments[2] == "pods":
             value = {"items": [{
@@ -366,9 +381,10 @@ def test_host_observation_obeys_its_deadline_and_retains_only_latest_private_log
         "observe-fleet-host.py", "--inputs", str(root), "--slot", "one",
         "--logs", str(logs), "--output", str(output),
     ])
-    assert helper.main() == int(overrun)
-    if overrun:
+    assert helper.main() == expected
+    if outcome != "ready":
         assert len(calls) == 1 and not output.exists()
+        assert not sleeps
     else:
         assert len(calls) == 4 and sleeps == [15]
         assert len(list(logs.iterdir())) == 4
@@ -376,3 +392,5 @@ def test_host_observation_obeys_its_deadline_and_retains_only_latest_private_log
         assert json.loads(output.read_text())["status"] == "ready"
     captured = capsys.readouterr()
     assert "private-" not in captured.out + captured.err
+    if outcome.startswith("shutdown-"):
+        assert "cleanup deadline" in captured.err

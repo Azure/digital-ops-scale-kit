@@ -13,6 +13,14 @@ from pathlib import Path
 MAX_LOG_BYTES = 8 * 1024 * 1024
 
 
+class FleetProcessError(ValueError):
+    """Process shutdown was not confirmed within the bounded cleanup wait."""
+
+    def __init__(self, operation_exit: int):
+        self.code = operation_exit or 1
+        super().__init__("The fleet process did not stop within its cleanup deadline.")
+
+
 def run(arguments: list[str], *, cwd: Path, logs: Path, name: str, timeout: float, environment=None) -> int:
     if (os.name != "posix" or type(timeout) not in {int, float}
             or not math.isfinite(timeout) or not 0 < timeout <= 18000):
@@ -24,19 +32,23 @@ def run(arguments: list[str], *, cwd: Path, logs: Path, name: str, timeout: floa
             arguments, cwd=cwd, env=environment, stdin=subprocess.DEVNULL,
             stdout=stdout, stderr=stderr, start_new_session=True,
         )
+        operation_exit = 1
         try:
             deadline = time.monotonic() + timeout
             while True:
                 if any(os.fstat(stream.fileno()).st_size > MAX_LOG_BYTES for stream in (stdout, stderr)):
-                    return 125
+                    operation_exit = 125
+                    break
                 code = process.poll()
                 if code is not None:
+                    operation_exit = code if code >= 0 else 130
                     break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    return 124
+                    operation_exit = 124
+                    break
                 time.sleep(min(0.1, remaining))
-            return code if code >= 0 else 130
+            return operation_exit
         finally:
             try:
                 os.killpg(process.pid, signal.SIGTERM)
@@ -55,4 +67,7 @@ def run(arguments: list[str], *, cwd: Path, logs: Path, name: str, timeout: floa
                         os.killpg(process.pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
-            process.wait(timeout=5)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                raise FleetProcessError(operation_exit) from None

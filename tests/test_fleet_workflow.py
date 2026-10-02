@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -15,6 +16,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from fleet_process import FleetProcessError  # noqa: E402
 from fleet_workflow import (  # noqa: E402
     ROLES,
     CoordinationError,
@@ -539,6 +541,69 @@ def test_linux_supervisor_caps_child_output_without_publishing_it(tmp_path):
     assert (tmp_path / "oversized.out").stat().st_mode & 0o777 == 0o600
 
 
+@pytest.mark.parametrize(("outcome", "shutdown_timeout", "expected"), [
+    ("success", False, 0), ("failure", False, 23), ("signal", False, 130),
+    ("timeout", False, 124), ("output", False, 125),
+    ("timeout", True, 124), ("output", True, 125),
+])
+def test_process_shutdown_retains_bounded_private_failure(
+    tmp_path, monkeypatch, outcome, shutdown_timeout, expected,
+):
+    helper = load_script("fleet_process")
+    clock = Clock()
+    calls, signals, permissions = [], [], []
+    code = {"success": 0, "failure": 23, "signal": -15}.get(outcome)
+
+    def wait(*, timeout):
+        calls.append(("wait", timeout))
+        if shutdown_timeout:
+            clock.sleep(timeout)
+            raise subprocess.TimeoutExpired(["private-command-marker"], timeout, b"private-output-marker")
+        return code if code is not None else -9
+
+    process = SimpleNamespace(pid=12345, poll=lambda: code, wait=wait)
+
+    def popen(arguments, **kwargs):
+        assert arguments == ["private-command-marker"]
+        assert kwargs["start_new_session"] is True
+        assert kwargs["stdin"] == subprocess.DEVNULL
+        assert kwargs["cwd"] == tmp_path
+        assert kwargs["env"] == {"PRIVATE_INPUT": "private-environment-marker"}
+        return process
+
+    def killpg(pid, sig):
+        assert pid == process.pid
+        signals.append(sig)
+        if code is not None:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(helper, "os", SimpleNamespace(
+        name="posix", killpg=killpg,
+        fchmod=lambda fd, mode: permissions.append(mode),
+        fstat=lambda fd: SimpleNamespace(st_size=helper.MAX_LOG_BYTES + 1 if outcome == "output" else 0),
+    ))
+    monkeypatch.setattr(helper, "signal", SimpleNamespace(SIGTERM=15, SIGKILL=9))
+    monkeypatch.setattr(helper, "time", SimpleNamespace(monotonic=clock.now, sleep=clock.sleep))
+    monkeypatch.setattr(helper, "subprocess", SimpleNamespace(
+        Popen=popen, DEVNULL=subprocess.DEVNULL, TimeoutExpired=subprocess.TimeoutExpired,
+    ))
+    arguments = dict(cwd=tmp_path, logs=tmp_path, name="shutdown", timeout=0.1,
+                     environment={"PRIVATE_INPUT": "private-environment-marker"})
+    if shutdown_timeout:
+        with pytest.raises(ValueError, match="cleanup deadline") as caught:
+            helper.run(["private-command-marker"], **arguments)
+        assert caught.value.code == expected
+        assert "private-" not in str(caught.value)
+        assert caught.value.__suppress_context__ is True
+    else:
+        assert helper.run(["private-command-marker"], **arguments) == expected
+    assert calls == [("wait", 5)]
+    assert permissions == [0o600, 0o600]
+    assert signals[0] == 15
+    assert (9 in signals) is (code is None)
+    assert clock.value <= 10.2
+
+
 def test_metadata_polling_keeps_only_the_latest_owned_diagnostics(tmp_path, monkeypatch):
     script = load_script("coordinate-release-fleet")
     monkeypatch.setenv("GH_TOKEN", "synthetic-token")
@@ -555,3 +620,29 @@ def test_metadata_polling_keeps_only_the_latest_owned_diagnostics(tmp_path, monk
     for _ in range(3):
         assert reader.read("repos/example/content/actions/runs/42", timeout=3) == {"value": "observed"}
     assert {path.name for path in directory.iterdir()} == {"3.out", "3.err"}
+
+
+@pytest.mark.parametrize("code", [124, 125])
+def test_metadata_shutdown_failure_stops_coordination_without_publishing_outputs(
+    tmp_path, monkeypatch, capsys, code,
+):
+    script = load_script("coordinate-release-fleet")
+    monkeypatch.setenv("GH_TOKEN", "synthetic-token")
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "outputs"))
+    monkeypatch.setattr(script, "candidate", lambda: parse(selection()))
+    calls = []
+
+    def run(*args, **kwargs):
+        calls.append(True)
+        raise FleetProcessError(code)
+
+    monkeypatch.setattr(script, "run_private", run)
+    monkeypatch.setattr(sys, "argv", [
+        "coordinate-release-fleet.py", "select", "--root", str(tmp_path),
+    ])
+    assert script.main() == code
+    assert calls == [True]
+    assert not (tmp_path / "outputs").exists()
+    captured = capsys.readouterr()
+    assert "cleanup deadline" in captured.err
+    assert "synthetic-token" not in captured.out + captured.err
