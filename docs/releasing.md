@@ -248,6 +248,16 @@ then repeat the ownership checks. Never substitute a subscription-wide
 search or general resource janitor. Keep provider diagnostics private.
 These helpers do not install Site Ops, deploy AIO or establish workload health.
 
+The producer's **Fleet qualification selection** summary identifies the
+exact admitted plan, engine, workspaces and inventory for the manual
+`scenario=fleet` E2E path. See [fleet acceptance and its runtime budget](e2e-testing.md#qualify-one-exact-candidate-across-two-sites).
+That path installs the selected engine outside checkout, seeds the normal
+operator project, coordinates two live hosts, and requires bound deployment,
+readiness and cleanup receipts. It does not rebuild candidate assets.
+This standalone workflow does not yet wire all required live scenarios into
+the publication gate. Final release approval still requires that integration
+and evidence from the unchanged candidate.
+
 ## Prepare the real release files
 
 Create a new directory for each release:

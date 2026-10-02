@@ -1,0 +1,33 @@
+name: Setup fleet qualification tools
+description: Prepare isolated controller dependencies without installing checkout Site Ops.
+outputs:
+  python:
+    value: ${{ steps.tools.outputs.python }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      with:
+        python-version: "3.11"
+    - id: tools
+      shell: bash
+      env:
+        PIP_CONFIG_FILE: /dev/null
+        PIP_INDEX_URL: https://packagefeedproxy.microsoft.io/pypi/simple/
+        PIP_EXTRA_INDEX_URL: ""
+        PIP_NO_INPUT: "1"
+        PIP_KEYRING_PROVIDER: disabled
+      run: |
+        set -euo pipefail
+        umask 077
+        unset PYTHONPATH PYTHONHOME
+        root="$RUNNER_TEMP/fleet-tools"
+        [[ ! -e "$root" ]] || { echo "::error::Fleet tools require new private state."; exit 1; }
+        python -m venv "$root"
+        if ! "$root/bin/python" -m pip install --require-hashes --only-binary=:all: --no-cache-dir \
+          -r scripts/siteops-build-requirements.txt -r scripts/siteops-runtime-requirements.txt \
+          > "$root/install.log" 2>&1; then
+          echo "::error::Fleet qualification dependencies could not be prepared."
+          exit 1
+        fi
+        echo "python=$root/bin/python" >> "$GITHUB_OUTPUT"

@@ -68,6 +68,8 @@ on:
         value: ${{ jobs.engine-input.outputs.selection-sha }}
       admission-artifact-id:
         value: ${{ jobs.admit.outputs.artifact-id }}
+      fleet-candidate:
+        value: ${{ jobs.admit.outputs.candidate }}
 
 permissions:
   contents: read
@@ -109,6 +111,7 @@ jobs:
       workspaces: ${{ steps.plan.outputs.workspaces }}
       workspace-matrix: ${{ steps.plan.outputs.workspace-matrix }}
       project-workspace: ${{ steps.plan.outputs.project-workspace }}
+      fleet: ${{ steps.plan.outputs.fleet }}
       single-workspace-artifact: ${{ steps.plan.outputs.single-workspace-artifact }}
       intent-path: ${{ steps.plan.outputs.intent-path }}
       plan-sha: ${{ steps.plan.outputs.plan-sha }}
@@ -204,6 +207,7 @@ jobs:
               for slot, request in enumerate(plan.get("workspaces", []), 1)
           ]}, separators=(",", ":")))
           print("project-workspace=" + (plan["workspaces"][0]["workspace"] if plan.get("workspaces") else ""))
+          print("fleet=" + str(any(row.get("id") == "azure.iot-operations" and row.get("workspace") == "workspaces/iot-operations" for row in plan.get("workspaces", []))).lower())
           print("single-workspace-artifact=" + (
               "workspace-attested-" + os.environ["GITHUB_RUN_ID"] + "-" + os.environ["GITHUB_RUN_ATTEMPT"] + "-1"
               if len(plan.get("workspaces", [])) == 1 else ""
@@ -952,6 +956,10 @@ jobs:
       notes-artifact-id: ${{ steps.notes-upload.outputs.artifact-id }}
       assets-artifact-id: ${{ steps.assets-upload.outputs.artifact-id }}
       payload-artifact-id: ${{ steps.payload-upload.outputs.artifact-id }}
+      engine-artifact-id: ${{ needs.engine-input.outputs.artifact-id }}
+      engine-selection-sha: ${{ needs.engine-input.outputs.selection-sha }}
+      workspace-artifact-id: ${{ needs.workspace-assets.outputs.artifact-id }}
+      workspace-inventory-sha: ${{ needs.workspace-assets.outputs.inventory-sha }}
     steps:
       - name: Require the admitted runner class
         shell: python
@@ -1514,6 +1522,7 @@ jobs:
       actions: read
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      candidate: ${{ steps.fleet.outputs.candidate }}
     env:
       CANDIDATE_REPOSITORY: ${{ github.repository }}
       CANDIDATE_COMMIT: ${{ github.sha }}
@@ -1623,6 +1632,7 @@ jobs:
           digest-mismatch: error
 
       - name: Admit exact bytes and provenance
+        id: admission
         shell: bash
         run: |
           set -euo pipefail
@@ -1632,6 +1642,8 @@ jobs:
             --payload "$root/payload" --run "$root/run.json" --jobs "$root/jobs.json" \
             --artifact-metadata "$root/metadata" --trusted-root "$root/trusted-root.json" \
             --state "$root/state" --output "$root/receipt.json"
+          digest="$(sha256sum "$root/receipt.json" | cut -d ' ' -f 1)"
+          echo "receipt-sha=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Retain the admission receipt
         id: upload
@@ -1642,3 +1654,22 @@ jobs:
           if-no-files-found: error
           overwrite: false
           retention-days: 30
+
+      - name: Render the exact fleet selection
+        id: fleet
+        if: needs.prepare.outputs.fleet == 'true'
+        shell: bash
+        env:
+          FLEET_ADMISSION_ID: ${{ steps.upload.outputs.artifact-id }}
+          FLEET_ADMISSION_SHA: ${{ steps.admission.outputs.receipt-sha }}
+          FLEET_PLAN_ID: ${{ needs.prepare.outputs.artifact-id }}
+          FLEET_PLAN_SHA: ${{ needs.review.outputs.plan-sha }}
+          FLEET_INVENTORY_ID: ${{ needs.review.outputs.assets-artifact-id }}
+          FLEET_INVENTORY_SHA: ${{ needs.review.outputs.asset-list-sha }}
+          FLEET_ENGINE_ID: ${{ needs.review.outputs.engine-artifact-id }}
+          FLEET_ENGINE_SHA: ${{ needs.review.outputs.engine-selection-sha }}
+          FLEET_WORKSPACES_ID: ${{ needs.review.outputs.workspace-artifact-id }}
+          FLEET_WORKSPACES_SHA: ${{ needs.review.outputs.workspace-inventory-sha }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/candidate-admission/tools/bin/python" -B scripts/emit-fleet-candidate.py

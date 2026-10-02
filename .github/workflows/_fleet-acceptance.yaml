@@ -1,0 +1,673 @@
+name: _Fleet Acceptance
+
+on:
+  workflow_call:
+    inputs:
+      candidate:
+        description: Exact FleetCandidate selection produced by candidate admission.
+        required: true
+        type: string
+      environment:
+        description: Separately approved Azure acceptance environment.
+        required: true
+        type: string
+      location:
+        description: Approved Azure region for both new resource groups.
+        required: true
+        type: string
+    secrets:
+      AZURE_CLIENT_ID:
+        required: false
+      AZURE_TENANT_ID:
+        required: false
+      AZURE_SUBSCRIPTION_ID:
+        required: false
+      AZURE_CUSTOM_LOCATIONS_OID:
+        required: false
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: fleet-acceptance-${{ github.repository }}-${{ inputs.environment }}
+  cancel-in-progress: false
+
+env:
+  FLEET_CANDIDATE: ${{ inputs.candidate }}
+  FLEET_RUN_ID: ${{ github.run_id }}
+  FLEET_RUN_ATTEMPT: ${{ github.run_attempt }}
+  SITEOPS_REDACT_OUTPUT: "1"
+  AZURE_CORE_OUTPUT: none
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  select:
+    name: Select fleet candidate
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      admission-id: ${{ steps.select.outputs.admission-id }}
+      admission-sha: ${{ steps.select.outputs.admission-sha }}
+      plan-id: ${{ steps.select.outputs.plan-id }}
+      plan-sha: ${{ steps.select.outputs.plan-sha }}
+      inventory-id: ${{ steps.select.outputs.inventory-id }}
+      engine-id: ${{ steps.select.outputs.engine-id }}
+      engine-sha: ${{ steps.select.outputs.engine-sha }}
+      workspaces-id: ${{ steps.select.outputs.workspaces-id }}
+      workspaces-sha: ${{ steps.select.outputs.workspaces-sha }}
+      producer-run: ${{ steps.select.outputs.producer-run }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-fleet-tools
+        id: tools
+      - name: Select exact producer inputs
+        id: select
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHON: ${{ steps.tools.outputs.python }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir "$RUNNER_TEMP/fleet"
+          "$PYTHON" -B scripts/coordinate-release-fleet.py select --root "$RUNNER_TEMP/fleet"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.select.outputs.admission-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.select.outputs.producer-run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/fleet/admission
+          merge-multiple: true
+          digest-mismatch: error
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.select.outputs.plan-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.select.outputs.producer-run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/fleet/plan
+          merge-multiple: true
+          digest-mismatch: error
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.select.outputs.inventory-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.select.outputs.producer-run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/fleet/inventory
+          merge-multiple: true
+          digest-mismatch: error
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.select.outputs.engine-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.select.outputs.producer-run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/fleet/engine
+          merge-multiple: true
+          digest-mismatch: error
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.select.outputs.workspaces-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.select.outputs.producer-run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/fleet/workspaces
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Bind frozen qualification inputs
+        shell: bash
+        env:
+          PYTHON: ${{ steps.tools.outputs.python }}
+        run: |
+          set -euo pipefail
+          "$PYTHON" -B scripts/coordinate-release-fleet.py check-inputs --root "$RUNNER_TEMP/fleet"
+
+  prepare:
+    name: Fleet prepare
+    needs: select
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    outputs:
+      ownership-id: ${{ steps.ownership.outputs.artifact-id }}
+      ownership-sha: ${{ steps.preflight.outputs.ownership-sha }}
+      started-at: ${{ steps.preflight.outputs.started-at }}
+    env:
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-fleet-tools
+        id: tools
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.select.outputs.admission-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.select.outputs.producer-run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/fleet/admission
+          merge-multiple: true
+          digest-mismatch: error
+      - uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
+        timeout-minutes: 5
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Preflight resource ownership
+        id: preflight
+        shell: bash
+        env:
+          PYTHON: ${{ steps.tools.outputs.python }}
+          ADMISSION_SHA: ${{ needs.select.outputs.admission-sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          root="$RUNNER_TEMP/fleet"
+          echo "started-at=$(date -u +%s)" >> "$GITHUB_OUTPUT"
+          "$PYTHON" -B scripts/manage-release-fleet.py preflight \
+            --admission "$root/admission/receipt.json" --expected-admission-sha "$ADMISSION_SHA" \
+            --private-logs "$root/preflight-private" --output "$root/ownership.json"
+          echo "ownership-sha=$(sha256sum "$root/ownership.json" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - name: Retain resource ownership
+        id: ownership
+        timeout-minutes: 5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fleet-ownership-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fleet/ownership.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 30
+      - name: Create owned resource groups
+        shell: bash
+        env:
+          PYTHON: ${{ steps.tools.outputs.python }}
+          ADMISSION_SHA: ${{ needs.select.outputs.admission-sha }}
+          OWNERSHIP_SHA: ${{ steps.preflight.outputs.ownership-sha }}
+          LOCATION: ${{ inputs.location }}
+        run: |
+          set -euo pipefail
+          umask 077
+          root="$RUNNER_TEMP/fleet"
+          "$PYTHON" -B scripts/manage-release-fleet.py create --execute \
+            --admission "$root/admission/receipt.json" --expected-admission-sha "$ADMISSION_SHA" \
+            --ownership "$root/ownership.json" --expected-ownership-sha "$OWNERSHIP_SHA" \
+            --location "$LOCATION" --private-logs "$root/create-private" --output "$root/created.json"
+
+  hosts:
+    name: Fleet host (${{ matrix.slot }})
+    needs: [select, prepare]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    environment: ${{ inputs.environment }}
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [one, two]
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      SLOT: ${{ matrix.slot }}
+      FLEET_STARTED_AT: ${{ needs.prepare.outputs.started-at }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-fleet-tools
+        id: tools
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.select.outputs.admission-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.select.outputs.producer-run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/fleet/admission
+          merge-multiple: true
+          digest-mismatch: error
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.prepare.outputs.ownership-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/fleet/ownership
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Prepare private target selection
+        shell: bash
+        env:
+          PYTHON: ${{ steps.tools.outputs.python }}
+        run: |
+          set -euo pipefail
+          "$PYTHON" -B scripts/coordinate-release-fleet.py scope --root "$RUNNER_TEMP/fleet" --slot "$SLOT"
+      - name: Require all three runner slots
+        id: participants
+        shell: bash
+        timeout-minutes: 16
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHON: ${{ steps.tools.outputs.python }}
+        run: |
+          set -euo pipefail
+          "$PYTHON" -B scripts/coordinate-release-fleet.py wait-participants --root "$RUNNER_TEMP/fleet" --timeout 900
+      - uses: ./.github/actions/create-k3s-cluster
+        timeout-minutes: 12
+        with:
+          private-diagnostics: "true"
+      - uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
+        timeout-minutes: 5
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Recheck host ownership
+        shell: bash
+        env:
+          PYTHON: ${{ steps.tools.outputs.python }}
+          OWNERSHIP_SHA: ${{ needs.prepare.outputs.ownership-sha }}
+        run: |
+          set -euo pipefail
+          "$PYTHON" -B scripts/coordinate-release-fleet.py check-ownership --root "$RUNNER_TEMP/fleet" \
+            --slot "$SLOT" --ownership "$RUNNER_TEMP/fleet/ownership/ownership.json" \
+            --expected-ownership-sha "$OWNERSHIP_SHA"
+      - uses: ./.github/actions/connect-arc
+        timeout-minutes: 25
+        with:
+          cluster-name: ${{ env.FLEET_CLUSTER_NAME }}
+          resource-group: ${{ env.FLEET_RESOURCE_GROUP }}
+          location: ${{ inputs.location }}
+          enable-workload-identity: "false"
+          custom-locations-oid: ${{ secrets.AZURE_CUSTOM_LOCATIONS_OID }}
+          private-provider-errors: "true"
+      - name: Host ready
+        id: ready
+        timeout-minutes: 6
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          kubectl get --raw /readyz > "$RUNNER_TEMP/fleet/host-ready.out" 2> "$RUNNER_TEMP/fleet/host-ready.err"
+          kubectl wait --for=condition=Ready node --all --timeout=300s \
+            >> "$RUNNER_TEMP/fleet/host-ready.out" 2>> "$RUNNER_TEMP/fleet/host-ready.err"
+          echo "The fleet host is ready."
+      - name: Await fleet deployment
+        timeout-minutes: 246
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHON: ${{ steps.tools.outputs.python }}
+        run: |
+          set -euo pipefail
+          "$PYTHON" -B scripts/coordinate-release-fleet.py wait-deployed --root "$RUNNER_TEMP/fleet" --timeout 14700
+      - name: Observe host readiness
+        timeout-minutes: 21
+        shell: bash
+        env:
+          PYTHON: ${{ steps.tools.outputs.python }}
+        run: |
+          set -euo pipefail
+          umask 077
+          "$PYTHON" -B scripts/observe-fleet-host.py --inputs "$RUNNER_TEMP/fleet" --slot "$SLOT" \
+            --logs "$RUNNER_TEMP/fleet/readiness-private" --output "$RUNNER_TEMP/fleet/readiness.json"
+      - name: Retain host readiness
+        timeout-minutes: 5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fleet-readiness-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.slot }}
+          path: ${{ runner.temp }}/fleet/readiness.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 30
+      - name: Hold host through cleanup
+        if: always() && steps.ready.outcome == 'success' && steps.participants.outcome == 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHON: ${{ steps.tools.outputs.python }}
+        run: |
+          set -euo pipefail
+          "$PYTHON" -B scripts/coordinate-release-fleet.py wait-cleanup --root "$RUNNER_TEMP/fleet" --timeout 19200
+
+  controller:
+    name: Fleet controller
+    needs: [select, prepare]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 275
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      FLEET_STARTED_AT: ${{ needs.prepare.outputs.started-at }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-fleet-tools
+        id: tools
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.select.outputs.admission-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.select.outputs.producer-run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/fleet/admission
+          merge-multiple: true
+          digest-mismatch: error
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.select.outputs.plan-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.select.outputs.producer-run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/fleet/plan
+          merge-multiple: true
+          digest-mismatch: error
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.select.outputs.engine-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.select.outputs.producer-run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/fleet/engine
+          merge-multiple: true
+          digest-mismatch: error
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.select.outputs.workspaces-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.select.outputs.producer-run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/fleet/workspaces
+          merge-multiple: true
+          digest-mismatch: error
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.prepare.outputs.ownership-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/fleet/ownership
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Require all three runner slots
+        shell: bash
+        timeout-minutes: 16
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHON: ${{ steps.tools.outputs.python }}
+        run: |
+          set -euo pipefail
+          "$PYTHON" -B scripts/coordinate-release-fleet.py wait-participants --root "$RUNNER_TEMP/fleet" --timeout 900
+      - name: Prepare installed candidate project
+        shell: bash
+        timeout-minutes: 35
+        env:
+          PYTHON: ${{ steps.tools.outputs.python }}
+          ENGINE_SHA: ${{ needs.select.outputs.engine-sha }}
+          WORKSPACES_SHA: ${{ needs.select.outputs.workspaces-sha }}
+          PLAN_SHA: ${{ needs.select.outputs.plan-sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          root="$RUNNER_TEMP/fleet"
+          gh attestation trusted-root > "$root/trusted-root.json" 2> "$root/trusted-root.err"
+          caller="$("$PYTHON" -c 'import json,os; print(json.loads(os.environ["FLEET_CANDIDATE"])["producer"]["caller"])')"
+          "$PYTHON" -B scripts/qualify-workspace-engine.py \
+            --engine "$root/engine" --expected-engine-selection-sha256 "$ENGINE_SHA" \
+            --workspaces "$root/workspaces" --expected-workspace-inventory-sha256 "$WORKSPACES_SHA" \
+            --plan "$root/plan/plan.json" --expected-plan-sha "$PLAN_SHA" \
+            --project-workspace workspaces/iot-operations \
+            --trusted-root "$root/trusted-root.json" --gh "$(command -v gh)" \
+            --builder-workflow "$caller" --expected-runner-environment self-hosted \
+            --platform linux-x86_64 --state "$root/controller" --output "$root/qualification.json" \
+            > "$root/qualification.out" 2> "$root/qualification.err"
+      - name: Await both live hosts
+        shell: bash
+        timeout-minutes: 46
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHON: ${{ steps.tools.outputs.python }}
+        run: |
+          set -euo pipefail
+          "$PYTHON" -B scripts/coordinate-release-fleet.py wait-ready --root "$RUNNER_TEMP/fleet" --timeout 2700
+      - uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
+        timeout-minutes: 5
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Refresh controller Azure identity
+        timeout-minutes: 1
+        shell: bash
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        run: |
+          set -euo pipefail
+          umask 077
+          root="$RUNNER_TEMP/fleet"
+          (
+            while sleep 240 && [[ "$(date -u +%s)" -lt "$((FLEET_STARTED_AT + 245 * 60))" ]]; do
+              if curl --fail --silent --show-error --max-time 30 \
+                -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+                "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange" \
+                > "$root/refresh-token.json" 2> "$root/refresh-token.err"; then
+                if token=$(python -c 'import json,sys; value=json.load(open(sys.argv[1]))["value"]; print(value) if isinstance(value,str) and 0<len(value)<=20000 else sys.exit(1)' \
+                  "$root/refresh-token.json" 2>> "$root/refresh-token.err"); then
+                  if timeout --kill-after=5s 60s az login --service-principal -u "$AZURE_CLIENT_ID" -t "$AZURE_TENANT_ID" \
+                    --federated-token "$token" --output none > "$root/refresh.out" 2> "$root/refresh.err"; then
+                    timeout --kill-after=5s 30s az account set --subscription "$AZURE_SUBSCRIPTION_ID" \
+                      >> "$root/refresh.out" 2>> "$root/refresh.err" ||
+                      echo "::warning::The controller subscription could not be restored after refresh."
+                  else
+                    echo "::warning::Azure controller authentication refresh failed."
+                  fi
+                else
+                  echo "::warning::The controller identity refresh response was invalid."
+                fi
+              else
+                echo "::warning::The controller identity refresh token was unavailable."
+              fi
+            done
+          ) &
+      - name: Deploy fleet
+        timeout-minutes: 201
+        shell: bash
+        env:
+          PYTHON: ${{ steps.tools.outputs.python }}
+          OWNERSHIP_SHA: ${{ needs.prepare.outputs.ownership-sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          "$PYTHON" -B scripts/deploy-release-fleet.py --inputs "$RUNNER_TEMP/fleet" \
+            --state "$RUNNER_TEMP/fleet/controller" --qualification "$RUNNER_TEMP/fleet/qualification.json" \
+            --ownership "$RUNNER_TEMP/fleet/ownership/ownership.json" --expected-ownership-sha "$OWNERSHIP_SHA" \
+            --output "$RUNNER_TEMP/fleet/deployment.json"
+      - name: Await both readiness observations
+        timeout-minutes: 21
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHON: ${{ steps.tools.outputs.python }}
+        run: |
+          set -euo pipefail
+          "$PYTHON" -B scripts/coordinate-release-fleet.py wait-observed --root "$RUNNER_TEMP/fleet" --timeout 1200
+      - name: Retain controller outcome
+        timeout-minutes: 5
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fleet-deployment-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fleet/deployment.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 30
+
+  cleanup:
+    name: Fleet cleanup
+    needs: [select, prepare, controller]
+    if: always() && needs.select.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-fleet-tools
+        id: tools
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.select.outputs.admission-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.select.outputs.producer-run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/fleet/admission
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Recover original ownership
+        id: ownership
+        shell: bash
+        env:
+          PYTHON: ${{ steps.tools.outputs.python }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          "$PYTHON" -B scripts/coordinate-release-fleet.py ownership --root "$RUNNER_TEMP/fleet"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.ownership.outputs.ownership-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/fleet/ownership
+          merge-multiple: true
+          digest-mismatch: error
+      - uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
+        timeout-minutes: 5
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Reconcile owned resource groups
+        timeout-minutes: 25
+        shell: bash
+        env:
+          PYTHON: ${{ steps.tools.outputs.python }}
+          ADMISSION_SHA: ${{ needs.select.outputs.admission-sha }}
+          OWNERSHIP_SHA: ${{ steps.ownership.outputs.ownership-sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          "$PYTHON" -B scripts/manage-release-fleet.py cleanup --execute \
+            --admission "$RUNNER_TEMP/fleet/admission/receipt.json" --expected-admission-sha "$ADMISSION_SHA" \
+            --ownership "$RUNNER_TEMP/fleet/ownership/ownership.json" --expected-ownership-sha "$OWNERSHIP_SHA" \
+            --private-logs "$RUNNER_TEMP/fleet/cleanup-private" --output "$RUNNER_TEMP/fleet/cleanup.json"
+      - name: Retain cleanup outcome
+        timeout-minutes: 5
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fleet-cleanup-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fleet/cleanup.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 30
+
+  result:
+    name: Require complete fleet acceptance
+    needs: [select, prepare, hosts, controller, cleanup]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Require every fleet boundary
+        shell: python
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          import json, os
+          results = json.loads(os.environ["RESULTS"])
+          required = {"select", "prepare", "hosts", "controller", "cleanup"}
+          if set(results) != required or any(results[key]["result"] != "success" for key in required):
+              raise SystemExit("Fleet acceptance did not complete every required boundary.")
+          print("Every required fleet job reported success. Checking the bound receipts.")
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-fleet-tools
+        id: tools
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: fleet-deployment-${{ github.run_id }}-${{ github.run_attempt }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/fleet-results/deployment
+          digest-mismatch: error
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: fleet-cleanup-${{ github.run_id }}-${{ github.run_attempt }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/fleet-results/cleanup
+          digest-mismatch: error
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: fleet-readiness-${{ github.run_id }}-${{ github.run_attempt }}-*
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/fleet-results/readiness
+          merge-multiple: false
+          digest-mismatch: error
+      - name: Require exact fleet receipts
+        shell: bash
+        env:
+          PYTHON: ${{ steps.tools.outputs.python }}
+        run: |
+          set -euo pipefail
+          "$PYTHON" -B scripts/aggregate-fleet-results.py --root "$RUNNER_TEMP/fleet-results" \
+            --output "$RUNNER_TEMP/fleet-acceptance.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fleet-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/fleet-acceptance.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 30

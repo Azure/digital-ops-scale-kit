@@ -27,6 +27,10 @@ inputs:
     required: false
     description: Reclaim runner disk before installing. Set false to keep the Android SDK.
     default: "true"
+  private-diagnostics:
+    required: false
+    description: Retain installer and node diagnostics privately for release acceptance.
+    default: "false"
 
 outputs:
   kubeconfig:
@@ -64,19 +68,34 @@ runs:
       shell: bash
       env:
         K3S_VERSION: ${{ inputs.version }}
+        PRIVATE_DIAGNOSTICS: ${{ inputs.private-diagnostics }}
       run: |
         set -euo pipefail
         # Official installer: drops a systemd unit, generates kubeconfig
         # at /etc/rancher/k3s/k3s.yaml, sets up CNI, etc.
         # INSTALL_K3S_EXEC defines the server args. The cluster-init argument makes this
         # the bootstrap node of a (single-node) HA-capable cluster.
-        curl -sfL https://get.k3s.io \
-          | INSTALL_K3S_VERSION="${K3S_VERSION}" \
-            INSTALL_K3S_EXEC="server --cluster-init --write-kubeconfig-mode=644" \
-            sh -
+        install_k3s() {
+          curl -sfL https://get.k3s.io \
+            | INSTALL_K3S_VERSION="${K3S_VERSION}" \
+              INSTALL_K3S_EXEC="server --cluster-init --write-kubeconfig-mode=644" \
+              sh -
+        }
+        if [[ "$PRIVATE_DIAGNOSTICS" == "true" ]]; then
+          umask 077
+          mkdir -m 700 "$RUNNER_TEMP/k3s-private"
+          if ! install_k3s > "$RUNNER_TEMP/k3s-private/install.out" 2> "$RUNNER_TEMP/k3s-private/install.err"; then
+            echo "::error::K3s installation failed; private diagnostics were retained."
+            exit 1
+          fi
+        else
+          install_k3s
+        fi
 
     - name: Wait for k3s API + node Ready
       shell: bash
+      env:
+        PRIVATE_DIAGNOSTICS: ${{ inputs.private-diagnostics }}
       run: |
         set -euo pipefail
         export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
@@ -92,14 +111,24 @@ runs:
           fi
           if [ "${attempt}" -eq "${MAX_ATTEMPTS}" ]; then
             echo "::error::k3s API did not become ready within $((MAX_ATTEMPTS * SLEEP_SECONDS))s"
-            sudo journalctl -u k3s --no-pager --lines=200 || true
+            if [[ "$PRIVATE_DIAGNOSTICS" == "true" ]]; then
+              sudo journalctl -u k3s --no-pager --lines=200 \
+                > "$RUNNER_TEMP/k3s-private/journal.out" 2> "$RUNNER_TEMP/k3s-private/journal.err" || true
+            else
+              sudo journalctl -u k3s --no-pager --lines=200 || true
+            fi
             exit 1
           fi
           echo "Waiting for k3s API (${attempt}/${MAX_ATTEMPTS})..."
           sleep "${SLEEP_SECONDS}"
         done
 
-        kubectl wait --for=condition=Ready node --all --timeout=300s
+        if [[ "$PRIVATE_DIAGNOSTICS" == "true" ]]; then
+          kubectl wait --for=condition=Ready node --all --timeout=300s \
+            > "$RUNNER_TEMP/k3s-private/nodes.out" 2> "$RUNNER_TEMP/k3s-private/nodes.err"
+        else
+          kubectl wait --for=condition=Ready node --all --timeout=300s
+        fi
 
     - name: Write kubeconfig to ~/.kube/config
       id: config

@@ -15,7 +15,7 @@ from pathlib import Path
 
 from siteops.arm_resources import ArmResourceError
 from siteops.arm_resources_azure_cli import _run_az
-from siteops.artifacts import load_artifact_json
+from siteops.artifacts import load_artifact_json, open_regular_file
 from siteops.cache_filesystem import check_cache_ancestors, make_private_directory
 
 SLOTS = ("one", "two")
@@ -38,6 +38,46 @@ class FleetError(ValueError):
             raise ValueError("Unsupported fleet failure category.")
         self.retryable = retryable
         super().__init__(reason)
+
+
+def expected_document(path: Path, expected_sha: str) -> dict:
+    with open_regular_file(path) as stream:
+        raw = stream.read(MAX_DOCUMENT + 1)
+    if len(raw) > MAX_DOCUMENT or hashlib.sha256(raw).hexdigest() != expected_sha:
+        raise FleetError("receipt-digest-mismatch")
+    result = load_artifact_json(raw, limit=MAX_DOCUMENT, label="Fleet receipt")
+    if not isinstance(result, dict):
+        raise FleetError("invalid-receipt")
+    return result
+
+
+def check_admission(admission: dict) -> None:
+    source = admission.get("source")
+    artifacts = admission.get("artifacts")
+    subjects = admission.get("subjects")
+    if (
+        set(admission) != {
+            "apiVersion", "kind", "source", "run", "attempt", "caller", "preview", "artifacts",
+            "planSha256", "inventorySha256", "subjects", "status", "installation", "deployment",
+        }
+        or admission["apiVersion"] != "siteops.release.acceptance/v1"
+        or admission["kind"] != "CandidateInputAdmission" or admission["status"] != "admitted"
+        or admission["installation"] != "not-run" or admission["deployment"] != "not-run"
+        or not isinstance(source, dict) or set(source) != {"repository", "commit", "ref"}
+        or type(admission["preview"]) is not bool
+        or admission["caller"] != (
+            ".github/workflows/ci.yaml" if admission["preview"] else ".github/workflows/release.yaml"
+        )
+        or any(type(admission[key]) is not int or admission[key] <= 0 for key in ("run", "attempt"))
+        or not isinstance(artifacts, dict) or set(artifacts) != {"plan", "inventory", "payload"}
+        or any(type(value) is not int or value <= 0 for value in artifacts.values())
+        or not isinstance(subjects, dict) or set(subjects) != {"engine", "workspace"}
+        or any(type(value) is not int or value < 0 for value in subjects.values())
+        or any(not isinstance(admission[key], str)
+               or not re.fullmatch("[0-9a-f]{64}", admission[key])
+               for key in ("planSha256", "inventorySha256"))
+    ):
+        raise FleetError("candidate-not-admitted")
 
 
 @dataclass(frozen=True)

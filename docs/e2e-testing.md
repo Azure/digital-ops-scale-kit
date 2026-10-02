@@ -22,7 +22,109 @@ Unit tests (`pytest tests/ -m "not integration"`) cover local engine,
 workspace, and workflow behavior and should remain the default pre-commit
 gate. E2E is intentionally opt-in (`workflow_dispatch`).
 
-When one run selects both `dataflow-sample` and `resource-set-samples`, the
+### Qualify one exact candidate across two Sites
+
+Choose `scenario=fleet` for mixed-release fleet acceptance. This is separate
+from the existing single-Site `aio` matrix. It uses two simultaneous
+`ubuntu-24.04` host jobs, each with native K3s and a new Arc registration
+in its own owned resource group. One installed Site Ops controller selects
+both Sites and makes one deployment with `--parallel 2`. It also checks that
+an unselected sentinel Site is excluded.
+
+Use the exact **Fleet qualification selection** JSON from the selected
+release producer's admission summary as `fleet-candidate`. Run the workflow
+at that same source commit, using a branch or retained tag pointing there.
+The selection binds the producer run/attempt, artifact IDs and frozen
+digests. Preview candidates remain previews and cannot authorize publication.
+The chosen candidate must contain the complete `azure.iot-operations`
+workspace. Select the separately approved Azure `environment` and `location`.
+Keep the ordinary single-Site overrides empty and leave teardown enabled.
+
+The approved environment supplies `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
+`AZURE_SUBSCRIPTION_ID` and, when directory lookup is unavailable,
+`CUSTOM_LOCATIONS_OID`. Azure permission must cover creation and deletion of
+the new groups, Arc onboarding, AIO deployment and its role assignments.
+The test does not create or widen those permissions.
+
+The two configured Sites select AIO `2607` and `2608`, Secret Sync disabled
+and the existing E2E Low broker memory profile. Acceptance checks exact target
+identities, operation identities/dispositions, effective release parameters,
+the installed engine version, actual deployed extension versions, Kubernetes
+instance presence, and readiness of active pods. It does not claim application
+data delivery or Secret Sync functionality. Those remain separate scenarios.
+
+#### Runtime and resource budget
+
+Keep capacity for **three simultaneous Linux jobs**: two hosts and the
+controller. Resource creation first records an absence/ownership receipt
+and uploads it before writes. Afterward, the host/controller startup barrier
+allows 15 minutes from that preflight for all three jobs to start, before
+provisioning their clusters. A capacity failure releases the host slots
+rather than holding them while the controller remains queued.
+
+Installation runs concurrently with host provisioning. All waits consume
+one clock started before group creation, rather than restarting a full
+allowance at each phase:
+
+| Boundary | Latest elapsed time from ownership preflight |
+|---|---|
+| All three runner jobs started | 15 minutes |
+| Both Arc/K3s hosts ready | 45 minutes |
+| Installed deployment and extension-version checks | 245 minutes |
+| Both Kubernetes readiness observations | 265 minutes |
+| Hosts stop waiting for automatic cleanup | 320 minutes |
+
+These are failure ceilings, not predicted durations or sleeps. Commands
+finish and release resources as soon as their assertions pass. The deployment
+command retains its 150-minute maximum, bounded further by the remaining
+shared time. Phase timings appear as fixed, identity-free messages.
+Long waits poll every 30 seconds and retain only their latest metadata
+diagnostics. Child-process output and execution are bounded.
+
+The controller has a 275-minute job cap, cleanup a separate 45-minute cap,
+and host jobs a 330-minute cap, below the six-hour hosted-job ceiling.
+The timeline reserves ten minutes after readiness for controller reporting
+and 45 minutes for cleanup, with further host shutdown headroom.
+Environment approvals and runner queueing are not guaranteed to finish
+inside that reserve. The environment must allow approved host, controller
+and cleanup jobs to proceed without additional unattended approval stalls.
+Missing or late cleanup is a failing/unknown result, never success.
+
+Runs for the same fleet acceptance environment are serialized without
+cancelling the active run. Do not start unnecessary concurrent fleet runs
+or reduce asserted workloads just to fit a runner. Existing source,
+single-Site guided, Secret Sync and workload cases remain in their owning
+lanes. Select relevant lanes during development and retain all required
+candidate coverage before release.
+
+#### Cleanup and interruption
+
+The cleanup job depends on the controller, not on host completion. Hosts
+remain alive through readiness and automatic cleanup, then exit. Each
+deletion requires the original absence receipt and matching run ownership
+tags, and cleanup waits for confirmed resource-group absence.
+The final gate requires the controller, both host receipts and cleanup
+to identify the same candidate and run. A green wrapper or missing receipt
+cannot substitute for that evidence.
+
+Hard workflow cancellation can prevent automatic cleanup. For a separately
+approved recovery, choose `scenario=fleet-cleanup` with the same
+`fleet-candidate`, original `fleet-original-run` and `fleet-original-attempt`,
+and the original subscription/environment. Use the original controller
+commit, preserving a branch or tag if necessary. Reconciliation recovers
+and verifies the durable pre-write ownership artifact, then checks resource
+ownership again. It refuses a still-running original workflow. It does not
+provision clusters or perform deployments.
+Raw target identities, Site files, kubeconfigs and provider logs are not
+uploaded by either mode.
+
+Start a fresh full fleet run for another attempt. Rerunning only failed
+jobs can combine retained outputs with a new run-attempt identity, which
+the ownership guards deliberately reject. Reconcile the old scope first.
+
+### Keep single-Site workload phases isolated
+
+When an `aio` run selects both `dataflow-sample` and `resource-set-samples`, the
 test harness removes the first sample's dataflows, profiles, and endpoints
 after its module completes. It waits for their projected custom resources to
 disappear before the advanced resource-set sample starts. A focused run that
