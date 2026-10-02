@@ -183,10 +183,20 @@ these steps:
 5. Requires all qualification results to identify the same engine, workspace
    inventory, and release plan, then freezes the complete publication
    inventory.
+6. Admits that frozen payload from the selected producer run and attempt.
+   A separate job checks the artifact IDs, complete inventory, exact bytes
+   and subject provenance before retaining an admission receipt.
 
 Workspace qualification does not compare executable deployment plans,
 authorize targets, deploy resources, or evaluate workload health. Publication
 remains a separate approval step.
+
+Candidate admission accepts a completed producer even while the surrounding
+release workflow is still running or awaiting approval. Its receipt records
+the source, caller, run, attempt and selected digests, and explicitly marks
+installation and deployment as not run. It is an input gate for subsequent
+acceptance, not evidence of a fleet deployment or workload readiness.
+Preview admission retains its preview identity and cannot authorize publication.
 
 The default preview's final summary shows one matrix of Python versions and
 platforms, plus a link to the attested release assets. Individual job logs

@@ -200,7 +200,7 @@ def test_production_admission_requires_explicit_repository_opt_in(tmp_path):
 
 
 @pytest.mark.parametrize("name,secured,public", [
-    ("_release-candidate.yaml", {"prepare", "workspace-assets", "engine-input", "review"}, {"workspace-qualify", "workspace-qualified"}),
+    ("_release-candidate.yaml", {"prepare", "workspace-assets", "engine-input", "review"}, {"workspace-qualify", "workspace-qualified", "admit"}),
     ("_siteops-distribution.yaml", {"build", "attest"}, {"qualify", "summary"}),
     ("_workspace-distribution.yaml", {"build", "attest"}, set()),
     ("release.yaml", {"publish"}, set()),
