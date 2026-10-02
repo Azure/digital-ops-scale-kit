@@ -86,7 +86,7 @@ Families run in the order `manifests/aio-resources/manifest.yaml` lists them, wh
 ## Select resource sets per site
 
 Each list under `properties.resourceSets` names ordered YAML sources from the
-matching `parameters/<area>/` directory:
+matching `resource-sets/<area>/` directory:
 
 ```yaml
 properties:
@@ -229,7 +229,7 @@ and step.
 
 1. Add the resource collection and its identity to
    `contracts/aio-catalog.yaml`, plus any provider reference rules.
-2. Add `parameters/<area>/` for reusable sets.
+2. Add `resource-sets/<area>/` for reusable sets.
 3. Add a typed parameter source to `manifests/aio-resources/manifest.yaml`, naming the
    collections that area may contribute.
 4. Add or update the gated family partial and its versioned Bicep entry point.
@@ -244,7 +244,7 @@ and step.
 
 ## Adding a set
 
-1. Create `parameters/<area>/<set>.yaml` with the definitions that area accepts.
+1. Create `resource-sets/<area>/<set>.yaml` with the definitions that area accepts.
 2. Add its name to the matching ordered list under
    `properties.resourceSets.<area>`.
 3. Prepare the deployment with

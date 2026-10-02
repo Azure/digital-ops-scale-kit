@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -36,6 +37,34 @@ def load_script(name):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.mark.parametrize(("repository_value", "environment_value", "expected"), [
+    ("repository-fixture", "", "repository-fixture"),
+    ("", "environment-fixture", "environment-fixture"),
+    ("repository-fixture", "environment-fixture", "environment-fixture"),
+])
+def test_fleet_onboarding_retains_the_existing_environment_secret_name(
+    repository_value, environment_value, expected,
+):
+    caller = yaml.safe_load((ROOT / ".github/workflows/e2e-test.yaml").read_text())["jobs"]["fleet"]
+    callee = yaml.safe_load((ROOT / ".github/workflows/_fleet-acceptance.yaml").read_text())
+    host = callee["jobs"]["hosts"]
+    connection = next(step for step in host["steps"] if step.get("uses") == "./.github/actions/connect-arc")
+    assert "environment" not in caller
+    assert host["environment"] == "${{ inputs.environment }}"
+
+    def secret_name(expression):
+        match = re.fullmatch(r"\$\{\{ secrets\.([A-Z_]+) \}\}", expression)
+        assert match, "This boundary must use one named secret, not a conditional fallback."
+        return match[1]
+
+    repository = {"CUSTOM_LOCATIONS_OID": repository_value}
+    passed = {key: repository.get(secret_name(value), "") for key, value in caller["secrets"].items()}
+    available = {**passed, **({"CUSTOM_LOCATIONS_OID": environment_value} if environment_value else {})}
+    name = secret_name(connection["with"]["custom-locations-oid"])
+    assert available.get(name) == expected
+    assert name in callee.get("on", callee.get(True))["workflow_call"]["secrets"]
 
 
 def selection():

@@ -22,7 +22,7 @@ on:
         required: false
       AZURE_SUBSCRIPTION_ID:
         required: false
-      AZURE_CUSTOM_LOCATIONS_OID:
+      CUSTOM_LOCATIONS_OID:
         required: false
 
 permissions:
@@ -296,7 +296,7 @@ jobs:
           resource-group: ${{ env.FLEET_RESOURCE_GROUP }}
           location: ${{ inputs.location }}
           enable-workload-identity: "false"
-          custom-locations-oid: ${{ secrets.AZURE_CUSTOM_LOCATIONS_OID }}
+          custom-locations-oid: ${{ secrets.CUSTOM_LOCATIONS_OID }}
           private-provider-errors: "true"
       - name: Host ready
         id: ready

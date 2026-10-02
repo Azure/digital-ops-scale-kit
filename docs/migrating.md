@@ -392,6 +392,13 @@ CI override logs retain counts and fixed diagnostics rather than Site names.
 Keep detailed validation output in a private local session. These ADO
 consumer changes do not introduce package production or release publication.
 
+For ADO Workload Identity Federation service connections, opt into the
+Azure CLI task's experimental session refresh with `keepAzSessionActive: true`
+on the deploy template, deployment pipeline or integration pipeline. The
+default is `false`, preserving other authentication schemes. Review
+[the WIF setup and qualification requirements](ci-cd-setup.md#1-create-service-connection-workload-identity-federation)
+before enabling it. It does not extend job timeouts or grant permissions.
+
 ### Temporary files
 
 Resolved parameter files now use the operating system temporary directory.

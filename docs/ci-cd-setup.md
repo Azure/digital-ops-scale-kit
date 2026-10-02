@@ -585,6 +585,7 @@ stages:
   - template: templates/siteops-deploy.yaml
     parameters:
       serviceConnection: azure-siteops
+      keepAzSessionActive: true  # WIF connections only.
       manifest: manifests/my-service.yaml
       environment: dev
 ```
@@ -681,6 +682,7 @@ stages:
       selector: environment=dev
       environment: dev
       serviceConnection: azure-siteops
+      keepAzSessionActive: true
       dryRun: true
 ```
 
@@ -714,6 +716,26 @@ In ADO → **Project settings → Service connections → New → Azure Resource
 The service connection name is referenced in the deploy pipeline. Default: `azure-siteops`.
 
 > **Reusing the GitHub Actions app registration:** If you already configured OIDC for GitHub Actions (section above), you can reuse that same app registration. Create a new federated credential for ADO. The issuer and subject claims are different from GitHub's. The Azure roles are shared.
+
+For a WIF service connection, the deploy stage template, deployment pipeline
+and integration pipeline expose `keepAzSessionActive`. Set it to `true` to
+request session refresh from `AzureCLI@2`. The examples here enable it for
+their WIF connections. The default remains `false` for existing callers.
+Leave it off for service connections using a client secret, certificate or
+managed-identity authentication: the task rejects refresh for those schemes.
+
+The Azure CLI task currently labels this option **experimental**. It signs
+in periodically during the task using a fresh federated assertion and stops
+refreshing when the task finishes. A successful initial login alone does
+not guarantee that a long deployment can obtain later tokens. An expired
+assertion may produce `AADSTS700024`. Use a deployed task version that supports
+the option and qualify it with the selected service connection. See the
+[Azure CLI task implementation](https://github.com/microsoft/azure-pipelines-tasks/tree/master/Tasks/AzureCLIV2).
+
+Session refresh does not extend the pipeline's job timeout, change Azure
+roles or replace environment approvals. The Site Ops templates keep the
+task's isolated Azure configuration and do not expose its service-principal
+credentials to the inline script. They add no separate login or refresh loop.
 
 #### 2. Create variable group
 
@@ -768,6 +790,7 @@ Same as GitHub Actions, see [Assign Azure roles](#3-assign-azure-roles). The ser
    - **Target environment**: `dev`, `staging`, or `prod`
    - **Additional site selector**: e.g., `country=US,name=seattle-dev` (optional)
    - **Dry run**: Prepare the executable plan without deploying
+   - **Refresh Azure WIF session**: Enable for the WIF service connection after reviewing the task's experimental setting above
 5. Click **"Run"**
 
 #### Deploy via Azure CLI
@@ -775,13 +798,14 @@ Same as GitHub Actions, see [Assign Azure roles](#3-assign-azure-roles). The ser
 ```bash
 az pipelines run \
   --name "Deploy Infrastructure" \
-  --parameters workspace=iot-operations manifest=manifests/aio-install/manifest.yaml environment=dev
+  --parameters workspace=iot-operations manifest=manifests/aio-install/manifest.yaml environment=dev \
+               keepAzSessionActive=true
 
 # With additional options
 az pipelines run \
   --name "Deploy Infrastructure" \
   --parameters workspace=iot-operations manifest=manifests/aio-install/manifest.yaml environment=dev \
-               selector="country=US" dryRun=true
+               selector="country=US" dryRun=true keepAzSessionActive=true
 ```
 
 ### ADO architecture
@@ -813,10 +837,11 @@ az pipelines run \
 ```
 
 Dry run stops after the publishable plan. Otherwise, `AzureCLI@2` handles
-authentication, plan-time compiler or module access, deployment, token
-lifecycle, and cleanup in one task. No separate login, token refresh, or
-logout steps are needed. The deployment result is validated and uploaded as a
-second summary using the same envelope rules as the GitHub workflow.
+authentication, plan-time compiler or module access, deployment and session
+cleanup in one task. WIF session refresh is the explicit `keepAzSessionActive`
+choice described above, not a guarantee from the initial login. The deployment
+result is validated and uploaded as a second summary using the same envelope
+rules as the GitHub workflow.
 
 Setup and override steps stop on the first failed command. Empty optional
 override values remain valid. Unit and integration result publication
@@ -875,7 +900,9 @@ and entry YAML paths to match its own candidate. It then calls only the
 dedicated `/preview` endpoint, with the validation run's branch and commit
 bound to every request. Setup templates, environment mappings, planning
 versus deployment, custom selectors, resource-set samples and integration
-phases are checked without running the selected jobs.
+phases are checked without running the selected jobs. Both the default
+session setting and explicit WIF refresh are checked for deploy and
+integration tasks.
 
 Grant the validation build identity read access to the selected definitions
 and repositories, and the resource authorization needed for template
@@ -896,7 +923,11 @@ example above and confirm both checkouts, engine origin, workspace selection
 and configured overrides. Local tests exercise those script/path boundaries.
 Only a separately approved hosted run qualifies repository service
 connections, agent tasks and Azure authentication. A preview success does
-not establish those outcomes.
+not establish those outcomes. For WIF refresh, retain the actual task version
+and run long enough to exercise token renewal and a subsequent authorized
+Azure operation. Confirm refresh failure is visible and the final task result
+preserves any deployment failure. Local controls and template previews do
+not establish that live token lifecycle.
 
 ### Per-environment migration
 

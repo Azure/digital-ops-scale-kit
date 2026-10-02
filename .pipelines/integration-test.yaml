@@ -25,6 +25,11 @@ parameters:
     type: boolean
     default: false
 
+  - name: keepAzSessionActive
+    displayName: Refresh Azure WIF session (experimental AzureCLI task option)
+    type: boolean
+    default: false
+
   - name: environment
     displayName: Target environment
     type: string
@@ -93,6 +98,7 @@ jobs:
               displayName: Run integration tests
               inputs:
                 azureSubscription: ${{ parameters.serviceConnections[parameters.environment] }}
+                keepAzSessionActive: ${{ parameters.keepAzSessionActive }}
                 scriptType: bash
                 scriptLocation: inlineScript
                 inlineScript: |

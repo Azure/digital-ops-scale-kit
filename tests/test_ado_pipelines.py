@@ -38,6 +38,35 @@ def _step(path: Path, name: str) -> dict:
     return matches[0]
 
 
+@pytest.mark.parametrize("path", [ROOT / ".pipelines" / "deploy.yaml", DEPLOY, INTEGRATION])
+def test_wif_session_refresh_is_explicit_opt_in(path):
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    parameter = next((row for row in data["parameters"] if row["name"] == "keepAzSessionActive"), None)
+    assert parameter is not None
+    assert parameter["type"] == "boolean" and parameter["default"] is False
+    if path.name == "deploy.yaml":
+        stage = next(row for row in data["stages"] if row.get("template") == "templates/siteops-deploy.yaml")
+        assert stage["parameters"]["keepAzSessionActive"] == "${{ parameters.keepAzSessionActive }}"
+    else:
+        step = _step(path, "Run integration tests" if path == INTEGRATION else "Prepare executable plan and deploy")
+        assert step["inputs"]["keepAzSessionActive"] == "${{ parameters.keepAzSessionActive }}"
+        assert step["inputs"].get("addSpnToEnvironment", False) is False
+        assert step["inputs"].get("useGlobalConfig", False) is False
+
+
+def test_wif_consumer_examples_explicitly_select_task_session_refresh():
+    guide = (ROOT / "docs" / "ci-cd-setup.md").read_text(encoding="utf-8")
+    custom = guide.split("### Custom deployment workflow", 1)[1].split("### Setup templates", 1)[0]
+    cross_repo = guide.split("### Reference the deployment template from another repository", 1)[1].split(
+        "### ADO project setup", 1,
+    )[0]
+    for section in (custom, cross_repo):
+        assert "keepAzSessionActive: true" in section
+    assert "The default remains `false`" in guide
+    assert "experimental" in guide.lower()
+    assert "No separate login, token refresh, or" not in guide
+
+
 @pytest.mark.parametrize(("upgrade", "install"), [(0, 0), (31, 0), (0, 32), (31, 32)])
 def test_setup_stops_on_the_first_failed_installation(tmp_path, upgrade, install):
     binary = tmp_path / "bin"

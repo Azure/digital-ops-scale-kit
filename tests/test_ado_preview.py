@@ -63,6 +63,7 @@ def _expanded(case):
         "environment": {"name": env}, "strategy": {"runOnce": {"deploy": {"steps": [{
             "displayName": "Prepare executable plan and deploy" if deploy else "Run integration tests",
             "inputs": {"azureSubscription": CONNECTIONS[env], "scriptType": "bash",
+                       "keepAzSessionActive": case.parameters.get("keepAzSessionActive", False),
                        "inlineScript": "siteops deploy --yes"},
             "env": task_env,
         }]}}},
@@ -149,6 +150,23 @@ def test_preview_checks_actual_expanded_deployment_inputs(preview, fault):
     else:
         step["template"] = "unexpanded.yaml"
     with pytest.raises(preview.PreviewError):
+        preview.validate_expansion(case, yaml.safe_dump(document), CONNECTIONS)
+
+
+@pytest.mark.parametrize("pipeline", ["deploy", "integration"])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_preview_checks_the_requested_wif_session_refresh(preview, pipeline, enabled):
+    selected = [case for case in preview.cases() if case.pipeline == pipeline and not case.override
+                and case.parameters.get("keepAzSessionActive", False) is enabled]
+    assert selected, "Both enabled and default-disabled paths need service preview coverage."
+    case = selected[0]
+    document = _expanded(case)
+    preview.validate_expansion(case, yaml.safe_dump(document), CONNECTIONS)
+    inputs = document["jobs"][0]["strategy"]["runOnce"]["deploy"]["steps"][0]["inputs"]
+    inputs["keepAzSessionActive"] = str(enabled)
+    preview.validate_expansion(case, yaml.safe_dump(document), CONNECTIONS)
+    inputs["keepAzSessionActive"] = not enabled
+    with pytest.raises(preview.PreviewError, match="session refresh"):
         preview.validate_expansion(case, yaml.safe_dump(document), CONNECTIONS)
 
 

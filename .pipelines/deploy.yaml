@@ -51,6 +51,11 @@ parameters:
     type: boolean
     default: false
 
+  - name: keepAzSessionActive
+    displayName: Refresh Azure WIF session (experimental AzureCLI task option)
+    type: boolean
+    default: false
+
   - name: siteopsSource
     displayName: siteops install source (e.g. git+https://github.com/.../digital-ops-scale-kit@<tag>). Empty = local editable install.
     type: string
@@ -151,6 +156,7 @@ stages:
   - template: templates/siteops-deploy.yaml
     parameters:
       serviceConnection: ${{ parameters.serviceConnections[parameters.environment] }}
+      keepAzSessionActive: ${{ parameters.keepAzSessionActive }}
       workspace: workspaces/${{ parameters.workspace }}
       manifest: ${{ parameters.manifest }}
       environment: ${{ parameters.environment }}

@@ -108,6 +108,9 @@ def cases() -> list[Case]:
         "deploy-custom-selector", "deploy", {"selector": "country=US", "dryRun": True},
         "environment=dev,country=US",
     ))
+    selected.append(Case(
+        "deploy-wif-session", "deploy", {"keepAzSessionActive": True}, "environment=dev",
+    ))
     for sample in ("resource-set-basic", "resource-set-composition"):
         for custom in (False, True):
             selected.append(Case(
@@ -126,6 +129,7 @@ def cases() -> list[Case]:
         raise PreviewError("The integration phase inventory is invalid.")
     selected.extend(Case(f"integration-{phase}", "integration", {"manifest": phase})
                     for phase in phases)
+    selected.append(Case("integration-wif-session", "integration", {"keepAzSessionActive": True}))
     for environment in ("staging", "prod"):
         selected.append(Case(f"integration-{environment}", "integration",
                              {"environment": environment, "skipCleanup": True}))
@@ -224,6 +228,8 @@ def validate_expansion(case: Case, text: str, connections: dict[str, str]) -> No
     inputs = _mapping(task.get("inputs", {}))
     if inputs.get("azureSubscription") != connections[environment] or inputs.get("scriptType") != "bash":
         raise PreviewError("The expanded task selected a different service connection or shell.")
+    if not _boolean(inputs.get("keepAzSessionActive", False), case.parameters.get("keepAzSessionActive", False)):
+        raise PreviewError("The expanded task changed the requested WIF session refresh setting.")
     task_env = _mapping(task.get("env", {}))
     if case.pipeline == "deploy":
         if (task_env.get("SELECTOR") != case.selector

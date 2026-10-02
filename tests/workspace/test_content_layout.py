@@ -39,6 +39,16 @@ def test_shared_sets_have_one_library_owner(workspace):
     assert (workspace / "samples" / "dataflow-sample" / "dataflows.yaml").is_file()
 
 
+def test_catalog_guide_uses_the_same_resource_set_root_as_the_workspace(workspace):
+    partial = yaml.safe_load((workspace / "manifests" / "_partials" / "_aio-resources.yaml").read_text())
+    roots = {Path(row["path"]).parts[0] for row in partial["parameters"] if isinstance(row, dict)}
+    assert roots == {"resource-sets"}
+    guide = (workspace.parents[1] / "docs" / "resource-catalog.md").read_text(encoding="utf-8")
+    assert "`parameters/<area>/" not in guide
+    assert "`resource-sets/<area>/`" in guide
+    assert "`resource-sets/<area>/<set>.yaml`" in guide
+
+
 def test_shared_and_implementation_partials_keep_their_owners(workspace):
     shared = list((workspace / "manifests" / "_partials").glob("_*.yaml"))
     assert shared

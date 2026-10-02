@@ -3,8 +3,12 @@
 
 parameters:
   - name: serviceConnection
-    displayName: Azure service connection name (WIF)
+    displayName: Azure service connection name
     type: string
+  - name: keepAzSessionActive
+    displayName: Refresh Azure WIF session (experimental AzureCLI task option)
+    type: boolean
+    default: false
   - name: workspace
     displayName: Workspace directory
     type: string
@@ -122,6 +126,7 @@ stages:
                   displayName: Prepare executable plan and deploy
                   inputs:
                     azureSubscription: ${{ parameters.serviceConnection }}
+                    keepAzSessionActive: ${{ parameters.keepAzSessionActive }}
                     scriptType: bash
                     scriptLocation: inlineScript
                     workingDirectory: $(SITEOPS_WORKSPACE_ROOT)
