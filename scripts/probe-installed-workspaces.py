@@ -93,6 +93,14 @@ def qualify(spec: dict) -> dict:
         descriptor_id,
     )
     descriptor = release.parse_descriptor(_read(assets / descriptor_id.name, 256 * 1024))
+    project_workspace = spec.get("projectWorkspace")
+    if "projectWorkspace" in spec and (
+        not isinstance(project_workspace, str)
+        or sum(entry.workspace == project_workspace for entry in descriptor.workspaces) != 1
+    ):
+        raise QualificationError("Select exactly one declared workspace for the candidate project.")
+    if project_workspace is not None:
+        from siteops.project import WorkspacePin, write_pin
     policy_path, roots = Path(spec["policy"]).resolve(), Path(spec["trustedRoot"]).resolve()
     if policy_path.is_relative_to(assets) or roots.is_relative_to(assets):
         raise QualificationError(
@@ -128,6 +136,7 @@ def qualify(spec: dict) -> dict:
 
     acquisition = WorkspaceAcquisition(cache, verify=verify)
     packages = manifests = 0
+    project_selection = None
     for entry in descriptor.workspaces:
         selected = ResolvedWorkspaceSource(release, entry)
         cache.retain_proof(assets / entry.proof.name, entry.proof)
@@ -151,6 +160,8 @@ def qualify(spec: dict) -> dict:
                 )
                 orchestrator.load_manifest(binding.manifest_path)
                 manifests += 1
+            if entry.workspace == project_workspace:
+                project_selection = selected
         packages += 1
     if packages != len(descriptor.workspaces) or packages == 0:
         raise QualificationError("No complete workspace qualification was recorded.")
@@ -161,7 +172,7 @@ def qualify(spec: dict) -> dict:
                 raise QualificationError(
                     "A workspace operation imported engine code outside its installation."
                 )
-    return {
+    result = {
         "apiVersion": "siteops.release.qualification/v1",
         "kind": "WorkspaceEngineQualification",
         "engineVersion": spec["engineVersion"],
@@ -180,6 +191,18 @@ def qualify(spec: dict) -> dict:
         "deployment": "not-run",
         "workloadHealth": "not-checked",
     }
+    if project_workspace is not None:
+        if project_selection is None:
+            raise QualificationError("The candidate workspace project was not created.")
+        project_pin = write_pin(
+            sites, WorkspacePin(project_selection), expected_previous=None,
+        ).sha256
+        result["project"] = {
+            "workspace": project_workspace, "pinSha256": project_pin,
+            "sourceReleaseObservation": "not-performed",
+        }
+        result["checks"].append("candidate-project-pin")
+    return result
 
 
 def main() -> int:
@@ -194,7 +217,7 @@ def main() -> int:
                 "The qualification specification differs from its expected identity."
             )
         spec = _json(raw)
-        if type(spec) is not dict or set(spec) != {
+        required = {
             "engineVersion",
             "assets",
             "state",
@@ -203,7 +226,9 @@ def main() -> int:
             "policy",
             "trustedRoot",
             "workspaceInventorySha256",
-        }:
+        }
+        if (type(spec) is not dict or not required <= spec.keys()
+                or spec.keys() - required - {"projectWorkspace"}):
             raise QualificationError(
                 "The qualification specification is incomplete or unsupported."
             )

@@ -108,6 +108,7 @@ jobs:
       version-mode: ${{ steps.plan.outputs.version-mode }}
       workspaces: ${{ steps.plan.outputs.workspaces }}
       workspace-matrix: ${{ steps.plan.outputs.workspace-matrix }}
+      project-workspace: ${{ steps.plan.outputs.project-workspace }}
       single-workspace-artifact: ${{ steps.plan.outputs.single-workspace-artifact }}
       intent-path: ${{ steps.plan.outputs.intent-path }}
       plan-sha: ${{ steps.plan.outputs.plan-sha }}
@@ -202,6 +203,7 @@ jobs:
               {"slot": slot, "workspace": request["workspace"]}
               for slot, request in enumerate(plan.get("workspaces", []), 1)
           ]}, separators=(",", ":")))
+          print("project-workspace=" + (plan["workspaces"][0]["workspace"] if plan.get("workspaces") else ""))
           print("single-workspace-artifact=" + (
               "workspace-attested-" + os.environ["GITHUB_RUN_ID"] + "-" + os.environ["GITHUB_RUN_ATTEMPT"] + "-1"
               if len(plan.get("workspaces", [])) == 1 else ""
@@ -670,6 +672,7 @@ jobs:
       EXPECTED_PLAN_SHA: ${{ needs.prepare.outputs.plan-sha }}
       QUALIFICATION_PLATFORM: ${{ matrix.platform }}
       QUALIFICATION_PYTHON: ${{ matrix.python }}
+      PROJECT_WORKSPACE: ${{ needs.prepare.outputs.project-workspace }}
       BUILDER_REF: ${{ github.workflow_ref }}
     steps:
       - name: Checkout qualification tools
@@ -702,6 +705,17 @@ jobs:
           run-id: ${{ github.run_id }}
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/qualification-workspaces
+          merge-multiple: true
+          digest-mismatch: error
+
+      - name: Download the candidate project declaration
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.prepare.outputs.artifact-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/qualification-project-plan
           merge-multiple: true
           digest-mismatch: error
 
@@ -769,6 +783,7 @@ jobs:
             --state "$QUALIFICATION_STATE" --output "$temp/workspace-qualification.json" \
             --gh "$gh_path" --builder-workflow "$builder" --platform "$QUALIFICATION_PLATFORM" \
             --expected-runner-environment "$EXPECTED_RUNNER_ENVIRONMENT" \
+            --project-workspace "$PROJECT_WORKSPACE" --plan "$temp/qualification-project-plan/plan.json" \
             > "$temp/workspace-qualification.out" 2> "$temp/workspace-qualification.err"; then
             echo "::error::The selected installed engine did not qualify the frozen workspaces."
             exit 1
@@ -838,7 +853,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -c '
-          import hashlib, json, os
+          import hashlib, json, os, re
           from pathlib import Path
           root = Path(os.environ["RUNNER_TEMP"])
           raw = (root / "qualification-identity/workspace-engine.json").read_bytes()
@@ -866,6 +881,7 @@ jobs:
           ):
               raise SystemExit("::error::The qualification matrix is missing or contains unexpected cells.")
           counts = set()
+          project_pins = set()
           for name, target in expected.items():
               folder = directory / name
               if {path.name for path in folder.iterdir()} != {"workspace-qualification.json"}:
@@ -874,6 +890,7 @@ jobs:
               if path.is_symlink() or not path.is_file() or path.stat().st_size > 1048576:
                   raise SystemExit("::error::A qualification cell is not a bounded regular result.")
               result = json.loads(path.read_bytes())
+              project = result.get("project")
               if (
                   result.get("apiVersion") != "siteops.release.qualification/v1"
                   or result.get("kind") != "WorkspaceEngineQualification"
@@ -885,12 +902,19 @@ jobs:
                   or type(result.get("packages")) is not int or result["packages"] != len(plan["workspaces"])
                   or type(result.get("catalogManifests")) is not int or result["catalogManifests"] < 0
                   or result.get("deployment") != "not-run" or result.get("workloadHealth") != "not-checked"
+                  or not isinstance(project, dict)
+                  or set(project) != {"workspace", "pinSha256", "sourceReleaseObservation"}
+                  or project["workspace"] != plan["workspaces"][0]["workspace"]
+                  or project["sourceReleaseObservation"] != "not-performed"
+                  or not isinstance(project["pinSha256"], str)
+                  or re.fullmatch("[0-9a-f]{64}", project["pinSha256"]) is None
               ):
                   raise SystemExit("::error::A qualification result differs from the selected engine and workspaces.")
               counts.add(result["catalogManifests"])
-          if len(counts) != 1:
-              raise SystemExit("::error::Qualification targets disagreed about the manifest catalog.")
-          print("Every declared engine target consumed the frozen workspace package set.")
+              project_pins.add(project["pinSha256"])
+          if len(counts) != 1 or len(project_pins) != 1:
+              raise SystemExit("::error::Qualification targets disagreed about the catalog or candidate project.")
+          print("Every declared engine target consumed the frozen packages and retained the same candidate project pin.")
           '
 
   review:

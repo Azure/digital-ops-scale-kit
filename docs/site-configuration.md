@@ -439,7 +439,13 @@ Extras cannot collide with the workspace's own `sites/` or `sites.local/` direct
 
 ### Discovery walks subdirectories
 
-Every trusted directory (`sites/`, each extras dir, `sites.local/`) is scanned recursively. A site at any depth is reachable by its basename (filename without extension), by its relative path under the trusted dir, or by its internal `name:` field. Basename uniqueness within each trusted dir is enforced at load time so the basename shorthand always resolves unambiguously. Cross-dir basename collisions are valid only when the relative path also matches (the overlay pattern).
+Site discovery scans `sites/` and each extra trusted directory recursively
+for `.yaml` and `.yml` files. `sites.local/` supplies matching overlays, not
+new Site identities. A Site at any depth is reachable by its basename
+(filename without extension), its relative path under the trusted directory,
+or its internal `name:` field. Basenames must be unique within each trusted
+directory. A basename shared across directories must also have the same
+relative path so the files describe one overlaid Site.
 
 | Path | Kind | Reachable via |
 |---|---|---|

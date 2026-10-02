@@ -179,9 +179,10 @@ these steps:
    workspace routing descriptor.
 4. Installs the selected engine from its authenticated lock and checks package
    compatibility, protected cache use, and guarded catalog loading on every
-   declared Windows or Linux Python target.
+   declared Windows or Linux Python target. Each target also creates an
+   operator project for the first declared workspace through the installed engine.
 5. Requires all qualification results to identify the same engine, workspace
-   inventory, and release plan, then freezes the complete publication
+   inventory, release plan and project pin, then freezes the complete publication
    inventory.
 6. Admits that frozen payload from the selected producer run and attempt.
    A separate job checks the artifact IDs, complete inventory, exact bytes

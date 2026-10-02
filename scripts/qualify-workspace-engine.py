@@ -29,7 +29,12 @@ from siteops_release_assets import (  # noqa: E402
 )
 from workspace_engine import SELECTION_NAME, EngineSelection, extract_engine_bundle  # noqa: E402
 
-from siteops.artifacts import ArtifactError, hash_file  # noqa: E402
+from siteops.artifacts import (  # noqa: E402
+    ArtifactError,
+    hash_file,
+    load_artifact_json,
+    open_regular_file,
+)
 from siteops.cache_filesystem import check_cache_ancestors, make_private_directory  # noqa: E402
 from siteops.process_capture import BoundedCapture  # noqa: E402
 from siteops.workspace_source import (  # noqa: E402
@@ -39,6 +44,29 @@ from siteops.workspace_source import (  # noqa: E402
 )
 
 logger = logging.getLogger(__name__)
+
+
+def project_release(plan_path: Path, expected_sha: str, source: dict, workspace: str) -> str:
+    """Bind a candidate project to the independently selected declaration."""
+    with open_regular_file(plan_path) as stream:
+        raw = stream.read(2 * 1024 * 1024 + 1)
+    if hashlib.sha256(raw).hexdigest() != expected_sha:
+        raise ArtifactError("The candidate project plan differs from its selected identity.")
+    plan = load_artifact_json(raw, limit=2 * 1024 * 1024, label="Candidate project plan")
+    if (
+        not isinstance(plan, dict) or plan.get("apiVersion") != "siteops.release/v1"
+        or plan.get("kind") != "ReleaseCandidate" or plan.get("active") is not True
+        or plan.get("source") != source
+        or not isinstance(plan.get("release"), dict)
+        or not isinstance(plan["release"].get("tag"), str)
+        or not 1 <= len(plan["release"]["tag"]) <= 128
+        or any(character.isspace() for character in plan["release"]["tag"])
+        or not isinstance(plan.get("workspaces"), list)
+        or sum(isinstance(row, dict) and row.get("workspace") == workspace
+               for row in plan["workspaces"]) != 1
+    ):
+        raise ArtifactError("The candidate project requires one workspace from its release declaration.")
+    return plan["release"]["tag"]
 
 
 def create_qualification_state(path: Path, protected_inputs: tuple[Path, ...]) -> None:
@@ -181,7 +209,13 @@ def main() -> int:
         "--expected-runner-environment", required=True, choices=("github-hosted", "self-hosted"),
         help="Trusted expected signing runner class for the selected engine and workspaces.",
     )
+    parser.add_argument("--project-workspace", metavar="PATH",
+                        help="Optionally seed the declared workspace into a new operator project.")
+    parser.add_argument("--plan", type=Path, metavar="FILE",
+                        help="Release plan bound by --expected-plan-sha, required for project seeding.")
     args = parser.parse_args()
+    if (args.project_workspace is None) != (args.plan is None):
+        parser.error("--project-workspace and --plan must be supplied together.")
     try:
         if importlib.metadata.version("pip") != "26.2.1":
             raise ArtifactError(
@@ -203,6 +237,10 @@ def main() -> int:
             or selection.plan_sha256 != args.expected_plan_sha
         ):
             raise ArtifactError("The selected engine and workspaces describe different candidates.")
+        release = (
+            project_release(args.plan, args.expected_plan_sha, selection.candidate, args.project_workspace)
+            if args.plan is not None else "candidate"
+        )
         create_qualification_state(args.state, (args.engine, args.workspaces))
         engine_verifier = ReleaseVerifier(
             args.state / "engine-policy",
@@ -309,13 +347,15 @@ def main() -> int:
             "state": str(args.state / "probe-state"),
             "source": {
                 **selection.candidate,
-                "release": "candidate",
+                "release": release,
             },
             "descriptor": descriptor.document(),
             "policy": str(workspace_policy.policy_file),
             "trustedRoot": str(workspace_policy.root),
             "workspaceInventorySha256": args.expected_workspace_inventory_sha256,
         }
+        if args.project_workspace is not None:
+            spec["projectWorkspace"] = args.project_workspace
         specification = (json.dumps(spec, sort_keys=True) + "\n").encode()
         path = args.state / "probe.json"
         path.write_bytes(specification)
@@ -349,6 +389,16 @@ def main() -> int:
             raise ArtifactError(
                 "The installed engine returned an unsupported qualification result."
             )
+        if args.project_workspace is not None:
+            project = report.get("project")
+            if not isinstance(project, dict) or set(project) != {
+                "workspace", "pinSha256", "sourceReleaseObservation",
+            } or project != {
+                "workspace": args.project_workspace,
+                "pinSha256": hash_file(args.state / "probe-state" / "operator" / "siteops.pin", limit=65536)[1],
+                "sourceReleaseObservation": "not-performed",
+            }:
+                raise ArtifactError("The installed engine did not retain the selected candidate project.")
         report["engineSelectionSha256"] = args.expected_engine_selection_sha256
         report["planSha256"] = args.expected_plan_sha
         report["target"] = {"python": target.python, "platform": target.platform}
