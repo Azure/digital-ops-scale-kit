@@ -65,6 +65,11 @@ def test_wif_consumer_examples_explicitly_select_task_session_refresh():
     assert "The default remains `false`" in guide
     assert "experimental" in guide.lower()
     assert "No separate login, token refresh, or" not in guide
+    refresh = next(line for line in guide.splitlines() if line.startswith("| **Token Refresh** |"))
+    ado_refresh = refresh.split("|")[3]
+    assert "Opt in" in ado_refresh
+    assert "`keepAzSessionActive`" in ado_refresh
+    assert "WIF" in ado_refresh
 
 
 @pytest.mark.parametrize(("upgrade", "install"), [(0, 0), (31, 0), (0, 32), (31, 32)])

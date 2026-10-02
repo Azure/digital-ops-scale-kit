@@ -408,7 +408,7 @@ See [ADO architecture](#ado-architecture) for the Azure DevOps equivalent.
 | **Override Value Masking** | Encoded `::add-mask::` commands | Encoded `##vso[task.setsecret]` commands |
 | **Concurrency Control** | `concurrency` groups (one deploy or integration-test per env, shared `azure-${env}` group) | Exclusive lock on ADO environments |
 | **Least Privilege** | `permissions:` block scopes GitHub token | Service connection authorization scopes access |
-| **Token Refresh** | Background OIDC refresh every 4 min | Not needed (`AzureCLI@2` manages lifecycle) |
+| **Token Refresh** | Background OIDC refresh every 4 min | Opt in with `keepAzSessionActive` for WIF connections |
 | **Credential Isolation** | `persist-credentials: false` on checkout | `persistCredentials: false` on checkout |
 | **Audit Trail** | All runs logged with triggering user | Same |
 | **Output Redaction** | `SITEOPS_REDACT_OUTPUT=1`, and on by default from `GITHUB_ACTIONS` | Same, and on by default from `TF_BUILD` |
