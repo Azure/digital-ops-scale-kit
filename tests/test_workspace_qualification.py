@@ -98,12 +98,19 @@ def qualification_inputs(tmp_path_factory):
     )
     native = FrozenReleaseAssets("example/content", "b" * 40, "refs/heads/main", native_assets)
     candidate = {"repository": "example/content", "commit": "a" * 40, "ref": "refs/heads/main"}
+    source = make_source(root / "source-fixture", revision="a" * 40)
+    plan = root / "plan.json"
+    plan.write_text(json.dumps({
+        "apiVersion": "siteops.release/v1", "kind": "ReleaseCandidate", "active": True,
+        "dryRun": True, "source": candidate, "release": {"tag": "v1.0.0b7"},
+        "workspaces": [{"workspace": source.source.entry.workspace}],
+    }))
+    plan_sha = hashlib.sha256(plan.read_bytes()).hexdigest()
     selection = EngineSelection(
-        candidate, "e" * 64, native, __version__, hashlib.sha256(manifest_bytes).hexdigest(),
-        ((target.python, platform),), ReferencedEngine("71", "siteops/v" + __version__, "c" * 40, native_assets),
+        candidate, plan_sha, native, __version__, hashlib.sha256(manifest_bytes).hexdigest(),
+        ((target.python, platform),), ReferencedEngine("71", "siteops/v" + __version__, "b" * 40, native_assets),
     )
     (engine / "workspace-engine.json").write_bytes(selection.serialized())
-    source = make_source(root / "source-fixture", revision="a" * 40)
     workspaces = root / "workspaces"
     workspaces.mkdir()
     shutil.copyfile(source.archive, workspaces / source.archive.name)
@@ -158,13 +165,15 @@ raise SystemExit(module.main())
         "workspace_sha": hashlib.sha256(workspace_assets.serialized()).hexdigest(),
         "gh": tools.root / "tools" / ("gh.exe" if os.name == "nt" else "gh"),
         "environment": tools.environment,
+        "plan": plan, "plan_sha": plan_sha, "workspace": source.source.entry.workspace,
     }
 
 
 @pytest.mark.parametrize("rejected", [None, "engine", "workspace"])
-def test_controller_installs_authenticated_lock_then_uses_selected_engine(qualification_inputs, rejected):
+@pytest.mark.parametrize("project", [False, True])
+def test_controller_installs_authenticated_lock_then_uses_selected_engine(qualification_inputs, rejected, project):
     values = qualification_inputs
-    name = rejected or "valid"
+    name = (rejected or "valid") + ("-project" if project else "")
     report = values["root"] / (name + "-qualified.json")
     state = values["root"] / (name + "-qualification")
     context = values["context"]
@@ -179,10 +188,11 @@ def test_controller_installs_authenticated_lock_then_uses_selected_engine(qualif
         values["python"], "-I", values["harness"], ROOT,
         "--engine", values["engine"], "--expected-engine-selection-sha256", values["engine_sha"],
         "--workspaces", values["workspaces"], "--expected-workspace-inventory-sha256", values["workspace_sha"],
-        "--trusted-root", values["roots"], "--expected-plan-sha", "e" * 64,
+        "--trusted-root", values["roots"], "--expected-plan-sha", values["plan_sha"],
         "--builder-workflow", ".github/workflows/ci.yaml", "--platform", values["platform"],
         "--expected-runner-environment", "self-hosted",
         "--state", state, "--output", report, "--gh", values["gh"],
+        *(["--plan", values["plan"], "--project-workspace", values["workspace"]] if project else []),
     ], root=values["root"], env={
         **values["environment"], "SITEOPS_TEST_TOOL_CONTEXT": str(context),
     }, expected=1 if rejected else 0)
@@ -201,3 +211,11 @@ def test_controller_installs_authenticated_lock_then_uses_selected_engine(qualif
     assert data["workspaceInventorySha256"] == values["workspace_sha"]
     assert data["deployment"] == "not-run"
     assert "selected installed engine" in result.stdout
+    if project:
+        pin = state / "probe-state" / "operator" / "siteops.pin"
+        assert data["project"] == {
+            "workspace": values["workspace"],
+            "pinSha256": hashlib.sha256(pin.read_bytes()).hexdigest(),
+            "sourceReleaseObservation": "not-performed",
+        }
+        assert json.loads(pin.read_bytes())["source"]["release"] == "v1.0.0b7"

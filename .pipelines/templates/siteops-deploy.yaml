@@ -3,8 +3,12 @@
 
 parameters:
   - name: serviceConnection
-    displayName: Azure service connection name (WIF)
+    displayName: Azure service connection name
     type: string
+  - name: keepAzSessionActive
+    displayName: Refresh Azure WIF session (experimental AzureCLI task option)
+    type: boolean
+    default: false
   - name: workspace
     displayName: Workspace directory
     type: string
@@ -32,6 +36,10 @@ parameters:
     displayName: Stage id (override when including this template more than once)
     type: string
     default: deploy
+  - name: templateRepository
+    displayName: Repository resource alias containing these templates
+    type: string
+    default: self
 
 stages:
   - stage: ${{ parameters.stageName }}
@@ -39,6 +47,12 @@ stages:
       PYTHONUNBUFFERED: '1'
       SITEOPS_REDACT_OUTPUT: '1'
       AZURE_CORE_OUTPUT: none
+      ${{ if eq(parameters.templateRepository, 'self') }}:
+        SITEOPS_TEMPLATE_ROOT: $(Build.SourcesDirectory)
+        SITEOPS_WORKSPACE_ROOT: $(Build.SourcesDirectory)
+      ${{ else }}:
+        SITEOPS_TEMPLATE_ROOT: $(Pipeline.Workspace)/s/siteops-automation
+        SITEOPS_WORKSPACE_ROOT: $(Pipeline.Workspace)/s/siteops-inputs
     jobs:
       - deployment: siteops_deploy
         displayName: Deploy
@@ -48,15 +62,25 @@ stages:
             deploy:
               steps:
                 - checkout: self
+                  ${{ if ne(parameters.templateRepository, 'self') }}:
+                    path: s/siteops-inputs
                   fetchDepth: 1
                   persistCredentials: false
+
+                - ${{ if ne(parameters.templateRepository, 'self') }}:
+                    - checkout: ${{ parameters.templateRepository }}
+                      path: s/siteops-automation
+                      fetchDepth: 1
+                      persistCredentials: false
 
                 - template: setup-siteops.yaml
                   parameters:
                     siteopsSource: ${{ parameters.siteopsSource }}
                     enableCache: false
+                    sourceDirectory: $(SITEOPS_TEMPLATE_ROOT)
 
                 - script: |
+                    set -euo pipefail
                     # Prevent path traversal attacks
                     if [[ "$WORKSPACE" == *".."* ]] || [[ "$MANIFEST" == *".."* ]]; then
                       echo "##vso[task.logissue type=error]Path traversal not allowed"
@@ -75,39 +99,39 @@ stages:
 
                     echo "✓ Inputs validated"
                   displayName: Validate inputs
+                  workingDirectory: $(SITEOPS_WORKSPACE_ROOT)
                   env:
                     WORKSPACE: ${{ parameters.workspace }}
                     MANIFEST: ${{ parameters.manifest }}
                     SELECTOR: ${{ parameters.selector }}
 
                 - script: |
-                    # ADO `script:` does not set pipefail by default. Without it
-                    # a python or jq failure could continue with overrides not
-                    # written or values not masked.
-                    set -o pipefail
+                    set -euo pipefail
                     if [[ -z "$SITE_OVERRIDES" ]]; then
                       echo "No site overrides configured, using committed sites"
                       exit 0
                     fi
 
-                    echo "$SITE_OVERRIDES" | python3 scripts/generate-site-overrides.py "$WORKSPACE"
-
-                    # Mask override values in ADO logs
-                    echo "$SITE_OVERRIDES" | jq -r '.. | strings' | while IFS= read -r val; do
-                      [[ -n "$val" ]] && echo "##vso[task.setvariable variable=masked;issecret=true]${val}"
-                    done
+                    python3 "$TEMPLATE_ROOT/scripts/mask-site-overrides.py" azure-pipelines
+                    printf '%s' "$SITE_OVERRIDES" |
+                      python3 "$TEMPLATE_ROOT/scripts/generate-site-overrides.py" "$WORKSPACE"
                   displayName: Setup site overrides
+                  workingDirectory: $(SITEOPS_WORKSPACE_ROOT)
                   env:
                     WORKSPACE: ${{ parameters.workspace }}
                     SITE_OVERRIDES: $(SITE_OVERRIDES)
+                    TEMPLATE_ROOT: $(SITEOPS_TEMPLATE_ROOT)
 
                 - task: AzureCLI@2
                   displayName: Prepare executable plan and deploy
                   inputs:
                     azureSubscription: ${{ parameters.serviceConnection }}
+                    keepAzSessionActive: ${{ parameters.keepAzSessionActive }}
                     scriptType: bash
                     scriptLocation: inlineScript
+                    workingDirectory: $(SITEOPS_WORKSPACE_ROOT)
                     inlineScript: |
+                      set -euo pipefail
                       # Bicep compiler acquisition and module restore run inside
                       # this authenticated AzureCLI task. Only publishable JSON
                       # reaches the uploaded plan summary.
@@ -122,8 +146,21 @@ stages:
 
                       PLAN_STDOUT="$PLAN_TEMP_DIRECTORY/siteops-plan.json"
                       PLAN_STDERR="$PLAN_TEMP_DIRECTORY/siteops-plan.stderr"
+                      PRIVATE_FILES=("$PLAN_STDOUT" "$PLAN_STDERR")
                       cleanup_plan_files() {
-                        rm -f "$PLAN_STDOUT" "$PLAN_STDERR"
+                        local status=$?
+                        local operation_status=${DEPLOY_EXIT_CODE:-${PLAN_EXIT_CODE:-0}}
+                        if [[ $operation_status -ne 0 ]]; then
+                          status=$operation_status
+                        fi
+                        if rm -f "${PRIVATE_FILES[@]}" 2>/dev/null; then
+                          :
+                        else
+                          local cleanup_status=$?
+                          echo "##vso[task.logissue type=error]Private deployment files could not be removed."
+                          if [[ $status -eq 0 ]]; then status=$cleanup_status; fi
+                        fi
+                        exit "$status"
                       }
                       trap cleanup_plan_files EXIT
 
@@ -197,11 +234,7 @@ stages:
 
                       RUN_STDOUT="$PLAN_TEMP_DIRECTORY/siteops-run.json"
                       RUN_STDERR="$PLAN_TEMP_DIRECTORY/siteops-run.stderr"
-                      cleanup_run_files() {
-                        cleanup_plan_files
-                        rm -f "$RUN_STDOUT" "$RUN_STDERR"
-                      }
-                      trap cleanup_run_files EXIT
+                      PRIVATE_FILES+=("$RUN_STDOUT" "$RUN_STDERR")
 
                       echo "Executing Site Ops deployment"
                       if siteops "${CMD_ARGS[@]}" >"$RUN_STDOUT" 2>"$RUN_STDERR"; then

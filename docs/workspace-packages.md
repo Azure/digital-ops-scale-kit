@@ -235,11 +235,28 @@ version and module location, then checks package compatibility, protected
 cache publication and reuse, and guarded loading of catalog manifests. Source
 checkout imports cannot satisfy this gate.
 
+The matrix also creates an operator project for the first declared workspace
+through the installed engine's normal pin API. Its release identity comes
+from the independently hashed release plan. Project publication follows
+successful checks of the complete declared package set. Every runtime target
+must produce the same pin digest. The receipt explicitly records that public
+release observation was not performed, since the candidate is not yet published.
+
+For a standalone qualification invocation, pass `--project-workspace PATH`
+and `--plan FILE` together to `qualify-workspace-engine.py`. The plan must match
+`--expected-plan-sha` and contain that exact workspace. The project is created
+under the selected private state at `probe-state/operator`, with its cache
+at `probe-state/cache`. Use that cache and the generated workspace policy/root
+files when running the installed CLI with `--project` and `--offline-content`.
+This seeds prepublication test state, not a new public archive-pinning route.
+Its temporary qualification policy does not enroll an operator source or
+authorize Azure deployment.
+
 The result reports package and catalog counts separately. It loads no operator
 Site values. It does not authorize targets, compare executable deployment
 plans, deploy resources, or evaluate workload health. The final matrix gate
 requires every declared target's result to name the same frozen engine,
-workspace inventory, and release plan.
+workspace inventory, release plan and candidate project pin.
 
 Native `uv tool install <wheel-url>` and the verified bootstrap are
 described in the [installation guide](install-siteops.md). The isolated

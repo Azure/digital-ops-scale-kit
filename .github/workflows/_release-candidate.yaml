@@ -66,6 +66,10 @@ on:
         value: ${{ jobs.workspace-assets.outputs.inventory-sha }}
       engine-selection-sha:
         value: ${{ jobs.engine-input.outputs.selection-sha }}
+      admission-artifact-id:
+        value: ${{ jobs.admit.outputs.artifact-id }}
+      fleet-candidate:
+        value: ${{ jobs.admit.outputs.candidate }}
 
 permissions:
   contents: read
@@ -106,6 +110,8 @@ jobs:
       version-mode: ${{ steps.plan.outputs.version-mode }}
       workspaces: ${{ steps.plan.outputs.workspaces }}
       workspace-matrix: ${{ steps.plan.outputs.workspace-matrix }}
+      project-workspace: ${{ steps.plan.outputs.project-workspace }}
+      fleet: ${{ steps.plan.outputs.fleet }}
       single-workspace-artifact: ${{ steps.plan.outputs.single-workspace-artifact }}
       intent-path: ${{ steps.plan.outputs.intent-path }}
       plan-sha: ${{ steps.plan.outputs.plan-sha }}
@@ -200,6 +206,8 @@ jobs:
               {"slot": slot, "workspace": request["workspace"]}
               for slot, request in enumerate(plan.get("workspaces", []), 1)
           ]}, separators=(",", ":")))
+          print("project-workspace=" + (plan["workspaces"][0]["workspace"] if plan.get("workspaces") else ""))
+          print("fleet=" + str(any(row.get("id") == "azure.iot-operations" and row.get("workspace") == "workspaces/iot-operations" for row in plan.get("workspaces", []))).lower())
           print("single-workspace-artifact=" + (
               "workspace-attested-" + os.environ["GITHUB_RUN_ID"] + "-" + os.environ["GITHUB_RUN_ATTEMPT"] + "-1"
               if len(plan.get("workspaces", [])) == 1 else ""
@@ -668,6 +676,7 @@ jobs:
       EXPECTED_PLAN_SHA: ${{ needs.prepare.outputs.plan-sha }}
       QUALIFICATION_PLATFORM: ${{ matrix.platform }}
       QUALIFICATION_PYTHON: ${{ matrix.python }}
+      PROJECT_WORKSPACE: ${{ needs.prepare.outputs.project-workspace }}
       BUILDER_REF: ${{ github.workflow_ref }}
     steps:
       - name: Checkout qualification tools
@@ -700,6 +709,17 @@ jobs:
           run-id: ${{ github.run_id }}
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/qualification-workspaces
+          merge-multiple: true
+          digest-mismatch: error
+
+      - name: Download the candidate project declaration
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.prepare.outputs.artifact-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/qualification-project-plan
           merge-multiple: true
           digest-mismatch: error
 
@@ -767,6 +787,7 @@ jobs:
             --state "$QUALIFICATION_STATE" --output "$temp/workspace-qualification.json" \
             --gh "$gh_path" --builder-workflow "$builder" --platform "$QUALIFICATION_PLATFORM" \
             --expected-runner-environment "$EXPECTED_RUNNER_ENVIRONMENT" \
+            --project-workspace "$PROJECT_WORKSPACE" --plan "$temp/qualification-project-plan/plan.json" \
             > "$temp/workspace-qualification.out" 2> "$temp/workspace-qualification.err"; then
             echo "::error::The selected installed engine did not qualify the frozen workspaces."
             exit 1
@@ -836,7 +857,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -c '
-          import hashlib, json, os
+          import hashlib, json, os, re
           from pathlib import Path
           root = Path(os.environ["RUNNER_TEMP"])
           raw = (root / "qualification-identity/workspace-engine.json").read_bytes()
@@ -864,6 +885,7 @@ jobs:
           ):
               raise SystemExit("::error::The qualification matrix is missing or contains unexpected cells.")
           counts = set()
+          project_pins = set()
           for name, target in expected.items():
               folder = directory / name
               if {path.name for path in folder.iterdir()} != {"workspace-qualification.json"}:
@@ -872,6 +894,7 @@ jobs:
               if path.is_symlink() or not path.is_file() or path.stat().st_size > 1048576:
                   raise SystemExit("::error::A qualification cell is not a bounded regular result.")
               result = json.loads(path.read_bytes())
+              project = result.get("project")
               if (
                   result.get("apiVersion") != "siteops.release.qualification/v1"
                   or result.get("kind") != "WorkspaceEngineQualification"
@@ -883,12 +906,19 @@ jobs:
                   or type(result.get("packages")) is not int or result["packages"] != len(plan["workspaces"])
                   or type(result.get("catalogManifests")) is not int or result["catalogManifests"] < 0
                   or result.get("deployment") != "not-run" or result.get("workloadHealth") != "not-checked"
+                  or not isinstance(project, dict)
+                  or set(project) != {"workspace", "pinSha256", "sourceReleaseObservation"}
+                  or project["workspace"] != plan["workspaces"][0]["workspace"]
+                  or project["sourceReleaseObservation"] != "not-performed"
+                  or not isinstance(project["pinSha256"], str)
+                  or re.fullmatch("[0-9a-f]{64}", project["pinSha256"]) is None
               ):
                   raise SystemExit("::error::A qualification result differs from the selected engine and workspaces.")
               counts.add(result["catalogManifests"])
-          if len(counts) != 1:
-              raise SystemExit("::error::Qualification targets disagreed about the manifest catalog.")
-          print("Every declared engine target consumed the frozen workspace package set.")
+              project_pins.add(project["pinSha256"])
+          if len(counts) != 1 or len(project_pins) != 1:
+              raise SystemExit("::error::Qualification targets disagreed about the catalog or candidate project.")
+          print("Every declared engine target consumed the frozen packages and retained the same candidate project pin.")
           '
 
   review:
@@ -926,6 +956,10 @@ jobs:
       notes-artifact-id: ${{ steps.notes-upload.outputs.artifact-id }}
       assets-artifact-id: ${{ steps.assets-upload.outputs.artifact-id }}
       payload-artifact-id: ${{ steps.payload-upload.outputs.artifact-id }}
+      engine-artifact-id: ${{ needs.engine-input.outputs.artifact-id }}
+      engine-selection-sha: ${{ needs.engine-input.outputs.selection-sha }}
+      workspace-artifact-id: ${{ needs.workspace-assets.outputs.artifact-id }}
+      workspace-inventory-sha: ${{ needs.workspace-assets.outputs.inventory-sha }}
     steps:
       - name: Require the admitted runner class
         shell: python
@@ -1476,3 +1510,166 @@ jobs:
         run: |
           set -euo pipefail
           python3 -B release-tools/scripts/render-siteops-release.py summary --root "$RUNNER_TEMP"
+
+  admit:
+    name: Admit frozen inputs
+    needs: [prepare, review]
+    if: needs.review.result == 'success' && needs.review.outputs.payload-artifact-id != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      candidate: ${{ steps.fleet.outputs.candidate }}
+    env:
+      CANDIDATE_REPOSITORY: ${{ github.repository }}
+      CANDIDATE_COMMIT: ${{ github.sha }}
+      CANDIDATE_REF: ${{ github.ref }}
+      CANDIDATE_RUN: ${{ github.run_id }}
+      CANDIDATE_ATTEMPT: ${{ github.run_attempt }}
+      CANDIDATE_CALLER: ${{ inputs.dry-run && '.github/workflows/ci.yaml' || '.github/workflows/release.yaml' }}
+      CANDIDATE_PREVIEW: ${{ inputs.dry-run }}
+      CANDIDATE_PLAN_ARTIFACT: ${{ needs.prepare.outputs.artifact-id }}
+      CANDIDATE_INVENTORY_ARTIFACT: ${{ needs.review.outputs.assets-artifact-id }}
+      CANDIDATE_PAYLOAD_ARTIFACT: ${{ needs.review.outputs.payload-artifact-id }}
+      CANDIDATE_PLAN_SHA: ${{ needs.review.outputs.plan-sha }}
+      CANDIDATE_INVENTORY_SHA: ${{ needs.review.outputs.asset-list-sha }}
+    steps:
+      - name: Checkout the selected controller
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Prepare admission tooling and metadata
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PIP_CONFIG_FILE: /dev/null
+          PIP_INDEX_URL: https://packagefeedproxy.microsoft.io/pypi/simple/
+          PIP_EXTRA_INDEX_URL: ""
+          PIP_NO_INPUT: "1"
+          PIP_KEYRING_PROVIDER: disabled
+          PIP_DISABLE_PIP_VERSION_CHECK: "1"
+        run: |
+          set -euo pipefail
+          umask 077
+          root="$RUNNER_TEMP/candidate-admission"
+          mkdir -m 700 "$root"
+          mkdir -m 700 "$root/metadata"
+          python -m venv "$root/tools"
+          if ! "$root/tools/bin/python" -m pip install --require-hashes --only-binary=:all: --no-cache-dir \
+            -r scripts/siteops-build-requirements.txt -r scripts/siteops-runtime-requirements.txt \
+            > "$root/tooling.log" 2>&1; then
+            echo "::error::Candidate admission tooling could not be prepared."
+            exit 1
+          fi
+          prefix="repos/$CANDIDATE_REPOSITORY/actions"
+          if ! gh api "$prefix/runs/$CANDIDATE_RUN/attempts/$CANDIDATE_ATTEMPT" \
+            > "$root/run.json" 2> "$root/run.err"; then
+            echo "::error::The selected producer attempt could not be read."
+            exit 1
+          fi
+          if ! gh api --paginate --slurp "$prefix/runs/$CANDIDATE_RUN/attempts/$CANDIDATE_ATTEMPT/jobs?per_page=100" \
+            > "$root/jobs.json" 2> "$root/jobs.err"; then
+            echo "::error::The selected producer jobs could not be read."
+            exit 1
+          fi
+          for role in plan inventory payload; do
+            case "$role" in
+              plan) id="$CANDIDATE_PLAN_ARTIFACT" ;;
+              inventory) id="$CANDIDATE_INVENTORY_ARTIFACT" ;;
+              payload) id="$CANDIDATE_PAYLOAD_ARTIFACT" ;;
+            esac
+            if ! gh api "$prefix/artifacts/$id" > "$root/metadata/$role.json" 2> "$root/metadata/$role.err"; then
+              echo "::error::A selected producer artifact could not be read."
+              exit 1
+            fi
+          done
+          if ! gh attestation trusted-root > "$root/trusted-root.json" 2> "$root/trusted-root.err"; then
+            echo "::error::Independent verification roots could not be obtained."
+            exit 1
+          fi
+
+      - name: Download the selected plan
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.prepare.outputs.artifact-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/candidate-admission/plan
+          merge-multiple: true
+          digest-mismatch: error
+
+      - name: Download the selected inventory
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.review.outputs.assets-artifact-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/candidate-admission/inventory
+          merge-multiple: true
+          digest-mismatch: error
+
+      - name: Download the selected payload
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.review.outputs.payload-artifact-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/candidate-admission/payload
+          merge-multiple: true
+          digest-mismatch: error
+
+      - name: Admit exact bytes and provenance
+        id: admission
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/candidate-admission"
+          "$root/tools/bin/python" -B scripts/admit-release-candidate.py \
+            --plan "$root/plan/plan.json" --inventory "$root/inventory/release-assets.json" \
+            --payload "$root/payload" --run "$root/run.json" --jobs "$root/jobs.json" \
+            --artifact-metadata "$root/metadata" --trusted-root "$root/trusted-root.json" \
+            --state "$root/state" --output "$root/receipt.json"
+          digest="$(sha256sum "$root/receipt.json" | cut -d ' ' -f 1)"
+          echo "receipt-sha=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Retain the admission receipt
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: candidate-admission-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/candidate-admission/receipt.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 30
+
+      - name: Render the exact fleet selection
+        id: fleet
+        if: needs.prepare.outputs.fleet == 'true'
+        shell: bash
+        env:
+          FLEET_ADMISSION_ID: ${{ steps.upload.outputs.artifact-id }}
+          FLEET_ADMISSION_SHA: ${{ steps.admission.outputs.receipt-sha }}
+          FLEET_PLAN_ID: ${{ needs.prepare.outputs.artifact-id }}
+          FLEET_PLAN_SHA: ${{ needs.review.outputs.plan-sha }}
+          FLEET_INVENTORY_ID: ${{ needs.review.outputs.assets-artifact-id }}
+          FLEET_INVENTORY_SHA: ${{ needs.review.outputs.asset-list-sha }}
+          FLEET_ENGINE_ID: ${{ needs.review.outputs.engine-artifact-id }}
+          FLEET_ENGINE_SHA: ${{ needs.review.outputs.engine-selection-sha }}
+          FLEET_WORKSPACES_ID: ${{ needs.review.outputs.workspace-artifact-id }}
+          FLEET_WORKSPACES_SHA: ${{ needs.review.outputs.workspace-inventory-sha }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/candidate-admission/tools/bin/python" -B scripts/emit-fleet-candidate.py

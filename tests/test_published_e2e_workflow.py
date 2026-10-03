@@ -153,7 +153,7 @@ def test_windows_capability_probe_is_opt_in_without_azure_authority():
     assert inputs["scenario"]["type"] == "choice"
     assert inputs["scenario"]["default"] == "aio"
     assert inputs["scenario"]["options"] == [
-        "aio", "windows-installer-preflight",
+        "aio", "fleet", "fleet-cleanup", "windows-installer-preflight",
     ]
 
     jobs = workflow["jobs"]

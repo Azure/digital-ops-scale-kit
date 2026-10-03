@@ -172,7 +172,7 @@ def pytest_collection_finish(session):
     """
     global _generated_overlays, _pre_existing_overlays
 
-    items = [item for item in session.items if "integration" in item.keywords]
+    items = [item for item in session.items if item.get_closest_marker("integration") is not None]
     if not items:
         return
 

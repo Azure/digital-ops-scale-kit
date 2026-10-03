@@ -10,6 +10,12 @@ primary GitHub Actions implementation and an Azure Pipelines reference.
 | [GitHub Actions](#github-actions) | `.github/workflows/` | Primary |
 | [Azure DevOps](#azure-devops) | `.pipelines/` | Reference implementation |
 
+Azure Pipelines is a consumer surface: install an identified Site Ops engine,
+select deployment content and configuration, then plan, deploy and check
+outcomes. Its reusable templates can be referenced from another repository.
+Building, signing and publishing Site Ops or Scale Kit release assets belongs
+to the GitHub Actions release workflows, not these ADO deployment pipelines.
+
 ## Prerequisites
 
 1. Azure subscription with resources to deploy
@@ -384,6 +390,11 @@ status line and the allowlisted JSON document. Run stdout and stderr files are
 removed when the step finishes. See [run-output.md](run-output.md) for the
 result contract.
 
+Reporting and file cleanup preserve a failed or interrupted Site Ops exit
+code. If the operation succeeded but its summary or private file cleanup
+fails, the task fails too. A warning on stderr alone does not determine the
+deployment result.
+
 See [ADO architecture](#ado-architecture) for the Azure DevOps equivalent.
 
 ## Security
@@ -394,10 +405,10 @@ See [ADO architecture](#ado-architecture) for the Azure DevOps equivalent.
 | **Environment Protection** | Required approvals for staging/prod | Approval checks on ADO environments |
 | **Input Validation** | Rejects traversal markers and unsupported selector characters | Same validation logic in pipeline scripts |
 | **Site Name Sanitization** | `SITE_OVERRIDES` keys validated against `^[a-zA-Z0-9_-]+$` | Same |
-| **Override Value Masking** | `::add-mask::` per value | `##vso[task.setvariable issecret=true]` per value |
+| **Override Value Masking** | Encoded `::add-mask::` commands | Encoded `##vso[task.setsecret]` commands |
 | **Concurrency Control** | `concurrency` groups (one deploy or integration-test per env, shared `azure-${env}` group) | Exclusive lock on ADO environments |
 | **Least Privilege** | `permissions:` block scopes GitHub token | Service connection authorization scopes access |
-| **Token Refresh** | Background OIDC refresh every 4 min | Not needed (`AzureCLI@2` manages lifecycle) |
+| **Token Refresh** | Background OIDC refresh every 4 min | Opt in with `keepAzSessionActive` for WIF connections |
 | **Credential Isolation** | `persist-credentials: false` on checkout | `persistCredentials: false` on checkout |
 | **Audit Trail** | All runs logged with triggering user | Same |
 | **Output Redaction** | `SITEOPS_REDACT_OUTPUT=1`, and on by default from `GITHUB_ACTIONS` | Same, and on by default from `TF_BUILD` |
@@ -414,6 +425,10 @@ Redaction follows the destination. Local plain output retains detailed
 reasons, while redacted plain output renders the allowed run fields.
 `GITHUB_ACTIONS` and `TF_BUILD` enable redaction automatically, and the
 shipped workflows also set `SITEOPS_REDACT_OUTPUT=1` explicitly.
+
+Site override generation follows the same setting. CI reports generated
+and preserved overlay counts, while private local output includes Site
+names and detailed validation errors.
 
 Diagnostic logging also scrubs recognized identifiers and credential
 patterns. That heuristic is separate from the publication allowlist and
@@ -570,6 +585,7 @@ stages:
   - template: templates/siteops-deploy.yaml
     parameters:
       serviceConnection: azure-siteops
+      keepAzSessionActive: true  # WIF connections only.
       manifest: manifests/my-service.yaml
       environment: dev
 ```
@@ -598,6 +614,7 @@ stages:
 | `installDev` | `false` | Include dev dependencies (pytest, pytest-cov) |
 | `siteopsSource` | (empty) | pip install spec for siteops. Empty = local editable install. |
 | `enableCache` | `true` | Cache the pip wheel directory across pipeline runs. Disable in deployment jobs (no cache scope available). |
+| `sourceDirectory` | `$(Build.SourcesDirectory)` | Directory used for an editable source installation and its cache input. The deployment template supplies its tooling checkout here. |
 
 ```yaml
 - template: templates/setup-siteops.yaml
@@ -613,11 +630,79 @@ stages:
 
 | Pipeline file | Purpose | Trigger |
 |---------------|---------|---------|
-| `.pipelines/ci.yaml` | Lint, unit tests, Bicep validation, manifest validation | Push to main, PRs |
+| `.pipelines/ci.yaml` | Contributor checks for engine, workspace and pipeline changes. Does not publish releases. | Push to main, PRs |
 | `.pipelines/deploy.yaml` | Manual deploy with environment selection | Manual only |
 | `.pipelines/integration-test.yaml` | Integration suite against an environment already deployed by `deploy.yaml` | Manual only |
 | `.pipelines/templates/siteops-deploy.yaml` | Stage template: deployment logic | Called by deploy.yaml |
 | `.pipelines/templates/setup-siteops.yaml` | Steps template: install Python + siteops | Called by all pipelines |
+| `.pipelines/validate-pipelines.yaml` | Maintainer template previews for consumer pipeline parameter branches. Does not run the previewed jobs. | Manual only |
+
+### Reference the deployment template from another repository
+
+Keep deployment configuration in your repository and pin the Scale Kit
+repository resource to the reviewed template revision. The template's
+`templateRepository` parameter names that resource alias. It checks out
+your repository into `s/siteops-inputs` and the automation into
+`s/siteops-automation`, relative to the agent's pipeline workspace.
+`workspace` remains relative to your repository, not the tooling checkout.
+
+Replace the template revision and engine wheel URL below with reviewed
+values from compatible release instructions. The selected template revision
+must contain the `templateRepository` parameter. Configure a GitHub
+repository service connection named `scalekit-github`, an Azure WIF service
+connection named `azure-siteops`, and the `dev` approval environment.
+
+```yaml
+trigger: none
+pr: none
+
+resources:
+  repositories:
+    - repository: scalekit
+      type: github
+      name: Azure/digital-ops-scale-kit
+      endpoint: scalekit-github
+      ref: refs/tags/<reviewed-template-release>
+
+pool:
+  vmImage: ubuntu-24.04
+
+variables:
+  - name: SITE_OVERRIDES
+    value: ''
+  # Add your approved variable group here when overrides are needed.
+
+stages:
+  - template: /.pipelines/templates/siteops-deploy.yaml@scalekit
+    parameters:
+      templateRepository: scalekit
+      siteopsSource: '<exact-engine-wheel-URL>'
+      workspace: deployment
+      manifest: manifests/install/manifest.yaml
+      selector: environment=dev
+      environment: dev
+      serviceConnection: azure-siteops
+      keepAzSessionActive: true
+      dryRun: true
+```
+
+Your `deployment` directory contains the ordinary Site Ops workspace,
+including manifests and Sites. Set `dryRun: false` only when deployment
+is intended. An Azure-authenticated plan can restore compiler modules,
+but does not submit deployment writes.
+
+The engine selection and template revision have separate purposes.
+`siteopsSource` selects the installed engine through the approved package
+feed or exact wheel URL. This is an ordinary package installation, not the
+verified-bundle bootstrap. `templateRepository` selects reviewed automation
+and its helpers. Neither authorizes Azure access or changes your workspace
+selection.
+
+The default `templateRepository: self` retains the existing checkout layout.
+An omitted `siteopsSource` retains the editable source route and requires
+the selected tooling directory to contain the Site Ops project. Existing
+consumers that manage their own checkout can continue using that route.
+For a released engine, supply its exact installation source explicitly.
 
 ### ADO project setup
 
@@ -632,6 +717,26 @@ The service connection name is referenced in the deploy pipeline. Default: `azur
 
 > **Reusing the GitHub Actions app registration:** If you already configured OIDC for GitHub Actions (section above), you can reuse that same app registration. Create a new federated credential for ADO. The issuer and subject claims are different from GitHub's. The Azure roles are shared.
 
+For a WIF service connection, the deploy stage template, deployment pipeline
+and integration pipeline expose `keepAzSessionActive`. Set it to `true` to
+request session refresh from `AzureCLI@2`. The examples here enable it for
+their WIF connections. The default remains `false` for existing callers.
+Leave it off for service connections using a client secret, certificate or
+managed-identity authentication: the task rejects refresh for those schemes.
+
+The Azure CLI task currently labels this option **experimental**. It signs
+in periodically during the task using a fresh federated assertion and stops
+refreshing when the task finishes. A successful initial login alone does
+not guarantee that a long deployment can obtain later tokens. An expired
+assertion may produce `AADSTS700024`. Use a deployed task version that supports
+the option and qualify it with the selected service connection. See the
+[Azure CLI task implementation](https://github.com/microsoft/azure-pipelines-tasks/tree/master/Tasks/AzureCLIV2).
+
+Session refresh does not extend the pipeline's job timeout, change Azure
+roles or replace environment approvals. The Site Ops templates keep the
+task's isolated Azure configuration and do not expose its service-principal
+credentials to the inline script. They add no separate login or refresh loop.
+
 #### 2. Create variable group
 
 In ADO → **Pipelines → Library → + Variable group**:
@@ -639,6 +744,13 @@ In ADO → **Pipelines → Library → + Variable group**:
 | Variable group | Variable | Type | Description |
 |----------------|----------|------|-------------|
 | `siteops-secrets` | `SITE_OVERRIDES` | Secret | JSON object, same format as the GitHub secret (see [site overrides](#site-overrides)) |
+
+The top-level pipelines default `SITE_OVERRIDES` to empty before loading
+the group, so a missing optional value leaves committed Sites in use.
+Reusable-template callers should likewise define an empty default or
+provide the secret through their own variable group. Mask registration
+encodes percent signs and line breaks before publishing logging commands.
+It is a supplementary protection, not permission to print private values.
 
 #### 3. Create environments
 
@@ -678,6 +790,7 @@ Same as GitHub Actions, see [Assign Azure roles](#3-assign-azure-roles). The ser
    - **Target environment**: `dev`, `staging`, or `prod`
    - **Additional site selector**: e.g., `country=US,name=seattle-dev` (optional)
    - **Dry run**: Prepare the executable plan without deploying
+   - **Refresh Azure WIF session**: Enable for the WIF service connection after reviewing the task's experimental setting above
 5. Click **"Run"**
 
 #### Deploy via Azure CLI
@@ -685,13 +798,14 @@ Same as GitHub Actions, see [Assign Azure roles](#3-assign-azure-roles). The ser
 ```bash
 az pipelines run \
   --name "Deploy Infrastructure" \
-  --parameters workspace=iot-operations manifest=manifests/aio-install/manifest.yaml environment=dev
+  --parameters workspace=iot-operations manifest=manifests/aio-install/manifest.yaml environment=dev \
+               keepAzSessionActive=true
 
 # With additional options
 az pipelines run \
   --name "Deploy Infrastructure" \
   --parameters workspace=iot-operations manifest=manifests/aio-install/manifest.yaml environment=dev \
-               selector="country=US" dryRun=true
+               selector="country=US" dryRun=true keepAzSessionActive=true
 ```
 
 ### ADO architecture
@@ -723,10 +837,97 @@ az pipelines run \
 ```
 
 Dry run stops after the publishable plan. Otherwise, `AzureCLI@2` handles
-authentication, plan-time compiler or module access, deployment, token
-lifecycle, and cleanup in one task. No separate login, token refresh, or
-logout steps are needed. The deployment result is validated and uploaded as a
-second summary using the same envelope rules as the GitHub workflow.
+authentication, plan-time compiler or module access, deployment and session
+cleanup in one task. WIF session refresh is the explicit `keepAzSessionActive`
+choice described above, not a guarantee from the initial login. The deployment
+result is validated and uploaded as a second summary using the same envelope
+rules as the GitHub workflow.
+
+Setup and override steps stop on the first failed command. Empty optional
+override values remain valid. Unit and integration result publication
+requires a results file and reports failed tests as task failures.
+
+### Automated pipeline validation
+
+Use complementary checks for different parts of the pipeline contract:
+
+| Check | What it establishes |
+|---|---|
+| Repository regression tests | Actual YAML script bodies preserve command failures, interruption, output validation, summary errors and cleanup outcomes. Controlled tools keep these checks independent of Azure. |
+| Azure DevOps YAML preview | The service parses templates and parameters for the selected repository revision. This checks Azure expression expansion rather than approximating it with a local YAML parser. |
+| Hosted CI and deployment qualification | Real tasks, agent images, cache and result publication work in the selected project. Authenticated planning and deployment require separately scoped service connections and targets. |
+
+Run the local pipeline regressions with:
+
+```text
+python -B -m pytest tests/test_ado_pipelines.py tests/workspace/test_deploy_registration.py tests/test_site_overrides_script.py
+```
+
+These tests run in normal CI, including GitHub PRs that change only
+`.pipelines/`. Azure Pipelines and GitHub Actions provision the same pinned
+Linux installation fixtures before their unit suites. Required native
+inputs fail explicitly when unavailable.
+
+For service validation, the
+[Preview API](https://learn.microsoft.com/en-us/rest/api/azure/devops/pipelines/preview/preview?view=azure-devops-rest-7.1)
+accepts `previewRun: true` and returns `finalYaml` without creating a run.
+Bind `resources.repositories.self.refName` and `version` to the chosen
+branch and commit. Exercise the default parameters, deployment versus dry
+run, each environment mapping, sample selectors and setup template options.
+`yamlOverride` replaces the entry document, so bind referenced templates
+to the same candidate too. Treat a rejected request or absent final YAML
+as a failed check. Keep expanded YAML private.
+
+Use a dedicated validation project or explicitly authorized pipeline
+definitions. Preview is a separate operation from queueing a build and
+does not establish script behavior, runtime authentication, environment
+approval or deployment success. A hosted CI run needs no Azure deployment
+identity. A deployment dry run still authenticates and can perform planning
+reads or compiler acquisition. Qualify that boundary and actual deployment
+only with the corresponding approval and scoped targets.
+
+### Run the automated template preview
+
+Register `.pipelines/validate-pipelines.yaml` as a separate, manually
+invoked validation pipeline. It consumes existing pipeline definitions,
+not Azure deployment credentials. Supply the numeric definition IDs for
+`.pipelines/ci.yaml`, `deploy.yaml` and `integration-test.yaml` through
+`pipelineIds`, along with the real service connection and variable group
+name mappings to validate.
+
+The validator reads those definitions and requires their source repository
+and entry YAML paths to match its own candidate. It then calls only the
+dedicated `/preview` endpoint, with the validation run's branch and commit
+bound to every request. Setup templates, environment mappings, planning
+versus deployment, custom selectors, resource-set samples and integration
+phases are checked without running the selected jobs. Both the default
+session setting and explicit WIF refresh are checked for deploy and
+integration tasks.
+
+Grant the validation build identity read access to the selected definitions
+and repositories, and the resource authorization needed for template
+expansion in that project. The Preview API documents `vso.build` scope.
+The job uses its explicitly mapped `System.AccessToken`, never a token in
+the repository or an interactive login. Do not grant Azure resource roles
+to run template previews.
+
+Run only reviewed pipeline source with this token. There is no automatic
+PR trigger, pipeline creation or fallback to queueing builds. The uploaded
+receipt contains the candidate commit, fixed case names and expansion
+digests. Expanded YAML, resource names and raw service diagnostics are not
+uploaded. A missing definition, mismatched repository, unsupported expansion
+or failed request fails validation.
+
+A separate customer-repository rehearsal should use the reusable-template
+example above and confirm both checkouts, engine origin, workspace selection
+and configured overrides. Local tests exercise those script/path boundaries.
+Only a separately approved hosted run qualifies repository service
+connections, agent tasks and Azure authentication. A preview success does
+not establish those outcomes. For WIF refresh, retain the actual task version
+and run long enough to exercise token renewal and a subsequent authorized
+Azure operation. Confirm refresh failure is visible and the final task result
+preserves any deployment failure. Local controls and template previews do
+not establish that live token lifecycle.
 
 ### Per-environment migration
 

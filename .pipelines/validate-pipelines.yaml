@@ -1,0 +1,64 @@
+# Preview the selected pipeline definitions without executing their jobs.
+trigger: none
+pr: none
+
+parameters:
+  - name: pipelineIds
+    displayName: Existing CI, deploy and integration pipeline IDs
+    type: object
+    default:
+      ci: 0
+      deploy: 0
+      integration: 0
+  - name: serviceConnections
+    displayName: Service connection names to validate per environment
+    type: object
+    default:
+      dev: azure-siteops
+      staging: azure-siteops
+      prod: azure-siteops
+  - name: secretGroups
+    displayName: Variable group names to validate per environment
+    type: object
+    default:
+      dev: siteops-secrets
+      staging: siteops-secrets
+      prod: siteops-secrets
+
+pool:
+  vmImage: ubuntu-24.04
+
+jobs:
+  - job: preview
+    displayName: Preview pipeline templates
+    timeoutInMinutes: 20
+    steps:
+      - checkout: self
+        fetchDepth: 1
+        persistCredentials: false
+
+      - template: templates/setup-siteops.yaml
+
+      - script: |
+          set -euo pipefail
+          umask 077
+          python3 scripts/preview-ado-pipelines.py \
+            --output "$RESULTS_DIRECTORY/pipeline-preview.json"
+        displayName: Preview the exact source candidate
+        env:
+          SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+          SYSTEM_COLLECTIONURI: $(System.CollectionUri)
+          SYSTEM_TEAMPROJECTID: $(System.TeamProjectId)
+          BUILD_REPOSITORY_URI: $(Build.Repository.Uri)
+          BUILD_SOURCEBRANCH: $(Build.SourceBranch)
+          BUILD_SOURCEVERSION: $(Build.SourceVersion)
+          ADO_PREVIEW_PIPELINE_IDS: ${{ convertToJson(parameters.pipelineIds) }}
+          ADO_PREVIEW_CONNECTIONS: ${{ convertToJson(parameters.serviceConnections) }}
+          ADO_PREVIEW_GROUPS: ${{ convertToJson(parameters.secretGroups) }}
+          RESULTS_DIRECTORY: $(Build.ArtifactStagingDirectory)
+
+      - task: PublishPipelineArtifact@1
+        displayName: Publish preview receipt
+        inputs:
+          targetPath: $(Build.ArtifactStagingDirectory)/pipeline-preview.json
+          artifact: pipeline-preview

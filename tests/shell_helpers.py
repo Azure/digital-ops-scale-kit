@@ -44,13 +44,15 @@ def write_executable(path: Path, content: str) -> None:
 
 def run_script(
     script: str, tmp_path: Path, exports: dict[str, str],
+    *, shell_options: tuple[str, ...] = ("-e", "-o", "pipefail"),
 ) -> subprocess.CompletedProcess[str]:
     """Run one workflow step's shell with exported inputs and no profile state.
 
     A `bin` directory under `tmp_path` is placed first on `PATH`, so a test can
-    hand the step recording or failing stand-ins for the tools it calls. The
-    step runs under the same `-e -o pipefail` options the runner applies, from
-    `tmp_path`, and its completed process is returned unchecked.
+    hand the step recording or failing stand-ins for the tools it calls.
+    The default options match GitHub Actions. Pass an empty tuple for Azure
+    Pipelines, whose script must establish its own error handling.
+    The step runs from `tmp_path` and returns its completed process unchecked.
     """
     bin_dir = tmp_path / "bin"
     preamble = []
@@ -64,9 +66,7 @@ def run_script(
             str(required_bash()),
             "--noprofile",
             "--norc",
-            "-e",
-            "-o",
-            "pipefail",
+            *shell_options,
             bash_path(script_path),
         ],
         cwd=tmp_path,

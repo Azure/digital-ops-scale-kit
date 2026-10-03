@@ -179,14 +179,25 @@ these steps:
    workspace routing descriptor.
 4. Installs the selected engine from its authenticated lock and checks package
    compatibility, protected cache use, and guarded catalog loading on every
-   declared Windows or Linux Python target.
+   declared Windows or Linux Python target. Each target also creates an
+   operator project for the first declared workspace through the installed engine.
 5. Requires all qualification results to identify the same engine, workspace
-   inventory, and release plan, then freezes the complete publication
+   inventory, release plan and project pin, then freezes the complete publication
    inventory.
+6. Admits that frozen payload from the selected producer run and attempt.
+   A separate job checks the artifact IDs, complete inventory, exact bytes
+   and subject provenance before retaining an admission receipt.
 
 Workspace qualification does not compare executable deployment plans,
 authorize targets, deploy resources, or evaluate workload health. Publication
 remains a separate approval step.
+
+Candidate admission accepts a completed producer even while the surrounding
+release workflow is still running or awaiting approval. Its receipt records
+the source, caller, run, attempt and selected digests, and explicitly marks
+installation and deployment as not run. It is an input gate for subsequent
+acceptance, not evidence of a fleet deployment or workload readiness.
+Preview admission retains its preview identity and cannot authorize publication.
 
 The default preview's final summary shows one matrix of Python versions and
 platforms, plus a link to the attested release assets. Individual job logs
@@ -207,6 +218,54 @@ and qualification required by its declaration. Script commands that accept
 `--dry-run` can instead perform unsigned local preparation. The flag alone
 does not imply signing. The approval UI and release upload still require a
 configured environment and explicit approval.
+
+## Fleet resource ownership
+
+The qualification helpers in `scripts/manage-release-fleet.py` operate on
+two fixed slots rather than accepting arbitrary resource-group names.
+Each operation binds the selected admission receipt, acceptance run/attempt
+and explicit Azure subscription. The public scope binding and Azure resource
+names are derived separately, so the receipt does not disclose target names.
+
+Preflight requires both groups to be absent and records hashes of distinct
+private ownership markers. Retain its ownership receipt durably before
+allowing creation, including when later provisioning might fail. Preflight
+and creation also require `--allocation-state PATH`: preflight writes the
+private markers there, and creation reads that same file. Never upload it.
+Creation and cleanup require `--execute`, the ownership receipt and its
+selected digest. These tools use the caller's approved Azure identity and
+do not sign in or grant permissions.
+Take the receipt and expected digest from the trusted qualification run,
+not deployment content. A digest check establishes identity, not authority.
+
+Creation binds each group through Azure's immutable `managedBy` property.
+An existing group with another value cannot acquire this run's marker
+through an update. Cleanup requires that property's hash to match the
+original receipt, together with the expected resource identity and tags.
+Receipts without marker commitments are not sufficient for automatic cleanup.
+Cleanup observes both groups until absence is confirmed or a bounded deadline
+expires. Missing ownership, residual resources and unknown observations
+remain explicit failing outcomes. An accepted deletion request is not
+confirmation that deletion finished. Cleanup preserves an earlier operation
+failure or interruption code even when resource removal succeeds.
+
+The ownership receipt supports a separately authorized reconciliation after
+cancellation. Reuse the original candidate, run/attempt and subscription.
+Reconciliation downloads the original receipt by its bound artifact ID with
+digest checking, rather than regenerating its commitments. Then repeat the
+ownership checks. Never substitute a subscription-wide search or general
+resource janitor. Keep provider diagnostics and allocation state private.
+These helpers do not install Site Ops, deploy AIO or establish workload health.
+
+The producer's **Fleet qualification selection** summary identifies the
+exact admitted plan, engine, workspaces and inventory for the manual
+`scenario=fleet` E2E path. See [fleet acceptance and its runtime budget](e2e-testing.md#qualify-one-exact-candidate-across-two-sites).
+That path installs the selected engine outside checkout, seeds the normal
+operator project, coordinates two live hosts, and requires bound deployment,
+readiness and cleanup receipts. It does not rebuild candidate assets.
+This standalone workflow does not yet wire all required live scenarios into
+the publication gate. Final release approval still requires that integration
+and evidence from the unchanged candidate.
 
 ## Prepare the real release files
 

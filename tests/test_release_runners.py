@@ -55,10 +55,12 @@ def test_linux_unit_gate_requires_native_archives_on_the_supported_host():
         "SITEOPS_TEST_UV_PYTHON_ARCHIVE", "SITEOPS_REQUIRE_LINUX_UV",
     ):
         assert variable in setup
-    assert "6590717592ace991ff83a63fef799e3ad9d33ecc8f96c5d6bdd732496e79337f" in setup
-    assert "68c6739376b65258dee5058ccf6777232fe38d31a578965ae8bda327ec7da3a8" in setup
-    assert setup.index("sha256sum --check") < setup.index("tar -xzf")
-    assert "command -v openssl" in setup
+    assert 'bash tests/fixtures/prepare-native-uv.sh "$fixtures"' in setup
+    fixture = (ROOT / "tests" / "fixtures" / "prepare-native-uv.sh").read_text()
+    assert "6590717592ace991ff83a63fef799e3ad9d33ecc8f96c5d6bdd732496e79337f" in fixture
+    assert "68c6739376b65258dee5058ccf6777232fe38d31a578965ae8bda327ec7da3a8" in fixture
+    assert fixture.index("sha256sum --check") < fixture.index("tar -xzf")
+    assert "command -v openssl" in fixture
 
 
 def test_windows_gate_runs_native_consumers_and_generated_entries():
@@ -198,7 +200,7 @@ def test_production_admission_requires_explicit_repository_opt_in(tmp_path):
 
 
 @pytest.mark.parametrize("name,secured,public", [
-    ("_release-candidate.yaml", {"prepare", "workspace-assets", "engine-input", "review"}, {"workspace-qualify", "workspace-qualified"}),
+    ("_release-candidate.yaml", {"prepare", "workspace-assets", "engine-input", "review"}, {"workspace-qualify", "workspace-qualified", "admit"}),
     ("_siteops-distribution.yaml", {"build", "attest"}, {"qualify", "summary"}),
     ("_workspace-distribution.yaml", {"build", "attest"}, set()),
     ("release.yaml", {"publish"}, set()),

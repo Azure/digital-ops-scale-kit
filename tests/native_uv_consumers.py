@@ -1,14 +1,18 @@
 """Readonly native fixtures copied into one test-owned uv qualification area."""
 
+import ctypes
 import hashlib
 import os
 import shutil
 import subprocess
 import sys
 import tarfile
+from ctypes import wintypes
 from pathlib import Path
 
 import pytest
+
+from siteops.arm_resources_azure_cli import _CREATE_SUSPENDED, _WindowsJob
 
 UV_DIGESTS = {
     "win32": "a0d2742d49564a32488753b02e76276e7b5ef1b1ea8cf30bcbf06ee28f60cd73",
@@ -20,9 +24,94 @@ LINUX_UV_ARCHIVE_SHA256 = "6590717592ace991ff83a63fef799e3ad9d33ecc8f96c5d6bdd73
 LINUX_UV_ARCHIVE_SIZE = 19827214
 
 
+def _windows_child_names(job: _WindowsJob) -> list[str]:
+    class ProcessIds(ctypes.Structure):
+        _fields_ = [
+            ("assigned", wintypes.DWORD), ("count", wintypes.DWORD),
+            ("ids", ctypes.c_size_t * 16),
+        ]
+
+    kernel = job._kernel
+    processes = ProcessIds()
+    if not kernel.QueryInformationJobObject(
+        job._handle, 3, ctypes.byref(processes), ctypes.sizeof(processes), None,
+    ):
+        return ["process-query-unavailable"]
+    if processes.count > 16:
+        return ["process-query-limit"]
+    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD),
+    ]
+    kernel.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    names = []
+    for pid in processes.ids[:processes.count]:
+        handle = kernel.OpenProcess(0x1000, False, pid)
+        if not handle:
+            names.append("exited-or-unavailable")
+            continue
+        try:
+            size = wintypes.DWORD(32768)
+            image = ctypes.create_unicode_buffer(size.value)
+            if not kernel.QueryFullProcessImageNameW(handle, 0, image, ctypes.byref(size)):
+                names.append("image-query-unavailable")
+                continue
+            name = Path(image.value).name.casefold()
+            names.append(name if name in {"powershell.exe", "python.exe", "uv.exe"} else "other")
+        finally:
+            kernel.CloseHandle(handle)
+    return sorted(names)
+
+
+def run_windows_installer(
+    arguments: list[str], *, environment: dict[str, str], cwd: Path,
+    phase: Path, timeout: float = 60,
+) -> subprocess.CompletedProcess[str]:
+    """Keep timeout diagnostics bounded and stop only this invocation's process tree."""
+    job = _WindowsJob()
+    try:
+        process = subprocess.Popen(
+            arguments, env=environment, cwd=cwd, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            creationflags=_CREATE_SUSPENDED,
+        )
+        try:
+            job.assign_and_resume(process)
+            try:
+                stdout, stderr = process.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                try:
+                    with phase.open("rb") as stream:
+                        observed = stream.read(64)
+                except FileNotFoundError:
+                    observed = b"not-started"
+                stages = {
+                    b"not-started", b"extracting-helper", b"checking-payload", b"complete",
+                }
+                stage = observed.decode("ascii") if observed in stages else "invalid-phase"
+                names = ",".join(_windows_child_names(job)) or "none"
+                pytest.fail(
+                    f"Windows installer timed out: phase={stage}, "
+                    f"launcher_exited={process.poll() is not None}, processes={names}",
+                    pytrace=False,
+                )
+            return subprocess.CompletedProcess(arguments, process.returncode, stdout, stderr)
+        finally:
+            try:
+                job.stop(process)
+            finally:
+                job.close()
+                for stream in (process.stdout, process.stderr):
+                    if stream is not None:
+                        stream.close()
+    finally:
+        job.close()
+
+
 def _required() -> bool:
     gate = "SITEOPS_REQUIRE_WINDOWS_UV" if os.name == "nt" else "SITEOPS_REQUIRE_LINUX_UV"
-    return bool(os.environ.get("CI") or os.environ.get(gate) == "1")
+    return bool(os.environ.get("CI") or os.environ.get("TF_BUILD") or os.environ.get(gate) == "1")
 
 
 def _unavailable(message: str) -> None:

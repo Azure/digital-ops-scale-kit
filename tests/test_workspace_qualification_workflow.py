@@ -25,6 +25,11 @@ def test_engine_selection_and_qualification_hold_only_read_permissions():
     assert qualification["strategy"]["matrix"] == "${{ fromJSON(needs.engine-input.outputs.matrix) }}"
     assert qualification["runs-on"] == "${{ matrix.os }}"
     assert qualification["strategy"]["max-parallel"] == 4
+    assert qualification["env"]["PROJECT_WORKSPACE"] == "${{ needs.prepare.outputs.project-workspace }}"
+    script = next(step["run"] for step in qualification["steps"]
+                  if step.get("name") == "Qualify through the installed engine")
+    assert '--project-workspace "$PROJECT_WORKSPACE"' in script
+    assert '--plan "$temp/qualification-project-plan/plan.json"' in script
     assert "workspace-qualified" in WORKFLOW["jobs"]["review"]["needs"]
     assert "needs.workspace-qualified.result == 'success'" in WORKFLOW["jobs"]["review"]["if"]
     for row in qualification["steps"]:
@@ -33,7 +38,10 @@ def test_engine_selection_and_qualification_hold_only_read_permissions():
             assert row["with"]["digest-mismatch"] == "error"
 
 
-@pytest.mark.parametrize("fault", [None, "missing", "extra", "engine", "workspace", "plan", "target", "count", "deployment"])
+@pytest.mark.parametrize("fault", [
+    None, "missing", "extra", "engine", "workspace", "plan", "target", "count", "deployment",
+    "project-missing", "project-workspace", "project-pin", "project-publication",
+])
 def test_complete_qualification_results_are_bound_to_exact_inputs(tmp_path, fault):
     (tmp_path / "bin").mkdir()
     write_executable(tmp_path / "bin" / "python3", '#!/usr/bin/env bash\nexec "$TEST_PYTHON" "$@"\n')
@@ -70,6 +78,10 @@ def test_complete_qualification_results_are_bound_to_exact_inputs(tmp_path, faul
             "workspaceInventorySha256": "c" * 64, "planSha256": plan_sha,
             "target": target, "packages": 1, "catalogManifests": 2,
             "deployment": "not-run", "workloadHealth": "not-checked",
+            "project": {
+                "workspace": "workspace", "pinSha256": "f" * 64,
+                "sourceReleaseObservation": "not-performed",
+            },
         }
         if index == 0:
             if fault in {"engine", "workspace", "plan"}:
@@ -81,6 +93,14 @@ def test_complete_qualification_results_are_bound_to_exact_inputs(tmp_path, faul
                 report["packages"] = True
             elif fault == "deployment":
                 report["deployment"] = "succeeded"
+            elif fault == "project-missing":
+                del report["project"]
+            elif fault == "project-workspace":
+                report["project"]["workspace"] = "other"
+            elif fault == "project-pin":
+                report["project"]["pinSha256"] = "a" * 64
+            elif fault == "project-publication":
+                report["project"]["sourceReleaseObservation"] = "published"
         (path / "workspace-qualification.json").write_text(json.dumps(report))
     if fault == "extra":
         (results / "unexpected").mkdir()

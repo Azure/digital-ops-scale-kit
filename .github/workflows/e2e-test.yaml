@@ -24,12 +24,12 @@ on:
   workflow_dispatch:
     inputs:
       scenario:
-        description: Select AIO E2E or a Windows installer check without Azure.
+        description: Select AIO E2E, exact-candidate fleet qualification/reconciliation, or a Windows installer check.
         type: choice
-        options: [aio, windows-installer-preflight]
+        options: [aio, fleet, fleet-cleanup, windows-installer-preflight]
         default: aio
       aio-releases:
-        description: Comma-separated AIO releases to fan out over (e.g. "2607,2608").
+        description: "AIO scenario only: comma-separated releases (e.g. 2607,2608). Fleet uses fixed 2607 and 2608 targets."
         type: string
         default: "2608"
       environment:
@@ -65,7 +65,7 @@ on:
         type: string
         default: ""
       secret-sync-modes:
-        description: "Comma-separated modes: enabled,disabled. Disabled mode omits Secret Sync, OIDC issuer, and workload identity. Use both modes with tests=aio-upgrade to qualify optionality."
+        description: "AIO scenario only: enabled,disabled. Disabled omits Secret Sync, OIDC issuer and workload identity. Fleet has Secret Sync disabled."
         type: string
         default: "enabled"
       tests:
@@ -85,6 +85,18 @@ on:
         type: choice
         options: [configured, guided]
         default: configured
+      fleet-candidate:
+        description: "Fleet modes only: exact FleetCandidate JSON from the producer's admission summary."
+        type: string
+        default: ""
+      fleet-original-run:
+        description: "Fleet cleanup only: original acceptance workflow run ID."
+        type: string
+        default: ""
+      fleet-original-attempt:
+        description: "Fleet cleanup only: original acceptance workflow attempt."
+        type: string
+        default: ""
 
 permissions:
   id-token: write
@@ -99,6 +111,73 @@ env:
   AZURE_CORE_OUTPUT: none
 
 jobs:
+  fleet-request:
+    name: Validate fleet request
+    if: inputs.scenario == 'fleet' || inputs.scenario == 'fleet-cleanup'
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - name: Require an explicit fleet scope
+        shell: python
+        run: |
+          import json, os, re
+          with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as stream:
+              request = json.load(stream)["inputs"]
+          if not request.get("fleet-candidate"):
+              raise SystemExit("Fleet scenarios require the exact candidate selection.")
+          if (str(request.get("skip-teardown", "false")).lower() == "true"
+                  or str(request.get("keep-cluster-alive-minutes", "0")) not in {"", "0"}
+                  or any(request.get(key, "").strip() for key in (
+                      "resource-group", "cluster-name", "custom-locations-oid", "upgrade-to",
+                      "tests", "published-release", "published-source-sha",
+                  ))):
+              raise SystemExit("Fleet scenarios use two owned targets and mandatory cleanup, not single-Site overrides.")
+          prior = (request.get("fleet-original-run", ""), request.get("fleet-original-attempt", ""))
+          if request["scenario"] == "fleet-cleanup":
+              if not all(re.fullmatch("[1-9][0-9]{0,19}", value) for value in prior):
+                  raise SystemExit("Fleet reconciliation requires the original run and attempt.")
+          elif any(prior):
+              raise SystemExit("Original run inputs apply only to fleet cleanup.")
+          print("The fleet request has an explicit bounded scope.")
+
+  fleet:
+    name: Fleet
+    needs: fleet-request
+    if: inputs.scenario == 'fleet'
+    uses: ./.github/workflows/_fleet-acceptance.yaml
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    with:
+      candidate: ${{ inputs.fleet-candidate }}
+      environment: ${{ inputs.environment }}
+      location: ${{ inputs.location }}
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      CUSTOM_LOCATIONS_OID: ${{ secrets.CUSTOM_LOCATIONS_OID }}
+
+  fleet-cleanup:
+    name: Fleet reconciliation
+    needs: fleet-request
+    if: inputs.scenario == 'fleet-cleanup'
+    uses: ./.github/workflows/_fleet-reconcile.yaml
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    with:
+      candidate: ${{ inputs.fleet-candidate }}
+      original-run: ${{ inputs.fleet-original-run }}
+      original-attempt: ${{ inputs.fleet-original-attempt }}
+      environment: ${{ inputs.environment }}
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
   windows-installer-preflight:
     if: inputs.scenario == 'windows-installer-preflight'
     runs-on: windows-2025

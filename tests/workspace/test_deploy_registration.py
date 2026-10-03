@@ -24,7 +24,7 @@ from tests.shell_helpers import (
     bash_path as _bash_path,
 )
 from tests.shell_helpers import (
-    required_bash as _required_bash,
+    run_script,
 )
 from tests.shell_helpers import (
     write_executable as _write_executable,
@@ -190,9 +190,23 @@ def _run_delivery_plan_script(
     run_step: bool = False,
     deploy_exit: int = 0,
     run_document_mode: str = "valid",
+    auxiliary_failure: str = "",
+    workspace: str = "workspace",
+    manifest: str = "manifests/install.yaml",
+    selector: str = "",
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path]:
     script, redaction = _delivery_plan_case(platform, run_step=run_step)
     bin_dir, invocation_log = _install_fake_delivery_tools(tmp_path)
+    if auxiliary_failure:
+        name = "cat" if auxiliary_failure == "report" else "rm"
+        code = 41 if name == "cat" else 42
+        selected_file = "siteops-run.json" if run_step else "siteops-plan.json"
+        _write_executable(
+            bin_dir / name,
+            f'#!/usr/bin/env bash\ncase "$*" in\n'
+            f'  *{selected_file}*) exit {code} ;;\n'
+            f'  *) exec /usr/bin/{name} "$@" ;;\nesac\n',
+        )
     temp_dir = tmp_path / "runner-temp"
     summary_dir = tmp_path / "summaries"
     temp_dir.mkdir()
@@ -200,7 +214,6 @@ def _run_delivery_plan_script(
     github_summary = summary_dir / "github-summary.md"
 
     exports = {
-        "PATH_PREFIX": _bash_path(bin_dir),
         "FAKE_SITEOPS_LOG": _bash_path(invocation_log),
         "FAKE_PLAN_EXIT": str(plan_exit),
         "FAKE_PLAN_DOCUMENT_VALID": "1" if valid_document else "0",
@@ -208,42 +221,22 @@ def _run_delivery_plan_script(
         "FAKE_DEPLOY_EXIT": str(deploy_exit),
         "FAKE_RUN_DOCUMENT_MODE": run_document_mode,
         "SITEOPS_REDACT_OUTPUT": redaction,
-        "INPUT_WORKSPACE": "workspace",
-        "INPUT_MANIFEST": "manifests/install.yaml",
-        "INPUT_SELECTOR": "",
+        "INPUT_WORKSPACE": workspace,
+        "INPUT_MANIFEST": manifest,
+        "INPUT_SELECTOR": selector,
         "INPUT_DRY_RUN": "true" if dry_run else "false",
         "RUNNER_TEMP": _bash_path(temp_dir),
         "GITHUB_STEP_SUMMARY": _bash_path(github_summary),
-        "WORKSPACE": "workspace",
-        "MANIFEST": "manifests/install.yaml",
-        "SELECTOR": "",
+        "WORKSPACE": workspace,
+        "MANIFEST": manifest,
+        "SELECTOR": selector,
         "DRY_RUN": "True" if dry_run else "False",
         "PLAN_TEMP_DIRECTORY": _bash_path(temp_dir),
         "PLAN_SUMMARY_DIRECTORY": _bash_path(summary_dir),
     }
-    preamble = [
-        f"export PATH={shlex.quote(exports.pop('PATH_PREFIX'))}:\"$PATH\""
-    ]
-    preamble.extend(
-        f"export {name}={shlex.quote(value)}"
-        for name, value in exports.items()
-    )
-    command = "\n".join((*preamble, script))
-
-    result = subprocess.run(
-        [
-            str(_required_bash()),
-            "--noprofile",
-            "--norc",
-            *(("-e", "-o", "pipefail") if platform == "github" else ()),
-            "-c",
-            command,
-        ],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=60,
+    result = run_script(
+        script, tmp_path, exports,
+        shell_options=("-e", "-o", "pipefail") if platform == "github" else (),
     )
     summary_path = (
         github_summary
@@ -624,3 +617,47 @@ class TestDeployDropdownRegistration:
         assert "--projection publishable" in invocations[-1]
         assert not (temp_dir / "siteops-run.json").exists()
         assert not (temp_dir / "siteops-run.stderr").exists()
+
+    @pytest.mark.parametrize("platform", ["github", "azure-pipelines"])
+    @pytest.mark.parametrize("run_step", [False, True], ids=["plan", "deploy"])
+    @pytest.mark.parametrize("auxiliary_failure", ["report", "cleanup"])
+    @pytest.mark.parametrize("operation_exit", [0, 23, 130])
+    def test_reporting_and_cleanup_preserve_the_original_operation_failure(
+        self, tmp_path, platform, run_step, auxiliary_failure, operation_exit,
+    ):
+        result, _, temp_dir, _ = _run_delivery_plan_script(
+            platform, tmp_path,
+            plan_exit=0 if run_step else operation_exit,
+            valid_document=True, dry_run=not run_step, run_step=run_step,
+            deploy_exit=operation_exit if run_step else 0,
+            auxiliary_failure=auxiliary_failure,
+        )
+        expected = operation_exit or (41 if auxiliary_failure == "report" else 42)
+        assert result.returncode == expected, (result.stdout, result.stderr)
+        assert "PRIVATE" not in result.stdout + result.stderr
+        if auxiliary_failure == "report":
+            assert not list(temp_dir.iterdir())
+
+    @pytest.mark.parametrize("dry_run", [False, True])
+    def test_ado_consumer_preserves_caller_workspace_manifest_and_target_selection(
+        self, tmp_path, dry_run,
+    ):
+        workspace = "workspaces/operator-workspace"
+        manifest = "manifests/custom-resources.yaml"
+        selector = "environment=prod,name=target-one"
+        result, _, _, invocation_log = _run_delivery_plan_script(
+            "azure-pipelines", tmp_path, plan_exit=0, valid_document=True, dry_run=dry_run,
+            workspace=workspace, manifest=manifest, selector=selector,
+        )
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        observed = [shlex.split(line)[1:] for line in invocation_log.read_text().splitlines()]
+        expected = [[
+            "-w", workspace, "plan", manifest, "--output", "json",
+            "--projection", "publishable", "-l", selector,
+        ]]
+        if not dry_run:
+            expected.append([
+                "-w", workspace, "deploy", manifest, "--yes", "--output", "json",
+                "--projection", "publishable", "-l", selector,
+            ])
+        assert observed == expected
