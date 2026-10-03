@@ -159,7 +159,7 @@ def main() -> int:
             attempt=int(os.environ["GITHUB_RUN_ATTEMPT"]), subscription=os.environ["AZURE_SUBSCRIPTION_ID"],
         )
         ownership = expected_document(args.ownership, args.expected_ownership_sha)
-        validate_ownership(scope, ownership)
+        owned_slots = validate_ownership(scope, ownership)
         qualification = read_json(args.qualification)
         project = args.state / "probe-state" / "operator"
         cache = args.state / "probe-state" / "cache"
@@ -175,7 +175,7 @@ def main() -> int:
         ):
             raise FleetRunError("The controller project differs from installed qualification.")
         groups = AzureGroups(scope, args.state / "group-observations")
-        if any(not scope.owns(slot, groups.show(slot)) for slot in RELEASES):
+        if any(not scope.owns(slot, groups.show(slot), owned_slots[slot]["ownerSha256"]) for slot in RELEASES):
             raise FleetRunError("Fleet deployment requires the owned resource groups.")
         python = args.state / "application" / "bin" / "python"
         command = args.state / "application" / "bin" / "siteops"

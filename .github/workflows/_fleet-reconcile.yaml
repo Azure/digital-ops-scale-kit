@@ -97,10 +97,11 @@ jobs:
         env:
           PYTHON: ${{ steps.tools.outputs.python }}
           ADMISSION_SHA: ${{ steps.select.outputs.admission-sha }}
-          OWNERSHIP_SHA: ${{ steps.ownership.outputs.ownership-sha }}
         run: |
           set -euo pipefail
           umask 077
+          # The preceding download verifies the selected original artifact's digest.
+          OWNERSHIP_SHA="$(sha256sum "$RUNNER_TEMP/fleet/ownership/ownership.json" | cut -d ' ' -f 1)"
           "$PYTHON" -B scripts/manage-release-fleet.py cleanup --execute \
             --admission "$RUNNER_TEMP/fleet/admission/receipt.json" --expected-admission-sha "$ADMISSION_SHA" \
             --ownership "$RUNNER_TEMP/fleet/ownership/ownership.json" --expected-ownership-sha "$OWNERSHIP_SHA" \

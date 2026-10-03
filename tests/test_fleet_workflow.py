@@ -367,8 +367,9 @@ def test_selection_entrypoint_reads_only_the_bound_producer_before_publishing_ou
 
 
 @pytest.mark.parametrize("uploaded", [False, True])
+@pytest.mark.parametrize("digest", ["sha256:" + "e" * 64, None])
 def test_reconciliation_uses_original_execution_and_requires_the_prewrite_upload(
-    inputs, monkeypatch, uploaded,
+    inputs, monkeypatch, uploaded, digest,
 ):
     root, value, _ = inputs
     script = load_script("coordinate-release-fleet")
@@ -405,17 +406,58 @@ def test_reconciliation_uses_original_execution_and_requires_the_prewrite_upload
                 }]}]
             return [{"artifacts": [{
                 "id": 500, "name": "fleet-ownership-50-2", "expired": False,
+                "size_in_bytes": 1000, "digest": digest,
                 "workflow_run": {"id": 50, "head_sha": SOURCE["commit"]},
             }]}]
 
     monkeypatch.setattr(script, "GitHubReads", Reads)
     monkeypatch.setattr(sys, "argv", ["coordinate-release-fleet.py", "ownership", "--root", str(root)])
-    assert script.main() == (0 if uploaded else 1)
+    assert script.main() == (0 if uploaded and digest else 1)
     assert all("/runs/50/" in endpoint for endpoint in calls)
-    if uploaded:
+    if uploaded and digest:
         assert "ownership-id=500" in output.read_text()
+        assert "ownership-sha" not in output.read_text()
     else:
-        assert not output.exists() and len(calls) == 2
+        assert not output.exists() and len(calls) == (3 if uploaded else 2)
+
+
+@pytest.mark.parametrize("matching_owner", [False, True])
+def test_host_requires_the_committed_immutable_owner(inputs, monkeypatch, capsys, matching_owner):
+    root, value, _ = inputs
+    script = load_script("coordinate-release-fleet")
+    subscription = "00000000-0000-0000-0000-000000000001"
+    for key, content in {
+        "FLEET_RUN_ID": "50", "FLEET_RUN_ATTEMPT": "1", "AZURE_SUBSCRIPTION_ID": subscription,
+    }.items():
+        monkeypatch.setenv(key, content)
+    selected = parse(value)
+    monkeypatch.setattr(script, "candidate", lambda: selected)
+    monkeypatch.setattr(script, "FleetBudget", SimpleNamespace(
+        from_environment=lambda: SimpleNamespace(remaining=lambda *args: 60),
+    ))
+    scope = script.scope_for(selected, root, run=50, attempt=1, subscription=subscription)
+    owners = {"one": "siteops-fleet-" + "1" * 64, "two": "siteops-fleet-" + "2" * 64}
+    ownership = root / "host-ownership.json"
+    ownership.write_text(json.dumps({
+        "apiVersion": "siteops.release.fleet/v1", "kind": "FleetOwnership",
+        "context": scope.context(), "scopeKey": scope.key,
+        "slots": {slot: {"admittedAbsent": True, "ownerSha256": hashlib.sha256(owner.encode()).hexdigest()}
+                  for slot, owner in owners.items()},
+    }))
+    observed = {
+        "id": f"/subscriptions/{subscription}/resourceGroups/{scope.group('one')}",
+        "name": scope.group("one"), "tags": scope.tags("one"),
+        "managedBy": owners["one" if matching_owner else "two"],
+    }
+    monkeypatch.setattr(script, "AzureGroups", lambda *args: SimpleNamespace(show=lambda slot: observed))
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: pytest.fail("Live request escaped the fixture."))
+    monkeypatch.setattr(sys, "argv", [
+        "coordinate-release-fleet.py", "check-ownership", "--root", str(root), "--slot", "one",
+        "--ownership", str(ownership), "--expected-ownership-sha", hashlib.sha256(ownership.read_bytes()).hexdigest(),
+    ])
+    assert script.main() == (0 if matching_owner else 1)
+    captured = capsys.readouterr()
+    assert all(owner not in captured.out + captured.err for owner in owners.values())
 
 
 def test_workflow_keeps_hosts_live_and_uploads_ownership_before_creation():
@@ -449,6 +491,36 @@ def test_workflow_keeps_hosts_live_and_uploads_ownership_before_creation():
     caller = yaml.safe_load((ROOT / ".github/workflows/e2e-test.yaml").read_text())
     assert caller["jobs"]["fleet"]["if"] == "inputs.scenario == 'fleet'"
     assert caller["jobs"]["fleet-cleanup"]["if"] == "inputs.scenario == 'fleet-cleanup'"
+
+
+def test_allocation_markers_stay_private_and_cleanup_consumes_verified_original_receipts():
+    flow = yaml.safe_load((ROOT / ".github/workflows/_fleet-acceptance.yaml").read_text())
+    steps = flow["jobs"]["prepare"]["steps"]
+    preflight = next(step for step in steps if step.get("id") == "preflight")
+    creation = next(step for step in steps if step.get("name") == "Create owned resource groups")
+    upload = next(step for step in steps if step.get("id") == "ownership")
+    for step in (preflight, creation):
+        assert '--allocation-state "$root/allocation.json"' in step["run"]
+    assert upload["with"]["path"] == "${{ runner.temp }}/fleet/ownership.json"
+    for filename, job, run_id, label in (
+        ("_fleet-acceptance.yaml", "cleanup", "${{ github.run_id }}", "Reconcile owned resource groups"),
+        ("_fleet-reconcile.yaml", "reconcile", "${{ inputs.original-run }}", "Reconcile original owned groups"),
+    ):
+        source = yaml.safe_load((ROOT / ".github/workflows" / filename).read_text())
+        steps = source["jobs"][job]["steps"]
+        download = next(step for step in steps if step.get("with", {}).get("path") == (
+            "${{ runner.temp }}/fleet/ownership"
+        ))
+        assert download["with"]["artifact-ids"] == "${{ steps.ownership.outputs.ownership-id }}"
+        assert download["with"]["run-id"] == run_id
+        assert download["with"]["repository"] == "${{ github.repository }}"
+        assert download["with"]["digest-mismatch"] == "error"
+        cleanup_step = next(step for step in steps if step.get("name") == label)
+        assert steps.index(download) < steps.index(cleanup_step)
+        assert 'sha256sum "$RUNNER_TEMP/fleet/ownership/ownership.json"' in cleanup_step["run"]
+        assert '--expected-ownership-sha "$OWNERSHIP_SHA"' in cleanup_step["run"]
+        assert "--allocation-state" not in cleanup_step["run"]
+        assert "ownership-sha" not in cleanup_step.get("env", {}).get("OWNERSHIP_SHA", "")
 
 
 @pytest.mark.skipif(os.name != "posix", reason="The fleet command supervisor runs on Linux hosts.")

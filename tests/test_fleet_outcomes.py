@@ -187,6 +187,7 @@ def test_aggregator_rejects_missing_ambiguous_or_unbound_evidence(receipts, faul
 
 @pytest.mark.parametrize(("failure", "expected"), [
     ("none", 0), ("command", 23), ("shutdown-timeout", 124), ("shutdown-output", 125),
+    ("ownership", 1),
 ])
 def test_controller_saves_two_sites_and_runs_exactly_one_deployment(
     tmp_path, monkeypatch, capsys, failure, expected,
@@ -227,11 +228,13 @@ def test_controller_saves_two_sites_and_runs_exactly_one_deployment(
     subscription = "00000000-0000-0000-0000-000000000001"
     scope = FleetScope(source["repository"], source["commit"], artifact_values["admission"]["sha256"],
                        "b" * 64, 50, 1, subscription)
+    owners = {"one": "siteops-fleet-" + "1" * 64, "two": "siteops-fleet-" + "2" * 64}
     ownership = tmp_path / "ownership.json"
     ownership.write_text(json.dumps({
         "apiVersion": "siteops.release.fleet/v1", "kind": "FleetOwnership",
         "context": scope.context(), "scopeKey": scope.key,
-        "slots": {slot: {"admittedAbsent": True} for slot in ("one", "two")},
+        "slots": {slot: {"admittedAbsent": True, "ownerSha256": hashlib.sha256(owner.encode()).hexdigest()}
+                  for slot, owner in owners.items()},
     }))
     environment = {
         "FLEET_CANDIDATE": json.dumps(selection), "GITHUB_REPOSITORY": source["repository"],
@@ -251,7 +254,8 @@ def test_controller_saves_two_sites_and_runs_exactly_one_deployment(
         def show(self, slot):
             name = scope.group(slot)
             return {"id": f"/subscriptions/{subscription}/resourceGroups/{name}",
-                    "name": name, "tags": scope.tags(slot)}
+                    "name": name, "tags": scope.tags(slot),
+                    "managedBy": "another-manager" if failure == "ownership" else owners[slot]}
 
     monkeypatch.setattr(helper, "AzureGroups", Groups)
     monkeypatch.setenv("FLEET_STARTED_AT", str(int(time.time())))
@@ -312,7 +316,9 @@ def test_controller_saves_two_sites_and_runs_exactly_one_deployment(
         "--output", str(output),
     ])
     assert helper.main() == expected
-    assert [name for name, _ in calls] == ["save-one", "save-two", "inspect-plan", "deploy"]
+    assert [name for name, _ in calls] == (
+        [] if failure == "ownership" else ["save-one", "save-two", "inspect-plan", "deploy"]
+    )
     assert bool(observed) is (failure == "none")
     report = json.loads(output.read_text())
     assert report["status"] == ("succeeded" if failure == "none" else "failed")

@@ -4,6 +4,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from dataclasses import replace
@@ -22,9 +23,11 @@ from release_fleet import (  # noqa: E402
     cleanup,
     create,
     preflight,
+    validate_ownership,
 )
 
 SUBSCRIPTION = "00000000-0000-0000-0000-000000000001"
+OWNERS = {"one": "siteops-fleet-" + "1" * 64, "two": "siteops-fleet-" + "2" * 64}
 
 
 @pytest.fixture(autouse=True)
@@ -47,6 +50,8 @@ class Groups:
         self.read_errors = {}
         self.create_failure = None
         self.calls = []
+        self.owners = dict(OWNERS)
+        self.created_owners = {}
 
     def exists(self, slot):
         self.calls.append(("exists", slot))
@@ -62,12 +67,13 @@ class Groups:
         name = self.scope.group(slot)
         return self.observations.get(slot, {
             "name": name, "id": f"/subscriptions/{SUBSCRIPTION}/resourceGroups/{name}",
-            "tags": self.scope.tags(slot),
+            "tags": self.scope.tags(slot), "managedBy": self.created_owners.get(slot),
         })
 
     def create(self, slot, location):
         self.calls.append(("create", slot))
         self.present[slot] = True
+        self.created_owners[slot] = self.owners[slot]
         if self.create_failure == slot:
             raise FleetError("provider-request-failed")
 
@@ -126,13 +132,74 @@ def test_creation_rechecks_absence_and_does_not_take_over_an_existing_group(scop
     assert not any(operation == "create" for operation, _ in groups.calls)
 
 
-def test_creation_requires_the_expected_identity_and_tags_before_the_next_slot(scope):
+@pytest.mark.parametrize("fault", ["identity", "immutable-owner"])
+def test_creation_requires_the_expected_identity_and_tags_before_the_next_slot(scope, fault):
     groups = Groups(scope)
     lease = preflight(scope, groups)
-    groups.observations["one"] = {"name": "other", "id": "other", "tags": {}}
+    groups.observations["one"] = (
+        {"name": "other", "id": "other", "tags": {}}
+        if fault == "identity" else {
+            "name": scope.group("one"),
+            "id": f"/subscriptions/{SUBSCRIPTION}/resourceGroups/{scope.group('one')}",
+            "tags": scope.tags("one"), "managedBy": OWNERS["two"],
+        }
+    )
     with pytest.raises(FleetError, match="ownership-mismatch"):
         create(scope, lease, groups, "eastus")
     assert ("create", "one") in groups.calls and ("create", "two") not in groups.calls
+
+
+@pytest.mark.parametrize("foreign_owner", [None, "", "another-manager"])
+@pytest.mark.parametrize("matching_tags", [False, True])
+def test_intervening_group_is_not_overwritten_or_deleted(
+    scope, tmp_path, foreign_owner, matching_tags,
+):
+    foreign = {
+        "id": f"/subscriptions/{SUBSCRIPTION}/resourceGroups/{scope.group('one')}",
+        "name": scope.group("one"), "managedBy": foreign_owner,
+        "tags": scope.tags("one") if matching_tags else {"owner": "another-actor"},
+    }
+    state = {slot: None for slot in SLOTS}
+    writes = []
+
+    def runner(arguments):
+        assert arguments[:2] == ["az", "group"]
+        slot = next(slot for slot in SLOTS if scope.group(slot) == arguments[arguments.index("--name") + 1])
+        operation = arguments[2]
+        if operation == "exists":
+            return 0, json.dumps(state[slot] is not None).encode(), b""
+        if operation == "show":
+            return 0, json.dumps(state[slot]).encode(), b""
+        if operation == "create":
+            if slot == "one":
+                state[slot] = copy.deepcopy(foreign)
+            owner = arguments[arguments.index("--managed-by") + 1] if "--managed-by" in arguments else None
+            if state[slot] is not None and state[slot].get("managedBy") != owner:
+                return 1, b"", b"ResourceGroupManagedByMismatch"
+            tags = dict(value.split("=", 1) for value in arguments[arguments.index("--tags") + 1:])
+            state[slot] = {
+                "id": f"/subscriptions/{SUBSCRIPTION}/resourceGroups/{scope.group(slot)}",
+                "name": scope.group(slot), "managedBy": owner, "tags": tags,
+            }
+            writes.append(("create", slot))
+            return 0, b"", b""
+        if operation == "delete":
+            writes.append(("delete", slot))
+            state[slot] = None
+            return 0, b"", b""
+        pytest.fail("Unexpected provider operation.")
+
+    groups = AzureGroups(scope, tmp_path / "logs", runner=runner)
+    groups.owners = dict(OWNERS)
+    lease = preflight(scope, groups)
+    with pytest.raises(FleetError, match="provider-request-failed"):
+        create(scope, lease, groups, "eastus")
+    assert state["one"] == foreign
+    code, report, _ = invoke(scope, lease, groups)
+    assert code == 1 and report["slots"]["one"]["state"] == "not-attempted"
+    assert report["slots"]["two"]["state"] == "absent"
+    assert state["one"] == foreign
+    assert writes == []
 
 
 def test_complete_cleanup_observes_absence_and_has_no_private_identities(scope):
@@ -146,12 +213,12 @@ def test_complete_cleanup_observes_absence_and_has_no_private_identities(scope):
     assert [call for call in groups.calls if call[0] == "delete"] == [("delete", "one"), ("delete", "two")]
     encoded = json.dumps(report) + json.dumps(lease)
     assert scope.key[:24] not in scope.group("one")
-    for private in (SUBSCRIPTION, *(scope.group(slot) for slot in SLOTS),
+    for private in (SUBSCRIPTION, *OWNERS.values(), *(scope.group(slot) for slot in SLOTS),
                     *(scope.cluster(slot) for slot in SLOTS)):
         assert private not in encoded
 
 
-@pytest.mark.parametrize("field", ["scope", "slot", "run", "name", "subscription"])
+@pytest.mark.parametrize("field", ["scope", "slot", "run", "name", "subscription", "immutable-owner"])
 def test_cleanup_refuses_foreign_ownership_but_still_cleans_other_slot(scope, field):
     groups = Groups(scope)
     lease = preflight(scope, groups)
@@ -162,6 +229,8 @@ def test_cleanup_refuses_foreign_ownership_but_still_cleans_other_slot(scope, fi
         observed["tags"][key] = "other"
     elif field == "name":
         observed["name"] = "other"
+    elif field == "immutable-owner":
+        observed["managedBy"] = OWNERS["two"]
     else:
         observed["id"] = observed["id"].replace(SUBSCRIPTION, "00000000-0000-0000-0000-000000000002")
     groups.observations["one"] = observed
@@ -318,14 +387,17 @@ def test_actual_management_entrypoint_uses_selected_receipts_and_preserves_exit(
         monkeypatch.setenv(key, value)
     selected = []
 
-    def groups(scope, _logs):
+    def groups(scope, _logs, *, owners=None):
         if not selected:
             selected.append(Groups(scope))
         assert selected[0].scope == scope
+        if owners is not None:
+            selected[0].owners = owners
         return selected[0]
 
     monkeypatch.setattr(module, "AzureGroups", groups)
     ownership = tmp_path / "ownership.json"
+    allocation = tmp_path / "allocation.json"
     for operation in ("preflight", "create", "cleanup"):
         output = ownership if operation == "preflight" else tmp_path / f"{operation}.json"
         args = [
@@ -340,15 +412,24 @@ def test_actual_management_entrypoint_uses_selected_receipts_and_preserves_exit(
             ])
         if operation == "create":
             args.extend(["--location", "eastus"])
+        if operation in {"preflight", "create"}:
+            args.extend(["--allocation-state", str(allocation)])
         if operation == "cleanup":
             args.extend(["--operation-exit", str(operation_exit)])
         monkeypatch.setattr(sys, "argv", args)
         assert module.main() == (operation_exit if operation == "cleanup" else 0)
         assert output.is_file()
+    private = json.loads(allocation.read_text())
+    assert len(set(private["owners"].values())) == 2
+    assert all(len(value) == len("siteops-fleet-") + 64 for value in private["owners"].values())
+    if os.name == "posix":
+        assert allocation.stat().st_mode & 0o777 == 0o600
     report = json.loads((tmp_path / "cleanup.json").read_text())
     assert report["status"] == "complete" and report["operationExit"] == operation_exit
     captured = capsys.readouterr()
     assert SUBSCRIPTION not in captured.out + captured.err
+    assert all(value not in captured.out + captured.err + ownership.read_text()
+               for value in private["owners"].values())
     assert not any(selected[0].present.values())
 
 
@@ -370,3 +451,69 @@ def test_mutating_entrypoints_require_deliberate_execution_arguments(tmp_path, m
         module.main()
     assert caught.value.code == 2
     assert not (tmp_path / "result").exists()
+
+
+def test_preflight_commits_distinct_private_markers_before_creation(scope):
+    groups = Groups(scope)
+    lease = preflight(scope, groups)
+    assert lease["slots"] == {
+        slot: {"admittedAbsent": True, "ownerSha256": hashlib.sha256(owner.encode()).hexdigest()}
+        for slot, owner in OWNERS.items()
+    }
+    assert not any(operation == "create" for operation, _ in groups.calls)
+
+
+@pytest.mark.parametrize("fault", ["missing", "duplicate", "malformed", "changed"])
+def test_creation_rejects_missing_or_changed_private_allocation_before_azure(scope, fault):
+    groups = Groups(scope)
+    lease = preflight(scope, groups)
+    groups.calls.clear()
+    if fault == "missing":
+        groups.owners = None
+    elif fault == "duplicate":
+        groups.owners["two"] = groups.owners["one"]
+    elif fault == "malformed":
+        groups.owners["one"] = "private-malformed-marker"
+    else:
+        groups.owners["one"] = "siteops-fleet-" + "3" * 64
+    with pytest.raises(FleetError) as caught:
+        create(scope, lease, groups, "eastus")
+    assert "private-" not in str(caught.value)
+    assert not groups.calls
+
+
+@pytest.mark.parametrize("fault", ["missing", "duplicate", "invalid"])
+def test_ownership_requires_original_marker_commitments(scope, fault):
+    groups = Groups(scope)
+    lease = preflight(scope, groups)
+    if fault == "missing":
+        del lease["slots"]["one"]["ownerSha256"]
+    elif fault == "duplicate":
+        lease["slots"]["two"]["ownerSha256"] = lease["slots"]["one"]["ownerSha256"]
+    else:
+        lease["slots"]["one"]["ownerSha256"] = "not-a-digest"
+    with pytest.raises(FleetError, match="ownership-context-mismatch"):
+        validate_ownership(scope, lease)
+
+
+@pytest.mark.parametrize("operation", ["preflight", "create"])
+def test_allocation_state_is_required_before_azure_reads(tmp_path, monkeypatch, operation):
+    spec = importlib.util.spec_from_file_location(
+        "manage_allocation_required", ROOT / "scripts" / "manage-release-fleet.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "AzureGroups",
+                        lambda *args, **kwargs: pytest.fail("Missing allocation reached Azure."))
+    args = [
+        "manage-release-fleet.py", operation, "--admission", str(tmp_path / "missing"),
+        "--expected-admission-sha", "0" * 64, "--output", str(tmp_path / "result"),
+        "--private-logs", str(tmp_path / "logs"),
+    ]
+    if operation == "create":
+        args.extend(["--execute", "--ownership", str(tmp_path / "ownership"),
+                     "--expected-ownership-sha", "0" * 64, "--location", "eastus"])
+    monkeypatch.setattr(sys, "argv", args)
+    with pytest.raises(SystemExit) as caught:
+        module.main()
+    assert caught.value.code == 2

@@ -227,25 +227,34 @@ Each operation binds the selected admission receipt, acceptance run/attempt
 and explicit Azure subscription. The public scope binding and Azure resource
 names are derived separately, so the receipt does not disclose target names.
 
-Preflight requires both groups to be absent. Retain its ownership receipt
-durably before allowing creation, including when later provisioning might
-fail. Creation and cleanup require `--execute`, that receipt and its
-independently selected digest. These tools use the caller's approved Azure
-identity and do not sign in or grant permissions.
+Preflight requires both groups to be absent and records hashes of distinct
+private ownership markers. Retain its ownership receipt durably before
+allowing creation, including when later provisioning might fail. Preflight
+and creation also require `--allocation-state PATH`: preflight writes the
+private markers there, and creation reads that same file. Never upload it.
+Creation and cleanup require `--execute`, the ownership receipt and its
+selected digest. These tools use the caller's approved Azure identity and
+do not sign in or grant permissions.
 Take the receipt and expected digest from the trusted qualification run,
 not deployment content. A digest check establishes identity, not authority.
 
-Cleanup verifies resource identity and ownership before requesting deletion.
-It observes both groups until absence is confirmed or a bounded deadline
+Creation binds each group through Azure's immutable `managedBy` property.
+An existing group with another value cannot acquire this run's marker
+through an update. Cleanup requires that property's hash to match the
+original receipt, together with the expected resource identity and tags.
+Receipts without marker commitments are not sufficient for automatic cleanup.
+Cleanup observes both groups until absence is confirmed or a bounded deadline
 expires. Missing ownership, residual resources and unknown observations
 remain explicit failing outcomes. An accepted deletion request is not
 confirmation that deletion finished. Cleanup preserves an earlier operation
 failure or interruption code even when resource removal succeeds.
 
 The ownership receipt supports a separately authorized reconciliation after
-cancellation. Reuse the original candidate, run/attempt and subscription,
-then repeat the ownership checks. Never substitute a subscription-wide
-search or general resource janitor. Keep provider diagnostics private.
+cancellation. Reuse the original candidate, run/attempt and subscription.
+Reconciliation downloads the original receipt by its bound artifact ID with
+digest checking, rather than regenerating its commitments. Then repeat the
+ownership checks. Never substitute a subscription-wide search or general
+resource janitor. Keep provider diagnostics and allocation state private.
 These helpers do not install Site Ops, deploy AIO or establish workload health.
 
 The producer's **Fleet qualification selection** summary identifies the

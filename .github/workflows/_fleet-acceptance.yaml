@@ -181,6 +181,7 @@ jobs:
           echo "started-at=$(date -u +%s)" >> "$GITHUB_OUTPUT"
           "$PYTHON" -B scripts/manage-release-fleet.py preflight \
             --admission "$root/admission/receipt.json" --expected-admission-sha "$ADMISSION_SHA" \
+            --allocation-state "$root/allocation.json" \
             --private-logs "$root/preflight-private" --output "$root/ownership.json"
           echo "ownership-sha=$(sha256sum "$root/ownership.json" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
       - name: Retain resource ownership
@@ -207,6 +208,7 @@ jobs:
           "$PYTHON" -B scripts/manage-release-fleet.py create --execute \
             --admission "$root/admission/receipt.json" --expected-admission-sha "$ADMISSION_SHA" \
             --ownership "$root/ownership.json" --expected-ownership-sha "$OWNERSHIP_SHA" \
+            --allocation-state "$root/allocation.json" \
             --location "$LOCATION" --private-logs "$root/create-private" --output "$root/created.json"
 
   hosts:
@@ -585,10 +587,11 @@ jobs:
         env:
           PYTHON: ${{ steps.tools.outputs.python }}
           ADMISSION_SHA: ${{ needs.select.outputs.admission-sha }}
-          OWNERSHIP_SHA: ${{ steps.ownership.outputs.ownership-sha }}
         run: |
           set -euo pipefail
           umask 077
+          # The preceding download verifies the selected original artifact's digest.
+          OWNERSHIP_SHA="$(sha256sum "$RUNNER_TEMP/fleet/ownership/ownership.json" | cut -d ' ' -f 1)"
           "$PYTHON" -B scripts/manage-release-fleet.py cleanup --execute \
             --admission "$RUNNER_TEMP/fleet/admission/receipt.json" --expected-admission-sha "$ADMISSION_SHA" \
             --ownership "$RUNNER_TEMP/fleet/ownership/ownership.json" --expected-ownership-sha "$OWNERSHIP_SHA" \

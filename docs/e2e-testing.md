@@ -46,6 +46,12 @@ The approved environment supplies `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
 the new groups, Arc onboarding, AIO deployment and its role assignments.
 The test does not create or widen those permissions.
 
+Fleet groups use private ownership markers in Azure's immutable `managedBy`
+property. Their hashes are retained before creation and checked before
+deployment or cleanup. This also applies in a shared subscription, without
+a separate allocation service. The `aio` scenario's persistent mode remains
+available for supplied groups and an identity scoped to those groups.
+
 The two configured Sites select AIO `2607` and `2608`, Secret Sync disabled
 and the existing E2E Low broker memory profile. Acceptance checks exact target
 identities, operation identities/dispositions, effective release parameters,
@@ -103,8 +109,8 @@ candidate coverage before release.
 
 The cleanup job depends on the controller, not on host completion. Hosts
 remain alive through readiness and automatic cleanup, then exit. Each
-deletion requires the original absence receipt and matching run ownership
-tags, and cleanup waits for confirmed resource-group absence.
+deletion requires the original receipt, its immutable marker commitment and
+matching run ownership tags. Cleanup waits for confirmed resource-group absence.
 The final gate requires the controller, both host receipts and cleanup
 to identify the same candidate and run. A green wrapper or missing receipt
 cannot substitute for that evidence.
@@ -114,9 +120,10 @@ approved recovery, choose `scenario=fleet-cleanup` with the same
 `fleet-candidate`, original `fleet-original-run` and `fleet-original-attempt`,
 and the original subscription/environment. Use the original controller
 commit, preserving a branch or tag if necessary. Reconciliation recovers
-and verifies the durable pre-write ownership artifact, then checks resource
-ownership again. It refuses a still-running original workflow. It does not
-provision clusters or perform deployments.
+and verifies the original ownership artifact by ID and digest, then checks
+resource ownership again. It needs no copy of the private allocation file
+and does not regenerate ownership commitments. It refuses a still-running
+original workflow. It does not provision clusters or perform deployments.
 Raw target identities, Site files, kubeconfigs and provider logs are not
 uploaded by either mode.
 

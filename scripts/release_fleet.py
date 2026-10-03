@@ -33,7 +33,7 @@ class FleetError(ValueError):
             "preexisting-group", "ownership-context-mismatch", "ownership-not-established",
             "ownership-mismatch", "invalid-cleanup-bound", "receipt-digest-mismatch",
             "invalid-receipt", "select-new-output-and-log-paths", "candidate-not-admitted",
-            "private-diagnostics-failed",
+            "private-diagnostics-failed", "invalid-allocation", "allocation-context-mismatch",
         }:
             raise ValueError("Unsupported fleet failure category.")
         self.retryable = retryable
@@ -49,6 +49,21 @@ def expected_document(path: Path, expected_sha: str) -> dict:
     if not isinstance(result, dict):
         raise FleetError("invalid-receipt")
     return result
+
+
+def owner_hash(owner: object) -> str:
+    if not isinstance(owner, str) or re.fullmatch(r"siteops-fleet-[0-9a-f]{64}", owner) is None:
+        raise FleetError("invalid-allocation")
+    return hashlib.sha256(owner.encode("ascii")).hexdigest()
+
+
+def allocation_hashes(owners: object) -> dict[str, str]:
+    if not isinstance(owners, dict) or set(owners) != set(SLOTS):
+        raise FleetError("invalid-allocation")
+    hashes = {slot: owner_hash(value) for slot, value in owners.items()}
+    if len(set(hashes.values())) != len(SLOTS):
+        raise FleetError("invalid-allocation")
+    return hashes
 
 
 def check_admission(admission: dict) -> None:
@@ -137,11 +152,16 @@ class FleetScope:
             "qualificationSlot": slot, "runId": str(self.run), "runAttempt": str(self.attempt),
         }
 
-    def owns(self, slot: str, observed: object) -> bool:
+    def owns(self, slot: str, observed: object, expected_owner_sha: str) -> bool:
         group = self.group(slot)
         expected_id = f"/subscriptions/{self.subscription}/resourceGroups/{group}".casefold()
+        try:
+            observed_owner_sha = owner_hash(observed.get("managedBy") if isinstance(observed, dict) else None)
+        except FleetError:
+            return False
         return (
             isinstance(observed, dict) and isinstance(observed.get("id"), str)
+            and observed_owner_sha == expected_owner_sha
             and observed["id"].casefold() == expected_id
             and isinstance(observed.get("name"), str) and observed["name"].casefold() == group.casefold()
             and isinstance(observed.get("tags"), dict)
@@ -155,12 +175,14 @@ class AzureGroups:
     def __init__(
         self, scope: FleetScope, private_logs: Path, *,
         runner: Callable[[list[str]], tuple[int, bytes, bytes]] = _run_az,
+        owners: dict[str, str] | None = None,
     ) -> None:
         self.scope = scope
         self.logs = private_logs
         check_cache_ancestors(self.logs)
         make_private_directory(self.logs)
         self.runner = runner
+        self.owners = owners
         self.counter = 0
 
     def _call(self, operation: str, slot: str, extra: list[str], *, output: str) -> bytes:
@@ -209,8 +231,12 @@ class AzureGroups:
     def create(self, slot: str, location: str) -> None:
         if not re.fullmatch(r"[a-z][a-z0-9]{1,63}", location):
             raise FleetError("invalid-location")
+        owners = self.owners
+        if owners is None:
+            raise FleetError("invalid-allocation")
+        allocation_hashes(owners)
         self._call("create", slot, [
-            "--location", location, "--tags",
+            "--location", location, "--managed-by", owners[slot], "--tags",
             *(f"{key}={value}" for key, value in self.scope.tags(slot).items()),
         ], output="none")
 
@@ -219,14 +245,15 @@ class AzureGroups:
 
 
 def preflight(scope: FleetScope, groups: AzureGroups) -> dict:
-    """Record absence for both slots before any creation is authorized."""
+    """Commit private creation markers and require absence before any creation."""
+    owners = allocation_hashes(groups.owners)
     for slot in SLOTS:
         if groups.exists(slot):
             raise FleetError("preexisting-group")
     return {
         "apiVersion": VERSION, "kind": "FleetOwnership",
         "context": scope.context(), "scopeKey": scope.key,
-        "slots": {slot: {"admittedAbsent": True} for slot in SLOTS},
+        "slots": {slot: {"admittedAbsent": True, "ownerSha256": owners[slot]} for slot in SLOTS},
     }
 
 
@@ -243,25 +270,31 @@ def validate_ownership(scope: FleetScope, lease: object) -> dict:
                for key, value in expected.items())
         or lease["scopeKey"] != scope.key
         or not isinstance(lease["slots"], dict) or set(lease["slots"]) != set(SLOTS)
-        or any(not isinstance(row, dict) or set(row) != {"admittedAbsent"}
-               or type(row["admittedAbsent"]) is not bool for row in lease["slots"].values())
+        or any(not isinstance(row, dict) or set(row) != {"admittedAbsent", "ownerSha256"}
+               or type(row["admittedAbsent"]) is not bool
+               or not isinstance(row["ownerSha256"], str)
+               or re.fullmatch("[0-9a-f]{64}", row["ownerSha256"]) is None
+               for row in lease["slots"].values())
+        or len({row["ownerSha256"] for row in lease["slots"].values()}) != len(SLOTS)
     ):
         raise FleetError("ownership-context-mismatch")
     return lease["slots"]
 
 
 def create(scope: FleetScope, lease: dict, groups: AzureGroups, location: str) -> None:
-    """Create only slots admitted absent, refusing an intervening existing group."""
+    """Fence each group creation with its committed immutable managedBy marker."""
     if not re.fullmatch(r"[a-z][a-z0-9]{1,63}", location):
         raise FleetError("invalid-location")
     slots = validate_ownership(scope, lease)
     if not all(slots[slot]["admittedAbsent"] for slot in SLOTS):
         raise FleetError("ownership-not-established")
+    if allocation_hashes(groups.owners) != {slot: slots[slot]["ownerSha256"] for slot in SLOTS}:
+        raise FleetError("allocation-context-mismatch")
     for slot in SLOTS:
         if groups.exists(slot):
             raise FleetError("preexisting-group")
         groups.create(slot, location)
-        if not scope.owns(slot, groups.show(slot)):
+        if not scope.owns(slot, groups.show(slot), slots[slot]["ownerSha256"]):
             raise FleetError("ownership-mismatch")
 
 
@@ -294,7 +327,7 @@ def cleanup(
                     del pending[slot]
                     continue
                 if pending[slot] == "inspect":
-                    if not scope.owns(slot, groups.show(slot)):
+                    if not scope.owns(slot, groups.show(slot), slots[slot]["ownerSha256"]):
                         results[slot] = {"state": "not-attempted", "reason": "ownership-mismatch"}
                         del pending[slot]
                         continue

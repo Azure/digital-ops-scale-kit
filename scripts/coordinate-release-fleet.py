@@ -4,9 +4,8 @@
 """Coordinate exact fleet job state without publishing target identities."""
 
 import argparse
-import hashlib
-import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -142,7 +141,9 @@ def main() -> int:
             ownership = expected_document(args.ownership, args.expected_ownership_sha)
             slots = validate_ownership(scope, ownership)
             groups = AzureGroups(scope, args.root / "owned-group-observation")
-            if not slots[args.slot]["admittedAbsent"] or not scope.owns(args.slot, groups.show(args.slot)):
+            if not slots[args.slot]["admittedAbsent"] or not scope.owns(
+                args.slot, groups.show(args.slot), slots[args.slot]["ownerSha256"],
+            ):
                 raise CoordinationError("The host resource group is not owned by this acceptance run.")
             print("The selected fleet slot is owned by this run.")
         elif args.operation.startswith("wait-"):
@@ -198,18 +199,14 @@ def main() -> int:
                        and item.get("name") == f"fleet-ownership-{scope.run}-{scope.attempt}"]
             if (len(matches) != 1 or matches[0].get("expired") is not False
                     or type(matches[0].get("id")) is not int
+                    or type(matches[0].get("size_in_bytes")) is not int or matches[0]["size_in_bytes"] <= 0
+                    or not isinstance(matches[0].get("digest"), str)
+                    or re.fullmatch("sha256:[0-9a-f]{64}", matches[0]["digest"]) is None
                     or type(matches[0].get("workflow_run", {}).get("id")) is not int
                     or matches[0].get("workflow_run", {}).get("id") != scope.run
                     or matches[0].get("workflow_run", {}).get("head_sha") != selected.source["commit"]):
                 raise CoordinationError("The original fleet ownership artifact is missing or ambiguous.")
-            ownership = {
-                "apiVersion": "siteops.release.fleet/v1", "kind": "FleetOwnership",
-                "context": scope.context(), "scopeKey": scope.key,
-                "slots": {slot: {"admittedAbsent": True} for slot in ("one", "two")},
-            }
-            validate_ownership(scope, ownership)
-            raw = (json.dumps(ownership, sort_keys=True) + "\n").encode("utf-8")
-            output({"ownership-id": matches[0]["id"], "ownership-sha": hashlib.sha256(raw).hexdigest()})
+            output({"ownership-id": matches[0]["id"]})
     except FleetProcessError as error:
         print(str(error), file=sys.stderr)
         return error.code
