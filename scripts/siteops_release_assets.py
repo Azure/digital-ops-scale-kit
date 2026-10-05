@@ -18,6 +18,9 @@ MAX_ASSET_BYTES = 4 * 1024 * 1024 * 1024
 ARCHIVE_NAME = "siteops-install.zip"
 PROOF_SUFFIX = ".attestation.jsonl"
 BOOTSTRAP_SCRIPTS = ("siteops-bootstrap.ps1", "siteops-bootstrap.sh")
+ENGINE_REFERENCE_NAME = "siteops-engine.json"
+ENGINE_REFERENCE_FILES = frozenset({ENGINE_REFERENCE_NAME, ENGINE_REFERENCE_NAME + PROOF_SUFFIX})
+MAX_ENGINE_REFERENCE_BYTES = 16384
 _WHEEL = re.compile(r"siteops-[0-9A-Za-z][0-9A-Za-z.!+_~-]*-py3-none-any\.whl")
 _RESERVED_NAMES = {
     "CON", "PRN", "AUX", "NUL",
@@ -74,6 +77,96 @@ class ReleaseAsset:
 
     def document(self) -> dict[str, Any]:
         return {"name": self.name, "size": self.size, "sha256": self.sha256}
+
+
+@dataclass(frozen=True)
+class EngineReference:
+    """Exact engine selection within the consumer's source, without provider or trust policy."""
+
+    release: str
+    revision: str
+    engine_release: str
+    engine_revision: str
+    version: str
+    bundle: ReleaseAsset
+    proof: ReleaseAsset
+    preview: bool
+
+    def __post_init__(self) -> None:
+        for value in (self.release, self.revision, self.engine_release, self.engine_revision):
+            if (not isinstance(value, str) or not 1 <= len(value) <= 256
+                    or not value.isprintable() or any(character.isspace() for character in value)):
+                raise ReleaseAssetsError("Engine reference selections require bounded nonempty identities.")
+        _text(self.version, r"[A-Za-z0-9][A-Za-z0-9.!+_-]*", 128)
+        if (
+            type(self.preview) is not bool
+            or not isinstance(self.bundle, ReleaseAsset) or not isinstance(self.proof, ReleaseAsset)
+            or self.bundle.name != ARCHIVE_NAME or self.proof.name != ARCHIVE_NAME + PROOF_SUFFIX
+            or self.bundle.size > 128 * 1024 * 1024 or self.proof.size > 2 * 1024 * 1024
+        ):
+            raise ReleaseAssetsError("The engine reference has invalid bundle or proof identities.")
+
+    def document(self) -> dict[str, Any]:
+        return {
+            "apiVersion": "siteops.release.engine/v1", "kind": "EngineReference",
+            "release": self.release, "revision": self.revision, "preview": self.preview,
+            "engine": {
+                "release": self.engine_release, "revision": self.engine_revision, "version": self.version,
+                "bundle": self.bundle.document(), "proof": self.proof.document(),
+            },
+        }
+
+    def serialized(self) -> bytes:
+        return (json.dumps(self.document(), sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+
+    @classmethod
+    def from_bytes(cls, raw: bytes) -> EngineReference:
+        def unique(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ReleaseAssetsError("The engine reference contains duplicate fields.")
+                result[key] = value
+            return result
+
+        if len(raw) > MAX_ENGINE_REFERENCE_BYTES:
+            raise ReleaseAssetsError("The engine reference exceeds its byte limit.")
+        try:
+            row = _object(json.loads(raw, object_pairs_hook=unique), {
+                "apiVersion", "kind", "release", "revision", "preview", "engine",
+            })
+            engine = _object(row["engine"], {"release", "revision", "version", "bundle", "proof"})
+            if row["apiVersion"] != "siteops.release.engine/v1" or row["kind"] != "EngineReference":
+                raise ReleaseAssetsError("The engine reference format is unsupported.")
+            return cls(
+                row["release"], row["revision"], engine["release"], engine["revision"], engine["version"],
+                ReleaseAsset.from_document(engine["bundle"]), ReleaseAsset.from_document(engine["proof"]),
+                row["preview"],
+            )
+        except (UnicodeError, ValueError, RecursionError, TypeError):
+            raise ReleaseAssetsError("The engine reference is invalid or unsupported.") from None
+
+
+def engine_reference(plan: dict[str, Any], selection: dict[str, Any]) -> EngineReference:
+    """Project qualified engine selection into the portable content-release record."""
+    native = FrozenReleaseAssets.from_document(selection["native"])
+    if selection["candidate"] != plan["source"] or native.repository != plan["source"]["repository"]:
+        raise ReleaseAssetsError("The engine reference must describe the selected source.")
+    if plan["siteops"]["bundle"]:
+        tag = plan["release"]["tag"]
+        if selection["reference"] is not None or native.source != plan["source"]:
+            raise ReleaseAssetsError("The engine reference differs from the selected build.")
+    else:
+        reference = ReferencedEngine.from_document(selection["reference"])
+        tag = plan["siteops"]["releaseTag"]
+        if reference.tag != tag or reference.assets != native.assets or selection["version"] != tag.removeprefix("siteops/v"):
+            raise ReleaseAssetsError("The engine reference differs from the selected release.")
+    native_engine_wheel(native.assets)
+    assets = {asset.name: asset for asset in native.assets}
+    return EngineReference(
+        plan["release"]["tag"], plan["source"]["commit"], tag, native.commit, selection["version"],
+        assets[ARCHIVE_NAME], assets[ARCHIVE_NAME + PROOF_SUFFIX], plan["dryRun"],
+    )
 
 
 def _inventory(values: Any) -> tuple[ReleaseAsset, ...]:
@@ -242,7 +335,7 @@ def publication_assets(plan: dict[str, Any], inventory: FrozenReleaseAssets) -> 
     requests = plan.get("workspaces", [])
     if type(requests) is not list or len(requests) > 64:
         raise ReleaseAssetsError("The publication workspace selection is invalid.")
-    workspace_names: set[str] = {"siteops-workspaces.json"} if requests else set()
+    workspace_names: set[str] = {"siteops-workspaces.json", *ENGINE_REFERENCE_FILES} if requests else set()
     for request in requests:
         name = validate_asset_name(request["package"])
         names = {name, validate_asset_name(name + PROOF_SUFFIX)}

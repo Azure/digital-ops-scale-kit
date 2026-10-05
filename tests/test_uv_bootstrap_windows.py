@@ -234,7 +234,10 @@ def test_windows_retained_proof_and_archive_paths_are_admitted_before_verificati
         "Get-ChildItem -LiteralPath $cache -Force"
     )
     assert source.index("Require-PrivateExecutablePath $asset $assets") < source.index(
-        "& $gh attestation verify $archive"
+        "Verify-ReleaseAsset $archive $engineCommit"
+    )
+    assert source.index("Require-PrivateExecutablePath $path $referenceAssets") < source.index(
+        "Verify-ReleaseAsset $referencePath $SourceCommit"
     )
     assert "[IO.File]::Copy($source, $target, $false)" in source
 
@@ -897,7 +900,7 @@ def test_native_production_install_block_executes_the_actual_verified_helper(
     root, manifest = bundle_factory()
     archive, _ = publish_assets(root, manifest, tmp_path / "assets")
     source = SCRIPT.read_text(encoding="utf-8")
-    install = source.split("    $installerHelper = Get-InstallerHelper $archive $download\n", 1)[
+    install = source.split("    $installerHelper = Get-InstallerHelper $archive $download $engineVersion\n", 1)[
         1
     ].split(
         '    Stage "Command directory:',
@@ -935,9 +938,12 @@ $curl = $null
 $Repository = 'example/publisher'
 $SourceCommit = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 $SourceRef = 'refs/heads/main'
+$engineCommit = $SourceCommit
+$engineRef = $SourceRef
+$engineVersion = ''
 $Replace = $env:TEST_REPLACE -eq '1'
 """
-        + "    $installerHelper = Get-InstallerHelper $archive $download\n"
+        + "    $installerHelper = Get-InstallerHelper $archive $download $engineVersion\n"
         + install
         + "\n'PRODUCTION_INSTALL_ACCEPTED'\n",
         encoding="utf-8",

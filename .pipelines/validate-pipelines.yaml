@@ -38,6 +38,8 @@ jobs:
         persistCredentials: false
 
       - template: templates/setup-siteops.yaml
+        parameters:
+          installDev: true
 
       - script: |
           set -euo pipefail

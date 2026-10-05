@@ -141,6 +141,43 @@ extraction or changed retained bundle fails for inspection rather than
 overwriting the existing directory. The bootstrap does not claim a
 transactional rollback.
 
+### Install the engine selected by a content release
+
+With a reviewed bootstrap that supports content selection, use
+`--content-release` or `-ContentRelease` in place of the direct engine
+`--release` or `-Release` input. Supply the content release's tag and full
+source commit:
+
+```bash
+bash ./siteops-bootstrap.sh --content-release "<content-release-tag>" \
+  --source-commit "<content-source-commit>"
+```
+
+```powershell
+.\siteops-bootstrap.ps1 -ContentRelease "<content-release-tag>" `
+  -SourceCommit "<content-source-commit>"
+```
+
+Obtain and approve the bootstrap itself through one of the routes above.
+Content selection does not authenticate a script you already executed.
+The selected content release must publish `siteops-engine.json` and its
+detached proof. The bootstrap verifies that reference, displays the selected
+engine, then separately checks the exact engine bundle, proof and version
+before installation. The referenced engine may belong to an earlier release
+in the same approved source. Neither the operator nor ADO signs anything.
+
+Direct engine installation remains available with `--release` or `-Release`,
+including older combined releases. A missing or rejected content reference
+does not fall back to another engine or a source checkout. For a release
+without that metadata, use its explicit engine installation instructions.
+Do not combine the two release inputs.
+
+Repeat installation rechecks both retained proofs without downloading the
+same assets again. Changing engines still requires explicit replacement.
+Source enrollment remains a separate choice and applies to the selected
+content source, not a policy supplied by the engine reference. Installation
+does not acquire workspace content, sign in or authorize Azure deployment.
+
 ### Verify the bootstrap script
 
 Install GitHub CLI 2.95 or newer in version 2 through an approved channel

@@ -182,8 +182,8 @@ these steps:
    declared Windows or Linux Python target. Each target also creates an
    operator project for the first declared workspace through the installed engine.
 5. Requires all qualification results to identify the same engine, workspace
-   inventory, release plan and project pin, then freezes the complete publication
-   inventory.
+   inventory, release plan and project pin. It signs the generated engine
+   reference and freezes the complete publication inventory.
 6. Admits that frozen payload from the selected producer run and attempt.
    A separate job checks the artifact IDs, complete inventory, exact bytes
    and subject provenance before retaining an admission receipt.
@@ -198,6 +198,21 @@ the source, caller, run, attempt and selected digests, and explicitly marks
 installation and deployment as not run. It is an input gate for subsequent
 acceptance, not evidence of a fleet deployment or workload readiness.
 Preview admission retains its preview identity and cannot authorize publication.
+
+Content releases that declare workspaces also publish `siteops-engine.json`
+and its detached proof. The signed reference identifies the exact engine
+release, source revision, version, installation bundle and proof selected
+for that content release. Combined prereleases identify their colocated
+engine. Content-only releases identify the existing engine without copying
+or rebuilding its assets.
+
+The reference contains identities, not download URLs, credentials or
+publisher policy. Its signature and the engine bundle's own provenance must
+both satisfy independent consumer policy. It does not replace the unsigned
+`siteops-workspaces.json` routing descriptor, grant source approval or choose
+the newest engine satisfying a compatibility range. A compatible bootstrap
+can consume it through [content release selection](install-siteops.md#install-the-engine-selected-by-a-content-release).
+Direct engine installation commands remain supported.
 
 The default preview's final summary shows one matrix of Python versions and
 platforms, plus a link to the attested release assets. Individual job logs
@@ -411,7 +426,7 @@ a separately released engine instead.
 | `tag` | Required version identity. `v...` releases Scale Kit content, while `siteops/v...` releases the engine independently. |
 | `headline` | Required short description used with the tag to form the release title. |
 | `siteops` | Required for a content release. Choose `{"build": true}` or `{"release": "siteops/v<version>"}`. Omit it for an independent engine release. |
-| `workspaces` | Optional reviewed workspace build inputs for a content release. See [workspace production](workspace-packages.md#build-workspaces-declared-by-a-release). Publication requires every declared package, its proof, and the routing descriptor. |
+| `workspaces` | Optional reviewed workspace build inputs for a content release. See [workspace production](workspace-packages.md#build-workspaces-declared-by-a-release). Publication requires every declared package, its proof, the routing descriptor and the signed engine reference. |
 | `latest` | Optional, defaults to `false`. Set `true` only to designate a stable Scale Kit release as GitHub's Latest release. |
 
 `siteops.build` is a selection, not an on/off switch. `true` includes a fresh
@@ -506,7 +521,8 @@ the approved publication list and compares the uploaded identities with that
 list.
 
 When workspaces are declared, the final payload combines their qualified ZIPs,
-proofs and `siteops-workspaces.json` with any engine assets built for this
+proofs, `siteops-workspaces.json` and the signed `siteops-engine.json` reference
+with any engine assets built for this
 release. The referenced engine's files remain in its own release. Candidate
 preparation compares its frozen engine selection with the current native
 inventory, preserving the exact engine that qualified the workspaces.

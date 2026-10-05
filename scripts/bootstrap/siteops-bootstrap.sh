@@ -7,7 +7,8 @@ stage() { printf 'Site Ops installation: %s\n' "$1"; }
 command -v bash >/dev/null || fail "Bash is required."
 
 extract_installer_helper() {
-  "$python" -I -S -B - "$archive" "$staging" <<'PY'
+  "$python" -I -S -B - "$archive" "$staging" "${engine_version:-}" <<'PY'
+import json
 import pathlib
 import stat
 import sys
@@ -15,6 +16,15 @@ import zipfile
 
 try:
     with zipfile.ZipFile(sys.argv[1]) as archive:
+        if sys.argv[3]:
+            metadata = [item for item in archive.infolist() if item.filename.casefold() == "bundle.json"]
+            if (len(metadata) != 1 or metadata[0].filename != "bundle.json"
+                    or not 0 < metadata[0].file_size <= 1048576):
+                raise ValueError()
+            with archive.open(metadata[0]) as stream:
+                manifest = json.loads(stream.read(1048577))
+            if manifest.get("package", {}).get("version") != sys.argv[3]:
+                raise ValueError()
         entries = [item for item in archive.infolist()
                    if item.filename.casefold() == "siteops-install.py"]
         if (len(entries) != 1 or entries[0].filename != "siteops-install.py"
@@ -29,7 +39,7 @@ try:
     with helper.open("xb") as output:
         output.write(content)
     print(helper)
-except (OSError, ValueError, zipfile.BadZipFile):
+except (OSError, ValueError, TypeError, AttributeError, zipfile.BadZipFile):
     sys.exit("The authenticated release has no valid installer helper.")
 PY
 }
@@ -241,7 +251,123 @@ admit_bound_runtime() {
   fi
 }
 
+verify_release_asset() {
+  local subject="$1" expected_commit="$2" expected_ref="$3" expected_caller="$4" workflow="$5"
+  local signer builder query verified
+  signer="https://github.com/$repository/.github/workflows/$workflow@$expected_ref"
+  builder="https://github.com/$repository/.github/workflows/$expected_caller@$expected_ref"
+  query="length > 0 and all(.[]; .verificationResult.mediaType == \"application/vnd.dev.sigstore.verificationresult+json;version=0.1\" and (.verificationResult.signature.certificate | .subjectAlternativeName == \"$signer\" and .issuer == \"https://token.actions.githubusercontent.com\" and .sourceRepositoryURI == \"https://github.com/$repository\" and .sourceRepositoryDigest == \"$expected_commit\" and .sourceRepositoryRef == \"$expected_ref\" and .buildSignerDigest == \"$expected_commit\" and .buildConfigURI == \"$builder\" and .buildConfigDigest == \"$expected_commit\" and .runnerEnvironment == \"self-hosted\"))"
+  verified="$(timeout --kill-after=5 120 gh attestation verify "$subject" \
+    --bundle "$subject.attestation.jsonl" --repo "$repository" \
+    --cert-identity "$signer" --source-ref "$expected_ref" --source-digest "$expected_commit" \
+    --signer-digest "$expected_commit" --cert-oidc-issuer https://token.actions.githubusercontent.com \
+    --predicate-type https://slsa.dev/provenance/v1 --hostname github.com \
+    --digest-alg sha256 --format json --jq "$query" 2>/dev/null)" ||
+    fail "The selected asset's provenance could not be verified."
+  [[ "$verified" == true ]] || fail "The asset certificate does not match the selected release."
+}
+prepare_runtime() {
+  [[ "${runtime_prepared:-false}" == false ]] || return 0
+  local disabled='^(0|false)?$'
+  local mirror='^https://([^/?#@[:space:]]+@)?[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?([/?#][^[:space:]]*)?$'
+  [[ -z "${UV_INSECURE_HOST:-}" && -z "${UV_PYTHON_DOWNLOADS_JSON_URL:-}" &&
+     "${UV_INSECURE_NO_ZIP_VALIDATION:-}" =~ $disabled ]] ||
+    fail "Remove insecure uv settings and custom runtime catalogs before verified installation."
+  [[ -z "${UV_PYTHON_INSTALL_MIRROR:-}" || "$UV_PYTHON_INSTALL_MIRROR" =~ $mirror ]] ||
+    fail "Select an approved HTTPS Python runtime mirror."
+  uv_unset=()
+  python_unset=()
+  while IFS= read -r name; do
+    case "$name" in
+      PYTHON*|VIRTUAL_ENV|CONDA_PREFIX) python_unset+=(-u "$name"); uv_unset+=(-u "$name") ;;
+      UV_TOOL_DIR|UV_TOOL_BIN_DIR|UV_PYTHON_INSTALL_DIR|UV_PYTHON_INSTALL_MIRROR)
+        [[ -n "${!name}" ]] || uv_unset+=(-u "$name") ;;
+      UV_*) uv_unset+=(-u "$name") ;;
+    esac
+  done < <(compgen -e)
+  for name in UV_TOOL_DIR UV_TOOL_BIN_DIR UV_PYTHON_INSTALL_DIR; do
+    if [[ -n "${!name:-}" ]]; then
+      admit_directory "${!name}" shared ||
+        fail "Select uv tool, command, and Python directories under trusted, non-symlinked directories."
+    fi
+  done
+  select_uv
+  uv_directory tool dir ||
+    fail "Select uv tool, command, and Python directories under trusted, non-symlinked directories."
+  tools="$admitted"
+  uv_directory tool dir --bin ||
+    fail "Select uv tool, command, and Python directories under trusted, non-symlinked directories."
+  bin="$admitted"
+  uv_directory python dir ||
+    fail "Select uv tool, command, and Python directories under trusted, non-symlinked directories."
+  pydir="$admitted"
+  expose_uv
+  if [[ ( -e "$bin/siteops" || -L "$bin/siteops" ) && ! -e "$tools/siteops" && ! -L "$tools/siteops" ]]; then
+    fail "The exposed command belongs to another installation. Remove it with its original manager."
+  fi
+  if $replace; then admit_bound_runtime; fi
+  select_runtime
+  runtime_prepared=true
+}
+read_engine_reference() {
+  "$python" -I -S -B - "$1" "$release" "$commit" "$source_ref" "$caller" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+try:
+    path, release, revision, source_ref, caller = sys.argv[1:]
+    with pathlib.Path(path).open("rb") as stream:
+        raw = stream.read(16385)
+    if not 0 < len(raw) <= 16384:
+        raise ValueError()
+    record = json.loads(raw)
+    if (type(record) is not dict
+            or set(record) != {"apiVersion", "kind", "release", "revision", "preview", "engine"}
+            or record["apiVersion"] != "siteops.release.engine/v1" or record["kind"] != "EngineReference"
+            or record["release"] != release or record["revision"] != revision
+            or type(record["preview"]) is not bool or record["preview"] != (caller == "ci.yaml")
+            or raw != (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()):
+        raise ValueError()
+    engine = record["engine"]
+    if (type(engine) is not dict or set(engine) != {"release", "revision", "version", "bundle", "proof"}
+            or not isinstance(engine["release"], str)
+            or re.fullmatch(r"(siteops/)?v[0-9][0-9A-Za-z._-]{0,100}", engine["release"]) is None
+            or not isinstance(engine["revision"], str) or re.fullmatch("[0-9a-f]{40}", engine["revision"]) is None
+            or not isinstance(engine["version"], str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.!+_-]{0,127}", engine["version"]) is None):
+        raise ValueError()
+    if engine["release"] == release:
+        if engine["revision"] != revision:
+            raise ValueError()
+        engine_ref, engine_caller = source_ref, caller
+    else:
+        if engine["release"] != "siteops/v" + engine["version"]:
+            raise ValueError()
+        engine_ref, engine_caller = "refs/heads/main", "release.yaml"
+    for key, name, maximum in (
+        ("bundle", "siteops-install.zip", 134217728),
+        ("proof", "siteops-install.zip.attestation.jsonl", 2097152),
+    ):
+        asset = engine[key]
+        if (type(asset) is not dict or set(asset) != {"name", "size", "sha256"} or asset["name"] != name
+                or type(asset["size"]) is not int or not 0 < asset["size"] <= maximum
+                or not isinstance(asset["sha256"], str) or re.fullmatch("[0-9a-f]{64}", asset["sha256"]) is None):
+            raise ValueError()
+    for value in (
+        engine["release"], engine["revision"], engine_ref, engine_caller, engine["version"],
+        engine["bundle"]["size"], engine["bundle"]["sha256"], engine["proof"]["size"], engine["proof"]["sha256"],
+    ):
+        print(value)
+except (OSError, ValueError, TypeError, KeyError, RecursionError):
+    sys.exit("The signed engine reference is invalid or differs from the selected content release.")
+PY
+}
+
 release=""
+content_release=""
+runtime_prepared=false
 commit=""
 repository="Azure/digital-ops-scale-kit"
 source_ref="refs/heads/main"
@@ -253,10 +379,11 @@ with_azure_cli=false
 replace=false
 while (($#)); do
   case "$1" in
-    --release|--source-commit|--repository|--source-ref|--caller|--enroll-source)
+    --release|--content-release|--source-commit|--repository|--source-ref|--caller|--enroll-source)
       (($# > 1)) || fail "$1 requires a value."
       case "$1" in
         --release) release="$2" ;;
+        --content-release) content_release="$2" ;;
         --source-commit) commit="$2" ;;
         --repository) repository="$2" ;;
         --source-ref) source_ref="$2" ;;
@@ -271,6 +398,11 @@ while (($#)); do
     *) fail "Unknown installation option." ;;
   esac
 done
+if [[ -n "$content_release" ]]; then
+  [[ -z "$release" && "$content_release" =~ ^v[0-9][0-9A-Za-z._-]{0,100}$ ]] ||
+    fail "Choose either --release for an engine or --content-release for its signed engine selection."
+  release="$content_release"
+fi
 [[ "$release" =~ ^(siteops/)?v[0-9][0-9A-Za-z._-]{0,100}$ ]] || fail "Select an exact release tag."
 [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || fail "Supply the approved full source commit."
 [[ "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "Supply an OWNER/REPO publisher."
@@ -449,12 +581,64 @@ staging="$(mktemp -d)"
 trap 'rm -rf -- "$staging"' EXIT
 admit_directory "$staging" private existing || fail "Use a private temporary directory."
 staging="$admitted"
-selection_id="$(printf '%s\0' "$repository" "$release" "$commit" "$source_ref" "$caller" |
+engine_release="$release"
+engine_commit="$commit"
+engine_ref="$source_ref"
+engine_caller="$caller"
+engine_version=""
+reference_download=""
+if [[ -n "$content_release" ]]; then
+  reference_id="$(printf '%s\0' "$repository" "$release" "$commit" "$source_ref" "$caller" |
+    sha256sum | cut -d ' ' -f 1)"
+  admit_directory "$data/engine-references" private ||
+    fail "The engine reference cache must use private storage."
+  reference_cache="$admitted/$reference_id"
+  reference_assets="$reference_cache"
+  if [[ -e "$reference_cache" || -L "$reference_cache" ]]; then
+    admit_directory "$reference_cache" private existing &&
+      [[ "$(find "$reference_cache" -mindepth 1 -maxdepth 1 -printf x | wc -c)" == 2 ]] ||
+      fail "Retained engine reference bytes are incomplete. Inspect them before retrying."
+    stage "Rechecking the retained content release's engine selection."
+  else
+    reference_download="$staging/reference"
+    mkdir -m 0700 "$reference_download"
+    reference_assets="$reference_download"
+    for asset in siteops-engine.json siteops-engine.json.attestation.jsonl; do
+      limit=16384
+      if [[ "$asset" == *.attestation.jsonl ]]; then limit=2097152; fi
+      curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+        --tlsv1.2 --max-redirs 3 --max-time 180 --max-filesize "$limit" \
+        -o "$reference_assets/$asset" "https://github.com/$repository/releases/download/$release/$asset" ||
+        fail "The content release's signed engine reference is unavailable. Use that release's explicit engine installation instructions."
+    done
+  fi
+  for asset in siteops-engine.json siteops-engine.json.attestation.jsonl; do
+    limit=16384
+    if [[ "$asset" == *.attestation.jsonl ]]; then limit=2097152; fi
+    admit_file "$reference_assets/$asset" private && [[ -s "$reference_assets/$asset" ]] &&
+      (( $(wc -c < "$reference_assets/$asset") <= limit )) ||
+      fail "The engine reference or its proof is invalid or oversized."
+  done
+  stage "Checking the content release's engine reference."
+  verify_release_asset "$reference_assets/siteops-engine.json" "$commit" "$source_ref" "$caller" _release-candidate.yaml
+  prepare_runtime
+  read_engine_reference "$reference_assets/siteops-engine.json" > "$staging/engine-selection" ||
+    fail "The signed engine reference could not select an engine."
+  mapfile -t selected_engine < "$staging/engine-selection"
+  [[ ${#selected_engine[@]} == 9 ]] || fail "The engine selection is incomplete."
+  engine_release="${selected_engine[0]}"
+  engine_commit="${selected_engine[1]}"
+  engine_ref="${selected_engine[2]}"
+  engine_caller="${selected_engine[3]}"
+  engine_version="${selected_engine[4]}"
+  stage "Selected engine: $engine_version from $engine_release ($engine_commit)."
+fi
+selection_id="$(printf '%s\0' "$repository" "$engine_release" "$engine_commit" "$engine_ref" "$engine_caller" |
   sha256sum | cut -d ' ' -f 1)"
 admit_directory "$data/install-downloads" private ||
   fail "The authenticated release cache must be private. Inspect it before retrying."
 cache="$admitted/$selection_id"
-encoded_release="${release//\//%2F}"
+encoded_release="${engine_release//\//%2F}"
 url="https://github.com/$repository/releases/download/$encoded_release/"
 assets="$staging"
 if [[ -e "$cache" || -L "$cache" ]]; then
@@ -482,18 +666,15 @@ for asset in siteops-install.zip siteops-install.zip.attestation.jsonl; do
     (( $(wc -c < "$assets/$asset") <= limit )) ||
     fail "Retained release bytes are invalid or oversized."
 done
-signer="https://github.com/$repository/.github/workflows/_siteops-distribution.yaml@$source_ref"
-builder="https://github.com/$repository/.github/workflows/$caller@$source_ref"
-query="length > 0 and all(.[]; .verificationResult.mediaType == \"application/vnd.dev.sigstore.verificationresult+json;version=0.1\" and (.verificationResult.signature.certificate | .subjectAlternativeName == \"$signer\" and .issuer == \"https://token.actions.githubusercontent.com\" and .sourceRepositoryURI == \"https://github.com/$repository\" and .sourceRepositoryDigest == \"$commit\" and .sourceRepositoryRef == \"$source_ref\" and .buildSignerDigest == \"$commit\" and .buildConfigURI == \"$builder\" and .buildConfigDigest == \"$commit\" and .runnerEnvironment == \"self-hosted\"))"
+if [[ -n "$content_release" ]]; then
+  [[ "$(stat -c %s -- "$assets/siteops-install.zip")" == "${selected_engine[5]}" &&
+     "$(sha256sum < "$assets/siteops-install.zip" | cut -d ' ' -f 1)" == "${selected_engine[6]}" &&
+     "$(stat -c %s -- "$assets/siteops-install.zip.attestation.jsonl")" == "${selected_engine[7]}" &&
+     "$(sha256sum < "$assets/siteops-install.zip.attestation.jsonl" | cut -d ' ' -f 1)" == "${selected_engine[8]}" ]] ||
+    fail "The engine bundle or proof differs from the signed content selection."
+fi
 stage "Checking the bundle's source, signer, caller, and runner."
-verified="$(timeout --kill-after=5 120 gh attestation verify "$assets/siteops-install.zip" \
-  --bundle "$assets/siteops-install.zip.attestation.jsonl" --repo "$repository" \
-  --cert-identity "$signer" --source-ref "$source_ref" --source-digest "$commit" \
-  --signer-digest "$commit" --cert-oidc-issuer https://token.actions.githubusercontent.com \
-  --predicate-type https://slsa.dev/provenance/v1 --hostname github.com \
-  --digest-alg sha256 --format json --jq "$query" 2>/dev/null)" ||
-  fail "The bundle's provenance could not be verified."
-[[ "$verified" == true ]] || fail "The bundle certificate does not match the selected release."
+verify_release_asset "$assets/siteops-install.zip" "$engine_commit" "$engine_ref" "$engine_caller" _siteops-distribution.yaml
 
 archive="$assets/siteops-install.zip"
 bundle_id="$(sha256sum < "$archive" | cut -d ' ' -f 1)"
@@ -505,45 +686,7 @@ if [[ -e "$bundle" || -L "$bundle" ]]; then
     fail "A retained installation directory must be owned by the current user and private."
 fi
 
-disabled='^(0|false)?$'
-mirror='^https://([^/?#@[:space:]]+@)?[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?(:[0-9]{1,5})?([/?#][^[:space:]]*)?$'
-[[ -z "${UV_INSECURE_HOST:-}" && -z "${UV_PYTHON_DOWNLOADS_JSON_URL:-}" &&
-   "${UV_INSECURE_NO_ZIP_VALIDATION:-}" =~ $disabled ]] ||
-  fail "Remove insecure uv settings and custom runtime catalogs before verified installation."
-[[ -z "${UV_PYTHON_INSTALL_MIRROR:-}" || "$UV_PYTHON_INSTALL_MIRROR" =~ $mirror ]] ||
-  fail "Select an approved HTTPS Python runtime mirror."
-uv_unset=()
-python_unset=()
-while IFS= read -r name; do
-  case "$name" in
-    PYTHON*|VIRTUAL_ENV|CONDA_PREFIX) python_unset+=(-u "$name"); uv_unset+=(-u "$name") ;;
-    UV_TOOL_DIR|UV_TOOL_BIN_DIR|UV_PYTHON_INSTALL_DIR|UV_PYTHON_INSTALL_MIRROR)
-      [[ -n "${!name}" ]] || uv_unset+=(-u "$name") ;;
-    UV_*) uv_unset+=(-u "$name") ;;
-  esac
-done < <(compgen -e)
-for name in UV_TOOL_DIR UV_TOOL_BIN_DIR UV_PYTHON_INSTALL_DIR; do
-  if [[ -n "${!name:-}" ]]; then
-    admit_directory "${!name}" shared ||
-      fail "Select uv tool, command, and Python directories under trusted, non-symlinked directories."
-  fi
-done
-select_uv
-uv_directory tool dir ||
-  fail "Select uv tool, command, and Python directories under trusted, non-symlinked directories."
-tools="$admitted"
-uv_directory tool dir --bin ||
-  fail "Select uv tool, command, and Python directories under trusted, non-symlinked directories."
-bin="$admitted"
-uv_directory python dir ||
-  fail "Select uv tool, command, and Python directories under trusted, non-symlinked directories."
-pydir="$admitted"
-expose_uv
-if [[ ( -e "$bin/siteops" || -L "$bin/siteops" ) && ! -e "$tools/siteops" && ! -L "$tools/siteops" ]]; then
-  fail "The exposed command belongs to another installation. Remove it with its original manager."
-fi
-if $replace; then admit_bound_runtime; fi
-select_runtime
+prepare_runtime
 installer_helper="$(extract_installer_helper)" ||
   fail "The authenticated installer helper could not be prepared."
 admit_file "$installer_helper" private ||
@@ -551,7 +694,7 @@ admit_file "$installer_helper" private ||
 mode=install
 if $replace; then mode=replace; fi
 helper_status=0
-check_payload "$mode" "$archive" "$bundle" "$repository" "$commit" "$source_ref" \
+check_payload "$mode" "$archive" "$bundle" "$repository" "$engine_commit" "$engine_ref" \
   "$uv" "$tools" "$bin" > "$staging/installed.json" 2>/dev/null || helper_status=$?
 case "$helper_status" in
   0) ;;
@@ -566,6 +709,8 @@ installed="$(< "$staging/installed.json")"
 result='^\{"version": "([A-Za-z0-9][A-Za-z0-9.!+_-]{0,127})", "wheel": "wheels/[^/"]+\.whl"\}$'
 [[ "$installed" =~ $result ]] || fail "The installer helper returned unsupported results."
 version="${BASH_REMATCH[1]}"
+[[ -z "$engine_version" || "$version" == "$engine_version" ]] ||
+  fail "The installed version differs from the signed content selection."
 siteops="$tools/siteops/bin/siteops"
 [[ -L "$bin/siteops" && "$(readlink -- "$bin/siteops")" == "$siteops" ]] && admit_file "$siteops" ||
   fail "The exposed siteops command does not match the selected build."
@@ -621,6 +766,15 @@ if [[ "$assets" == "$staging" ]]; then
       fail "Authenticated release bytes could not be retained after installation."
     [[ "$(sha256sum < "$staging/$asset")" == "$(sha256sum < "$cache/$asset")" ]] ||
       fail "The retained release bytes differ from the authenticated download."
+  done
+fi
+if [[ -n "$reference_download" ]]; then
+  mkdir "$reference_cache" || fail "The engine reference cache could not be reserved."
+  for asset in siteops-engine.json siteops-engine.json.attestation.jsonl; do
+    (set -C; cat -- "$reference_download/$asset" > "$reference_cache/$asset") ||
+      fail "The verified engine reference could not be retained."
+    [[ "$(sha256sum < "$reference_download/$asset")" == "$(sha256sum < "$reference_cache/$asset")" ]] ||
+      fail "The retained engine reference differs from the verified bytes."
   done
 fi
 if [[ -n "$enroll_name" ]]; then

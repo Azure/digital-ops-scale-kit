@@ -82,6 +82,8 @@ jobs:
       APPROVED_ASSET_LIST_SHA: ${{ needs.candidate.outputs.asset-list-sha }}
       APPROVED_ENGINE_ID: ${{ needs.candidate.outputs.engine-id }}
       APPROVED_ENGINE_REF: ${{ needs.candidate.outputs.engine-ref }}
+      APPROVED_ENGINE_REVISION: ${{ needs.candidate.outputs.engine-revision }}
+      APPROVED_ENGINE_VERSION: ${{ needs.candidate.outputs.engine-version }}
     steps:
       - name: Require the admitted runner class
         shell: python
@@ -238,7 +240,7 @@ jobs:
           if not isinstance(requests, list) or len(requests) > 64:
               raise SystemExit("::error::The approved workspace selection is invalid.")
           if requests:
-              workspace_names.add("siteops-workspaces.json")
+              workspace_names.update({"siteops-workspaces.json", "siteops-engine.json", "siteops-engine.json.attestation.jsonl"})
           for request in requests:
               name = request.get("package") if isinstance(request, dict) else None
               if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.!+_~-]*\.zip", name) or ".." in name:
@@ -267,6 +269,30 @@ jobs:
               or approved_assets[approved_wheel][1] != os.environ["APPROVED_WHEEL_SHA"]
           ):
               raise SystemExit("::error::The approved wheel identity is inconsistent.")
+          if requests:
+              reference_path = root / "release-bundle/siteops-engine.json"
+              if reference_path.is_symlink() or not reference_path.is_file() or reference_path.stat().st_size > 16384:
+                  raise SystemExit("::error::The approved engine reference must be a bounded regular file.")
+              reference_raw = reference_path.read_bytes()
+              if (len(reference_raw), hashlib.sha256(reference_raw).hexdigest()) != published_assets["siteops-engine.json"]:
+                  raise SystemExit("::error::The engine reference changed after approval.")
+              expected_reference = {
+                  "apiVersion": "siteops.release.engine/v1", "kind": "EngineReference",
+                  "release": release["tag"], "revision": plan["source"]["commit"], "preview": False,
+                  "engine": {
+                      "release": release["tag"] if engine["bundle"] else engine["releaseTag"],
+                      "revision": os.environ["APPROVED_ENGINE_REVISION"],
+                      "version": os.environ["APPROVED_ENGINE_VERSION"],
+                      "bundle": {"name": "siteops-install.zip", "size": approved_assets["siteops-install.zip"][0],
+                                 "sha256": approved_assets["siteops-install.zip"][1]},
+                      "proof": {"name": "siteops-install.zip.attestation.jsonl",
+                                "size": approved_assets["siteops-install.zip.attestation.jsonl"][0],
+                                "sha256": approved_assets["siteops-install.zip.attestation.jsonl"][1]},
+                  },
+              }
+              expected_reference_raw = (json.dumps(expected_reference, sort_keys=True, separators=(",", ":")) + "\n").encode()
+              if not expected_reference["engine"]["revision"] or not expected_reference["engine"]["version"] or reference_raw != expected_reference_raw:
+                  raise SystemExit("::error::The approved engine reference differs from qualified engine selection.")
 
           prefix = "repos/" + os.environ["GITHUB_REPOSITORY"]
           for path_key, hash_key in (("path", "sha256"), ("notesPath", "notesSha256")):
@@ -384,6 +410,8 @@ jobs:
           plan = json.loads(Path(sys.argv[3]).read_bytes())
           for request in plan.get("workspaces", []):
               sys.stdout.buffer.write((request["package"] + "\t_workspace-distribution.yaml\n").encode("utf-8"))
+          if plan.get("workspaces"):
+              sys.stdout.buffer.write(b"siteops-engine.json\t_release-candidate.yaml\n")
           ' "$RUNNER_TEMP/release-bundle" "$RUNNER_TEMP/release-assets/release-assets.json" \
             "$RUNNER_TEMP/release-plan/plan.json" > "$RUNNER_TEMP/release-subjects.txt"
           while IFS=$'\t' read -r name workflow; do

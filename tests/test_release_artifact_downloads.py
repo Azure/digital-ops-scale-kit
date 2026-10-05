@@ -46,9 +46,12 @@ def test_declared_download_inventory_keeps_names_for_single_and_multiple_artifac
             {"python": "3.11", "platform": platform}
             for platform in ("linux-x86_64", "windows-x86_64")[:count]
         ]
-        (tmp_path / "engine-selection.json").write_text(json.dumps({
+        selection = {
             "selectionSha256": "a" * 64, "matrix": {"include": targets},
-        }))
+            "engineReferenceSha256": "b" * 64, "engineRevision": "c" * 40,
+            "engineVersion": "1.0.0b1+build.42.3.gcccccccccccc",
+        }
+        (tmp_path / "engine-selection.json").write_text(json.dumps(selection))
         body = step("engine-input", "Freeze the selected engine")["run"]
         producer, output, output_step = "engine-input", "single-qualification-artifact", "select"
         download = step("workspace-qualified", "Download every qualification cell")["with"]
@@ -58,6 +61,14 @@ def test_declared_download_inventory_keeps_names_for_single_and_multiple_artifac
     assert len(programs) == 1
     exec(compile(programs[0], "<artifact-inventory>", "exec"), {})
     values = dict(line.split("=", 1) for line in capsys.readouterr().out.splitlines())
+    if kind == "qualification":
+        for key, field in (
+            ("selection-sha", "selectionSha256"), ("reference-sha", "engineReferenceSha256"),
+            ("engine-revision", "engineRevision"), ("engine-version", "engineVersion"),
+        ):
+            assert values[key] == selection[field]
+            assert WORKFLOW["jobs"][producer]["outputs"][key] == "${{ steps.select.outputs." + key + " }}"
+        assert json.loads(values["matrix"]) == selection["matrix"]
     assert values[output] == (expected[0] if count == 1 else "")
     assert WORKFLOW["jobs"][producer]["outputs"][output] == "${{ steps." + output_step + ".outputs." + output + " }}"
     expression = "${{ needs." + producer + ".outputs." + output + " }}"

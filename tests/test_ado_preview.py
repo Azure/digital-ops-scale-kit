@@ -32,11 +32,24 @@ def preview():
 
 
 def _expanded(case):
+    if case.name.startswith("consumer-validate-"):
+        return {"stages": [{"stage": "validate", "jobs": [{"job": "siteops_validate", "steps": [
+            {"displayName": "Install Site Ops", "env": {
+                "SITEOPS_RELEASE": case.parameters["release"],
+                "SITEOPS_SOURCE_COMMIT": case.parameters["sourceCommit"],
+            }},
+            {"displayName": "Validate caller content", "env": {
+                "WORKSPACE": case.parameters["workspace"], "MANIFEST": case.parameters["manifest"],
+                "SELECTOR": case.parameters.get("selector", ""), "SITE_FILE": case.parameters.get("siteFile", ""),
+            }},
+        ]}]}]}
     if case.override:
         steps = [{
             "displayName": "Install Site Ops",
             "env": {"INSTALL_DEV": case.parameters.get("installDev", False),
-                    "SITEOPS_SOURCE": case.parameters.get("siteopsSource", "")},
+                    "SITEOPS_SOURCE": case.parameters.get("siteopsSource", ""),
+                    "SITEOPS_RELEASE": case.parameters.get("release", ""),
+                    "SITEOPS_SOURCE_COMMIT": case.parameters.get("sourceCommit", "")},
         }]
         if case.parameters["enableCache"]:
             steps.append({"displayName": "Cache pip packages"})
@@ -53,7 +66,8 @@ def _expanded(case):
     deploy = case.pipeline == "deploy"
     task_env = (
         {"SELECTOR": case.selector, "DRY_RUN": case.parameters.get("dryRun", False),
-         "MANIFEST": case.parameters.get("manifest", "manifests/aio-install/manifest.yaml")}
+         "MANIFEST": case.parameters.get("manifest", "manifests/aio-install/manifest.yaml"),
+         "SITE_FILE": case.parameters.get("siteFile", "")}
         if deploy else
         {"MANIFEST": case.parameters.get("manifest", "all"),
          "INTEGRATION_SKIP_CLEANUP": case.parameters.get("skipCleanup", False)}
@@ -64,7 +78,7 @@ def _expanded(case):
             "displayName": "Prepare executable plan and deploy" if deploy else "Run integration tests",
             "inputs": {"azureSubscription": CONNECTIONS[env], "scriptType": "bash",
                        "keepAzSessionActive": case.parameters.get("keepAzSessionActive", False),
-                       "inlineScript": "siteops deploy --yes"},
+                       "inlineScript": "siteops deploy --yes" + (" --site-file target.yaml" if case.parameters.get("siteFile") else "")},
             "env": task_env,
         }]}}},
     }]}
@@ -167,6 +181,24 @@ def test_preview_checks_the_requested_wif_session_refresh(preview, pipeline, ena
     preview.validate_expansion(case, yaml.safe_dump(document), CONNECTIONS)
     inputs["keepAzSessionActive"] = not enabled
     with pytest.raises(preview.PreviewError, match="session refresh"):
+        preview.validate_expansion(case, yaml.safe_dump(document), CONNECTIONS)
+
+
+@pytest.mark.parametrize("fault", [None, "azure", "release", "site-file"])
+def test_preview_qualifies_lightweight_consumer_validation(preview, fault):
+    case = next(case for case in preview.cases() if case.name == "consumer-validate-site-file")
+    document = _expanded(case)
+    job = document["stages"][0]["jobs"][0]
+    if fault == "azure":
+        job["steps"].append({"task": "AzureCLI@2"})
+    elif fault == "release":
+        job["steps"][0]["env"]["SITEOPS_RELEASE"] = "other"
+    elif fault == "site-file":
+        job["steps"][1]["env"]["SITE_FILE"] = "other.yaml"
+    if fault:
+        with pytest.raises(preview.PreviewError):
+            preview.validate_expansion(case, yaml.safe_dump(document), CONNECTIONS)
+    else:
         preview.validate_expansion(case, yaml.safe_dump(document), CONNECTIONS)
 
 

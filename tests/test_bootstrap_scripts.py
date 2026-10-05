@@ -28,7 +28,10 @@ def test_managed_azure_linux_uses_existing_os_tools_without_sudo():
 
 def test_bash_bootstrap_admits_private_data_root_before_retained_tool_use():
     bash = (SCRIPTS / "siteops-bootstrap.sh").read_text(encoding="utf-8")
-    assert bash.index('admit_directory "$data" private') < bash.index("\nselect_uv\n")
+    for invocation in ("\n  prepare_runtime\n", "\nprepare_runtime\n"):
+        assert bash.index('admit_directory "$data" private') < bash.index(invocation)
+    runtime = re.search(r"(?ms)^prepare_runtime\(\) \{.*?^\}", bash).group()
+    assert "\n  select_uv\n" in runtime
 
 
 def test_windows_bootstrap_admits_private_data_root_before_retained_tool_use():
@@ -587,8 +590,8 @@ def test_windows_bootstrap_checks_native_verifier_certificate_before_bundle_use(
     tmp_path, accepted,
 ):
     script = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
-    block = script.split('    $signer = "', 1)[1].split("    $bundleId =", 1)[0]
-    block = '    $signer = "' + block
+    block = re.search(r"(?ms)^function Verify-ReleaseAsset\([^\n]*\) \{.*?^\}", script).group()
+    assert "Verify-ReleaseAsset $archive $engineCommit $engineRef $engineCaller '_siteops-distribution.yaml'" in script
     observation = verified_observation(
         "Azure/digital-ops-scale-kit", SOURCE_SHA, "refs/heads/main",
         ".github/workflows/_siteops-distribution.yaml", ".github/workflows/release.yaml",
@@ -608,7 +611,8 @@ $archive = 'unopened.zip'
 $Repository = 'Azure/digital-ops-scale-kit'
 $SourceRef = 'refs/heads/main'
 $Caller = 'release.yaml'
-$SourceCommit = '""" + SOURCE_SHA + "'\n" + block + "\n'CERTIFICATE_ACCEPTED'\n",
+$SourceCommit = '""" + SOURCE_SHA + "'\n" + block
+        + "\nVerify-ReleaseAsset $archive $SourceCommit $SourceRef $Caller '_siteops-distribution.yaml'\n'CERTIFICATE_ACCEPTED'\n",
         encoding="utf-8",
     )
     result = subprocess.run(
@@ -624,13 +628,12 @@ $SourceCommit = '""" + SOURCE_SHA + "'\n" + block + "\n'CERTIFICATE_ACCEPTED'\n"
 @pytest.mark.skipif(sys.platform != "win32", reason="PowerShell 5.1 is available on Windows.")
 def test_windows_retained_release_key_binds_exact_selection(tmp_path):
     script = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
-    block = script.split('    $identity = (', 1)[1].split('    $cache = Join-Path', 1)[0]
-    block = '    $identity = (' + block
+    block = re.search(r"(?ms)^function Get-SelectionKey\([^\n]*\) \{.*?^\}", script).group()
     statement = (
         "$Repository='Azure/digital-ops-scale-kit';$Release='siteops/v1.0.0b1';"
         "$SourceCommit='" + SOURCE_SHA + "';$SourceRef='refs/heads/main';"
         "$Caller='release.yaml';$data='unused';"
-        + block + "\n$cacheId\n"
+        + block + "\nGet-SelectionKey $Release $SourceCommit $SourceRef $Caller\n"
     )
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-Command", statement],

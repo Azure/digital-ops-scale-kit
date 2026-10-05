@@ -1,5 +1,4 @@
-# Steps template: Install Python and Site Ops
-# Azure Pipelines counterpart to .github/actions/setup-siteops/action.yaml
+# Steps template: Install an identified engine or an explicitly selected source.
 
 parameters:
   - name: pythonVersion
@@ -7,11 +6,11 @@ parameters:
     type: string
     default: '3.11'
   - name: installDev
-    displayName: Include dev dependencies (pytest, pytest-cov)
+    displayName: Explicit editable checkout installation with development dependencies
     type: boolean
     default: false
   - name: siteopsSource
-    displayName: siteops install source (empty = local editable install)
+    displayName: Explicit pip source (empty selects the released engine)
     type: string
     default: ''
   - name: enableCache
@@ -19,9 +18,21 @@ parameters:
     type: boolean
     default: true
   - name: sourceDirectory
-    displayName: Source directory for a local installation
+    displayName: Reviewed automation or development source directory
     type: string
     default: $(Build.SourcesDirectory)
+  - name: templateRepository
+    type: string
+    default: self
+  - name: release
+    type: string
+    default: ''
+  - name: sourceCommit
+    type: string
+    default: ''
+  - name: repository
+    type: string
+    default: ''
 
 steps:
   - task: UsePythonVersion@0
@@ -29,7 +40,7 @@ steps:
     inputs:
       versionSpec: ${{ parameters.pythonVersion }}
 
-  - ${{ if eq(parameters.enableCache, true) }}:
+  - ${{ if and(eq(parameters.enableCache, true), or(eq(parameters.installDev, true), not(in(parameters.siteopsSource, '', ' ')))) }}:
     - script: |
         set -euo pipefail
         PIP_CACHE_DIR="$(pip cache dir)"
@@ -53,19 +64,46 @@ steps:
 
   - script: |
       set -euo pipefail
-      pip install --upgrade pip
-      if [ -n "$SITEOPS_SOURCE" ]; then
-        pip install "$SITEOPS_SOURCE"
-      elif [ "$INSTALL_DEV" = "True" ]; then
-        pip install -e ".[dev]"
+      if [[ -n "${SITEOPS_SOURCE//[[:space:]]/}" || "$INSTALL_DEV" == "True" ]]; then
+        if [[ -n "${SITEOPS_RELEASE//[[:space:]]/}${SITEOPS_SOURCE_COMMIT//[[:space:]]/}${SITEOPS_REPOSITORY//[[:space:]]/}" ||
+              ( -n "${SITEOPS_SOURCE//[[:space:]]/}" && "$INSTALL_DEV" == "True" ) ]]; then
+          echo "##vso[task.logissue type=error]Choose a release, an explicit source, or a development installation."
+          exit 1
+        fi
+        pip install --upgrade pip
+        if [[ -n "${SITEOPS_SOURCE//[[:space:]]/}" ]]; then
+          pip install "$SITEOPS_SOURCE"
+        else
+          pip install -e ".[dev]"
+        fi
       else
-        pip install -e .
+        if [[ ! -f "$SOURCE_DIRECTORY/scripts/install-siteops-consumer.py" ]]; then
+          echo "##vso[task.logissue type=error]Release installation requires the matching automation scripts. Select templateRepository or copy the matching helpers."
+          exit 1
+        fi
+        python3 -I -S -B "$SOURCE_DIRECTORY/scripts/install-siteops-consumer.py" \
+          --source-directory "$SOURCE_DIRECTORY" --state-parent "$STATE_PARENT"
       fi
     displayName: Install Site Ops
     workingDirectory: ${{ parameters.sourceDirectory }}
     env:
       INSTALL_DEV: ${{ parameters.installDev }}
       SITEOPS_SOURCE: ${{ parameters.siteopsSource }}
+      SITEOPS_RELEASE: ${{ parameters.release }}
+      SITEOPS_SOURCE_COMMIT: ${{ parameters.sourceCommit }}
+      SITEOPS_REPOSITORY: ${{ parameters.repository }}
+      SOURCE_DIRECTORY: ${{ parameters.sourceDirectory }}
+      STATE_PARENT: $(Agent.TempDirectory)
+      ${{ if eq(parameters.templateRepository, 'self') }}:
+        SITEOPS_AUTOMATION_REF: $(Build.SourceBranch)
+        SITEOPS_AUTOMATION_VERSION: $(Build.SourceVersion)
+        SITEOPS_AUTOMATION_REPOSITORY: $(Build.Repository.Name)
+        SITEOPS_AUTOMATION_PROVIDER: $(Build.Repository.Provider)
+      ${{ else }}:
+        SITEOPS_AUTOMATION_REF: $(SITEOPS_AUTOMATION_REF)
+        SITEOPS_AUTOMATION_VERSION: $(SITEOPS_AUTOMATION_VERSION)
+        SITEOPS_AUTOMATION_REPOSITORY: $(SITEOPS_AUTOMATION_REPOSITORY)
+        SITEOPS_AUTOMATION_PROVIDER: $(SITEOPS_AUTOMATION_PROVIDER)
 
   - script: siteops --version
     displayName: Verify Site Ops installation

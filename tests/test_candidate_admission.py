@@ -36,7 +36,7 @@ def candidate(tmp_path, admission):
     payload.mkdir()
     names = (
         "siteops-install.zip", "siteops-1.0.0b1-py3-none-any.whl",
-        "siteops-bootstrap.sh", "siteops-bootstrap.ps1", "workspace.zip",
+        "siteops-bootstrap.sh", "siteops-bootstrap.ps1", "workspace.zip", "siteops-engine.json",
     )
     assets = []
     for name in (*names, *(name + ".attestation.jsonl" for name in names), "siteops-workspaces.json"):
@@ -90,15 +90,16 @@ def test_completed_producer_is_admitted_while_the_release_is_still_running(admis
     )
     assert result["status"] == "admitted"
     assert result["installation"] == result["deployment"] == "not-run"
-    assert result["subjects"] == {"engine": 4, "workspace": 1}
+    assert result["subjects"] == {"engine": 4, "workspace": 2}
     assert result["run"] == 42 and result["attempt"] == 3
     assert result["source"] == expected.source and result["artifacts"] == expected.artifacts
     assert {item[1] for item in verified} == {
         "siteops-install.zip", "siteops-1.0.0b1-py3-none-any.whl",
-        "siteops-bootstrap.sh", "siteops-bootstrap.ps1", "workspace.zip",
+        "siteops-bootstrap.sh", "siteops-bootstrap.ps1", "workspace.zip", "siteops-engine.json",
     }
     assert all(name == identity and proof == name + ".attestation.jsonl"
                for _, name, proof, identity in verified)
+    assert next(role for role, name, *_ in verified if name == "siteops-engine.json") == "engine-reference"
 
 
 @pytest.mark.parametrize("fault", [
@@ -210,7 +211,9 @@ def test_content_only_admission_checks_its_payload_without_claiming_an_engine_in
 ):
     expected, _, _, _, raw, inventory, payload = candidate
     native = tuple(asset for asset in inventory.assets if asset.name.startswith("siteops-")
-                   and asset.name != "siteops-workspaces.json")
+                   and asset.name not in {
+                       "siteops-workspaces.json", "siteops-engine.json", "siteops-engine.json.attestation.jsonl",
+                   })
     remaining = tuple(asset for asset in inventory.assets if asset not in native)
     for asset in native:
         (payload / asset.name).unlink()
@@ -224,8 +227,8 @@ def test_content_only_admission_checks_its_payload_without_claiming_an_engine_in
     roles = []
     receipt = admission.admit(expected, raw, inventory.serialized(), payload,
                               lambda role, *args: roles.append(role))
-    assert roles == ["workspace"]
-    assert receipt["subjects"] == {"engine": 0, "workspace": 1}
+    assert roles == ["workspace", "engine-reference"]
+    assert receipt["subjects"] == {"engine": 0, "workspace": 2}
     assert receipt["installation"] == "not-run"
 
 
@@ -290,10 +293,11 @@ def test_controller_checks_independent_policy_and_writes_only_a_complete_receipt
     if reject:
         assert not output.exists()
     else:
-        assert json.loads(output.read_text())["subjects"] == {"engine": 4, "workspace": 1}
+        assert json.loads(output.read_text())["subjects"] == {"engine": 4, "workspace": 2}
         assert set(calls) == {
             ".github/workflows/_siteops-distribution.yaml",
             ".github/workflows/_workspace-distribution.yaml",
+            ".github/workflows/_release-candidate.yaml",
         }
 
 

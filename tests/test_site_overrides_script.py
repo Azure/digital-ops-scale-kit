@@ -49,3 +49,25 @@ def test_override_generation_keeps_site_identity_out_of_ci_output(
     if not invalid:
         assert "Generated 1 site override(s)" in output.out
         assert "Skipped 1 site(s)" in output.out
+
+
+def test_override_generation_preserves_a_file_created_after_the_existence_check(tmp_path, monkeypatch):
+    spec = importlib.util.spec_from_file_location("override_race", SCRIPT)
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    path = tmp_path / "site.yaml"
+    original = Path.open
+    intervened = False
+
+    def open_file(self, mode="r", *args, **kwargs):
+        nonlocal intervened
+        if self == path and not intervened and mode in {"w", "x"}:
+            intervened = True
+            with original(self, "w", encoding="utf-8") as stream:
+                stream.write('{"preserved":true}\n')
+        return original(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_file)
+    generated, skipped = helper.generate_overlays({"site": {"parameters.value": "new"}}, tmp_path)
+    assert generated == [] and skipped == ["site"]
+    assert json.loads(path.read_text()) == {"preserved": True}

@@ -1,0 +1,20 @@
+# Shared caller and automation identities for consumer stages.
+parameters:
+  - name: templateRepository
+    type: string
+    default: self
+
+variables:
+  PYTHONUNBUFFERED: '1'
+  SITEOPS_REDACT_OUTPUT: '1'
+  AZURE_CORE_OUTPUT: none
+  ${{ if eq(parameters.templateRepository, 'self') }}:
+    SITEOPS_TEMPLATE_ROOT: $(Build.SourcesDirectory)
+    SITEOPS_WORKSPACE_ROOT: $(Build.SourcesDirectory)
+  ${{ else }}:
+    SITEOPS_TEMPLATE_ROOT: $(Pipeline.Workspace)/s/siteops-automation
+    SITEOPS_WORKSPACE_ROOT: $(Pipeline.Workspace)/s/siteops-inputs
+    SITEOPS_AUTOMATION_REF: ${{ format('$[ resources.repositories[''{0}''].ref ]', parameters.templateRepository) }}
+    SITEOPS_AUTOMATION_VERSION: ${{ format('$[ resources.repositories[''{0}''].version ]', parameters.templateRepository) }}
+    SITEOPS_AUTOMATION_REPOSITORY: ${{ format('$[ resources.repositories[''{0}''].name ]', parameters.templateRepository) }}
+    SITEOPS_AUTOMATION_PROVIDER: ${{ format('$[ resources.repositories[''{0}''].type ]', parameters.templateRepository) }}

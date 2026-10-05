@@ -57,7 +57,19 @@ parameters:
     default: false
 
   - name: siteopsSource
-    displayName: siteops install source (e.g. git+https://github.com/.../digital-ops-scale-kit@<tag>). Empty = local editable install.
+    displayName: Explicit pip engine source (otherwise use the selected release)
+    type: string
+    default: ' '
+  - name: release
+    displayName: Engine or content release (empty uses this checkout's tag)
+    type: string
+    default: ' '
+  - name: sourceCommit
+    displayName: Full source commit for an explicit release
+    type: string
+    default: ' '
+  - name: siteFile
+    displayName: Complete Site file in this checkout (instead of a selector)
     type: string
     default: ' '
 
@@ -90,7 +102,7 @@ variables:
     value: '1'
 
 pool:
-  vmImage: ubuntu-latest
+  vmImage: ubuntu-24.04
 
 stages:
   - stage: prepare
@@ -102,8 +114,6 @@ stages:
           - checkout: self
             fetchDepth: 1
             persistCredentials: false
-
-          - template: templates/setup-siteops.yaml
 
           - script: |
               set -euo pipefail
@@ -132,6 +142,10 @@ stages:
                   fi
                   ;;
               esac
+              if [[ -n "${SITE_FILE//[[:space:]]/}" && -n "${SELECTOR//[[:space:]]/}" ]]; then
+                echo "##vso[task.logissue type=error]Choose siteFile or selector, not both."
+                exit 1
+              fi
 
               SUMMARY_FILE="$(Build.ArtifactStagingDirectory)/deploy-config.md"
               echo "### Deployment Configuration" > "$SUMMARY_FILE"
@@ -152,6 +166,8 @@ stages:
               WORKSPACE_DIR: workspaces/${{ parameters.workspace }}
               MANIFEST_REL: ${{ parameters.manifest }}
               DRY_RUN: ${{ parameters.dryRun }}
+              SITE_FILE: ${{ parameters.siteFile }}
+              SELECTOR: ${{ parameters.selector }}
 
   - template: templates/siteops-deploy.yaml
     parameters:
@@ -160,7 +176,9 @@ stages:
       workspace: workspaces/${{ parameters.workspace }}
       manifest: ${{ parameters.manifest }}
       environment: ${{ parameters.environment }}
-      ${{ if eq(parameters.manifest, 'samples/resource-set-basic/manifest.yaml') }}:
+      ${{ if not(in(parameters.siteFile, '', ' ')) }}:
+        siteFile: ${{ parameters.siteFile }}
+      ${{ elseif eq(parameters.manifest, 'samples/resource-set-basic/manifest.yaml') }}:
         ${{ if not(in(parameters.selector, '', ' ')) }}:
           selector: environment=sample,sample=resource-set-basic,${{ parameters.selector }}
         ${{ else }}:
@@ -175,5 +193,7 @@ stages:
       ${{ else }}:
         selector: environment=${{ parameters.environment }}
       dryRun: ${{ parameters.dryRun }}
+      release: ${{ parameters.release }}
+      sourceCommit: ${{ parameters.sourceCommit }}
       ${{ if not(in(parameters.siteopsSource, '', ' ')) }}:
         siteopsSource: ${{ parameters.siteopsSource }}

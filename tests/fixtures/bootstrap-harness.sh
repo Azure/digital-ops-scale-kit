@@ -75,6 +75,15 @@ release=https://github.com/example/publisher/releases/download
 case "$target" in
   "$release/siteops%2Fv1.0.0b1/siteops-install.zip") cp -- "$TEST_BUNDLE_ARCHIVE" "$output" ;;
   "$release/siteops%2Fv1.0.0b2/siteops-install.zip") cp -- "$TEST_REPLACEMENT_ARCHIVE" "$output" ;;
+  "$release/siteops%2Fv1.2.3/siteops-install.zip") cp -- "$TEST_REFERENCED_ARCHIVE" "$output" ;;
+  "$release/v1.0.0b7/siteops-install.zip") cp -- "$TEST_BUNDLE_ARCHIVE" "$output" ;;
+  "$release/v1.0.0b"[78]/siteops-engine.json)
+    [[ "${TEST_NO_REFERENCE:-0}" == 0 ]] || exit 22
+    cp -- "$TEST_REFERENCE_ROOT/${target##*/download/}" "$output" ;;
+  "$release/v1.0.0b"[78]/siteops-engine.json.attestation.jsonl)
+    printf 'opaque reference proof\n' > "$output" ;;
+  "$release/siteops%2Fv1.2.3/siteops-install.zip.attestation.jsonl"|"$release/v1.0.0b7/siteops-install.zip.attestation.jsonl")
+    printf 'opaque proof\n' > "$output" ;;
   "$release/siteops%2Fv1.0.0b"[12]/siteops-install.zip.attestation.jsonl)
     printf 'opaque proof\n' > "$output" ;;
   https://github.com/astral-sh/uv/releases/download/0.12.20/uv-x86_64-unknown-linux-gnu.tar.gz)
@@ -92,6 +101,11 @@ case "${1:-} ${2:-}" in
     else echo "gh version 2.95.0 (fixture)"; fi ;;
   "attestation verify")
     [[ " $* " == *" --repo example/publisher "* && -f "$3" ]] || exit 97
+    if [[ "$3" == */siteops-engine.json ]]; then
+      [[ " $* " == *"/_release-candidate.yaml@"* ]] || exit 97
+      printf '%s\n' "${TEST_REFERENCE_VERIFY:-true}"
+      exit 0
+    fi
     [[ "${TEST_VERIFY:-true}" != error ]] || exit 1
     printf '%s\n' "${TEST_VERIFY:-true}" ;;
   "attestation trusted-root")
@@ -166,6 +180,41 @@ fresh_home() {
   extra=()
   bootstrap_path="$doubles:$system"
 }
+reference_root="$root/references"
+if [[ "$scenario" == content ]]; then
+  [[ -f "${TEST_REFERENCED_ARCHIVE:-}" ]] || die "The referenced engine fixture is required."
+  "$real_python" -I - "$reference_root" "$TEST_BUNDLE_ARCHIVE" "$TEST_REFERENCED_ARCHIVE" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+import zipfile
+
+root = pathlib.Path(sys.argv[1])
+for tag, revision, engine_tag, engine_revision, path, preview in (
+    ("v1.0.0b7", "a" * 40, "v1.0.0b7", "a" * 40, pathlib.Path(sys.argv[2]), False),
+    ("v1.0.0b8", "c" * 40, "siteops/v1.2.3", "d" * 40, pathlib.Path(sys.argv[3]), True),
+):
+    raw = path.read_bytes()
+    proof = b"opaque proof\n"
+    with zipfile.ZipFile(path) as archive:
+        version = json.loads(archive.read("bundle.json"))["package"]["version"]
+    record = {
+        "apiVersion": "siteops.release.engine/v1", "kind": "EngineReference",
+        "release": tag, "revision": revision, "preview": preview,
+        "engine": {
+            "release": engine_tag, "revision": engine_revision, "version": version,
+            "bundle": {"name": "siteops-install.zip", "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest()},
+            "proof": {"name": "siteops-install.zip.attestation.jsonl", "size": len(proof), "sha256": hashlib.sha256(proof).hexdigest()},
+        },
+    }
+    directory = root / tag
+    directory.mkdir(parents=True)
+    (directory / "siteops-engine.json").write_text(
+        json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8",
+    )
+PY
+fi
 run_bootstrap() {
   local label="$1"
   shift
@@ -173,6 +222,8 @@ run_bootstrap() {
     SSL_CERT_FILE="$tls/ca.pem" UV_PYTHON_INSTALL_MIRROR="$mirror_url" \
     PYTHONPATH="$root/inject" TEST_LOGS="$logs" TEST_SITEOPS_LOG="$logs/siteops" \
     TEST_BUNDLE_ARCHIVE="$TEST_BUNDLE_ARCHIVE" TEST_REPLACEMENT_ARCHIVE="$TEST_REPLACEMENT_ARCHIVE" \
+    TEST_REFERENCED_ARCHIVE="${TEST_REFERENCED_ARCHIVE:-}" TEST_REFERENCE_ROOT="$reference_root" \
+    TEST_REFERENCE_VERIFY="${reference_verify:-true}" TEST_NO_REFERENCE="${no_reference:-0}" \
     TEST_UV_ARCHIVE="$TEST_UV_ARCHIVE" TEST_VERIFY="${verify:-true}" \
     TEST_OLD_GH="${old_gh:-0}" TEST_TAMPER_UV="${tamper_uv:-0}" "${extra[@]}" \
     bash "$bootstrap" --repository example/publisher "$@" > "$logs/$label.out" 2>&1
@@ -322,11 +373,11 @@ scenario_root() {
   mkdir -p "$root/sticky"
   chmod 1777 "$root/sticky"
   extra=(XDG_DATA_HOME="$root/sticky/data")
-  verify=false refuses sticky-root "The bundle certificate does not match" "${first[@]}"
+  verify=false refuses sticky-root "The asset certificate does not match" "${first[@]}"
   [[ "$(stat -c %a "$root/sticky/data/siteops")" == 700 ]] ||
     die "A sticky parent did not receive a private data root."
   extra=()
-  verify=false refuses rejected-proof "The bundle certificate does not match" "${first[@]}"
+  verify=false refuses rejected-proof "The asset certificate does not match" "${first[@]}"
   verify=error refuses failed-proof "provenance could not be verified" "${first[@]}"
   [[ ! -e "$data/bundles" && ! -e "$data/tools" && ! -e "$HOME/.local/share/uv" && ! -e "$bin" ]] ||
     die "A rejected proof changed installation state."
@@ -495,9 +546,81 @@ scenario_managed() {
     die "Managed Azure Linux did not install the selected build."
   succeeds managed-repeat "${first[@]}"
 }
+scenario_content() {
+  local downloads combined referenced
+  combined=(--content-release v1.0.0b7 --source-commit "$(printf 'a%.0s' {1..40})" --yes)
+  referenced=(--content-release v1.0.0b8 --source-commit "$(printf 'c%.0s' {1..40})" \
+    --source-ref refs/heads/content-preview --caller ci.yaml --yes)
+  fresh_home content-missing
+  no_reference=1 refuses missing-reference "signed engine reference is unavailable" "${combined[@]}"
+  no_uv_download missing-reference
+  [[ ! -e "$tools/siteops" ]] || die "Missing metadata installed an engine."
+  fresh_home content-proof
+  reference_verify=false refuses reference-proof "asset certificate does not match" "${combined[@]}"
+  no_uv_download reference-proof
+  cp "$reference_root/v1.0.0b7/siteops-engine.json" "$logs/original-reference"
+  for fault in digest version; do
+    fresh_home "content-$fault"
+    "$real_python" -I - "$logs/original-reference" "$reference_root/v1.0.0b7/siteops-engine.json" "$fault" <<'PY'
+import json
+import pathlib
+import sys
+
+record = json.loads(pathlib.Path(sys.argv[1]).read_bytes())
+if sys.argv[3] == "digest":
+    record["engine"]["bundle"]["sha256"] = "0" * 64
+else:
+    record["engine"]["version"] = "1.9.9"
+pathlib.Path(sys.argv[2]).write_text(
+    json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8",
+)
+PY
+    if [[ "$fault" == digest ]]; then
+      refuses wrong-bundle-digest "differs from the signed content selection" "${combined[@]}"
+    else
+      refuses wrong-bundle-version "installer helper could not be prepared" "${combined[@]}"
+    fi
+    [[ ! -e "$tools/siteops" ]] || die "A rejected engine selection installed the tool."
+  done
+  cp "$logs/original-reference" "$reference_root/v1.0.0b7/siteops-engine.json"
+  fresh_home content-combined
+  planted "$root/untrusted-parser" "$root/untrusted-parser-ran"
+  extra=(runtime_prepared=true python="$root/untrusted-parser")
+  succeeds content-combined "${combined[@]}"
+  [[ ! -e "$root/untrusted-parser-ran" ]] || die "Ambient runtime state bypassed tool admission."
+  extra=()
+  [[ "$(installed_version "$bin")" == "siteops $first_version" ]] || die "Combined content selected another engine."
+  downloads="$(count "$logs/curl")"
+  succeeds content-repeat "${combined[@]}"
+  [[ "$(count "$logs/curl")" == "$downloads" ]] || die "Repeated content resolution redownloaded assets."
+  verify=false refuses content-bundle-proof "asset certificate does not match" "${combined[@]}"
+  fresh_home content-reference
+  succeeds content-reference "${referenced[@]}" --enroll-source demo
+  [[ "$(installed_version "$bin")" == "siteops 1.2.3" ]] || die "Content-only selection installed another engine."
+  "$real_python" -I - "$logs/siteops" "$logs/gh" <<'PY' || die "Content and engine policy identities were mixed."
+import json
+import sys
+
+records = [json.loads(line) for line in open(sys.argv[1])]
+policy = [item["policy"] for item in records if item["policy"]][-1]["provider"]
+assert policy["sourceRef"] == "refs/heads/content-preview"
+assert policy["builderWorkflow"] == ".github/workflows/ci.yaml"
+commands = open(sys.argv[2]).read().splitlines()
+bundle = [line for line in commands if "attestation verify" in line and "/siteops-install.zip " in line][-1]
+assert "--source-digest " + "d" * 40 in bundle
+assert "/_siteops-distribution.yaml@refs/heads/main" in bundle
+assert "/release.yaml@refs/heads/main" in bundle
+reference = [line for line in commands if "attestation verify" in line and "/siteops-engine.json " in line][-1]
+assert "--source-digest " + "c" * 40 in reference
+assert "/_release-candidate.yaml@refs/heads/content-preview" in reference
+PY
+  downloads="$(count "$logs/curl")"
+  succeeds referenced-repeat "${referenced[@]}"
+  [[ "$(count "$logs/curl")" == "$downloads" ]] || die "Referenced engine was not retained."
+}
 
 case "$scenario" in
-  journey|root|storage|policy|tools|runtime|managed) "scenario_$scenario" ;;
+  journey|root|storage|policy|tools|runtime|managed|content) "scenario_$scenario" ;;
   *) die "Unknown scenario $scenario." ;;
 esac
 [[ ! -s "$logs/rejected" ]] || { cat "$logs/rejected" >&2; die "An unexpected tool call was made."; }

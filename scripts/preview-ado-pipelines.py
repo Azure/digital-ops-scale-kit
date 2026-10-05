@@ -111,6 +111,7 @@ def cases() -> list[Case]:
     selected.append(Case(
         "deploy-wif-session", "deploy", {"keepAzSessionActive": True}, "environment=dev",
     ))
+    selected.append(Case("deploy-site-file", "deploy", {"siteFile": "operator/site.yaml", "dryRun": True}))
     for sample in ("resource-set-basic", "resource-set-composition"):
         for custom in (False, True):
             selected.append(Case(
@@ -134,9 +135,9 @@ def cases() -> list[Case]:
         selected.append(Case(f"integration-{environment}", "integration",
                              {"environment": environment, "skipCleanup": True}))
     for label, options in (
-        ("local", {"enableCache": True, "installDev": False}),
         ("development", {"enableCache": True, "installDev": True}),
         ("external", {"enableCache": False, "siteopsSource": "https://example.invalid/siteops.whl"}),
+        ("release", {"enableCache": False, "release": "v1.0.0b7", "sourceCommit": "a" * 40}),
     ):
         override = yaml.safe_dump({
             "trigger": "none", "pr": "none", "pool": {"vmImage": "ubuntu-24.04"},
@@ -145,6 +146,17 @@ def cases() -> list[Case]:
             }]}],
         })
         selected.append(Case(f"setup-{label}", "ci", options, override=override))
+    for label, targeting in (("selector", {"selector": "environment=dev"}), ("site-file", {"siteFile": "operator/site.yaml"})):
+        options = {
+            "workspace": "deployment", "manifest": "manifests/custom.yaml",
+            "release": "v1.0.0b7", "sourceCommit": "a" * 40, **targeting,
+        }
+        override = yaml.safe_dump({
+            "trigger": "none", "pr": "none", "pool": {"vmImage": "ubuntu-24.04"},
+            "variables": {"SITE_OVERRIDES": ""},
+            "stages": [{"template": "templates/siteops-validate.yaml", "parameters": options}],
+        })
+        selected.append(Case(f"consumer-validate-{label}", "ci", options, override=override))
     return selected
 
 
@@ -193,6 +205,24 @@ def validate_expansion(case: Case, text: str, connections: dict[str, str]) -> No
         raise PreviewError("The expanded pipeline is empty.")
     if any("template" in node for node in nodes):
         raise PreviewError("The service returned unexpanded template references.")
+    if case.name.startswith("consumer-validate-"):
+        _one(nodes, "job", "siteops_validate")
+        if any(node.get("task", "").startswith("AzureCLI") or "environment" in node for node in nodes):
+            raise PreviewError("Structural consumer validation must not acquire Azure deployment authority.")
+        installation = _one(nodes, "displayName", "Install Site Ops")
+        environment = _mapping(installation.get("env"))
+        if (environment.get("SITEOPS_RELEASE") != case.parameters["release"]
+                or environment.get("SITEOPS_SOURCE_COMMIT") != case.parameters["sourceCommit"]):
+            raise PreviewError("Consumer validation changed its selected release.")
+        validation = _one(nodes, "displayName", "Validate caller content")
+        environment = _mapping(validation.get("env"))
+        expected = {
+            "WORKSPACE": case.parameters["workspace"], "MANIFEST": case.parameters["manifest"],
+            "SELECTOR": case.parameters.get("selector", ""), "SITE_FILE": case.parameters.get("siteFile", ""),
+        }
+        if any(environment.get(key) != value for key, value in expected.items()):
+            raise PreviewError("Consumer validation changed its caller content or targeting.")
+        return
     if case.override:
         _one(nodes, "job", "setup_preview")
         installation = _one(nodes, "displayName", "Install Site Ops")
@@ -201,6 +231,9 @@ def validate_expansion(case: Case, text: str, connections: dict[str, str]) -> No
             raise PreviewError("The setup template selected different development dependencies.")
         if environment.get("SITEOPS_SOURCE", "") != case.parameters.get("siteopsSource", ""):
             raise PreviewError("The setup template selected a different installation source.")
+        if (environment.get("SITEOPS_RELEASE", "") != case.parameters.get("release", "")
+                or environment.get("SITEOPS_SOURCE_COMMIT", "") != case.parameters.get("sourceCommit", "")):
+            raise PreviewError("The setup template selected a different release identity.")
         caches = [node for node in nodes if node.get("displayName") == "Cache pip packages"]
         if len(caches) != int(case.parameters["enableCache"]):
             raise PreviewError("The setup cache condition did not match the requested case.")
@@ -233,12 +266,13 @@ def validate_expansion(case: Case, text: str, connections: dict[str, str]) -> No
     task_env = _mapping(task.get("env", {}))
     if case.pipeline == "deploy":
         if (task_env.get("SELECTOR") != case.selector
+                or task_env.get("SITE_FILE", "") != case.parameters.get("siteFile", "")
                 or not _boolean(task_env.get("DRY_RUN"), case.parameters.get("dryRun", False))
                 or task_env.get("MANIFEST") != case.parameters.get(
                     "manifest", "manifests/aio-install/manifest.yaml")):
             raise PreviewError("The expanded deployment inputs differ from the requested case.")
         body = inputs.get("inlineScript", "")
-        if not isinstance(body, str) or "--yes" not in body:
+        if not isinstance(body, str) or "--yes" not in body or (case.parameters.get("siteFile") and "--site-file" not in body):
             raise PreviewError("The expanded deployment omitted unattended consent.")
     elif (task_env.get("MANIFEST") != case.parameters.get("manifest", "all")
           or not _boolean(task_env.get("INTEGRATION_SKIP_CLEANUP"),

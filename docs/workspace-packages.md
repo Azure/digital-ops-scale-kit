@@ -258,6 +258,12 @@ plans, deploy resources, or evaluate workload health. The final matrix gate
 requires every declared target's result to name the same frozen engine,
 workspace inventory, release plan and candidate project pin.
 
+The release workflow projects that frozen selection into the signed
+`siteops-engine.json` reference described in [release preparation](releasing.md#preview-a-release-without-publishing).
+It records the selected engine's own source revision and bundle identities.
+The internal `workspace-engine.json` remains qualification state, not a
+public consumer contract.
+
 Native `uv tool install <wheel-url>` and the verified bootstrap are
 described in the [installation guide](install-siteops.md). The isolated
 qualification environment is release tooling, not another operator installer.

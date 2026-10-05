@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from release_verification import ReleaseVerifier  # noqa: E402
 from siteops_release_assets import (  # noqa: E402
+    ENGINE_REFERENCE_NAME,
     PROOF_SUFFIX,
     FrozenReleaseAssets,
     publication_assets,
@@ -192,7 +193,8 @@ def admit(expected: Expected, plan_raw: bytes, inventory_raw: bytes, payload: Pa
             proof = by_name.get(subject.name + PROOF_SUFFIX)
             if proof is None:
                 raise AdmissionError("A candidate subject has no independently selected proof.")
-            verify(role, payload / subject.name, payload / proof.name,
+            verify("engine-reference" if subject.name == ENGINE_REFERENCE_NAME else role,
+                   payload / subject.name, payload / proof.name,
                    ArtifactIdentity(subject.name, subject.size, subject.sha256))
         counts[role] = len(subjects)
     return {
@@ -233,7 +235,10 @@ def main() -> int:
             if role not in verifiers:
                 verifiers[role] = ReleaseVerifier(
                     args.state / role, args.trusted_root, expected.source,
-                    signer=f".github/workflows/_{'siteops' if role == 'engine' else 'workspace'}-distribution.yaml",
+                    signer=(
+                        ".github/workflows/_release-candidate.yaml" if role == "engine-reference"
+                        else f".github/workflows/_{'siteops' if role == 'engine' else 'workspace'}-distribution.yaml"
+                    ),
                     builder=expected.caller, runner_environment="self-hosted",
                 )
             verifiers[role](artifact, proof, identity)

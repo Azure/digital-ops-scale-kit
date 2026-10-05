@@ -77,8 +77,8 @@ def native_inputs() -> dict[str, Path]:
 
 
 @pytest.fixture
-def published(bundle_factory, tmp_path, monkeypatch) -> tuple[Path, Path]:
-    """Publish two helper-bearing bundles whose command records its use."""
+def published(bundle_factory, tmp_path, monkeypatch) -> tuple[Path, Path, Path]:
+    """Publish combined and independently versioned bundles with recording commands."""
     original = native_bundle.write_wheel
 
     def recording(path, **options):
@@ -92,7 +92,9 @@ def published(bundle_factory, tmp_path, monkeypatch) -> tuple[Path, Path]:
         root, manifest = bundle_factory(number, source_sha=source * 40)
         archive, _ = publish_assets(root, manifest, tmp_path / f"release-{number}")
         archives.append(archive)
-    return archives[0], archives[1]
+    root, manifest = bundle_factory(3, source_sha="d" * 40, version="1.2.3")
+    archive, _ = publish_assets(root, manifest, tmp_path / "release-3")
+    return archives[0], archives[1], archive
 
 
 def _ubuntu() -> None:
@@ -114,6 +116,7 @@ def _harness(tmp_path, scenario, script, published, native_inputs):
             "TEST_SCENARIO": scenario,
             "TEST_BUNDLE_ARCHIVE": str(published[0]),
             "TEST_REPLACEMENT_ARCHIVE": str(published[1]),
+            "TEST_REFERENCED_ARCHIVE": str(published[2]),
             "TEST_UV_ARCHIVE": str(native_inputs["SITEOPS_TEST_UV_ARCHIVE"]),
             "TEST_PYTHON_ARCHIVE": str(native_inputs["SITEOPS_TEST_UV_PYTHON_ARCHIVE"]),
         },
@@ -129,7 +132,7 @@ def _harness(tmp_path, scenario, script, published, native_inputs):
 @linux_only
 @pytest.mark.parametrize(
     "scenario",
-    ["journey", "root", "storage", "policy", "tools", "runtime"],
+    ["journey", "root", "storage", "policy", "tools", "runtime", "content"],
 )
 def test_ubuntu_bootstrap_installs_through_native_uv_and_the_shipped_helper(
     tmp_path,
@@ -217,11 +220,12 @@ def test_linux_storage_guard_distinguishes_trusted_neighbors(tmp_path, setup, ch
 def test_linux_bootstrap_admits_uv_storage_and_runtime_before_execution():
     source = SCRIPT.read_text(encoding="utf-8")
     assert "python list" not in source
-    assert source.index('admit_directory "${!name}" shared') < source.index("\nselect_uv\n")
-    assert source.index("\nif $replace; then admit_bound_runtime; fi\n") < source.index(
-        "\nselect_runtime\n",
+    runtime = re.search(r"(?ms)^prepare_runtime\(\) \{.*?^\}", source).group()
+    assert runtime.index('admit_directory "${!name}" shared') < runtime.index("\n  select_uv\n")
+    assert runtime.index("\n  if $replace; then admit_bound_runtime; fi\n") < runtime.index(
+        "\n  select_runtime\n",
     )
-    assert source.index("\nselect_runtime\n") < source.index(
+    assert source.index("\nprepare_runtime\n") < source.index(
         'installer_helper="$(extract_installer_helper)"',
     )
     selection = source.split("select_runtime() {", 1)[1].split("\n}\n", 1)[0]

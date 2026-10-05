@@ -378,9 +378,23 @@ expected entry directories contain no manifests.
 For templates referenced from another repository, the optional
 `templateRepository` parameter selects your pinned repository resource
 alias. Your workspace remains in the caller's checkout and helpers come
-from the separate tooling checkout. Existing `self` and `siteopsSource`
-defaults are unchanged. See the [consumer template example](ci-cd-setup.md#reference-the-deployment-template-from-another-repository)
-before selecting a template revision that contains this parameter.
+from the separate tooling checkout. The consumer default now installs the
+exact engine selected by that tagged release through the verified bootstrap.
+An unpinned checkout no longer silently installs itself editably.
+Choose one of these routes:
+
+- Reference an exact release containing the consumer templates and signed engine reference.
+- Supply `release` and `sourceCommit` explicitly for a branch checkout or copied templates.
+- Keep an explicit `siteopsSource` for an ordinary wheel or tagged VCS installation.
+- Use `installDev: true` in the setup template for contributor checkout installation.
+
+These choices are mutually exclusive. Update validation and deployment to
+use the same selection. The new `siteops-validate.yaml` template performs
+structural validation without an Azure task. See the
+[consumer example](ci-cd-setup.md#reference-the-deployment-template-from-another-repository).
+The default `templateRepository: self` still preserves the checkout layout,
+but does not imply development installation. An older release without
+the signed engine reference needs explicit engine selection.
 
 If you maintain copied templates, update their scripts and helper files
 together with the selected engine. The copy has no external repository
@@ -388,6 +402,14 @@ resource from which to infer a release. Keep its engine selection explicit.
 Include pipeline and version-pin files in CI path filters so an installation
 change is validated even when workspace files are unchanged.
 
+Both consumer stages accept `siteFile` for one complete Site relative to
+the caller checkout. Do not combine it with `selector`. Existing inventory
+selection and fleet behavior remain unchanged.
+
+Override generation now uses only the Python standard library, including
+when the engine is installed in an isolated uv environment. Generated
+`.yaml` overlays contain JSON, which is valid YAML, preserving booleans,
+numbers and strings. Existing overlay files are never overwritten.
 CI override logs retain counts and fixed diagnostics rather than Site names.
 Keep detailed validation output in a private local session. These ADO
 consumer changes do not introduce package production or release publication.

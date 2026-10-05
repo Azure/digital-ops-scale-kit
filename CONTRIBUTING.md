@@ -65,6 +65,11 @@ paths remain within the platform limit. Offline build qualification can use
 `SITEOPS_TEST_BACKEND_WHEELHOUSE` with the pip wheel pinned in
 `scripts/siteops-build-requirements.txt`.
 
+Loopback HTTPS tests generate temporary certificates and private keys with
+OpenSSL, then remove them after use. Linux needs `openssl` on PATH. Windows
+uses the OpenSSL included with Git for Windows. Do not commit private keys
+as test fixtures or disable certificate verification to avoid this dependency.
+
 The bootstrap harness under `tests/fixtures/` uses controlled tools and
 no cloud credentials. Its pinned Ubuntu 24.04 image installs only Python
 and venv for testing. Run the harness without network access as an

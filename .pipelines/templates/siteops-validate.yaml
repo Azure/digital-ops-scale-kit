@@ -1,0 +1,81 @@
+# Stage template: structural consumer validation without Azure authority.
+parameters:
+  - name: templateRepository
+    type: string
+    default: self
+  - name: workspace
+    type: string
+    default: workspaces/iot-operations
+  - name: manifest
+    type: string
+  - name: selector
+    type: string
+    default: ''
+  - name: siteFile
+    type: string
+    default: ''
+  - name: siteopsSource
+    type: string
+    default: ''
+  - name: release
+    type: string
+    default: ''
+  - name: sourceCommit
+    type: string
+    default: ''
+  - name: repository
+    type: string
+    default: ''
+  - name: stageName
+    type: string
+    default: validate
+
+stages:
+  - stage: ${{ parameters.stageName }}
+    variables:
+      - template: siteops-context.yaml
+        parameters:
+          templateRepository: ${{ parameters.templateRepository }}
+    jobs:
+      - job: siteops_validate
+        displayName: Validate Site Ops content
+        steps:
+          - template: siteops-checkout.yaml
+            parameters:
+              templateRepository: ${{ parameters.templateRepository }}
+          - template: setup-siteops.yaml
+            parameters:
+              templateRepository: ${{ parameters.templateRepository }}
+              sourceDirectory: $(SITEOPS_TEMPLATE_ROOT)
+              siteopsSource: ${{ parameters.siteopsSource }}
+              release: ${{ parameters.release }}
+              sourceCommit: ${{ parameters.sourceCommit }}
+              repository: ${{ parameters.repository }}
+          - template: siteops-inputs.yaml
+            parameters:
+              workspace: ${{ parameters.workspace }}
+              manifest: ${{ parameters.manifest }}
+              selector: ${{ parameters.selector }}
+              siteFile: ${{ parameters.siteFile }}
+          - script: |
+              set -euo pipefail
+              umask 077
+              private="$(mktemp -d "$STATE_PARENT/siteops-validate.XXXXXX")"
+              args=(-w "$WORKSPACE" validate "$MANIFEST")
+              [[ -n "$SELECTOR" ]] && args+=(-l "$SELECTOR")
+              [[ -n "$SITE_FILE" ]] && args+=(--site-file "$SITE_FILE")
+              if siteops "${args[@]}" > "$private/stdout" 2> "$private/stderr"; then
+                echo "Manifest structure and static references are valid."
+              else
+                code=$?
+                echo "##vso[task.logissue type=error]Structural validation failed. Reproduce locally for private diagnostics."
+                exit "$code"
+              fi
+            displayName: Validate caller content
+            workingDirectory: $(SITEOPS_WORKSPACE_ROOT)
+            env:
+              WORKSPACE: ${{ parameters.workspace }}
+              MANIFEST: ${{ parameters.manifest }}
+              SELECTOR: ${{ parameters.selector }}
+              SITE_FILE: ${{ parameters.siteFile }}
+              STATE_PARENT: $(Agent.TempDirectory)

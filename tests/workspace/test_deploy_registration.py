@@ -47,6 +47,10 @@ _RESOURCE_SET_SAMPLES = (
 def _ado_deployment_steps() -> tuple[dict, list[dict]]:
     data = yaml.safe_load(REUSABLE_ADO_DEPLOY.read_text(encoding="utf-8"))
     stage = data["stages"][0]
+    assert stage["variables"][0]["template"] == "siteops-context.yaml"
+    stage["variables"] = yaml.safe_load(
+        (REUSABLE_ADO_DEPLOY.parent / "siteops-context.yaml").read_text(encoding="utf-8"),
+    )["variables"]
     steps = stage["jobs"][0]["strategy"]["runOnce"]["deploy"]["steps"]
     return stage, steps
 
@@ -194,6 +198,7 @@ def _run_delivery_plan_script(
     workspace: str = "workspace",
     manifest: str = "manifests/install.yaml",
     selector: str = "",
+    site_file: str = "",
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path]:
     script, redaction = _delivery_plan_case(platform, run_step=run_step)
     bin_dir, invocation_log = _install_fake_delivery_tools(tmp_path)
@@ -230,6 +235,7 @@ def _run_delivery_plan_script(
         "WORKSPACE": workspace,
         "MANIFEST": manifest,
         "SELECTOR": selector,
+        "SITE_FILE": site_file,
         "DRY_RUN": "True" if dry_run else "False",
         "PLAN_TEMP_DIRECTORY": _bash_path(temp_dir),
         "PLAN_SUMMARY_DIRECTORY": _bash_path(summary_dir),
@@ -246,6 +252,18 @@ def _run_delivery_plan_script(
         )
     )
     return result, summary_path, temp_dir, invocation_log
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_ado_single_site_is_forwarded_to_plan_and_deploy(tmp_path, dry_run):
+    result, _, _, calls = _run_delivery_plan_script(
+        "azure-pipelines", tmp_path, plan_exit=0, valid_document=True,
+        dry_run=dry_run, site_file="operator/site.yaml",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    commands = calls.read_text().splitlines()
+    assert len(commands) == (1 if dry_run else 2)
+    assert all("--site-file operator/site.yaml" in command and " -l " not in command for command in commands)
 
 
 def _github_manifest_options() -> list[str]:

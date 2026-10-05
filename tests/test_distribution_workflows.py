@@ -1148,7 +1148,8 @@ def test_the_bundle_keeps_native_installation_separate_from_bootstrap_scripts():
     """The authenticated bundle carries the shared native install helper."""
     scripts = REPO_ROOT / "scripts"
     assert not (scripts / "install-siteops.py").exists()
-    assert not list(scripts.glob("install*.py"))
+    # The pipeline adapter delegates to the bootstrap, not a second native installer.
+    assert {path.name for path in scripts.glob("install*.py")} == {"install-siteops-consumer.py"}
     assert (scripts / "bootstrap" / BOOTSTRAP_PS1).is_file()
     assert (scripts / "bootstrap" / BOOTSTRAP_SH).is_file()
     retired = ("`install.py`", "siteops_distribution", "--store-dir", "SiteOpsInstallationResult")

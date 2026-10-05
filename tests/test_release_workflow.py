@@ -23,6 +23,7 @@ from tests.shell_helpers import run_script as _run_script
 from tests.verification_helpers import verified_observation
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "scripts"))
 WORKFLOW = yaml.safe_load((ROOT / ".github" / "workflows" / "release.yaml").read_text())
 CANDIDATE_WORKFLOW = yaml.safe_load((ROOT / ".github" / "workflows" / "_release-candidate.yaml").read_text())
 CI_WORKFLOW = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yaml").read_text())
@@ -159,6 +160,8 @@ def _reference_inventory(candidate):
 
 
 def _workspace_publication(candidate, tmp_path, *, built=True):
+    from siteops_release_assets import engine_reference
+
     from siteops.package_builder import build_package
     from siteops.workspace_source import (
         ArtifactIdentity,
@@ -217,10 +220,17 @@ def _workspace_publication(candidate, tmp_path, *, built=True):
         "version": "1.0.0b1+build.42.1.gcccccccccccc" if built else "1.0.0",
         "reference": native["engine"],
     }
+    if not built:
+        selected["native"]["source"] = {**native["source"], "commit": "e" * 40}
     selected_root = root / "release-engine-selection"
     selected_root.mkdir()
     selected_raw = json.dumps(selected).encode()
     (selected_root / "workspace-engine.json").write_bytes(selected_raw)
+    reference_root = root / "release-engine-reference"
+    reference_root.mkdir()
+    reference_raw = engine_reference(candidate["plan"], selected).serialized()
+    (reference_root / "siteops-engine.json").write_bytes(reference_raw)
+    (reference_root / "siteops-engine.json.attestation.jsonl").write_bytes(b"synthetic engine reference proof")
     if not built:
         tag = urllib.parse.quote(native["engine"]["tag"], safe="")
         candidate["responses"][f"repos/{REPO}/releases/tags/{tag}"] = {
@@ -233,7 +243,10 @@ def _workspace_publication(candidate, tmp_path, *, built=True):
             "status": 200, "body": {"object": {"sha": "d" * 40}},
         }
     return {"WORKSPACE_SHA": digest(workspace_raw), "ENGINE_SELECTION_SHA": digest(selected_raw),
-            "APPROVED_ENGINE_ID": "71", "APPROVED_ENGINE_REF": "d" * 40}
+            "APPROVED_ENGINE_ID": "71", "APPROVED_ENGINE_REF": "d" * 40,
+            "ENGINE_REFERENCE_SHA": digest(reference_raw),
+            "APPROVED_ENGINE_REVISION": selected["native"]["source"]["commit"],
+            "APPROVED_ENGINE_VERSION": selected["version"]}
 
 
 @pytest.fixture
@@ -254,6 +267,8 @@ with open(os.environ["FAKE_CALLS"], "a") as output:
     output.write(json.dumps(args) + "\\n")
 if args[:2] == ["attestation", "verify"]:
     expected = os.environ.get("EXPECTED_SIGNER_IDENTITY")
+    if Path(args[2]).name == "siteops-engine.json":
+        expected = "https://github.com/" + os.environ["GITHUB_REPOSITORY"] + "/.github/workflows/_release-candidate.yaml@" + os.environ["SOURCE_REF"]
     if Path(args[2]).name in json.loads(os.environ.get("WORKSPACE_SUBJECTS", "[]")):
         expected = "https://github.com/" + os.environ["GITHUB_REPOSITORY"] + "/.github/workflows/_workspace-distribution.yaml@" + os.environ["SOURCE_REF"]
     if expected and args[args.index("--cert-identity") + 1] != expected:
@@ -396,8 +411,11 @@ else:
         environment["WORKSPACE_SUBJECTS"] = json.dumps(packages)
         observations = {}
         scripts = tuple(name for name in BOOTSTRAP[::2] if (native_root / name).is_file())
-        for subject in (ARCHIVE, wheel_path.name, *scripts, *packages):
-            signer = ".github/workflows/" + ("_workspace-distribution.yaml" if subject in packages else "_siteops-distribution.yaml")
+        for subject in (ARCHIVE, wheel_path.name, *scripts, *packages, *(("siteops-engine.json",) if packages else ())):
+            signer = ".github/workflows/" + (
+                "_release-candidate.yaml" if subject == "siteops-engine.json"
+                else "_workspace-distribution.yaml" if subject in packages else "_siteops-distribution.yaml"
+            )
             observation = verified_observation(
                 REPO, environment["SOURCE_SHA"], environment["SOURCE_REF"], signer,
                 builder,
@@ -483,6 +501,46 @@ def test_candidate_and_publisher_reject_each_mismatched_verified_claim(runner, j
     assert "certificate does not match release policy" in result.stdout + result.stderr
     assert "PRIVATE_WRONG" not in result.stdout + result.stderr
     assert len([call for call in calls if call[:2] == ["attestation", "verify"]]) == 1
+    assert not any("--method" in call or call[:2] == ["release", "create"] for call in calls)
+
+
+@pytest.mark.parametrize("built", [False, True])
+@pytest.mark.parametrize("fault", ["missing", "selection", "preview", "policy", "proof"])
+def test_publisher_requires_the_exact_signed_engine_reference(candidate, runner, tmp_path, built, fault):
+    extra = _workspace_publication(candidate, tmp_path, built=built)
+    result, _, _ = runner("review", "Freeze the complete qualified publication payload", extra=extra)
+    assert result.returncode == 0, result.stdout + result.stderr
+    root = candidate["root"]
+    (root / "release-bundle").rename(root / "review-native")
+    candidate["native_directory"] = "review-native"
+    shutil.copytree(root / "release-payload", root / "release-bundle")
+    inventory_path = root / "release-assets/release-assets.json"
+    inventory = json.loads((root / "final-release-assets/release-assets.json").read_bytes())
+    path = root / "release-bundle/siteops-engine.json"
+    if fault == "missing":
+        inventory["assets"] = [row for row in inventory["assets"] if not row["name"].startswith("siteops-engine.json")]
+    elif fault in {"selection", "preview", "policy"}:
+        record = json.loads(path.read_bytes())
+        if fault == "selection":
+            record["engine"]["revision"] = "b" * 40
+        elif fault == "preview":
+            record["preview"] = True
+        else:
+            record["policy"] = {"allow": True}
+        raw = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        path.write_bytes(raw)
+        row = next(row for row in inventory["assets"] if row["name"] == path.name)
+        row.update(size=len(raw), sha256=digest(raw))
+    inventory_path.write_text(json.dumps(inventory))
+    if fault == "proof":
+        extra["FAIL_ATTESTATION_SUBJECT"] = "siteops-engine.json"
+    result, _, calls = runner(
+        "publish", "Verify the approved release assets" if fault == "proof" else "Verify the approved candidate",
+        extra=extra,
+    )
+    assert result.returncode != 0
+    if fault == "proof":
+        assert any(call[:2] == ["attestation", "verify"] and Path(call[2]).name == "siteops-engine.json" for call in calls)
     assert not any("--method" in call or call[:2] == ["release", "create"] for call in calls)
 
 
@@ -1692,7 +1750,7 @@ def test_complete_workspace_candidate_reaches_only_the_approved_publication_set(
     root = candidate["root"]
     inventory = json.loads((root / "final-release-assets/release-assets.json").read_bytes())
     assert outputs["asset-list-sha"] == digest((root / "final-release-assets/release-assets.json").read_bytes())
-    assert len(inventory["assets"]) == (11 if built else 3)
+    assert len(inventory["assets"]) == (13 if built else 5)
     result, _, _ = runner("review", "Render the final release notes", extra={"ENGINE_VERSION": "1.0.0b1+build.42"})
     assert result.returncode == 0, result.stdout + result.stderr
     notes = (root / "publish-notes.md").read_text()
@@ -1704,8 +1762,11 @@ def test_complete_workspace_candidate_reaches_only_the_approved_publication_set(
     shutil.copytree(root / "release-payload", root / "release-bundle")
     (root / "release-assets/release-assets.json").write_bytes((root / "final-release-assets/release-assets.json").read_bytes())
     for name in ("Verify the approved candidate", "Verify the approved release assets"):
-        result, _, _ = runner("publish", name, extra=extra)
+        result, _, calls = runner("publish", name, extra=extra)
         assert result.returncode == 0, result.stdout + result.stderr
+        if name == "Verify the approved release assets":
+            assert any(call[:2] == ["attestation", "verify"] and Path(call[2]).name == "siteops-engine.json"
+                       for call in calls)
     result, _, calls = runner("publish", "Verify the approved workspace subjects and descriptor", extra=extra)
     assert result.returncode == 0, result.stdout + result.stderr
     assert any(call[:2] == ["attestation", "verify"] and Path(call[2]).name == "workspace.zip" for call in calls)

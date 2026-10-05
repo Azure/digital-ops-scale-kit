@@ -11,6 +11,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.ado_helpers import TEMPLATES
+from tests.ado_helpers import step as _step
 from tests.native_uv_consumers import _required, _unavailable
 from tests.shell_helpers import bash_path, run_script, write_executable
 
@@ -20,22 +22,6 @@ DEPLOY = ROOT / ".pipelines" / "templates" / "siteops-deploy.yaml"
 INTEGRATION = ROOT / ".pipelines" / "integration-test.yaml"
 CI = ROOT / ".pipelines" / "ci.yaml"
 NATIVE_FIXTURES = ROOT / "tests" / "fixtures" / "prepare-native-uv.sh"
-
-
-def _step(path: Path, name: str) -> dict:
-    def walk(node):
-        if isinstance(node, dict):
-            if node.get("displayName", node.get("name")) == name:
-                yield node
-            for value in node.values():
-                yield from walk(value)
-        elif isinstance(node, list):
-            for value in node:
-                yield from walk(value)
-
-    matches = list(walk(yaml.safe_load(path.read_text(encoding="utf-8"))))
-    assert len(matches) == 1
-    return matches[0]
 
 
 @pytest.mark.parametrize("path", [ROOT / ".pipelines" / "deploy.yaml", DEPLOY, INTEGRATION])
@@ -79,13 +65,14 @@ def test_setup_stops_on_the_first_failed_installation(tmp_path, upgrade, install
     write_executable(binary / "pip", """#!/usr/bin/env bash
 case "$*" in
   'install --upgrade pip') echo upgrade >> calls; exit "$UPGRADE_EXIT" ;;
-  'install -e .') echo install >> calls; exit "$INSTALL_EXIT" ;;
+  'install -e .[dev]') echo install >> calls; exit "$INSTALL_EXIT" ;;
   *) exit 98 ;;
 esac
 """)
     result = run_script(
         _step(SETUP, "Install Site Ops")["script"], tmp_path,
-        {"SITEOPS_SOURCE": "", "INSTALL_DEV": "False",
+        {"SITEOPS_SOURCE": "", "INSTALL_DEV": "True",
+         "SITEOPS_RELEASE": "", "SITEOPS_SOURCE_COMMIT": "", "SITEOPS_REPOSITORY": "",
          "UPGRADE_EXIT": str(upgrade), "INSTALL_EXIT": str(install)},
         shell_options=(),
     )
@@ -125,8 +112,8 @@ def test_override_preparation_preserves_failures_and_empty_values(
     binary.mkdir()
     write_executable(binary / "python3", """#!/usr/bin/env bash
 case "$*" in
-  './scripts/generate-site-overrides.py workspace') echo generator >> calls; exit "$GENERATOR_EXIT" ;;
-  './scripts/mask-site-overrides.py azure-pipelines') echo masker >> calls; exit "$MASK_EXIT" ;;
+  '-I -S -B ./scripts/generate-site-overrides.py workspace') echo generator >> calls; exit "$GENERATOR_EXIT" ;;
+  '-I -S -B ./scripts/mask-site-overrides.py azure-pipelines') echo masker >> calls; exit "$MASK_EXIT" ;;
   *) exit 98 ;;
 esac
 """)
@@ -353,19 +340,22 @@ def test_reusable_template_separates_the_callers_workspace_from_pinned_tooling(t
     defaults = {parameter["name"]: parameter.get("default") for parameter in data["parameters"]}
     assert defaults["templateRepository"] == "self"
     stage = data["stages"][0]
-    variables = stage["variables"]
+    assert stage["variables"] == [{
+        "template": "siteops-context.yaml", "parameters": {"templateRepository": "${{ parameters.templateRepository }}"},
+    }]
+    variables = yaml.safe_load((TEMPLATES / "siteops-context.yaml").read_text())["variables"]
     assert variables["${{ if eq(parameters.templateRepository, 'self') }}"] == {
         "SITEOPS_TEMPLATE_ROOT": "$(Build.SourcesDirectory)",
         "SITEOPS_WORKSPACE_ROOT": "$(Build.SourcesDirectory)",
     }
-    assert variables["${{ else }}"] == {
-        "SITEOPS_TEMPLATE_ROOT": "$(Pipeline.Workspace)/s/siteops-automation",
-        "SITEOPS_WORKSPACE_ROOT": "$(Pipeline.Workspace)/s/siteops-inputs",
-    }
+    assert variables["${{ else }}"]["SITEOPS_TEMPLATE_ROOT"] == "$(Pipeline.Workspace)/s/siteops-automation"
+    assert variables["${{ else }}"]["SITEOPS_WORKSPACE_ROOT"] == "$(Pipeline.Workspace)/s/siteops-inputs"
     steps = stage["jobs"][0]["strategy"]["runOnce"]["deploy"]["steps"]
-    assert steps[0]["checkout"] == "self"
-    assert steps[0]["${{ if ne(parameters.templateRepository, 'self') }}"]["path"] == "s/siteops-inputs"
-    checkout = steps[1]["${{ if ne(parameters.templateRepository, 'self') }}"][0]
+    assert steps[0]["template"] == "siteops-checkout.yaml"
+    checkouts = yaml.safe_load((TEMPLATES / "siteops-checkout.yaml").read_text())["steps"]
+    assert checkouts[0]["checkout"] == "self"
+    assert checkouts[0]["${{ if ne(parameters.templateRepository, 'self') }}"]["path"] == "s/siteops-inputs"
+    checkout = checkouts[1]["${{ if ne(parameters.templateRepository, 'self') }}"][0]
     assert checkout["checkout"] == "${{ parameters.templateRepository }}"
     assert checkout["path"] == "s/siteops-automation"
     assert checkout["persistCredentials"] is False
@@ -415,7 +405,7 @@ def test_setup_retains_local_and_external_consumer_installation_routes(tmp_path,
 if [[ "$#" == 3 && "$1" == install && "$2" == --upgrade && "$3" == pip ]]; then
   exit 0
 fi
-if [[ "$#" == 3 && "$1" == install && "$2" == -e && "$3" == . ]] ||
+if [[ "$#" == 3 && "$1" == install && "$2" == -e && "$3" == '.[dev]' ]] ||
    [[ "$#" == 2 && "$1" == install && "$2" == "$EXPECTED_SOURCE" && -n "$2" ]]; then
   printf '%s\\n' "$@" > installed
 else
@@ -424,12 +414,13 @@ fi
 """)
     result = run_script(
         step["script"], tmp_path,
-        {"SITEOPS_SOURCE": spec, "INSTALL_DEV": "False", "EXPECTED_SOURCE": spec},
+        {"SITEOPS_SOURCE": spec, "INSTALL_DEV": "False" if spec else "True", "EXPECTED_SOURCE": spec,
+         "SITEOPS_RELEASE": "", "SITEOPS_SOURCE_COMMIT": "", "SITEOPS_REPOSITORY": ""},
         shell_options=(),
     )
     assert result.returncode == 0
     assert (tmp_path / "installed").read_text().splitlines() == (
-        ["install", spec] if spec else ["install", "-e", "."]
+        ["install", spec] if spec else ["install", "-e", ".[dev]"]
     )
 
 

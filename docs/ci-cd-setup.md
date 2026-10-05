@@ -579,7 +579,12 @@ trigger:
 pr: none
 
 variables:
+  - name: SITE_OVERRIDES
+    value: ''
   - group: siteops-secrets
+
+pool:
+  vmImage: ubuntu-24.04
 
 stages:
   - template: templates/siteops-deploy.yaml
@@ -588,6 +593,8 @@ stages:
       keepAzSessionActive: true  # WIF connections only.
       manifest: manifests/my-service.yaml
       environment: dev
+      release: '<reviewed-release>'
+      sourceCommit: '<full-release-source-commit>'
 ```
 
 ### Setup templates
@@ -611,10 +618,13 @@ stages:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `pythonVersion` | `'3.11'` | Python version to install |
-| `installDev` | `false` | Include dev dependencies (pytest, pytest-cov) |
-| `siteopsSource` | (empty) | pip install spec for siteops. Empty = local editable install. |
-| `enableCache` | `true` | Cache the pip wheel directory across pipeline runs. Disable in deployment jobs (no cache scope available). |
-| `sourceDirectory` | `$(Build.SourcesDirectory)` | Directory used for an editable source installation and its cache input. The deployment template supplies its tooling checkout here. |
+| `installDev` | `false` | Explicit editable checkout installation with development dependencies. Used by contributor CI. |
+| `siteopsSource` | (empty) | Explicit pip installation spec, such as an exact tagged VCS source or wheel. Not the verified bundle route. |
+| `release`, `sourceCommit` | (empty) | An explicit engine/content release and full source commit. Otherwise use the exact tagged template repository selection. |
+| `repository` | (empty) | Publisher for an explicit release selection. Defaults to `Azure/digital-ops-scale-kit`. Inferred selection uses the template repository. |
+| `templateRepository` | `self` | Automation repository alias. The consumer stage templates supply its runtime ref/version and checkout. |
+| `enableCache` | `true` | Pip cache for explicit source/development installation only. Disabled in deployment jobs. |
+| `sourceDirectory` | `$(Build.SourcesDirectory)` | Reviewed automation checkout for the shared bootstrap, or the explicitly selected development source directory. |
 
 ```yaml
 - template: templates/setup-siteops.yaml
@@ -634,6 +644,7 @@ stages:
 | `.pipelines/deploy.yaml` | Manual deploy with environment selection | Manual only |
 | `.pipelines/integration-test.yaml` | Integration suite against an environment already deployed by `deploy.yaml` | Manual only |
 | `.pipelines/templates/siteops-deploy.yaml` | Stage template: deployment logic | Called by deploy.yaml |
+| `.pipelines/templates/siteops-validate.yaml` | Stage template: structural consumer validation without Azure authentication | Referenced by consumer pipelines |
 | `.pipelines/templates/setup-siteops.yaml` | Steps template: install Python + siteops | Called by all pipelines |
 | `.pipelines/validate-pipelines.yaml` | Maintainer template previews for consumer pipeline parameter branches. Does not run the previewed jobs. | Manual only |
 
@@ -646,11 +657,13 @@ your repository into `s/siteops-inputs` and the automation into
 `s/siteops-automation`, relative to the agent's pipeline workspace.
 `workspace` remains relative to your repository, not the tooling checkout.
 
-Replace the template revision and engine wheel URL below with reviewed
-values from compatible release instructions. The selected template revision
-must contain the `templateRepository` parameter. Configure a GitHub
+Pin one reviewed content release below. Both stages install its exact
+selected engine through the verified bootstrap, without a second engine
+version pin. The release must include these consumer templates and the
+signed engine reference. Configure a GitHub
 repository service connection named `scalekit-github`, an Azure WIF service
 connection named `azure-siteops`, and the `dev` approval environment.
+The validation stage itself needs no Azure service connection.
 
 ```yaml
 trigger: none
@@ -662,7 +675,7 @@ resources:
       type: github
       name: Azure/digital-ops-scale-kit
       endpoint: scalekit-github
-      ref: refs/tags/<reviewed-template-release>
+      ref: refs/tags/<reviewed-release>
 
 pool:
   vmImage: ubuntu-24.04
@@ -673,10 +686,15 @@ variables:
   # Add your approved variable group here when overrides are needed.
 
 stages:
+  - template: /.pipelines/templates/siteops-validate.yaml@scalekit
+    parameters:
+      templateRepository: scalekit
+      workspace: deployment
+      manifest: manifests/install/manifest.yaml
+
   - template: /.pipelines/templates/siteops-deploy.yaml@scalekit
     parameters:
       templateRepository: scalekit
-      siteopsSource: '<exact-engine-wheel-URL>'
       workspace: deployment
       manifest: manifests/install/manifest.yaml
       selector: environment=dev
@@ -687,22 +705,43 @@ stages:
 ```
 
 Your `deployment` directory contains the ordinary Site Ops workspace,
-including manifests and Sites. Set `dryRun: false` only when deployment
-is intended. An Azure-authenticated plan can restore compiler modules,
-but does not submit deployment writes.
+including manifests and Sites. No content package or project conversion is
+required for this caller-owned workspace. Structural validation checks
+syntax and static references without preparing an executable plan or
+using Azure credentials. Set `dryRun: false` only when deployment is
+intended. An Azure-authenticated plan can restore compiler modules, but
+does not submit deployment writes.
 
-The engine selection and template revision have separate purposes.
-`siteopsSource` selects the installed engine through the approved package
-feed or exact wheel URL. This is an ordinary package installation, not the
-verified-bundle bootstrap. `templateRepository` selects reviewed automation
-and its helpers. Neither authorizes Azure access or changes your workspace
-selection.
+The pinned automation checkout is reviewed executable code. Its tag and
+resolved commit select the content reference. The bootstrap then verifies
+the signed engine reference and the engine's own bundle provenance.
+ADO only downloads and verifies these assets. It needs no signing key or
+release-publication permission. Each job uses fresh installation state
+under the agent's temporary directory, separate from any preinstalled
+Site Ops tool. Use Ubuntu 24.04 agents for this template route.
 
-The default `templateRepository: self` retains the existing checkout layout.
-An omitted `siteopsSource` retains the editable source route and requires
-the selected tooling directory to contain the Site Ops project. Existing
-consumers that manage their own checkout can continue using that route.
-For a released engine, supply its exact installation source explicitly.
+The deployment identity can remain scoped to existing target resource
+groups. Installation does not log in to Azure, grant permissions, create
+groups or approve content sources. Manifest operations determine any
+additional scope needed.
+
+For one standalone Site, pass `siteFile: operator/site.yaml` to either
+stage instead of `selector`. Its path is relative to the caller checkout.
+Supplying both is an error. A manifest remains required. For a fleet, keep
+the existing inventory and selector semantics.
+
+With `templateRepository: self`, a tagged checkout can select its release.
+A branch checkout or copied template must instead provide `release` and
+`sourceCommit`, or explicitly select `siteopsSource`. The release pair
+uses the same verified bootstrap. `siteopsSource` remains an ordinary pip
+installation through your approved feed, including exact tagged VCS sources.
+Do not combine release, source and `installDev` selections.
+
+Older releases without the signed reference require their explicit engine
+selection. There is no lookup of the newest compatible engine and no
+silent fallback to editable installation. Referenced templates are the
+recommended route. If you copy templates, retain their matching shared
+templates and helper scripts from the same revision.
 
 ### ADO project setup
 
@@ -791,6 +830,7 @@ Same as GitHub Actions, see [Assign Azure roles](#3-assign-azure-roles). The ser
    - **Additional site selector**: e.g., `country=US,name=seattle-dev` (optional)
    - **Dry run**: Prepare the executable plan without deploying
    - **Refresh Azure WIF session**: Enable for the WIF service connection after reviewing the task's experimental setting above
+   - **Engine or content release** and **Full source commit**: Required together when running an untagged checkout, unless an explicit pip engine source is selected
 5. Click **"Run"**
 
 #### Deploy via Azure CLI
@@ -799,12 +839,14 @@ Same as GitHub Actions, see [Assign Azure roles](#3-assign-azure-roles). The ser
 az pipelines run \
   --name "Deploy Infrastructure" \
   --parameters workspace=iot-operations manifest=manifests/aio-install/manifest.yaml environment=dev \
+               release="<reviewed-release>" sourceCommit="<full-release-source-commit>" \
                keepAzSessionActive=true
 
 # With additional options
 az pipelines run \
   --name "Deploy Infrastructure" \
   --parameters workspace=iot-operations manifest=manifests/aio-install/manifest.yaml environment=dev \
+               release="<reviewed-release>" sourceCommit="<full-release-source-commit>" \
                selector="country=US" dryRun=true keepAzSessionActive=true
 ```
 
