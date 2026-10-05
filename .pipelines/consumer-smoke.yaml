@@ -1,0 +1,26 @@
+# Exercise the explicit source-install consumer path without Azure access.
+trigger: none
+pr: none
+
+pool:
+  vmImage: ubuntu-24.04
+
+variables:
+  SITE_OVERRIDES: ''
+
+stages:
+  - template: templates/siteops-validate.yaml
+    parameters:
+      stageName: validate_selector
+      siteopsSource: $(Build.SourcesDirectory)
+      workspace: tests/fixtures/ado-consumer/workspace
+      manifest: manifests/smoke.yaml
+      selector: environment=smoke
+
+  - template: templates/siteops-validate.yaml
+    parameters:
+      stageName: validate_site_file
+      siteopsSource: $(Build.SourcesDirectory)
+      workspace: tests/fixtures/ado-consumer/workspace
+      manifest: manifests/smoke.yaml
+      siteFile: tests/fixtures/ado-consumer/operator/site.yaml

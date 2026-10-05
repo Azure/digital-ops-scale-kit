@@ -647,6 +647,7 @@ stages:
 | `.pipelines/templates/siteops-validate.yaml` | Stage template: structural consumer validation without Azure authentication | Referenced by consumer pipelines |
 | `.pipelines/templates/setup-siteops.yaml` | Steps template: install Python + siteops | Called by all pipelines |
 | `.pipelines/validate-pipelines.yaml` | Maintainer template previews for consumer pipeline parameter branches. Does not run the previewed jobs. | Manual only |
+| `.pipelines/consumer-smoke.yaml` | Hosted source installation and structural consumer validation with fixture content | Manual only |
 
 ### Reference the deployment template from another repository
 
@@ -927,6 +928,33 @@ approval or deployment success. A hosted CI run needs no Azure deployment
 identity. A deployment dry run still authenticates and can perform planning
 reads or compiler acquisition. Qualify that boundary and actual deployment
 only with the corresponding approval and scoped targets.
+
+### Run the hosted consumer smoke test
+
+Register `.pipelines/consumer-smoke.yaml` as a separate manual pipeline
+using **Existing Azure Pipelines YAML file** and the reviewed source branch.
+Save the definition, then select the approved commit when queuing its run.
+Leave `.pipelines/validate-pipelines.yaml` registered separately for full
+template previews.
+
+The smoke pipeline uses the ordinary consumer setup to install the selected
+checkout with a noneditable pip installation. It then calls the reusable
+validation stage for two cases: a workspace Site selected by label and a
+standalone Site file outside the workspace inventory. Both use the committed
+fixture under `tests/fixtures/ado-consumer`, including a real manifest and
+its referenced ARM JSON file. The fixture contains synthetic target values.
+The pipeline only runs compile-free `validate`.
+
+This run needs repository checkout access and the agent's approved Python
+package feed. Configure that feed through the agent's pip configuration or
+a `PIP_INDEX_URL` pipeline variable when required by your organization.
+It needs no pipeline-ID mapping, variable group or Azure service connection.
+Each validation stage must succeed for the run to pass.
+
+This covers the explicit source-install route on the selected hosted agent.
+Signed-release installation, separate caller/tooling repository checkouts,
+executable planning, deployment and WIF renewal require their own
+qualification.
 
 ### Run the automated template preview
 
