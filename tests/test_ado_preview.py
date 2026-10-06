@@ -492,7 +492,8 @@ def test_validation_pipeline_is_manual_and_has_no_deployment_identity():
     source = yaml.safe_load((ROOT / ".pipelines" / "validate-pipelines.yaml").read_text())
     assert source["trigger"] == source["pr"] == "none"
     assert "pipelineIds" not in {parameter["name"] for parameter in source["parameters"]}
-    steps = source["stages"][0]["jobs"][0]["steps"]
+    stage = next(stage for stage in source["stages"] if stage.get("stage") == "preview")
+    steps = stage["jobs"][0]["steps"]
     assert not any(step.get("task", "").startswith("AzureCLI@") for step in steps)
     assert source["variables"] == {"SITE_OVERRIDES": ""}
     execute = next(step for step in steps if "script" in step)

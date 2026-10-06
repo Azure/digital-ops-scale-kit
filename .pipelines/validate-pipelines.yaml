@@ -25,8 +25,11 @@ variables:
   SITE_OVERRIDES: ''
 
 stages:
+  - template: templates/consumer-smoke.yaml
+
   - stage: preview
     displayName: Preview pipeline templates
+    dependsOn: []
     jobs:
       - job: preview
         timeoutInMinutes: 20
@@ -62,8 +65,6 @@ stages:
             inputs:
               targetPath: $(Build.ArtifactStagingDirectory)/pipeline-preview.json
               artifact: pipeline-preview
-
-  - template: templates/consumer-smoke.yaml
 
   - stage: qualification_report
     displayName: Report qualification

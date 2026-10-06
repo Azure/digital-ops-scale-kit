@@ -950,7 +950,7 @@ documented above, with their own content and deployment identity.
 3. Queue one approved run bound to the selected branch and full commit,
    then inspect its qualification summary and `ado-qualification` artifact.
 
-The first stage discovers its own definition through `System.DefinitionId`
+The preview stage discovers its own definition through `System.DefinitionId`
 and verifies the repository and qualification entry path. CI, deployment
 and integration definitions do not need to be registered separately.
 The controller requires a clean checkout at the selected commit and reads
@@ -965,17 +965,23 @@ and every integration phase. Both default and enabled WIF session refresh
 are expanded. These requests use only the dedicated `/preview` endpoint
 and never execute the deployment or integration jobs.
 
-The following consumer stages use the ordinary setup and validation
-templates. Each installs the selected checkout with a noneditable pip
-installation and runs compile-free `validate` against real fixtures under
+The consumer stages run independently of the preview stage, so a preview
+failure does not suppress runtime evidence. Available agent capacity
+determines whether the lanes execute concurrently. The Site-file case still
+follows a successful selector case.
+
+Both consumer stages use the ordinary setup and validation templates.
+Each installs the selected checkout with a noneditable pip installation
+and runs compile-free `validate` against real fixtures under
 `tests/fixtures/ado-consumer`. One case selects a workspace Site by label.
 The other uses a standalone Site file outside the workspace inventory.
 The fixture includes its referenced ARM JSON and synthetic target values.
 These stages have no Azure task, variable group or mapped preview token.
 
-The final stage reads native job outcomes without polling or queueing other
-pipelines. All required jobs must return `Succeeded`, and the complete
-preview receipt must match the selected source. Failed, canceled, skipped,
+The final stage waits for both lanes and reads native job outcomes without
+polling or queueing other pipelines. All required jobs must return
+`Succeeded`, and the complete preview receipt must match the selected
+source. Failed, canceled, skipped,
 missing or partially successful jobs cannot produce a passing report.
 The report includes the selected source-install identity and the preview
 case inventory with input and expansion digests. Reports are published

@@ -51,6 +51,22 @@ def test_smoke_pipeline_reuses_the_consumer_validation_template():
     assert not any("SYSTEM_ACCESSTOKEN" in node.get("env", {}) for node in all_nodes)
 
 
+def test_preview_failure_does_not_schedule_or_gate_the_consumer_lane():
+    document = yaml.safe_load(PIPELINE.read_text(encoding="utf-8"))
+    stages = document["stages"]
+    assert stages[0] == {"template": "templates/consumer-smoke.yaml"}
+    preview = next(stage for stage in stages if stage.get("stage") == "preview")
+    assert preview["dependsOn"] == []
+    consumer = yaml.safe_load((TEMPLATES / "siteops-validate.yaml").read_text(encoding="utf-8"))
+    assert "dependsOn" not in consumer["stages"][0]
+    assert [case["parameters"]["stageName"] for case in smoke_cases()] == [
+        "validate_selector", "validate_site_file",
+    ]
+    report = next(stage for stage in stages if stage.get("stage") == "qualification_report")
+    assert set(report["dependsOn"]) == {"preview", "validate_selector", "validate_site_file"}
+    assert report["condition"] == "always()"
+
+
 @pytest.fixture(scope="module")
 def installed_smoke_engine(tmp_path_factory):
     root = tmp_path_factory.mktemp("ado-smoke")
