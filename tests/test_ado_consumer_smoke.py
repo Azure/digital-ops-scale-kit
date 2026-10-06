@@ -10,12 +10,13 @@ from tests.ado_helpers import TEMPLATES, nodes
 from tests.installed_runtime import build_engine_wheel, install_engine
 
 ROOT = Path(__file__).resolve().parents[1]
-PIPELINE = ROOT / ".pipelines" / "consumer-smoke.yaml"
+PIPELINE = ROOT / ".pipelines" / "validate-pipelines.yaml"
+SMOKE_STAGES = TEMPLATES / "consumer-smoke.yaml"
 FIXTURE = ROOT / "tests" / "fixtures" / "ado-consumer"
 
 
 def smoke_cases():
-    return yaml.safe_load(PIPELINE.read_text(encoding="utf-8"))["stages"]
+    return yaml.safe_load(SMOKE_STAGES.read_text(encoding="utf-8"))["stages"]
 
 
 def test_smoke_pipeline_reuses_the_consumer_validation_template():
@@ -23,13 +24,14 @@ def test_smoke_pipeline_reuses_the_consumer_validation_template():
     assert document["trigger"] == document["pr"] == "none"
     assert document["pool"]["vmImage"] == "ubuntu-24.04"
     assert document["variables"] == {"SITE_OVERRIDES": ""}
+    assert {"template": "templates/consumer-smoke.yaml"} in document["stages"]
     cases = smoke_cases()
     assert len(cases) == 2
     assert {case["parameters"]["stageName"] for case in cases} == {
         "validate_selector", "validate_site_file",
     }
     for case in cases:
-        assert case["template"] == "templates/siteops-validate.yaml"
+        assert case["template"] == "siteops-validate.yaml"
         options = case["parameters"]
         assert options["siteopsSource"] == "$(Build.SourcesDirectory)"
         assert options["workspace"] == "tests/fixtures/ado-consumer/workspace"
@@ -38,7 +40,7 @@ def test_smoke_pipeline_reuses_the_consumer_validation_template():
     selector, site_file = (case["parameters"] for case in cases)
     assert selector["selector"] == "environment=smoke"
     assert site_file["siteFile"] == "tests/fixtures/ado-consumer/operator/site.yaml"
-    all_nodes = [*nodes(PIPELINE), *nodes(TEMPLATES / "siteops-validate.yaml")]
+    all_nodes = list(nodes(SMOKE_STAGES))
     assert not any(
         node.get("task", "").startswith("AzureCLI")
         or "environment" in node

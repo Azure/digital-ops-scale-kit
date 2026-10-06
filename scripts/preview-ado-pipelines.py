@@ -13,12 +13,14 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
 import yaml
+from source_snapshot import SourceSnapshotError, _git, validate_repository
 
 ROOT = Path(__file__).resolve().parents[1]
+QUALIFICATION_PIPELINE = ".pipelines/validate-pipelines.yaml"
 PIPELINES = {
     "ci": ".pipelines/ci.yaml",
     "deploy": ".pipelines/deploy.yaml",
@@ -94,7 +96,7 @@ class Case:
     override: str | None = None
 
 
-def cases() -> list[Case]:
+def cases(integration_source: str | None = None) -> list[Case]:
     """Cover parameter branches rather than every possible parameter combination."""
     selected = [Case("ci", "ci", {})]
     for environment in ENVIRONMENTS:
@@ -120,13 +122,23 @@ def cases() -> list[Case]:
                  "selector": "country=US" if custom else " "},
                 f"environment=sample,sample={sample}" + (",country=US" if custom else ""),
             ))
-    source = yaml.safe_load((ROOT / PIPELINES["integration"]).read_text(encoding="utf-8"))
-    phases = next(parameter["values"] for parameter in source["parameters"]
-                  if parameter["name"] == "manifest")
-    if not phases or len(phases) != len(set(phases)) or any(
+    try:
+        source = yaml.safe_load(
+            integration_source if integration_source is not None
+            else (ROOT / PIPELINES["integration"]).read_text(encoding="utf-8")
+        )
+    except yaml.YAMLError:
+        raise PreviewError("The integration phase inventory is invalid.") from None
+    parameters = source.get("parameters") if isinstance(source, dict) else None
+    inventories = [
+        parameter.get("values") for parameter in parameters
+        if isinstance(parameter, dict) and parameter.get("name") == "manifest"
+    ] if isinstance(parameters, list) else []
+    phases = inventories[0] if len(inventories) == 1 else None
+    if not isinstance(phases, list) or not phases or any(
         not isinstance(phase, str) or not re.fullmatch(r"[a-z0-9-]+", phase)
         for phase in phases
-    ):
+    ) or len(phases) != len(set(phases)):
         raise PreviewError("The integration phase inventory is invalid.")
     selected.extend(Case(f"integration-{phase}", "integration", {"manifest": phase})
                     for phase in phases)
@@ -283,25 +295,55 @@ def validate_expansion(case: Case, text: str, connections: dict[str, str]) -> No
 def _repository(value: str) -> str:
     if not isinstance(value, str):
         raise PreviewError("Select an HTTPS source repository without credentials.")
-    url = urlsplit(value)
-    if (url.scheme != "https" or not url.hostname or url.username or url.password
+    try:
+        url = urlsplit(value)
+    except ValueError:
+        raise PreviewError("Select an HTTPS source repository without credentials.") from None
+    organization = url.path.split("/")[1] if url.path.startswith("/") else ""
+    organization_hint = (
+        url.hostname == "dev.azure.com" and bool(organization)
+        and url.username is not None and url.username.casefold() == organization.casefold()
+    )
+    if (url.scheme != "https" or not url.hostname or url.password is not None
+            or (url.username is not None and not organization_hint)
             or url.query or url.fragment):
         raise PreviewError("Select an HTTPS source repository without credentials.")
-    return value.rstrip("/").removesuffix(".git").casefold()
+    canonical = urlunsplit((url.scheme, url.netloc.rsplit("@", 1)[-1], url.path, "", ""))
+    return canonical.rstrip("/").removesuffix(".git").casefold()
+
+
+def source_documents(commit: str) -> dict[str, str]:
+    """Read bounded raw Git blobs after admitting the exact clean checkout."""
+    try:
+        validate_repository(ROOT, commit)
+        documents = {}
+        for name, path in PIPELINES.items():
+            identity = f"{commit}:{path}"
+            size = _git(ROOT, ["--no-replace-objects", "cat-file", "-s", identity])
+            if size.returncode or not size.stdout.strip().isdigit():
+                raise PreviewError("A committed pipeline file could not be inspected.")
+            length = int(size.stdout.strip())
+            if not 0 < length <= MAX_RESPONSE:
+                raise PreviewError("A committed pipeline file is empty or too large.")
+            result = _git(ROOT, ["--no-replace-objects", "cat-file", "blob", identity])
+            if result.returncode or len(result.stdout) != length:
+                raise PreviewError("A committed pipeline file could not be read completely.")
+            documents[name] = result.stdout.decode("utf-8")
+        return documents
+    except (SourceSnapshotError, ValueError):
+        raise PreviewError("The exact clean source checkout could not be read.") from None
 
 
 def qualify(
-    client: AdoClient, pipeline_ids: dict[str, int], repository: str, ref: str, commit: str,
+    client: AdoClient, pipeline_id: int, repository: str, ref: str, commit: str,
     connections: dict[str, str], groups: dict[str, str],
 ) -> dict:
-    """Read the chosen definitions and preview only that exact repository candidate."""
+    """Use this qualification definition to preview the exact committed entry points."""
     if (not re.fullmatch(r"refs/heads/[A-Za-z0-9._/-]+", ref) or ".." in ref
             or not re.fullmatch(r"[0-9a-f]{40}", commit)):
         raise PreviewError("Select a branch and its exact full source commit.")
-    if (not isinstance(pipeline_ids, dict) or set(pipeline_ids) != set(PIPELINES)
-            or any(type(value) is not int or value <= 0 for value in pipeline_ids.values())
-            or len(set(pipeline_ids.values())) != len(PIPELINES)):
-        raise PreviewError("Select distinct positive CI, deploy and integration pipeline IDs.")
+    if type(pipeline_id) is not int or pipeline_id <= 0:
+        raise PreviewError("Select the positive qualification pipeline ID.")
     for mapping in (connections, groups):
         if not isinstance(mapping, dict) or set(mapping) != set(ENVIRONMENTS) or any(
             not isinstance(value, str) or not value.strip()
@@ -309,20 +351,18 @@ def qualify(
         ):
             raise PreviewError("Provide explicit service connection and variable group mappings.")
     expected_repository = _repository(repository)
-    for name, path in PIPELINES.items():
-        try:
-            definition = client.request(pipeline_ids[name])
-            source = _mapping(definition.get("repository"))
-            process = _mapping(definition.get("process"))
-            filename = process.get("yamlFilename")
-            if (definition.get("id") != pipeline_ids[name]
-                    or _repository(source.get("url", "")) != expected_repository
-                    or not isinstance(filename, str) or filename.lstrip("/") != path):
-                raise PreviewError("The definition does not match the candidate repository and YAML.")
-        except PreviewError as error:
-            raise PreviewError(f"{name} definition: {error}") from None
+    documents = source_documents(commit)
+    definition = client.request(pipeline_id)
+    source = _mapping(definition.get("repository"))
+    process = _mapping(definition.get("process"))
+    filename = process.get("yamlFilename")
+    if (definition.get("id") != pipeline_id
+            or _repository(source.get("url", "")) != expected_repository
+            or not isinstance(filename, str) or filename.lstrip("/") != QUALIFICATION_PIPELINE):
+        raise PreviewError("The qualification definition does not match the candidate repository and YAML.")
     receipts = []
-    for case in cases():
+    selected = cases(documents["integration"])
+    for case in selected:
         parameters = dict(case.parameters) if case.override is None else {}
         if case.pipeline != "ci":
             parameters.update(serviceConnections=connections, secretGroups=groups)
@@ -330,21 +370,23 @@ def qualify(
             "previewRun": True,
             "resources": {"repositories": {"self": {"refName": ref, "version": commit}}},
             "templateParameters": parameters,
+            "yamlOverride": case.override if case.override is not None else documents[case.pipeline],
         }
-        if case.override:
-            payload["yamlOverride"] = case.override
         print(f"Previewing {case.name}.", flush=True)
         try:
-            document = client.request(pipeline_ids[case.pipeline], preview=payload)
+            document = client.request(pipeline_id, preview=payload)
             text = document.get("finalYaml")
             if not isinstance(text, str) or not text.strip() or len(text.encode("utf-8")) > MAX_RESPONSE:
                 raise PreviewError("The preview service returned no bounded final YAML.")
             validate_expansion(case, text, connections)
         except PreviewError as error:
             raise PreviewError(f"{case.name}: {error}") from None
+        request_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         receipts.append({"case": case.name, "status": "passed",
+                         "inputSha256": hashlib.sha256(request_bytes).hexdigest(),
                          "expandedSha256": hashlib.sha256(text.encode("utf-8")).hexdigest()})
-    return {"sourceCommit": commit, "status": "passed", "cases": receipts}
+    return {"sourceCommit": commit, "status": "passed",
+            "expectedCases": [case.name for case in selected], "cases": receipts}
 
 
 def main() -> int:
@@ -359,7 +401,7 @@ def main() -> int:
             os.environ["SYSTEM_ACCESSTOKEN"],
         )
         report = qualify(
-            client, json.loads(os.environ["ADO_PREVIEW_PIPELINE_IDS"]),
+            client, int(os.environ["SYSTEM_DEFINITIONID"]),
             os.environ["BUILD_REPOSITORY_URI"], os.environ["BUILD_SOURCEBRANCH"],
             os.environ["BUILD_SOURCEVERSION"], json.loads(os.environ["ADO_PREVIEW_CONNECTIONS"]),
             json.loads(os.environ["ADO_PREVIEW_GROUPS"]),

@@ -1,15 +1,6 @@
-# Exercise the explicit source-install consumer path without Azure access.
-trigger: none
-pr: none
-
-pool:
-  vmImage: ubuntu-24.04
-
-variables:
-  SITE_OVERRIDES: ''
-
+# Maintainer stages exercising the ordinary source-install consumer path.
 stages:
-  - template: templates/siteops-validate.yaml
+  - template: siteops-validate.yaml
     parameters:
       stageName: validate_selector
       siteopsSource: $(Build.SourcesDirectory)
@@ -17,7 +8,7 @@ stages:
       manifest: manifests/smoke.yaml
       selector: environment=smoke
 
-  - template: templates/siteops-validate.yaml
+  - template: siteops-validate.yaml
     parameters:
       stageName: validate_site_file
       siteopsSource: $(Build.SourcesDirectory)

@@ -1,8 +1,10 @@
 """Qualify the preview-only API boundary without contacting Azure DevOps."""
 
+import hashlib
 import importlib.util
 import io
 import json
+import subprocess
 import sys
 from email.message import Message
 from pathlib import Path
@@ -19,16 +21,26 @@ REF = "refs/heads/validation"
 REPOSITORY = "https://github.com/example/repository"
 CONNECTIONS = {name: f"private-{name}-connection" for name in ("dev", "staging", "prod")}
 GROUPS = {name: f"private-{name}-group" for name in CONNECTIONS}
-IDS = {"ci": 10, "deploy": 20, "integration": 30}
+PIPELINE_ID = 10
 
 
 @pytest.fixture
-def preview():
+def preview_module(monkeypatch):
+    monkeypatch.syspath_prepend(str(ROOT / "scripts"))
     spec = importlib.util.spec_from_file_location("ado_preview", ROOT / "scripts" / "preview-ado-pipelines.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture
+def preview(preview_module, monkeypatch):
+    monkeypatch.setattr(preview_module, "source_documents", lambda commit: {
+        name: (ROOT / path).read_text(encoding="utf-8")
+        for name, path in preview_module.PIPELINES.items()
+    })
+    return preview_module
 
 
 def _expanded(case):
@@ -93,12 +105,11 @@ def _client(preview, fault=""):
         def request(self, pipeline_id, *, preview=None):
             self.calls.append((pipeline_id, preview))
             if preview is None:
-                name = next(name for name, value in IDS.items() if value == pipeline_id)
                 return {
-                    "id": pipeline_id, "repository": {"url": REPOSITORY + ("/other" if fault == "repo" else "")},
+                    "id": pipeline_id + (1 if fault == "id" else 0),
+                    "repository": {"url": REPOSITORY + ("/other" if fault == "repo" else "")},
                     "process": {"yamlFilename": ".pipelines/" + (
-                        "wrong.yaml" if fault == "path" else
-                        {"ci": "ci.yaml", "deploy": "deploy.yaml", "integration": "integration-test.yaml"}[name]
+                        "wrong.yaml" if fault == "path" else "validate-pipelines.yaml"
                     )},
                 }
             if fault == "missing-yaml":
@@ -113,34 +124,42 @@ def _client(preview, fault=""):
 
 def test_preview_binds_every_request_to_the_exact_source_and_retains_only_safe_receipts(preview):
     client = _client(preview)
-    report = preview.qualify(client, IDS, REPOSITORY, REF, SOURCE, CONNECTIONS, GROUPS)
-    assert [call[1] for call in client.calls[:3]] == [None] * 3
+    report = preview.qualify(client, PIPELINE_ID, REPOSITORY, REF, SOURCE, CONNECTIONS, GROUPS)
+    assert client.calls[0] == (PIPELINE_ID, None)
     selected = preview.cases()
-    assert len(client.calls[3:]) == len(selected) == len(report["cases"])
+    assert len(client.calls[1:]) == len(selected) == len(report["cases"])
     assert len({case.name for case in selected}) == len(selected)
-    for case, (pipeline_id, request) in zip(selected, client.calls[3:], strict=True):
-        assert pipeline_id == IDS[case.pipeline]
+    for case, (pipeline_id, request) in zip(selected, client.calls[1:], strict=True):
+        assert pipeline_id == PIPELINE_ID
         assert request["previewRun"] is True
         assert request["resources"]["repositories"]["self"] == {"refName": REF, "version": SOURCE}
         if case.override:
             assert request["yamlOverride"] == case.override
             assert request["templateParameters"] == {}
-        elif case.pipeline != "ci":
-            assert request["templateParameters"]["serviceConnections"] == CONNECTIONS
-            assert request["templateParameters"]["secretGroups"] == GROUPS
+        else:
+            assert request["yamlOverride"] == preview.source_documents(SOURCE)[case.pipeline]
+            if case.pipeline != "ci":
+                assert request["templateParameters"]["serviceConnections"] == CONNECTIONS
+                assert request["templateParameters"]["secretGroups"] == GROUPS
     receipt = json.dumps(report)
     assert report["sourceCommit"] == SOURCE
+    assert report["expectedCases"] == [case.name for case in selected]
     assert "private-" not in receipt and "example.invalid" not in receipt
     assert "finalYaml" not in receipt
     assert all(len(case["expandedSha256"]) == 64 for case in report["cases"])
+    assert all(len(case["inputSha256"]) == 64 for case in report["cases"])
+    assert len({case["inputSha256"] for case in report["cases"]}) == len(selected)
+    for receipt, (_, request) in zip(report["cases"], client.calls[1:], strict=True):
+        encoded = json.dumps(request, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        assert receipt["inputSha256"] == hashlib.sha256(encoded).hexdigest()
 
 
-@pytest.mark.parametrize("fault", ["repo", "path", "missing-yaml", "empty-yaml"])
+@pytest.mark.parametrize("fault", ["repo", "path", "id", "missing-yaml", "empty-yaml"])
 def test_preview_refuses_unbound_definitions_and_absent_expansion(preview, fault):
     client = _client(preview, fault)
     with pytest.raises(preview.PreviewError):
-        preview.qualify(client, IDS, REPOSITORY, REF, SOURCE, CONNECTIONS, GROUPS)
-    assert len(client.calls) == (1 if fault in {"repo", "path"} else 4)
+        preview.qualify(client, PIPELINE_ID, REPOSITORY, REF, SOURCE, CONNECTIONS, GROUPS)
+    assert len(client.calls) == (1 if fault in {"repo", "path", "id"} else 2)
 
 
 @pytest.mark.parametrize("fault", ["wrong-selector", "wrong-connection", "wrong-dry-run",
@@ -291,7 +310,7 @@ def test_preview_command_publishes_a_receipt_only_after_all_cases_pass(
         "SYSTEM_COLLECTIONURI": "https://dev.azure.com/example",
         "SYSTEM_TEAMPROJECTID": "project",
         "SYSTEM_ACCESSTOKEN": "synthetic-token",
-        "ADO_PREVIEW_PIPELINE_IDS": json.dumps(IDS),
+        "SYSTEM_DEFINITIONID": str(PIPELINE_ID),
         "BUILD_REPOSITORY_URI": REPOSITORY,
         "BUILD_SOURCEBRANCH": REF,
         "BUILD_SOURCEVERSION": SOURCE,
@@ -299,7 +318,7 @@ def test_preview_command_publishes_a_receipt_only_after_all_cases_pass(
         "ADO_PREVIEW_GROUPS": json.dumps(GROUPS),
     }
     if fault == "malformed-config":
-        environment["ADO_PREVIEW_PIPELINE_IDS"] = "private-malformed-configuration"
+        environment["SYSTEM_DEFINITIONID"] = "private-malformed-configuration"
     if fault == "existing-output":
         output.write_text("existing-receipt", encoding="utf-8")
     for key, value in environment.items():
@@ -325,7 +344,7 @@ def test_preview_command_publishes_a_receipt_only_after_all_cases_pass(
         if fault == "malformed-config":
             assert client.calls == []
         else:
-            assert len(client.calls) == 4
+            assert len(client.calls) == 2
 
 
 @pytest.mark.parametrize("collection", ["http://dev.azure.com/example", "https://other.invalid/example",
@@ -336,12 +355,11 @@ def test_preview_authentication_is_confined_to_the_selected_ado_origin(preview, 
         preview.AdoClient(collection, "project", "synthetic-token")
 
 
-@pytest.mark.parametrize("ids", [[], {}, {"ci": True, "deploy": 20, "integration": 30},
-                               {"ci": 10, "deploy": 10, "integration": 30}])
-def test_invalid_pipeline_selection_never_reaches_the_service(preview, ids):
+@pytest.mark.parametrize("pipeline_id", [True, 0, -1, "", "10", {}, None])
+def test_invalid_pipeline_selection_never_reaches_the_service(preview, pipeline_id):
     client = _client(preview)
     with pytest.raises(preview.PreviewError):
-        preview.qualify(client, ids, REPOSITORY, REF, SOURCE, CONNECTIONS, GROUPS)
+        preview.qualify(client, pipeline_id, REPOSITORY, REF, SOURCE, CONNECTIONS, GROUPS)
     assert client.calls == []
 
 
@@ -377,13 +395,150 @@ def test_preview_structure_limits_accept_the_boundary_and_reject_the_next_node(p
 def test_validation_pipeline_is_manual_and_has_no_deployment_identity():
     source = yaml.safe_load((ROOT / ".pipelines" / "validate-pipelines.yaml").read_text())
     assert source["trigger"] == source["pr"] == "none"
-    steps = source["jobs"][0]["steps"]
+    assert "pipelineIds" not in {parameter["name"] for parameter in source["parameters"]}
+    steps = source["stages"][0]["jobs"][0]["steps"]
     assert not any(step.get("task", "").startswith("AzureCLI@") for step in steps)
-    assert not any("group" in node for node in source.get("variables", []))
+    assert source["variables"] == {"SITE_OVERRIDES": ""}
     execute = next(step for step in steps if "script" in step)
     assert "scripts/preview-ado-pipelines.py" in execute["script"]
     assert execute["env"]["BUILD_SOURCEVERSION"] == "$(Build.SourceVersion)"
     assert execute["env"]["SYSTEM_ACCESSTOKEN"] == "$(System.AccessToken)"
+    assert execute["env"]["SYSTEM_DEFINITIONID"] == "$(System.DefinitionId)"
+    assert "ADO_PREVIEW_PIPELINE_IDS" not in execute["env"]
     artifact = next(step for step in steps if step.get("task") == "PublishPipelineArtifact@1")
     assert artifact.get("condition", "succeeded()") == "succeeded()"
     assert artifact["inputs"]["targetPath"].endswith("/pipeline-preview.json")
+
+
+def test_full_preview_matrix_is_retained(preview):
+    integration = yaml.safe_load((ROOT / preview.PIPELINES["integration"]).read_text())
+    phases = next(parameter["values"] for parameter in integration["parameters"]
+                  if parameter["name"] == "manifest")
+    expected = {"ci", "deploy-custom-selector", "deploy-wif-session", "deploy-site-file",
+                "integration-wif-session", "integration-staging", "integration-prod",
+                "setup-development", "setup-external", "setup-release",
+                "consumer-validate-selector", "consumer-validate-site-file"}
+    expected.update(f"deploy-{environment}-{action}"
+                    for environment in ("dev", "staging", "prod") for action in ("plan", "apply"))
+    expected.update(f"deploy-{sample}-{selector}"
+                    for sample in ("resource-set-basic", "resource-set-composition")
+                    for selector in ("default", "custom"))
+    expected.update(f"integration-{phase}" for phase in phases)
+    assert len(preview.cases()) == len(expected) == 29
+    assert {case.name for case in preview.cases()} == expected
+
+
+def test_source_read_failure_stops_before_service_access(preview, monkeypatch):
+    def fail(commit):
+        assert commit == SOURCE
+        raise preview.PreviewError("The reviewed source could not be read.")
+
+    monkeypatch.setattr(preview, "source_documents", fail)
+    client = _client(preview)
+    with pytest.raises(preview.PreviewError, match="source"):
+        preview.qualify(client, PIPELINE_ID, REPOSITORY, REF, SOURCE, CONNECTIONS, GROUPS)
+    assert client.calls == []
+
+
+@pytest.mark.parametrize("fault", [None, "checkout", "size", "oversized", "read", "encoding"])
+def test_source_documents_use_bounded_committed_blobs(preview_module, tmp_path, monkeypatch, fault):
+    module = preview_module
+    monkeypatch.setattr(module, "ROOT", tmp_path)
+    documents = {name: f"# committed {name}\njobs: []\n" for name in module.PIPELINES}
+    validated = []
+    calls = []
+    for path in module.PIPELINES.values():
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("uncommitted private marker", encoding="utf-8")
+
+    def validate(root, commit):
+        validated.append((root, commit))
+        if fault == "checkout":
+            raise module.SourceSnapshotError("The source checkout changed.")
+
+    def git(root, arguments):
+        assert root == tmp_path
+        calls.append(arguments)
+        assert arguments[:2] == ["--no-replace-objects", "cat-file"]
+        name = next(name for name, path in module.PIPELINES.items()
+                    if arguments[-1] == SOURCE + ":" + path)
+        raw = b"\xff" if fault == "encoding" else documents[name].encode()
+        if arguments[2] == "-s":
+            size = module.MAX_RESPONSE + 1 if fault == "oversized" else len(raw)
+            return subprocess.CompletedProcess(arguments, int(fault == "size"), str(size).encode())
+        assert arguments[2] == "blob"
+        return subprocess.CompletedProcess(arguments, int(fault == "read"), raw)
+
+    monkeypatch.setattr(module, "validate_repository", validate)
+    monkeypatch.setattr(module, "_git", git)
+    if fault:
+        with pytest.raises(module.PreviewError):
+            module.source_documents(SOURCE)
+    else:
+        assert module.source_documents(SOURCE) == documents
+        assert len(calls) == 6
+    assert validated == [(tmp_path, SOURCE)]
+    if fault in {"size", "oversized"}:
+        assert len(calls) == 1
+
+
+def test_azure_repo_organization_hint_is_not_a_credential(preview):
+    plain = "https://dev.azure.com/example/project/_git/repository"
+    hinted = "https://example@dev.azure.com/example/project/_git/repository"
+    assert preview._repository(plain) == preview._repository(hinted)
+
+
+@pytest.mark.parametrize("repository", [
+    "https://user@github.com/example/repository",
+    "https://other@dev.azure.com/example/project/_git/repository",
+    "https://example:private@dev.azure.com/example/project/_git/repository",
+    "https://example@other.invalid/example/project/_git/repository",
+])
+def test_repository_hints_do_not_admit_credentials_or_other_hosts(preview, repository):
+    with pytest.raises(preview.PreviewError, match="credentials"):
+        preview._repository(repository)
+
+
+def test_case_inventory_uses_the_selected_committed_integration_source(preview):
+    document = yaml.safe_dump({
+        "parameters": [{"name": "manifest", "values": ["selected-phase"]}],
+    })
+    selected = preview.cases(document)
+    assert any(case.name == "integration-selected-phase" for case in selected)
+    assert not any(case.name == "integration-all" for case in selected)
+
+
+@pytest.mark.parametrize("document", [
+    "", "[]", "parameters: []", "parameters: [\n",
+    "parameters: [{name: manifest, values: []}]",
+    "parameters: [{name: manifest, values: [all, all]}]",
+    "parameters: [{name: manifest, values: [1]}]",
+    "parameters: [{name: manifest, values: [{}]}]",
+])
+def test_bad_committed_phase_inventory_is_a_fixed_failure(preview, document):
+    with pytest.raises(preview.PreviewError, match="phase inventory"):
+        preview.cases(document)
+
+
+@pytest.mark.parametrize("length", [0, 31, 32, 33])
+def test_committed_source_size_boundaries(preview_module, tmp_path, monkeypatch, length):
+    module = preview_module
+    monkeypatch.setattr(module, "ROOT", tmp_path)
+    monkeypatch.setattr(module, "MAX_RESPONSE", 32)
+    monkeypatch.setattr(module, "validate_repository", lambda root, commit: None)
+    reads = []
+
+    def git(root, arguments):
+        reads.append(arguments)
+        raw = str(length).encode() if arguments[2] == "-s" else b"x" * length
+        return subprocess.CompletedProcess(arguments, 0, raw)
+
+    monkeypatch.setattr(module, "_git", git)
+    if length in {0, 33}:
+        with pytest.raises(module.PreviewError, match="empty or too large"):
+            module.source_documents(SOURCE)
+        assert len(reads) == 1
+    else:
+        assert all(len(text) == length for text in module.source_documents(SOURCE).values())
+        assert len(reads) == 6

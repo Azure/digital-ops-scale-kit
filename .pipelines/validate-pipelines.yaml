@@ -1,15 +1,8 @@
-# Preview the selected pipeline definitions without executing their jobs.
+# Maintainer qualification: full template previews and non-deploying consumer smoke.
 trigger: none
 pr: none
 
 parameters:
-  - name: pipelineIds
-    displayName: Existing CI, deploy and integration pipeline IDs
-    type: object
-    default:
-      ci: 0
-      deploy: 0
-      integration: 0
   - name: serviceConnections
     displayName: Service connection names to validate per environment
     type: object
@@ -28,39 +21,99 @@ parameters:
 pool:
   vmImage: ubuntu-24.04
 
-jobs:
-  - job: preview
+variables:
+  SITE_OVERRIDES: ''
+
+stages:
+  - stage: preview
     displayName: Preview pipeline templates
-    timeoutInMinutes: 20
-    steps:
-      - checkout: self
-        fetchDepth: 1
-        persistCredentials: false
+    jobs:
+      - job: preview
+        timeoutInMinutes: 20
+        steps:
+          - checkout: self
+            fetchDepth: 1
+            persistCredentials: false
 
-      - template: templates/setup-siteops.yaml
-        parameters:
-          installDev: true
+          - template: templates/setup-siteops.yaml
+            parameters:
+              installDev: true
 
-      - script: |
-          set -euo pipefail
-          umask 077
-          python3 scripts/preview-ado-pipelines.py \
-            --output "$RESULTS_DIRECTORY/pipeline-preview.json"
-        displayName: Preview the exact source candidate
-        env:
-          SYSTEM_ACCESSTOKEN: $(System.AccessToken)
-          SYSTEM_COLLECTIONURI: $(System.CollectionUri)
-          SYSTEM_TEAMPROJECTID: $(System.TeamProjectId)
-          BUILD_REPOSITORY_URI: $(Build.Repository.Uri)
-          BUILD_SOURCEBRANCH: $(Build.SourceBranch)
-          BUILD_SOURCEVERSION: $(Build.SourceVersion)
-          ADO_PREVIEW_PIPELINE_IDS: ${{ convertToJson(parameters.pipelineIds) }}
-          ADO_PREVIEW_CONNECTIONS: ${{ convertToJson(parameters.serviceConnections) }}
-          ADO_PREVIEW_GROUPS: ${{ convertToJson(parameters.secretGroups) }}
-          RESULTS_DIRECTORY: $(Build.ArtifactStagingDirectory)
+          - script: |
+              set -euo pipefail
+              umask 077
+              python3 scripts/preview-ado-pipelines.py \
+                --output "$RESULTS_DIRECTORY/pipeline-preview.json"
+            displayName: Preview the exact source candidate
+            env:
+              SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+              SYSTEM_COLLECTIONURI: $(System.CollectionUri)
+              SYSTEM_TEAMPROJECTID: $(System.TeamProjectId)
+              SYSTEM_DEFINITIONID: $(System.DefinitionId)
+              BUILD_REPOSITORY_URI: $(Build.Repository.Uri)
+              BUILD_SOURCEBRANCH: $(Build.SourceBranch)
+              BUILD_SOURCEVERSION: $(Build.SourceVersion)
+              ADO_PREVIEW_CONNECTIONS: ${{ convertToJson(parameters.serviceConnections) }}
+              ADO_PREVIEW_GROUPS: ${{ convertToJson(parameters.secretGroups) }}
+              RESULTS_DIRECTORY: $(Build.ArtifactStagingDirectory)
 
-      - task: PublishPipelineArtifact@1
-        displayName: Publish preview receipt
-        inputs:
-          targetPath: $(Build.ArtifactStagingDirectory)/pipeline-preview.json
-          artifact: pipeline-preview
+          - task: PublishPipelineArtifact@1
+            displayName: Publish preview receipt
+            inputs:
+              targetPath: $(Build.ArtifactStagingDirectory)/pipeline-preview.json
+              artifact: pipeline-preview
+
+  - template: templates/consumer-smoke.yaml
+
+  - stage: qualification_report
+    displayName: Report qualification
+    dependsOn: [preview, validate_selector, validate_site_file]
+    condition: always()
+    jobs:
+      - job: report
+        condition: always()
+        timeoutInMinutes: 5
+        variables:
+          ADO_QUALIFICATION_REPORT_READY: 'false'
+          PREVIEW_RESULT: $[ stageDependencies.preview.preview.result ]
+          SELECTOR_RESULT: $[ stageDependencies.validate_selector.siteops_validate.result ]
+          SITE_FILE_RESULT: $[ stageDependencies.validate_site_file.siteops_validate.result ]
+        steps:
+          - checkout: self
+            fetchDepth: 1
+            persistCredentials: false
+
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '3.11'
+
+          - task: DownloadPipelineArtifact@2
+            displayName: Read preview receipt
+            condition: eq(variables['PREVIEW_RESULT'], 'Succeeded')
+            inputs:
+              buildType: current
+              artifactName: pipeline-preview
+              targetPath: $(Agent.TempDirectory)/ado-preview
+
+          - script: |
+              set -euo pipefail
+              umask 077
+              python3 -I -S -B scripts/summarize-ado-qualification.py \
+                --preview "$PREVIEW_RECEIPT" --output "$REPORT_DIRECTORY"
+            displayName: Summarize qualification
+            condition: always()
+            env:
+              BUILD_SOURCEVERSION: $(Build.SourceVersion)
+              PREVIEW_RESULT: $(PREVIEW_RESULT)
+              SELECTOR_RESULT: $(SELECTOR_RESULT)
+              SITE_FILE_RESULT: $(SITE_FILE_RESULT)
+              REPORT_PREPARATION_RESULT: $(Agent.JobStatus)
+              PREVIEW_RECEIPT: $(Agent.TempDirectory)/ado-preview/pipeline-preview.json
+              REPORT_DIRECTORY: $(Build.ArtifactStagingDirectory)/ado-qualification
+
+          - task: PublishPipelineArtifact@1
+            displayName: Publish qualification report
+            condition: and(always(), eq(variables['ADO_QUALIFICATION_REPORT_READY'], 'true'))
+            inputs:
+              targetPath: $(Build.ArtifactStagingDirectory)/ado-qualification
+              artifact: ado-qualification
