@@ -27,11 +27,44 @@ PIPELINES = {
     "integration": ".pipelines/integration-test.yaml",
 }
 MAX_RESPONSE = 4 * 1024 * 1024
+MAX_ERROR_RESPONSE = 16 * 1024
 ENVIRONMENTS = ("dev", "staging", "prod")
+HTTP_ERROR_CATEGORIES = {
+    "NullReferenceException": "service-null-reference",
+    "System.NullReferenceException": "service-null-reference",
+    "AccessDeniedException": "access-denied",
+    "VssUnauthorizedException": "authentication-rejected",
+    "PipelineValidationException": "yaml-validation",
+    "JsonReaderException": "request-json",
+    "Newtonsoft.Json.JsonReaderException": "request-json",
+    "ArgumentNullException": "missing-argument",
+    "System.ArgumentNullException": "missing-argument",
+}
 
 
 class PreviewError(Exception):
     """A fixed diagnostic suitable for a public validation log."""
+
+
+def _http_error_category(error: HTTPError) -> str:
+    """Retain only an allowlisted exception category, never service message text."""
+    try:
+        raw = error.read(MAX_ERROR_RESPONSE + 1)
+        if len(raw) > MAX_ERROR_RESPONSE:
+            return "diagnostic-unavailable"
+        document = json.loads(raw)
+    except (OSError, ValueError, RecursionError):
+        return "diagnostic-unavailable"
+    if not isinstance(document, dict):
+        return "diagnostic-unavailable"
+    names = [document.get("typeKey")]
+    qualified_name = document.get("typeName")
+    if isinstance(qualified_name, str):
+        names.append(qualified_name.split(",", 1)[0].strip())
+    for name in names:
+        if isinstance(name, str) and name in HTTP_ERROR_CATEGORIES:
+            return HTTP_ERROR_CATEGORIES[name]
+    return "unclassified"
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -79,7 +112,14 @@ class AdoClient:
                 raise PreviewError("The pipeline service response exceeded its size limit.")
             document = json.loads(raw)
         except HTTPError as error:
-            raise PreviewError(f"The pipeline service rejected the request (HTTP {error.code}).") from None
+            category = _http_error_category(error)
+            try:
+                error.close()
+            except OSError:
+                category = "diagnostic-unavailable"
+            raise PreviewError(
+                f"The pipeline service rejected the request (HTTP {error.code}; category: {category})."
+            ) from None
         except (URLError, OSError, ValueError, RecursionError):
             raise PreviewError("The pipeline service response could not be read.") from None
         if not isinstance(document, dict):

@@ -990,7 +990,10 @@ original publisher identity for signed-release verification.
 Run only reviewed pipeline source with the explicitly mapped
 `System.AccessToken`. The harness has no automatic PR trigger, interactive
 login or pipeline-creation behavior. Expanded YAML, resource names and raw
-service diagnostics are not published.
+service diagnostics are not published. HTTP failures retain the status code
+and an allowlisted service exception category. Unknown or unreadable details
+remain undisclosed. These categories describe the server response, not a
+proven cause, and do not trigger retries or an execution-endpoint fallback.
 
 A complete passing run qualifies template expansion and the explicit
 source-install consumer checks for that candidate. Verified-release

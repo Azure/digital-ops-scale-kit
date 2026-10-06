@@ -274,6 +274,102 @@ def test_http_failures_never_queue_a_run_or_publish_private_diagnostics(preview,
     assert len(calls) == 1 and "/preview?" in calls[0].full_url
 
 
+@pytest.mark.parametrize("type_key,category", [
+    ("NullReferenceException", "service-null-reference"),
+    ("AccessDeniedException", "access-denied"),
+    ("VssUnauthorizedException", "authentication-rejected"),
+    ("PipelineValidationException", "yaml-validation"),
+    ("JsonReaderException", "request-json"),
+    ("ArgumentNullException", "missing-argument"),
+    ("private-service-type", "unclassified"),
+])
+def test_http_error_categories_preserve_failure_without_private_response_text(
+    preview, type_key, category,
+):
+    client = preview.AdoClient("https://dev.azure.com/example", "project", "synthetic-token")
+    body = io.BytesIO(json.dumps({
+        "typeKey": type_key, "message": "private-resource-name synthetic-token",
+        "innerException": {"message": "private-inner-detail"},
+    }).encode())
+    calls = []
+
+    def fail(request, *, timeout):
+        calls.append(request)
+        raise HTTPError(request.full_url, 500, "private-reason", {}, body)
+
+    client.opener.open = fail
+    with pytest.raises(preview.PreviewError) as caught:
+        client.request(10, preview={"previewRun": True})
+    diagnostic = str(caught.value)
+    assert "HTTP 500" in diagnostic and f"category: {category}" in diagnostic
+    assert "private-" not in diagnostic and "synthetic-token" not in diagnostic
+    assert body.closed
+    assert len(calls) == 1 and "/preview?" in calls[0].full_url
+
+
+@pytest.mark.parametrize("fault", ["malformed", "array", "bad-type", "oversized", "read", "close", "none"])
+def test_unavailable_http_diagnostics_do_not_mask_the_original_failure(preview, fault):
+    class Body(io.BytesIO):
+        def read(self, size=-1):
+            assert size == preview.MAX_ERROR_RESPONSE + 1
+            if fault == "read":
+                raise OSError("private-read-detail")
+            return super().read(size)
+
+        def close(self):
+            super().close()
+            if fault == "close":
+                raise OSError("private-close-detail")
+
+    raw = json.dumps({"typeKey": "NullReferenceException", "message": "private-detail"}).encode()
+    if fault == "malformed":
+        raw = b"private-malformed"
+    elif fault == "array":
+        raw = b"[]"
+    elif fault == "bad-type":
+        raw = b'{"typeKey":["private-detail"]}'
+    elif fault == "oversized":
+        raw = raw.ljust(preview.MAX_ERROR_RESPONSE + 1, b" ")
+    body = None if fault == "none" else Body(raw)
+    client = preview.AdoClient("https://dev.azure.com/example", "project", "synthetic-token")
+
+    def fail(request, *, timeout):
+        raise HTTPError(request.full_url, 503, "private-reason", {}, body)
+
+    client.opener.open = fail
+    with pytest.raises(preview.PreviewError) as caught:
+        client.request(10, preview={"previewRun": True})
+    assert "HTTP 503" in str(caught.value)
+    assert "private-" not in str(caught.value)
+    assert "diagnostic-unavailable" in str(caught.value) or "unclassified" in str(caught.value)
+
+
+@pytest.mark.parametrize("qualified_name,category", [
+    ("System.NullReferenceException, private-assembly-detail", "service-null-reference"),
+    ("Newtonsoft.Json.JsonReaderException, private-assembly-detail", "request-json"),
+    ("private.Namespace.NullReferenceException", "unclassified"),
+])
+@pytest.mark.parametrize("padding", [False, True])
+def test_http_categories_admit_only_known_qualified_types_and_the_exact_size_boundary(
+    preview, qualified_name, category, padding,
+):
+    raw = json.dumps({"typeName": qualified_name, "message": "private-detail"}).encode()
+    if padding:
+        raw = raw.ljust(preview.MAX_ERROR_RESPONSE, b" ")
+    body = io.BytesIO(raw)
+    client = preview.AdoClient("https://dev.azure.com/example", "project", "synthetic-token")
+
+    def fail(request, *, timeout):
+        raise HTTPError(request.full_url, 500, "private-reason", {}, body)
+
+    client.opener.open = fail
+    with pytest.raises(preview.PreviewError) as caught:
+        client.request(10, preview={"previewRun": True})
+    assert f"category: {category}" in str(caught.value)
+    assert "private" not in str(caught.value)
+    assert body.closed
+
+
 @pytest.mark.parametrize("destination", [
     "https://other.invalid/private-diagnostic",
     "https://dev.azure.com/example/project/_apis/pipelines/10/runs",
