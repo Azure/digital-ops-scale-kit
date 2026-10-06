@@ -202,7 +202,7 @@ def test_custom_pipeline_examples_use_each_platforms_supported_selection():
 
 
 def test_contributor_pipelines_request_development_installation_explicitly():
-    for name in ("ci.yaml", "integration-test.yaml", "validate-pipelines.yaml"):
+    for name in ("ci.yaml", "integration-test.yaml"):
         setups = [node for node in nodes(ROOT / ".pipelines" / name)
                   if node.get("template") == "templates/setup-siteops.yaml"]
         assert setups and all(node.get("parameters", {}).get("installDev") is True for node in setups)

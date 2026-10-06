@@ -1,5 +1,6 @@
 """Qualify the preview-only API boundary without contacting Azure DevOps."""
 
+import ast
 import hashlib
 import importlib.util
 import io
@@ -578,7 +579,7 @@ def test_validation_pipeline_is_manual_and_has_no_deployment_identity():
     steps = stage["jobs"][0]["steps"]
     assert not any(step.get("task", "").startswith("AzureCLI@") for step in steps)
     assert source["variables"] == {"SITE_OVERRIDES": ""}
-    execute = next(step for step in steps if "script" in step)
+    execute = next(step for step in steps if step.get("displayName") == "Preview the exact source candidate")
     assert "scripts/preview-ado-pipelines.py" in execute["script"]
     assert execute["env"]["BUILD_SOURCEVERSION"] == "$(Build.SourceVersion)"
     assert execute["env"]["SYSTEM_ACCESSTOKEN"] == "$(System.AccessToken)"
@@ -587,6 +588,66 @@ def test_validation_pipeline_is_manual_and_has_no_deployment_identity():
     artifact = next(step for step in steps if step.get("task") == "PublishPipelineArtifact@1")
     assert artifact.get("condition", "succeeded()") == "succeeded()"
     assert artifact["inputs"]["targetPath"].endswith("/pipeline-preview.json")
+
+
+def _preview_steps():
+    source = yaml.safe_load((ROOT / ".pipelines" / "validate-pipelines.yaml").read_text())
+    stage = next(stage for stage in source["stages"] if stage.get("stage") == "preview")
+    return stage["jobs"][0]["steps"]
+
+
+def test_preview_job_installs_only_hash_locked_dependencies():
+    steps = _preview_steps()
+    assert not any("template" in step for step in steps)
+    assert not any(step.get("task", "").startswith("Cache@") for step in steps)
+    names = [step.get("displayName") for step in steps]
+    install = steps[names.index("Install locked preview dependencies")]
+    execute = steps[names.index("Preview the exact source candidate")]
+    assert names.index("Install locked preview dependencies") < names.index("Preview the exact source candidate")
+    for flag in ("--require-hashes", "--only-binary=:all:", "--no-cache-dir",
+                 "-r scripts/siteops-runtime-requirements.txt"):
+        assert flag in install["script"]
+    assert install["env"]["PIP_EXTRA_INDEX_URL"] == ""
+    assert install["env"]["PREVIEW_TOOLS"] == execute["env"]["PREVIEW_TOOLS"]
+    assert "SYSTEM_ACCESSTOKEN" not in install["env"]
+    assert '"$PREVIEW_TOOLS/bin/python" -E -s -B scripts/preview-ado-pipelines.py' in execute["script"]
+
+
+def test_only_the_preview_step_receives_the_job_token():
+    mappings = [
+        path for path in sorted((ROOT / ".pipelines").rglob("*.yaml"))
+        for _ in range(path.read_text(encoding="utf-8").count("System.AccessToken"))
+    ]
+    assert mappings == [ROOT / ".pipelines" / "validate-pipelines.yaml"]
+    holders = [step for step in _preview_steps() if "SYSTEM_ACCESSTOKEN" in step.get("env", {})]
+    assert [step["displayName"] for step in holders] == ["Preview the exact source candidate"]
+
+
+def test_preview_third_party_imports_are_covered_by_the_runtime_lock():
+    scripts = ROOT / "scripts"
+    local = {path.stem for path in scripts.glob("*.py")}
+    pending, seen, external = ["preview-ado-pipelines"], set(), set()
+    while pending:
+        name = pending.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        tree = ast.parse((scripts / f"{name}.py").read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                modules = [alias.name.split(".")[0] for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                modules = [node.module.split(".")[0]]
+            else:
+                continue
+            for module in modules:
+                if module in local:
+                    pending.append(module)
+                elif module not in sys.stdlib_module_names and module != "__future__":
+                    external.add(module)
+    assert external == {"yaml"}
+    lock = (scripts / "siteops-runtime-requirements.txt").read_text(encoding="utf-8")
+    assert "PyYAML==" in lock
 
 
 def test_full_preview_matrix_is_retained(preview):

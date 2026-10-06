@@ -1007,6 +1007,14 @@ diagnostic also names that type. Messages and other unknown or unreadable
 details remain undisclosed. These categories describe the server response, not a
 proven cause, and do not trigger retries or an execution-endpoint fallback.
 
+The preview step is the only step that receives `System.AccessToken`.
+Its job installs just the hash-locked runtime requirements as binary
+wheels, without a cache, into a private virtual environment. It runs the
+controller with `-E -s -B` so Python environment variables, user packages
+and bytecode writes stay out of the token-bearing process. Keep **Limit job
+authorization scope to current project** enabled and restrict who can edit
+or queue this pipeline to maintainers.
+
 A complete passing run qualifies template expansion and the explicit
 source-install consumer checks for that candidate. Verified-release
 installation, separate caller/tooling repository checkouts, executable

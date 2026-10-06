@@ -38,17 +38,33 @@ stages:
             fetchDepth: 1
             persistCredentials: false
 
-          - template: templates/setup-siteops.yaml
-            parameters:
-              installDev: true
+          - task: UsePythonVersion@0
+            displayName: Set up Python 3.11
+            inputs:
+              versionSpec: '3.11'
 
           - script: |
               set -euo pipefail
               umask 077
-              python3 scripts/preview-ado-pipelines.py \
+              python -m venv "$PREVIEW_TOOLS"
+              "$PREVIEW_TOOLS/bin/python" -m pip install --require-hashes --only-binary=:all: --no-cache-dir \
+                -r scripts/siteops-runtime-requirements.txt
+            displayName: Install locked preview dependencies
+            env:
+              PREVIEW_TOOLS: $(Agent.TempDirectory)/preview-tools
+              PIP_EXTRA_INDEX_URL: ''
+              PIP_NO_INPUT: '1'
+              PIP_KEYRING_PROVIDER: disabled
+              PIP_DISABLE_PIP_VERSION_CHECK: '1'
+
+          - script: |
+              set -euo pipefail
+              umask 077
+              "$PREVIEW_TOOLS/bin/python" -E -s -B scripts/preview-ado-pipelines.py \
                 --output "$RESULTS_DIRECTORY/pipeline-preview.json"
             displayName: Preview the exact source candidate
             env:
+              PREVIEW_TOOLS: $(Agent.TempDirectory)/preview-tools
               SYSTEM_ACCESSTOKEN: $(System.AccessToken)
               SYSTEM_COLLECTIONURI: $(System.CollectionUri)
               SYSTEM_TEAMPROJECTID: $(System.TeamProjectId)
