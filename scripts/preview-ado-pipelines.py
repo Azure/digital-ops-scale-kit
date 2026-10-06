@@ -201,7 +201,7 @@ def cases(integration_source: str | None = None) -> list[Case]:
             "jobs": [{"job": "setup_preview", "steps": [{
                 "template": "templates/setup-siteops.yaml", "parameters": options,
             }]}],
-        })
+        }, sort_keys=False)
         selected.append(Case(f"setup-{label}", "ci", options, override=override))
     for label, targeting in (("selector", {"selector": "environment=dev"}), ("site-file", {"siteFile": "operator/site.yaml"})):
         options = {
@@ -212,7 +212,7 @@ def cases(integration_source: str | None = None) -> list[Case]:
             "trigger": "none", "pr": "none", "pool": {"vmImage": "ubuntu-24.04"},
             "variables": {"SITE_OVERRIDES": ""},
             "stages": [{"template": "templates/siteops-validate.yaml", "parameters": options}],
-        })
+        }, sort_keys=False)
         selected.append(Case(f"consumer-validate-{label}", "ci", options, override=override))
     return selected
 

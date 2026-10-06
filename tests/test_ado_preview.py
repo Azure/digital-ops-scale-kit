@@ -166,6 +166,29 @@ def test_template_parameters_reject_values_without_a_string_encoding(preview, va
         preview._template_parameter(value)
 
 
+def test_generated_overrides_lead_each_item_with_its_type_key(preview):
+    overrides = [case for case in preview.cases() if case.override]
+    assert {case.name for case in overrides} == {
+        "setup-development", "setup-external", "setup-release",
+        "consumer-validate-selector", "consumer-validate-site-file",
+    }
+    for case in overrides:
+        items = []
+        pending = [yaml.safe_load(case.override)]
+        while pending:
+            node = pending.pop()
+            if isinstance(node, dict):
+                for key in ("stages", "jobs", "steps"):
+                    items.extend(node.get(key, []))
+                pending.extend(node.values())
+            elif isinstance(node, list):
+                pending.extend(node)
+        assert items
+        for item in items:
+            first = next(iter(item))
+            assert first in {"template", "stage", "job"}, (case.name, first)
+
+
 @pytest.mark.parametrize("fault", ["repo", "path", "id", "missing-yaml", "empty-yaml"])
 def test_preview_refuses_unbound_definitions_and_absent_expansion(preview, fault):
     client = _client(preview, fault)
