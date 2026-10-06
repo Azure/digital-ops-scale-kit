@@ -943,10 +943,14 @@ documented above, with their own content and deployment identity.
 2. Configure the agent's approved Python package feed and the real
    `serviceConnections` and `secretGroups` name mappings to preview.
    A `PIP_INDEX_URL` pipeline variable can select the approved feed when
-   required by your organization. Grant the build identity read access to
-   its definition and source repository, plus the resource authorization
-   required for template expansion. The Preview API documents `vso.build`
-   scope. This qualification does not need Azure resource roles.
+   required by your organization. On this qualification pipeline only,
+   allow **Edit build pipeline** for the project build service identity,
+   `<project> Build Service (<organization>)`. Template previews submit
+   entry YAML through `yamlOverride`, which requires that permission.
+   Keep the identity's other permissions inherited. The build identity also
+   needs read access to its definition and source repository, plus the
+   resource authorization required for template expansion. This
+   qualification does not need Azure resource roles.
 3. Queue one approved run bound to the selected branch and full commit,
    then inspect its qualification summary and `ado-qualification` artifact.
 

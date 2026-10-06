@@ -379,6 +379,17 @@ def source_documents(commit: str) -> dict[str, str]:
         raise PreviewError("The exact clean source checkout could not be read.") from None
 
 
+def _template_parameter(value: object) -> str:
+    """Encode one runtime parameter as a string, the value type the Pipelines API accepts."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"))
+    raise PreviewError("Template parameters must be strings, booleans, mappings or lists.")
+
+
 def qualify(
     client: AdoClient, pipeline_id: int, repository: str, ref: str, commit: str,
     connections: dict[str, str], groups: dict[str, str],
@@ -414,7 +425,9 @@ def qualify(
         payload = {
             "previewRun": True,
             "resources": {"repositories": {"self": {"refName": ref, "version": commit}}},
-            "templateParameters": parameters,
+            "templateParameters": {
+                name: _template_parameter(value) for name, value in parameters.items()
+            },
             "yamlOverride": case.override if case.override is not None else documents[case.pipeline],
         }
         print(f"Previewing {case.name}.", flush=True)

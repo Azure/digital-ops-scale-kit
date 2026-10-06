@@ -138,9 +138,15 @@ def test_preview_binds_every_request_to_the_exact_source_and_retains_only_safe_r
             assert request["templateParameters"] == {}
         else:
             assert request["yamlOverride"] == preview.source_documents(SOURCE)[case.pipeline]
+            values = request["templateParameters"]
+            assert all(isinstance(value, str) for value in values.values())
+            for name, value in case.parameters.items():
+                expected = ("true" if value else "false") if isinstance(value, bool) else value
+                assert values[name] == expected
             if case.pipeline != "ci":
-                assert request["templateParameters"]["serviceConnections"] == CONNECTIONS
-                assert request["templateParameters"]["secretGroups"] == GROUPS
+                assert set(values) == set(case.parameters) | {"serviceConnections", "secretGroups"}
+                assert yaml.safe_load(values["serviceConnections"]) == CONNECTIONS
+                assert yaml.safe_load(values["secretGroups"]) == GROUPS
     receipt = json.dumps(report)
     assert report["sourceCommit"] == SOURCE
     assert report["expectedCases"] == [case.name for case in selected]
@@ -152,6 +158,12 @@ def test_preview_binds_every_request_to_the_exact_source_and_retains_only_safe_r
     for receipt, (_, request) in zip(report["cases"], client.calls[1:], strict=True):
         encoded = json.dumps(request, sort_keys=True, separators=(",", ":")).encode("utf-8")
         assert receipt["inputSha256"] == hashlib.sha256(encoded).hexdigest()
+
+
+@pytest.mark.parametrize("value", [None, 1, 1.5])
+def test_template_parameters_reject_values_without_a_string_encoding(preview, value):
+    with pytest.raises(preview.PreviewError):
+        preview._template_parameter(value)
 
 
 @pytest.mark.parametrize("fault", ["repo", "path", "id", "missing-yaml", "empty-yaml"])
