@@ -19,6 +19,17 @@ SCRIPTS = ROOT / "scripts" / "bootstrap"
 SOURCE_SHA = "c" * 40
 
 
+def test_ubuntu_fixture_uses_a_pinned_acr_base_and_nonroot_python():
+    source = (ROOT / "tests" / "fixtures" / "Dockerfile.bootstrap-ubuntu").read_text(encoding="utf-8")
+    assert re.fullmatch(
+        r"FROM ubuntu\.azurecr\.io/ubuntu:noble@sha256:[0-9a-f]{64}",
+        source.splitlines()[0],
+    )
+    assert "apt-get install -y --no-install-recommends python3 python3-venv" in source
+    assert "USER 65534:65534" in source
+    assert "ENV PYTHONDONTWRITEBYTECODE=1" in source
+
+
 def test_managed_azure_linux_uses_existing_os_tools_without_sudo():
     bash = (SCRIPTS / "siteops-bootstrap.sh").read_text(encoding="utf-8")
     assert "azurelinux:3.0" in bash

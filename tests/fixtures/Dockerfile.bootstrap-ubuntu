@@ -1,4 +1,4 @@
-FROM docker.io/library/ubuntu@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
+FROM ubuntu.azurecr.io/ubuntu:noble@sha256:5ce7043d3beb84e91bfeecacb5fafc80602bf247a1dd6016bc0fe7d69d707eca
 
 RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive \
     apt-get install -y --no-install-recommends python3 python3-venv

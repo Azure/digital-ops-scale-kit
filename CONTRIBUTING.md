@@ -71,8 +71,10 @@ uses the OpenSSL included with Git for Windows. Do not commit private keys
 as test fixtures or disable certificate verification to avoid this dependency.
 
 The bootstrap harness under `tests/fixtures/` uses controlled tools and
-no cloud credentials. Its pinned Ubuntu 24.04 image installs only Python
-and venv for testing. Run the harness without network access as an
+no cloud credentials. `Dockerfile.bootstrap-ubuntu` pins the Ubuntu Noble
+base from `ubuntu.azurecr.io/ubuntu` and installs only Python and venv for
+testing. Keep both the Ubuntu 24.04 target and the immutable image digest
+when updating this fixture. Run the harness without network access as an
 unprivileged user, with a read-only root and the platform script, harness
 and shared installer source mounted read only. Passing doubles does not qualify a signed
 published asset or a fresh Windows WinGet installation.
