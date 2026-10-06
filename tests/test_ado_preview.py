@@ -370,6 +370,53 @@ def test_http_categories_admit_only_known_qualified_types_and_the_exact_size_bou
     assert body.closed
 
 
+def _service_failure(preview, document):
+    body = io.BytesIO(json.dumps(document).encode())
+    client = preview.AdoClient("https://dev.azure.com/example", "project", "synthetic-token")
+
+    def fail(request, *, timeout):
+        raise HTTPError(request.full_url, 500, "private-reason", {}, body)
+
+    client.opener.open = fail
+    with pytest.raises(preview.PreviewError) as caught:
+        client.request(10, preview={"previewRun": True})
+    assert body.closed
+    return str(caught.value)
+
+
+@pytest.mark.parametrize("type_key", [
+    "PipelinePreviewServiceException",
+    "X" + "a" * 95 + "Exception",
+])
+def test_unlisted_service_exception_class_names_are_reported_without_message_text(preview, type_key):
+    diagnostic = _service_failure(preview, {
+        "typeKey": type_key,
+        "typeName": "Private.Namespace.PrivateType, private-assembly-detail",
+        "message": "private-resource-name synthetic-token",
+        "innerException": {"message": "private-inner-detail"},
+    })
+    assert f"(HTTP 500; category: unclassified; service type: {type_key})." in diagnostic
+    assert "private" not in diagnostic.casefold() and "synthetic-token" not in diagnostic
+
+
+@pytest.mark.parametrize("document", [
+    {"typeKey": "private-service-type"},
+    {"typeKey": "privateServiceException"},
+    {"typeKey": "Private.ServiceException"},
+    {"typeKey": "Private ServiceException"},
+    {"typeKey": "PrivateServiceExceptionDetail"},
+    {"typeKey": "\u00c4privateServiceException"},
+    {"typeKey": "PrivateServiceException\n"},
+    {"typeKey": "X" + "a" * 96 + "Exception"},
+    {"typeKey": ["PrivateServiceException"]},
+    {"typeName": "Private.Namespace.PrivateServiceException, private-assembly-detail"},
+])
+def test_service_type_report_rejects_values_outside_the_class_name_shape(preview, document):
+    diagnostic = _service_failure(preview, {**document, "message": "private-detail"})
+    assert diagnostic.endswith("(HTTP 500; category: unclassified).")
+    assert "service type" not in diagnostic and "private" not in diagnostic.casefold()
+
+
 @pytest.mark.parametrize("destination", [
     "https://other.invalid/private-diagnostic",
     "https://dev.azure.com/example/project/_apis/pipelines/10/runs",

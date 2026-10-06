@@ -40,31 +40,36 @@ HTTP_ERROR_CATEGORIES = {
     "ArgumentNullException": "missing-argument",
     "System.ArgumentNullException": "missing-argument",
 }
+SERVICE_EXCEPTION_TYPE = re.compile(r"[A-Z][A-Za-z0-9]{0,95}Exception")
 
 
 class PreviewError(Exception):
     """A fixed diagnostic suitable for a public validation log."""
 
 
-def _http_error_category(error: HTTPError) -> str:
-    """Retain only an allowlisted exception category, never service message text."""
+def _http_error_detail(error: HTTPError) -> str:
+    """Describe a service failure by category and class name, never message text."""
     try:
         raw = error.read(MAX_ERROR_RESPONSE + 1)
         if len(raw) > MAX_ERROR_RESPONSE:
-            return "diagnostic-unavailable"
+            return "category: diagnostic-unavailable"
         document = json.loads(raw)
     except (OSError, ValueError, RecursionError):
-        return "diagnostic-unavailable"
+        return "category: diagnostic-unavailable"
     if not isinstance(document, dict):
-        return "diagnostic-unavailable"
-    names = [document.get("typeKey")]
+        return "category: diagnostic-unavailable"
+    type_key = document.get("typeKey")
+    names = [type_key]
     qualified_name = document.get("typeName")
     if isinstance(qualified_name, str):
         names.append(qualified_name.split(",", 1)[0].strip())
     for name in names:
         if isinstance(name, str) and name in HTTP_ERROR_CATEGORIES:
-            return HTTP_ERROR_CATEGORIES[name]
-    return "unclassified"
+            return f"category: {HTTP_ERROR_CATEGORIES[name]}"
+    # An unlisted type key is reported only when it has the shape of a bare .NET exception class name.
+    if isinstance(type_key, str) and SERVICE_EXCEPTION_TYPE.fullmatch(type_key):
+        return f"category: unclassified; service type: {type_key}"
+    return "category: unclassified"
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -112,13 +117,13 @@ class AdoClient:
                 raise PreviewError("The pipeline service response exceeded its size limit.")
             document = json.loads(raw)
         except HTTPError as error:
-            category = _http_error_category(error)
+            detail = _http_error_detail(error)
             try:
                 error.close()
             except OSError:
-                category = "diagnostic-unavailable"
+                detail = "category: diagnostic-unavailable"
             raise PreviewError(
-                f"The pipeline service rejected the request (HTTP {error.code}; category: {category})."
+                f"The pipeline service rejected the request (HTTP {error.code}; {detail})."
             ) from None
         except (URLError, OSError, ValueError, RecursionError):
             raise PreviewError("The pipeline service response could not be read.") from None
