@@ -238,13 +238,12 @@ def test_windows_content_install_uses_native_uv_and_rechecks_both_retained_proof
 function Native([string]$Name) {
     switch ($Name) {
         'curl.exe' { return 'Test-Download' }
-        'gh.exe' { return 'Test-Verify' }
         'uv.exe' { return $env:TEST_UV }
         'siteops.exe' { return (Join-Path $env:UV_TOOL_BIN_DIR 'siteops.exe') }
         default { throw 'Unexpected native tool selection.' }
     }
 }
-function WinGetPackage { throw 'OS package acquisition escaped the fixture.' }
+function Select-GitHubCli { 'Test-Verify' }
 function Test-Download {
     $mapping = Get-Content -LiteralPath $env:TEST_DOWNLOADS -Raw | ConvertFrom-Json
     $source = $mapping.PSObject.Properties[$args[-1]].Value
@@ -255,7 +254,6 @@ function Test-Download {
     $global:LASTEXITCODE = 0
 }
 function Test-Verify {
-    if ($args[0] -eq 'version') { 'gh version 2.95.0 (fixture)'; $global:LASTEXITCODE = 0; return }
     if ($args[0] -ne 'attestation' -or $args[1] -ne 'verify') { throw 'Unapproved verifier operation.' }
     $name = [IO.Path]::GetFileName($args[2])
     [IO.File]::AppendAllText($env:TEST_LOG, "verify-$name`n")

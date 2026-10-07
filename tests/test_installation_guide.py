@@ -74,7 +74,7 @@ def test_quickstart_separates_release_installation_and_checkout_browsing():
     assert "docs/install-siteops.md" in readme
 
 
-def test_hosted_bootstrap_guidance_matches_managed_host_behavior():
+def test_hosted_bootstrap_guidance_matches_host_behavior():
     guide = GUIDE.read_text(encoding="utf-8")
     bash = (GUIDE.parent.parent / "scripts/bootstrap/siteops-bootstrap.sh").read_text(
         encoding="utf-8",
@@ -83,10 +83,13 @@ def test_hosted_bootstrap_guidance_matches_managed_host_behavior():
         encoding="utf-8",
     )
     for phrase in (
-        "Azure Cloud Shell", "Azure Linux 3", "without `sudo`", "uv-managed Python",
-        "UV_PYTHON_INSTALL_MIRROR", "Codespace", "k3d", "Arc-connected",
+        "Azure Cloud Shell", "Ubuntu 26.04", "administrator rights or install OS packages",
+        "user private group", "uv-managed Python", "UV_PYTHON_INSTALL_MIRROR", "Codespace", "k3d",
+        "Arc-connected",
     ):
         assert phrase in guide
+    for removed in ("--with-azure-cli", "-WithAzureCli", "managed Azure Linux 3"):
+        assert removed not in guide
     for script in (bash, powershell):
         assert "Command directory:" in script
     assert "export PATH=" in guide and "$env:PATH" in guide

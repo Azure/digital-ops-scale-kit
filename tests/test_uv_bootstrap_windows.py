@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import zipfile
 from pathlib import Path
 
@@ -22,7 +23,7 @@ pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Requires native
 def _functions(*names):
     source = SCRIPT.read_text(encoding="utf-8")
     bodies = []
-    for name in names:
+    for name in dict.fromkeys(("Read-NodeAcl", *names)):
         found = re.search(rf"(?ms)^function {name}\([^\n]*\) \{{.*?^\}}", source)
         assert found, f"The production {name} helper is missing."
         bodies.append(found.group())
@@ -44,7 +45,14 @@ def _runtime_functions(*names):
     return _functions(*names, *helpers)
 
 
-def _run(wrapper, tmp_path, **values):
+def _shell(name):
+    program = shutil.which(name)
+    if program is None:
+        pytest.skip(f"{name} is not installed on this host.")
+    return program
+
+
+def _run(wrapper, tmp_path, *, program="powershell.exe", **values):
     environment = {
         key: item
         for key, item in os.environ.items()
@@ -52,7 +60,7 @@ def _run(wrapper, tmp_path, **values):
     }
     environment.update({key: str(value) for key, value in values.items()})
     return subprocess.run(
-        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
+        [program, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
         cwd=tmp_path,
         env=environment,
         capture_output=True,
@@ -239,7 +247,8 @@ def test_windows_retained_proof_and_archive_paths_are_admitted_before_verificati
     assert source.index("Require-PrivateExecutablePath $path $referenceAssets") < source.index(
         "Verify-ReleaseAsset $referencePath $SourceCommit"
     )
-    assert "[IO.File]::Copy($source, $target, $false)" in source
+    assert "[IO.File]::Move((Join-Path $download $name), (Join-Path $cache $name))" in source
+    assert "[IO.File]::Copy($source, $target" not in source
 
 
 @pytest.mark.parametrize(
@@ -1286,3 +1295,195 @@ if ($selected -cne (Join-Path $data 'tools\\uv\\0.12.20\\uv.exe')) {
     assert "EXPOSURE_ACCEPTED" in result.stdout
     assert (bin_directory / "uv.exe").read_bytes() == executable.read_bytes()
     assert not (profile / ".local" / "bin" / "uv.exe").exists()
+
+
+# Long failures wrap differently in each edition's error view, so wrappers report them on stdout.
+_REPORTED_FAIL = "function Fail([string]$message) { Write-Host ('FAIL: ' + $message); exit 1 }\n"
+
+
+_GH_OUTCOMES = {
+    "accepted": "GH_SELECTED",
+    "missing": "FAIL: GitHub CLI 2.95 or newer is required. Install it from https://cli.github.com, then retry.",
+    "old": "FAIL: GitHub CLI 2.95 or newer is required. Install it from https://cli.github.com, then retry.",
+    "writable": (
+        "FAIL: The GitHub CLI executable must be owned by an administrator or the current user "
+        "and protected from other users."
+    ),
+}
+
+
+@pytest.mark.parametrize("shell", ["powershell.exe", "pwsh"])
+@pytest.mark.parametrize("case", sorted(_GH_OUTCOMES))
+def test_native_github_cli_is_an_admitted_prerequisite(tmp_path, shell, case):
+    program = _shell(shell)
+    tools = tmp_path / "gh"
+    tools.mkdir()
+    gh = tools / "gh.cmd"
+    gh.write_text(
+        "@echo off\n"
+        'echo ran>"%TEST_MARKER%"\n'
+        f"echo gh version {'2.94.1' if case == 'old' else '2.95.0'} (fixture)\n",
+        encoding="ascii",
+    )
+    wrapper = tmp_path / "gh.ps1"
+    wrapper.write_text(
+        _functions("Require-PrivateExecutablePath", "Select-GitHubCli")
+        + "\n" + _REPORTED_FAIL
+        + """
+function Native([string]$name) {
+    if ($name -cne 'gh.exe') { throw 'Unexpected native command.' }
+    if ($env:TEST_GH) { return $env:TEST_GH }
+    return $null
+}
+$selected = Select-GitHubCli
+if ($selected -cne $env:TEST_GH) { throw 'The admitted GitHub CLI path was not returned.' }
+'GH_SELECTED'
+""",
+        encoding="utf-8",
+    )
+    if case == "writable":
+        grant = subprocess.run(
+            ["icacls.exe", str(tools), "/grant", "*S-1-5-32-545:(OI)(CI)M"],
+            capture_output=True, text=True, timeout=20,
+        )
+        if grant.returncode:
+            pytest.skip("The test user cannot change the synthetic GitHub CLI ACL.")
+    marker = tmp_path / "executed"
+    try:
+        result = _run(
+            wrapper, tmp_path, program=program,
+            TEST_GH="" if case == "missing" else gh, TEST_MARKER=marker,
+        )
+    finally:
+        if case == "writable":
+            subprocess.run(
+                ["icacls.exe", str(tools), "/remove:g", "*S-1-5-32-545"],
+                capture_output=True, text=True, check=True, timeout=20,
+            )
+    assert (result.returncode == 0) is (case == "accepted"), result.stdout + result.stderr
+    assert _GH_OUTCOMES[case] in result.stdout
+    # The version probe runs only after the file and its directories pass admission.
+    assert marker.exists() is (case in {"accepted", "old"})
+
+
+@pytest.mark.parametrize("shell", ["powershell.exe", "pwsh"])
+def test_native_staging_is_private_per_run_and_replaces_temporary_storage(tmp_path, shell):
+    program = _shell(shell)
+    source = SCRIPT.read_text(encoding="utf-8")
+    prefix = "$staging = Join-Path $data 'install-staging'\n"
+    setup = prefix + source.split(prefix, 1)[1].split("    $engineRelease = $Release\n", 1)[0]
+    cleanup = "finally {\n" + source.split("\nfinally {\n", 1)[1]
+    wrapper = tmp_path / "staging.ps1"
+    wrapper.write_text(
+        _functions("Require-PrivateDataRoot")
+        + "\n$data = $env:TEST_DATA\nRequire-PrivateDataRoot $data\n"
+        + setup
+        + """
+    $acl = Read-NodeAcl $download -Directory
+    'RUN=' + $download
+    'RUN_OWNED=' + ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ceq
+        [Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
+    'RUN_PROTECTED=' + $acl.AreAccessRulesProtected
+    'TEMP=' + $env:TEMP
+    'TMP=' + $env:TMP
+    'TMPDIR=' + $env:TMPDIR
+    [IO.File]::WriteAllText((Join-Path $env:TEMP 'scratch'), 'private')
+}
+"""
+        + cleanup
+        + "\n'AFTER_TEMP=' + $env:TEMP\n'AFTER_TMPDIR=' + $env:TMPDIR\n",
+        encoding="utf-8",
+    )
+    data = tmp_path / "siteops"
+    environment = {"TEST_DATA": data, "TEMP": tmp_path, "TMP": tmp_path, "TMPDIR": "caller-tmpdir"}
+    first = _run(wrapper, tmp_path, program=program, **environment)
+    assert first.returncode == 0, first.stdout + first.stderr
+
+    staging = data / "install-staging"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep", encoding="ascii")
+    stale = staging / "stale-plain"
+    stale.mkdir()
+    (stale / "partial.zip").write_bytes(b"partial")
+    linked = staging / "stale-linked"
+    (linked / "nested").mkdir(parents=True)
+    subprocess.run(
+        ["cmd.exe", "/c", "mklink", "/J", str(linked / "nested" / "link"), str(outside)],
+        capture_output=True, text=True, check=True, timeout=20,
+    )
+    stale_file = staging / "stale-file"
+    stale_file.write_bytes(b"partial")
+    fresh = staging / "fresh"
+    fresh.mkdir()
+    expired = time.time() - 2 * 86400
+    for path in (stale, linked, stale_file):
+        os.utime(path, (expired, expired))
+
+    second = _run(wrapper, tmp_path, program=program, **environment)
+    assert second.returncode == 0, second.stdout + second.stderr
+    values = dict(line.split("=", 1) for line in second.stdout.splitlines() if "=" in line)
+    run = Path(values["RUN"])
+    assert run.parent == staging
+    assert values["RUN_OWNED"] == "True" and values["RUN_PROTECTED"] == "True"
+    assert values["TEMP"] == values["TMP"] == values["TMPDIR"] == str(run / "temp")
+    assert values["AFTER_TEMP"] == str(tmp_path) and values["AFTER_TMPDIR"] == "caller-tmpdir"
+    assert not run.exists()
+    assert not stale.exists() and not stale_file.exists()
+    assert fresh.is_dir()
+    # Removing a stale entry never follows a link out of private staging.
+    assert (outside / "keep.txt").read_text(encoding="ascii") == "keep"
+
+
+@pytest.mark.parametrize("occupied", [False, True])
+def test_native_retained_downloads_move_into_new_private_caches(tmp_path, occupied):
+    source = SCRIPT.read_text(encoding="utf-8")
+    start = "    if ($assets -eq $download) {\n"
+    retain = start + source.split(start, 1)[1].split(
+        "\n    if ($EnrollSource) {\n        if ($env:SITEOPS_REDACT_OUTPUT", 1,
+    )[0]
+    wrapper = tmp_path / "retain.ps1"
+    wrapper.write_text(
+        _functions("Require-PrivateDataRoot")
+        + "\n" + _REPORTED_FAIL
+        + """
+$data = $env:TEST_DATA
+Require-PrivateDataRoot $data
+$download = Join-Path $data 'staging'
+Require-PrivateDataRoot $download
+$referenceDownload = Join-Path $download 'reference'
+Require-PrivateDataRoot $referenceDownload
+foreach ($name in @('siteops-install.zip', 'siteops-install.zip.attestation.jsonl')) {
+    [IO.File]::WriteAllText((Join-Path $download $name), $name)
+}
+foreach ($name in @('siteops-engine.json', 'siteops-engine.json.attestation.jsonl')) {
+    [IO.File]::WriteAllText((Join-Path $referenceDownload $name), $name)
+}
+$assets = $download
+$cache = Join-Path $data 'release'
+$referenceCache = Join-Path $data 'reference'
+if ($env:TEST_OCCUPIED) { Require-PrivateDataRoot $cache }
+"""
+        + retain
+        + "\n'RETAINED'\n",
+        encoding="utf-8",
+    )
+    data = tmp_path / "siteops"
+    result = _run(wrapper, tmp_path, TEST_DATA=data, TEST_OCCUPIED="1" if occupied else "")
+    bundle = ("siteops-install.zip", "siteops-install.zip.attestation.jsonl")
+    reference = ("siteops-engine.json", "siteops-engine.json.attestation.jsonl")
+    if occupied:
+        assert result.returncode != 0
+        assert "FAIL: The retained release location changed during installation." in result.stdout
+        assert not any((data / "release").iterdir())
+        assert all((data / "staging" / name).is_file() for name in bundle)
+        return
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "RETAINED" in result.stdout
+    for cache, staged, names in (
+        (data / "release", data / "staging", bundle),
+        (data / "reference", data / "staging" / "reference", reference),
+    ):
+        assert sorted(item.name for item in cache.iterdir()) == sorted(names)
+        assert all((cache / name).read_text(encoding="ascii") == name for name in names)
+        assert not any((staged / name).exists() for name in names)

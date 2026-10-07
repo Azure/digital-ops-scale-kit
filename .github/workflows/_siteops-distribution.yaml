@@ -1024,9 +1024,6 @@ jobs:
           }
           $env:HOME = Join-Path $owned 'home'
           $env:LOCALAPPDATA = Join-Path $owned 'bootstrap-profile'
-          $env:TEMP = Join-Path $owned 'bootstrap-temp'
-          $env:TMP = $env:TEMP
-          $env:TMPDIR = $env:TEMP
           $env:GH_CONFIG_DIR = Join-Path $owned 'gh-config'
           $env:UV_TOOL_DIR = Join-Path $owned 'bootstrap-tools'
           $env:UV_TOOL_BIN_DIR = Join-Path $owned 'bootstrap-bin'
@@ -1062,8 +1059,7 @@ jobs:
                   throw 'The Windows qualification data root could not be protected.'
               }
           }
-          foreach ($directory in @($env:TEMP, $env:GH_CONFIG_DIR,
-                                  $env:UV_TOOL_DIR, $env:UV_TOOL_BIN_DIR)) {
+          foreach ($directory in @($env:GH_CONFIG_DIR, $env:UV_TOOL_DIR, $env:UV_TOOL_BIN_DIR)) {
               New-Item -ItemType Directory -Path $directory -Force | Out-Null
           }
           if ($env:BUILDER_IDENTITY -notmatch '/(ci|release)\.yaml@') {
@@ -1136,6 +1132,9 @@ jobs:
           if ((Get-Content -LiteralPath $log -Raw) -notmatch
               'Rechecking the retained release without downloading') {
               throw 'The signed PowerShell bootstrap did not consume the private verified cache.'
+          }
+          if (@(Get-ChildItem -LiteralPath (Join-Path $bootstrapData 'install-staging') -Force).Count) {
+              throw 'The signed PowerShell bootstrap left staged files behind.'
           }
           $configuration = Join-Path $env:UV_TOOL_DIR 'siteops\pyvenv.cfg'
           if ((Get-Item -LiteralPath $configuration).Length -gt 65536) {

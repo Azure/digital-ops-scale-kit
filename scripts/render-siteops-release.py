@@ -40,7 +40,7 @@ def bootstrap_commands(
     repository, commit, source_ref = source["repository"], source["commit"], source["ref"]
     bash, powershell = scripts["siteops-bootstrap.sh"], scripts["siteops-bootstrap.ps1"]
     return [
-        "Ubuntu 24.04 or managed Azure Linux 3, x64:",
+        "Linux x64 with glibc, including Ubuntu and Azure Cloud Shell:",
         f"""```bash
 (
   set -euo pipefail
@@ -94,8 +94,8 @@ def bootstrap_commands(
         "The initial script trusts this release's HTTPS delivery. "
         "The script separately authenticates the engine ZIP before extracting its installer helper.",
         "Review the proposed tool changes when prompted. These commands install the engine only. "
-        "To include Azure CLI, add `--with-azure-cli` to the final Bash invocation or "
-        "`-WithAzureCli` to the PowerShell invocation. Source enrollment is a separate choice: "
+        "They need `curl` and GitHub CLI 2.95 or newer and never use administrator rights. "
+        "Source enrollment is a separate choice: "
         "add `--enroll-source NAME` or `-EnrollSource NAME` only for an approved source. "
         "For the official Azure/digital-ops-scale-kit publisher, the guided examples use `official`. "
         "Azure authentication and deployment remain separate.",

@@ -77,7 +77,7 @@ testing. Keep both the Ubuntu 24.04 target and the immutable image digest
 when updating this fixture. Run the harness without network access as an
 unprivileged user, with a read-only root and the platform script, harness
 and shared installer source mounted read only. Passing doubles does not qualify a signed
-published asset or a fresh Windows WinGet installation.
+published asset or a fresh Windows installation.
 
 The engine ZIP carries its shared installer helper as `siteops-install.py`,
 copied from `scripts/siteops_distribution.py` in the frozen source.

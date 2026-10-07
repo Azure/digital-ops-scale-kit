@@ -24,8 +24,10 @@ path.
 
 ## Choose an installation route
 
-The bootstrap scripts support Ubuntu 24.04 x64, managed Azure Linux 3 x64,
-and Windows x64. Select an
+The bootstrap scripts support Windows x64 and x64 Linux distributions based
+on glibc, such as Ubuntu 24.04, Ubuntu 26.04 and Azure Cloud Shell. Install
+`curl` and GitHub CLI 2.95 or newer first. The scripts never use
+administrator rights or install OS packages. Select an
 exact approved release. Its release notes provide complete commands with the
 tag, source commit, publisher and script digest already filled in.
 Do not use a floating branch or `latest` as installation
@@ -39,7 +41,7 @@ deployment are separate.
 | Route | First script trust | Requirements |
 |---|---|---|
 | [Release wheel](#install-the-release-wheel) | Approved release channel and dependency feed. Native uv does not verify the detached proof. | uv from an approved channel and a configured package feed. |
-| [HTTPS bootstrap](#bootstrap-from-https) | Official HTTPS delivery. The script has not been independently authenticated before it starts. | Supported shell and HTTPS downloader. Missing tools may require an approved package channel and administrator consent. |
+| [HTTPS bootstrap](#bootstrap-from-https) | Official HTTPS delivery. The script has not been independently authenticated before it starts. | Supported shell, `curl` and GitHub CLI 2.95 or newer. No administrator rights. |
 | [Verify the bootstrap script](#verify-the-bootstrap-script) | Detached proof, exact publisher, source commit, signing workflow, caller and runner checked before execution. | GitHub CLI 2.95 or newer in version 2 from an approved channel. No GitHub login. |
 
 Managed environments can [provision approved tools first](#before-you-start),
@@ -70,11 +72,11 @@ tool changes and leaves Azure authentication and source enrollment separate.
 <summary>Assemble an approved selection manually</summary>
 
 For an approved selection assembled manually, the following templates also
-request Azure CLI and explicitly enroll the official content source. Replace
+explicitly enroll the official content source. Replace
 the tag and commit with the pair from that release. These templates rely on
 HTTPS delivery without the additional digest check in the generated commands.
 
-Ubuntu 24.04 or managed Azure Linux 3:
+Linux:
 
 ```bash
 (
@@ -85,16 +87,12 @@ Ubuntu 24.04 or managed Azure Linux 3:
   url="https://github.com/Azure/digital-ops-scale-kit/releases/download/${tag//\//%2F}/siteops-bootstrap.sh"
   curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
     --tlsv1.2 --max-redirs 3 --max-time 120 --output "$script" "$url" &&
-    bash "$script" --release "$tag" --source-commit "$sha" \
-      --with-azure-cli --enroll-source official
+    bash "$script" --release "$tag" --source-commit "$sha" --enroll-source official
 )
 ```
 
-If Ubuntu has `wget` but not `curl`, use
-`wget --https-only --max-redirect=3 --timeout=120 -O "$script" "$url"`
-in place of the `curl` download above, then run the same `bash` command
-only when the download succeeds. The script will disclose any required
-tool changes, including obtaining `curl` from the approved Ubuntu channel.
+The bootstrap downloads release assets with `curl`. If `curl` is missing,
+install it through your distribution's approved channel first.
 
 Windows PowerShell:
 
@@ -113,7 +111,7 @@ Windows PowerShell:
     --tlsv1.2 --max-redirs 3 --max-time 120 --output $script $url
   if ($LASTEXITCODE -ne 0) { throw "The bootstrap script could not be downloaded." }
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script `
-    -Release $tag -SourceCommit $sha -WithAzureCli -EnrollSource official
+    -Release $tag -SourceCommit $sha -EnrollSource official
   if ($LASTEXITCODE -ne 0) { throw "Site Ops installation did not complete." }
 }
 ```
@@ -181,13 +179,13 @@ does not acquire workspace content, sign in or authorize Azure deployment.
 ### Verify the bootstrap script
 
 Install GitHub CLI 2.95 or newer in version 2 through an approved channel
-before this route. Ubuntu 24.04's distribution package is older than the
-qualified verifier. Download the versioned script and its proof without
+before any route. Some distribution packages, such as Ubuntu 24.04's, are
+older than the qualified verifier. Download the versioned script and its proof without
 executing either one. Neither public asset requires GitHub authentication.
 The verification below uses your approved source commit, not an identity
 read from the script or proof.
 
-Ubuntu 24.04 or managed Azure Linux 3:
+Linux:
 
 ```bash
 (
@@ -213,8 +211,7 @@ Ubuntu 24.04 or managed Azure Linux 3:
     --predicate-type https://slsa.dev/provenance/v1 --hostname github.com \
     --digest-alg sha256 --format json --jq "$query")"
   [[ "$verified" == true ]] || { echo "Script verification failed." >&2; exit 1; }
-  bash "$script" --release "$tag" --source-commit "$sha" \
-    --with-azure-cli --enroll-source official
+  bash "$script" --release "$tag" --source-commit "$sha" --enroll-source official
 )
 ```
 
@@ -287,7 +284,7 @@ foreach ($item in $observations) {
   }
 }
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script `
-  -Release $tag -SourceCommit $sha -WithAzureCli -EnrollSource official
+  -Release $tag -SourceCommit $sha -EnrollSource official
 if ($LASTEXITCODE -ne 0) { throw "Site Ops installation did not complete." }
 }
 ```
@@ -300,12 +297,12 @@ already meet the supported versions are retained.
 
 ### Azure Cloud Shell and Codespaces
 
-Azure Cloud Shell runs managed Azure Linux 3 without `sudo`. Its route uses
-existing OS tools such as `curl`, GitHub CLI and Azure CLI. The bootstrap
+Azure Cloud Shell provides `curl`, GitHub CLI and Azure CLI. The bootstrap
 acquires pinned native uv when needed and provisions uv-managed Python,
 without requiring a system Python, pipx or virtualenv installation.
-It makes no OS package changes in this mode and fails with a remedy if a
-required OS tool is missing.
+On every host it makes no OS package changes and fails with a remedy if
+`curl` or GitHub CLI is missing. It reports a missing Azure CLI without
+failing, because only later Azure operations need it.
 
 The authenticated application uses only bundled wheels and no package index.
 Runtime downloads use uv's verified catalog and system certificates, or an
@@ -317,14 +314,23 @@ or interrupted session may end a long deployment. Confirm the current Azure
 identity and subscription privately before resource reads or deployment.
 
 The Bash bootstrap keeps retained files under
-`${XDG_DATA_HOME:-$HOME/.local/share}/siteops`. The directory must be private
-to the current user, and its ancestors must not be untrusted or symlinked.
+`${XDG_DATA_HOME:-$HOME/.local/share}/siteops` and stages downloads inside
+it, so the system temporary directory is not used. The directory must be
+private to the current user, and its ancestors must not be untrusted or
+symlinked. Ancestors may be writable by your own user private group, as
+with the common `0002` login umask, but not by other users or shared groups.
 If your XDG data path is shared, select a private user-owned location with
 trusted ancestors before installing. The script rejects an unsafe root
 before choosing a retained uv executable or reading cached assets.
 The Windows bootstrap checks the same boundary for its
 `LOCALAPPDATA\siteops` directory, including ancestor write access and
-reparse points, before using retained tools or downloads. It also
+reparse points, before using retained tools or downloads. It stages
+downloads in `LOCALAPPDATA\siteops\install-staging`, never `%TEMP%`, and
+removes each run's directory when it exits. Both scripts use the first
+GitHub CLI on `PATH` only when the executable and every parent directory
+are owned by you or the system and other users cannot modify, delete or
+change permissions on them. Standard Program Files installations and
+installations for a single user qualify. Shims in shared locations do not. It also
 checks the complete path and ACL of selected uv tools, ordinary uv storage
 and concrete uv-managed Python before running them. Existing qualified uv
 0.12.20 is reused when its executable bytes and path pass admission.
@@ -356,10 +362,11 @@ but its base image can change. Check `/etc/os-release` and tool versions in
 the actual session. The bootstrap preserves another uv installation and
 uses a pinned executable when its selected version is not qualified.
 Application and Python directories remain ordinary uv storage, including
-explicit directory selections that pass admission. Directories writable
-by another user or group are refused rather than having their permissions
-changed automatically. Select protected storage after reviewing the access
-needed by other applications.
+explicit directory selections that pass admission. Group write access is
+accepted only from your own user private group. Directories writable by
+other users or shared groups are refused rather than having their
+permissions changed automatically. Select protected storage after reviewing
+the access needed by other applications.
 Sign in to Azure explicitly when needed. Its local k3d cluster is not an
 Arc-connected target until you connect it separately with authorization.
 For both hosted journeys, installing the CLI is only the first step: obtain
@@ -384,17 +391,18 @@ explicitly selected. Do not assume a fixed command directory.
 ## Before you start
 
 Run as your ordinary user rather than as an administrator or with `sudo`, and
-keep downloaded files in a private directory. The bootstrap can provision
-missing prerequisites after consent. Use your organization's approved channels
-to provision them first when software installation is centrally managed.
+keep downloaded files in a private directory. After consent, the bootstrap
+provisions only uv and managed Python. Install `curl` and GitHub CLI first,
+through your organization's approved channels when software installation is
+centrally managed.
 
 | Prerequisite | Requirement | Needed for |
 |---|---|---|
-| Platform | Windows x64, Ubuntu 24.04 x64 or managed Azure Linux 3 x64 | Bootstrap |
+| Platform | Windows x64, or x64 Linux based on glibc such as Ubuntu 24.04, Ubuntu 26.04 or Azure Cloud Shell | Bootstrap |
 | Native manager | uv 0.12.20 from an approved channel | Both routes |
 | Python | Managed CPython 3.11.16 for a fresh bootstrap. uv can provision it without a system Python installation. | Both routes |
 | Package feed | An approved index that serves the required runtime wheels. Configure it in uv. | Online release wheel |
-| GitHub CLI | Version 2.95.0 or newer in the 2.x release line | Detached proof verification |
+| GitHub CLI | Version 2.95.0 or newer in the 2.x release line | Bootstrap and detached proof verification. No login. |
 
 Obtain these tools through your organization's managed software channel or their
 official instructions:
@@ -597,6 +605,8 @@ environment detail. Keep them private and review them before sharing.
 | Symptom | Action |
 |---|---|
 | Attestation verification fails | Stop before extracting or installing. Confirm the selected release, source commit, both files, and a trusted GitHub CLI installation. |
+| GitHub CLI 2.95 or newer is required | Install GitHub CLI from https://cli.github.com or your approved channel, then retry. Some distribution packages are older than the qualified version. |
+| The GitHub CLI executable must be protected from other users | Use a GitHub CLI installed in a location that only you or administrators can change, earlier in `PATH` than any shared shim. |
 | No matching distribution during a release wheel installation | The configured feed does not serve a required runtime wheel for this interpreter. Use the verified bundle, which carries them. |
 | `uv` is not found | Use the bootstrap, or provision the qualified uv through an approved channel. |
 | The installed build is not the one you selected | Use the intended release's bootstrap with `--replace` or `-Replace`, then check command ownership and version. |

@@ -2,7 +2,7 @@
 set -euo pipefail
 umask 077
 
-fail() { printf 'Site Ops installation: %s\n' "$1" >&2; exit 1; }
+fail() { printf 'Site Ops installation failed: %s\n' "$1" >&2; exit 1; }
 stage() { printf 'Site Ops installation: %s\n' "$1"; }
 command -v bash >/dev/null || fail "Bash is required."
 
@@ -47,15 +47,37 @@ check_payload() {
   "$python" -I -S -B "$installer_helper" "$@"
 }
 
-# An existing directory on a trusted path belongs to root or this user and
-# excludes other writers unless a sticky bit protects this user's child.
+# A user private group (pam_umask with USERGROUPS_ENAB) holds only this user,
+# so its write access adds no other writer. Debian's OpenSSH and zsh's
+# compaudit accept it under the same conditions. Any lookup failure refuses it.
+detect_private_group() {
+  local gid user group name members accounts account primary
+  private_gid=""
+  gid="$(id -g)" && user="$(getent passwd "$uid")" && group="$(getent group "$gid")" &&
+    accounts="$(getent passwd)" || return 0
+  IFS=: read -r name _ _ members <<< "$group"
+  [[ "$name" == "${user%%:*}" && ( -z "$members" || "$members" == "$name" ) ]] || return 0
+  while IFS=: read -r account _ _ primary _; do
+    [[ "$primary" != "$gid" || "$account" == "$name" ]] || return 0
+  done <<< "$accounts"
+  private_gid="$gid"
+}
+# Only root or this user may own a trusted entry. Other write is never
+# accepted, and group write only from this user's private group.
+writers_trusted() {
+  local mode=$((8#$3))
+  [[ "$1" == "$uid" || "$1" == 0 ]] && (( (mode & 8#002) == 0 )) && {
+    (( (mode & 8#020) == 0 )) || [[ "$1" == "$uid" && -n "$private_gid" && "$2" == "$private_gid" ]]
+  }
+}
+# An existing directory on a trusted path has trusted writers, or a sticky
+# bit protects this user's child from them.
 trusted_parent() {
-  local info mode
+  local owner group mode
   [[ -d "$1" && ! -L "$1" ]] || return 1
-  info="$(stat -c '%u %a' -- "$1")" || return 1
-  mode=$((8#${info#* }))
-  [[ "${info% *}" == "$uid" || "${info% *}" == 0 ]] &&
-    (( (mode & 8#022) == 0 || (mode & 8#1000) ))
+  read -r owner group mode < <(stat -c '%u %g %a' -- "$1") || return 1
+  writers_trusted "$owner" "$group" "$mode" ||
+    { [[ "$owner" == "$uid" || "$owner" == 0 ]] && (( 8#$mode & 8#1000 )); }
 }
 # Walk an absolute path from the root without following links. Missing
 # directories are created privately unless the caller requires an existing
@@ -63,7 +85,7 @@ trusted_parent() {
 # Native uv storage only excludes other writers. Sets admitted to the
 # lexically normalized path.
 admit_directory() {
-  local path="$1" kind="$2" create="${3:-create}" current="" part info
+  local path="$1" kind="$2" create="${3:-create}" current="" part owner group mode
   local -a parts
   admitted=""
   [[ "$path" == /?* && "$path" != *//* && ! "$path" =~ [[:cntrl:]] ]] || return 1
@@ -82,27 +104,26 @@ admit_directory() {
     trusted_parent "$current" || return 1
   done
   [[ -n "$current" ]] || return 1
-  info="$(stat -c '%u %a' -- "$current")" || return 1
+  read -r owner group mode < <(stat -c '%u %g %a' -- "$current") || return 1
   if [[ "$kind" == private ]]; then
-    [[ "${info% *}" == "$uid" ]] && (( (8#${info#* } & 8#077) == 0 )) || return 1
+    [[ "$owner" == "$uid" ]] && (( (8#$mode & 8#077) == 0 )) || return 1
   else
-    (( (8#${info#* } & 8#022) == 0 )) || return 1
+    writers_trusted "$owner" "$group" "$mode" || return 1
   fi
   admitted="$current"
 }
-# A selected file is a regular file owned by root or this user, without other
-# writers, inside admitted existing directories.
+# A selected file is a regular file with trusted writers inside admitted
+# existing directories.
 admit_file() {
-  local name="${1##*/}" file info
+  local name="${1##*/}" file owner group mode
   [[ "$1" == /*/* || "$1" == /?* ]] && [[ -n "$name" && "$name" != . && "$name" != .. ]] ||
     return 1
   admit_directory "${1%/*}" "${2:-shared}" existing || return 1
   file="$admitted/$name"
   admitted=""
   [[ -f "$file" && ! -L "$file" ]] || return 1
-  info="$(stat -c '%u %a' -- "$file")" || return 1
-  [[ "${info% *}" == "$uid" || "${info% *}" == 0 ]] &&
-    (( (8#${info#* } & 8#022) == 0 )) || return 1
+  read -r owner group mode < <(stat -c '%u %g %a' -- "$file") || return 1
+  writers_trusted "$owner" "$group" "$mode" || return 1
   admitted="$file"
 }
 pinned_uv() {
@@ -173,13 +194,14 @@ expose_uv() {
 }
 # Admit a whole concrete runtime tree before any of its files execute.
 admit_runtime_tree() {
-  local concrete="$1" minor="$2" unsafe link target
+  local concrete="$1" minor="$2" unsafe link target group_write=(-perm /020)
   admit_directory "$concrete" shared existing ||
     fail "The uv-managed Python must use trusted, non-symlinked directories."
   [[ -f "$concrete/bin/python$minor" && ! -L "$concrete/bin/python$minor" ]] ||
     fail "The uv-managed Python installation is incomplete. Inspect it before repair."
-  unsafe="$(find "$concrete" \( ! -uid "$uid" ! -uid 0 -o ! -type l -perm /022 \) \
-    -print -quit 2>/dev/null)" && [[ -z "$unsafe" ]] ||
+  [[ -z "$private_gid" ]] || group_write+=(\( ! -uid "$uid" -o ! -gid "$private_gid" \))
+  unsafe="$(find "$concrete" \( ! -uid "$uid" ! -uid 0 -o ! -type l \
+    \( -perm /002 -o "${group_write[@]}" \) \) -print -quit 2>/dev/null)" && [[ -z "$unsafe" ]] ||
     fail "The uv-managed Python has files other users can change. Inspect it before repair."
   while IFS= read -r -d '' link; do
     target="$(readlink -e -- "$link")" && [[ "$target" == "$concrete"/* ]] ||
@@ -257,7 +279,7 @@ verify_release_asset() {
   signer="https://github.com/$repository/.github/workflows/$workflow@$expected_ref"
   builder="https://github.com/$repository/.github/workflows/$expected_caller@$expected_ref"
   query="length > 0 and all(.[]; .verificationResult.mediaType == \"application/vnd.dev.sigstore.verificationresult+json;version=0.1\" and (.verificationResult.signature.certificate | .subjectAlternativeName == \"$signer\" and .issuer == \"https://token.actions.githubusercontent.com\" and .sourceRepositoryURI == \"https://github.com/$repository\" and .sourceRepositoryDigest == \"$expected_commit\" and .sourceRepositoryRef == \"$expected_ref\" and .buildSignerDigest == \"$expected_commit\" and .buildConfigURI == \"$builder\" and .buildConfigDigest == \"$expected_commit\" and .runnerEnvironment == \"self-hosted\"))"
-  verified="$(timeout --kill-after=5 120 gh attestation verify "$subject" \
+  verified="$(timeout --kill-after=5 120 "$gh" attestation verify "$subject" \
     --bundle "$subject.attestation.jsonl" --repo "$repository" \
     --cert-identity "$signer" --source-ref "$expected_ref" --source-digest "$expected_commit" \
     --signer-digest "$expected_commit" --cert-oidc-issuer https://token.actions.githubusercontent.com \
@@ -375,8 +397,8 @@ caller="release.yaml"
 enroll_name=""
 approve=false
 dry_run=false
-with_azure_cli=false
 replace=false
+private_gid=""
 while (($#)); do
   case "$1" in
     --release|--content-release|--source-commit|--repository|--source-ref|--caller|--enroll-source)
@@ -393,7 +415,6 @@ while (($#)); do
       shift 2 ;;
     --yes) approve=true; shift ;;
     --dry-run) dry_run=true; shift ;;
-    --with-azure-cli) with_azure_cli=true; shift ;;
     --replace) replace=true; shift ;;
     *) fail "Unknown installation option." ;;
   esac
@@ -411,39 +432,33 @@ fi
 [[ -z "$enroll_name" || "$enroll_name" =~ ^[a-z][a-z0-9-]{0,39}$ ]] ||
   fail "Choose a lowercase approved source name."
 [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] || fail "Use Linux on x86_64."
-. /etc/os-release
-case "${ID:-}:${VERSION_ID:-}" in
-  ubuntu:24.04) platform=ubuntu ;;
-  azurelinux:3.0) platform=azurelinux ;;
-  *) fail "This bootstrap supports Ubuntu 24.04 and managed Azure Linux 3." ;;
-esac
+command -v getconf >/dev/null && getconf GNU_LIBC_VERSION >/dev/null 2>&1 ||
+  fail "Use a Linux distribution based on glibc."
+for tool in curl cut env find getent head id mktemp mv readlink sha256sum stat tar timeout wc; do
+  command -v "$tool" >/dev/null || fail "The base system tool $tool is required."
+done
+uid="$(id -u)"
+detect_private_group
+# The verifier runs only after its file and every parent pass admission.
+gh="$(command -v gh || true)"
+gh_version=""
+if [[ "$gh" == /* ]] && gh="$(readlink -e -- "$gh")"; then
+  admit_file "$gh" ||
+    fail "The GitHub CLI executable must be owned by an administrator or the current user and protected from other users."
+  gh="$admitted"
+  gh_version="$(timeout --kill-after=5 30 "$gh" version 2>/dev/null | head -n 1)" || gh_version=""
+fi
+[[ "$gh_version" =~ ^gh\ version\ 2\.([0-9]+)\.[0-9]+ ]] && ((10#${BASH_REMATCH[1]} >= 95)) ||
+  fail "GitHub CLI 2.95 or newer is required. Install it from https://cli.github.com, then retry."
 
 data="${XDG_DATA_HOME:-$HOME/.local/share}/siteops"
 [[ "$data" == /* && "$data" != /siteops ]] || fail "Select an absolute private data location."
 stage "Release: $release ($commit) from $repository."
-if [[ "$platform" == azurelinux ]]; then
-  stage "Managed Azure Linux uses existing OS tools without sudo or package manager changes."
-else
-  stage "Missing OS tools use approved Ubuntu package channels."
-fi
-stage "GitHub CLI 2.95+, checksum-pinned uv 0.12.20, and uv-managed Python are needed."
-stage "Existing uv and Python installations are not upgraded. No account is signed in."
+stage "Uses the installed GitHub CLI, checksum-pinned uv 0.12.20, and uv-managed Python."
+stage "No administrator rights or OS packages are used. No account is signed in."
+stage "Existing uv and Python installations are not upgraded."
 stage "Managed Python downloads use uv's HTTPS runtime source or an approved HTTPS mirror."
 stage "Shell profiles are not edited. Add the reported command directory to PATH if needed."
-if command -v curl >/dev/null; then
-  stage "Keep: installed HTTPS downloader."
-elif [[ "$platform" == azurelinux ]]; then
-  stage "Required: HTTPS downloader supplied by the managed environment."
-else
-  stage "Add: curl and certificate authorities from Ubuntu."
-fi
-if command -v gh >/dev/null; then
-  stage "Check: installed GitHub CLI version before changing tools."
-elif [[ "$platform" == azurelinux ]]; then
-  stage "Required: GitHub CLI 2.95 or newer supplied by the managed environment."
-else
-  stage "Add: GitHub CLI from its signed Ubuntu package channel."
-fi
 if command -v uv >/dev/null; then
   stage "Check: the existing uv executable. Preserve it if another version is installed."
 else
@@ -453,15 +468,8 @@ stage "Check: ordinary uv tool, command, and managed Python storage."
 if $replace; then
   stage "The selected build will explicitly replace or repair an existing Site Ops installation."
 fi
-if $with_azure_cli; then
-  if command -v az >/dev/null; then
-    stage "Keep: available Azure CLI."
-  elif [[ "$platform" == azurelinux ]]; then
-    stage "Required: Azure CLI supplied by the managed environment."
-  else
-    stage "Add: Azure CLI from the Microsoft Ubuntu package channel."
-  fi
-fi
+command -v az >/dev/null ||
+  stage "Azure CLI was not found. Install it before deploying: https://aka.ms/installazurecli"
 if [[ -n "$enroll_name" ]]; then
   if [[ "${SITEOPS_REDACT_OUTPUT:-0}" == 1 ]]; then
     stage "An explicitly selected source will be enrolled after installation."
@@ -483,104 +491,34 @@ if [[ -n "$enroll_name" ]] && ! $approve; then
   [[ "$answer" == y || "$answer" == Y ]] || fail "Source enrollment was not approved."
 fi
 
-for tool in cut env find head id mktemp readlink sha256sum stat tar timeout wc; do
-  command -v "$tool" >/dev/null || fail "The base system tool $tool is required."
-done
-uid="$(id -u)"
 admit_directory "$data" private ||
-  fail "Configure a private Site Ops data root under trusted, non-symlinked directories."
+  fail "Configure a private Site Ops data root under trusted, non-symlinked directories. Its parent directories must not be writable by other users or shared groups."
 data="$admitted"
 
-require_sudo() {
-  [[ "$platform" == ubuntu ]] ||
-    fail "Managed Azure Linux requires compatible OS tools. Use a provisioned session with curl, GitHub CLI, and Azure CLI when selected."
-  command -v sudo >/dev/null || fail "An approved administrator is needed to install missing OS tools."
-  sudo -n true 2>/dev/null || {
-    [[ -t 0 ]] || fail "Missing OS tools require administrator authorization."
-    sudo -v || fail "Administrator authorization was declined."
-  }
+# Staged files rely on umask 077. Inherited access rules can override it, so
+# check what new entries in private storage actually get.
+keeps_private() {
+  local entry owner mode
+  : > "$1/probe-file" && mkdir -- "$1/probe-directory" || return 1
+  for entry in "$1/probe-file" "$1/probe-directory"; do
+    read -r owner mode < <(stat -c '%u %a' -- "$entry") || return 1
+    [[ "$owner" == "$uid" ]] && (( (8#$mode & 8#077) == 0 )) || return 1
+  done
+  rm -rf -- "$1/probe-file" "$1/probe-directory"
 }
-if ! command -v curl >/dev/null; then
-  require_sudo
-  sudo apt-get update -qq
-  sudo apt-get install -y curl ca-certificates
-fi
-
-gh_ready=false
-if command -v gh >/dev/null; then
-  gh_version="$(gh version | head -n 1)"
-  if [[ "$gh_version" =~ ^gh\ version\ 2\.([0-9]+)\.([0-9]+) ]] && ((10#${BASH_REMATCH[1]} > 95 || (10#${BASH_REMATCH[1]} == 95 && 10#${BASH_REMATCH[2]} >= 0))); then
-    gh_ready=true
-  fi
-fi
-if ! $gh_ready; then
-  require_sudo
-  keyring=/etc/apt/keyrings/githubcli-archive-keyring.gpg
-  source_file=/etc/apt/sources.list.d/github-cli.list
-  key="$(mktemp)"
-  trap 'rm -f -- "$key"' EXIT
-  curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
-    --tlsv1.2 --max-time 60 --max-filesize 65536 \
-    -o "$key" https://cli.github.com/packages/githubcli-archive-keyring.gpg
-  printf '%s  %s\n' '6084d5d7bd8e288441e0e94fc6275570895da18e6751f70f057485dc2d1a811b' "$key" |
-    sha256sum --check --status || fail "The approved GitHub CLI package key changed."
-  sudo install -d -m 0755 /etc/apt/keyrings /etc/apt/sources.list.d
-  if [[ -e "$keyring" ]]; then
-    cmp -s "$key" "$keyring" || fail "An existing GitHub CLI package key differs."
-  else
-    sudo install -m 0644 "$key" "$keyring"
-  fi
-  source_line="deb [arch=$(dpkg --print-architecture) signed-by=$keyring] https://cli.github.com/packages stable main"
-  if [[ -e "$source_file" ]]; then
-    [[ "$(cat "$source_file")" == "$source_line" ]] || fail "An existing GitHub CLI source differs."
-  else
-    printf '%s\n' "$source_line" | sudo tee "$source_file" >/dev/null
-  fi
-  sudo apt-get update -qq
-  sudo apt-get install -y gh
-  rm -f -- "$key"
-  trap - EXIT
-fi
-command -v gh >/dev/null || fail "GitHub CLI was not installed."
-[[ "$(gh version | head -n 1)" =~ ^gh\ version\ 2\.([0-9]+)\.([0-9]+) ]] &&
-  ((10#${BASH_REMATCH[1]} >= 95)) || fail "GitHub CLI 2.95 or newer in the 2.x line is required."
-
-if $with_azure_cli && ! command -v az >/dev/null; then
-  require_sudo
-  keyring=/etc/apt/keyrings/microsoft.gpg
-  source_file=/etc/apt/sources.list.d/azure-cli.sources
-  key="$(mktemp)"
-  trap 'rm -f -- "$key"' EXIT
-  curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
-    --tlsv1.2 --max-time 60 --max-filesize 65536 \
-    -o "$key" https://packages.microsoft.com/keys/microsoft.asc
-  command -v gpg >/dev/null || fail "GPG is required to admit the Microsoft package key."
-  dearmored="$(mktemp)"
-  gpg --batch --yes --dearmor -o "$dearmored" "$key" ||
-    fail "The Microsoft package key is invalid."
-  sudo install -d -m 0755 /etc/apt/keyrings /etc/apt/sources.list.d
-  if [[ -e "$keyring" ]]; then
-    cmp -s "$dearmored" "$keyring" || fail "An existing Microsoft package key differs."
-  else
-    sudo install -m 0644 "$dearmored" "$keyring"
-  fi
-  source_text="$(printf 'Types: deb\nURIs: https://packages.microsoft.com/repos/azure-cli/\nSuites: noble\nComponents: main\nArchitectures: amd64\nSigned-by: %s\n' "$keyring")"
-  if [[ -e "$source_file" ]]; then
-    [[ "$(cat "$source_file")" == "$source_text" ]] || fail "An existing Azure CLI source differs."
-  else
-    printf '%s\n' "$source_text" | sudo tee "$source_file" >/dev/null
-  fi
-  sudo apt-get update -qq
-  sudo apt-get install -y azure-cli
-  rm -f -- "$key" "$dearmored"
-  trap - EXIT
-  command -v az >/dev/null || fail "Azure CLI was not installed."
-fi
-
-staging="$(mktemp -d)"
-trap 'rm -rf -- "$staging"' EXIT
-admit_directory "$staging" private existing || fail "Use a private temporary directory."
+admit_directory "$data/install-staging" private ||
+  fail "Site Ops staging storage must be private. Inspect it before retrying."
+staging_root="$admitted"
+# Remove staging left by interrupted runs. A day exceeds any live installation.
+find "$staging_root" -mindepth 1 -maxdepth 1 -mmin +1440 -exec rm -rf -- {} + 2>/dev/null || true
+staging=""
+trap '[[ -z "$staging" ]] || rm -rf -- "$staging"' EXIT
+staging="$(mktemp -d "$staging_root/run.XXXXXXXXXX")" && admit_directory "$staging" private existing &&
+  keeps_private "$admitted" ||
+  fail "New files in the Site Ops data root do not stay private. Remove inherited access rules from it, then retry."
 staging="$admitted"
+mkdir -m 0700 -- "$staging/tmp"
+export TMPDIR="$staging/tmp"
 engine_release="$release"
 engine_commit="$commit"
 engine_ref="$source_ref"
@@ -654,7 +592,7 @@ else
     stage "Downloading $asset anonymously."
     curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
       --tlsv1.2 --max-redirs 3 --max-time 180 --max-filesize "$limit" \
-      -o "$staging/$asset" "$url$asset"
+      -o "$staging/$asset" "$url$asset" || fail "A required release asset could not be downloaded."
     [[ -s "$staging/$asset" && $(wc -c < "$staging/$asset") -le $limit ]] ||
       fail "A required release asset is empty or exceeds its byte limit."
   done
@@ -723,7 +661,7 @@ stage "Command directory: $bin. Add it to your current PATH or open a new shell.
 stage "For native removal, run uv tool uninstall siteops."
 if [[ -n "$enroll_name" ]]; then
   trusted_root="$staging/trusted-root.jsonl"
-  timeout --kill-after=5 120 gh attestation trusted-root | head -c 2097153 > "$trusted_root" ||
+  timeout --kill-after=5 120 "$gh" attestation trusted-root | head -c 2097153 > "$trusted_root" ||
     fail "The GitHub trusted-root snapshot could not be obtained."
   [[ -s "$trusted_root" && $(wc -c < "$trusted_root") -le 2097152 ]] ||
     fail "The trusted-root snapshot is empty or oversized."
@@ -760,22 +698,14 @@ PY
     fail "The approved source could not be enrolled."
 fi
 if [[ "$assets" == "$staging" ]]; then
-  mkdir "$cache" || fail "The authenticated release cache could not be reserved."
-  for asset in siteops-install.zip siteops-install.zip.attestation.jsonl; do
-    (set -C; cat -- "$staging/$asset" > "$cache/$asset") ||
-      fail "Authenticated release bytes could not be retained after installation."
-    [[ "$(sha256sum < "$staging/$asset")" == "$(sha256sum < "$cache/$asset")" ]] ||
-      fail "The retained release bytes differ from the authenticated download."
-  done
+  mkdir -m 0700 -- "$cache" || fail "The authenticated release cache could not be reserved."
+  mv -- "$staging/siteops-install.zip" "$staging/siteops-install.zip.attestation.jsonl" "$cache/" ||
+    fail "Authenticated release bytes could not be retained after installation."
 fi
 if [[ -n "$reference_download" ]]; then
-  mkdir "$reference_cache" || fail "The engine reference cache could not be reserved."
-  for asset in siteops-engine.json siteops-engine.json.attestation.jsonl; do
-    (set -C; cat -- "$reference_download/$asset" > "$reference_cache/$asset") ||
-      fail "The verified engine reference could not be retained."
-    [[ "$(sha256sum < "$reference_download/$asset")" == "$(sha256sum < "$reference_cache/$asset")" ]] ||
-      fail "The retained engine reference differs from the verified bytes."
-  done
+  mkdir -m 0700 -- "$reference_cache" || fail "The engine reference cache could not be reserved."
+  mv -- "$reference_download/siteops-engine.json" "$reference_download/siteops-engine.json.attestation.jsonl" \
+    "$reference_cache/" || fail "The verified engine reference could not be retained."
 fi
 if [[ -n "$enroll_name" ]]; then
   if [[ "${SITEOPS_REDACT_OUTPUT:-0}" == 1 ]]; then

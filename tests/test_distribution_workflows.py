@@ -462,7 +462,7 @@ def test_qualification_keeps_windows_state_under_one_private_user_profile_root()
     windows = _script(qualify, "Install with the signed PowerShell bootstrap")
     assert "$owned = $env:SITEOPS_QUALIFICATION_ROOT" in windows
     assert "Join-Path $env:RUNNER_TEMP 'siteops-qualification'" not in windows
-    for directory in ("home", "bootstrap-profile", "bootstrap-temp", "python", "cache", "tooling"):
+    for directory in ("home", "bootstrap-profile", "python", "cache", "tooling"):
         assert directory in windows
     assert "$download = Join-Path $env:RUNNER_TEMP 'siteops-download'" in windows
 
@@ -484,8 +484,11 @@ def test_windows_native_scratch_and_retained_bundle_use_the_selected_root():
     )
     assert 'wheel="$temp/siteops-download/$WHEEL_NAME"' in online
     windows = _script(qualify, "Install with the signed PowerShell bootstrap")
-    assert "$env:TMP = $env:TEMP" in windows
-    assert "$env:TMPDIR = $env:TEMP" in windows
+    # The bootstrap stages privately under its data root, so the runner's temporary directory stays as is.
+    assert "$env:TEMP" not in windows and "$env:TMP" not in windows
+    assert windows.index("Rechecking the retained release without downloading") < windows.index(
+        "(Join-Path $bootstrapData 'install-staging')",
+    )
 
 
 def test_qualification_verifies_before_it_extracts():
@@ -629,6 +632,15 @@ def test_windows_bootstrap_qualification_owns_every_preloaded_cache_directory():
     assert "Require-PrivateDataRoot $cache" in lines
 
 
+def _windows_acl_reader() -> str:
+    source = (REPO_ROOT / "scripts" / "bootstrap" / "siteops-bootstrap.ps1").read_text(
+        encoding="utf-8",
+    )
+    reader = re.search(r"(?ms)^function Read-NodeAcl\([^\n]*\) \{.*?^\}", source)
+    assert reader is not None
+    return reader.group(0) + "\n"
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows ACL ancestry needs PowerShell.")
 def test_windows_qualification_profile_ancestry_before_tool_selection(tmp_path):
     source = (REPO_ROOT / "scripts" / "bootstrap" / "siteops-bootstrap.ps1").read_text(
@@ -643,6 +655,7 @@ def test_windows_qualification_profile_ancestry_before_tool_selection(tmp_path):
     wrapper.write_text(
         "$ErrorActionPreference='Stop'\n"
         "function Fail([string]$message) { throw $message }\n"
+        + _windows_acl_reader()
         + ancestor_guard
         + "\n    'RUNNER_ANCESTRY_ADMITTED'\n}\n"
         "Require-PrivateDataRoot $env:TEST_QUALIFICATION_ROOT -Managed\n",
@@ -705,6 +718,7 @@ def test_windows_bootstrap_qualification_protects_data_root_and_ancestry(
             "$profileHome=$env:TEST_PROFILE_HOME\n"
             + "$env:HOME = Join-Path $owned 'home'\n" + setup
             + "\nfunction Fail([string]$message) { throw \"Site Ops installation: $message\" }\n"
+            + _windows_acl_reader()
             + helper.group(0)
             + "\n$selectionId = 'fixture'\n" + preload
             + "Require-PrivateDataRoot (Join-Path $env:LOCALAPPDATA 'siteops')\n"
@@ -837,6 +851,7 @@ def test_windows_bootstrap_qualification_classifies_real_acl_failure(tmp_path):
         result = _run_windows_bootstrap_qualifier(
             tmp_path,
             "function Fail([string]$message) { throw \"Site Ops installation: $message\" }\n"
+            + _windows_acl_reader()
             + helper.group(0)
             + "\nRequire-PrivateDataRoot $env:TEST_DATA_ROOT\n",
             {"TEST_DATA_ROOT": str(shared / "siteops")},

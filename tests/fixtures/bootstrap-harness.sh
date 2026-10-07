@@ -52,10 +52,22 @@ mkdir -p "$logs" "$doubles" "$system" "$root/tmp" "$root/homes" "$root/inject/si
 : > "$logs/mirror"
 : > "$logs/rejected"
 : > "$logs/siteops"
-for tool in bash cat chmod cmp cp cut env find gzip head id mkdir mktemp readlink rm \
+for tool in bash cat chmod cmp cp cut env find getconf gzip head id mkdir mktemp mv readlink rm \
     sha256sum stat tar tee timeout uname wc; do
   ln -s "$(command -v "$tool")" "$system/$tool"
 done
+# Account lookups pass through unless a scenario simulates a private or shared group.
+real_getent="$(command -v getent)"
+cat > "$doubles/getent" <<SH
+#!/usr/bin/env bash
+user="\$("$real_getent" passwd "\$(id -u)")" || exit 2
+case "\${TEST_GETENT:-}:\$1" in
+  private:group) printf '%s:x:%s:\n' "\${user%%:*}" "\$2" ;;
+  shared:group) printf '%s:x:%s:%s,intruder\n' "\${user%%:*}" "\$2" "\${user%%:*}" ;;
+  private:passwd|shared:passwd) [[ \$# == 1 ]] && printf '%s\n' "\$user" || "$real_getent" "\$@" ;;
+  *) exec "$real_getent" "\$@" ;;
+esac
+SH
 for tool in apt apt-get dpkg gpg pip pip3 pipx python python3 sudo tdnf; do
   printf '#!/usr/bin/env bash\nprintf "%%s %%s\\n" %s "$*" >> "$TEST_LOGS/rejected"\nexit 99\n' \
     "$tool" > "$doubles/$tool"
@@ -225,7 +237,7 @@ run_bootstrap() {
     TEST_REFERENCED_ARCHIVE="${TEST_REFERENCED_ARCHIVE:-}" TEST_REFERENCE_ROOT="$reference_root" \
     TEST_REFERENCE_VERIFY="${reference_verify:-true}" TEST_NO_REFERENCE="${no_reference:-0}" \
     TEST_UV_ARCHIVE="$TEST_UV_ARCHIVE" TEST_VERIFY="${verify:-true}" \
-    TEST_OLD_GH="${old_gh:-0}" TEST_TAMPER_UV="${tamper_uv:-0}" "${extra[@]}" \
+    TEST_OLD_GH="${old_gh:-0}" TEST_TAMPER_UV="${tamper_uv:-0}" TEST_GETENT="${getent_mode:-}" "${extra[@]}" \
     bash "$bootstrap" --repository example/publisher "$@" > "$logs/$label.out" 2>&1
 }
 succeeds() {
@@ -259,6 +271,22 @@ planted() {
   printf '#!/usr/bin/env bash\n: > %q\nexit 1\n' "$2" > "$1"
   chmod 0755 "$1"
 }
+# Give new entries owner rwx, group r-x and other rwx regardless of umask.
+inherit_open_access() {
+  "$real_python" -I - "$1" <<'PY' || die "The fixture filesystem must support POSIX default ACLs."
+import os
+import struct
+import sys
+
+entries = ((0x01, 7), (0x04, 5), (0x20, 7))
+value = struct.pack("<I", 2) + b"".join(struct.pack("<HHI", tag, permissions, 0xFFFFFFFF)
+                                        for tag, permissions in entries)
+os.setxattr(sys.argv[1], "system.posix_acl_default", value)
+PY
+  ( umask 077; : > "$1/check" )
+  [[ "$(stat -c %a "$1/check")" == 646 ]] || die "The inherited access fixture did not override the umask."
+  rm -- "$1/check"
+}
 scenario_journey() {
   local receipt identity second_bundle downloads
   fresh_home journey
@@ -279,6 +307,10 @@ scenario_journey() {
     die "The installed command reports another build."
   grep -qF "Installed siteops $first_version with approved source demo." "$logs/install.out" ||
     die "The installation did not report the enrolled build."
+  grep -qF "Azure CLI was not found. Install it before deploying:" "$logs/install.out" ||
+    die "A missing Azure CLI was not reported."
+  [[ -d "$data/install-staging" && -z "$(find "$data/install-staging" -mindepth 1 -print -quit)" ]] ||
+    die "Installation staging was not removed."
   ! grep -q '127\.0\.0\.1' "$logs/install.out" || die "Runtime source details were printed."
   [[ "$(find "$data/install-downloads" -type f | wc -l)" == 2 ]] ||
     die "The authenticated release was not retained."
@@ -365,9 +397,19 @@ scenario_root() {
   mkdir -p "$root/group/data"
   chmod 0770 "$root/group"
   extra=(XDG_DATA_HOME="$root/group/data")
-  refuses group-root "private Site Ops data root" "${first[@]}"
+  getent_mode=shared refuses group-root "Site Ops installation failed: Configure a private Site Ops data root" "${first[@]}"
+  grep -qF -- "must not be writable by other users or shared groups" "$logs/group-root.out" ||
+    die "group-root did not report how to repair a shared parent."
   [[ ! -e "$root/planted-ran" && ! -s "$logs/curl" ]] ||
     die "An untrusted data root executed a tool or downloaded content."
+
+  # The user's private group adds no other writer, as with a 0002 login umask.
+  mkdir -p "$root/user-group/data"
+  chmod 0775 "$root/user-group" "$root/user-group/data"
+  extra=(XDG_DATA_HOME="$root/user-group/data")
+  getent_mode=private verify=false refuses user-group-root "The asset certificate does not match" "${first[@]}"
+  [[ "$(stat -c %a "$root/user-group/data/siteops")" == 700 ]] ||
+    die "A private-group parent did not receive a private data root."
 
   # A sticky shared parent cannot replace this user's private child.
   mkdir -p "$root/sticky"
@@ -385,7 +427,7 @@ scenario_root() {
   [[ ! -s "$logs/mirror" ]] || die "A rejected proof provisioned a runtime."
 }
 scenario_storage() {
-  local base
+  local base downloads
   fresh_home storage
   mkdir -p "$root/open" "$root/real-python"
   chmod 0777 "$root/open"
@@ -415,6 +457,33 @@ scenario_storage() {
   env -i HOME="$HOME" PATH="$system" UV_TOOL_DIR="$base/tools" UV_TOOL_BIN_DIR="$base/bin" \
     "$base/bin/uv" tool uninstall siteops --no-config > "$logs/explicit-uninstall.out" 2>&1 ||
     die "Stock uv could not remove the explicit installation."
+
+  # Staging lives in private Site Ops storage, so a temporary directory that
+  # widens new files or lets other users change them is never used.
+  fresh_home storage-staging
+  mkdir "$root/inherited"
+  inherit_open_access "$root/inherited"
+  mkdir -p "$data/install-staging/run.stale" "$data/install-staging/run.live"
+  chmod 0700 "$data" "$data/install-staging" "$data/install-staging/run.stale" "$data/install-staging/run.live"
+  touch -d '2 days ago' "$data/install-staging/run.stale"
+  extra=(TMPDIR="$root/inherited")
+  succeeds inherited-temp "${first[@]}" --enroll-source demo
+  [[ "$(installed_version "$bin")" == "siteops $first_version" ]] ||
+    die "Private staging did not install the selected build."
+  [[ -z "$(find "$root/inherited" -mindepth 1 -print -quit)" ]] ||
+    die "The temporary directory was used for staging."
+  [[ "$(find "$data/install-staging" -mindepth 1)" == "$data/install-staging/run.live" ]] ||
+    die "Staging remained, stale staging was kept, or live staging was removed."
+  [[ "$(find "$data/install-downloads" -type f -perm 600 | wc -l)" == 2 ]] ||
+    die "The retained release is not owner-only."
+  extra=(TMPDIR="$root/open")
+  succeeds open-temp "${first[@]}"
+  mkdir "$root/inherited-data"
+  inherit_open_access "$root/inherited-data"
+  extra=(XDG_DATA_HOME="$root/inherited-data")
+  downloads="$(count "$logs/curl")"
+  refuses inherited-data "New files in the Site Ops data root do not stay private." "${first[@]}"
+  [[ "$(count "$logs/curl")" == "$downloads" ]] || die "Storage that widens new files downloaded content."
 }
 scenario_policy() {
   local setting
@@ -534,17 +603,22 @@ scenario_runtime() {
   refuses mislabeled-runtime "differs from the installed runtime." "${first[@]}"
   [[ ! -e "$tools/siteops" ]] || die "A mislabeled runtime installed Site Ops."
 }
-scenario_managed() {
-  fresh_home managed
-  old_gh=1 refuses old-verifier "Managed Azure Linux requires compatible OS tools" "${first[@]}"
-  [[ ! -s "$logs/curl" && ! -e "$HOME/.local/share/uv" ]] ||
-    die "Missing managed OS tools changed installation state."
-  succeeds managed-install "${first[@]}"
-  grep -qF "Managed Azure Linux uses existing OS tools without sudo" "$logs/managed-install.out" ||
-    die "The managed host boundary was not reported."
-  [[ "$(installed_version "$bin")" == "siteops $first_version" ]] ||
-    die "Managed Azure Linux did not install the selected build."
-  succeeds managed-repeat "${first[@]}"
+scenario_prerequisites() {
+  local runs
+  fresh_home prerequisites
+  old_gh=1 refuses old-gh "GitHub CLI 2.95 or newer is required. Install it from https://cli.github.com" "${first[@]}"
+  mkdir -m 0755 "$root/no-gh" "$root/open-gh"
+  ln -s "$doubles/curl" "$root/no-gh/curl"
+  ln -s "$doubles/getent" "$root/no-gh/getent"
+  bootstrap_path="$root/no-gh:$system"
+  refuses missing-gh "GitHub CLI 2.95 or newer is required." "${first[@]}"
+  cp -- "$doubles/gh" "$root/open-gh/gh"
+  chmod 0777 "$root/open-gh"
+  runs="$(count "$logs/gh")"
+  bootstrap_path="$root/open-gh:$doubles:$system"
+  refuses open-gh "The GitHub CLI executable must be owned by an administrator or the current user" "${first[@]}"
+  [[ "$(count "$logs/gh")" == "$runs" ]] || die "An unadmitted GitHub CLI was executed."
+  [[ ! -s "$logs/curl" && ! -e "$data" ]] || die "A rejected GitHub CLI changed installation state."
 }
 scenario_content() {
   local downloads combined referenced
@@ -620,7 +694,7 @@ PY
 }
 
 case "$scenario" in
-  journey|root|storage|policy|tools|runtime|managed|content) "scenario_$scenario" ;;
+  journey|root|storage|policy|tools|runtime|prerequisites|content) "scenario_$scenario" ;;
   *) die "Unknown scenario $scenario." ;;
 esac
 [[ ! -s "$logs/rejected" ]] || { cat "$logs/rejected" >&2; die "An unexpected tool call was made."; }

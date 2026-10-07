@@ -60,7 +60,8 @@ For independent script provenance before any installer code runs, use the
 [verified bootstrap entry](docs/install-siteops.md#verify-the-bootstrap-script).
 When choosing the bootstrap, add `--enroll-source official` or
 `-EnrollSource official` to approve the official content source explicitly.
-It can also provision Azure CLI with `--with-azure-cli` or `-WithAzureCli`.
+The bootstrap needs `curl` and GitHub CLI 2.95 or newer, and reports when
+Azure CLI is missing.
 Other installation routes use [independent source enrollment](docs/projects.md#use-an-approved-source).
 Installing the CLI alone does not acquire or approve workspace content.
 

@@ -161,9 +161,9 @@ desktop experience for a standard user.
 The regular PR CI job runs native copied-command, symlink-rejection and
 unsafe-path controls, with required symlink capability. Neither Windows check
 builds a Site Ops release or claims a verified
-engine installation, a WinGet package installation, Azure deployment,
-or a normal Windows desktop session. Signed bundle and actual WinGet
-provisioning remain distinct qualification gates.
+engine installation, Azure deployment or a normal Windows desktop session.
+Signed bundle installation remains a distinct qualification gate. The
+bootstrap does not install packages with WinGet.
 
 ## How it fits together
 
