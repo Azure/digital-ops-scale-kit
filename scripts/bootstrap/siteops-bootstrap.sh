@@ -431,6 +431,8 @@ fi
 [[ "$caller" == release.yaml || "$caller" == ci.yaml ]] || fail "Select a supported calling workflow."
 [[ -z "$enroll_name" || "$enroll_name" =~ ^[a-z][a-z0-9-]{0,39}$ ]] ||
   fail "Choose a lowercase approved source name."
+[[ -z "$enroll_name" || ( "$caller" == release.yaml && "$source_ref" == refs/heads/main ) ]] ||
+  fail "Source enrollment applies to releases built by release.yaml from refs/heads/main. Enroll other builds with explicit trust files."
 [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] || fail "Use Linux on x86_64."
 command -v getconf >/dev/null && getconf GNU_LIBC_VERSION >/dev/null 2>&1 ||
   fail "Use a Linux distribution based on glibc."
@@ -662,41 +664,7 @@ hash -r
 stage "Command directory: $bin. Add it to your current PATH or open a new shell."
 stage "For native removal, run uv tool uninstall siteops."
 if [[ -n "$enroll_name" ]]; then
-  trusted_root="$staging/trusted-root.jsonl"
-  timeout --kill-after=5 120 "$gh" attestation trusted-root | head -c 2097153 > "$trusted_root" ||
-    fail "The GitHub trusted-root snapshot could not be obtained."
-  [[ -s "$trusted_root" && $(wc -c < "$trusted_root") -le 2097152 ]] ||
-    fail "The trusted-root snapshot is empty or oversized."
-  root_digest="$(sha256sum < "$trusted_root" | cut -d ' ' -f 1)"
-  policy_file="$staging/source-policy.json"
-  "$python" -I -S -B - "$policy_file" "$root_digest" "$repository" "$source_ref" "$caller" <<'PY'
-import datetime
-import json
-import pathlib
-import sys
-
-destination, digest, repository, source_ref, caller = sys.argv[1:]
-policy = {
-    "apiVersion": "siteops/v1alpha1",
-    "kind": "ArtifactVerificationPolicy",
-    "id": "approved-source",
-    "version": 1,
-    "validUntil": (datetime.datetime.now(datetime.timezone.utc)
-                   + datetime.timedelta(days=30)).isoformat(),
-    "trustedRootSha256": digest,
-    "provider": {
-        "kind": "github-attestation/v1",
-        "repository": repository,
-        "sourceRef": source_ref,
-        "signerWorkflow": ".github/workflows/_workspace-distribution.yaml",
-        "builderWorkflow": ".github/workflows/" + caller,
-        "runnerEnvironment": "self-hosted",
-    },
-}
-pathlib.Path(destination).write_text(json.dumps(policy), encoding="utf-8")
-PY
-  env "${python_unset[@]}" "$siteops" --trust-policy "$policy_file" --trusted-root "$trusted_root" \
-    source enroll "$enroll_name" --source "github:$repository" ||
+  env "${python_unset[@]}" "$siteops" source enroll "$enroll_name" --source "github:$repository" ||
     fail "The approved source could not be enrolled."
 fi
 if [[ "$assets" == "$staging" ]]; then

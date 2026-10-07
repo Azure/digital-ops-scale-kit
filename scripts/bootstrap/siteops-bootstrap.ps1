@@ -791,6 +791,9 @@ if ($Release -cnotmatch '^(siteops/)?v[0-9][0-9A-Za-z._-]{0,100}$' -or
 if ($EnrollSource -and $EnrollSource -cnotmatch '^[a-z][a-z0-9-]{0,39}$') {
     Fail 'Choose a lowercase approved source name.'
 }
+if ($EnrollSource -and ($Caller -cne 'release.yaml' -or $SourceRef -cne 'refs/heads/main')) {
+    Fail 'Source enrollment applies to releases built by release.yaml from refs/heads/main. Enroll other builds with explicit trust files.'
+}
 if (-not [Environment]::Is64BitOperatingSystem -or
     [Environment]::OSVersion.Version.Major -lt 10) {
     Fail 'A supported Windows x64 machine is required.'
@@ -1019,49 +1022,7 @@ try {
     Stage "Command directory: $commandDirectory. Add it to your current PATH or open a new shell."
     Stage 'For native removal, run uv tool uninstall siteops.'
     if ($EnrollSource) {
-        $lines = [Collections.Generic.List[string]]::new()
-        $bytes = 0
-        $previousPreference = $ErrorActionPreference
-        try {
-            $ErrorActionPreference = 'Continue'
-            & $gh attestation trusted-root 2>$null | ForEach-Object {
-                $bytes += [Text.Encoding]::UTF8.GetByteCount($_) + 1
-                if ($bytes -gt 2097152) { Fail 'The trusted-root snapshot exceeds its byte limit.' }
-                $lines.Add($_)
-            }
-            $rootExit = $LASTEXITCODE
-        } finally {
-            $ErrorActionPreference = $previousPreference
-        }
-        if ($rootExit -ne 0 -or $lines.Count -eq 0) {
-            Fail 'The GitHub trusted-root snapshot could not be obtained.'
-        }
-        $rootFile = Join-Path $download 'trusted-root.jsonl'
-        $utf8 = [Text.UTF8Encoding]::new($false)
-        [IO.File]::WriteAllText($rootFile, ($lines -join "`n") + "`n", $utf8)
-        $rootDigest = (Get-FileHash -LiteralPath $rootFile -Algorithm SHA256).Hash.ToLowerInvariant()
-        $policyFile = Join-Path $download 'source-policy.json'
-        $policy = @{
-            apiVersion = 'siteops/v1alpha1'
-            kind = 'ArtifactVerificationPolicy'
-            id = 'approved-source'
-            version = 1
-            validUntil = [DateTimeOffset]::UtcNow.AddDays(30).ToString(
-                'yyyy-MM-ddTHH:mm:ss.ffffffzzz', [Globalization.CultureInfo]::InvariantCulture
-            )
-            trustedRootSha256 = $rootDigest
-            provider = @{
-                kind = 'github-attestation/v1'
-                repository = $Repository
-                sourceRef = $SourceRef
-                signerWorkflow = '.github/workflows/_workspace-distribution.yaml'
-                builderWorkflow = ".github/workflows/$Caller"
-                runnerEnvironment = 'self-hosted'
-            }
-        }
-        [IO.File]::WriteAllText($policyFile, ($policy | ConvertTo-Json -Depth 5) + "`n", $utf8)
-        & $siteops --trust-policy $policyFile --trusted-root $rootFile `
-            source enroll $EnrollSource --source "github:$Repository"
+        & $siteops source enroll $EnrollSource --source "github:$Repository"
         if ($LASTEXITCODE -ne 0) { Fail 'The approved source could not be enrolled.' }
     }
     if ($assets -eq $download) {

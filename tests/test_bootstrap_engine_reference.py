@@ -310,45 +310,15 @@ function Test-Verify {
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Native PowerShell source enrollment.")
-def test_windows_content_enrollment_does_not_adopt_the_engine_caller(tmp_path):
+def test_windows_enrollment_delegates_to_siteops_and_refuses_other_builds(tmp_path):
     source = (BOOTSTRAP / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
-    start = "    if ($EnrollSource) {\n        $lines ="
-    block = start + source.split(start, 1)[1].split("    if ($assets -eq $download)", 1)[0]
-    wrapper = tmp_path / "enroll.ps1"
-    wrapper.write_text(
-        r"""
-$ErrorActionPreference = 'Stop'
-function Fail([string]$message) { throw $message }
-function Test-Roots {
-    if (($args -join ' ') -cne 'attestation trusted-root') { throw 'Unexpected root request.' }
-    '{"fixture":"independent-roots"}'
-    $global:LASTEXITCODE = 0
-}
-function Test-Enroll {
-    if ($args[0] -cne '--trust-policy' -or $args[4] -cne 'source' -or $args[5] -cne 'enroll') {
-        throw 'Unexpected enrollment operation.'
-    }
-    Get-Content -LiteralPath $args[1] -Raw
-    $global:LASTEXITCODE = 0
-}
-$download = $env:TEST_STATE
-$gh = 'Test-Roots'
-$siteops = 'Test-Enroll'
-$EnrollSource = 'demo'
-$Repository = 'example/publisher'
-$SourceRef = 'refs/heads/content-preview'
-$Caller = 'ci.yaml'
-$engineRef = 'refs/heads/main'
-$engineCaller = 'release.yaml'
-"""
-        + block, encoding="utf-8",
-    )
+    assert '    if ($EnrollSource) {\n        & $siteops source enroll $EnrollSource --source "github:$Repository"\n' in source
+    assert "--trust-policy" not in source and "trusted-root" not in source
     result = subprocess.run([
-        shutil.which("powershell.exe"), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper),
-    ], cwd=tmp_path, env={**isolated_environment(tmp_path / "state"), "TEST_STATE": str(tmp_path)},
-        capture_output=True, text=True, timeout=30)
-    assert result.returncode == 0, result.stdout + result.stderr
-    provider = json.loads(result.stdout)["provider"]
-    assert provider["sourceRef"] == "refs/heads/content-preview"
-    assert provider["builderWorkflow"] == ".github/workflows/ci.yaml"
-    assert provider["signerWorkflow"] == ".github/workflows/_workspace-distribution.yaml"
+        shutil.which("powershell.exe"), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+        str(BOOTSTRAP / "siteops-bootstrap.ps1"), "-Release", "siteops/v1.0.0b1", "-SourceCommit", CONTENT_SHA,
+        "-Caller", "ci.yaml", "-EnrollSource", "demo", "-DryRun",
+    ], cwd=tmp_path, env=isolated_environment(tmp_path / "state"), capture_output=True, text=True, timeout=30)
+    assert result.returncode != 0
+    assert "Source enrollment applies to releases built by release.yaml" in result.stdout + result.stderr
+    assert not (tmp_path / "state" / "siteops").exists()

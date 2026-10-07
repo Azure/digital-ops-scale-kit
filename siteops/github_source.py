@@ -585,7 +585,7 @@ def _resolve_gh() -> str:
     return str(resolved)
 
 
-def _run_gh(argv: list[str]) -> tuple[int, bytes, bytes]:
+def _run_gh(argv: list[str], *, timeout: float = _CLI_TIMEOUT_SECONDS) -> tuple[int, bytes, bytes]:
     try:
         process = subprocess.Popen(
             argv,
@@ -617,7 +617,7 @@ def _run_gh(argv: list[str]) -> tuple[int, bytes, bytes]:
         for reader in readers:
             reader.start()
 
-        deadline = time.monotonic() + _CLI_TIMEOUT_SECONDS
+        deadline = time.monotonic() + timeout
         timed_out = False
         while process.poll() is None:
             if stdout.exceeded.is_set() or stderr.exceeded.is_set():

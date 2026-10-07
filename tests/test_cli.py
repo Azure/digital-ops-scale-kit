@@ -1363,10 +1363,10 @@ class TestMainArgumentParsing:
             with pytest.raises(SystemExit) as stopped:
                 main()
         assert stopped.value.code == 2
-        assert "--source" in capsys.readouterr().err
+        assert "unrecognized arguments: --sour" in capsys.readouterr().err
 
     @pytest.mark.parametrize(("arguments", "expected"), [
-        (["source", "--help"], "Enroll a consumer-approved source"),
+        (["source", "--help"], "Enroll or renew a consumer-approved source"),
         (["source", "enroll", "--help"], "--trust-policy FILE"),
         (["source", "show", "--help"], "private"),
         (["source", "list", "--help"], "private"),

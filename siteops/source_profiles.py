@@ -10,8 +10,9 @@ import json
 import logging
 import os
 import re
+import shutil
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from siteops.artifacts import ArtifactError, load_artifact_json, open_regular_file
@@ -21,8 +22,13 @@ from siteops.cache_filesystem import (
     make_private_directory,
 )
 from siteops.cache_layout import write_new
-from siteops.github_attestation import load_github_policy
+from siteops.github_attestation import GitHubArtifactPolicy, fetch_trusted_root, load_github_policy
 from siteops.github_source import GitHubReference
+from siteops.runtime import RuntimePaths, create_private_directory
+
+# The official Scale Kit publisher, used when enrollment names no other source.
+OFFICIAL_SOURCE = "github:Azure/digital-ops-scale-kit"
+_STANDARD_VALIDITY = timedelta(days=30)
 
 _NAME = re.compile(r"[a-z][a-z0-9-]{0,39}")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
@@ -231,6 +237,64 @@ def enroll_source(name: str, source: str, policy_file: Path, root_file: Path) ->
         if cleanup_failed:
             logger.warning("Approved source enrollment cleanup could not be completed.")
         raise SourceProfileError("The approved source could not be recorded.") from None
+
+
+def standard_release_policy(repository: str, trusted_root_sha256: str) -> bytes:
+    """Accept only releases built from the publisher's main branch by its release workflows."""
+    document = {
+        "apiVersion": "siteops/v1alpha1",
+        "kind": "ArtifactVerificationPolicy",
+        "id": "approved-source",
+        "version": 1,
+        "validUntil": (datetime.now(timezone.utc) + _STANDARD_VALIDITY).isoformat(),
+        "trustedRootSha256": trusted_root_sha256,
+        "provider": {
+            "kind": "github-attestation/v1",
+            "repository": repository,
+            "sourceRef": "refs/heads/main",
+            "signerWorkflow": ".github/workflows/_workspace-distribution.yaml",
+            "builderWorkflow": ".github/workflows/release.yaml",
+            "runnerEnvironment": "self-hosted",
+        },
+    }
+    return (json.dumps(document, sort_keys=True) + "\n").encode("utf-8")
+
+
+def _identity(policy: GitHubArtifactPolicy) -> tuple:
+    return (policy.policy_id, policy.version, policy.repository.casefold(), policy.source_ref,
+            policy.signer_workflow, policy.builder_workflow, policy.runner_environment)
+
+
+def enroll_standard_source(name: str, source: str = OFFICIAL_SOURCE) -> ApprovedSource:
+    """Enroll, or renew, a publisher's standard release policy with the current trusted root.
+
+    Renewal replaces an approval only when its publisher identity is unchanged.
+    """
+    name = _name(name)
+    reference = GitHubReference.parse(source)
+    if reference.ref is not None:
+        raise SourceProfileError("Enroll the source repository, not a release.")
+    repository = f"{reference.owner}/{reference.repository}"
+    root_bytes = fetch_trusted_root()
+    staging = create_private_directory(RuntimePaths.resolve().temp_root, prefix="siteops-enroll-")
+    try:
+        policy_file, root_file = staging / _POLICY, staging / _ROOT
+        write_new(policy_file, standard_release_policy(repository, hashlib.sha256(root_bytes).hexdigest()))
+        write_new(root_file, root_bytes)
+        directory = source_root() / name
+        if directory.exists() or directory.is_symlink():
+            existing = read_source(name, require_valid=False)
+            if (
+                existing.reference.casefold() != f"github:{repository}".casefold()
+                or _identity(load_github_policy(existing.policy)) != _identity(load_github_policy(policy_file))
+            ):
+                raise SourceProfileError(
+                    "The existing source approval differs. Remove it before enrolling changed trust."
+                )
+            remove_source(name)
+        return enroll_source(name, source, policy_file, root_file)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def list_sources() -> tuple[str, ...]:

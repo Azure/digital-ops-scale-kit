@@ -431,3 +431,66 @@ def test_redacted_source_inspection_and_invalid_enrollment_are_safe(
     assert "private-name" not in output.out + output.err
     assert "private-rejected" not in output.out + output.err
     assert not storage.exists()
+
+def _standard_root(monkeypatch, *roots: bytes) -> None:
+    import siteops.source_profiles as profiles
+
+    supplied = iter(roots)
+    monkeypatch.setattr(profiles, "fetch_trusted_root", lambda: next(supplied))
+
+
+def test_standard_enrollment_approves_main_branch_releases_and_renews(inputs, monkeypatch):
+    from siteops.source_profiles import OFFICIAL_SOURCE, enroll_standard_source
+
+    _standard_root(monkeypatch, b'{"root":1}\n', b'{"root":2}\n')
+    first = enroll_standard_source("core")
+    assert first.reference == OFFICIAL_SOURCE == "github:Azure/digital-ops-scale-kit"
+    policy = json.loads(first.policy.read_text(encoding="utf-8"))
+    assert policy["provider"] == {
+        "kind": "github-attestation/v1", "repository": "Azure/digital-ops-scale-kit",
+        "sourceRef": "refs/heads/main",
+        "signerWorkflow": ".github/workflows/_workspace-distribution.yaml",
+        "builderWorkflow": ".github/workflows/release.yaml", "runnerEnvironment": "self-hosted",
+    }
+    remaining = datetime.fromisoformat(policy["validUntil"]) - datetime.now(timezone.utc)
+    assert timedelta(days=29) < remaining <= timedelta(days=30)
+    assert first.trusted_root.read_bytes() == b'{"root":1}\n'
+
+    renewed = enroll_standard_source("core")
+    assert renewed.trusted_root.read_bytes() == b'{"root":2}\n'
+    assert renewed.root_sha256 != first.root_sha256
+    assert list_sources() == ("core",)
+
+
+def test_standard_enrollment_never_replaces_different_trust(inputs, monkeypatch):
+    from siteops.source_profiles import enroll_standard_source
+
+    _, policy_file, root_file, _ = inputs
+    enroll_source("approved", "github:example/content", policy_file, root_file)
+    _standard_root(monkeypatch, b'{"root":1}\n', b'{"root":1}\n')
+    for source in ("github:example/content", "github:other/content"):
+        with pytest.raises(SourceProfileError, match="differs"):
+            enroll_standard_source("approved", source)
+    assert read_source("approved").policy.read_bytes() == policy_file.read_bytes()
+
+
+def test_source_enroll_defaults_to_the_official_publisher_under_any_name(inputs, monkeypatch, capsys):
+    storage, policy_file, _, _ = inputs
+    _standard_root(monkeypatch, b'{"root":1}\n')
+    monkeypatch.setattr(sys, "argv", ["siteops", "source", "enroll", "core"])
+    with pytest.raises(SystemExit) as stopped:
+        cli.main()
+    output = capsys.readouterr()
+    assert stopped.value.code == 0, output.err
+    assert "Approved source core: github:Azure/digital-ops-scale-kit." in output.out
+    assert "Valid until:" in output.out
+    assert (storage / "core").is_dir()
+
+    monkeypatch.setattr(sys, "argv", [
+        "siteops", "--trust-policy", str(policy_file), "source", "enroll", "other",
+    ])
+    with pytest.raises(SystemExit) as stopped:
+        cli.main()
+    assert stopped.value.code == 1
+    assert "Supply both --trust-policy and --trusted-root" in capsys.readouterr().err
+    assert not (storage / "other").exists()

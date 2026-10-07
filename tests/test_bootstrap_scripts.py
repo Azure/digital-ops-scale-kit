@@ -616,10 +616,11 @@ def test_windows_native_verification_parses_json_without_powershell_51_jq_quotin
     assert "ConvertFrom-Json" in windows
 
 
-def test_windows_prerequisites_are_checked_not_installed_and_policy_time_is_portable():
+def test_windows_prerequisites_are_checked_not_installed_and_enrollment_is_delegated():
     powershell = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
     for removed in ("WithAzureCli", "WinGet", "winget", "GetEnvironmentVariable('PATH'",
-                    "Ensure-UvStorage $env:TEMP", "Join-Path $env:TEMP"):
+                    "Ensure-UvStorage $env:TEMP", "Join-Path $env:TEMP", "attestation trusted-root",
+                    "ArtifactVerificationPolicy"):
         assert removed not in powershell
     lines = [line.strip() for line in powershell.splitlines()]
     resolved = lines.index("$gh = Select-GitHubCli")
@@ -629,10 +630,9 @@ def test_windows_prerequisites_are_checked_not_installed_and_policy_time_is_port
     assert selection.index("Require-PrivateExecutablePath $path $path -Optional") < selection.index(
         "& $path version",
     )
-    assert "& $gh attestation verify" in powershell and "& $gh attestation trusted-root" in powershell
+    assert "& $gh attestation verify" in powershell
+    assert '& $siteops source enroll $EnrollSource --source "github:$Repository"' in lines
     assert "Stage 'Azure CLI was not found. Install it before deploying: https://aka.ms/installazurecli'" in lines
-    assert ".ToString('o')" not in powershell
-    assert "yyyy-MM-ddTHH:mm:ss.ffffffzzz" in powershell
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="This checks native PowerShell 5.1 argument handling.")

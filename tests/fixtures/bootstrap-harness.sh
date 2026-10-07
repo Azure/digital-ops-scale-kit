@@ -320,15 +320,10 @@ import json
 import sys
 
 records = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
-enrollments = [item for item in records if item["arguments"][:1] == ["--trust-policy"]]
+enrollments = [item for item in records if item["arguments"][:2] == ["source", "enroll"]]
 assert len(enrollments) == 1
-arguments = enrollments[0]["arguments"]
-assert arguments[2] == "--trusted-root"
-assert arguments[4:] == ["source", "enroll", "demo", "--source", "github:example/publisher"]
-provider = enrollments[0]["policy"]["provider"]
-assert provider["repository"] == "example/publisher"
-assert provider["sourceRef"] == "refs/heads/main"
-assert provider["builderWorkflow"] == ".github/workflows/release.yaml"
+assert enrollments[0]["arguments"] == ["source", "enroll", "demo", "--source", "github:example/publisher"]
+assert not any(item["arguments"][:1] == ["--trust-policy"] for item in records)
 assert all(item["python"] == [] for item in records)
 PY
   [[ ! -e "$root/inject-ran" ]] || die "Inherited Python paths reached the installed command."
@@ -607,6 +602,8 @@ scenario_runtime() {
 scenario_prerequisites() {
   local runs
   fresh_home prerequisites
+  refuses preview-enrollment "Source enrollment applies to releases built by release.yaml" \
+    "${first[@]}" --caller ci.yaml --enroll-source demo
   old_gh=1 refuses old-gh "GitHub CLI 2.95 or newer is required. Install it from https://cli.github.com" "${first[@]}"
   mkdir -m 0755 "$root/no-gh" "$root/open-gh"
   ln -s "$doubles/curl" "$root/no-gh/curl"
@@ -670,17 +667,14 @@ PY
   [[ "$(count "$logs/curl")" == "$downloads" ]] || die "Repeated content resolution redownloaded assets."
   verify=false refuses content-bundle-proof "asset certificate does not match" "${combined[@]}"
   fresh_home content-reference
-  succeeds content-reference "${referenced[@]}" --enroll-source demo
+  refuses content-preview-enrollment "Source enrollment applies to releases built by release.yaml" \
+    "${referenced[@]}" --enroll-source demo
+  succeeds content-reference "${referenced[@]}"
   [[ "$(installed_version "$bin")" == "siteops 1.2.3" ]] || die "Content-only selection installed another engine."
-  "$real_python" -I - "$logs/siteops" "$logs/gh" <<'PY' || die "Content and engine policy identities were mixed."
-import json
+  "$real_python" -I - "$logs/gh" <<'PY' || die "Content and engine verification identities were mixed."
 import sys
 
-records = [json.loads(line) for line in open(sys.argv[1])]
-policy = [item["policy"] for item in records if item["policy"]][-1]["provider"]
-assert policy["sourceRef"] == "refs/heads/content-preview"
-assert policy["builderWorkflow"] == ".github/workflows/ci.yaml"
-commands = open(sys.argv[2]).read().splitlines()
+commands = open(sys.argv[1]).read().splitlines()
 bundle = [line for line in commands if "attestation verify" in line and "/siteops-install.zip " in line][-1]
 assert "--source-digest " + "d" * 40 in bundle
 assert "/_siteops-distribution.yaml@refs/heads/main" in bundle

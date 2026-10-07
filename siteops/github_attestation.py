@@ -209,6 +209,18 @@ def _run(argv: list[str]) -> tuple[int, bytes]:
     return code, stdout
 
 
+def fetch_trusted_root() -> bytes:
+    """Obtain the current Sigstore trusted root through the admitted GitHub CLI, without signing in."""
+    executable = _resolve_verifier()
+    try:
+        code, stdout, _ = _run_gh([executable, "attestation", "trusted-root"], timeout=120.0)
+    except BrowseError:
+        raise VerificationError("The trusted-root snapshot could not be obtained within its limits.") from None
+    if code != 0 or not stdout.strip() or len(stdout) > MAX_EVIDENCE_BYTES:
+        raise VerificationError("The GitHub trusted-root snapshot could not be obtained.")
+    return stdout
+
+
 def _observations(
     payload: bytes, policy: GitHubArtifactPolicy, digest: str, source_commit: str, evaluated_at: datetime,
 ) -> bytes:

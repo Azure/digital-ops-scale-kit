@@ -256,7 +256,14 @@ def cmd_project(args: argparse.Namespace) -> int:
 def cmd_source(args: argparse.Namespace) -> int:
     """Manage consumer-approved source trust independently of projects."""
     from siteops.github_attestation import load_github_policy
-    from siteops.source_profiles import enroll_source, list_sources, read_source, remove_source
+    from siteops.source_profiles import (
+        OFFICIAL_SOURCE,
+        enroll_source,
+        enroll_standard_source,
+        list_sources,
+        read_source,
+        remove_source,
+    )
 
     redacted = is_redaction_enabled()
     if redacted and args.source_command in {"show", "list"}:
@@ -266,18 +273,26 @@ def cmd_source(args: argparse.Namespace) -> int:
         if args.project is not None or args.workspace is not None or args.approved_source is not None:
             raise ProjectError("Source enrollment is user configuration, not a project or workspace selection.")
         if args.source_command == "enroll":
-            if args.trust_policy is None or args.trusted_root is None:
-                raise ProjectError("Source enrollment requires --trust-policy and --trusted-root.")
-            from siteops.workspace_cache import default_cache_root
+            source = args.source or OFFICIAL_SOURCE
+            if (args.trust_policy is None) != (args.trusted_root is None):
+                raise ProjectError(
+                    "Supply both --trust-policy and --trusted-root, or neither for the "
+                    "publisher's standard release policy."
+                )
+            if args.trust_policy is None:
+                result = enroll_standard_source(args.name, source)
+            else:
+                from siteops.workspace_cache import default_cache_root
 
-            policy_file, root_file = require_trust_inputs(
-                default_cache_root(), args.trust_policy, args.trusted_root,
-            )
-            result = enroll_source(args.name, args.source, policy_file, root_file)
+                policy_file, root_file = require_trust_inputs(
+                    default_cache_root(), args.trust_policy, args.trusted_root,
+                )
+                result = enroll_source(args.name, source, policy_file, root_file)
             if redacted:
                 print("Approved source enrolled.")
             else:
                 print(f"Approved source {_content_text(result.name)}: {_content_text(result.reference)}.")
+                print(f"Valid until: {load_github_policy(result.policy).valid_until.isoformat()}.")
             return 0
         if args.trust_policy is not None or args.trusted_root is not None:
             raise ProjectError("Trust file options apply to source enroll, not inspection or removal.")
@@ -2128,7 +2143,7 @@ Examples:
     )
     source_commands = p_source.add_subparsers(dest="source_command", required=True)
     for name, help_text in (
-        ("enroll", "Enroll a consumer-approved source using independent trust files"),
+        ("enroll", "Enroll or renew a consumer-approved source"),
         ("show", "Inspect one approved source in a private destination"),
         ("list", "List approved source names in a private destination"),
         ("remove", "Remove one approval without changing a workspace pin"),
@@ -2136,8 +2151,10 @@ Examples:
         description = help_text
         if name == "enroll":
             description += (
-                ". Supply global --trust-policy FILE and --trusted-root FILE "
-                "before 'source enroll'."
+                ". Without trust files, Site Ops approves the publisher's releases built from "
+                "its main branch for 30 days, using the current trusted root from GitHub CLI. "
+                "Rerun to renew. For a custom policy, supply global --trust-policy FILE and "
+                "--trusted-root FILE before 'source enroll'."
             )
         command = source_commands.add_parser(name, help=help_text, description=description)
         if name != "list":
@@ -2146,8 +2163,8 @@ Examples:
             )
         if name == "enroll":
             command.add_argument(
-                "--source", required=True, action=_SingleValueOption,
-                help="Approved repository: github:OWNER/REPO",
+                "--source", action=_SingleValueOption,
+                help="Approved repository: github:OWNER/REPO (default: the official Scale Kit publisher)",
             )
 
     p_index = subparsers.add_parser(
