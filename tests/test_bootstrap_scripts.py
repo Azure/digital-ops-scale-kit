@@ -66,6 +66,15 @@ def test_windows_bootstrap_owns_new_data_root_before_private_acl_and_admission()
     assert "Reject 'ROOT_DATA_OWNER'" in create
 
 
+def test_windows_bootstrap_creates_retained_bundle_as_user_before_helper_extraction():
+    powershell = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
+    lines = [line.strip() for line in powershell.splitlines()]
+    declared = lines.index("$bundle = Join-Path $root $bundleId")
+    helper = next(index for index, line in enumerate(lines) if line.startswith("$installed = Check-Payload @("))
+    # The helper would otherwise create the bundle with the elevated token's default owner.
+    assert "Require-PrivateDataRoot $bundle" in lines[declared + 1:helper]
+    assert not any("Test-Path -LiteralPath $bundle" in line for line in lines)
+
 def test_windows_bootstrap_checks_managed_executables_before_running_them():
     powershell = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
     assert powershell.index("Require-PrivateExecutablePath $available (Split-Path -Parent $available) -Optional") < (

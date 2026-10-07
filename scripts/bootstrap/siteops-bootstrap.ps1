@@ -986,7 +986,8 @@ try {
     $root = Join-Path $data 'bundles'
     Require-PrivateDataRoot $root
     $bundle = Join-Path $root $bundleId
-    if (Test-Path -LiteralPath $bundle) { Require-PrivateDataRoot $bundle }
+    # Create the retained bundle as the user. An elevated helper would otherwise assign it to Administrators.
+    Require-PrivateDataRoot $bundle
     $script:UvCacheDir = Join-Path $download 'uv-cache'
     Ensure-UvStorage $script:UvCacheDir
     foreach ($name in @('UV_TOOL_DIR', 'UV_TOOL_BIN_DIR', 'UV_PYTHON_INSTALL_DIR')) {
