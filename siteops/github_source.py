@@ -25,10 +25,16 @@ from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Callable
 from urllib.parse import quote, urlsplit
 
+from siteops.artifacts import ArtifactError
 from siteops.browse import BrowseError
+from siteops.cache_filesystem import check_trusted_executable
 from siteops.compilation import resolve_tool_from_path
 from siteops.process_capture import BoundedCapture as _BoundedCapture
 
+UNTRUSTED_GH = (
+    "The GitHub CLI executable must be owned by an administrator or the current user "
+    "and protected from other users."
+)
 GITHUB_API_VERSION = "2026-03-10"
 _API_ROOT = "https://api.github.com"
 _ACCEPT = "application/vnd.github+json"
@@ -572,6 +578,10 @@ def _resolve_gh() -> str:
         )
     if os.name == "nt" and resolved.suffix.casefold() != ".exe":
         raise _error("github.tool-missing", "Use an installed gh.exe binary, not a shell wrapper.")
+    try:
+        check_trusted_executable(resolved)
+    except (ArtifactError, OSError, RuntimeError):
+        raise _error("github.tool-untrusted", UNTRUSTED_GH) from None
     return str(resolved)
 
 

@@ -93,7 +93,7 @@ def _current_windows_sid(advapi, kernel) -> str:
         kernel.CloseHandle(token)
 
 
-def _check_windows_access(path: Path, *, private: bool) -> None:
+def _check_windows_access(path: Path, *, private: bool, executable: bool = False) -> None:
     from ctypes import wintypes as w
 
     class AclSize(ctypes.Structure):
@@ -105,7 +105,7 @@ def _check_windows_access(path: Path, *, private: bool) -> None:
     advapi, kernel = _windows()
     current = _current_windows_sid(advapi, kernel)
     trusted = {current, "S-1-5-18", "S-1-5-32-544"}
-    # The system volume can be owned by Windows Modules Installer.
+    # Windows Modules Installer can own the system volume and write Program Files.
     trusted_owners = trusted | {
         "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
     }
@@ -138,8 +138,9 @@ def _check_windows_access(path: Path, *, private: bool) -> None:
                 continue
             sid = _sid_text(advapi, kernel, ctypes.c_void_p(address.value + 8))
             # Ancestors must prevent replacement or permission changes by other users.
-            forbidden = 0xFFFFFFFF if private else 0x500D0140
-            if ace.mask & forbidden and not _trusted_windows_ace(sid, trusted):
+            # An executable must also prevent writes to its own content and attributes.
+            forbidden = 0xFFFFFFFF if private else 0x500D0156 if executable else 0x500D0140
+            if ace.mask & forbidden and not _trusted_windows_ace(sid, trusted if private else trusted_owners):
                 raise CacheError(
                     "Choose a private cache location whose access controls exclude other users.",
                     code="cache.permissions",
@@ -154,6 +155,37 @@ def check_private_node(path: Path, *, directory: bool) -> None:
         _check_windows_access(path, private=True)
     elif info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
         raise CacheError("Cache paths must be owned by the current user and private.", code="cache.permissions")
+
+
+@lru_cache(maxsize=1)
+def _private_group() -> int | None:
+    """Return the user's private group when its write access adds no other writer.
+
+    pam_umask creates such groups with USERGROUPS_ENAB, and Debian's OpenSSH and
+    zsh's compaudit accept them under the same conditions. Failed lookups refuse.
+    """
+    import grp
+    import pwd
+
+    try:
+        user = pwd.getpwuid(os.getuid())
+        group = grp.getgrgid(os.getegid())
+        accounts = pwd.getpwall()
+    except (KeyError, OSError):
+        return None
+    if group.gr_name != user.pw_name or any(member != user.pw_name for member in group.gr_mem):
+        return None
+    if any(account.pw_gid == group.gr_gid and account.pw_name != user.pw_name for account in accounts):
+        return None
+    return group.gr_gid
+
+
+def _writers_trusted(info: os.stat_result) -> bool:
+    """Accept root or user ownership, never other write, and group write only from a private group."""
+    mode = stat.S_IMODE(info.st_mode)
+    if info.st_uid not in {0, os.getuid()} or mode & 0o002:
+        return False
+    return not mode & 0o020 or (info.st_uid == os.getuid() and info.st_gid == _private_group())
 
 
 def check_cache_ancestors(path: Path) -> None:
@@ -171,11 +203,19 @@ def check_cache_ancestors(path: Path) -> None:
         if os.name == "nt":
             _check_windows_access(parent, private=False)
         else:
-            trusted_owner = info.st_uid in {0, os.getuid()}
-            writable = stat.S_IMODE(info.st_mode) & 0o022
-            sticky = info.st_mode & stat.S_ISVTX
-            if not trusted_owner or (writable and not sticky):
+            sticky = info.st_uid in {0, os.getuid()} and info.st_mode & stat.S_ISVTX
+            if not (_writers_trusted(info) or sticky):
                 raise CacheError("Cache ancestors must prevent changes by other users.", code="cache.permissions")
+
+
+def check_trusted_executable(path: Path) -> None:
+    """Admit a resolved executable that only trusted principals can replace or modify."""
+    check_cache_ancestors(path)
+    info = require_node(path, directory=False)
+    if os.name == "nt":
+        _check_windows_access(path, private=False, executable=True)
+    elif not _writers_trusted(info):
+        raise CacheError("The executable must be protected from other users.", code="cache.permissions")
 
 
 def make_private_directory(path: Path) -> None:
