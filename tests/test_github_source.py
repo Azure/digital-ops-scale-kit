@@ -631,6 +631,21 @@ def test_cli_transport_reports_executable_start_failure(monkeypatch, tmp_path):
     _assert_code(error, "github.tool-missing")
 
 
+def test_cli_transport_runs_gh_without_telemetry(monkeypatch):
+    started = {}
+
+    def refuse(*_args, **kwargs):
+        started.update(kwargs)
+        raise FileNotFoundError()
+
+    monkeypatch.setenv("GH_TELEMETRY", "enabled")
+    monkeypatch.setattr(github_source.subprocess, "Popen", refuse)
+    with pytest.raises(BrowseError):
+        github_source._run_gh(["gh", "version"])
+
+    assert started["env"]["GH_TELEMETRY"] == "false"
+
+
 def test_cli_transport_rejects_redirects_and_invalid_json(monkeypatch, tmp_path):
     process = _Process(_included(302, b"secret redirect"))
     _install_cli(monkeypatch, tmp_path, process)

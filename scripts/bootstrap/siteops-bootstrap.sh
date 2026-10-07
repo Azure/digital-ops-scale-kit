@@ -440,6 +440,8 @@ done
 uid="$(id -u)"
 detect_private_group
 # The verifier runs only after its file and every parent pass admission.
+# Site Ops runs gh as an internal verifier, so gh records no telemetry or device identifier.
+export GH_TELEMETRY=false
 gh="$(command -v gh || true)"
 gh_version=""
 if [[ "$gh" == /* ]] && gh="$(readlink -e -- "$gh")"; then

@@ -107,6 +107,7 @@ SH
 cat > "$doubles/gh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$TEST_LOGS/gh"
+[[ "${GH_TELEMETRY:-}" == false ]] || { echo "gh telemetry enabled" >> "$TEST_LOGS/rejected"; exit 96; }
 case "${1:-} ${2:-}" in
   "version ")
     if [[ "${TEST_OLD_GH:-0}" == 1 ]]; then echo "gh version 2.94.0 (fixture)"

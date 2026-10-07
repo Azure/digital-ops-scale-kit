@@ -330,7 +330,8 @@ removes each run's directory when it exits. Both scripts use the first
 GitHub CLI on `PATH` only when the executable and every parent directory
 are owned by you or the system and other users cannot modify, delete or
 change permissions on them. Standard Program Files installations and
-installations for a single user qualify. Shims in shared locations do not. It also
+installations for a single user qualify. Shims in shared locations do not.
+Site Ops turns off GitHub CLI telemetry for the commands it runs. It also
 checks the complete path and ACL of selected uv tools, ordinary uv storage
 and concrete uv-managed Python before running them. Existing qualified uv
 0.12.20 is reused when its executable bytes and path pass admission.

@@ -797,6 +797,8 @@ if (-not [Environment]::Is64BitOperatingSystem -or
 }
 $curl = Native 'curl.exe'
 if (-not $curl) { Fail 'Windows curl.exe is required for anonymous HTTPS downloads.' }
+# Site Ops runs gh as an internal verifier, so gh records no telemetry or device identifier.
+$env:GH_TELEMETRY = 'false'
 $gh = Select-GitHubCli
 Stage "Release: $Release ($SourceCommit) from $Repository."
 Stage 'Uses the installed GitHub CLI, checksum-pinned uv 0.12.20, and uv-managed Python.'

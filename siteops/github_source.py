@@ -594,6 +594,8 @@ def _run_gh(argv: list[str]) -> tuple[int, bytes, bytes]:
             stderr=subprocess.PIPE,
             shell=False,
             bufsize=0,
+            # gh is an internal tool here, so it records no telemetry or device identifier.
+            env={**os.environ, "GH_TELEMETRY": "false"},
         )
     except (FileNotFoundError, PermissionError, OSError):
         raise _error(

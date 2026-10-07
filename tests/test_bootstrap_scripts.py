@@ -37,6 +37,13 @@ def test_bash_bootstrap_gates_on_capability_without_elevation():
         assert removed not in bash
 
 
+def test_bootstraps_run_github_cli_without_telemetry():
+    bash = (SCRIPTS / "siteops-bootstrap.sh").read_text(encoding="utf-8")
+    assert bash.index("\nexport GH_TELEMETRY=false\n") < bash.index('gh_version="$(timeout')
+    powershell = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
+    assert powershell.index("\n$env:GH_TELEMETRY = 'false'\n") < powershell.index("\n$gh = Select-GitHubCli\n")
+
+
 def test_bash_bootstrap_admits_private_data_root_before_retained_tool_use():
     bash = (SCRIPTS / "siteops-bootstrap.sh").read_text(encoding="utf-8")
     for invocation in ("\n  prepare_runtime\n", "\nprepare_runtime\n"):
