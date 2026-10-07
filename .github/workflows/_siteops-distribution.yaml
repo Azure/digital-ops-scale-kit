@@ -1080,7 +1080,26 @@ jobs:
               ).Replace('-', '').ToLowerInvariant()
           } finally { $hasher.Dispose() }
           $cache = Join-Path $env:LOCALAPPDATA "siteops\install-downloads\$selectionId"
-          New-Item -ItemType Directory -Path $cache -Force | Out-Null
+          $cacheRoot = Split-Path -Parent $cache
+          # Elevated runners assign new directories to Administrators. The bootstrap requires the user.
+          foreach ($directory in @($cacheRoot, $cache)) {
+              try {
+                  New-Item -ItemType Directory -Path $directory -ErrorAction Stop | Out-Null
+              } catch {
+                  throw 'The Windows qualification cache could not be created.'
+              }
+              $previousPreference = $ErrorActionPreference
+              try {
+                  $ErrorActionPreference = 'Continue'
+                  & icacls.exe $directory /setowner "*$sid" *> $null
+                  $cacheOwned = $LASTEXITCODE -eq 0
+              } finally {
+                  $ErrorActionPreference = $previousPreference
+              }
+              if (-not $cacheOwned) {
+                  throw 'The Windows qualification cache could not be owned by the runner user.'
+              }
+          }
           Copy-Item -LiteralPath (Join-Path $download $env:ARCHIVE_NAME) -Destination $cache
           Copy-Item -LiteralPath (Join-Path $download ($env:ARCHIVE_NAME + $env:ATTESTATION_SUFFIX)) `
               -Destination $cache

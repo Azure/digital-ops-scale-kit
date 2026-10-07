@@ -610,6 +610,25 @@ def test_windows_bootstrap_qualification_selects_private_user_profile_before_cac
     assert "$env:UV_PYTHON_INSTALL_DIR = Join-Path $owned 'python'" in script
 
 
+def test_windows_bootstrap_qualification_owns_every_preloaded_cache_directory():
+    script = _script(REUSABLE["jobs"]["qualify"], "Install with the signed PowerShell bootstrap")
+    preload = script.split("$cache = Join-Path $env:LOCALAPPDATA", 1)[1].split(
+        "Copy-Item -LiteralPath", 1,
+    )[0]
+    assert "foreach ($directory in @($cacheRoot, $cache))" in preload
+    assert '& icacls.exe $directory /setowner "*$sid"' in preload
+    assert "-Force" not in preload
+    assert script.index(preload) < script.index("& powershell.exe -NoProfile -ExecutionPolicy Bypass")
+    bootstrap = (REPO_ROOT / "scripts" / "bootstrap" / "siteops-bootstrap.ps1").read_text(
+        encoding="utf-8",
+    )
+    lines = {line.strip() for line in bootstrap.splitlines()}
+    # The preloaded directories are exactly the unmanaged cache roots the bootstrap admits.
+    assert "$cacheRoot = Join-Path $data 'install-downloads'" in lines
+    assert "Require-PrivateDataRoot $cacheRoot" in lines
+    assert "Require-PrivateDataRoot $cache" in lines
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows ACL ancestry needs PowerShell.")
 def test_windows_qualification_profile_ancestry_before_tool_selection(tmp_path):
     source = (REPO_ROOT / "scripts" / "bootstrap" / "siteops-bootstrap.ps1").read_text(
@@ -661,6 +680,9 @@ def test_windows_bootstrap_qualification_protects_data_root_and_ancestry(
     )
     helper = re.search(r"(?ms)^function Require-PrivateDataRoot\([^\n]*\) \{.*?^\}", source)
     assert helper is not None
+    preload = "$cache = Join-Path $env:LOCALAPPDATA" + script.split(
+        "$cache = Join-Path $env:LOCALAPPDATA", 1,
+    )[1].split("Copy-Item -LiteralPath", 1)[0]
     profile = tmp_path / "profile"
     profile.mkdir()
     grant = subprocess.run(
@@ -684,9 +706,10 @@ def test_windows_bootstrap_qualification_protects_data_root_and_ancestry(
             + "$env:HOME = Join-Path $owned 'home'\n" + setup
             + "\nfunction Fail([string]$message) { throw \"Site Ops installation: $message\" }\n"
             + helper.group(0)
-            + "\n$cache=Join-Path $env:LOCALAPPDATA 'siteops\\install-downloads\\fixture'\n"
-            "New-Item -ItemType Directory -Path $cache -Force | Out-Null\n"
-            "Require-PrivateDataRoot (Join-Path $env:LOCALAPPDATA 'siteops')\n"
+            + "\n$selectionId = 'fixture'\n" + preload
+            + "Require-PrivateDataRoot (Join-Path $env:LOCALAPPDATA 'siteops')\n"
+            "Require-PrivateDataRoot $cacheRoot\n"
+            "Require-PrivateDataRoot $cache\n"
             "'PRIVATE_ROOT_ACCEPTED'\n",
             encoding="utf-8",
         )
