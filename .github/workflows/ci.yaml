@@ -237,6 +237,41 @@ jobs:
           path: coverage.xml
           retention-days: 7
 
+  linux-bootstrap:
+    name: Linux Bootstrap (Ubuntu 26.04)
+    if: github.event_name != 'workflow_dispatch' || inputs.run-mode == 'ci-only'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Site Ops
+        uses: ./.github/actions/setup-siteops
+        with:
+          install-dev: "true"
+
+      - name: Prepare native Linux uv fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+          fixtures="$RUNNER_TEMP/siteops-uv-fixtures"
+          bash tests/fixtures/prepare-native-uv.sh "$fixtures"
+          {
+            echo "SITEOPS_TEST_UV=$fixtures/native/uv"
+            echo "SITEOPS_TEST_UV_ARCHIVE=$fixtures/uv.tar.gz"
+            echo "SITEOPS_TEST_UV_PYTHON_ARCHIVE=$fixtures/cpython.tar.gz"
+            echo "SITEOPS_REQUIRE_LINUX_UV=1"
+          } >> "$GITHUB_ENV"
+
+      # The next ubuntu-latest image replaces most GNU core utilities with uutils.
+      - name: Run Linux bootstrap and filesystem trust tests
+        run: pytest tests/test_uv_bootstrap_linux.py tests/test_bootstrap_scripts.py tests/test_filesystem_trust.py -v
+
   windows-bootstrap:
     name: Windows Bootstrap
     if: github.event_name != 'workflow_dispatch' || inputs.run-mode == 'ci-only'
@@ -469,7 +504,7 @@ jobs:
 
   overview:
     name: Overview
-    needs: [lint, test, windows-bootstrap, validate, release-runner, installer-check, release-preview, attestation-check]
+    needs: [lint, test, linux-bootstrap, windows-bootstrap, validate, release-runner, installer-check, release-preview, attestation-check]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -482,6 +517,7 @@ jobs:
           SOURCE_SHA: ${{ github.sha }}
           LINT_RESULT: ${{ needs.lint.result }}
           TEST_RESULT: ${{ needs.test.result }}
+          LINUX_RESULT: ${{ needs.linux-bootstrap.result }}
           WINDOWS_RESULT: ${{ needs.windows-bootstrap.result }}
           VALIDATE_RESULT: ${{ needs.validate.result }}
           RUNNER_RESULT: ${{ needs.release-runner.result }}
@@ -516,11 +552,11 @@ jobs:
           if mode is None or not re.fullmatch("[0-9a-f]{40}", source):
               raise SystemExit("::error::The CI summary requires a supported mode and source commit.")
           title, extra, scope = mode
-          windows = (
-              (("Windows bootstrap", "WINDOWS_RESULT"),)
+          platforms = (
+              (("Linux bootstrap (Ubuntu 26.04)", "LINUX_RESULT"), ("Windows bootstrap", "WINDOWS_RESULT"))
               if os.environ["CI_MODE"] == "ci-only" else ()
           )
-          rows = (("Lint", "LINT_RESULT"), ("Unit tests", "TEST_RESULT"), *windows,
+          rows = (("Lint", "LINT_RESULT"), ("Unit tests", "TEST_RESULT"), *platforms,
                   ("Manifests", "VALIDATE_RESULT"), *extra)
           results = {"success": "Passed", "failure": "Failed", "cancelled": "Cancelled", "skipped": "Skipped"}
           lines = ["## CI: " + title, "", "Source: `" + source + "`", "", "| Check | Result |", "|---|---|"]

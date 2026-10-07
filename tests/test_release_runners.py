@@ -204,7 +204,7 @@ def test_production_admission_requires_explicit_repository_opt_in(tmp_path):
     ("_siteops-distribution.yaml", {"build", "attest"}, {"qualify", "summary"}),
     ("_workspace-distribution.yaml", {"build", "attest"}, set()),
     ("release.yaml", {"publish"}, set()),
-    ("ci.yaml", set(), {"lint", "test", "windows-bootstrap", "validate", "overview"}),
+    ("ci.yaml", set(), {"lint", "test", "linux-bootstrap", "windows-bootstrap", "validate", "overview"}),
 ])
 def test_runner_placement_follows_artifact_authority(name, secured, public):
     document = workflow(name)
@@ -218,7 +218,7 @@ def test_runner_placement_follows_artifact_authority(name, secured, public):
         assert job["steps"][0] == workflow("_siteops-distribution.yaml")["jobs"]["build"]["steps"][0]
     for key in public:
         assert document["jobs"][key]["runs-on"] in {
-            "ubuntu-latest", "ubuntu-24.04", "windows-2025", "${{ matrix.os }}",
+            "ubuntu-latest", "ubuntu-24.04", "ubuntu-26.04", "windows-2025", "${{ matrix.os }}",
         }
 
 
@@ -556,7 +556,7 @@ def test_ci_overview_reports_only_the_selected_path(tmp_path, monkeypatch, mode,
     assert job["permissions"] == {}
     assert job["runs-on"] == "ubuntu-latest"
     assert job["needs"] == [
-        "lint", "test", "windows-bootstrap", "validate", "release-runner",
+        "lint", "test", "linux-bootstrap", "windows-bootstrap", "validate", "release-runner",
         "installer-check", "release-preview", "attestation-check",
     ]
     assert len(job["steps"]) == 1 and "uses" not in job["steps"][0]
@@ -564,7 +564,7 @@ def test_ci_overview_reports_only_the_selected_path(tmp_path, monkeypatch, mode,
     values = {
         "CI_MODE": mode, "SOURCE_SHA": "a" * 40,
         "LINT_RESULT": "success", "TEST_RESULT": "failure", "VALIDATE_RESULT": "success",
-        "WINDOWS_RESULT": "failure",
+        "LINUX_RESULT": "success", "WINDOWS_RESULT": "failure",
         "RUNNER_RESULT": "success", "INSTALLER_RESULT": "skipped", "PREVIEW_RESULT": "cancelled",
         "ATTESTATION_RESULT": "failure",
         "GITHUB_STEP_SUMMARY": str(summary),
@@ -575,6 +575,7 @@ def test_ci_overview_reports_only_the_selected_path(tmp_path, monkeypatch, mode,
     text = summary.read_text()
     assert "| Lint | Passed |" in text and "| Unit tests | Failed |" in text
     assert "| Manifests | Passed |" in text
+    assert ("| Linux bootstrap (Ubuntu 26.04) | Passed |" in text) is (mode == "ci-only")
     assert ("| Windows bootstrap | Failed |" in text) is (mode == "ci-only")
     for label in visible:
         assert "| " + label + " |" in text
@@ -593,6 +594,7 @@ def test_ci_overview_reports_only_the_selected_path(tmp_path, monkeypatch, mode,
     {"CI_MODE": "unreviewed"},
     {"SOURCE_SHA": "unsafe | source"},
     {"TEST_RESULT": "untrusted | result"},
+    {"LINUX_RESULT": "untrusted | result"},
     {"WINDOWS_RESULT": "untrusted | result"},
 ])
 def test_ci_overview_does_not_publish_unsupported_values(tmp_path, monkeypatch, changes):
@@ -600,8 +602,8 @@ def test_ci_overview_does_not_publish_unsupported_values(tmp_path, monkeypatch, 
     summary.write_text("existing\n")
     values = {
         "CI_MODE": "ci-only", "SOURCE_SHA": "a" * 40,
-        "LINT_RESULT": "success", "TEST_RESULT": "success", "WINDOWS_RESULT": "success",
-        "VALIDATE_RESULT": "success",
+        "LINT_RESULT": "success", "TEST_RESULT": "success", "LINUX_RESULT": "success",
+        "WINDOWS_RESULT": "success", "VALIDATE_RESULT": "success",
         "GITHUB_STEP_SUMMARY": str(summary), **changes,
     }
     for key, value in values.items():
