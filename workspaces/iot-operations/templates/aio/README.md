@@ -6,9 +6,9 @@ Knowing which kind you are in tells you how to add to it.
 
 | Kind | Example | Shape |
 |---|---|---|
-| **Platform lifecycle** | `enablement.bicep`, `instance.bicep`, `resolve-aio.bicep` | Top-level templates a manifest step points at directly. `instance.bicep` and `resolve-aio.bicep` are dispatchers that switch on the AIO API version. |
-| **Per-API-version modules** | `modules/` | Inner modules a dispatcher routes to, one per API version. Added only where an API version genuinely diverges. |
-| **Resource catalog families** | `assets/`, `dataflows/` | A `main.bicep` routing on its provider's API version to one module per API version under the family's own `modules/`. Deployed through `manifests/aio-resources/manifest.yaml`, gated per site. |
+| **Platform lifecycle** | `enablement.bicep`, `instance.bicep`, `resolve-aio.bicep` | Templates at the top level that a manifest step points at directly. `instance.bicep` and `resolve-aio.bicep` are dispatchers that switch on the AIO API version. |
+| **Modules for each API version** | `modules/` | Inner modules a dispatcher routes to, one per API version. Added only where an API version genuinely diverges. |
+| **Resource catalog families** | `assets/`, `dataflows/` | A `main.bicep` routing on its provider's API version to one module per API version under the family's own `modules/`. Deployed through `manifests/aio-resources/manifest.yaml`, gated for each Site. |
 | **Lifecycle phases** | `upgrade/` | Templates for one operation that spans several steps, kept together rather than at the top level. |
 
 ## Platform lifecycle and dispatchers
@@ -18,8 +18,8 @@ computed, which is why an API version that diverges needs its own module
 rather than a parameter. Adding an `aioApiVersion` means updating every
 consumer that routes on it. See [aio-releases.md](../../../../docs/aio-releases.md).
 
-The read side routes on the same API version as the write side. For an
-Arc-mapped resource provider the pinned API version selects the resource shape
+The read side routes on the same API version as the write side. For a
+resource provider that Arc maps, the pinned API version selects the resource shape
 the provider projects through, so `resolve-aio.bicep` is a dispatcher rather
 than a single `existing` reference.
 
@@ -36,7 +36,7 @@ Public resource areas do not have to match deployment families. Sites select
 both in one step. The `dataflows` area and deployment family both cover
 endpoints, profiles, and dataflows.
 
-A family writes at the API version the site's release ships, matching the platform
+A family writes at the API version the Site's AIO release ships, matching the platform
 templates. The writable surface of these resources is identical across supported
 API versions today, but schema equality does not imply the provider behaves the
 same way, so the API version is not assumed to be interchangeable. Adding an API

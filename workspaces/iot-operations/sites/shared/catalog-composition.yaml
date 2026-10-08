@@ -1,4 +1,4 @@
-# Shared provider selections for the advanced resource-set sample
+# Shared provider selections for the advanced resource set sample
 
 apiVersion: siteops/v1
 kind: SiteTemplate

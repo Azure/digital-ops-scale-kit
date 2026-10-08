@@ -5,7 +5,7 @@ through `properties.resourceSets.<area>` on a Site.
 
 | Area | Contains |
 |---|---|
-| `devices/` | Device definitions and external-device assertions |
+| `devices/` | Device definitions and assertions about external devices |
 | `assets/` | Asset definitions and their provider requirements |
 | `dataflows/` | Endpoints, profiles and dataflow routes |
 
@@ -15,13 +15,13 @@ For example, `properties.resourceSets.dataflows: [basic-routing]` selects
 composing several sets. An empty list clears an inherited selection.
 
 These files describe desired workload resources. Shared defaults and
-step-output wiring remain under `parameters/`. A declaration used only by one
+wiring of step outputs remain under `parameters/`. A declaration used only by one
 sample can stay beside that sample. Promote it here when it becomes an
 intentionally shared selection, rather than maintaining two copies.
 
 Device and asset selections are separate public areas even though one
 internally ordered deployment family writes both. Collection identity,
-references and provider-owned seeds are defined by
+references and the seeds that providers own are defined by
 [`contracts/aio-catalog.yaml`](../contracts/aio-catalog.yaml).
 
 Selection applies resources, not a separate deployment package. Deselecting

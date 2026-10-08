@@ -1,7 +1,7 @@
 # resource-set-basic
 
-Start here to see a site select one reusable resource set. The committed
-`catalog-basic` site selects only `basic-routing`:
+Start here to see a Site select one reusable resource set. The committed
+`catalog-basic` Site selects only `basic-routing`:
 
 ```yaml
 properties:
@@ -13,20 +13,20 @@ properties:
 The sample deploys:
 
 1. The existing AIO instance lookup.
-2. One dataflow named `basic-routing` on the instance-owned `default` profile
-   and endpoint.
+2. One dataflow named `basic-routing` on the `default` profile and endpoint
+   that the instance owns.
 
 The dataflow reads
 `azure-iot-operations/data/siteops-samples/basic/#` and republishes messages to
-`siteops-samples/catalog-basic/basic` through the same instance-owned local
-MQTT endpoint. The destination sits outside the source wildcard, so
+`siteops-samples/catalog-basic/basic` through the same local MQTT endpoint
+that the instance owns. The destination sits outside the source wildcard, so
 republished messages do not loop.
 
-## Prepare the site
+## Prepare the Site
 
-The committed site contains placeholder identity. Create
+The committed Site contains placeholder identity. Create
 `workspaces/iot-operations/sites.local/catalog-basic.yaml` with values for the
-target cluster:
+cluster:
 
 ```yaml
 apiVersion: siteops/v1
@@ -42,11 +42,11 @@ parameters:
 For a new installation, use the [install guide](../../manifests/aio-install/README.md)
 with this same Site and assess AIO readiness before adding the workload.
 For an existing installation, set `parameters.aioInstanceName` in the overlay
-when its name differs from the Site-derived default. The instance name is a
+when its name differs from the default derived from the Site. The instance name is a
 lookup input, not a value discovered by this sample. Confirm that
 `properties.aioRelease` matches the existing installation.
 
-The committed site uses `environment=sample`, which keeps it out of ordinary
+The committed Site uses `environment=sample`, which keeps it out of ordinary
 development fleet deployments. In the GitHub Actions or Azure Pipelines
 deployment UI, select the `dev` environment. The workflow uses that environment
 for credentials and approvals and adds the sample selector automatically.
@@ -72,19 +72,19 @@ Microsoft's
 shows how to run an authenticated client inside the cluster. The
 `resource-set-samples` value of the `tests` input in the
 [E2E workflow](../../../../docs/e2e-testing.md) performs the same proof with a
-run-specific payload: it subscribes first, publishes under the sample source
+payload specific to the run: it subscribes first, publishes under the sample source
 prefix, and requires that payload at the destination.
 
 ## Remove the sample
 
 Deselecting the set stops applying it and does not delete the dataflow. Delete
-the resource explicitly, then remove the local site overlay:
+the resource explicitly, then remove the local Site overlay:
 
 ```bash
 az resource delete --ids <basic-routing-dataflow-id>
 ```
 
-Remove `sites.local/catalog-basic.yaml` when the sample site is no longer
+Remove `sites.local/catalog-basic.yaml` when the sample Site is no longer
 used.
 
 ## Authoritative resource shapes

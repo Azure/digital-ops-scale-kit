@@ -1,8 +1,8 @@
-# Common parameters applied to all steps via manifest-level parameters.
-# Auto-filtering ensures each template only receives parameters it accepts.
+# Common parameters applied to all steps through parameters at manifest level.
+# Automatic filtering ensures each template only receives parameters it accepts.
 #
 # This file lives under `parameters/common/` (not at `parameters/` root) so
-# the dir mirrors the {common, inputs, outputs, aio-releases} convention
+# the directory mirrors the {common, inputs, outputs, aio-releases} convention
 # documented in `parameters/README.md`.
 
 # ─────────────────────────────────────────────────────────────
@@ -21,7 +21,7 @@ schemaRegistryName: "{{ site.name }}-sr"
 adrNamespaceName: "{{ site.name }}-ns"
 
 # ─────────────────────────────────────────────────────────────
-# Edge Site Parameters (for edge-site templates)
+# Edge Site Parameters (for templates/edge-site)
 # ─────────────────────────────────────────────────────────────
 siteAddress:
   country: "{{ site.labels.country }}"
@@ -39,12 +39,12 @@ trustConfig:
 
 # cert-manager ownership flag. Drives both the install gate
 # (enablement.bicep) and the upgrade gate (resolve-extensions.bicep,
-# update-extensions.bicep). Sourced from site config so trust source and
+# update-extensions.bicep). Sourced from Site config so trust source and
 # cert-manager ownership remain orthogonal capabilities.
 enableCertManager: "{{ site.properties.deployOptions.enableCertManager }}"
 
 # ─────────────────────────────────────────────────────────────
-# Resource Metadata (auto-filtered per template)
+# Resource Metadata (filtered automatically for each template)
 # ─────────────────────────────────────────────────────────────
 tags:
   environment: "{{ site.labels.environment? }}"

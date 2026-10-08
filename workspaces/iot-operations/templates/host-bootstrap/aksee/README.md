@@ -1,11 +1,12 @@
 # AKS Edge Essentials bootstrap implementation
 
-The [operator guide](../../../manifests/aksee-bootstrap/README.md) owns target
+The [operator guide](../../../manifests/aksee-bootstrap/README.md) owns Site
 configuration, deployment, monitoring, recovery and the bootstrap state
 contract.
 
-This directory owns the Bicep template, implementation-local partial and
-target-delivered scripts. The public manifest adds the worker-completion wait
+This directory owns the Bicep template, the partial local to this
+implementation and the scripts delivered to the host. The public manifest adds
+the wait for worker completion
 before another operation can use the cluster.
 
 Edit the launcher and worker sources, then use the

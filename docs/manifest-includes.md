@@ -1,6 +1,6 @@
 # Manifest Includes
 
-A manifest can splice another manifest's steps into its own step list using a step-level `include:` directive. This makes one manifest viewable two ways: standalone, or as a partial composed into a larger pipeline.
+A manifest can splice another manifest's steps into its own step list using an `include:` step. This makes one manifest viewable two ways: standalone, or as a partial composed into a larger pipeline.
 
 ```yaml
 # Simplified from samples/aio-with-opc-ua/manifest.yaml, which also sets a
@@ -20,7 +20,7 @@ Include paths are resolved relative to the including manifest's directory. From 
 
 After resolution, the parent's step list is a flat sequence of every step the included manifests contribute, in declared order, interleaved with any inline steps the parent defines.
 
-The standalone-vs-partial distinction matters for composition. Compositions should include the leaf `_partial.yaml`s, not standalone `manifest.yaml`s. Standalone manifests can repeat prerequisites such as `resolve-aio`, which causes a flattened step-name collision. See [Standalone manifests vs partials](#standalone-manifests-vs-partials) and [Composing samples](../workspaces/iot-operations/samples/README.md#composing-samples).
+The difference between standalone manifests and partials matters for composition. Compositions should include the leaf `_partial.yaml`s, not standalone `manifest.yaml`s. Standalone manifests can repeat prerequisites such as `resolve-aio`, which gives two flattened steps the same name. See [Standalone manifests vs partials](#standalone-manifests-vs-partials) and [Composing samples](../workspaces/iot-operations/samples/README.md#composing-samples).
 
 ## Step shape
 
@@ -35,7 +35,7 @@ No other keys are allowed alongside `include:`. Adding `name`, `template`, `type
 
 - Paths are resolved relative to the **including manifest's directory**.
 - The resolved path must stay inside the workspace root. `../` traversal that escapes the workspace is rejected.
-- The path is static. Site-driven include paths (e.g. `samples/{{ site.properties.preferredSample }}/manifest.yaml`) are not supported.
+- The path is static. It cannot depend on Site values, such as `samples/{{ site.properties.preferredSample }}/manifest.yaml`.
 
 ## Conditional includes
 
@@ -50,13 +50,13 @@ steps:
 
 If a spliced step already has its own `when:`, the include cannot also set one. Combining two `when:` expressions is not supported. Consolidate into a single condition on either side.
 
-If the included manifest, or any manifest it includes, defines manifest-level `parameters:`, the include cannot set `when:`. Manifest-level parameters apply unconditionally to every parent step at deploy time, so a gated include contributing parameters would silently affect ungated parent steps. Either drop the include's `when:` or move parameters onto the included manifest's individual steps.
+If the included manifest, or any manifest it includes, defines `parameters:` at manifest level, the include cannot set `when:`. Parameters at manifest level apply unconditionally to every parent step at deploy time, so a gated include contributing parameters would silently affect ungated parent steps. Either drop the include's `when:` or move parameters onto the included manifest's individual steps.
 
 ## Recursive includes
 
 Includes may include further includes. Cycles are detected (a manifest cannot, directly or indirectly, include itself) and reported with the full include chain. Maximum include depth is 8.
 
-A partial shared by two siblings (A includes B and C, both B and C include D) is allowed. Cycle detection tracks the current depth-first path, not a global visited set. Step-name collisions in the resulting flat list are still rejected. Ensure shared partials contribute uniquely-named steps. This is the main reason compositions should compose `_partial.yaml` files rather than two standalone manifests that each include the same partial.
+A partial shared by two siblings (A includes B and C, both B and C include D) is allowed. Cycle detection tracks the current include chain, not a global visited set. Duplicate step names in the resulting flat list are still rejected. Ensure shared partials contribute steps with unique names. This is the main reason compositions should compose `_partial.yaml` files rather than two standalone manifests that each include the same partial.
 
 ## Step name uniqueness
 
@@ -64,10 +64,10 @@ Step names must be unique across the entire flattened pipeline (parent and all i
 
 ## Parameter merge
 
-Manifest-level `parameters:` lists merge across includes:
+`parameters:` lists at manifest level merge across includes:
 
 - The parent's `parameters:` come first.
-- Each include's manifest-level `parameters:` are appended after, in include order.
+- Each include's `parameters:` at manifest level are appended after, in include order.
 - Duplicate string paths are compared as normalized POSIX strings. Parameter
   source objects are compared by normalized `path` and `forEach`. The first
   occurrence keeps its position, and duplicate sources must declare the same
@@ -78,22 +78,22 @@ Manifest-level `parameters:` lists merge across includes:
   governed by a `ParameterComposition` contract composes by identity instead,
   and two sources writing one identity are rejected.
 
-Step-level `parameters:` (on individual steps) are not affected by include resolution. They follow the existing per-step rules.
+`parameters:` on individual steps are not affected by include resolution. They follow the existing rules for steps.
 
 `parameterCompositions:` paths also merge across includes. They are
-workspace-relative, canonicalized, and deduplicated. A gated include contributes
+relative to the workspace, canonicalized, and deduplicated. A gated include contributes
 its contracts unconditionally because the contract describes parameter
 identity and references, while rules over unselected collections bind nothing.
 
 ## Standalone manifests vs partials
 
-Any manifest can be included. When it is, top-level fields that only make sense for standalone deployment are silently ignored:
+Any manifest can be included. When it is, fields at the top level that only make sense for standalone deployment are silently ignored:
 
 - `name`, `description`, `selector`, `sites`, and `parallel` flow no further than the included file.
-- Only `steps:`, manifest-level `parameters:`, and
+- Only `steps:`, `parameters:` at manifest level, and
   `parameterCompositions:` are spliced into the parent.
 
-The convention for files authored primarily to be included is the `_` filename prefix (e.g., `_aio-fundamentals.yaml`, `_partial.yaml`). Standalone manifests such as `manifests/aio-install/manifest.yaml` exist as convenience entry points for `siteops deploy`. **Compositions should include the `_` partials, not the standalone manifests**, so that two siblings can share a common preamble without colliding on step names.
+The convention for files authored primarily to be included is the `_` filename prefix (e.g., `_aio-fundamentals.yaml`, `_partial.yaml`). Standalone manifests such as `manifests/aio-install/manifest.yaml` exist as convenient starting points for `siteops deploy`. **Compositions should include the `_` partials, not the standalone manifests**, so that two siblings can share a common preamble without colliding on step names.
 
 ## Empty includes
 
@@ -101,10 +101,10 @@ An include must contribute at least one step after recursion. Including a manife
 
 ## Output chaining across includes
 
-Step output references (`{{ steps.<name>.outputs.<field> }}`) are resolved against the post-flatten step list. A consumer can reference any other step's outputs as long as the producing step appears earlier than the consumer in the flat post-include order.
+Step output references (`{{ steps.<name>.outputs.<field> }}`) are resolved against the flattened step list. A consumer can reference any other step's outputs as long as the producing step appears earlier than the consumer in that flat order.
 
 ## See also
 
 - [manifest-reference.md](manifest-reference.md): step shapes, conditional steps, parallel execution.
-- [parameter-resolution.md](parameter-resolution.md): how parameters merge across manifest, site, and step levels.
-- [targeting.md](targeting.md): how a composed manifest's sites are selected. Partials inherit the parent's targeting.
+- [parameter-resolution.md](parameter-resolution.md): how parameters merge across manifest, Site, and step levels.
+- [targeting.md](targeting.md): how a composed manifest's Sites are selected. Partials inherit the parent's targeting.

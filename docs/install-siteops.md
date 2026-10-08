@@ -11,7 +11,7 @@ recorded dependencies. Choose the route whose requirements and provenance
 guarantees match your environment.
 
 A Site Ops release installs the engine only. Workspace content has its own
-source and version. Select a compatible approved release directly with
+source and version. Select a compatible release from an approved source with
 `--source SOURCE@RELEASE` in the [guided deployment](guided-inputs.md),
 use a [workspace pin](projects.md#run-project-pin) for repeatable fleets,
 or use a local checkout. Installing the engine does not acquire or authorize
@@ -55,8 +55,8 @@ endpoint as authority for the initial script. Later verification of the
 archive does not retroactively authenticate that script. For publisher
 provenance before any installer code runs, select the verified path. A
 checksum obtained alongside a script from the same location does not add
-independent publisher authentication. The script's approved source setup
-is always opt-in.
+independent publisher authentication. The script enrolls a source only
+when you ask it to.
 
 ### Bootstrap from HTTPS
 
@@ -164,7 +164,7 @@ The selected content release must publish `siteops-engine.json` and its
 detached proof. The bootstrap verifies that reference, displays the selected
 engine, then separately checks the exact engine bundle, proof and version
 before installation. The referenced engine may belong to an earlier release
-in the same approved source.
+in the same source repository.
 
 Direct engine installation remains available with `--release` or `-Release`,
 including older combined releases. A missing or rejected content reference
@@ -184,8 +184,8 @@ Install GitHub CLI 2.95 or newer in version 2 through an approved channel
 before any route. Some distribution packages, such as Ubuntu 24.04's, are
 older than the qualified verifier. Download the versioned script and its proof without
 executing either one. Neither public asset requires GitHub authentication.
-The verification below uses your approved source commit, not an identity
-read from the script or proof.
+The verification below uses the source commit from your reviewed release
+instructions, not an identity read from the script or proof.
 
 Linux:
 
@@ -300,7 +300,7 @@ already meet the supported versions are retained.
 ### Azure Cloud Shell and Codespaces
 
 Azure Cloud Shell provides `curl`, GitHub CLI and Azure CLI. The bootstrap
-acquires pinned native uv when needed and provisions uv-managed Python,
+acquires pinned native uv when needed and provisions Python managed by uv,
 without requiring a system Python, pipx or virtualenv installation.
 On every host it makes no OS package changes and fails with a remedy if
 `curl` or GitHub CLI is missing. It reports a missing Azure CLI without
@@ -321,7 +321,7 @@ it, so the system temporary directory is not used. The directory must be
 private to the current user, and its ancestors must not be untrusted or
 symlinked. Ancestors may be writable by your own user private group, as
 with the common `0002` login umask, but not by other users or shared groups.
-If your XDG data path is shared, select a private user-owned location with
+If your XDG data path is shared, select a private location that you own with
 trusted ancestors before installing. The script rejects an unsafe root
 before choosing a retained uv executable or reading cached assets.
 The Windows bootstrap checks the same boundary for its
@@ -335,9 +335,9 @@ change permissions on them. Standard Program Files installations and
 installations for a single user qualify. Shims in shared locations do not.
 Site Ops turns off GitHub CLI telemetry for the commands it runs. It also
 checks the complete path and ACL of selected uv tools, ordinary uv storage
-and concrete uv-managed Python before running them. Existing qualified uv
+and the concrete Python that uv manages before running them. Existing qualified uv
 0.12.20 is reused when its executable bytes and path pass admission.
-Otherwise the script acquires the checksum-pinned native archive into a
+Otherwise the script acquires the native archive pinned by checksum into a
 protected Site Ops tooling cache without changing another uv installation.
 When no uv is on `PATH`, both scripts also place the pinned uv in your
 ordinary command directory for later `uv tool uninstall siteops`. Both
@@ -371,11 +371,11 @@ accepted only from your own user private group. Directories writable by
 other users or shared groups are refused rather than having their
 permissions changed automatically. Select protected storage after reviewing
 the access needed by other applications.
-Sign in to Azure explicitly when needed. Its local k3d cluster is not an
-Arc-connected target until you connect it separately with authorization.
+Sign in to Azure explicitly when needed. Its local k3d cluster is not
+connected to Azure Arc until you connect it separately with authorization.
 For both hosted journeys, installing the CLI is only the first step: obtain
-an approved workspace and review a plan before deploying to an existing
-Arc-connected cluster.
+a workspace from an approved source and review a plan before deploying to
+an existing cluster connected to Azure Arc.
 
 The script verifies `siteops` inside its child shell and prints its
 `Command directory:` on success. If `siteops` is not on the parent shell's
@@ -404,7 +404,7 @@ centrally managed.
 |---|---|---|
 | Platform | Windows x64, or x64 Linux based on glibc such as Ubuntu 24.04, Ubuntu 26.04 or Azure Cloud Shell | Bootstrap |
 | Native manager | uv 0.12.20 from an approved channel. The bootstrap acquires a copy pinned by checksum when no qualified uv is on `PATH`. | Release wheel |
-| Python | uv-managed CPython. uv provisions 3.11.16 when needed, without a system Python installation. | Both routes, with no separate installation |
+| Python | CPython managed by uv. uv provisions 3.11.16 when needed, without a system Python installation. | Both routes, with no separate installation |
 | Package feed | An approved index that serves the required runtime wheels. Configure it in uv. | Online release wheel |
 | GitHub CLI | Version 2.95.0 or newer in the 2.x release line | Bootstrap, and Site Ops verification of published workspace content. No login. |
 
@@ -487,11 +487,11 @@ before switching between online and verified routes.
 
 ## Install the verified bundle
 
-Use either bootstrap entry above. Both authenticate `siteops-install.zip`
+Use either bootstrap route above. Both authenticate `siteops-install.zip`
 against its detached proof before extracting the installer helper. For
 provenance before the first script runs, choose
 [Verify the bootstrap script](#verify-the-bootstrap-script).
-An environment with centrally provisioned tools uses that same entry.
+An environment with centrally provisioned tools uses that same route.
 
 ### Release assets
 
@@ -502,7 +502,7 @@ An environment with centrally provisioned tools uses that same entry.
 
 Each asset has its own detached proof, `<asset>.attestation.jsonl`.
 Releases with `siteops-bootstrap.sh` and `siteops-bootstrap.ps1` also provide
-a proof for each script. Both bootstrap entry routes run the same platform
+a proof for each script. Both bootstrap routes run the same platform
 script and consume the authenticated archive.
 
 Use the script and engine ZIP from the same release. The script verifies
@@ -511,7 +511,8 @@ The helper cannot select the publisher or authorize its own archive.
 
 The ZIP contains the engine wheel, all recorded runtime dependency wheels,
 `pylock.toml` and the shared installer helper. The helper checks the complete
-payload before calling native uv with offline, no-index and no-build options,
+payload before calling native uv with its `--offline`, `--no-index` and
+`--no-build` options,
 then checks the installed application bytes and runtime binding. A raw
 `uv tool install --with-requirements pylock.toml` command is not a substitute
 for those checks. Keep the producer's lock unchanged.
@@ -521,7 +522,7 @@ It runs a fresh helper from the authenticated archive, not an unchecked
 retained copy. You do not separately download the standalone wheel or its
 proof for this route.
 
-### Publisher and managed-environment policy
+### Publisher and managed environment policy
 
 The expected repository, source ref, source commit, signing workflow, caller
 and runner class come from your approved release selection. Downloaded
@@ -534,13 +535,13 @@ an official release.
 
 GitHub CLI verifies the signing chain and file digest. The bootstrap also
 checks the source, signer, caller and runner fields before extraction.
-`--bundle` reads the detached proof without a GitHub login. Trusted-root
-refresh can still use the network. Verification establishes origin and
+`--bundle` reads the detached proof without a GitHub login. Refreshing the
+trusted root can still use the network. Verification establishes origin and
 integrity, not the absence of defects.
 
 Application installation uses only admitted bundle wheels, but the bootstrap
 is not a fully offline installer. Runtime or tool acquisition, release
-downloads and trusted-root refresh can require network access. A managed
+downloads and trusted root refresh can require network access. A managed
 environment must approve those channels and storage locations before use.
 If its policy cannot permit them, stop and use an independently approved
 managed distribution rather than bypassing verification.
@@ -562,8 +563,8 @@ directory to `PATH`, then open a new terminal. A successful installation
 message is not proof that `PATH` resolves to that command: check
 `siteops --version` after any installation change.
 
-Before using published content, approve its source once. Run the same
-command again to renew the 30 day approval:
+Before using published content, enroll its source once. Run the same
+command again to renew the 30 day enrollment:
 
 ```text
 siteops source enroll official
@@ -589,7 +590,7 @@ installation. Neither route follows `latest` automatically.
 | Move an online uv installation to a verified one | Use the selected bootstrap with `--replace` or `-Replace`. |
 | Move a verified installation to an online one | Review the different dependency and provenance guarantees, then use the exact wheel command with `--reinstall`. |
 | Remove Site Ops | `uv tool uninstall siteops` |
-| Renew the content source approval | `siteops source enroll official`, using the name you enrolled. Rerunning the bootstrap with `--enroll-source` or `-EnrollSource` also renews it. |
+| Renew the content source enrollment | `siteops source enroll official`, using the name you enrolled. Rerunning the bootstrap with `--enroll-source` or `-EnrollSource` also renews it. |
 
 The bootstrap leaves a matching, validated installation unchanged.
 Replacement uses native uv and the selected admitted runtime. It does not
@@ -611,8 +612,8 @@ Installation behavior:
   before using `uv tool uninstall siteops`, then reinstall from the approved
   release. Installation does not silently remove those files.
 - Native `uv tool upgrade` and an online reinstall do not perform the
-  bootstrap's publisher and payload checks. Use the verified entry for
-  verified maintenance.
+  bootstrap's publisher and payload checks. Use the verified bootstrap route
+  for verified maintenance.
 - Confirm `siteops --version` and command ownership after a reported failure.
 - Interruption is not a transaction. Forced process termination, power loss, or
   storage failure is not a guaranteed rollback.
@@ -632,7 +633,7 @@ uv owns application environments, Python installations and command exposure.
 The bootstrap honors admitted `UV_TOOL_DIR`, `UV_TOOL_BIN_DIR` and
 `UV_PYTHON_INSTALL_DIR` locations. These may be shared with other uv tools.
 Uninstalling Site Ops does not authorize deleting shared uv storage, runtimes,
-tooling or source approvals. Diagnostics can contain local paths and
+tooling or approved sources. Diagnostics can contain local paths and
 environment detail. Keep them private and review them before sharing.
 
 ## Common problems
@@ -650,8 +651,9 @@ environment detail. Keep them private and review them before sharing.
 | The tool has unrecognized Python startup files | Inspect the environment before using native uninstall. Rerun the approved bootstrap after removing the tool with its manager. |
 | A retained bundle fails validation | Preserve it for private inspection. Acquire the selected release again in an approved private location rather than editing the lock or wheels. |
 
-## Supported targets
+## Supported platforms
 
 Each Site Ops release qualifies both installation paths on Windows and Linux
-across CPython 3.10 through 3.14 before publication. PyPy, free-threaded Python,
-musl-based Linux, macOS, and ARM are outside the supported matrix.
+across CPython 3.10 through 3.14 before publication. PyPy, Python builds with
+free threading, Linux distributions based on musl, macOS, and ARM are outside
+the supported matrix.

@@ -1,5 +1,5 @@
-# Base site template for IoT Operations deployments
-# All sites inherit from this to get consistent defaults
+# Base Site template for IoT Operations deployments
+# All Sites inherit from this to get consistent defaults
 
 apiVersion: siteops/v1
 kind: SiteTemplate
@@ -9,11 +9,11 @@ labels:
   managedBy: siteops
 
 properties:
-  # AIO version (release moniker) - determines extension versions
-  # See: parameters/aio-releases/ for available releases
+  # AIO release, which determines extension versions
+  # See: parameters/aio-releases/ for available AIO releases
   aioRelease: "2608"
 
-  # Deployment options - control which components are deployed
+  # Deployment options: control which components are deployed
   deployOptions:
     enableGlobalSite: false      # Subscription-scoped edge site
     enableEdgeSite: false        # RG-scoped edge site
@@ -31,8 +31,8 @@ parameters:
   # AKS Edge Essentials host bootstrap defaults
   aksee:
     # MSI the bootstrap installs. Default is the latest K3s build. Override
-    # per-site with a versioned MSI URL (Microsoft Download Center) to pin a
-    # specific AKS Edge Essentials release.
+    # for each Site with a versioned MSI URL (Microsoft Download Center) to pin a
+    # specific AKS EE release.
     aksEdgeMsiUrl: "https://aka.ms/aks-edge/k3s-msi"
     # Optional target Kubernetes minor version for the aksee-upgrade worker
     # (e.g. "1.33"). Empty means no explicit target.

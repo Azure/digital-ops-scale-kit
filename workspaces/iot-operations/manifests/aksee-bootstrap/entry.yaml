@@ -4,13 +4,13 @@ role: standalone
 category: core
 tags: [host, windows, aksee, bootstrap]
 documentation: [README.md]
-outcome: Bootstrap an AKS Edge Essentials cluster through an Arc-enabled Windows host.
+outcome: Bootstrap an AKS Edge Essentials cluster through a Windows host connected to Azure Arc.
 prerequisites:
-  - An Arc-enabled Windows host meeting the guide's requirements, with the required managed-identity permissions and resource providers.
-  - Explicit host and cluster configuration, target-side installer review and approval for reboots.
+  - A Windows host connected to Azure Arc that meets the guide's requirements, with the required managed identity permissions and resource providers.
+  - Explicit host and cluster configuration, review of the installer on the host, and approval for reboots.
 effects:
   - Delivers a privileged host worker through Arc Run Command and can reboot the machine.
   - The parent waits on worker state. Launcher completion is not worker completion, and the wait does not compare run IDs.
 removal:
-  - Use the operator guide's phase-specific remediation and cleanup. Do not treat reapplication as a general rollback.
-coverage: Host-operation synopsis, not artifact qualification or a complete input contract. Installer identity, host health and downstream AIO health require their separate evidence.
+  - Use the operator guide's remediation and cleanup for each phase. Do not treat reapplication as a general rollback.
+coverage: Synopsis of the host operation. Installer identity, host health and downstream AIO health each need their own checks.

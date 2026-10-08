@@ -13,13 +13,13 @@ deployment.
 | Task | Guide |
 |---|---|
 | Install an identified Site Ops release | [Install Site Ops](install-siteops.md) |
-| Deploy AIO to one explicit target | [Guided inputs](guided-inputs.md) |
+| Deploy AIO to one existing cluster | [Guided inputs](guided-inputs.md) |
 | Install AIO and enable Secret Sync together | [Combined installation](guided-inputs.md#install-aio-with-secret-sync) |
-| Enable Secret Sync on an existing AIO instance | [Existing-instance inputs](guided-inputs.md#enable-secret-sync-on-an-existing-instance) |
+| Enable Secret Sync on an existing AIO instance | [Inputs for an existing instance](guided-inputs.md#enable-secret-sync-on-an-existing-instance) |
 | Deploy AIO with a configured example Site | [Local checkout guide](getting-started.md) |
-| Configure and inspect a deployment target | [Site configuration](site-configuration.md) |
+| Configure and inspect a Site | [Site configuration](site-configuration.md) |
 | Understand the included AIO content | [IoT Operations workspace](../workspaces/iot-operations/README.md) |
-| Find and inspect deployment choices | [Browse deployment content](browse-content.md) |
+| Find and inspect deployment choices | [Browse manifests](browse-content.md) |
 | Browse a published source without cloning | [Remote content indexes](remote-content.md) |
 | Use typed answers or a complete Site file | [Guided inputs](guided-inputs.md) |
 | Use configured Sites with packaged or local content | [Operator projects](projects.md) |
@@ -27,10 +27,10 @@ deployment.
 | Diagnose a failed command or provider operation | [Troubleshooting](troubleshooting.md) |
 | Fix an installation problem | [Installation problems](install-siteops.md#common-problems) |
 
-Installing the CLI does not acquire a workspace or approve a source. Follow
+Installing the CLI does not acquire a workspace or enroll a source. Follow
 the selected release's installation and source instructions. With a compatible
-published workspace and an independently approved consumer alias, begin
-without pinning a project or writing an answer file:
+published workspace and an approved source that you enrolled independently,
+begin without pinning a project or writing an answer file:
 
 ```text
 siteops deploy aio-install --source "official@<release>" --input "cluster=<Arc-cluster-resource-ID>"
@@ -38,24 +38,24 @@ siteops deploy aio-install --source "official@<release>" --input "cluster=<Arc-c
 
 This private interactive command prepares, reviews, confirms and executes
 one plan. Use `--yes` only for explicitly authorized unattended execution.
-The target read and deployment still require your Azure identity. A local
+The cluster read and deployment still require your Azure identity. A local
 checkout uses `-w`, while [operator projects](projects.md) add configured
-Sites, fleet selection and optional offline-content reuse.
+Sites, fleet selection and optional reuse of offline content.
 
 ## Prepare and run deployments
 
 For configured Sites, fleets and deeper inspection, choose the reference
 you need. These are not prerequisites for the direct deployment above:
 
-1. Use [site configuration](site-configuration.md) to inspect inheritance and
+1. Use [Site configuration](site-configuration.md) to inspect inheritance and
    overlays.
-2. Use [site targeting](targeting.md) to select one site or a fleet.
+2. Use [Site targeting](targeting.md) to select one Site or a fleet.
 3. Use the [manifest reference](manifest-reference.md) to understand the
    ordered operations.
 4. Use [deployment plan output](plan-output.md) for a separate optional
    executable preview without deployment writes.
 5. Use [deployment run output](run-output.md) to interpret results,
-   interruption, temporary files, and publication-safe output.
+   interruption, temporary files, and output that is safe to publish.
 
 For advanced authoring:
 
@@ -64,7 +64,7 @@ For advanced authoring:
 - [Parameter resolution](parameter-resolution.md) covers merge order,
   template variables, and output chaining.
 
-`validate` is compile-free structural checking without target reads. `plan`
+`validate` checks structure without compiling or reading Azure resources. `plan`
 adds compilation and local capability preflight, with authorized prerequisite
 reads when you supply typed resource IDs. `deploy` performs provider operations. Neither a
 valid plan nor a successful resource deployment establishes workload
@@ -81,19 +81,19 @@ readiness.
 | Enable and operate Secret Sync | [Secret Sync](secret-sync.md) |
 | Start from a deployable example | [Workspace samples](../workspaces/iot-operations/samples/README.md) |
 
-These pages describe workspace content. The Site Ops engine remains
-content-agnostic.
+These pages describe workspace content. The Site Ops engine does not depend
+on any particular content.
 
 ## Automate and qualify
 
 | Task | Guide |
 |---|---|
 | Configure OIDC, protected environments, overrides, and deployment workflows | [CI/CD setup](ci-cd-setup.md) |
-| Run selected live-subscription scenarios | [End-to-end testing](e2e-testing.md) |
+| Run selected scenarios in a live subscription | [E2E testing](e2e-testing.md) |
 | Publish private and public plan or run output safely | [Plan output](plan-output.md) and [run output](run-output.md) |
 
 Hosted tests establish only the assertions selected by that workflow run.
-They do not certify an arbitrary target, deployment, or AIO workload as ready
+They do not certify an arbitrary Site, deployment, or AIO workload as ready
 for production.
 
 ## Upgrade, release, or contribute
@@ -102,7 +102,7 @@ for production.
 |---|---|
 | Update an existing workspace to the current preview contract | [Migration guide](migrating.md) |
 | Prepare and publish a Scale Kit or Site Ops release | [Release guide](releasing.md) |
-| Build a complete workspace content artifact | [Workspace packages](workspace-packages.md) |
+| Build a complete workspace package | [Workspace packages](workspace-packages.md) |
 | Identify workspace packages within a release | [Workspace release sources](workspace-sources.md) |
 | Understand publisher policy and artifact evidence | [Artifact verification](artifact-verification.md) |
 | Understand repository and workspace boundaries | [Repository and workspace guide](repository-guide.md) |
@@ -112,12 +112,15 @@ for production.
 
 | Term | Meaning |
 |---|---|
-| **Site Ops** | The generic CLI and orchestration engine under `siteops/` |
-| **Workspace** | A directory containing sites, manifests, parameters, and templates, with optional contracts, samples, and local overlays |
-| **Site** | A deployable target with subscription, optional resource group, location, labels, parameters, and properties |
+| **Site Ops** | The deployment orchestration engine, installed independently. The command is `siteops` |
+| **Scale Kit** | The content component: manifests, templates, parameters, Sites and samples |
+| **Package** | The signed form in which a publisher distributes workspace content |
+| **Approved source** | A publisher you enrolled with `siteops source enroll`, selected by name |
+| **Workspace** | A directory containing Sites, manifests, parameters, and templates, with optional contracts, samples, and local overlays |
+| **Site** | One deployment target with subscription, optional resource group, location, labels, parameters, and properties |
 | **Project** | An operator directory containing Site configuration and an optional workspace pin |
-| **SiteTemplate** | A reusable site base referenced through `inherits:` and not deployed directly |
-| **Manifest** | An ordered set of operations with site targeting and parameter sources |
+| **SiteTemplate** | A reusable Site base referenced through `inherits:` and not deployed directly |
+| **Manifest** | An ordered set of operations with Site targeting and parameter sources |
 | **Partial** | A manifest intended for `include:` composition, conventionally named with a leading underscore |
 | **Plan** | The prepared operation set produced without Azure or Kubernetes mutation |
 | **Run result** | The final account of attempted, skipped, incomplete, and unconfirmed operations |

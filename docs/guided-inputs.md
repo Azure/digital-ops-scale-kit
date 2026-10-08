@@ -1,7 +1,7 @@
 # Deploy AIO with guided inputs
 
-Deploy Azure IoT Operations to one existing Arc-connected cluster with a
-single command. Site Ops builds one explicit Site in memory from typed
+Deploy Azure IoT Operations to one existing cluster connected to Azure Arc
+with a single command. Site Ops builds one explicit Site in memory from typed
 answers, without a project pin, saved Site, generated answer file or
 separate plan command.
 
@@ -9,40 +9,40 @@ separate plan command.
 |---|---|
 | Install AIO on an existing Arc cluster | [AIO installation](#install-aio-from-an-existing-cluster) |
 | Install AIO and enable Secret Sync together | [Combined installation](#install-aio-with-secret-sync) |
-| Enable Secret Sync without reinstalling AIO | [Existing-instance enablement](#enable-secret-sync-on-an-existing-instance) |
+| Enable Secret Sync without reinstalling AIO | [Enablement on an existing instance](#enable-secret-sync-on-an-existing-instance) |
 
 Install a compatible Site Ops build and select a release containing the
 complete AIO workspace and its typed input contract. The source and release
-come from your selected release instructions. `official` is the name you
-enrolled with `siteops source enroll official`, not an approval supplied by
+come from your selected release instructions. `official` is the approved source you
+enrolled with `siteops source enroll official`, not authority supplied by
 the package. See [approved sources](projects.md#use-an-approved-source).
 Independent `--trust-policy` and `--trusted-root` files can select a
-provider locator instead. Source approval does not sign in to Azure or
-approve deployment.
+source repository directly instead. Enrolling a source does not sign in to
+Azure or confirm deployment.
 
 Existing local `-w` workspaces and configured Sites remain supported. There
 is no required migration to a project pin or typed answers. Use
 `siteops inputs` when a manifest declares a typed contract and you want one
 explicit Site without first configuring it. Do not combine `--input-file`, `--input`
-or `--site-file` targeting with a configured-Site `-l` selector. Saved Sites
+or `--site-file` targeting with an `-l` selector for configured Sites. Saved Sites
 can later be selected with the same explicit fleet selectors as before.
 
 ## Install AIO from an existing cluster
 
-The existing Arc cluster resource ID is the only required target answer
-for the guided AIO installation. Replace the placeholder and run:
+The existing Arc cluster resource ID is the only required answer for the
+guided AIO installation. Replace the placeholder and run:
 
 ```text
 siteops deploy aio-install --source "official@<release>" --input "cluster=<Arc-cluster-resource-ID>"
 ```
 
 In a private TTY, deploy shows the validated resource IDs and prepares one
-executable plan with each target's subscription, resource group and operations.
+executable plan with each Site's subscription, resource group and operations.
 It asks for confirmation, then executes that same plan. For JSON,
 CI or any noninteractive invocation, add `--yes` to authorize execution
 explicitly. Without it the command stops with a usage error before content
 or Azure access. The cluster and resource group must already exist. The
-declared resource-ID answer authorizes bounded reads using your Azure CLI
+declared resource ID answer authorizes bounded reads using your Azure CLI
 identity to derive subscription, resource group, region and cluster name.
 An explicit manual value must agree with those facts. Deployment can create
 or update resources and incur charges. To check the deployed AIO services
@@ -54,14 +54,14 @@ For a separate executable preview, run:
 siteops plan aio-install --source "official@<release>" --input "cluster=<Arc-cluster-resource-ID>"
 ```
 
-Add `--describe` for the compile-free plan shape. A separate plan never
+Add `--describe` to see the plan shape without compiling. A separate plan never
 authorizes a later deploy: deploy builds a fresh plan. Direct `--source`
 requires an explicit published release and online source resolution, even
 when verified package bytes can be reused from cache. If the release contains
 several workspaces, global `-w` selects a relative workspace path inside
 that source, not a local directory. Global `--project` can supply your
 configured Sites without changing its existing pin. A
-[project pin](projects.md#run-project-pin) is optional for this single target
+[project pin](projects.md#run-project-pin) is optional for this single Site
 and useful for repeatable fleets or `--offline-content`.
 
 Site Ops generates a stable name from a lowercase cluster prefix and a hash
@@ -108,7 +108,7 @@ Supply the completed file to deploy with the same interactive review:
 siteops deploy aio-install --source "official@<release>" --input-file ./aio-inputs.yaml
 ```
 
-For an optional inspection-only preview, run
+For an optional preview that only inspects, run
 `inputs aio-install --source "official@<release>" --input-file ./aio-inputs.yaml --read-resources`.
 Only `inputs` requires that flag to authorize an Azure read while previewing
 or saving.
@@ -131,15 +131,15 @@ rejected. Duplicate and unknown answer names fail.
 
 The ID must identify an existing
 `Microsoft.Kubernetes/connectedClusters` resource. Site Ops checks its
-type and identity, reads its region, and derives the four target values
+type and identity, reads its region, and derives the four Site values
 before calling the normal planner. A supplied manual value must agree
 with the observed resource. The read uses your existing Azure CLI
-identity and fails if that identity cannot access the target. Site Ops
+identity and fails if that identity cannot access the cluster. Site Ops
 does not sign you in, change accounts or grant permissions. It reads
 again for the separate deploy invocation rather than treating a
 previous plan's observation as current.
 `--offline-content` on a pinned project restricts source content acquisition,
-not Azure target reads or deployment. Direct `--source` instead requires
+not Azure resource reads or deployment. Direct `--source` instead requires
 online release resolution, even if its verified content is already cached.
 
 ## Install AIO with Secret Sync
@@ -162,11 +162,11 @@ a different resource group. Omit it to create a new vault. A successful
 resource read establishes those reported settings at that moment, not
 cluster readiness, federation success or secret materialization.
 
-## Manual targets without resource reads
+## Manual Site values without resource reads
 
 Omit `cluster` and provide `siteName`, `subscription`, `resourceGroup`,
 `location` and `clusterName` instead. Use the same inline or file route
-without an Azure target read. Name, environment and country overrides follow
+without an Azure resource read. Name, environment and country overrides follow
 the same validation rules, and the labels remain optional. The manual route
 does not establish Azure resource existence or enable guided Secret Sync,
 which requires observed cluster prerequisites.
@@ -188,7 +188,7 @@ siteops deploy secretsync --source "official@<release>" --input "instance=<AIO-i
 custom location and that location's Arc cluster. The related resources
 must remain in the instance's subscription and resource group. OIDC issuer
 and workload identity must already be enabled. Unsupported relationships,
-conflicting target values or missing prerequisites fail before deployment.
+conflicting Site values or missing prerequisites fail before deployment.
 The reads do not enable cluster features or grant roles.
 
 The plan contains only instance resolution and Secret Sync enablement.
@@ -231,16 +231,16 @@ checks and the [Secret Sync guidance](secret-sync.md) for those outcomes.
 
 A repeated deploy can perform provider writes. Site Ops does not roll back
 or delete resources automatically after failure. Review the retained
-deployment result and target state before retrying. For a disposable demo,
+deployment result and the current resource state before retrying. For a disposable demo,
 plan cleanup of the created Azure resources and Kubernetes objects without
 deleting the existing cluster or resources owned by others.
 
 ## Deploy a selected AIO release to each cluster
 
 `aioRelease` is a typed answer mapped to the selected Site's
-`properties.aioRelease`. The bundled IoT Operations workspace supplies
-release configurations for `2607` and `2608`, with `2608` as the current
-default. To use different releases without saving Site files, prepare and
+`properties.aioRelease`. The packaged IoT Operations workspace supplies
+AIO release configurations for `2607` and `2608`, with `2608` as the current
+default. To use different AIO releases without saving Site files, prepare and
 deploy each existing Arc cluster in a separate invocation:
 
 ```text
@@ -251,16 +251,16 @@ siteops deploy aio-install --source "official@<release>" --input siteName=plant-
 Replace the two placeholders with the full ARM IDs of two different
 connected clusters, each in its own resource group.
 Each command constructs one Site in memory and selects the corresponding
-release parameters from the verified workspace. Each deploy reviews its own
+AIO release parameters from the verified workspace. Each deploy reviews its own
 plan. These examples leave Secret Sync disabled.
 Run `aio-upgrade`, not `aio-install`, to change an existing installation's
-release.
+AIO release.
 
 ## Keep a Site for later
 
-For repeatable configured-Site and fleet workflows, first
+For repeatable workflows with configured Sites and fleets, first
 [pin a reviewed release](projects.md#run-project-pin) in `./factory`
-and select its `official` approval. To retain resolved configuration, create
+and select its `official` approved source. To retain resolved configuration, create
 the project's `sites` directory
 and run `inputs` with a completed answer file. When that file contains an Arc
 cluster ID, authorize its resource read while saving:
@@ -278,9 +278,9 @@ Site inventory, it checks the new name and path against configured Sites
 before writing. Files saved inside a configured Site directory need a
 lowercase `.yaml` or `.yml` suffix so the inventory can discover them.
 A Site saved outside that inventory remains available by explicit path.
-An inline target remains in memory unless you explicitly choose `--save-site`.
+An inline Site remains in memory unless you explicitly choose `--save-site`.
 Saving a Site built from resource observations does not store the
-observations or re-check their prerequisites on later `--site-file` use.
+observations or recheck their prerequisites on later `--site-file` use.
 If you retain the generated name, use the name shown by the input preview
 as the Site filename and selector. Without an environment label, the saved
 Site does not match the manifest's default `environment=dev` selector.
@@ -312,8 +312,8 @@ values:
 The original file may have `enableSecretSync: true` and an
 `existingVault`. Copying it and overriding only `enableSecretSync=false`
 is invalid because `existingVault` is then inactive. The separate
-file contains no first-cluster identity or conditional vault input.
-The four required target fields derived from `cluster` are omitted,
+file contains no identity of the first cluster or conditional vault input.
+The four required Site fields derived from `cluster` are omitted,
 so each authorized read supplies the new cluster's facts:
 
 ```text
@@ -322,8 +322,8 @@ siteops --approved-source official --project ./factory inputs aio-install --inpu
 siteops --approved-source official --project ./factory plan aio-install -l name=plant-two,name=plant-three
 ```
 
-The two-name selector bounds this plan to new Sites and excludes
-plant-one. Review the target count and names before using the same
+The selector with two names bounds this plan to new Sites and excludes
+plant-one. Review the Site count and names before using the same
 selector with `deploy`. Reapplying `aio-install` to a cluster that already
 runs AIO can overwrite settings managed by the operator. To target three
 or four new clusters instead, save more Sites from the fleet file
@@ -331,7 +331,7 @@ and include only their names. The manifest permits
 three concurrent Sites by default. For four concurrent Sites, pass
 `--parallel 4` to both plan and deploy. Use a label such as
 `environment=dev` only after confirming that it selects precisely the
-new cohort and excludes plant-one. `parallel` limits concurrent work,
+new Sites and excludes plant-one. `parallel` limits concurrent work,
 not the number of Sites selected. Saved Sites do not repeat guided
 OIDC and workload identity checks when Secret Sync is enabled.
 
@@ -345,7 +345,7 @@ siteops --approved-source official --project ./factory deploy aio-install -l env
 ```
 
 `-l environment=dev` selects every configured Site labeled `dev`, including
-Sites that already run AIO. Review the exact target names and operations in
+Sites that already run AIO. Review the exact Site names and operations in
 the plan and the `aioRelease` value in each selected Site before deploying.
 For only two or three new clusters, use the
 bounded `name=` selector above so a previously deployed Site is not
@@ -353,8 +353,8 @@ reinstalled.
 
 An explicit Site replaces the manifest's default selector or `sites:` list.
 Combining `--site-file`, `--input-file`, or `--input` with `-l` fails rather than
-joining another target. If an entry does not declare an input contract,
-use a complete Site file or the configured-Site workflow. `browse` remains
+joining another Site. If a manifest does not declare typed inputs,
+use a complete Site file or the workflow for configured Sites. `browse` remains
 descriptive: it never treats authored guidance as an executable input schema.
 
 For fleet deployments, use [project Sites](projects.md) and

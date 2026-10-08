@@ -8,9 +8,9 @@ This operation does not install AIO or implicitly enable Secret Sync.
 
 Confirm the Site's subscription, resource group and AIO release. Supply
 `parameters.aioInstanceName` when the existing instance does not use the
-Site-derived naming convention.
+naming convention derived from the Site.
 
-Select named files from the [resource-set library](../../resource-sets/README.md):
+Select named files from the [resource set library](../../resource-sets/README.md):
 
 ```yaml
 properties:
@@ -21,9 +21,9 @@ properties:
 
 Omitting an area preserves any inherited selection. An explicit empty list
 clears it. Selected collections come from their declaration files, not
-`site.parameters` or step-level replacements.
+`site.parameters` or replacements at step level.
 See [composition](../../../../docs/resource-catalog.md) for advanced references
-and external-provider assertions.
+and assertions about external providers.
 
 ## Review and deploy
 
@@ -42,13 +42,13 @@ dataflows. An unselected family is skipped.
 
 The deployment creates or updates selected resources using the intended Azure
 identity. Read permissions, ARM deployment permissions and the applicable
-child-resource write permissions are required. Resource use can incur costs.
+write permissions for child resources are required. Resource use can incur costs.
 
 Inspect the provider and workload state after deployment. A successfully
 applied declaration does not establish data movement. The
-[basic-routing example](../../samples/resource-set-basic/README.md) includes a
+[basic routing example](../../samples/resource-set-basic/README.md) includes a
 separate MQTT canary procedure.
 
-Removing an entry or deselecting a set stops applying it. It does not delete
+Removing an item or deselecting a set stops applying it. It does not delete
 previously created resources. Delete those resources deliberately, accounting
 for their dependencies and ownership.

@@ -1,4 +1,4 @@
-# Advanced resource-set composition sample site
+# Advanced resource set composition sample Site
 
 apiVersion: siteops/v1
 kind: Site

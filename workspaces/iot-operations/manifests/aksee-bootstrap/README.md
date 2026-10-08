@@ -1,10 +1,10 @@
 # AKS Edge Essentials host bootstrap
 
-Takes a freshly Arc-onboarded Windows VM through:
+Takes a Windows VM freshly onboarded to Azure Arc through:
 
-- AKS Edge Essentials install (MSI + Hyper-V, including the reboot)
-- Single-node K3s cluster deployment
-- Cluster Arc-connect with custom locations enabled (OIDC issuer + workload identity opt-in)
+- AKS EE install (MSI + Hyper-V, including the reboot)
+- K3s cluster deployment on a single node
+- Cluster connection to Azure Arc with custom locations enabled (OIDC issuer and workload identity optional)
 
 After this completes, the cluster satisfies the AIO prerequisites and the existing AIO deploy chain runs against it.
 
@@ -16,23 +16,23 @@ administrator session on the VM.
 
 ## How it composes
 
-Three entry shapes:
+Three ways to run it:
 
-| Entry | Use |
+| Manifest | Use |
 |---|---|
-| `manifests/aksee-bootstrap/manifest.yaml` | Standalone host bootstrap. Stops after the cluster is Arc-connected and prepared for AIO deployment. |
-| `templates/host-bootstrap/aksee/_partial.yaml` | Internal partial co-located with this implementation. Composed by the standalone above and by compositions like the next row. |
-| `samples/aio-with-aksee-bootstrap/manifest.yaml` | End-to-end bare VM to AIO in one deploy. Composes the partial above plus `_aio-fundamentals.yaml`. |
+| `manifests/aksee-bootstrap/manifest.yaml` | Standalone host bootstrap. Stops after the cluster is connected to Azure Arc and prepared for AIO deployment. |
+| `templates/host-bootstrap/aksee/_partial.yaml` | Internal partial kept with this implementation. Composed by the standalone above and by compositions like the next row. |
+| `samples/aio-with-aksee-bootstrap/manifest.yaml` | From a bare VM to AIO in one deploy. Composes the partial above plus `_aio-fundamentals.yaml`. |
 
-## Prerequisites per target VM (one-time)
+## Prerequisites for each VM (once)
 
-### 1. Server is Arc-connected
+### 1. Server is connected to Azure Arc
 
-The VM must already be Arc-onboarded as a `Microsoft.HybridCompute/machines` resource before the bootstrap runs. Use the [official onboarding flow](https://learn.microsoft.com/azure/azure-arc/servers/onboard-portal) or your existing onboarding script. The bootstrap targets the VM by its Arc machine name.
+The VM must already be onboarded to Azure Arc as a `Microsoft.HybridCompute/machines` resource before the bootstrap runs. Use the [official onboarding flow](https://learn.microsoft.com/azure/azure-arc/servers/onboard-portal) or your existing onboarding script. The bootstrap finds the VM by its Arc machine name.
 
 ### 2. Grant the Arc machine identity access to the resource group
 
-The bootstrap uses no service principal. The worker authenticates as the Arc machine's system-assigned managed identity for everything it does in Azure: the Phase 3 Arc-connect, the AIO feature enablement, and the Phase 99 state-tag write. Grant that identity access on the target resource group, either `Contributor` (simplest) or, for least privilege, `Kubernetes Cluster - Azure Arc Onboarding` (connect + enable-features) plus `Tag Contributor` (for the `Microsoft.Resources/tags/write` the tag needs).
+The bootstrap uses no service principal. The worker authenticates as the Arc machine's system-assigned managed identity for everything it does in Azure: the Phase 3 Arc connection, the AIO feature enablement, and the Phase 99 state tag write. Grant that identity access on the Site's resource group, either `Contributor` (simplest) or, for least privilege, `Kubernetes Cluster - Azure Arc Onboarding` (connect and enable features) plus `Tag Contributor` (for the `Microsoft.Resources/tags/write` the tag needs).
 
 ```bash
 ARC_PRINCIPAL_ID=$(az resource show -g <rg> -n <vm-name> --resource-type Microsoft.HybridCompute/machines --query "identity.principalId" -o tsv)
@@ -52,7 +52,7 @@ az provider register --namespace Microsoft.IoTOperations
 
 ## Site configuration
 
-Set the cluster name and an `aksee` section under your site's `parameters`. The bootstrap uses no secret, so the whole config lives in the committable `sites/` tree:
+Set the cluster name and an `aksee` section under your Site's `parameters`. The bootstrap uses no secret, so the whole config lives in the committable `sites/` tree:
 
 ```yaml
 # sites/<site>.yaml (committable)
@@ -70,23 +70,23 @@ parameters:
     customLocationsOid: <custom-locations RP object id>
 ```
 
-`inherits: base-site.yaml` supplies the AKS Edge Essentials installer URL and the
-`deployOptions` toggles the bootstrap reads. A site that omits required values
+`inherits: base-site.yaml` supplies the AKS EE installer URL and the
+`deployOptions` toggles the bootstrap reads. A Site that omits required values
 fails executable planning before deployment.
 
 Required fields:
 
 | Field | Source |
 |---|---|
-| `clusterName` (top-level) | Name to register the new K3s cluster as in Arc. The AIO steps target the same name, so set it once. New per site. |
-| `aksee.machineName` | The Arc-onboarded VM's machine resource name. |
-| `aksee.customLocationsOid` | `az ad sp show --id bc313c14-388c-4e7d-a58e-70017303ee3b --query id -o tsv`. Tenant-wide. |
+| `clusterName` (top level) | Name to register the new K3s cluster as in Arc. The AIO steps use the same name, so set it once. New for each Site. |
+| `aksee.machineName` | The machine resource name of the VM onboarded to Azure Arc. |
+| `aksee.customLocationsOid` | `az ad sp show --id bc313c14-388c-4e7d-a58e-70017303ee3b --query id -o tsv`. The same across the tenant. |
 
 Optional fields:
 
 | Field | Default | Source |
 |---|---|---|
-| `aksee.aksEdgeMsiUrl` | latest K3s build (`base-site`) | A Microsoft-published versioned AKS EE MSI URL to pin a specific release. |
+| `aksee.aksEdgeMsiUrl` | latest K3s build (`base-site`) | A versioned AKS EE MSI URL published by Microsoft, to pin a specific AKS EE release. |
 
 ## Run
 
@@ -109,7 +109,7 @@ timeout. Use the monitor commands below to track phase progression.
 
 ## Monitor
 
-From an admin PowerShell session on the VM (non-admin sessions cannot read the working directory, which is ACL-locked to Administrators + SYSTEM):
+From an administrator PowerShell session on the VM (other sessions cannot read the working directory, whose ACL admits only Administrators and SYSTEM):
 
 ```powershell
 $dir = 'C:\ProgramData\siteops\aksee-bootstrap'
@@ -126,14 +126,14 @@ Phase progression to expect:
 
 | Phase | Status | What's happening |
 |---|---|---|
-| 0 | running | Pre-flight checks (admin, OS, memory, disk, NuGet provider) |
+| 0 | running | Preflight checks (administrator, OS, memory, disk, NuGet provider) |
 | 1 | running | MSI install, Hyper-V enable (may reboot) |
 | 2 | pending-reboot | Hyper-V reboot imminent or in progress |
 | 2 | running | Cluster deployment |
 | 3 | running | Azure CLI install, Arc operations, custom locations enablement |
 | 99 | succeeded | Done |
 
-Live-follow form for the latest worker log:
+To follow the latest worker log as it grows:
 
 ```powershell
 $log = Get-ChildItem 'C:\ProgramData\siteops\aksee-bootstrap\worker-*.log' | Sort-Object LastWriteTime | Select-Object -Last 1
@@ -142,7 +142,7 @@ Get-Content $log.FullName -Tail 50 -Wait
 
 ## Verify
 
-On the VM after `state.json` shows `phase=99 status=succeeded`. The bootstrap copies the cluster kubeconfig to the shared ACL-locked path below (the original under the task account's profile is purged in Phase 99). Open an admin PowerShell and point `KUBECONFIG` at the shared copy:
+On the VM after `state.json` shows `phase=99 status=succeeded`. The bootstrap copies the cluster kubeconfig to the shared, ACL protected path below (the original under the task account's profile is purged in Phase 99). Open an admin PowerShell and point `KUBECONFIG` at the shared copy:
 
 ```powershell
 $env:KUBECONFIG = 'C:\ProgramData\siteops\aksee-bootstrap\kubeconfig'
@@ -165,7 +165,7 @@ az connectedk8s show --name <cluster-name> --resource-group <rg> --query "{oidc:
 
 ### Monitoring shells need admin
 
-`C:\ProgramData\siteops\aksee-bootstrap\` has ACLs locked to Administrators + SYSTEM at launcher time (the directory holds the cluster kubeconfig and the az token cache). A non-admin PowerShell session cannot read the state file, the worker transcripts, or the msiexec log. Open monitoring shells as Administrator.
+`C:\ProgramData\siteops\aksee-bootstrap\` has ACLs locked to Administrators + SYSTEM at launcher time (the directory holds the cluster kubeconfig and the az token cache). A PowerShell session without administrator rights cannot read the state file, the worker transcripts, or the msiexec log. Open monitoring shells as Administrator.
 
 ### Bootstrap stuck on a phase
 
@@ -199,16 +199,16 @@ Get-WinEvent -LogName 'Microsoft-Windows-TaskScheduler/Operational' -MaxEvents 5
     Where-Object { $_.Message -like '*SiteOpsAksEeBootstrap*' }
 ```
 
-### Re-apply against an already-bootstrapped host
+### Reapply against a host that is already bootstrapped
 
-Re-running the bootstrap against a completed host revalidates Phase 3 only. The launcher changes the
+Rerunning the bootstrap against a completed host revalidates Phase 3 only. The launcher changes the
 state tag to `running`, records a new run ID, and starts the worker at Phase 3. The worker verifies the
-Arc-connected cluster and reapplies the requested Arc features. It does not reinstall AKS EE, enable
+cluster connected to Azure Arc and reapplies the requested Arc features. It does not reinstall AKS EE, enable
 host features, recreate K3s, or reboot Windows.
 
-### Re-run a failed phase
+### Rerun a failed phase
 
-Use when a transient failure hit a single phase (network blip, az CLI download timeout) and you want to retry the same phase without re-running the launcher.
+Use when a transient failure hit a single phase (network blip, az CLI download timeout) and you want to retry the same phase without rerunning the launcher.
 
 ```powershell
 # Reset state to re-attempt a specific phase after correcting the failure.
@@ -244,18 +244,18 @@ Remove-AksEdgeDeployment -Confirm:$false -ErrorAction SilentlyContinue
 
 | Phase | Action | May reboot? |
 |---|---|---|
-| 0  | Pre-flight: admin, OS, memory, disk, nested virt | No |
+| 0  | Preflight: administrator, OS, memory, disk, nested virtualization | No |
 | 1  | MSI install + `Install-AksEdgeHostFeatures` | Yes (Hyper-V enable) |
-| 2  | Render the cluster config (AioDeploy cluster-only, no service principal) and create the single-node K3s cluster | No |
-| 3  | Install Azure CLI if missing, authenticate with the Arc machine managed identity, Arc-connect the cluster, enable `cluster-connect` and `custom-locations`, and (when `enableWorkloadIdentity` is requested) wire the OIDC issuer through the K3s apiserver | No |
-| 99 | Cleanup (unregister the scheduled task, purge the system-profile kubeconfig and az token cache, and remove the rendered config). Write the terminal bootstrap tags on the Arc machine. | No |
+| 2  | Render the cluster config (`AioDeploy` set, cluster only, no service principal) and create the K3s cluster on a single node | No |
+| 3  | Install Azure CLI if missing, authenticate with the Arc machine managed identity, connect the cluster to Azure Arc, enable `cluster-connect` and `custom-locations`, and (when `enableWorkloadIdentity` is requested) wire the OIDC issuer through the K3s apiserver | No |
+| 99 | Cleanup (unregister the scheduled task, purge the kubeconfig in the system profile and the az token cache, and remove the rendered config). Write the terminal bootstrap tags on the Arc machine. | No |
 
 The worker checks existing state so supported retries can resume without
 repeating completed work. Phase 1 writes the next phase to `state.json` before
-calling `Install-AksEdgeHostFeatures` so the at-startup scheduled-task trigger
+calling `Install-AksEdgeHostFeatures` so the scheduled task trigger at startup
 resumes at Phase 2 after the reboot.
 
-Phase 3 layers AIO-specific features on top of the basic Arc-connected cluster. The reason for layering instead of doing everything in Phase 2: the inner `aksedge-config.json` schema does not recognize OIDC issuer, workload identity, or custom-locations fields. Phase 3 handles them explicitly through `az connectedk8s` commands.
+Phase 3 adds features specific to AIO on top of the basic cluster connected to Azure Arc. The reason for layering instead of doing everything in Phase 2: the inner `aksedge-config.json` schema does not recognize OIDC issuer, workload identity, or custom locations fields. Phase 3 handles them explicitly through `az connectedk8s` commands.
 
 ## Bootstrap state tag
 
@@ -268,7 +268,7 @@ The launcher and worker write tags on the configured Arc machine resource:
   deployment that wrote the state. The shipped wait checks only
   `siteops.bootstrap.state`.
 
-Downstream automation reads this tag to gate on actual bootstrap completion. A siteops `type: wait` step is the intended primary consumer. A CI script polling via `az tag list` works the same way.
+Downstream automation reads this tag to gate on actual bootstrap completion. A Site Ops `type: wait` step is the intended primary consumer. A CI script polling via `az tag list` works the same way.
 
 The worker writes the tag using the Arc machine managed identity (the same identity it uses for all Phase 3 Azure operations). The required permission is `Microsoft.Resources/tags/write` on the Arc machine resource.
 
@@ -299,25 +299,25 @@ az tag list --resource-id "/subscriptions/<sub>/resourceGroups/<rg>/providers/Mi
 
 | Flag | Default | Effect |
 |---|---|---|
-| `enableWorkloadIdentity` | false | When true, Phase 3 enables the OIDC issuer and workload identity on the Arc connection and patches the K3s apiserver `service-account-issuer`. Required when downstream AIO components use workload-identity-backed secret sync. |
+| `enableWorkloadIdentity` | false | When true, Phase 3 enables the OIDC issuer and workload identity on the Arc connection and patches the K3s apiserver `service-account-issuer`. Required when downstream AIO components use Secret Sync backed by workload identity. |
 
-Set it per site via `deployOptions.enableWorkloadIdentity: true` (paired with `enableSecretSync`). For direct launcher invocation, pass `-EnableWorkloadIdentity true`.
+Set it for each Site via `deployOptions.enableWorkloadIdentity: true` (paired with `enableSecretSync`). For direct launcher invocation, pass `-EnableWorkloadIdentity true`.
 
 ## Security
 
-- **No secret:** the bootstrap uses no service principal. The worker authenticates with the Arc machine's system-assigned managed identity (short-lived HIMDS tokens), so there is no credential to deliver, encrypt, store, or clean up.
-- **ACLs:** `C:\ProgramData\siteops\aksee-bootstrap\` has inherited ACLs removed and re-granted to Administrators + SYSTEM only.
+- **No secret:** the bootstrap uses no service principal. The worker authenticates with the Arc machine's system-assigned managed identity (HIMDS tokens with a short lifetime), so there is no credential to deliver, encrypt, store, or clean up.
+- **ACLs:** `C:\ProgramData\siteops\aksee-bootstrap\` has inherited ACLs removed and access granted again to Administrators + SYSTEM only.
 - **Task identity:** the worker Scheduled Task runs as `NT AUTHORITY\SYSTEM`, so no local account or password is created or stored. SYSTEM uses a `ServiceAccount` logon, which needs no stored credential to survive the bootstrap's reboot.
-- **az token cache:** Phase 3 scopes `AZURE_CONFIG_DIR` into the ACL-locked working directory so the az tokens stay behind the Administrators + SYSTEM ACL. Phase 99 removes the cache on success.
-- **Cluster kubeconfig:** Phase 2 copies the cluster kubeconfig (a long-lived bearer token) into the ACL-locked working directory and Phase 99 keeps it there for the operator, behind the Administrators + SYSTEM ACL.
+- **az token cache:** Phase 3 scopes `AZURE_CONFIG_DIR` into the protected working directory so the az tokens stay behind the Administrators + SYSTEM ACL. Phase 99 removes the cache on success.
+- **Cluster kubeconfig:** Phase 2 copies the cluster kubeconfig (a bearer token with a long lifetime) into the protected working directory and Phase 99 keeps it there for the operator, behind the Administrators + SYSTEM ACL.
 
 ## Installer integrity
 
-The worker Authenticode-verifies each installer MSI (AKS Edge Essentials, Azure CLI) before running it. The signature must be `Valid` (signed, untampered, chain-trusted) and the signer organization must be Microsoft, so a poisoned `aka.ms` redirect to a differently-signed binary is rejected. The default revocation check reaches the CRL or OCSP endpoint over the same network used for the download, so a fully air-gapped host may report a non-`Valid` status and need a revocation exception.
+The worker verifies the Authenticode signature of each installer MSI (AKS EE, Azure CLI) before running it. The signature must be `Valid` (signed, untampered, trusted through its chain) and the signer organization must be Microsoft, so a poisoned `aka.ms` redirect to a binary signed by anyone else is rejected. The default revocation check reaches the CRL or OCSP endpoint over the same network used for the download, so a fully disconnected host may report a non-`Valid` status and need a revocation exception.
 
 ## Run directly (advanced)
 
-Site Ops delivers the launcher through Bicep and Arc Run Command. For debugging or one-off use without Site Ops, the full launcher script can run directly on the VM. See the [script build workflow](../../templates/host-bootstrap/aksee/scripts/README.md) for the development workflow.
+Site Ops delivers the launcher through Bicep and Arc Run Command. For debugging or a single run without Site Ops, the full launcher script can run directly on the VM. See the [script build workflow](../../templates/host-bootstrap/aksee/scripts/README.md) for the development workflow.
 
 ## Known limitations
 

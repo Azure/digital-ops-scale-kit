@@ -85,8 +85,8 @@ def test_hosted_bootstrap_guidance_matches_host_behavior():
     )
     for phrase in (
         "Azure Cloud Shell", "Ubuntu 26.04", "administrator rights or install OS packages",
-        "user private group", "uv-managed Python", "UV_PYTHON_INSTALL_MIRROR", "Codespace", "k3d",
-        "Arc-connected",
+        "user private group", "Python managed by uv", "UV_PYTHON_INSTALL_MIRROR", "Codespace", "k3d",
+        "connected to Azure Arc",
     ):
         assert phrase in guide
     for removed in ("--with-azure-cli", "-WithAzureCli", "managed Azure Linux 3"):

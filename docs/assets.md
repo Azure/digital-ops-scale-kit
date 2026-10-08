@@ -2,7 +2,7 @@
 
 An asset is a piece of equipment the edge reads data from: an oven, a pump, a press. A device is what the connector talks to on its behalf, carrying the endpoints an asset's data comes through. Both are Azure Device Registry resources, created under the ADR namespace the AIO instance is bound to. Sites select device and asset sets independently, while one deployment step creates devices before assets.
 
-For what a declaration is, how to attach one, when to write Bicep instead, and the API-version policy, see [resource-catalog.md](resource-catalog.md). Those rules apply to every resource area.
+For what a declaration is, how to attach one, when to write Bicep instead, and the API version policy, see [resource-catalog.md](resource-catalog.md). Those rules apply to every resource area.
 
 ## Device and asset definitions
 
@@ -10,14 +10,14 @@ A resource set carries the array for its resource area:
 
 | Key | Creates | Template |
 |---|---|---|
-| `devices` | Endpoints the connector reads through, one entry per device | `templates/aio/assets/modules/assets-<api-version>.bicep` |
+| `devices` | Endpoints the connector reads through, one item per device | `templates/aio/assets/modules/assets-<api-version>.bicep` |
 | `assets` | The equipment itself, each bound to one endpoint on one device | same module |
 
-`templates/aio/assets/main.bicep` is what a manifest step points at. It routes to the module for the ADR API version the site's release ships, so a site's devices and assets are written at the same API version as the namespace holding them.
+`templates/aio/assets/main.bicep` is what a manifest step points at. It routes to the module for the ADR API version the Site's AIO release ships, so a Site's devices and assets are written at the same API version as the namespace holding them.
 
-Each entry is `{ name, properties }`. The template adds the location, the tags, the `extendedLocation`, and the namespace parent, so a declaration carries only what is specific to the resource.
+Each item is `{ name, properties }`. The template adds the location, the tags, the `extendedLocation`, and the namespace parent, so a declaration carries only what is specific to the resource.
 
-A site composes the device and asset sets:
+A Site composes the device and asset sets:
 
 ```yaml
 properties:
@@ -85,7 +85,7 @@ set and available identities when a device or endpoint is missing. Published CI
 output reports the failure without resource identities.
 
 An externally supplied device is selected through a device set whose
-`_siteops.external.devices` entry declares its identity, reason, and optional
+`_siteops.external.devices` item declares its identity, reason, and optional
 expected endpoint shape. The asset set stays unchanged whether the device is
 applied by this catalog or supplied elsewhere.
 
@@ -107,19 +107,20 @@ Device and asset names are resource names, and the provider constrains them:
 | `devices` | 3 to 63 | `^[a-z0-9][a-z0-9-]*[a-z0-9]$` |
 | `assets` | 3 to 63 | `^[a-z0-9][a-z0-9-]*[a-z0-9]$` |
 
-The Device Registry ARM API accepts a broader device-name shape, but the device
-is projected to Kubernetes under the same name. The catalog therefore requires
-the lowercase, alphanumeric-ended subset that is valid on both surfaces.
+The Device Registry ARM API accepts a broader shape for device names, but the
+device is projected to Kubernetes under the same name. The catalog therefore
+requires the lowercase subset, starting and ending with a letter or digit, that
+is valid on both surfaces.
 
-A name may interpolate site values, and the rules apply to the resolved value. The workspace tests render every committed declaration against every committed site and check the result, so a name that is valid for one site and too long or wrongly cased for another fails in CI.
+A name may interpolate Site values, and the rules apply to the resolved value. The workspace tests render every committed declaration against every committed Site and check the result, so a name that is valid for one Site and too long or wrongly cased for another fails in CI.
 
 ## Where a declaration's values come from
 
-Every `{{ ... }}` in a declaration resolves per site, so one committed file deploys across a fleet and each site receives its own values. `resource-sets/devices/site-devices.yaml` and `resource-sets/assets/site-assets.yaml` ship as the worked pair. The asset carries `{{ site.name }}` in the display name, in an attribute, and in the MQTT topic its dataset publishes to, so a hundred sites deploying one file each land on their own topic and stay tellable apart in the portal.
+Every `{{ ... }}` in a declaration resolves for each Site, so one committed file deploys across a fleet and each Site receives its own values. `resource-sets/devices/site-devices.yaml` and `resource-sets/assets/site-assets.yaml` ship as the worked pair. The asset carries `{{ site.name }}` in the display name, in an attribute, and in the MQTT topic its dataset publishes to, so a hundred Sites deploying one file each land on their own topic and stay tellable apart in the portal.
 
-Interpolate into string-valued properties such as topics, display names, attributes, and endpoint addresses. The workspace tests compile each committed declaration against every supported API version, and they read a declaration as written rather than as resolved, so an interpolation in a numeric or boolean property is reported as a type error. State those values directly.
+Interpolate into properties with string values, such as topics, display names, attributes, and endpoint addresses. The workspace tests compile each committed declaration against every supported API version, and they read a declaration as written rather than as resolved, so an interpolation in a numeric or boolean property is reported as a type error. State those values directly.
 
-Preview the site values a declaration reads before deploying:
+Preview the Site values a declaration reads before deploying:
 
 ```bash
 siteops -w workspaces/iot-operations sites munich-dev --output yaml
@@ -130,22 +131,22 @@ siteops -w workspaces/iot-operations sites munich-dev --output yaml
 The Device Registry deployment family runs as one step, `asset-resources`.
 Inside it, every selected device is created before any selected asset. An asset
 refers to its device by name through `deviceRef`, and ARM does not model that
-relationship, so each per-version module expresses the ordering with
+relationship, so each module for an API version expresses the ordering with
 `dependsOn`.
 
-Across families, `manifests/_partials/_aio-resources.yaml`, which the `aio-resources` entry includes, runs the asset step before the dataflow step, so a dataflow whose source names an asset finds it already there.
+Across families, `manifests/_partials/_aio-resources.yaml`, which the `aio-resources` manifest includes, runs the asset step before the dataflow step, so a dataflow whose source names an asset finds it already there.
 
 ## Composing with other steps
 
-`manifests/_partials/_assets.yaml` is a partial, so a manifest that already installs AIO can add devices and assets without a second deploy. `manifests/_partials/_aio-resources.yaml` gates it when either selection list is non-empty, and `samples/asset-sample/` composes it alongside `_resolve-aio.yaml` as a standalone deploy.
+`manifests/_partials/_assets.yaml` is a partial, so a manifest that already installs AIO can add devices and assets without a second deploy. `manifests/_partials/_aio-resources.yaml` gates it when either selection list is nonempty, and `samples/asset-sample/` composes it alongside `_resolve-aio.yaml` as a standalone deploy.
 
-`_assets.yaml` carries no manifest-level parameters, which is what lets a composing manifest gate it and supply the declaration.
+`_assets.yaml` carries no parameters at manifest level, which is what lets a composing manifest gate it and supply the declaration.
 
-The step reads two chained values from `resolve-aio` through `parameters/inputs/catalog.yaml`: the custom location name, and the ADR namespace name the instance is actually bound to. That is why the family reads a namespace it discovered rather than one derived from the site name.
+The step reads two chained values from `resolve-aio` through `parameters/inputs/catalog.yaml`: the custom location name, and the ADR namespace name the instance is actually bound to. That is why the family reads a namespace it discovered rather than one derived from the Site name.
 
 ## Seeing data move
 
-A device and an asset deploy on their own. Telemetry needs a server answering at the address the device declares. `samples/opc-ua-solution/` brings up the OPC PLC simulator as `opcplc-000000` in the AIO namespace, which is what the worked example addresses. Deploy that sample first, or point the address at a server the site already runs.
+A device and an asset deploy on their own. Telemetry needs a server answering at the address the device declares. `samples/opc-ua-solution/` brings up the OPC PLC simulator as `opcplc-000000` in the AIO namespace, which is what the worked example addresses. Deploy that sample first, or point the address at a server the Site already runs.
 
 ## Verifying a deploy
 
@@ -158,7 +159,7 @@ A device reports `spec.enabled` and its inbound endpoints. An asset reports the 
 
 ## Removing an asset
 
-Removing an entry from a declaration and redeploying leaves the resource in place. Delete it explicitly, and delete assets before the devices they bind to:
+Removing an item from a declaration and redeploying leaves the resource in place. Delete it explicitly, and delete assets before the devices they bind to:
 
 ```bash
 az resource delete --ids <assetResourceId>

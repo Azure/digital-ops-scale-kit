@@ -1,6 +1,6 @@
 # Site Configuration
 
-Sites define **where** to deploy: the Azure subscription, resource group, location, and site-specific configuration.
+Sites define **where** to deploy: the Azure subscription, resource group, location, and configuration specific to each Site.
 
 With an [operator project](projects.md), `--project DIRECTORY` selects its
 `sites` and `sites.local` directories independently from the content
@@ -16,39 +16,39 @@ whichever configuration root is selected.
 | I want to... | Do this |
 |---|---|
 | Supply one complete Site without storing it in the workspace | Pass `--site-file FILE` to `validate`, `plan`, or `deploy` |
-| Answer a selected deployment's typed inputs | Use [`siteops inputs`](guided-inputs.md), then pass `--input-file FILE` or repeat `--input NAME=VALUE` |
+| Answer a selected manifest's typed inputs | Use [`siteops inputs`](guided-inputs.md), then pass `--input-file FILE` or repeat `--input NAME=VALUE` |
 | Preview a resolved Site without writing it | Use `siteops inputs <manifest> --input-file FILE` with complete answers |
-| Add a new deployable site | Drop `my-site.yaml` under the configuration root's `sites/` (any subdir) or an extras dir |
-| Share a reusable template across sites | Put it in `sites/<name>.yaml` (same dir) or `sites/shared/<name>.yaml` (subdir) and reference via `inherits:` |
-| Override a committed site at runtime without a PR | Put `my-site.yaml` in the configuration root's `sites.local/` (overlay merges, `inherits:` stripped) |
-| Inject a site from CI without touching the workspace | Register a dir via `SITEOPS_EXTRA_SITES_DIRS` / `--extra-sites-dir` and drop `my-site.yaml` in it |
-| Target one specific site at the CLI | `siteops deploy <manifest> -l name=<site-name>` |
-| Target multiple specific sites at the CLI | `siteops deploy <manifest> -l name=<a>,name=<b>` |
-| Pin the manifest to a labeled cohort | Set `selector:` in the manifest |
-| Hard-code the target list for a manifest | Set `sites:` in the manifest |
+| Add a new deployable Site | Drop `my-site.yaml` under the configuration root's `sites/` (any subdirectory) or an extras directory |
+| Share a reusable template across Sites | Put it in `sites/<name>.yaml` (same directory) or `sites/shared/<name>.yaml` (subdirectory) and reference via `inherits:` |
+| Override a committed Site at runtime without a PR | Put `my-site.yaml` in the configuration root's `sites.local/` (overlay merges, `inherits:` stripped) |
+| Inject a Site from CI without touching the workspace | Register a directory via `SITEOPS_EXTRA_SITES_DIRS` / `--extra-sites-dir` and drop `my-site.yaml` in it |
+| Target one specific Site at the CLI | `siteops deploy <manifest> -l name=<site-name>` |
+| Target multiple specific Sites at the CLI | `siteops deploy <manifest> -l name=<a>,name=<b>` |
+| Pin the manifest to a labeled fleet | Set `selector:` in the manifest |
+| Fix the list of Sites for a manifest | Set `sites:` in the manifest |
 | List configured Sites with location, resource group and labels | `siteops -w <workspace> sites` |
-| Preview a fully-resolved site (post inherit + overlay) | `siteops -w <workspace> sites <name> --output yaml` |
-| Inspect resolved sites in private automation | `siteops -w <workspace> sites --output json` |
-| See where every value in a resolved site came from | `siteops -w <workspace> sites <name> --show-sources` |
+| Preview a fully resolved Site (after inheritance and overlays) | `siteops -w <workspace> sites <name> --output yaml` |
+| Inspect resolved Sites in private automation | `siteops -w <workspace> sites --output json` |
+| See where every value in a resolved Site came from | `siteops -w <workspace> sites <name> --show-sources` |
 
-The reference material below covers the model in depth. See [targeting.md](targeting.md) for the selector grammar and the no-match diagnostic.
+The reference material below covers the model in depth. See [targeting.md](targeting.md) for the selector grammar and the diagnostic when nothing matches.
 
-## Inspect resolved sites
+## Inspect resolved Sites
 
-Check what a site resolves to after inheritance and overlays:
+Check what a Site resolves to after inheritance and overlays:
 
 ```bash
 siteops -w workspaces/iot-operations sites munich-dev --output yaml
 ```
 
-The default `--output plain` is a human-readable display. Every format uses
-the same resolved sites and sorts them by name.
+The default `--output plain` is a display for people to read. Every format
+uses the same resolved Sites and sorts them by name.
 
 | Format | Output shape |
 |---|---|
 | `plain` | One line per Site (name, location, resource group and labels) when several match. Full resolved detail for one Site, or for every match with `--show-sources` |
-| `yaml` | One `Site` document per match, separated by `---` for multiple sites |
-| `json` | One array of `Site` objects, including when only one site matches |
+| `yaml` | One `Site` document per match, separated by `---` for multiple Sites |
+| `json` | One array of `Site` objects, including when only one Site matches |
 
 Run `siteops sites NAME` to see one Site's resolved configuration in plain
 output. Values use YAML spelling, such as `false`, `null` and `[a, b]`.
@@ -69,16 +69,17 @@ Sites operate at two levels based on whether they have a `resourceGroup`:
 
 | Site has | Site level | Deploys |
 |----------|-----------|--------|
-| `subscription` + `resourceGroup` | RG-level | Resource-group steps and target-scoped kubectl or wait steps |
-| `subscription` only | Subscription-level | `scope: subscription` steps and target-scoped kubectl or wait steps |
+| `subscription` + `resourceGroup` | Resource group | Resource group steps, and kubectl or wait steps for the Site |
+| `subscription` only | Subscription | `scope: subscription` steps, and kubectl or wait steps for the Site |
 
-RG-level sites are the common case. A subscription-level site deploys shared
-resources once for its subscription, such as Azure Edge Sites. RG-level sites
-in that subscription can consume those outputs through cross-scope chaining.
+Sites at resource group level are the common case. A Site at subscription
+level deploys shared resources once for its subscription, such as Azure Edge
+Sites. Sites at resource group level in that subscription can consume those
+outputs by chaining across scopes.
 
 ## Site structure
 
-**RG-level site** (most common):
+**Site at resource group level** (most common):
 
 ```yaml
 apiVersion: siteops/v1
@@ -106,14 +107,14 @@ properties:
 
 ### Site identity
 
-A site is reachable by its filename basename, its relative path under the trusted directory, or its internal `name:` field. The three forms are symmetric. By convention `name:` matches the basename, but it can differ when a friendlier identifier is needed. See [targeting.md](targeting.md) for the full identity model and the workspace invariants the orchestrator enforces at load time.
+A Site is reachable by its filename basename, its relative path under the trusted directory, or its internal `name:` field. The three forms are symmetric. By convention `name:` matches the basename, but it can differ when a friendlier identifier is needed. See [targeting.md](targeting.md) for the full identity model and the workspace invariants the orchestrator enforces at load time.
 
 Saving with `siteops inputs ... --save-site` into the selected `sites/`
 inventory checks Site identities before writing. A later plan loads that
 inventory again so concurrent or subsequent configuration changes are
 still checked.
 
-**Subscription-level site** (for shared resources):
+**Site at subscription level** (for shared resources):
 
 ```yaml
 apiVersion: siteops/v1
@@ -160,7 +161,7 @@ labels:
 
 Use labels when you need to:
 
-- Select sites with `-l` / `--selector`
+- Select Sites with `-l` / `--selector`
 - Reference simple string values in templates
 
 ### Parameters
@@ -178,16 +179,16 @@ parameters:
 Use parameters for:
 
 - Infrastructure configuration (cluster names, sizing)
-- Values that vary per-site based on capacity
+- Values that vary by Site based on capacity
 - Complex objects consumed by Bicep templates
 
-#### Top-level vs namespaced parameters
+#### Top level vs namespaced parameters
 
-Site Ops hands a `site.parameters` entry to a template only when its top-level
-key matches one of the template's `param` names. A nested block reaches a
+Site Ops hands a `site.parameters` entry to a template only when its key at
+the top level matches one of the template's `param` names. A nested block reaches a
 template only if the template declares a matching object parameter (such as
 `param brokerConfig`). Otherwise each nested field must be mapped to a
-top-level `param` in a `parameters/inputs/*.yaml` file.
+`param` at the top level in a `parameters/inputs/*.yaml` file.
 
 These habits keep this predictable:
 
@@ -197,8 +198,8 @@ These habits keep this predictable:
   (host sets one key, AIO reads another) and the bootstrap passes, then AIO
   fails looking up a cluster name that was never registered.
 - Group a feature's settings under a namespace for clarity, like the `aksee`
-  block. Namespacing is optional: single-purpose values such as `brokerConfig`
-  sit at the top level too.
+  block. Namespacing is optional: values with a single purpose, such as
+  `brokerConfig`, sit at the top level too.
 
 ```yaml
 parameters:
@@ -210,7 +211,7 @@ parameters:
 
 ### Properties
 
-Free-form site state read by manifests and templates via
+Site state in any shape, read by manifests and templates via
 `{{ site.properties.<path> }}` substitution and `when:` conditions.
 Open schema. Site Ops does not enforce field names or shapes. The
 workspace defines its own conventions.
@@ -257,8 +258,8 @@ properties:
 Use properties for:
 
 - Capability toggles, gated via `when:` or passed through to a template (`deployOptions.*`)
-- Path-selection keys the engine reads (`aioRelease` picks one release file, and each list under `resourceSets` selects ordered files from the matching `resource-sets/<area>/` directory)
-- Free-form data structures consumed via `{{ site.properties.X }}`
+- Keys the engine reads to select paths (`aioRelease` picks one AIO release file, and each list under `resourceSets` selects ordered files from the matching `resource-sets/<area>/` directory)
+- Data structures in any shape, consumed via `{{ site.properties.X }}`
 
 > **Template values go in `parameters:`. Capability toggles are the one
 > exception.** A name, size, or count the engine hands to a Bicep `param`
@@ -266,19 +267,19 @@ Use properties for:
 > `properties.deployOptions`, and when a template needs one, a line in the
 > step's `parameters/inputs` file passes it through to the `param`.
 
-### What siteops enforces vs what the workspace conventions are
+### What Site Ops enforces vs what the workspace conventions are
 
-The Site Ops engine has a deliberately narrow contract over a site
+The Site Ops engine has a deliberately narrow contract over a Site
 file. Knowing where the boundary sits tells you what you can rename
 when forking the workspace:
 
 | Layer | Owned by | What it cares about |
 |---|---|---|
-| YAML and preparation mechanics | Site Ops engine | Top-level fields (`name`, `subscription`, `resourceGroup`, `location`, `labels`, `inherits`, `parameters`, `properties`), selector parsing on `labels`, supported site-value substitutions, and executable filtering against an acquired template schema. |
+| YAML and preparation mechanics | Site Ops engine | Fields at the top level (`name`, `subscription`, `resourceGroup`, `location`, `labels`, `inherits`, `parameters`, `properties`), selector parsing on `labels`, supported substitutions of Site values, and executable filtering against an acquired template schema. |
 | Field semantics | The workspace | The names of fields under `properties:` (`aioRelease`, `deployOptions`, the `enable*`/`allow*` toggle prefixes, etc.) and the names of label keys used in selectors (`environment`, `country`, `scope`, etc.). |
 
 Anything in the second row is a convention you can rename for your own
-workspace. The iot-operations workspace happens to use
+workspace. The IoT Operations workspace happens to use
 `properties.aioRelease`, `properties.deployOptions.enable*`, and
 `labels.environment`. A forked workspace could call them
 `properties.release`, `properties.featureFlags.*`, or `labels.tier`
@@ -286,18 +287,18 @@ without the engine caring. Just keep manifest `when:` conditions and
 `{{ site.properties.X }}` references in sync with whatever the
 workspace decides.
 
-### What a site file is checked against
+### What a Site file is checked against
 
-The top-level field set above is **closed**. A key the engine does not read is
-rejected when the site loads, rather than being ignored, and the error suggests
+The set of fields at the top level above is **closed**. A key the engine does
+not read is rejected when the Site loads, rather than being ignored, and the error suggests
 the field you probably meant:
 
 ```
-Site 'munich-dev' has unknown top-level key(s): `paramaters`
-  (did you mean `parameters`?). Allowed: ['apiVersion', 'description',
+Error: Site 'munich-dev' has unknown top-level key(s): `paramaters` (did
+  you mean `parameters`?). Allowed: ['apiVersion', 'description',
   'inherits', 'kind', 'labels', 'location', 'name', 'parameters',
-  'properties', 'resourceGroup', 'subscription'].
-  Merged from: sites/base-site.yaml, sites/munich-dev.yaml.
+  'properties', 'resourceGroup', 'subscription']. Merged from:
+  sites/base-site.yaml, sites/shared/germany.yaml, sites/munich-dev.yaml.
 ```
 
 The check runs on the merged result of the inherit chain and every overlay, so
@@ -307,7 +308,7 @@ directory, and `sites.local/`.
 
 Rejecting rather than ignoring is what makes a misspelled field visible. It
 matters most for `properties`, since resource sets read it to decide what a
-site deploys, and a typo there leaves the site on defaults.
+Site deploys, and a typo there leaves the Site on defaults.
 
 Further rules apply:
 
@@ -325,20 +326,20 @@ Further rules apply:
 - **A field that holds text must hold text.** `name`, `subscription`,
   `resourceGroup`, `location`, `description`, and `inherits` are rejected when
   written as a list or a number. Quote a value YAML would otherwise read as a
-  number, such as a site named for a release.
+  number, such as a Site named for a release.
 - **`description` is accepted and not read.** It is there so a shared
   `SiteTemplate` can carry a note.
-- **`inherits` is read at the top level of the file.** Both shapes inherit that way. A site using
+- **`inherits` is read at the top level of the file.** Both shapes inherit that way. A Site using
   the `metadata`/`spec` envelope inherits by putting `inherits:` alongside `apiVersion` and `kind`.
   Written inside `spec` it is rejected by name rather than reported as a misspelling, since the
   placement is what is wrong.
 
-A file that declares `spec` and also carries flat-shape fields at the top level
+A file that declares `spec` and also carries fields of the flat shape at the top level
 is reported as mixing the two shapes. Pick one: move the fields under
 `metadata` and `spec`, or remove `spec` and keep everything at the top level.
 
 The envelope shape puts `name`, `description` and `labels` under `metadata`,
-and the target fields under `spec`:
+and the remaining fields under `spec`:
 
 ```yaml
 apiVersion: siteops/v1
@@ -360,14 +361,14 @@ flat parent with an envelope child, or the reverse, is also reported as mixing
 the two shapes.
 
 What is inside `labels`, `properties`, and `parameters` stays **open**, because
-those hold workspace-defined content and the engine stays out of it. A key in
+those hold content defined by the workspace and the engine stays out of it. A key in
 there that nothing reads is a different problem, and the workspace's own test
 suite catches it rather than the engine.
 
 ### Templates in a parameter name
 
-Supported site expressions resolve in a parameter **name** as well as a value,
-so one declaration can key data by site:
+Supported Site expressions resolve in a parameter **name** as well as a value,
+so one declaration can key data by Site:
 
 ```yaml
 parameters:
@@ -376,9 +377,9 @@ parameters:
       role: primary
 ```
 
-Keep the template on a **nested** name unless the resolved top-level name is
-itself a declared template parameter. Executable preparation filters a
-top-level name that the acquired template does not accept and reports any
+Keep the template on a **nested** name unless the resolved name at the top
+level is itself a declared template parameter. Executable preparation filters
+a name at the top level that the acquired template does not accept and reports any
 required parameter that remains missing.
 
 These cases fail rather than resolve: a name that cannot be resolved, a
@@ -401,7 +402,7 @@ when: "{{ site.labels.environment == 'prod' }}"
 
 ### Rule of thumb
 
-- Need to filter sites? Use **labels** (strings only).
+- Need to filter Sites? Use **labels** (strings only).
 - Need a `when` condition? Use **labels** (string comparison) or **properties** (truthy check).
 - Goes into Bicep templates? Use **parameters**.
 - Structured metadata (tags, arrays, deployment options)? Use **properties**.
@@ -431,23 +432,23 @@ subscription: "real-subscription-id"
 resourceGroup: real-resource-group
 ```
 
-> **Security**: Only base files (in trusted site directories) can specify `inherits`. Overlays in `sites.local/` cannot inject inheritance.
+> **Security**: Only base files (in trusted Site directories) can specify `inherits`. Overlays in `sites.local/` cannot inject inheritance.
 
-## Extra trusted site directories
+## Extra trusted Site directories
 
 In addition to the configuration root's `sites/` directory, Site Ops can search
-one or more extra trusted directories for site files. Files in these
+one or more extra trusted directories for Site files. Files in these
 directories are treated exactly like files in `sites/`: they are
 discoverable by `siteops sites`, they can declare `inherits`, and they
 serve as valid base files for the inheritance chain.
 
 Use cases include:
 
-- **CI / end-to-end tests**: keep test-only sites out of `workspaces/*/sites/`
+- **CI and E2E tests**: keep Sites used only by tests out of `workspaces/*/sites/`
   (production config) and inject them only when the test workflow runs.
-- **Cross-repo site libraries**: pull shared sites from another repository
+- **Site libraries in other repositories**: pull shared Sites from another repository
   checked out alongside the workspace.
-- **Blueprint catalogs**: keep opinionated site templates in a central
+- **Blueprint catalogs**: keep opinionated Site templates in a central
   location, pointed at from multiple workspaces.
 
 Provide extra directories via the CLI or environment variable:
@@ -498,17 +499,17 @@ or incomplete selections also fail without emitting a partial document.
 Diagnostics use stderr rather than the structured stdout stream.
 
 Source annotations are part of the plain display. Combining `--show-sources`
-with YAML or JSON reports `--show-sources requires --output plain`.
+with YAML or JSON reports `Error: --show-sources requires --output plain.`
 
-Site inspection is private. Sensitive-looking keys in parameters and
-properties are masked, but site identities and ordinary configuration values
+Site inspection is private. Keys that look sensitive in parameters and
+properties are masked, but Site identities and ordinary configuration values
 remain. These views are not publishable projections or lossless configuration
 exports. Site details are unavailable when `SITEOPS_REDACT_OUTPUT` or a CI
 environment marker enables redaction. For an authorized private destination,
 explicitly set `SITEOPS_REDACT_OUTPUT=0` and keep the output private.
 
 JSON requires string mapping keys and representable values. YAML values
-such as timestamps and non-finite numbers produce a clear JSON error rather
+such as timestamps and numbers that are not finite produce a clear JSON error rather
 than being silently converted. Use `--output yaml` to inspect those values.
 
 ## Site inheritance
@@ -554,26 +555,28 @@ parameters:
 ### How `inherits:` paths are resolved
 
 Resolution is relative to the **child file's own directory**. The only
-exception is the bare-filename fallback (row 1 below), which lets an
-extras-dir site inherit a template from the configuration root without copying it.
+exception is the fallback for a bare filename (row 1 below), which lets a
+Site in an extras directory inherit a template from the configuration root
+without copying it.
 
 | Form | Example | Resolves to |
 |---|---|---|
 | Bare filename | `inherits: base-site.yaml` | `./base-site.yaml` next to the child, then fallback to `<configuration-root>/sites/base-site.yaml` |
 | Subpath | `inherits: shared/usa-east.yaml` | `<child-dir>/shared/usa-east.yaml` |
 | Parent / sibling | `inherits: ../base-site.yaml` | `<child-dir>/../base-site.yaml` |
-| Absolute | `inherits: /abs/path/tpl.yaml` | Used as-is |
+| Absolute | `inherits: /abs/path/tpl.yaml` | Used unchanged |
 
 The fallback searches only the configuration root's `sites/`: the project's
-with `--project`, otherwise the workspace's. It never searches extras dirs or
-`sites.local/`, so there is no implicit shared-template namespace between
-trusted directories.
+with `--project`, otherwise the workspace's. It never searches extras
+directories or `sites.local/`, so trusted directories share no implicit
+namespace for templates.
 
-> **Trust model.** `inherits:` is author-trusted and not filesystem-sandboxed.
-> It may point to a sibling `shared/` dir or an absolute path. The control is
-> *who may author files in trusted sites locations* (`sites/` under the
-> configuration root, and extras dirs). Anyone who can write an `inherits:` value can already set any
-> other site field. `sites.local/` overlays strip `inherits:`, so runtime
+> **Trust model.** `inherits:` trusts its author and is not confined to a
+> filesystem sandbox. It may point to a sibling `shared/` directory or an
+> absolute path. The control is *who may author files in trusted Site
+> locations* (`sites/` under the configuration root, and extras directories).
+> Anyone who can write an `inherits:` value can already set any other Site
+> field. `sites.local/` overlays strip `inherits:`, so runtime
 > overlays cannot introduce new inheritance targets.
 
 ### SiteTemplate vs Site
@@ -589,13 +592,13 @@ trusted directories.
 
 `inherits target`, then `sites/`, then `<extra trusted dirs>`, then `sites.local/`
 
-Inherited values are overridden by child site values. Nested objects (labels, parameters, properties) merge recursively. See [Extra trusted site directories](#extra-trusted-site-directories) for how extra dirs participate in the chain.
+Inherited values are overridden by child Site values. Nested objects (labels, parameters, properties) merge recursively. See [Extra trusted Site directories](#extra-trusted-site-directories) for how extra directories participate in the chain.
 
-> **Security**: Only base files (in trusted site directories) can specify `inherits`. Overlays in `sites.local/` cannot inject inheritance, even when extra trusted dirs are configured.
+> **Security**: Only base files (in trusted Site directories) can specify `inherits`. Overlays in `sites.local/` cannot inject inheritance, even when extra trusted directories are configured.
 
 ## Site selection from a manifest
 
-A manifest's target sites resolve from CLI `-l/--selector` (overrides
+A manifest's Sites resolve from CLI `-l/--selector` (overrides
 everything), manifest `sites:` (explicit name list), or manifest `selector:`
 (label expression). A manifest with none of these is a library or partial. It
 can be checked with `validate`, while `plan` and `deploy` require `-l` or one
@@ -611,11 +614,11 @@ siteops plan aio-install -l name=a,name=b          # multi-site (name OR-combine
 
 `deploy` accepts the same selection once the plan is right.
 
-`-l` is repeatable. Distinct keys AND-combine. Repeated `name=` values OR-combine. Any other duplicate key is an error. Path-form names (`-l name=regions/eu/munich`) work for nested site files. See [targeting.md](targeting.md) for the full grammar, the no-match diagnostic, and the validation rules.
+`-l` is repeatable. Distinct keys combine with AND. Repeated `name=` values combine with OR. Any other duplicate key is an error. Path names (`-l name=regions/eu/munich`) work for nested Site files. See [targeting.md](targeting.md) for the full grammar, the diagnostic when nothing matches, and the validation rules.
 
 ## Scaling to a fleet
 
-Once you cross a handful of sites, two-axis composition (region by environment) duplicates env config across `<region>-dev.yaml` and `<region>-prod.yaml`. The recommended pattern: introduce intermediate `SiteTemplate` files so each concrete site inherits one chain.
+Once you pass a handful of Sites, composing on two axes (region by environment) duplicates environment config across `<region>-dev.yaml` and `<region>-prod.yaml`. The recommended pattern: introduce intermediate `SiteTemplate` files so each concrete Site inherits one chain.
 
 ```
 sites/
@@ -630,7 +633,7 @@ sites/
 └── ...
 ```
 
-Each concrete site declares a single `inherits:` parent. The intermediate `SiteTemplate` files capture the cross-cutting axes so that adding a new region or environment is a one-file change instead of N edits across N regions.
+Each concrete Site declares a single `inherits:` parent. The intermediate `SiteTemplate` files capture the axes shared across Sites, so adding a new region or environment changes one file instead of N files across N regions.
 
 For an AIO fleet, use one resource group per AIO instance. Each Site deploys into its `resourceGroup`, which is its Arc cluster's resource group, so connect each cluster in its own resource group. Set `resourceGroup` on each concrete Site, not in a shared `SiteTemplate`.
 

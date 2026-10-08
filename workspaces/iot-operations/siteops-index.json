@@ -3,7 +3,7 @@
   "entries": [
     {
       "guidance": {
-        "coverage": "Shared platform fragment. Its parent owns targeting, ordering and optional capabilities.",
+        "coverage": "Shared platform partial. Its parent owns targeting, ordering and optional capabilities.",
         "documentation": [
           "manifests/README.md"
         ],
@@ -18,7 +18,7 @@
     },
     {
       "guidance": {
-        "coverage": "Shared source expansion and family ordering. The parent owns its target selection.",
+        "coverage": "Shared source expansion and family ordering. The parent owns its Site selection.",
         "documentation": [
           "manifests/README.md"
         ],
@@ -33,7 +33,7 @@
     },
     {
       "guidance": {
-        "coverage": "Requires the composing entry's prior instance lookup and selected declarations.",
+        "coverage": "Requires the composing manifest's prior instance lookup and selected declarations.",
         "documentation": [
           "manifests/README.md"
         ],
@@ -49,7 +49,7 @@
     },
     {
       "guidance": {
-        "coverage": "Requires the composing entry's prior instance lookup and selected declarations.",
+        "coverage": "Requires the composing manifest's prior instance lookup and selected declarations.",
         "documentation": [
           "manifests/README.md"
         ],
@@ -64,7 +64,7 @@
     },
     {
       "guidance": {
-        "coverage": "The parent supplies the instance name and release configuration. Associated infrastructure is read during deployment.",
+        "coverage": "The parent supplies the instance name and AIO release configuration. Associated infrastructure is read during deployment.",
         "documentation": [
           "manifests/README.md"
         ],
@@ -79,7 +79,7 @@
     },
     {
       "guidance": {
-        "coverage": "Requires preceding instance and cluster lookup outputs from the composing entry.",
+        "coverage": "Requires preceding instance and cluster lookup outputs from the composing manifest.",
         "documentation": [
           "manifests/README.md"
         ],
@@ -101,13 +101,13 @@
         ],
         "effects": [
           "Creates or updates AIO extensions, instance resources, custom location, ADR namespace, Schema Registry storage and role assignments.",
-          "Secret Sync enablement in this same deployment creates or updates identity, federation, vault and Secret Provider Class resources. Subscription-scoped Edge Site work needs an applicable subscription target.",
+          "Secret Sync enablement in this same deployment creates or updates identity, federation, vault and Secret Provider Class resources. An Edge Site scoped to the subscription needs a Site at subscription level.",
           "Deployment can incur Azure charges and leave partial changes after failure or interruption.",
-          "Use the upgrade entry for in-place version changes. Reapplying installation can overwrite operator-managed settings."
+          "Use the upgrade manifest to change versions in place. Reapplying installation can overwrite settings that operators manage."
         ],
         "inputs": [
           {
-            "description": "Target subscription from a configured Site or typed single-Site answers.",
+            "description": "The Site's subscription, from a configured Site or typed answers for one Site.",
             "field": "subscription",
             "requirement": "required",
             "sensitivity": "unknown",
@@ -121,21 +121,21 @@
             "type": "string"
           },
           {
-            "description": "Confirm the real target region. Shared configuration also uses it as cluster location.",
+            "description": "Confirm the Site's real region. Shared configuration also uses it as cluster location.",
             "field": "location",
             "requirement": "required",
             "sensitivity": "unknown",
             "type": "string"
           },
           {
-            "description": "Existing Arc-connected Kubernetes cluster name, not the Site name. A declared cluster resource ID can supply this and the target subscription, resource group and location through an explicit Azure read.",
+            "description": "Name of the existing Kubernetes cluster connected to Azure Arc, not the Site name. A declared cluster resource ID can supply this and the Site's subscription, resource group and location through an explicit Azure read.",
             "field": "parameters.clusterName",
             "requirement": "required",
             "sensitivity": "unknown",
             "type": "string"
           },
           {
-            "defaultBehavior": "Review the effective release in the selected Site before deployment.",
+            "defaultBehavior": "Review the effective AIO release in the selected Site before deployment.",
             "description": "The resolved Site needs an AIO release. The configured example inherits one, while the typed AIO route defaults to 2608.",
             "field": "properties.aioRelease",
             "requirement": "required",
@@ -159,7 +159,7 @@
           },
           {
             "defaultBehavior": "The shared fallback derives the name from the Site name.",
-            "description": "Installation can accept a Site override of the shared custom-location name.",
+            "description": "Installation can accept a Site override of the shared custom location name.",
             "field": "parameters.customLocationName",
             "requirement": "optional",
             "sensitivity": "non-sensitive",
@@ -173,24 +173,24 @@
             "type": "object"
           },
           {
-            "description": "Review cert-manager, Edge Site and optional Secret Sync settings. The typed defaults leave Secret Sync disabled. Guided enablement requires an observed cluster reporting OIDC and workload identity before writes. Host flags do not retrofit those features.",
+            "description": "Review cert-manager, Edge Site and optional Secret Sync settings. The typed defaults leave Secret Sync disabled. Guided enablement requires an observed cluster reporting OIDC and workload identity before writes. Host flags do not add those features to an existing cluster.",
             "field": "properties.deployOptions",
             "requirement": "conditional",
             "sensitivity": "unknown",
             "type": "mapping"
           }
         ],
-        "outcome": "Install AIO platform fundamentals on an existing Arc-connected Kubernetes cluster.",
+        "outcome": "Install AIO platform fundamentals on an existing Kubernetes cluster connected to Azure Arc.",
         "prerequisites": [
-          "An existing resource group and Arc-connected Kubernetes cluster meeting the selected AIO release's requirements.",
-          "Azure CLI for ARM deployment. Source template preparation requires Bicep. Verified workspace packages contain compiled ARM JSON and need no local Bicep compiler for this entry. This manifest contains no kubectl step.",
-          "Resource-derived guided inputs require an explicit read by the selected Azure provider using the operator's already configured Azure identity. Source access and deployment authorization remain separate.",
-          "An authorized deployment identity, including the required role-assignment permissions. Common guidance is Owner or User Access Administrator plus Contributor.",
-          "Enabling Secret Sync requires pre-existing OIDC and workload-identity readiness on the cluster."
+          "An existing resource group and a Kubernetes cluster connected to Azure Arc that meet the selected AIO release's requirements.",
+          "Azure CLI for ARM deployment. Source template preparation requires Bicep. Verified workspace packages contain compiled ARM JSON and need no local Bicep compiler for this manifest. This manifest contains no kubectl step.",
+          "Guided inputs derived from a resource ID require an explicit read by the selected Azure provider using the operator's already configured Azure identity. Source access and deployment authorization remain separate.",
+          "An authorized deployment identity, including the permissions required to create role assignments. Common guidance is Owner or User Access Administrator plus Contributor.",
+          "Enabling Secret Sync requires OIDC and workload identity to be ready on the cluster beforehand."
         ],
         "removal": [
           "Remove created resources deliberately while preserving the existing cluster and other retained resources.",
-          "There is no automatic rollback or general uninstall entry."
+          "Removal is a manual step. Site Ops does not roll back or uninstall automatically."
         ],
         "supplied": [
           {
@@ -238,8 +238,8 @@
         ],
         "outcome": "Apply the device, asset and dataflow resource sets selected by each Site.",
         "prerequisites": [
-          "An existing AIO instance, correct instance name and matching release configuration.",
-          "Resource-set selections and permission for their deployments, reads and resource writes."
+          "An existing AIO instance, correct instance name and matching AIO release configuration.",
+          "Resource set selections and permission for their deployments, reads and resource writes."
         ],
         "removal": [
           "Deselection does not delete resources. Remove the intended resources deliberately."
@@ -257,19 +257,19 @@
     {
       "guidance": {
         "category": "core",
-        "coverage": "Operational synopsis. Follow the guide for release selection, supported paths and post-upgrade workload observations. Detailed input and effective permission coverage is not declared.",
+        "coverage": "Operational synopsis. Follow the guide for AIO release selection, supported paths and workload observations after the upgrade.",
         "documentation": [
           "manifests/aio-upgrade/README.md"
         ],
         "effects": [
-          "Updates extensions and release-required resources while preserving supported existing configuration.",
+          "Updates extensions and the resources the AIO release requires while preserving supported existing configuration.",
           "Does not perform general migrations of instance child resources.",
-          "Avoid workload resource-set deployments between changing the release pin and completing the upgrade."
+          "Avoid resource set deployments between changing the AIO release pin and completing the upgrade."
         ],
-        "outcome": "Upgrade AIO-related extensions and resources explicitly required by the selected release.",
+        "outcome": "Upgrade the AIO extensions and the resources that the selected AIO release explicitly requires.",
         "prerequisites": [
           "An existing AIO installation and a supported upgrade transition.",
-          "A configured Site with the intended target release and permission for the selected updates."
+          "A configured Site with the intended AIO release and permission for the selected updates."
         ],
         "removal": [
           "There is no general rollback. Review partial outcomes and recovery guidance before retrying."
@@ -286,7 +286,7 @@
     {
       "guidance": {
         "category": "core",
-        "coverage": "Host-operation synopsis, not artifact qualification or a complete input contract. Installer identity, host health and downstream AIO health require their separate evidence.",
+        "coverage": "Synopsis of the host operation. Installer identity, host health and downstream AIO health each need their own checks.",
         "documentation": [
           "manifests/aksee-bootstrap/README.md"
         ],
@@ -294,13 +294,13 @@
           "Delivers a privileged host worker through Arc Run Command and can reboot the machine.",
           "The parent waits on worker state. Launcher completion is not worker completion, and the wait does not compare run IDs."
         ],
-        "outcome": "Bootstrap an AKS Edge Essentials cluster through an Arc-enabled Windows host.",
+        "outcome": "Bootstrap an AKS Edge Essentials cluster through a Windows host connected to Azure Arc.",
         "prerequisites": [
-          "An Arc-enabled Windows host meeting the guide's requirements, with the required managed-identity permissions and resource providers.",
-          "Explicit host and cluster configuration, target-side installer review and approval for reboots."
+          "A Windows host connected to Azure Arc that meets the guide's requirements, with the required managed identity permissions and resource providers.",
+          "Explicit host and cluster configuration, review of the installer on the host, and approval for reboots."
         ],
         "removal": [
-          "Use the operator guide's phase-specific remediation and cleanup. Do not treat reapplication as a general rollback."
+          "Use the operator guide's remediation and cleanup for each phase. Do not treat reapplication as a general rollback."
         ],
         "tags": [
           "host",
@@ -321,10 +321,10 @@
           "manifests/aksee-upgrade/README.md"
         ],
         "effects": [
-          "Runs target-side upgrade work and can interrupt workloads during node VM reboot.",
-          "Completion uses a worker state tag rather than run-correlated evidence."
+          "Runs upgrade work on the host and can interrupt workloads during the node VM reboot.",
+          "Completion uses a worker state tag rather than evidence tied to the run."
         ],
-        "outcome": "Upgrade an existing AKS Edge Essentials cluster through its Arc-enabled host.",
+        "outcome": "Upgrade an existing AKS Edge Essentials cluster through its host connected to Azure Arc.",
         "prerequisites": [
           "An existing supported host and cluster with the guide's permissions and upgrade settings.",
           "An approved maintenance window and access for potential console remediation."
@@ -354,10 +354,10 @@
           "Can create or configure identity, vault, federation, permissions and Secret Provider Class resources, and update the instance.",
           "Enablement is separate from materializing selected secret values in Kubernetes."
         ],
-        "outcome": "Enable workload-identity-backed Secret Sync on an existing AIO instance.",
+        "outcome": "Enable Secret Sync, backed by workload identity, on an existing AIO instance.",
         "prerequisites": [
           "An existing AIO instance and cluster with OIDC issuer and workload identity enabled.",
-          "An instance resource ID for the guided 2607/2608 route, or a configured Site with the actual instance name and appropriate release selection.",
+          "An instance resource ID for the guided 2607/2608 route, or a configured Site with the actual instance name and appropriate AIO release selection.",
           "Permissions for identities, vault resources and role assignments as applicable."
         ],
         "removal": [
@@ -382,7 +382,7 @@
         ],
         "effects": [
           "Combines privileged host work, possible reboots and AIO resource deployment.",
-          "The state-only wait does not provide run-correlated completion. This composition does not add Secret Sync."
+          "The wait checks only the state, not completion tied to the run. This composition does not add Secret Sync."
         ],
         "outcome": "Bootstrap the host, wait for worker state, then install AIO fundamentals.",
         "prerequisites": [
@@ -407,7 +407,7 @@
     {
       "guidance": {
         "category": "sample",
-        "coverage": "Composition synopsis. The guides own detailed configuration, functional limits for each release and the telemetry checks after deployment.",
+        "coverage": "Composition synopsis. The guides own detailed configuration, functional limits for each AIO release and the telemetry checks after deployment.",
         "documentation": [
           "samples/aio-with-opc-ua/README.md"
         ],
@@ -416,13 +416,13 @@
           "Applies the external simulator manifest to the cluster with kubectl. Browsing does not read that manifest.",
           "Creates billable resources and role assignments. Deployment does not establish telemetry delivery."
         ],
-        "outcome": "Install AIO and the composed OPC UA-to-cloud example on a fresh cluster.",
+        "outcome": "Install AIO and the composed example from OPC UA to the cloud on a fresh cluster.",
         "prerequisites": [
-          "A prepared Arc-connected cluster, configured Site and both installation and solution permissions.",
+          "A prepared cluster connected to Azure Arc, a configured Site, and both installation and solution permissions.",
           "Azure CLI with the connectedk8s extension, and kubectl. The simulator step applies a Kubernetes manifest through the Arc cluster connect proxy.",
           "Azure access to the Arc cluster through cluster connect, and Kubernetes RBAC in the cluster for the simulator objects, as listed in the OPC UA sample prerequisites.",
           "Outbound access to raw.githubusercontent.com. The simulator manifest is downloaded from a pinned commit during deployment.",
-          "Review the selected release's connector limitations and the solution's simulator input."
+          "Review the selected AIO release's connector limitations and the solution's simulator input."
         ],
         "removal": [
           "Use the component guides to remove owned resources deliberately while preserving retained infrastructure."
@@ -441,13 +441,13 @@
     {
       "guidance": {
         "category": "sample",
-        "coverage": "Fixed-declaration example. Detailed definitions and functional prerequisites are in the guide, not a complete operator input schema.",
+        "coverage": "Example with a fixed declaration. The guide holds the detailed definitions and functional prerequisites.",
         "documentation": [
           "samples/asset-sample/README.md"
         ],
         "effects": [
-          "Applies fixed shared resource-set sources. Resources can deploy even when the sample simulator is absent.",
-          "Real telemetry requires a reachable server and the appropriate connector behavior for the selected release."
+          "Applies fixed shared resource set sources. Resources can deploy even when the sample simulator is absent.",
+          "Real telemetry requires a reachable server and the appropriate connector behavior for the selected AIO release."
         ],
         "outcome": "Apply the worked YAML device and asset definitions to an existing AIO instance.",
         "prerequisites": [
@@ -471,15 +471,15 @@
     {
       "guidance": {
         "category": "sample",
-        "coverage": "Local-declaration example. Review namespace assumptions and routing behavior in the guide before applying it.",
+        "coverage": "Example with a local declaration. Review namespace assumptions and routing behavior in the guide before applying it.",
         "documentation": [
           "samples/dataflow-sample/README.md"
         ],
         "effects": [
-          "Applies the local declaration through shared templates, with Site-specific topics and client identity.",
+          "Applies the local declaration through shared templates, with topics and client identity specific to each Site.",
           "Provisions routing resources without establishing their health or message movement."
         ],
-        "outcome": "Apply sample-local YAML endpoints, profiles and dataflows to an existing AIO instance.",
+        "outcome": "Apply the sample's own YAML endpoints, profiles and dataflows to an existing AIO instance.",
         "prerequisites": [
           "An existing instance, configured Site and permission for the selected resource deployments.",
           "An authenticated MQTT client or actual telemetry source for functional observation."
@@ -500,7 +500,7 @@
     },
     {
       "guidance": {
-        "coverage": "Solution and simulator fragment. The parent supplies the existing-instance lookup.",
+        "coverage": "Solution and simulator partial. The parent supplies the lookup of the existing instance.",
         "documentation": [
           "samples/opc-ua-solution/README.md"
         ],
@@ -516,24 +516,24 @@
     {
       "guidance": {
         "category": "sample",
-        "coverage": "Solution synopsis. This card does not certify the external execution input, package completeness, release support or data movement.",
+        "coverage": "Solution synopsis. The guide covers the external simulator manifest, AIO release support and data movement checks.",
         "documentation": [
           "samples/opc-ua-solution/README.md"
         ],
         "effects": [
-          "Creates Device Registry, Event Hub, role-assignment and dataflow resources and applies the simulator through kubectl.",
+          "Creates Device Registry, Event Hub, role assignment and dataflow resources and applies the simulator through kubectl.",
           "The external simulator document is obtained during execution, outside this local inspection.",
-          "Provider completion is not telemetry-delivery evidence."
+          "Confirm telemetry delivery separately with the guide's checks."
         ],
-        "outcome": "Deploy a simulated OPC UA-to-Event Hub solution on an existing AIO instance.",
+        "outcome": "Deploy a simulated solution from OPC UA to Event Hub on an existing AIO instance.",
         "prerequisites": [
           "An existing AIO instance, configured Site, deployment permissions and Arc Kubernetes access.",
           "Azure CLI with the connectedk8s extension, and kubectl. The simulator step applies a Kubernetes manifest through the Arc cluster connect proxy.",
           "Outbound access to raw.githubusercontent.com for the simulator manifest pinned to a commit.",
-          "Review the selected release's connector limitations and that external simulator manifest."
+          "Review the selected AIO release's connector limitations and that external simulator manifest."
         ],
         "removal": [
-          "Follow the guide's Azure-resource and simulator cleanup, preserving shared infrastructure."
+          "Follow the guide's cleanup of Azure resources and the simulator, preserving shared infrastructure."
         ],
         "tags": [
           "aio",
@@ -549,14 +549,14 @@
     {
       "guidance": {
         "category": "sample",
-        "coverage": "Covers the basic-routing set and its existing-instance handoff. Deployment success does not establish dataflow health or message delivery. Subscribe first, publish a unique payload and observe it at the destination using the guide's MQTT procedure.",
+        "coverage": "Covers the basic-routing set and its handoff to an existing instance. To confirm message delivery, subscribe first, publish a unique payload and observe it at the destination using the guide's MQTT procedure.",
         "documentation": [
           "samples/resource-set-basic/README.md"
         ],
         "effects": [
           "Reads the existing instance's associated infrastructure during deployment and creates or updates the basic-routing dataflow.",
           "Reads azure-iot-operations/data/siteops-samples/basic/# and republishes to siteops-samples/<site-name>/basic.",
-          "The selected set declares no additional endpoint, profile or cloud service. It uses existing AIO capacity, which is not a zero-cost guarantee."
+          "The selected set declares no additional endpoint, profile or cloud service. It uses existing AIO capacity, which can still incur costs."
         ],
         "inputs": [
           {
@@ -574,7 +574,7 @@
             "type": "string"
           },
           {
-            "description": "Required by the Site model. Keep the correct target location even though these workload templates do not consume it as a dataflow input.",
+            "description": "Required by the Site model. Keep the Site's correct location even though these workload templates do not consume it as a dataflow input.",
             "field": "location",
             "requirement": "required",
             "sensitivity": "unknown",
@@ -582,7 +582,7 @@
           },
           {
             "defaultBehavior": "Inherited from the Site configuration, not discovered by browsing.",
-            "description": "Select the release configuration appropriate to the existing installation's API generation.",
+            "description": "Select the AIO release configuration appropriate to the existing installation's API generation.",
             "field": "properties.aioRelease",
             "requirement": "required",
             "sensitivity": "non-sensitive",
@@ -608,8 +608,8 @@
         "outcome": "Route local MQTT messages through the existing AIO instance's default endpoint and profile.",
         "prerequisites": [
           "An existing AIO installation ready for the workload, with its default endpoint and profile.",
-          "For a new installation, use catalog-basic for both aio-install and this sample. For an existing installation, configure its instance name and release rather than reinstalling.",
-          "Azure CLI and Bicep, with permission for the ARM deployments, associated reads and AIO child-resource writes.",
+          "For a new installation, use catalog-basic for both aio-install and this sample. For an existing installation, configure its instance name and AIO release rather than reinstalling.",
+          "Azure CLI and Bicep, with permission for the ARM deployments, associated reads and writes to AIO child resources.",
           "Cluster access and an authenticated MQTT client are separate requirements for functional observation. This manifest has no kubectl step."
         ],
         "removal": [
@@ -618,7 +618,7 @@
         ],
         "supplied": [
           {
-            "description": "During deployment, resolve-aio reads the custom location bound to the named instance. This higher-priority step binding supersedes the conventional Site-derived name.",
+            "description": "During deployment, resolve-aio reads the custom location bound to the named instance. This step binding has higher priority and supersedes the conventional name derived from the Site.",
             "input": "customLocationName",
             "step": "dataflow-resources"
           },
@@ -642,7 +642,7 @@
     },
     {
       "guidance": {
-        "coverage": "Creates the example's simulator and Bicep-owned device before catalog consumers.",
+        "coverage": "Creates the example's simulator and the device that Bicep owns before catalog consumers.",
         "documentation": [
           "samples/resource-set-composition/README.md"
         ],
@@ -658,19 +658,19 @@
     {
       "guidance": {
         "category": "sample",
-        "coverage": "Advanced-composition synopsis. The guide owns the selected sets and functional observation procedure. Detailed operator input and permission coverage is not declared.",
+        "coverage": "Synopsis of the advanced composition. The guide owns the selected sets and the functional observation procedure.",
         "documentation": [
           "samples/resource-set-composition/README.md"
         ],
         "effects": [
-          "Applies a local simulator and Bicep-owned provider before the selected catalog resources.",
+          "Applies a local simulator and a provider that Bicep owns before the selected catalog resources.",
           "External assertions describe expected providers. They are not live existence observations."
         ],
-        "outcome": "Demonstrate inherited selections, managed and external providers, and cross-resource composition.",
+        "outcome": "Demonstrate inherited selections, managed and external providers, and composition across resources.",
         "prerequisites": [
           "An existing AIO installation and the configured catalog-composition Site.",
           "Azure CLI with the connectedk8s extension, and kubectl. The simulator step applies a local Kubernetes manifest through the Arc cluster connect proxy.",
-          "Review the guide's simulator, resource permissions and external-provider ownership."
+          "Review the guide's simulator, resource permissions and ownership of external providers."
         ],
         "removal": [
           "Remove managed resources and the example provider according to their actual ownership. Deselection does not prune."
@@ -704,17 +704,17 @@
     {
       "guidance": {
         "category": "sample",
-        "coverage": "Sensitive-data example synopsis. No secret values, actual target configuration or materialization evidence are read or exported.",
+        "coverage": "Synopsis of an example with sensitive data. Browsing reads no secret values or Site configuration. The guide describes how to confirm materialization.",
         "documentation": [
           "samples/secretsync-sample/README.md"
         ],
         "effects": [
           "Writes declared Key Vault values and creates SecretSync resources after enablement.",
-          "Declared Secret Provider Class objects can replace out-of-band object configuration."
+          "Declared Secret Provider Class objects can replace object configuration made outside the declaration."
         ],
         "outcome": "Demonstrate Secret Sync enablement, secret population and synchronized resources.",
         "prerequisites": [
-          "Existing AIO, OIDC and workload-identity readiness, plus the required Azure and Kubernetes permissions.",
+          "Existing AIO, with OIDC and workload identity ready, plus the required Azure and Kubernetes permissions.",
           "Replace placeholder secret declarations through an authorized private authoring route."
         ],
         "removal": [
@@ -732,7 +732,7 @@
     },
     {
       "guidance": {
-        "coverage": "Starts bootstrap only. The composing entry must supply the worker-completion wait.",
+        "coverage": "Starts bootstrap only. The composing manifest must supply the wait for worker completion.",
         "documentation": [
           "manifests/aksee-bootstrap/README.md"
         ],
@@ -748,7 +748,7 @@
     },
     {
       "guidance": {
-        "coverage": "Starts upgrade only. The composing entry must supply the worker-completion wait.",
+        "coverage": "Starts upgrade only. The composing manifest must supply the wait for worker completion.",
         "documentation": [
           "manifests/aksee-upgrade/README.md"
         ],

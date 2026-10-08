@@ -1,13 +1,13 @@
 # E2E Testing
 
-The default end-to-end (E2E) scenario exercises selected Scale Kit deployments
+The default E2E (end to end) scenario exercises selected Scale Kit deployments
 in a live Azure subscription. A workflow matrix cell creates a fresh k3s
 cluster, registers it with Azure Arc, deploys Azure IoT Operations through
 Site Ops, and runs the selected integration tests. Ephemeral mode normally
 deletes its resource group. Persistent mode removes resources in the run's
 snapshot delta, and `skip-teardown` preserves them for inspection.
 
-A passing cell establishes only the assertions selected for that release,
+A passing cell establishes only the assertions selected for that AIO release,
 mode, and test allowlist. It does not certify an arbitrary cluster, AIO
 installation, or workload as ready for production. The AIO runs create Azure
 resources and can incur charges until teardown completes.
@@ -16,16 +16,16 @@ Use E2E tests when:
 
 - Validating a PR that changes orchestration, merge, or deployment logic.
 - Qualifying a new AIO release before updating workspace defaults.
-- Reproducing a field issue end-to-end against a real subscription.
+- Reproducing a field issue from start to finish against a real subscription.
 
 Unit tests (`pytest tests/ -m "not integration"`) cover local engine,
-workspace, and workflow behavior and should remain the default pre-commit
-gate. E2E is intentionally opt-in (`workflow_dispatch`).
+workspace, and workflow behavior and should remain the default gate before
+each commit. E2E runs only when you dispatch it (`workflow_dispatch`).
 
 ### Qualify one exact candidate across two Sites
 
-Choose `scenario=fleet` for mixed-release fleet acceptance. This is separate
-from the existing single-Site `aio` matrix. It uses two simultaneous
+Choose `scenario=fleet` for acceptance of a fleet with mixed AIO releases.
+This is separate from the existing `aio` matrix, which deploys one Site. It uses two simultaneous
 `ubuntu-24.04` host jobs, each with native K3s and a new Arc registration
 in its own owned resource group. One installed Site Ops controller selects
 both Sites and makes one deployment with `--parallel 2`. It also checks that
@@ -38,7 +38,7 @@ The selection binds the producer run/attempt, artifact IDs and frozen
 digests. Preview candidates remain previews and cannot authorize publication.
 The chosen candidate must contain the complete `azure.iot-operations`
 workspace. Select the separately approved Azure `environment` and `location`.
-Keep the ordinary single-Site overrides empty and leave teardown enabled.
+Keep the ordinary overrides for one Site empty and leave teardown enabled.
 
 The approved environment supplies `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
 `AZURE_SUBSCRIPTION_ID` and, when directory lookup is unavailable,
@@ -53,8 +53,8 @@ a separate allocation service. The `aio` scenario's persistent mode remains
 available for supplied groups and an identity scoped to those groups.
 
 The two configured Sites select AIO `2607` and `2608`, Secret Sync disabled
-and the existing E2E Low broker memory profile. Acceptance checks exact target
-identities, operation identities/dispositions, effective release parameters,
+and the existing E2E Low broker memory profile. Acceptance checks exact Site
+identities, operation identities and dispositions, effective AIO release parameters,
 the installed engine version, actual deployed extension versions, Kubernetes
 instance presence, and readiness of active pods. It does not claim application
 data delivery or Secret Sync functionality. Those remain separate scenarios.
@@ -76,32 +76,32 @@ allowance at each phase:
 |---|---|
 | All three runner jobs started | 15 minutes |
 | Both Arc/K3s hosts ready | 45 minutes |
-| Installed deployment and extension-version checks | 245 minutes |
+| Installed deployment and extension version checks | 245 minutes |
 | Both Kubernetes readiness observations | 265 minutes |
 | Hosts stop waiting for automatic cleanup | 320 minutes |
 
 These are failure ceilings, not predicted durations or sleeps. Commands
 finish and release resources as soon as their assertions pass. The deployment
 command retains its 150-minute maximum, bounded further by the remaining
-shared time. Phase timings appear as fixed, identity-free messages.
+shared time. Phase timings appear as fixed messages without identities.
 Long waits poll every 30 seconds and retain only their latest metadata
-diagnostics. Child-process output and execution are bounded. If shutdown
+diagnostics. Output and execution of child processes are bounded. If shutdown
 cannot be confirmed within its cleanup deadline, the phase stops with an
 explicit failure rather than retrying the command or reporting success.
 
 The controller has a 275-minute job cap, cleanup a separate 45-minute cap,
-and host jobs a 330-minute cap, below the six-hour hosted-job ceiling.
+and host jobs a 330-minute cap, below the six hour ceiling for hosted jobs.
 The timeline reserves ten minutes after readiness for controller reporting
 and 45 minutes for cleanup, with further host shutdown headroom.
 Environment approvals and runner queueing are not guaranteed to finish
 inside that reserve. The environment must allow approved host, controller
 and cleanup jobs to proceed without additional unattended approval stalls.
-Missing or late cleanup is a failing/unknown result, never success.
+Missing or late cleanup is a failing or unknown result, never success.
 
 Runs for the same fleet acceptance environment are serialized without
 cancelling the active run. Do not start unnecessary concurrent fleet runs
 or reduce asserted workloads just to fit a runner. Existing source,
-single-Site guided, Secret Sync and workload cases remain in their owning
+guided cases for one Site, Secret Sync and workload cases remain in their owning
 lanes. Select relevant lanes during development and retain all required
 candidate coverage before release.
 
@@ -110,7 +110,7 @@ candidate coverage before release.
 The cleanup job depends on the controller, not on host completion. Hosts
 remain alive through readiness and automatic cleanup, then exit. Each
 deletion requires the original receipt, its immutable marker commitment and
-matching run ownership tags. Cleanup waits for confirmed resource-group absence.
+matching run ownership tags. Cleanup waits until the resource group is confirmed absent.
 The final gate requires the controller, both host receipts and cleanup
 to identify the same candidate and run. A green wrapper or missing receipt
 cannot substitute for that evidence.
@@ -122,23 +122,23 @@ and the original subscription/environment. Use the original controller
 commit, preserving a branch or tag if necessary. Reconciliation recovers
 and verifies the original ownership artifact by ID and digest, then checks
 resource ownership again. It needs no copy of the private allocation file
-and does not regenerate ownership commitments. It refuses a still-running
-original workflow. It does not provision clusters or perform deployments.
-Raw target identities, Site files, kubeconfigs and provider logs are not
+and does not regenerate ownership commitments. It refuses an original workflow
+that is still running. It does not provision clusters or perform deployments.
+Raw Site identities, Site files, kubeconfigs and provider logs are not
 uploaded by either mode.
 
 Start a fresh full fleet run for another attempt. Rerunning only failed
-jobs can combine retained outputs with a new run-attempt identity, which
+jobs can combine retained outputs with a new run attempt identity, which
 the ownership guards deliberately reject. Reconcile the old scope first.
 
-### Keep single-Site workload phases isolated
+### Keep workload phases isolated on one Site
 
 When an `aio` run selects both `dataflow-sample` and `resource-set-samples`, the
 test harness removes the first sample's dataflows, profiles, and endpoints
 after its module completes. It waits for their projected custom resources to
-disappear before the advanced resource-set sample starts. A focused run that
+disappear before the advanced resource set sample starts. A focused run that
 selects only one phase preserves that phase's resources for an optional
-pre-teardown inspection hold.
+inspection hold before teardown.
 
 ### Check a Windows runner before installer qualification
 
@@ -148,7 +148,7 @@ diagnostic runs without Azure credentials, a cluster, source checkout or
 package installation. It reports only whether WinGet is callable,
 whether Python and GitHub CLI are on PATH, and whether the runner
 can create a private copied file and file symlink. Missing WinGet or
-file-link capability fails the job. CI uses file links to exercise symlink
+file link capability fails the job. CI uses file links to exercise symlink
 rejection independently of the installation manager.
 
 The default `scenario=aio` keeps the existing Azure E2E behavior.
@@ -158,8 +158,8 @@ installation coverage and approval. GitHub-hosted Windows Server runners
 run as administrators without UAC, so they do not establish the Windows
 desktop experience for a standard user.
 
-The regular PR CI job runs native copied-command, symlink-rejection and
-unsafe-path controls, with required symlink capability. Neither Windows check
+The regular PR CI job runs native controls for copied commands, symlink
+rejection and unsafe paths, with required symlink capability. Neither Windows check
 builds a Site Ops release or claims a verified
 engine installation, Azure deployment or a normal Windows desktop session.
 Signed bundle installation remains a distinct qualification gate.
@@ -203,14 +203,14 @@ Signed bundle installation remains a distinct qualification gate.
  └────────────────────────────────────────────────────────────┘
 ```
 
-No Azure-specific site file is committed. The E2E site is rendered at run time from `tests/e2e/sites/e2e-test.yaml.tmpl` into a writable directory and surfaced to the orchestrator via `SITEOPS_EXTRA_SITES_DIRS` (see [Site configuration](site-configuration.md)).
+No Site file specific to Azure is committed. The E2E Site is rendered at run time from `tests/e2e/sites/e2e-test.yaml.tmpl` into a writable directory and surfaced to the orchestrator via `SITEOPS_EXTRA_SITES_DIRS` (see [Site configuration](site-configuration.md)).
 
 ## Modes
 
 | Mode | Resource group | SP scope | When to use |
 |------|---------------|----------|-------------|
-| ephemeral (default) | Workflow creates and deletes per run. | Subscription-level `Owner`. | Routine CI validation, fully automated. |
-| persistent | Operator supplies a pre-existing RG. Only resources created during the run are deleted (snapshot delta). The cluster itself is always a fresh k3s on the runner (bring-your-own-cluster is not supported). | RG-level `Owner`. | Restricted subscriptions where sub-level Owner is not acceptable. Multi-release matrices are serialized in the shared RG. |
+| ephemeral (default) | Workflow creates and deletes it for each run. | `Owner` at subscription level. | Routine CI validation, fully automated. |
+| persistent | Operator supplies an existing RG. Only resources created during the run are deleted (snapshot delta). The cluster itself is always a fresh k3s on the runner. | `Owner` at RG level. | Restricted subscriptions where `Owner` at subscription level is not acceptable. Matrices with several AIO releases are serialized in the shared RG. |
 
 `Owner` is required (not `Contributor`) because AIO deployments make role assignments (for example, schema registry and Key Vault). `Contributor` cannot grant roles.
 
@@ -221,7 +221,7 @@ No Azure-specific site file is committed. The E2E site is rendered at run time f
 Follow [CI/CD setup - Azure OIDC Configuration](ci-cd-setup.md#azure-oidc-configuration) to create the service principal and federated credential. The SP needs:
 
 - **ephemeral mode:** `Owner` on the subscription.
-- **persistent mode:** `Owner` on the target resource group.
+- **persistent mode:** `Owner` on the selected resource group.
 
 ### 2. Custom Locations RP object ID
 
@@ -247,7 +247,7 @@ Create a GitHub Environment (for example, `dev`) and set these secrets:
 | `AZURE_CLIENT_OID` | `az ad sp show --id <AZURE_CLIENT_ID> --query id -o tsv` | optional |
 | `DEBUG_USER_OID` | `az ad signed-in-user show --query id -o tsv` (or a group OID) | optional |
 
-`AZURE_CLIENT_OID` is the SP's directory object ID. The e2e job binds it to namespace-admin on `azure-iot-operations` so kubectl steps that traverse the Arc proxy (e.g. the OPC PLC simulator) succeed. If unset, the workflow falls back to a Microsoft Graph lookup, which requires the SP to have `Directory.Read.All`.
+`AZURE_CLIENT_OID` is the SP's directory object ID. The e2e job grants it namespace admin rights on `azure-iot-operations` so kubectl steps that traverse the Arc proxy (e.g. the OPC PLC simulator) succeed. If unset, the workflow falls back to a Microsoft Graph lookup, which requires the SP to have `Directory.Read.All`.
 
 `DEBUG_USER_OID` is a human user (or group) Microsoft Entra object ID. When set, the e2e job binds it to `cluster-admin` on the runner k3s so you can inspect the live cluster via `az connectedk8s proxy -n <cluster> -g <rg>`. Pair with `skip-teardown: true` and/or `keep-cluster-alive-minutes` to keep the cluster around long enough to debug.
 
@@ -262,23 +262,23 @@ gh secret set DEBUG_USER_OID        --env dev --body "$(az ad signed-in-user sho
 
 ## Running in CI
 
-From the **Actions** tab, dispatch **E2E Tests** with the defaults to run a single-release ephemeral-mode pass against the `dev` environment:
+From the **Actions** tab, dispatch **E2E Tests** with the defaults to run one AIO release in ephemeral mode against the `dev` environment:
 
 | Input | Typical value | Notes |
 |-------|--------------|-------|
 | `scenario` | `aio` | `aio` runs the AIO matrix described on this page. `fleet` and `fleet-cleanup` run [fleet qualification](#qualify-one-exact-candidate-across-two-sites). `windows-installer-preflight` runs the [Windows runner check](#check-a-windows-runner-before-installer-qualification). |
-| `aio-releases` | `2608` or `2607,2608` | Comma-separated. Ephemeral fans out in parallel. Persistent serializes cells in the same RG. See [aio-releases.md](aio-releases.md) for how releases are defined and pinned. |
+| `aio-releases` | `2608` or `2607,2608` | Separated by commas. Ephemeral mode runs them in parallel. Persistent mode serializes cells in the same RG. See [aio-releases.md](aio-releases.md) for how AIO releases are defined and pinned. |
 | `environment` | `dev` | GitHub Environment whose secrets/approvers apply. |
 | `location` | `eastus2` | ephemeral mode only. Persistent derives from the RG. |
 | `resource-group` | empty (ephemeral) or existing RG (persistent) | |
-| `cluster-name` | empty | Arc cluster name to register. auto-generated if empty. |
+| `cluster-name` | empty | Arc cluster name to register. Generated automatically if empty. |
 | `custom-locations-oid` | tenant value | See prerequisite 2. |
 | `skip-teardown` | false | Preserve the deployment for inspection. Scope depends on mode (see below). |
 | `keep-cluster-alive-minutes` | `0` | Hold the runner for N min before teardown for debugging. Clamped to what is left of the job budget so teardown still runs. Nothing should be added to the persistent RG during the hold (it'll be deleted by teardown). |
-| `tests` | empty (run all) or `aio-install,enable-secretsync` | Comma-separated allowlist of test phases to deploy and run. Valid values: `aio-install`, `enable-secretsync`, `sync-secrets`, `opc-ua-solution`, `dataflow-sample`, `aio-resources`, `resource-set-samples`, `aio-upgrade`. Useful for demos and focused debugging when paired with `keep-cluster-alive-minutes`. |
-| `upgrade-to` | empty or `2608` | Optional AIO release to upgrade to after install-phase tests pass. Empty skips the upgrade phase. Per-cell skip when equal to the cell's `aio-releases` value. Requires `aio-upgrade` to be in the `tests` allowlist (or `tests` empty). |
+| `tests` | empty (run all) or `aio-install,enable-secretsync` | Allowlist of test phases to deploy and run, separated by commas. Valid values: `aio-install`, `enable-secretsync`, `sync-secrets`, `opc-ua-solution`, `dataflow-sample`, `aio-resources`, `resource-set-samples`, `aio-upgrade`. Useful for demos and focused debugging when paired with `keep-cluster-alive-minutes`. |
+| `upgrade-to` | empty or `2608` | Optional AIO release to upgrade to after the install phase tests pass. Empty skips the upgrade phase. Each cell skips it when it equals the cell's `aio-releases` value. Requires `aio-upgrade` to be in the `tests` allowlist (or `tests` empty). |
 | `secret-sync-modes` | `enabled` or `enabled,disabled` | Matrix modes for Secret Sync and workload identity. Use `enabled,disabled` with `tests=aio-upgrade` to qualify upgrade behavior with and without the OIDC profile. |
-| `published-release` | empty or an exact tag | Empty keeps the checkout-source integration suite. A tag selects the bounded verified published-package mode below. |
+| `published-release` | empty or an exact tag | Empty keeps the integration suite that runs from the checkout source. A tag selects the bounded, verified published package mode below. |
 | `published-source-sha` | empty or a full commit | Required with `published-release`. Must be the exact commit targeted by the published tag. |
 | `published-journey` | `configured` | Applies only with `published-release`. `configured` deploys a configured Site, and `guided` deploys one guided Site. See below. |
 | `fleet-candidate` | empty | Fleet scenarios only. The exact **Fleet qualification selection** JSON from the release producer's admission summary. |
@@ -296,13 +296,13 @@ gh workflow run e2e-test.yaml \
 
 ### Qualify a published engine and workspace
 
-Published-package mode proves a different boundary from the ordinary source
+Published package mode proves a different boundary from the ordinary source
 suite. It does not install `-e .`, import Site Ops from checkout, or use the
-checkout workspace as deployment content.
+checkout workspace as workspace content.
 
 The workflow:
 
-1. Checks the published tag targets the exact supplied `main` commit.
+1. Checks the published tag points at the exact supplied `main` commit.
 2. Downloads the installation ZIP and detached proof from the current
    repository and compares both with GitHub's published size and SHA-256.
 3. Verifies the exact `_siteops-distribution.yaml` signer, `release.yaml`
@@ -313,17 +313,18 @@ The workflow:
    authenticated bundle helper admits the complete payload, installs without
    an index or source build, and checks the installed bytes. Command and
    module checks require the selected installed engine rather than checkout.
-5. Creates an independent workspace signer policy and trusted-root snapshot.
-6. Before Azure provisioning, renders a self-contained operator Site outside
+5. Creates an independent workspace signer policy and trusted root snapshot.
+6. Before Azure provisioning, renders a complete operator Site outside
    the package, anonymously pins the published IoT Operations workspace into
    that project, confirms pinning did not change the Site and prepares an
-   offline compile-free `aio-install` plan.
+   offline `aio-install` plan without compiling.
 7. Runs `aio-install` through the same project with package acquisition
    offline, then checks the redacted deployment summary, expected Azure
    resource types, AIO instance custom resource and at least one running,
    Ready operator pod. Completed AIO job pods are not required to become Ready.
-8. Uploads only bounded count/status receipts and runs the existing persistent
-   snapshot-delta teardown, preserving the operator-supplied RG.
+8. Uploads only bounded count and status receipts and runs the existing
+   persistent teardown of the snapshot delta, preserving the RG that the
+   operator supplied.
 
 Published qualification is deliberately bounded:
 
@@ -331,7 +332,7 @@ Published qualification is deliberately bounded:
 |---|---|
 | `published-release` | Exact approved published tag |
 | `published-source-sha` | Exact full source commit |
-| `aio-releases` | One release. Guided mode uses `2608`. |
+| `aio-releases` | One AIO release. Guided mode uses `2608`. |
 | `tests` | `aio-install` |
 | `published-journey` | `configured` or `guided` |
 | `secret-sync-modes` | `disabled` for configured Sites. Guided supports `disabled`, `enabled` or both. |
@@ -341,9 +342,9 @@ Published qualification is deliberately bounded:
 | `skip-teardown` | `false` |
 | `keep-cluster-alive-minutes` | `0` |
 
-The mode snapshots an existing RG, creates a fresh Arc-connected k3s
-registration and deploys the selected AIO release. It can incur Azure charges
-until snapshot-delta cleanup completes. The RG itself is preserved. Anything
+The mode snapshots an existing RG, creates a fresh k3s registration connected
+to Azure Arc and deploys the selected AIO release. It can incur Azure charges
+until cleanup of the snapshot delta completes. The RG itself is preserved. Anything
 another actor adds after the snapshot can enter the deletion delta, so use a
 dedicated RG and do not make concurrent changes during the run. The mode
 establishes the published engine/package deployment route and bounded AIO
@@ -352,18 +353,19 @@ data movement or general production health. A configured disabled cell
 does not establish Secret Sync. A guided enabled cell additionally
 observes the Secret Provider Class, managed identity, vault, federated
 credential and instance binding. The cell compares current RG resource IDs
-with its private pre-run snapshot before selecting resources. It rejects
-missing or ambiguous run-owned resources without publishing their identities.
+with its private snapshot from before the run, before selecting resources. It
+rejects missing or ambiguous resources that the run owns without publishing
+their identities.
 Secret Sync infrastructure enablement does not prove secret materialization.
 
-Within the guided disabled cell, the installed engine prepares resource-backed,
-manual-file and inline-input plans from the verified package.
+Within the guided disabled cell, the installed engine prepares plans from a
+resource ID, a manual file and inline inputs, using the verified package.
 The manual and inline routes do not authorize a cluster resource read. A
 complete manual Site is also saved to the operator project and planned with a
-bounded configured-Site selector. The cell compares the selected target and
+bounded selector for configured Sites. The cell compares the selected Site and
 operation identities and dispositions in private runner files, then deploys
-only the resource-backed target. These additional preparations do not prove
-byte-identical parameter values, a second deployment, or live readiness for
+only the Site built from the resource ID. These additional preparations do not
+prove identical parameter bytes, a second deployment, or live readiness for
 the other input routes.
 
 Example guided qualification in one dedicated existing RG. Supply an
@@ -385,24 +387,24 @@ gh workflow run e2e-test.yaml \
 
 | Mode | Normal teardown | With `skip-teardown: true` |
 |------|----------------|----------------------------|
-| ephemeral | `az group delete` on the workflow-created RG. | **Entire RG and every resource inside it persist.** You are responsible for deleting the RG afterwards. Otherwise orphan RGs accumulate and bill indefinitely. |
-| persistent | `az connectedk8s delete` (only if the Arc cluster was created by this run) + snapshot-delta deletion of resources created during the run. RG itself is never touched. | Arc cluster + resources created by this run persist inside the operator's RG. Anything that existed before the run is untouched in either case. |
+| ephemeral | `az group delete` on the RG that the workflow created. | **Entire RG and every resource inside it persist.** You are responsible for deleting the RG afterwards. Otherwise orphan RGs accumulate and bill indefinitely. |
+| persistent | `az connectedk8s delete` (only if the Arc cluster was created by this run) + deletion of the snapshot delta, the resources created during the run. RG itself is never touched. | Arc cluster + resources created by this run persist inside the operator's RG. Anything that existed before the run is untouched in either case. |
 
 ### Teardown safety guarantees
 
-Ephemeral teardown runs three independent guards before `az group delete`. Any single mismatch hard-fails the step rather than proceeding:
+Ephemeral teardown runs three independent guards before `az group delete`. Any single mismatch fails the step rather than proceeding:
 
-1. **Name pattern.** RG must match `rg-e2e-<run_id>-<run_attempt>-*` built from the **current** workflow run, not a generic prefix. A pre-existing RG named `rg-e2e-...` from another run cannot pass.
-2. **Tag provenance.** RG must carry `managedBy=siteops-e2e`, `ephemeral=true`, `run_id=<this run>`, `run_attempt=<this attempt>`. Tags are written by the `Create resource group` step and are never applied by the persistent path, so an operator-supplied RG cannot accidentally carry them.
+1. **Name pattern.** RG must match `rg-e2e-<run_id>-<run_attempt>-*` built from the **current** workflow run, not a generic prefix. An existing RG named `rg-e2e-...` from another run cannot pass.
+2. **Tag provenance.** RG must carry `managedBy=siteops-e2e`, `ephemeral=true`, `run_id=<this run>`, `run_attempt=<this attempt>`. Tags are written by the `Create resource group (ephemeral mode)` step and are never applied by the persistent path, so an RG that an operator supplies cannot accidentally carry them.
 3. **Existence.** A missing RG is treated as idempotent success (not failure), so reruns after manual cleanup do not fail spuriously.
 
-Persistent teardown deletes the Arc cluster only if it was not present in the pre-run snapshot (i.e. only clusters this run registered). An operator-owned cluster with the same name is preserved. Resource deletion is bounded to the snapshot delta (post − pre): the workflow records every resource ID present in the RG before any Azure-side creation and deletes only what was added during the run. Missing snapshot → skip delta cleanup (manual inspection). Post-run enumeration failure → emit an error instead of declaring the RG clean.
+Persistent teardown deletes the Arc cluster only if it was not present in the snapshot taken before the run (only clusters this run registered). A cluster with the same name that an operator owns is preserved. Resource deletion is bounded to the snapshot delta (after minus before): the workflow records every resource ID present in the RG before it creates anything in Azure and deletes only what was added during the run. Missing snapshot → skip delta cleanup (manual inspection). Enumeration failure after the run → emit an error instead of declaring the RG clean.
 
 **Use a dedicated RG for persistent mode.** Anything added to the RG between the snapshot and teardown (by operators, automation, or a `keep-cluster-alive-minutes` hold) appears in the delta and is deleted.
 
-Operator target names are masked before step environments can display them.
-Persistent runs serialize on a case-insensitive target key that does not
-contain the resource group name. For the published persistent snapshot and
+Names that the operator supplies are masked before step environments can
+display them. Persistent runs serialize on a concurrency key that ignores
+case and does not contain the resource group name. For the published persistent snapshot and
 teardown, public logs and summaries report fixed reasons and aggregate counts.
 Those steps keep resource ID lists and provider diagnostics in private runner
 files. The published Arc connection also keeps provider diagnostics on the
@@ -412,17 +414,17 @@ When cleanup reports an incomplete or unknown result, inspect the dedicated
 RG privately through an authorized Azure inventory. A successful cleanup
 step is not an independent RG inventory check.
 
-A JUnit XML artifact is uploaded per source-mode matrix cell
+A JUnit XML artifact is uploaded for each source mode matrix cell
 (`e2e-results-<release>-secretsync-<mode>.xml`). When `upgrade-to` is set and
 the cell exercises the upgrade phase, a second artifact
 (`e2e-results-<release>-to-<upgrade-to>-secretsync-<mode>.xml`) is uploaded
-with the upgrade-only test results. Published-package mode instead uploads
+with the results of the upgrade tests. Published package mode instead uploads
 only `published-deployment.json` and `published-readiness.json`. They contain
 public release identities and aggregate counts, not Azure resource IDs.
 
 ## Running locally
 
-Local runs target your own k3s (or any Arc-connected) cluster against your own subscription. The renderer is cross-platform Python. No `envsubst` or bash required.
+Local runs use your own k3s cluster (or any cluster connected to Azure Arc) and your own subscription. The renderer is Python and runs on any platform. No `envsubst` or bash required.
 
 Set the required variables. The renderer fills in defaults for the optional ones.
 
@@ -470,13 +472,13 @@ export INTEGRATION_SELECTOR="name=$E2E_SITE_NAME"
 pytest tests/integration/ -v -m integration
 ```
 
-Setting `E2E_SITE_NAME` explicitly (or letting the renderer default to `e2e-local-<unix_time>`) gives you a predictable site name up front. The renderer also writes the file as `<E2E_SITE_NAME>.yaml` so the filename matches the site's `name:` field (the standard siteops convention).
+Setting `E2E_SITE_NAME` explicitly (or letting the renderer default to `e2e-local-<unix_time>`) gives you a predictable Site name up front. The renderer also writes the file as `<E2E_SITE_NAME>.yaml` so the filename matches the Site's `name:` field (the standard Site Ops convention).
 
-You must already be logged in (`az login`) and have the cluster registered with Arc. The workflow automates these steps but local runs assume you already have an Arc-enabled target.
+You must already be logged in (`az login`) and have the cluster registered with Arc. The workflow automates these steps but local runs assume your cluster is already connected to Azure Arc.
 
-### Running upgrade-phase tests locally
+### Running upgrade phase tests locally
 
-To exercise the cross-release upgrade locally, install at one release first (block above), then re-render the site at the upgrade target and run the upgrade-only test classes:
+To exercise an upgrade between AIO releases locally, install at one AIO release first (block above), then render the Site again at the release you upgrade to and run the upgrade test classes:
 
 ```bash
 # Re-render with the upgrade target. Same E2E_SITE_NAME so the file overwrites in place.
@@ -489,23 +491,23 @@ pytest tests/integration/ -v -m integration
 
 `SITEOPS_E2E_UPGRADE_PHASE=1` does two things:
 
-- **Narrows test collection** to `_UPGRADE_PHASE_ALLOWED_CLASSES` in `tests/integration/conftest.py`. Classes whose assertions require install-phase outputs are listed in `_UPGRADE_PHASE_INSTALL_ONLY_CLASSES` instead. A workspace test requires every class in the upgrade module to appear in exactly one collection.
-- **Short-circuits the `aio_install_result` fixture** so `aio-install` is not re-deployed at the new release on top of the existing instance.
+- **Narrows test collection** to `_UPGRADE_PHASE_ALLOWED_CLASSES` in `tests/integration/conftest.py`. Classes whose assertions require outputs from the install phase are listed in `_UPGRADE_PHASE_INSTALL_ONLY_CLASSES` instead. A workspace test requires every class in the upgrade module to appear in exactly one collection.
+- **Bypasses the `aio_install_result` fixture** so `aio-install` is not deployed again at the new AIO release on top of the existing instance.
 
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
 | `azure/login` fails with `AADSTS70021` | Federated credential `sub` claim mismatch. | Confirm the credential matches `repo:<org>/<repo>:environment:<env>` (or branch ref) exactly. See [CI/CD setup](ci-cd-setup.md#azure-oidc-configuration). |
-| Pytest collects 0 integration tests | Selector does not match the rendered site, or `SITEOPS_EXTRA_SITES_DIRS` is unset. | Check `INTEGRATION_SELECTOR` equals the rendered site's `name:` field. |
+| Pytest collects 0 integration tests | Selector does not match the rendered Site, or `SITEOPS_EXTRA_SITES_DIRS` is unset. | Check `INTEGRATION_SELECTOR` equals the rendered Site's `name:` field. |
 | Rendered output still contains `${...}` | Template references a variable not in `ALL_VARS`. | Add it to `REQUIRED_VARS` or `OPTIONAL_VARS` in `scripts/render-e2e-site.py`. |
 | AIO deploy fails with `AuthorizationFailed` on role assignment | SP is `Contributor`, not `Owner`. | Escalate to `Owner` on sub (ephemeral) or RG (persistent). |
-| Persistent-mode teardown leaves resources | The snapshot step failed or was skipped. | Inspect the step summary warning and the `Snapshot RG resources` step log. Clean up residual resources manually. |
-| Step summary shows `incomplete in RG ... (N residual resource(s))` | One or more delta deletes did not converge in 5 retry passes. | Inspect the `[delete-failed pass=*]` warnings in the teardown step log. Clean up the named resources manually. For a connectedCluster, use `az connectedk8s delete -n <name> -g <rg> --yes --force`. |
-| connect-arc times out waiting for `Connected` | Arc registration or heartbeat did not reach `Connected`. Authentication, cluster reachability, or custom-locations configuration may be involved. | Verify prerequisite 2. Re-run with `skip-teardown: true` and inspect `az connectedk8s show` from an authorized local session. |
+| Teardown in persistent mode leaves resources | The snapshot step failed or was skipped. | Inspect the step summary warning and the `Snapshot RG resources (persistent mode)` step log. Clean up residual resources manually. |
+| Step summary shows `Persistent-mode teardown incomplete (N residual resource(s))` | One or more delta deletes did not converge in 5 retry passes. | Inspect the `[delete-failed pass=*]` warnings in the teardown step log. Clean up the named resources manually. For a connectedCluster, use `az connectedk8s delete -n <name> -g <rg> --yes --force`. |
+| connect-arc times out waiting for `Connected` | Arc registration or heartbeat did not reach `Connected`. Authentication, cluster reachability, or custom locations configuration may be involved. | Verify prerequisite 2. Rerun with `skip-teardown: true` and inspect `az connectedk8s show` from an authorized local session. |
 
 ## Related docs
 
 - [CI/CD setup](ci-cd-setup.md): OIDC, federated credential, general CI wiring.
-- [Site configuration](site-configuration.md): trusted site directories and `SITEOPS_EXTRA_SITES_DIRS`.
-- [Troubleshooting](troubleshooting.md): general siteops diagnostics.
+- [Site configuration](site-configuration.md): trusted Site directories and `SITEOPS_EXTRA_SITES_DIRS`.
+- [Troubleshooting](troubleshooting.md): general Site Ops diagnostics.

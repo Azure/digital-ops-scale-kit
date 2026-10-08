@@ -1,4 +1,4 @@
-# Fan-out outputs from the aio-instance step, forwarded to later consumers.
+# Outputs of the aio-instance step, forwarded to later consumers.
 # See docs/parameter-resolution.md for the inputs/outputs convention.
 # Consumed by: schema-registry-role
 

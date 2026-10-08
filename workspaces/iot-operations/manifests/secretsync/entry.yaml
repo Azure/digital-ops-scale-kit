@@ -4,10 +4,10 @@ role: standalone
 category: core
 tags: [aio, secretsync, identity]
 documentation: [README.md]
-outcome: Enable workload-identity-backed Secret Sync on an existing AIO instance.
+outcome: Enable Secret Sync, backed by workload identity, on an existing AIO instance.
 prerequisites:
   - An existing AIO instance and cluster with OIDC issuer and workload identity enabled.
-  - An instance resource ID for the guided 2607/2608 route, or a configured Site with the actual instance name and appropriate release selection.
+  - An instance resource ID for the guided 2607/2608 route, or a configured Site with the actual instance name and appropriate AIO release selection.
   - Permissions for identities, vault resources and role assignments as applicable.
 effects:
   - Can create or configure identity, vault, federation, permissions and Secret Provider Class resources, and update the instance.

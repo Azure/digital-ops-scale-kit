@@ -10,7 +10,7 @@ prerequisites:
   - A configured Site identifying the intended host and resulting cluster.
 effects:
   - Combines privileged host work, possible reboots and AIO resource deployment.
-  - The state-only wait does not provide run-correlated completion. This composition does not add Secret Sync.
+  - The wait checks only the state, not completion tied to the run. This composition does not add Secret Sync.
 removal:
   - Follow each component's ownership and cleanup guidance. There is no combined rollback.
 coverage: Composition synopsis. Review both component guides and observe host, AIO readiness and workload outcomes separately.

@@ -13,16 +13,16 @@ siteops -w <workspace> deploy <manifest>
 ```
 
 In a private interactive terminal, the command prepares one executable plan,
-displays its targets and operations, asks for confirmation, then executes
-that same plan and prints a final summary with one row per site. A declined
-review submits no operations. `--yes` explicitly approves unattended, CI or
+displays its Sites and operations, asks for confirmation, then executes
+that same plan and prints a final summary with one row per Site. A declined
+review submits no operations. `--yes` explicitly confirms unattended, CI or
 JSON execution without printing the full private plan or bypassing
-validation, source trust or target prerequisites. Without `--yes`, a
+validation, source trust or Site prerequisites. Without `--yes`, a
 noninteractive invocation exits with argparse usage error 2 before content
 or Azure access. For preparation without execution, use `plan`.
 
 Progress lines and logs go to stderr while the run is in flight. For a direct
-published source, fixed messages name release resolution, missing-content
+published source, fixed messages name release resolution, missing content
 download, verification and plan preparation phases. While preparation compiles
 templates and checks local tools, a line reports elapsed time after 10 seconds
 and then every 30 seconds. These lines do not expose a percentage or turn
@@ -72,8 +72,8 @@ A run that does not succeed names the incomplete work and the next step:
   plan before deploying again.
 ```
 
-Rows size themselves to the sites in the run rather than to a fixed table. A
-name longer than the column keeps its own line, so a target identity is never
+Rows size themselves to the Sites in the run rather than to a fixed table. A
+name longer than the column keeps its own line, so a Site name is never
 truncated. Markers are plain ASCII (`+` succeeded, `x` failed, `-` did not
 run, `?` unconfirmed), the same set that [plan output](plan-output.md) uses,
 and no color or cursor control is emitted. Prose wraps to the terminal width,
@@ -85,8 +85,31 @@ resources before deciding to deploy again. Unconfirmed work takes priority
 in this guidance even when another operation failed. A new deployment runs
 a fresh plan, not just unfinished operations from this run.
 
-Progress lines during the run use the same markers and the `[site]` prefix,
-and they go to stderr so stdout stays parseable.
+Progress lines during the run go to stderr so stdout stays parseable. A line
+about one Site starts with the Site name in brackets and uses the same
+markers. A manifest with steps at subscription scope runs in two phases, and
+each phase starts with its own line. This example is shortened:
+
+```text
+  [Phase 1] Steps at subscription scope: 1 target
+[contoso-global] starting
+[contoso-global] > global-edge-site (deployment)...
+[contoso-global] + global-edge-site
+[contoso-global] + succeeded in 21.3s
+
+  [Phase 2] Steps in resource groups: 2 targets
+
+  [Parallel] Deploying to 2 targets (2 concurrent)
+[munich-dev] starting
+[munich-dev] > schema-registry (deployment)...
+[munich-dev] + schema-registry
+[munich-dev] + succeeded in 41.0s
+```
+
+A manifest without steps at subscription scope starts with
+`[Execution] Prepared targets: N targets` instead. The `[Parallel]` line
+appears when more than one Site deploys at once. Redacted output shows
+`<site>` in place of each Site name.
 
 ## Read the outcome
 
@@ -101,7 +124,7 @@ Every prepared operation is accounted for, including work that never started.
 | `cancelled` | The operation was still queued when the run was asked to stop |
 | `unknown` | The operation may have completed, but its final state was not confirmed |
 
-A site carries the same set of values, aggregated from its operations. A run
+A Site carries the same set of values, aggregated from its operations. A run
 adds `invalid`, which means preparation failed and nothing was executed.
 
 `unknown` means an operation's final effect or observation could not be
@@ -161,7 +184,7 @@ unsupported `apiVersion`, `kind`, or `projection`, and should treat
 `summary.interrupted` as the only reason an otherwise successful run reports
 exit code 130.
 
-Each run generates a fresh identifier. It appears in local-private JSON for
+Each run generates a fresh identifier. It appears in `local-private` JSON for
 correlating one execution and is not published, so public automation should
 not depend on it.
 
@@ -185,12 +208,12 @@ Site Ops rejects an explicit `local-private` projection while redaction is
 enabled.
 
 The publishable projection is built from an allowlist rather than by redacting
-the local document. It omits site names, step names, deployment names, paths,
+the local document. It omits Site names, step names, deployment names, paths,
 provider outputs, and raw error text. Diagnostic codes and summaries are fixed
 category text, so a diagnostic written by a producer is never published
 verbatim. An unrecognized category publishes a generic entry.
 
-The local-private projection carries identities and typed reasons. It never
+The `local-private` projection carries identities and typed reasons. It never
 serializes operation outputs or raw provider errors. A reason or diagnostic
 adds detail only when its producer supplied a separate value free message.
 
@@ -200,20 +223,20 @@ text and unconfirmed deployment names.
 
 ## Interrupt a run
 
-During preparation or interactive review, Ctrl-C cancels before deployment
+During preparation or interactive review, Ctrl+C cancels before deployment
 submission and exits `130`. Local tool cleanup may delay the return.
 Declining the confirmation also exits `130`, without submitting operations
 or producing a completed deployment result.
 
-During execution, Ctrl-C records a stop request, prints what to expect,
+During execution, Ctrl+C records a stop request, prints what to expect,
 stops new work and wakes polling loops and
 backoff sleeps. A call already running in a child process is not interrupted.
 It returns on its own or reaches its existing timeout first. The current
 bounds are 60 seconds for one deployment state read, 5 minutes for a
-deployment submission, and 10 minutes for a kubectl operation. These are
-per-call bounds, not a time limit for the whole command.
+deployment submission, and 10 minutes for a kubectl operation. These bounds
+apply to each call, not to the whole command.
 
-Pressing Ctrl-C again repeats that expectation. It does not force an exit,
+Pressing Ctrl+C again repeats that expectation. It does not force an exit,
 because workers still hold temporary files and outcomes already observed would
 be lost.
 
@@ -233,7 +256,7 @@ already prepared recorded as `not-run`, and a nonzero exit code. Plain mode
 prints the same failure as the equivalent `plan` command.
 
 An unexpected error outside execution produces no synthetic result document.
-If a target fails unexpectedly during execution, the result retains earlier
+If a Site fails unexpectedly during execution, the result retains earlier
 observations, identifies the incomplete work, and exits nonzero.
 
 ## Temporary files

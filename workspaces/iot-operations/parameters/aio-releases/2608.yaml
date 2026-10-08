@@ -1,4 +1,4 @@
-# AIO Release 2608 - Version Configuration
+# AIO release 2608: version configuration
 # Source: https://github.com/Azure/azure-iot-ops-cli-extension/wiki/IoT-Operations-versions#2608
 
 aioVersion: "1.4.73"

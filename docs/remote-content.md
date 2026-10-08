@@ -1,6 +1,6 @@
 # Browse a published source
 
-Browse a source's published deployment descriptions without cloning its
+Browse a source's published manifest descriptions without cloning its
 repository. The source must contain a generated Site Ops index.
 Replace `<owner>` and `<repository>` in these examples:
 
@@ -14,10 +14,10 @@ siteops browse --source github:<owner>/<repository> --category sample --tag mqtt
 A root GitHub repository URL also works. Use `--ref` to select a branch, tag
 or commit, or append `@<ref>` to the `github:` locator. Without a ref, Site Ops
 resolves the repository's default branch rather than assuming its name.
-`--source NAME` also accepts an independently enrolled consumer alias for
-metadata browsing, optionally with `@<ref>`. Its repository reference may
-be resolved even after its execution approval expires. This passive read
-does not renew trust or approve use of a workspace package.
+`--source NAME` also accepts the name of an approved source that you enrolled
+independently, optionally with `@<ref>`. Its repository reference may
+be resolved even after the enrollment expires. This passive read
+does not renew the enrollment or allow use of a workspace package.
 
 ```bash
 siteops browse --source https://github.com/<owner>/<repository> --ref <branch-or-tag>
@@ -27,10 +27,10 @@ The command resolves one exact commit, then reads that commit's tree and
 immutable index blobs. The source and revision remain visible in plain and
 JSON output. Documentation links point at that same revision.
 
-## Choose a workspace and entry
+## Choose a workspace and manifest
 
 A source with one index is selected automatically. If several workspaces
-publish indexes, the command lists their source-relative paths and asks for
+publish indexes, the command lists their paths within the source and asks for
 an explicit selection:
 
 ```bash
@@ -44,7 +44,7 @@ Names, paths, filters, category labels and partial visibility follow
 
 An index can serve a large collection without downloading every manifest.
 Source validation uses a pinned tree and index blobs, not a separate content
-request for every entry.
+request for every manifest.
 
 ## Use cached metadata with `browse`
 
@@ -108,7 +108,7 @@ The `--offline-content` switch limits source content acquisition, not Azure
 resource reads or deployment operations in other commands. Direct executable
 `--source SOURCE@RELEASE` resolves a published release online on each
 invocation and cannot be combined with this switch. A project pin is the
-offline-content and repeatable fleet route.
+route for offline content and repeatable fleets.
 
 ## Public and authorized source access
 
@@ -124,8 +124,7 @@ authentication. It does not extract tokens, inspect personal credential
 stores, change login or fall back to another credential source after failure.
 
 `--auth cli` applies only to descriptive metadata browsing. Package
-acquisition for `project pin` uses anonymous source access. Authenticated
-package acquisition is not implemented.
+acquisition for `project pin` always uses anonymous source access.
 
 Anonymous and CLI access use separate cache scopes. Retained data belongs to
 the current operating system user and stays available locally after the
@@ -149,13 +148,14 @@ source. It does not establish package provenance, executable compatibility,
 effective Site inputs, deployment authorization or workload health.
 
 Remote cards intentionally omit authored targeting from the public index.
-They report that targeting is unavailable rather than claiming no targets
-were declared. They also omit executable plan/deploy suggestions because this
+They report that targeting is unavailable rather than claiming that no
+selector or Sites were declared. They also omit executable plan/deploy suggestions because this
 command has not acquired a complete deployable workspace.
 
-Read the operator guide at the displayed revision. With an independently
-approved source and a published release, [guided inputs](guided-inputs.md)
-can use direct `--source SOURCE@RELEASE` for one explicit target. An
+Read the operator guide at the displayed revision. With an approved source
+that you enrolled independently and a published release,
+[guided inputs](guided-inputs.md) can use direct `--source SOURCE@RELEASE`
+for one explicit Site. An
 [operator project](projects.md) can instead pin the verified package for
 configured Sites and repeat use.
 You can also select a reviewed local workspace. Descriptive index browsing
@@ -168,7 +168,7 @@ siteops browse --source github:<owner>/<repository> --output json
 ```
 
 A private repository's identity and source selection can be private even
-when its index format contains only approved descriptive fields. Destination
+when its index format contains only published descriptive fields. Destination
 redaction refuses browsing before source access.
 
 ## Publish descriptions from a workspace
@@ -180,16 +180,16 @@ browsing:
 siteops -w workspaces/iot-operations index --public --for-source github
 ```
 
-`--public` explicitly approves the workspace's declared entry names and
-guidance for a publication projection. Review that text before publishing. Read access
-or a public repository is not automatic publication approval.
+`--public` explicitly publishes the workspace's declared manifest names and
+guidance by marking them public. Review that text first. Read access
+or a public repository does not publish descriptions automatically.
 
 The command writes two generated files:
 
 | File | Audience and purpose |
 |---|---|
-| `siteops-index.json` | Approved descriptive entries. Suitable as input to a separately implemented read-only gallery |
-| `siteops-index.inputs.json` | Source-private input paths and freshness digests. Keep with the authorized source, not in the gallery |
+| `siteops-index.json` | Published manifest descriptions. Suitable as input to a separate gallery that only reads them |
+| `siteops-index.inputs.json` | Input paths private to the source and freshness digests. Keep with the authorized source, not in the gallery |
 
 On POSIX, both generated files allow at most owner read/write access.
 Refreshing preserves existing permissions only within that limit.
@@ -205,9 +205,9 @@ The binding file records the exact candidate set, present and absent guidance
 inputs, and the public index's content identity. UTF-8 source identities
 normalize uniform LF/CRLF line endings. The GitHub adapter adds optional Git
 object identities for both forms. Other source adapters do not need those
-Git-specific identities.
+identities, which are specific to Git.
 
-The index contains no self-referential commit or archive digest. GitHub pins
+The index contains no digest of the commit or archive that contains it. GitHub pins
 the commit containing the generated files and compares the recorded inputs
 against that commit's tree. Changes to headers, metadata, extra paths or the
 conventional candidate set make an old index stale. Template behavior and
@@ -233,13 +233,13 @@ not a silent fallback to floating remote YAML.
 
 Keep generated outputs unchanged when publishing them. The input bindings
 can describe private source paths, so a gallery should receive only the
-public index and separately approved presentation assets.
+public index and separately reviewed presentation assets.
 
 ## Boundaries
 
-The first adapter supports GitHub.com. The common index, entry model,
-filtering and rendering do not require GitHub fields. An approved artifact
-source or another Git host can supply the same model through its own
+The GitHub adapter reads GitHub.com. The common index, manifest description
+model, filtering and rendering do not require GitHub fields, so another
+artifact source or Git host can supply the same model through its own
 identity and authorization boundary.
 
 A gallery consumes the public index, not the source binding file or private

@@ -15,9 +15,9 @@ description: |
 
   Prerequisites:
     - AIO instance must be deployed and running
-    - The site's aioRelease must point to a parameters/aio-releases/<release>.yaml file
+    - The Site's aioRelease must point to a parameters/aio-releases/<release>.yaml file
 
-# Max concurrent sites. 0 = unlimited, 1 = serial.
+# Max concurrent Sites. 0 = unlimited, 1 = serial.
 parallel: 3
 
 # Default selector. Override at the CLI with `-l <key>=<value>`.

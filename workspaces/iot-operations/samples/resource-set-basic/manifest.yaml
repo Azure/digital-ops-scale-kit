@@ -2,8 +2,8 @@ apiVersion: siteops/v1
 kind: Manifest
 name: resource-set-basic
 description: |
-  Beginner resource-set example. One site selects one reusable dataflow set,
-  which republishes local AIO asset telemetry to a site-specific MQTT topic.
+  Beginner resource set example. One Site selects one reusable dataflow set,
+  which republishes local AIO asset telemetry to an MQTT topic for that Site.
 
 parallel: 1
 selector: "environment=sample,sample=resource-set-basic"

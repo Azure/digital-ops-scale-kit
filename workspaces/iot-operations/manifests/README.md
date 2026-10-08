@@ -1,28 +1,29 @@
 # manifests/
 
 Core operations for the AIO workspace. Each named directory contains its
-`manifest.yaml` and operator guide. Examples use the same entry shape under
+`manifest.yaml` and operator guide. Examples use the same directory shape under
 [`samples`](../samples/README.md).
 
 Optional `entry.yaml` describes the operator contract for `siteops browse`.
 Other manifest filenames use `<stem>.entry.yaml`. Keep those facts with their
-entry, rather than duplicating an inventory of cards. See the
-[authoring contract](../../../docs/browse-content.md#author-an-entry).
+manifest, rather than duplicating an inventory of cards. See the
+[authoring contract](../../../docs/browse-content.md#author-browse-guidance).
 
 ## Files
 
 | Operation | Purpose |
 |---|---|
-| [aio-install](aio-install/README.md) | Install AIO on an existing Arc-connected cluster |
+| [aio-install](aio-install/README.md) | Install AIO on an existing cluster connected to Azure Arc |
 | [aio-upgrade](aio-upgrade/README.md) | Upgrade an existing installation to its selected AIO release |
-| [aio-resources](aio-resources/README.md) | Apply Site-selected devices, assets and dataflows |
+| [aio-resources](aio-resources/README.md) | Apply the devices, assets and dataflows that Sites select |
 | [secretsync](secretsync/README.md) | Enable Secret Sync on an existing instance |
 | [aksee-bootstrap](aksee-bootstrap/README.md) | Bootstrap an AKS Edge Essentials host and wait for completion |
-| [aksee-upgrade](aksee-upgrade/README.md) | Upgrade an existing AKS Edge Essentials cluster |
+| [aksee-upgrade](aksee-upgrade/README.md) | Upgrade an existing AKS EE cluster |
 
-Shared orchestration fragments live under `_partials/`. They are composed by
-entries, rather than presented as standalone operator choices. Sample-local
-and host-implementation partials stay beside the material they compose.
+Shared orchestration partials live under `_partials/`. Manifests compose
+them, rather than presenting them as standalone operator choices. Partials
+that belong to one sample or host implementation stay beside the material
+they compose.
 
 ## Conventions
 
@@ -32,7 +33,7 @@ and host-implementation partials stay beside the material they compose.
 
 ## Authoring a new partial
 
-1. Put a shared fragment at `_partials/_<topic>.yaml`. Keep implementation-local fragments with their owner.
+1. Put a shared partial at `_partials/_<topic>.yaml`. Keep partials that belong to one implementation with their owner.
 2. Set `kind: Manifest`. The engine has no separate Partial kind.
 3. Include only the steps that make up the topic. Do not pull prerequisites. The parent decides ordering.
 4. If the partial needs values from upstream steps, reference them as `{{ steps.<name>.outputs.<key> }}` and document the expected upstream step in the description.

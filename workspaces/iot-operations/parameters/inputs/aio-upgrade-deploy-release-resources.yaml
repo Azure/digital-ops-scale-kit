@@ -1,5 +1,5 @@
-# Fan-in inputs into the deploy-release-resources step of the aio-upgrade manifest.
+# Inputs to the deploy-release-resources step of the aio-upgrade manifest.
 # See docs/parameter-resolution.md for the inputs/outputs convention.
-# aioInstanceName comes from the manifest-level common parameter file.
+# aioInstanceName comes from the common parameter file attached at manifest level.
 
 customLocationId: "{{ steps.resolve-aio.outputs.customLocationId }}"

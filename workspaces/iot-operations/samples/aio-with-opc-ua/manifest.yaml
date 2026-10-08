@@ -2,12 +2,12 @@ apiVersion: siteops/v1
 kind: Manifest
 name: aio-with-opc-ua
 description: |
-  End-to-end example: composes the AIO platform install with the OPC UA
-  sample on top, configuring an asset-to-Event Hub telemetry path through the
-  broker and a dataflow. Deployment does not verify data movement. Observe the
-  broker topic and Event Hub separately after the components reconcile.
+  Install the Azure IoT Operations platform and the OPC UA sample in one
+  deploy: a simulated OPC UA asset whose telemetry flows through the broker
+  and a dataflow to Event Hub. After the components reconcile, observe the
+  broker topic and Event Hub to confirm that data moves.
 
-  Post-flatten step sequence (preview with `siteops plan <manifest> --describe`):
+  Flattened step sequence (preview with `siteops plan <manifest> --describe`):
     1. global-edge-site         (gated by enableGlobalSite)
     2. edge-site                (gated by enableEdgeSite)
     3. schema-registry
@@ -23,7 +23,7 @@ description: |
 # Default selector. Override at the CLI with `-l <key>=<value>`.
 selector: "environment=dev"
 
-# Max concurrent sites. 0 = unlimited, 1 = serial.
+# Max concurrent Sites. 0 = unlimited, 1 = serial.
 parallel: 3
 
 parameters:
@@ -33,7 +33,7 @@ parameters:
 steps:
   - include: ../../manifests/_partials/_aio-fundamentals.yaml
   - include: ../../manifests/_partials/_resolve-aio.yaml
-  # Matches the aio-install manifest, so the site toggle means the same thing here.
+  # Matches the aio-install manifest, so the Site toggle means the same thing here.
   - include: ../../manifests/_partials/_secretsync.yaml
     when: "{{ site.properties.deployOptions.enableSecretSync }}"
   - include: ../opc-ua-solution/_partial.yaml

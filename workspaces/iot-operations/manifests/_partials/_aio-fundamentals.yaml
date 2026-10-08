@@ -2,31 +2,31 @@ apiVersion: siteops/v1
 kind: Manifest
 name: aio-fundamentals
 description: |
-  AIO fundamentals partial: Arc extensions, custom location, instance, schema
-  registry, ADR namespace, plus optional global/edge sites. No secret sync,
-  no samples.
+  AIO fundamentals partial: Arc extensions, custom location, instance, Schema
+  Registry, ADR namespace, plus the optional global Edge Site and Edge Site.
+  Secret Sync and samples are composed separately.
 
   Internal partial (filename prefixed `_`). Not deployed directly. Composed
-  by `aio-install` (which adds the secret sync step) and by compositional
+  by `aio-install` (which adds the Secret Sync step) and by compositional
   samples (which add capabilities on top).
 
-# Shared parameters applied to all steps (auto-filtered per template). The
+# Shared parameters applied to all steps (filtered automatically for each template). The
 # aio-releases YAML lives at the manifest level so any step that declares
 # aioVersion / aioApiVersion / adrApiVersion / certManagerVersion /
-# secretStoreVersion (etc.) picks it up without per-step duplication.
+# secretStoreVersion (etc.) picks it up without a copy in each step.
 parameters:
   - parameters/common/common.yaml
   - "parameters/aio-releases/{{ site.properties.aioRelease }}.yaml"
 
 steps:
-  # Edge Site (Global) - subscription-scoped. Deployed once per subscription.
-  # RG-level sites resolve outputs via cross-scope output chaining.
+  # Edge Site (Global), scoped to the subscription. Deployed once per subscription.
+  # Sites at resource group level resolve outputs by chaining outputs across scopes.
   - name: global-edge-site
     template: templates/edge-site/subscription.bicep
     scope: subscription
     when: "{{ site.properties.deployOptions.enableGlobalSite }}"
 
-  # Edge Site (Per-RG) - deployed per resource group.
+  # Edge Site for each resource group, deployed once per resource group.
   - name: edge-site
     template: templates/edge-site/main.bicep
     scope: resourceGroup

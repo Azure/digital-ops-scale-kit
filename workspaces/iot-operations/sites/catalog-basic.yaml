@@ -1,4 +1,4 @@
-# Beginner resource-set sample site
+# Beginner resource set sample Site
 
 apiVersion: siteops/v1
 kind: Site

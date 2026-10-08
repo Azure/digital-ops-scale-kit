@@ -4,7 +4,7 @@ name: dataflow-steps
 description: |
   Deploys the effective dataflow endpoint, profile, and dataflow composition
   for an existing AIO instance. Expects an upstream `resolve-aio` step. One
-  API-versioned deployment creates endpoints and profiles before the dataflows
+  deployment, versioned by API, creates endpoints and profiles before the dataflows
   that reference them.
 
   Internal partial. `aio-resources` and direct samples include it. See

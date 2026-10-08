@@ -6,11 +6,11 @@ tags: [aio, secretsync, identity]
 documentation: [README.md]
 outcome: Demonstrate Secret Sync enablement, secret population and synchronized resources.
 prerequisites:
-  - Existing AIO, OIDC and workload-identity readiness, plus the required Azure and Kubernetes permissions.
+  - Existing AIO, with OIDC and workload identity ready, plus the required Azure and Kubernetes permissions.
   - Replace placeholder secret declarations through an authorized private authoring route.
 effects:
   - Writes declared Key Vault values and creates SecretSync resources after enablement.
-  - Declared Secret Provider Class objects can replace out-of-band object configuration.
+  - Declared Secret Provider Class objects can replace object configuration made outside the declaration.
 removal:
   - Follow the guide's ownership and removal procedure for synchronized objects and retained vault data.
-coverage: Sensitive-data example synopsis. No secret values, actual target configuration or materialization evidence are read or exported.
+coverage: Synopsis of an example with sensitive data. Browsing reads no secret values or Site configuration. The guide describes how to confirm materialization.

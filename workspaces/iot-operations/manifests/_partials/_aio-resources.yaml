@@ -3,7 +3,7 @@ kind: Manifest
 name: aio-resources-steps
 description: |
   Internal catalog partial. Resolves the existing AIO instance, expands the
-  resource sets selected by each site, and deploys Device Registry resources
+  resource sets selected by each Site, and deploys Device Registry resources
   before the dataflows that can consume them.
 
 parameters:

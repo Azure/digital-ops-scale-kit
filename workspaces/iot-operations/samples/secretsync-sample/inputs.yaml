@@ -1,7 +1,7 @@
 # Step output to step input wiring for the sync-secrets step. Chaining files
 # attach at step level, where they are scoped to the one consumer and cannot be
-# overridden by a site. The secrets the sample declares live in `secrets.yaml`,
-# which attaches at manifest level so a site can override it.
+# overridden by a Site. The secrets the sample declares live in `secrets.yaml`,
+# which attaches at manifest level so a Site can override it.
 # See docs/parameter-resolution.md for the inputs/outputs convention.
 # Consumed by: sync-secrets (in _partial.yaml)
 

@@ -1119,7 +1119,7 @@ class TestSampleTemplateApiPolicy:
 
     Rationale: a single sample template that works against every shipped release
     avoids per-version dispatch in samples. See docs/aio-releases.md
-    ("Sample template API-version policy").
+    ("Sample template API version policy").
     """
 
     _RP_TO_VERSION_KEY = {
@@ -1219,6 +1219,6 @@ class TestSampleTemplateApiPolicy:
                     )
         assert not violations, (
             "Sample templates must pin to the oldest supported API version "
-            "(see docs/aio-releases.md 'Sample template API-version policy'):\n  "
+            "(see docs/aio-releases.md 'Sample template API version policy'):\n  "
             + "\n  ".join(violations)
         )

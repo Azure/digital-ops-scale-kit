@@ -1,19 +1,19 @@
 # Contoso Global Subscription Site
 #
-# Subscription-level site for deploying shared resources once per subscription.
-# RG-level sites in the same subscription resolve outputs from this site
-# via cross-scope output chaining.
+# Site at subscription level, for deploying shared resources once per subscription.
+# Sites at resource group level in the same subscription resolve outputs from
+# this Site by chaining outputs across scopes.
 #
-# This site has no resourceGroup, so only `scope: subscription` steps run.
+# This Site has no resourceGroup, so only `scope: subscription` steps run.
 # The global-edge-site step deploys here, then munich-dev, seattle-dev, etc.
 # can reference its outputs.
 #
 # Target with: -l scope=subscription   (the default `environment=dev` selector
-# in the aio-install manifest does not match this site, by design.)
+# in the aio-install manifest does not match this Site, by design.)
 #
-# AIO-install fields inherited from base-site.yaml (aioRelease, brokerConfig,
+# aio-install fields inherited from base-site.yaml (aioRelease, brokerConfig,
 # defaultDataflowInstanceCount, deployOptions.enableSecretSync, etc.) are
-# inert here. No resourceGroup-scoped step runs against this site.
+# inert here. No step scoped to a resource group runs against this Site.
 
 apiVersion: siteops/v1
 kind: Site
@@ -22,7 +22,7 @@ inherits: base-site.yaml
 
 subscription: "00000000-0000-0000-0000-000000000000"
 location: eastus
-# No resourceGroup → subscription-level site
+# No resourceGroup → Site at subscription level
 
 labels:
   scope: subscription

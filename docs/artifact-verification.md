@@ -1,11 +1,11 @@
 # Artifact verification policy
 
 Artifact verification binds downloaded bytes to publisher and workflow
-evidence under consumer-owned policy. An artifact digest identifies bytes.
+evidence under policy that the consumer owns. An artifact digest identifies bytes.
 A provenance proof identifies the workflow that attested to those bytes.
 
 The verifier consumes an already downloaded artifact, its detached proof, a
-separately provisioned trusted-root snapshot, and trusted local policy. It
+separately provisioned trusted root snapshot, and trusted local policy. It
 creates a receipt only after the artifact identity and verified observations
 satisfy that policy.
 
@@ -17,8 +17,8 @@ use the receipt together with their own identity and access boundaries.
 
 The current adapter supports GitHub CLI 2.95 or newer in the 2.x release line
 and reusable workflows in the same repository and commit.
-The policy identifies both the reusable signing workflow and its top-level
-build workflow, plus one exact signing runner class.
+The policy identifies both the reusable signing workflow and the build
+workflow that calls it, plus one exact signing runner class.
 
 An administrator supplies a policy with this shape, replacing the placeholders:
 
@@ -42,8 +42,8 @@ An administrator supplies a policy with this shape, replacing the placeholders:
 ```
 
 An acquisition caller must supply the exact source commit and expected
-artifact SHA-256 from an approved source resolver. Source resolution is not
-implemented by this verifier. A package, release-note body, or verifier policy
+artifact SHA-256 from a trusted source resolver. Source resolution happens
+outside this verifier. A package, release note body, or verifier policy
 echo cannot supply the consumer's publisher policy.
 
 `siteops source enroll NAME` without trust files writes this shape for the
@@ -51,10 +51,10 @@ publisher's standard release contract: `sourceRef` `refs/heads/main`,
 `signerWorkflow` `.github/workflows/_workspace-distribution.yaml`,
 `builderWorkflow` `.github/workflows/release.yaml` and `runnerEnvironment`
 `self-hosted`, valid for 30 days. Supply your own policy when your publisher
-or approval period differs. See [approved sources](projects.md#use-an-approved-source).
+or enrollment period differs. See [approved sources](projects.md#use-an-approved-source).
 
 `runnerEnvironment` is required. Choose `github-hosted` or `self-hosted`
-according to your independently approved publisher policy. There is no
+according to your independently reviewed publisher policy. There is no
 inference from the downloaded proof and no acceptance of both classes through
 one value. A `self-hosted` certificate does not identify a particular pool,
 image or isolation configuration. Approve those controls separately.
@@ -104,16 +104,16 @@ The `ArtifactVerification` receipt records:
 
 - The exact artifact SHA-256 and size.
 - Policy identity, version, exact file digest and validity deadline.
-- Detached-proof and trusted-root digests.
+- Digests of the detached proof and trusted root.
 - Verifier identity and the evaluation time.
-- Verified observations inside a provider-specific evidence object.
+- Verified observations inside an evidence object specific to the provider.
 
 The common receipt does not require GitHub repository or workflow fields.
 Those belong to the GitHub evidence object, so another verifier can preserve
 the same artifact and policy identities.
 
-Proof and root inputs are copied into invocation-owned staging before the
-native tool reads them. Artifact identity, policy expiry and policy-file
+Proof and root inputs are copied into staging owned by the invocation before
+the native tool reads them. Artifact identity, policy expiry and policy file
 identity are checked again before a receipt is returned. An expired or
 changed policy fails explicitly.
 
@@ -124,7 +124,7 @@ to this same verifier on each cache publication and lease. Pinned reuse
 requires no source request. Policy and root paths are supplied by application
 code, not by package or release metadata.
 
-On POSIX, temporary files are owner-only. Windows inherits the staging
+On POSIX, only the owner can access temporary files. Windows inherits the staging
 parent's access controls, so acquisition must supply a protected location.
 Cleanup failures are warnings and do not replace a primary verification
 failure.
@@ -132,7 +132,7 @@ failure.
 ## Offline limits
 
 A detached local proof plus a custom, independently provisioned trusted root
-allows verification without a GitHub login or automatic trust-root retrieval.
+allows verification without a GitHub login or automatic trusted root retrieval.
 Acquiring or refreshing those roots is a separate trusted operation.
 
 This is historical cryptographic evidence under a particular root and policy

@@ -12,25 +12,25 @@ Compare this directory with `../opc-ua-solution/`, which expresses its dataflow 
    - two execution pools (`dataflow-sample-profile`, `dataflow-sample-alerts-pool`) so neither path shares the default pool
    - two dataflows. `dataflow-sample-passthrough` subscribes to every asset topic under `azure-iot-operations/data/`, passes each message through, and republishes it. `dataflow-sample-alerts` reads the narrower `azure-iot-operations/data/alerts/` prefix through its own pool and its own endpoint.
 
-Each key is a list, so all six resources come from one file and deploy in a single round trip. Adding a seventh is adding a list entry, not adding a step. Nothing in this sample is a template.
+Each key is a list, so all six resources come from one file and deploy in a single round trip. Adding a seventh is adding a list item, not adding a step. Nothing in this sample is a template.
 
-### Per-site values
+### Values for each Site
 
-The declaration reads site values, so one committed file gives every site its own topics and its own broker client id:
+The declaration reads Site values, so one committed file gives every Site its own topics and its own broker client id:
 
-- destination topics carry `{{ site.labels.country }}`, `{{ site.labels.city }}`, and `{{ site.name }}`, so a central subscriber can tell sites apart
+- destination topics carry `{{ site.labels.country }}`, `{{ site.labels.city }}`, and `{{ site.name }}`, so a central subscriber can tell Sites apart
 - each endpoint sets `clientIdPrefix` from `{{ site.name }}`, which resolves two levels below `properties`
 
-A site value resolves at any depth in a declaration. Use one every target site carries. A site that leaves a `{{ ... }}` unresolved fails the step before it deploys. `tests/workspace/test_catalog_gating.py` checks every committed definition against every committed site earlier in CI.
+A Site value resolves at any depth in a declaration. Use one that every selected Site carries. A Site that leaves a `{{ ... }}` unresolved fails the step before it deploys. `tests/workspace/test_catalog_gating.py` checks every committed definition against every committed Site earlier in CI.
 
 ## Prerequisites
 
-- AIO must be installed on the target cluster. Run `aio-install` first.
-- The site's `aioRelease` must point to a release config under `parameters/aio-releases/`.
+- AIO must be installed on the cluster. Run `aio-install` first.
+- The Site's `aioRelease` must point to an AIO release config under `parameters/aio-releases/`.
 
 The deployment creates no supporting cloud service outside the existing AIO
 instance and uses the normal Site Ops deployment identity. Exercising the data
-path separately requires an authenticated in-cluster MQTT client.
+path separately requires an authenticated MQTT client in the cluster.
 
 ## Seeing data move
 
@@ -38,15 +38,15 @@ A successful deployment provisions the dataflow resources but does not
 establish dataflow health or data movement. A stock AIO install has no assets,
 so use one of these routes to give the dataflows something to carry:
 
-- **Deploy `samples/opc-ua-solution/manifest.yaml` first.** It brings up a simulated OPC UA server, a device, and an oven asset publishing under `azure-iot-operations/data/`, which this dataflow's source subscribes to. Both samples deploy against the same existing AIO install, so running them in sequence is all it takes. On release `2607` the MQTT client below is the quickest route, for the reason [that sample's README](../opc-ua-solution/README.md#releases-this-data-path-reaches) gives.
-- **Publish a message yourself** with an in-cluster MQTT client (see Microsoft's [`mqtt-client.yaml` reference](https://learn.microsoft.com/azure/iot-operations/manage-mqtt-broker/howto-test-connection)), targeting a topic under `azure-iot-operations/data/`, and subscribe to `dataflow-sample/<country>/<site>/output` to watch it arrive.
+- **Deploy `samples/opc-ua-solution/manifest.yaml` first.** It brings up a simulated OPC UA server, a device, and an oven asset publishing under `azure-iot-operations/data/`, which this dataflow's source subscribes to. Both samples deploy against the same existing AIO install, so running them in sequence is all it takes. On AIO release `2607` the MQTT client below is the quickest route, for the reason [that sample's README](../opc-ua-solution/README.md#releases-this-data-path-reaches) gives.
+- **Publish a message yourself** with an MQTT client in the cluster (see Microsoft's [`mqtt-client.yaml` reference](https://learn.microsoft.com/azure/iot-operations/manage-mqtt-broker/howto-test-connection)), targeting a topic under `azure-iot-operations/data/`, and subscribe to `dataflow-sample/<country>/<site>/output` to watch it arrive.
 
 `dataflow-sample-alerts` reads the narrower `azure-iot-operations/data/alerts/#`, which neither route publishes to, so it stays idle until something publishes under that prefix. Publish there to exercise it, and subscribe to `dataflow-sample/alerts/<city>/<site>`.
 
 ## Configure before deploying
 
-Edit `dataflows.yaml` for this one-off sample. Composed resource arrays are
-owned by manifest-level definition sources, so `site.parameters` and step
+Edit `dataflows.yaml` for this sample, which you deploy once. Composed resource
+arrays are owned by definition sources at manifest level, so `site.parameters` and step
 parameter files cannot replace them. The endpoint host and trust bundle name in
 `dataflows.yaml` assume an install in the default `azure-iot-operations`
 namespace. Adjust both when the install uses a different namespace.
@@ -63,9 +63,9 @@ manifest's `environment=dev` default.
 
 The dataflow carries whatever assets publish. For real telemetry through it, deploy `samples/opc-ua-solution/manifest.yaml` first to bring up a simulated asset, then deploy this sample.
 
-## Sharing a declaration across sites
+## Sharing a declaration across Sites
 
-This sample keeps its declaration next to itself. A fleet usually wants the opposite: one declaration shared by every site of a class. Move the file to `resource-sets/dataflows/<set>.yaml`, point sites at it, and deploy `manifests/aio-resources/manifest.yaml`:
+This sample keeps its declaration next to itself. A fleet usually wants the opposite: one declaration shared by every Site of a class. Move the file to `resource-sets/dataflows/<set>.yaml`, point Sites at it, and deploy `manifests/aio-resources/manifest.yaml`:
 
 ```yaml
 # sites/<site>.yaml
