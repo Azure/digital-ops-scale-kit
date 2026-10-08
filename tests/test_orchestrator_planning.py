@@ -480,7 +480,7 @@ def test_engine_validates_loaded_inputs_before_tool_preflight(
         pytest.param(
             None,
             None,
-            "did not resolve for site",
+            "did not resolve for Site",
             id="unresolved",
         ),
         pytest.param(
@@ -2698,7 +2698,7 @@ def test_executable_plan_requires_subscription_target(tmp_path):
 
     assert result.status is PlanStatus.INVALID
     assert result.diagnostics[0].code == "validation.failed"
-    assert "no subscription-level site" in result.diagnostics[0].detail
+    assert "no subscription-level Site" in result.diagnostics[0].detail
     assert not result.executable
 
 

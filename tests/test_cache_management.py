@@ -318,5 +318,5 @@ def test_cli_rejects_project_scoping_and_invalid_limits(stored, monkeypatch, cap
     monkeypatch.setenv("SITEOPS_CACHE_DIR", str(stored.cache.root))
     for args in (["--project", "factory", "cache", "list"], ["cache", "list", "--limit", "0"]):
         code, output = invoke(monkeypatch, capsys, args)
-        assert code == 1 and output.err
+        assert code == 1 and output.err.startswith("Error: ")
     assert path_for(stored, "package").exists()

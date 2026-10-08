@@ -11,6 +11,7 @@ import yaml
 
 from siteops.arm_resources import ArmResourceObservation
 from siteops.guided_inputs import (
+    GuidedInputError,
     load_contract,
     load_direct_site,
     write_yaml_exclusive,
@@ -1370,6 +1371,19 @@ def test_inline_answers_are_typed_and_unique(tmp_path, inline, error):
         load_contract(manifest).resolve(inline=inline)
 
 
+@pytest.mark.parametrize(("answer", "private"), [
+    ("locaton=eastus", "Inline inputs contain an unknown input 'locaton'. Did you mean 'location'?"),
+    ("zzz=1", "Inline inputs contain an unknown input 'zzz'. Run `siteops inputs MANIFEST` "
+              "to list the declared inputs."),
+])
+def test_unknown_input_is_named_only_in_its_private_detail(tmp_path, answer, private):
+    manifest, _ = _manifest_and_contract(tmp_path)
+    with pytest.raises(GuidedInputError) as rejected:
+        load_contract(manifest).resolve(inline=[answer])
+    assert str(rejected.value) == "Inline inputs contain an unknown input name."
+    assert rejected.value.private_message == private
+
+
 @pytest.mark.parametrize(
     ("contents", "error"),
     [
@@ -1553,10 +1567,12 @@ def test_exclusive_yaml_writer_does_not_overwrite_or_create_parents(tmp_path):
     assert yaml.safe_load(destination.read_text(encoding="utf-8")) == data
     if os.name == "posix":
         assert stat.S_IMODE(destination.stat().st_mode) == 0o600
-    with pytest.raises(FileExistsError):
+    with pytest.raises(GuidedInputError, match="already exists") as existing:
         write_yaml_exclusive(destination, {"subscription": "different"})
+    assert str(destination) not in str(existing.value)
+    assert existing.value.private_message == f"{destination} already exists. Choose a new file name."
     assert yaml.safe_load(destination.read_text(encoding="utf-8")) == data
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(GuidedInputError, match="directory does not exist"):
         write_yaml_exclusive(tmp_path / "missing" / "site.yaml", data)
     assert not (tmp_path / "missing").exists()
     with pytest.raises(ValueError, match="mapping"):

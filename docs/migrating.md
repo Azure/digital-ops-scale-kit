@@ -45,7 +45,7 @@ Start with the changes that affect your workflow:
 | Run `deploy` from a script or pipeline | Add [`--yes`](#deployment-confirmation). |
 | Preview with `deploy --dry-run` or `validate --plan` | Use [`siteops plan`](#plan-replaces-preview-options). |
 | Use `sites --render`, read plain `sites` output or run `sites` in CI | Review [site inspection](#inspect-sites). |
-| Match text in plain `validate` output | Review [plain output](#plain-output). |
+| Match text in plain output or error messages | Review [plain output](#plain-output) and [error messages](#error-messages). |
 | Reference shipped manifests, partials or dataflow sets by path | Update [workspace content paths](#workspace-content-paths). |
 | Pass a manifest filename without a directory | Review [manifest names and paths](#manifest-names-and-paths). |
 | Rely on the workspace default AIO release | Review the [2608 default](#default-aio-release). |
@@ -78,7 +78,7 @@ connectedk8s and azure-iot-ops extensions require. An older version blocks
 those steps before anything is submitted:
 
 ```text
-error: Azure CLI 2.69.0 was found. Azure CLI 2.70.0 or newer is required. Run `az upgrade`, then retry.
+Error: Azure CLI 2.69.0 was found. Azure CLI 2.70.0 or newer is required. Run `az upgrade`, then retry.
 ```
 
 `validate` and `browse` do not check Azure CLI. Deployments now run with
@@ -153,6 +153,21 @@ Plain output uses ASCII markers: `+` succeeded or runs, `x` failed or blocked,
 `+ Manifest is valid: NAME` with the manifest name rather than its file name,
 and writes validation errors to stderr. Scripts should test the exit code
 rather than this text.
+
+### Error messages
+
+Plain errors start with `Error:`. `cache` and `index` errors no longer start
+with a code such as `cache.entry-missing:` or `index.approval:`, and
+`validate` reports `Error: Validation failed with N error(s):`. Plan and run
+diagnostics are labeled `Error:` and `Warning:`. JSON output keeps the codes.
+Messages capitalize Site, for example `No Sites matched the specified criteria`.
+
+A global option after the command still fails with usage error 2. Instead of
+`unrecognized arguments`, it names the option and where it goes:
+
+```text
+siteops: error: -w is a global option. Put it before the command: siteops -w PATH plan ...
+```
 
 ### Workspace content paths
 
@@ -306,8 +321,8 @@ that v1.0.0b6 `deploy` warned about or left to Azure:
   reports `Manifest parameter file not found` or `Parameter file not found`,
   where v1.0.0b6 `deploy` logged a warning and continued. A file that holds a
   scalar or an array reports `must contain a mapping`.
-- **Targets:** a manifest selector that matches no site reports
-  `No sites matched the specified criteria` and exits with code 1. A manifest
+- **Targets:** a manifest selector that matches no Site reports
+  `No Sites matched the specified criteria` and exits with code 1. A manifest
   without steps reports `Manifest has no steps defined`. In both cases
   v1.0.0b6 printed `Nothing to deploy` and exited with code 0.
 - **Template inputs:** a template parameter that is not nullable and has no

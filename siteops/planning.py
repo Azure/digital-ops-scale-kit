@@ -624,7 +624,7 @@ def _resolve_data_reference(
             return _render_data_reference(reference)
         raise PlanValueResolutionError(
             detail=(
-                f"Step '{reference.source.step}' on site "
+                f"Step '{reference.source.step}' on Site "
                 f"'{reference.source.target}' has no available outputs."
             ),
             public_message=(
@@ -640,7 +640,7 @@ def _resolve_data_reference(
                 return _render_data_reference(reference)
             raise PlanValueResolutionError(
                 detail=(
-                    f"Step '{reference.source.step}' on site "
+                    f"Step '{reference.source.step}' on Site "
                     f"'{reference.source.target}' has no output at "
                     f"{'.'.join(reference.output_path)!r}."
                 ),
@@ -1397,7 +1397,7 @@ def render_plain_plan(
 
     if not plan.targets:
         lines = [
-            f"{terminal.WARNING} No sites matched for manifest "
+            f"{terminal.WARNING} No Sites matched for manifest "
             f"'{terminal.sanitize(plan.manifest_name)}'"
         ]
         if plan.cli_selector:
@@ -1497,13 +1497,12 @@ def render_plain_plan(
 
     if len(plan.targets) > 1:
         if plan.max_parallel_sites == 1:
-            lines.append("  Execution: Sequential (one site at a time)")
+            lines.append("  Execution: one Site at a time")
         elif plan.max_parallel_sites == 0:
-            lines.append("  Execution: Parallel (all sites concurrently)")
+            lines.append("  Execution: all Sites at once")
         else:
             lines.append(
-                "  Execution: Parallel "
-                f"(max {plan.max_parallel_sites} concurrent)"
+                f"  Execution: up to {plan.max_parallel_sites} Sites at once"
             )
     lines.append("")
     return _plain_text(lines)
@@ -1529,7 +1528,7 @@ def _diagnostic_lines(diagnostic: PlanDiagnostic, *, indent: str) -> list[str]:
         diagnostic.detail or diagnostic.summary
     )
     return [
-        f"{indent}{diagnostic.severity.value}: {first}",
+        f"{indent}{diagnostic.severity.value.capitalize()}: {first}",
         *(f"{indent}  {line}" for line in rest),
     ]
 
@@ -1579,7 +1578,7 @@ def _render_publishable_plan(document: Mapping[str, Any]) -> str:
             (
                 "",
                 "  Resource composition:",
-                f"    Across {summary['targetCount']} site(s): "
+                f"    Across {summary['targetCount']} Site(s): "
                 f"{composition['selectedSourceCount']} selected source(s), "
                 f"{composition['appliedResourceCount']} applied resource(s), "
                 f"{composition['externalAssertionCount']} external assertion(s)",
@@ -1593,7 +1592,7 @@ def _render_publishable_plan(document: Mapping[str, Any]) -> str:
     if document["diagnostics"]:
         lines.extend(("", "  Diagnostics:"))
         lines.extend(
-            f"    {diagnostic['severity']}: {diagnostic['summary']}"
+            f"    {diagnostic['severity'].capitalize()}: {diagnostic['summary']}"
             for diagnostic in document["diagnostics"]
         )
     lines.append("")
@@ -1805,14 +1804,19 @@ def _render_data_reference(reference: DataReference) -> str:
 
 
 # Fixed tool names and remedies that plan and run projections both publish.
+# Bicep templates compile through Azure CLI, so template compiler failures
+# share one remedy.
+BICEP_COMPILER_SUMMARY = (
+    "Azure CLI (`az`) with Bicep is required for Bicep template steps. Install "
+    "Azure CLI from https://aka.ms/installazurecli, run `az bicep install`, "
+    "then rerun the command."
+)
 PUBLISHABLE_CAPABILITY_SUMMARIES = {
     "capability.arm-control-plane.missing": (
         "Azure CLI (`az`) is required for deployment and wait steps. Install "
         "it from https://aka.ms/installazurecli, then rerun the command."
     ),
-    "capability.bicep-compiler.missing": (
-        "A required local deployment capability is unavailable."
-    ),
+    "capability.bicep-compiler.missing": BICEP_COMPILER_SUMMARY,
     "capability.kubectl.missing": (
         "kubectl is required for kubectl steps. Install it from "
         "https://kubernetes.io/docs/tasks/tools/, then rerun the command."
@@ -1860,11 +1864,11 @@ _PUBLISHABLE_DIAGNOSTICS = {
     ),
     "compilation.tool-missing": (
         "plan.capability-unavailable",
-        "A required local deployment capability is unavailable.",
+        BICEP_COMPILER_SUMMARY,
     ),
     "compilation.tool-unavailable": (
         "plan.capability-unavailable",
-        "A required local deployment capability is unavailable.",
+        BICEP_COMPILER_SUMMARY,
     ),
     "operation-preparation.invalid": (
         "plan.operation-preparation-failed",
@@ -1877,7 +1881,7 @@ _PUBLISHABLE_DIAGNOSTICS = {
     "parameter-selection.invalid": (
         "plan.parameter-selection-invalid",
         "Parameter file selection failed. Set SITEOPS_REDACT_OUTPUT=0, then "
-        "rerun the command locally for site and path details.",
+        "rerun the command locally for Site and path details.",
     ),
     "plan.targeting.required": (
         "plan.targeting-required",
@@ -1886,7 +1890,7 @@ _PUBLISHABLE_DIAGNOSTICS = {
     ),
     "plan.targeting.empty": (
         "plan.targeting-empty",
-        "No sites matched the selected criteria.",
+        "No Sites matched the selected criteria.",
     ),
     "plan.target-set-incomplete": (
         "plan.target-set-incomplete",

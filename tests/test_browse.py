@@ -109,7 +109,7 @@ def test_selected_card_distinguishes_advice_from_input_contract(tmp_path):
         source=BrowseSource(kind="github", reference="github:example/repo"),
     )
     remote_plain = render_browse_plain(remote)
-    assert "Pin an approved workspace" in remote_plain
+    assert "Pin a release from an approved source" in remote_plain
     assert "Remote metadata cannot validate typed inputs" in remote_plain
     assert "Typed inputs:" not in remote_plain
 
@@ -271,6 +271,25 @@ def test_partial_hint_matches_the_inventory_option(tmp_path):
     included = render_browse_plain(inspect_content(tmp_path, include_partials=True))
     assert "Use --include-partials" not in included
     assert "Omit --include-partials to hide them." in included
+
+
+@pytest.mark.parametrize("width", [72, 100])
+def test_inventory_rows_use_the_manifest_label_and_the_terminal_width(tmp_path, monkeypatch, width):
+    _entry(tmp_path, description="Install the platform. " * 12)
+    monkeypatch.setattr(browse_output, "line_width", lambda: width)
+    plain = render_browse_plain(inspect_content(tmp_path))
+    assert "Manifests: 1 shown, 1 matches, 1 headers read." in plain
+    row = next(line for line in plain.splitlines() if line.startswith("  example ["))
+    assert row.endswith("...")
+    assert width - 12 <= len(row) <= width
+
+
+def test_inventory_diagnostics_show_text_without_codes(tmp_path):
+    _entry(tmp_path)
+    plain = render_browse_plain(inspect_content(tmp_path, "exampel"))
+    assert "Inspection is incomplete:\n  - Manifest not found. Did you mean 'example'?" in plain
+    assert "lookup.missing" not in plain
+    assert "lookup.missing" in serialize_browse_json(inspect_content(tmp_path, "exampel"))
 
 
 def test_heading_states_the_inspection_boundary_without_outcome_claims(tmp_path):

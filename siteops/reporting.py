@@ -11,7 +11,11 @@ from collections import Counter
 from typing import Any, TextIO
 
 from siteops import terminal
-from siteops.planning import PUBLISHABLE_CAPABILITY_SUMMARIES, PlanProjection
+from siteops.planning import (
+    BICEP_COMPILER_SUMMARY,
+    PUBLISHABLE_CAPABILITY_SUMMARIES,
+    PlanProjection,
+)
 from siteops.results import (
     OperationResult,
     OperationStatus,
@@ -80,11 +84,11 @@ _PUBLISHABLE_RUN_DIAGNOSTICS = {
     ),
     "compilation.tool-missing": (
         "run.capability-unavailable",
-        "A required local deployment capability is unavailable.",
+        BICEP_COMPILER_SUMMARY,
     ),
     "compilation.tool-unavailable": (
         "run.capability-unavailable",
-        "A required local deployment capability is unavailable.",
+        BICEP_COMPILER_SUMMARY,
     ),
     "operation-preparation.invalid": (
         "run.preparation-invalid",
@@ -104,7 +108,7 @@ _PUBLISHABLE_RUN_DIAGNOSTICS = {
     ),
     "plan.targeting.empty": (
         "run.targeting-empty",
-        "No sites matched the selected criteria.",
+        "No Sites matched the selected criteria.",
     ),
     "plan.targeting.required": (
         "run.targeting-required",
@@ -488,7 +492,7 @@ def _render_publishable_plain(result: RunResult) -> str:
         for diagnostic in document["diagnostics"]:
             lines.extend(
                 _wrap(
-                    sanitize(f"{diagnostic['severity']}: {diagnostic['summary']}"),
+                    sanitize(f"{diagnostic['severity'].capitalize()}: {diagnostic['summary']}"),
                     indent="    ",
                     hanging="      ",
                 )
@@ -605,7 +609,7 @@ def render_plain_run(result: RunResult, *, redacted: bool) -> str:
             lines.extend(
                 _wrap(
                     sanitize(
-                        f"{diagnostic.severity.value}: "
+                        f"{diagnostic.severity.value.capitalize()}: "
                         f"{diagnostic.private_detail or diagnostic.summary}"
                     ),
                     indent="    ",
@@ -678,10 +682,10 @@ class TextProgressReporter:
                 return preparation[event.phase] + "\n"
             label = {
                 ProgressPhase.SUBSCRIPTION: (
-                    "[Phase 1] Subscription-scoped steps"
+                    "[Phase 1] Steps at subscription scope"
                 ),
                 ProgressPhase.RESOURCE_GROUP: (
-                    "[Phase 2] Resource group-scoped steps"
+                    "[Phase 2] Steps in resource groups"
                 ),
                 ProgressPhase.TARGETS: "[Execution] Prepared targets",
             }[event.phase]

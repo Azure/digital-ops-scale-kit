@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import copy
+import difflib
 import hashlib
 import re
 from collections.abc import Mapping
@@ -48,7 +49,24 @@ _OBSERVED_FIELDS = frozenset({"id", "subscription", "resourceGroup", "name", "lo
 
 
 class GuidedInputError(ValueError):
-    """A guided-input validation failure with no supplied values or local paths."""
+    """A guided-input validation failure with no supplied values or local paths.
+
+    `private_message` may name a supplied input or file for output that is not
+    redacted.
+    """
+
+    private_message: str | None = None
+
+
+def _unknown_input(name: str, declared: list[str], source: str) -> GuidedInputError:
+    error = GuidedInputError(f"{source} contain an unknown input name.")
+    nearest = difflib.get_close_matches(name, declared, n=1)
+    hint = (
+        f"Did you mean '{nearest[0]}'?" if nearest
+        else "Run `siteops inputs MANIFEST` to list the declared inputs."
+    )
+    error.private_message = f"{source} contain an unknown input '{name}'. {hint}"
+    return error
 
 
 class ResourceInputError(GuidedInputError):
@@ -663,7 +681,7 @@ class InputContract:
                 raise GuidedInputError("Inline inputs must use NAME=VALUE format.")
             name, value = answer.split("=", 1)
             if name not in fields:
-                raise GuidedInputError("Inline inputs contain an unknown input name.")
+                raise _unknown_input(name, list(fields), "Inline inputs")
             if name in inline_values:
                 raise GuidedInputError(f"Duplicate inline input '{name}'.")
             field = fields[name]
@@ -701,7 +719,7 @@ class InputContract:
             file_values = _mapping(document["values"], "Input values")
             for name, value in file_values.items():
                 if name not in fields:
-                    raise GuidedInputError("Input values contain an unknown input name.")
+                    raise _unknown_input(name, list(fields), "Input values")
                 field = fields[name]
                 if field.resource is not None and field.resource.from_resource is not None:
                     raise GuidedInputError(
@@ -1092,4 +1110,13 @@ def write_yaml_exclusive(path: Path, data: dict[str, Any]) -> None:
         raise GuidedInputError("YAML output must contain only supported plain data.") from None
     if len(raw) > _MAX_YAML_BYTES:
         raise GuidedInputError("YAML output exceeds the 128 KiB limit.")
-    write_new(path, raw)
+    try:
+        write_new(path, raw)
+    except FileExistsError:
+        error = GuidedInputError("The output file already exists. Choose a new file name.")
+        error.private_message = f"{path} already exists. Choose a new file name."
+        raise error from None
+    except FileNotFoundError:
+        error = GuidedInputError("The output file's directory does not exist.")
+        error.private_message = f"The directory for {path} does not exist."
+        raise error from None

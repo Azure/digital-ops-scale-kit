@@ -290,7 +290,7 @@ def test_index_project_rejection_is_a_diagnostic_not_a_traceback(tmp_path, monke
     with pytest.raises(SystemExit) as stopped:
         cli.main()
     assert stopped.value.code == 1
-    assert "index.project:" in capsys.readouterr().err
+    assert capsys.readouterr().err.startswith("Error: ")
 
 
 def test_index_explicit_local_workspace_and_public_approval_controls(tmp_path, monkeypatch, capsys):
@@ -307,14 +307,14 @@ def test_index_explicit_local_workspace_and_public_approval_controls(tmp_path, m
         assert stopped.value.code == expected
         output = capsys.readouterr()
         if expected:
-            assert "index.approval:" in output.err
+            assert output.err == "Error: Add --public to publish the authored descriptions in the index.\n"
     monkeypatch.setattr(sys, "argv", [
         "siteops", "--approved-source", "official", "-w", str(local), "index", "--public",
     ])
     with pytest.raises(SystemExit) as stopped:
         cli.main()
     assert stopped.value.code == 1
-    assert "index.project:" in capsys.readouterr().err
+    assert capsys.readouterr().err.startswith("Error: ")
     assert (local / "siteops-index.json").is_file()
     assert not (project / "siteops-index.json").exists()
 

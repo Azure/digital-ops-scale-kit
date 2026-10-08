@@ -430,7 +430,7 @@ class TestExplainNoMatch:
     def test_label_typo_lists_actual_workspace_values(self, multi_site_workspace):
         orchestrator = Orchestrator(multi_site_workspace)
         msg = orchestrator.explain_no_match("environment=prdo")
-        assert "matched no sites" in msg
+        assert "matched no Sites" in msg
         assert "environment=prdo" in msg
         # Diagnostic should list the actual `environment` values present.
         assert "dev" in msg or "prod" in msg
@@ -439,7 +439,7 @@ class TestExplainNoMatch:
         orchestrator = Orchestrator(multi_site_workspace)
         msg = orchestrator.explain_no_match("nonexistent=value")
         assert "nonexistent" in msg
-        assert "no site declares" in msg or "Workspace" in msg
+        assert "no Site declares" in msg or "Workspace" in msg
 
     def test_name_typo_lists_workspace_site_names(self, multi_site_workspace):
         orchestrator = Orchestrator(multi_site_workspace)
@@ -457,7 +457,7 @@ class TestExplainNoMatch:
     def test_empty_workspace(self, tmp_workspace):
         orchestrator = Orchestrator(tmp_workspace)
         msg = orchestrator.explain_no_match("env=dev")
-        assert "No sites in workspace" in msg
+        assert "No Sites in workspace" in msg
 
     def test_invalid_selector_surfaces_parse_error(self, multi_site_workspace):
         orchestrator = Orchestrator(multi_site_workspace)
@@ -473,7 +473,7 @@ class TestExplainNoMatch:
         all_sites = orchestrator.load_all_sites()
         real_name = all_sites[0].name
         msg = orchestrator.explain_no_match(f"name={real_name},nonexistent=value")
-        assert "matched no sites" in msg
+        assert "matched no Sites" in msg
         assert real_name in msg
         # Tells the operator the name matched but another key filtered.
         assert "matched a workspace site but" in msg or "another selector key" in msg
@@ -709,9 +709,9 @@ class TestPlanParallelDisplay:
     @pytest.mark.parametrize(
         ("parallel", "expected"),
         [
-            (3, "Execution: Parallel (max 3 concurrent)"),
-            (1, "Execution: Sequential (one site at a time)"),
-            (0, "Execution: Parallel (all sites concurrently)"),
+            (3, "Execution: up to 3 Sites at once"),
+            (1, "Execution: one Site at a time"),
+            (0, "Execution: all Sites at once"),
         ],
     )
     def test_fleet_plan_shows_parallel_config(
@@ -803,7 +803,7 @@ class TestStepSiteCompatibility:
 
         reason = orchestrator._check_step_site_compatibility(sub_step, rg_site)
         assert reason is not None
-        assert "subscription-scoped" in reason
+        assert "Runs at subscription scope" in reason
 
     def test_rg_step_with_subscription_site_skipped(self, tmp_workspace):
         """ResourceGroup-scoped step should be skipped for subscription-level site."""
@@ -825,7 +825,7 @@ class TestStepSiteCompatibility:
 
         reason = orchestrator._check_step_site_compatibility(rg_step, sub_site)
         assert reason is not None
-        assert "resourceGroup-scoped" in reason
+        assert "Runs in a resource group" in reason
 
     def test_matching_scope_returns_none(self, tmp_workspace):
         """Matching scope/site level should return None (compatible)."""
@@ -919,8 +919,9 @@ name: bad-site
 
         assert len(sites) == 1
         err = capsys.readouterr().err
-        assert "Skipped 1 site(s) due to errors:" in err
-        assert "bad-site" in err
+        assert "! Skipped 1 Site(s) due to errors:" in err
+        assert "  - bad-site: " in err
+        assert all(ord(character) < 128 for character in err)
 
     def test_load_all_sites_no_warning_when_all_valid(self, tmp_workspace, capsys):
         """No stderr warning when all sites load successfully."""
@@ -1019,7 +1020,7 @@ class TestSiteIdentityResolution:
         # Filename fast path still works for either file directly. The
         # collision only surfaces when the index is built (on internal-
         # name lookup or any path that triggers the fallback).
-        with pytest.raises(ValueError, match="Two sites declare the same"):
+        with pytest.raises(ValueError, match="Two Sites declare the same"):
             orchestrator.load_site("contoso-edge")
 
     def test_internal_name_shadowing_another_stem_rejected(self, tmp_workspace):
@@ -1057,7 +1058,7 @@ class TestSiteIdentityResolution:
         # collision is in their internal `name:` fields. The eager
         # index build (triggered by _find_trusted_site_file) must
         # surface the drift even though we never miss the filename path.
-        with pytest.raises(ValueError, match="Two sites declare the same"):
+        with pytest.raises(ValueError, match="Two Sites declare the same"):
             orchestrator.load_site("site-a")
 
     def test_shadow_caught_via_stem_fast_path(self, tmp_workspace):
@@ -1265,7 +1266,7 @@ class TestNestedSiteDiscovery:
         extras = tmp_path / "extras-dir"
         self._write_site(extras, Path("regions/eu/munich.yaml"), "munich-overlay")
         orchestrator = Orchestrator(tmp_workspace, extra_trusted_sites_dirs=[extras])
-        with pytest.raises(ValueError, match="cannot rename the site"):
+        with pytest.raises(ValueError, match="cannot rename the Site"):
             orchestrator.load_site("munich")
 
     def test_path_form_lookup_normalizes_backslash(self, tmp_workspace):

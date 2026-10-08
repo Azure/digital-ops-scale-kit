@@ -4,17 +4,18 @@
 """Command-line interface for Azure Site Ops.
 
 Commands:
-    browse   - Discover and inspect deployment content
-    index    - Build approved public descriptions and source bindings
-    sites    - Inspect sites as plain text, YAML, or JSON
-    inputs   - Inspect typed answers for a selected deployment
+    browse   - Discover and inspect manifests
+    inputs   - Inspect typed inputs for a manifest
+    sites    - Inspect Sites as plain text, YAML, or JSON
     validate - Validate manifest structure and references
     plan     - Prepare and preflight a deployment plan
-    deploy   - Deploy a manifest to target sites
+    deploy   - Deploy a manifest to its Sites
+    project  - Pin or show a project's published release
+    source   - Enroll, inspect or remove approved sources
+    index    - Build a public content index (for content authors)
+    cache    - Inspect or remove cached content
 
-Global flags:
-    -v/--verbose controls log verbosity only. Use `plan` to prepare a
-    deployment plan.
+Global options precede the command. `-v/--verbose` enables debug logging.
 """
 
 import argparse
@@ -145,6 +146,12 @@ def resolve_manifest_path(manifest: str | Path, workspace: Path) -> Path:
     return reader.workspace / path
 
 
+def _error_text(error: BaseException) -> str:
+    """Return an error's private detail unless output is redacted."""
+    private = getattr(error, "private_message", None)
+    return private if private and not is_redaction_enabled() else str(error)
+
+
 def _command_manifest(args: argparse.Namespace) -> Path | None:
     try:
         binding = getattr(args, "package_binding", None)
@@ -159,7 +166,7 @@ def _command_manifest(args: argparse.Namespace) -> Path | None:
                 "lookup.missing", "Manifest not found.", (str(path),)
             )
     except (ManifestSelectionError, BrowseError) as error:
-        print(f"Error: {_multiline_text(str(error))}", file=sys.stderr)
+        print(f"Error: {_multiline_text(_error_text(error))}", file=sys.stderr)
         if isinstance(error, ManifestSelectionError) and error.paths and not is_redaction_enabled():
             print("Explicit paths:", file=sys.stderr)
             for choice in error.paths:
@@ -244,8 +251,8 @@ def _context_options(args: argparse.Namespace) -> dict[str, Any]:
 def cmd_project(args: argparse.Namespace) -> int:
     """Inspect or explicitly change a project's complete workspace selection."""
     if is_redaction_enabled():
-        print("Project source details are private. Use SITEOPS_REDACT_OUTPUT=0 for an authorized destination.",
-              file=sys.stderr)
+        print("Error: Project source details are private. Use SITEOPS_REDACT_OUTPUT=0 for an authorized "
+              "destination.", file=sys.stderr)
         return 1
     try:
         if args.project is not None or args.workspace is not None:
@@ -287,25 +294,27 @@ def cmd_project(args: argparse.Namespace) -> int:
             print(f"Pin: {PIN_NAME}")
             print(f"Source: {_content_text(selection.source.reference)} @ {_content_text(selection.source.release)}")
             print(f"Workspace: {_content_text(selection.entry.workspace)}")
-            print(f"Kit: {_content_text(selection.entry.kit_id)} {_content_text(selection.entry.kit_version)}")
+            print(f"Package: {_content_text(selection.entry.kit_id)} {_content_text(selection.entry.kit_version)}")
             print(f"Revision: {_content_text(selection.source.revision)}")
             print(f"Package SHA-256: {selection.entry.package.sha256}")
-            print("The pin records selection. Package use revalidates current consumer policy.")
+            print("The pin records selection. Each use verifies the package against current source approval.")
         return 0
     except (ArtifactError, BrowseError) as error:
-        print(f"Error: {error}", file=sys.stderr)
+        print(f"Error: {_multiline_text(_error_text(error))}", file=sys.stderr)
         for choice in getattr(error, "choices", ()):
             print(f"Workspace choice: {_content_text(choice)}", file=sys.stderr)
         return 1
 
 
 def cmd_source(args: argparse.Namespace) -> int:
-    """Manage consumer-approved source trust independently of projects."""
+    """Manage approved sources independently of projects."""
+    from siteops.artifacts import hash_file
     from siteops.github_attestation import load_github_policy
     from siteops.source_profiles import (
-        default_source,
+        OFFICIAL_SOURCE,
         enroll_source,
         enroll_standard_source,
+        existing_source,
         list_sources,
         read_source,
         remove_source,
@@ -313,7 +322,8 @@ def cmd_source(args: argparse.Namespace) -> int:
 
     redacted = is_redaction_enabled()
     if redacted and args.source_command in {"show", "list"}:
-        print("Source approval details are private. Use an authorized private destination.", file=sys.stderr)
+        print("Error: Source approval details are private. Use SITEOPS_REDACT_OUTPUT=0 for an authorized "
+              "destination.", file=sys.stderr)
         return 1
     try:
         if args.project is not None or args.workspace is not None or args.approved_source is not None:
@@ -324,7 +334,8 @@ def cmd_source(args: argparse.Namespace) -> int:
                     "Supply both --trust-policy and --trusted-root, or neither for the "
                     "publisher's standard release policy."
                 )
-            source = args.source or default_source(args.name)
+            previous = existing_source(args.name)
+            source = args.source or (previous.reference if previous is not None else OFFICIAL_SOURCE)
             if args.trust_policy is None:
                 print(
                     "Reading the current GitHub trusted root with the GitHub CLI...",
@@ -338,16 +349,48 @@ def cmd_source(args: argparse.Namespace) -> int:
                     default_cache_root(), args.trust_policy, args.trusted_root,
                 )
                 result = enroll_source(args.name, source, policy_file, root_file)
-            if redacted:
-                print("Approved source enrolled.")
+            valid_until = load_github_policy(result.policy).valid_until.isoformat()
+            if previous is None:
+                lines = (
+                    ["Approved source enrolled."] if redacted else [
+                        f"Approved source {_content_text(result.name)}: {_content_text(result.reference)}.",
+                        f"Valid until: {valid_until}.",
+                    ]
+                )
+            elif args.trust_policy is None:
+                root = "unchanged" if result.root_sha256 == previous.root_sha256 else "updated"
+                lines = (
+                    [f"Approved source renewed. Trusted root {root}."] if redacted else [
+                        f"Renewed approved source {_content_text(result.name)}: "
+                        f"{_content_text(result.reference)}.",
+                        f"Trusted root: {root}.",
+                        f"Valid until: {valid_until}.",
+                    ]
+                )
             else:
-                print(f"Approved source {_content_text(result.name)}: {_content_text(result.reference)}.")
-                print(f"Valid until: {load_github_policy(result.policy).valid_until.isoformat()}.")
+                lines = (
+                    ["Approved source unchanged."] if redacted else [
+                        f"Approved source {_content_text(result.name)} is already enrolled for "
+                        f"{_content_text(result.reference)}. The existing approval is unchanged.",
+                        f"Valid until: {valid_until}.",
+                    ]
+                )
+                if hash_file(policy_file, limit=8 * 1024 * 1024)[1] != previous.policy_sha256:
+                    name = "NAME" if redacted else _content_text(result.name)
+                    lines.append(
+                        "The supplied policy was not applied. To replace the approval, run "
+                        f"`siteops source remove {name}`, then enroll again."
+                    )
+            for line in lines:
+                print(line)
             return 0
         if args.trust_policy is not None or args.trusted_root is not None:
             raise ProjectError("Trust file options apply to source enroll, not inspection or removal.")
         if args.source_command == "list":
-            for name in list_sources():
+            names = list_sources()
+            if not names:
+                print("No approved sources. Run `siteops source enroll NAME` to add one.")
+            for name in names:
                 print(_content_text(name))
         elif args.source_command == "show":
             result = read_source(args.name, require_valid=False)
@@ -369,7 +412,7 @@ def cmd_source(args: argparse.Namespace) -> int:
         return 0
     except (ArtifactError, BrowseError) as error:
         print("Error: Approved source operation failed. Check private source configuration."
-              if redacted else f"Error: {error}", file=sys.stderr)
+              if redacted else f"Error: {_multiline_text(_error_text(error))}", file=sys.stderr)
         return 1
     except OSError:
         print("Error: The approved source files could not be accessed.", file=sys.stderr)
@@ -381,8 +424,8 @@ def cmd_cache(args: argparse.Namespace) -> int:
     from siteops.cache_management import CacheManagement
 
     if is_redaction_enabled():
-        print("Cache details are private. Use SITEOPS_REDACT_OUTPUT=0 for an authorized destination.",
-              file=sys.stderr)
+        print("Error: Cache details are private. Use SITEOPS_REDACT_OUTPUT=0 for an authorized "
+              "destination.", file=sys.stderr)
         return 1
     try:
         if any((
@@ -423,7 +466,7 @@ def cmd_cache(args: argparse.Namespace) -> int:
             print("Workspace pins, Site configuration and trust inputs are unchanged.")
         return 0
     except ArtifactError as error:
-        print(f"{error.code}: {error}", file=sys.stderr)
+        print(f"Error: {_multiline_text(str(error))}", file=sys.stderr)
         return 1
 
 
@@ -431,7 +474,7 @@ def cmd_browse(args: argparse.Namespace) -> int:
     """Inspect content before any Site configuration or Orchestrator is loaded."""
     if is_redaction_enabled():
         print(
-            "Content inspection output is private. Use SITEOPS_REDACT_OUTPUT=0 "
+            "Error: Content inspection output is private. Use SITEOPS_REDACT_OUTPUT=0 "
             "only for an authorized private destination.",
             file=sys.stderr,
         )
@@ -441,7 +484,7 @@ def cmd_browse(args: argparse.Namespace) -> int:
         if args.source:
             if (args.project is not None or args.trust_policy is not None
                     or args.trusted_root is not None or args.approved_source is not None):
-                raise ProjectError("Choose metadata --source browsing or project content, not both.")
+                raise ProjectError("Browse either a published index with --source or project content, not both.")
             from siteops.github_catalog import inspect_github
 
             request = resolve_source_request(args.source, release=args.ref, for_inspection=True)
@@ -479,7 +522,7 @@ def cmd_browse(args: argparse.Namespace) -> int:
     except ArtifactError as error:
         from siteops.browse import BrowseDiagnostic
 
-        result = BrowseResult("", diagnostics=(BrowseDiagnostic(error.code, str(error)),))
+        result = BrowseResult("", diagnostics=(BrowseDiagnostic(error.code, _error_text(error)),))
     except ValueError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
@@ -496,7 +539,7 @@ def cmd_index(args: argparse.Namespace) -> int:
 
     try:
         if not args.public:
-            raise BrowseError("index.approval", "Use --public to approve the authored publication.")
+            raise BrowseError("index.approval", "Add --public to publish the authored descriptions in the index.")
         if (args.project is not None or args.trust_policy is not None
                 or args.trusted_root is not None or args.approved_source is not None):
             raise BrowseError("index.project", "Index generation uses local workspace input, not project or trust options.")
@@ -511,10 +554,10 @@ def cmd_index(args: argparse.Namespace) -> int:
         bundle = build_content_index(workspace, approve_public=True, additional_digests=digests)
         write_content_index(workspace, bundle, check=args.check)
     except BrowseError as error:
-        print(f"{error.diagnostic.code}: {error.diagnostic.summary}", file=sys.stderr)
+        print(f"Error: {error.diagnostic.summary}", file=sys.stderr)
         return 1
     action = "Current" if args.check else "Generated"
-    print(f"{action} index: {bundle.published} published entries, "
+    print(f"{action} index: {bundle.published} published manifests, "
           f"{bundle.unclassified} unclassified candidates omitted.")
     print("Commit both generated files next to the workspace. "
           "Publish only siteops-index.json, not siteops-index.inputs.json, to a gallery.")
@@ -578,7 +621,7 @@ def _validation_failure_result(
 
 def _write_plain_validation_errors(errors: list[str]) -> None:
     print(
-        f"\n{terminal.FAILED} Validation failed with {len(errors)} error(s):\n",
+        f"\nError: Validation failed with {len(errors)} error(s):\n",
         file=sys.stderr,
     )
     for error in errors:
@@ -626,7 +669,7 @@ class ResourceReadError(GuidedInputError):
 
 
 def _guided_error_detail(error: Exception) -> str:
-    return str(error) if isinstance(error, GuidedInputError) else report_site_load_error(error)
+    return _error_text(error) if isinstance(error, GuidedInputError) else report_site_load_error(error)
 
 
 def _is_cancelled_read(error: Exception) -> bool:
@@ -825,6 +868,7 @@ def cmd_inputs(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     if manifest_path is None:
         return 1
     try:
+        manifest_name = _content_text(orchestrator.manifest_name(manifest_path))
         contract = load_contract(
             manifest_path,
             binding=getattr(args, "package_binding", None),
@@ -878,8 +922,6 @@ def cmd_inputs(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
                 preview = "\n".join(_content_text(line) for line in document.splitlines())
         if args.output == "json":
             rendered_json = json.dumps(description, ensure_ascii=False, indent=2, allow_nan=False)
-        else:
-            manifest_name = _content_text(orchestrator.load_manifest(manifest_path).name)
         if args.example:
             write_yaml_exclusive(args.example, contract.example())
             destination = (
@@ -1258,7 +1300,7 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         return result.exit_code
     except MultipleSubscriptionSitesError as e:
         detail = (
-            "Only one subscription-level site per subscription is allowed."
+            "Only one Site without a resource group is allowed per subscription."
             if is_redaction_enabled()
             else str(e)
         )
@@ -1569,7 +1611,7 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         try:
             selector = parse_selector(selector_str)
         except ValueError as e:
-            detail = "Invalid site selector." if is_redaction_enabled() else str(e)
+            detail = "Invalid Site selector." if is_redaction_enabled() else str(e)
             print(f"\nError: {_multiline_text(detail)}\n", file=sys.stderr)
             return 1
         # Use filter_sites for parity with deploy: trusted-file fast
@@ -1601,9 +1643,9 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
                 else ", ".join(_content_text(name) for name, _ in orchestrator.skipped_sites)
             )
             print(
-                f"\nError: no site could be loaded. "
-                f"{len(orchestrator.skipped_sites)} site file(s) were rejected "
-                f"({names}). Fix those files rather than adding a new site.\n",
+                f"\nError: No Site could be loaded. "
+                f"{len(orchestrator.skipped_sites)} Site file(s) were rejected "
+                f"({names}). Fix those files rather than adding a new Site.\n",
                 file=sys.stderr,
             )
             return 1
@@ -1613,14 +1655,14 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
             # scripts and `&&`-chained commands surface the failure
             # instead of silently treating "0 sites" as success.
             message = (
-                "No sites matched selector."
+                "Error: No Sites matched the selector."
                 if is_redaction_enabled()
-                else f"No sites matched selector: {_content_text(selector_str)}"
+                else f"Error: No Sites matched the selector: {_content_text(selector_str)}"
             )
             print(f"\n{message}\n", file=sys.stderr)
             return 1
         if output_format == "plain":
-            print("\nNo sites found in workspace\n")
+            print("\nNo Sites found in the workspace.\n")
             return 0
 
     if orchestrator.skipped_sites:
@@ -1628,7 +1670,7 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         # The names are already reported above. This makes the shortfall
         # visible to a wrapper script and to CI rather than only to a reader.
         print(
-            f"Error: {len(orchestrator.skipped_sites)} site(s) could not be "
+            f"Error: {len(orchestrator.skipped_sites)} Site(s) could not be "
             f"loaded, so this listing is incomplete. Fix the files named above.",
             file=sys.stderr,
         )
@@ -1651,7 +1693,7 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
                 serialized = json.dumps(documents, indent=2, allow_nan=False) + "\n"
             except (TypeError, ValueError):
                 print(
-                    "Error: Resolved site values cannot be represented as JSON. "
+                    "Error: Resolved Site values cannot be represented as JSON. "
                     "Use --output yaml to inspect YAML values.",
                     file=sys.stderr,
                 )
@@ -1839,12 +1881,82 @@ def _auto_discover_workspace(start: Path) -> Path | None:
 
 
 _SELECTOR_HELP = (
-    "Filter sites by labels (e.g., `environment=prod`, `name=munich-dev`). "
+    "Select Sites by label, for example `environment=prod` or `name=munich-dev`. "
     "Repeatable: multiple `-l` flags AND-combine across distinct keys. "
     "Duplicate `name=` values OR-combine. Any other duplicate key is an "
     "error. `name=` accepts the basename, the relative path under a trusted "
-    "`sites/` dir, or the file's internal `name:` field."
+    "`sites/` directory, or the file's internal `name:` field."
 )
+
+# One description of what --source accepts. Each command adds what it selects.
+_SOURCE_HELP = "Approved source name or github:OWNER/REPO locator"
+
+_PARALLEL_HELP = (
+    "Maximum Sites deployed at once: a positive integer, or 0, max or auto for "
+    "no limit. Overrides the manifest's `parallel` setting."
+)
+
+_ROOT_EPILOG = """
+Global options such as -w, --project and --approved-source go before the command.
+
+Examples:
+  # Enroll the official content source once, then deploy AIO to one Arc cluster.
+  siteops source enroll official
+  siteops deploy aio-install --source "official@<release>" --input "cluster=<Arc-cluster-resource-ID>"
+  # Inspect the typed inputs a manifest accepts.
+  siteops inputs aio-install --source "official@<release>"
+  # Pin a release in an operator project, then plan for selected Sites.
+  siteops --approved-source official project pin ./factory --release <release>
+  siteops --approved-source official --project ./factory plan aio-install -l name=plant-two,name=plant-three
+  # Author content in a local checkout.
+  siteops -w workspaces/iot-operations plan aio-install --input "cluster=<Arc-cluster-resource-ID>"
+
+Environment:
+  SITEOPS_REDACT_OUTPUT     1 withholds private details from output, 0 shows them.
+                            Redaction is on by default when GITHUB_ACTIONS or
+                            TF_BUILD is set.
+  CI, GITHUB_ACTIONS,       When any is set, deploy requires --yes.
+  TF_BUILD
+  SITEOPS_CACHE_DIR         Absolute path of the content cache.
+  SITEOPS_TEMP_DIR          Absolute parent directory for temporary files.
+  SITEOPS_EXTRA_SITES_DIRS  Additional trusted Site directories, separated like
+                            PATH. --extra-sites-dir takes precedence.
+  SITEOPS_ARC_PROXY_WAIT    Seconds to wait for the Arc proxy (default 180).
+  SITEOPS_ARC_PROXY_MAX_PORT_RETRIES
+                            Arc proxy attempts when a port is in use (default 3).
+  SITEOPS_WAIT_MAX_CONSECUTIVE_ERRORS
+                            Polling errors in a row that stop a wait step
+                            (default 10).
+  LOCALAPPDATA (Windows), XDG_CONFIG_HOME and XDG_CACHE_HOME
+                            Locate approved sources and the default cache.
+"""
+
+
+def _global_option_hint(parser: argparse.ArgumentParser, args: argparse.Namespace, extras: list[str]) -> str | None:
+    """Name global options given after the command, with the order that works."""
+    usage = {
+        option: f"{option} {action.metavar}" if action.metavar else option
+        for action in parser._actions
+        if action.option_strings and action.dest not in {"help", "version"}
+        for option in action.option_strings
+    }
+    found = []
+    for token in extras:
+        option = token.split("=", 1)[0]
+        if option not in usage and not token.startswith("--"):
+            option = token[:2]
+        if option in usage and option not in found:
+            found.append(option)
+    if not found:
+        return None
+    command = args.command or "COMMAND"
+    group = getattr(args, f"{command}_command", None)
+    if group:
+        command += f" {group}"
+    names = " and ".join(found)
+    subject = f"{names} is a global option" if len(found) == 1 else f"{names} are global options"
+    placement = " ".join(usage[option] for option in found)
+    return f"{subject}. Put {'it' if len(found) == 1 else 'them'} before the command: siteops {placement} {command} ..."
 
 
 def main() -> None:
@@ -1862,20 +1974,7 @@ def main() -> None:
         prog="siteops",
         description="Azure Site Ops: multi-site Azure IaC orchestration.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Global options such as --project and --approved-source precede the command.
-
-Examples:
-  siteops -w workspaces/iot-operations browse aio-install
-  siteops deploy aio-install --source official@RELEASE --input "cluster=<Arc-cluster-resource-ID>"
-  siteops -w workspaces/iot-operations plan aio-install --input "cluster=<Arc-cluster-resource-ID>"
-  # Optionally inspect inputs and generate an answer file.
-  siteops -w workspaces/iot-operations inputs aio-install --example ./aio-inputs.yaml
-  # After source enrollment, pin an identified release and select only new fleet Sites.
-  siteops --approved-source NAME project pin ./factory --release RELEASE
-  siteops --approved-source NAME --project ./factory plan aio-install -l name=plant-two,name=plant-three
-  siteops --approved-source NAME --project ./factory deploy aio-install -l name=plant-two,name=plant-three
-""",
+        epilog=_ROOT_EPILOG,
     )
     parser.add_argument("--version", action="version", version=f"siteops {__version__}")
     parser.add_argument(
@@ -1900,9 +1999,8 @@ Examples:
         default=None,
         metavar="DIR",
         help=(
-            "Additional trusted sites/ directory (repeatable). Also accepts "
-            "the SITEOPS_EXTRA_SITES_DIRS env var. See "
-            "docs/site-configuration.md for trust rules and precedence."
+            "Additional trusted Site directory (repeatable). Takes precedence "
+            "over SITEOPS_EXTRA_SITES_DIRS."
         ),
     )
     parser.add_argument(
@@ -1911,61 +2009,76 @@ Examples:
     )
     parser.add_argument(
         "--trust-policy", type=Path, action=_SingleValueOption, metavar="FILE",
-        help="Independent local artifact verification policy, required to create or use a workspace pin",
+        help=(
+            "Local verification policy for published content. With --trusted-root, "
+            "an alternative to an approved source."
+        ),
     )
     parser.add_argument(
         "--trusted-root", type=Path, action=_SingleValueOption, metavar="FILE",
-        help="Independent local trusted root snapshot, required to create or use a workspace pin",
+        help=(
+            "Local trusted root snapshot for the trust policy. With --trust-policy, "
+            "an alternative to an approved source."
+        ),
     )
     parser.add_argument(
         "--approved-source", action=_SingleValueOption, metavar="NAME",
-        help="Explicitly selected consumer source enrollment for a project pin or packaged command",
+        help=(
+            "Approved source that verifies a workspace pin, `project pin` or a "
+            "--source github:OWNER/REPO locator. Content commands can instead name "
+            "it in --source NAME@RELEASE."
+        ),
     )
 
     parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
-        help=(
-            "Raise log verbosity to DEBUG. Controls logging only. To see a "
-            "deployment plan use `siteops plan`."
-        ),
+        help="Show debug logging.",
     )
 
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(dest="command")
 
     p_browse = subparsers.add_parser(
         "browse",
-        help="Discover and inspect deployment content",
+        help="Discover and inspect manifests",
         description=(
-            "Inspect local manifest headers and optional authored guidance without "
-            "loading Sites, compiling templates or contacting deployment services."
+            "List and inspect manifests and their authored guidance without loading "
+            "Sites, compiling templates or contacting deployment services. Reads a "
+            "local workspace or a project's pinned package, or with --source, the "
+            "published index of an approved source or repository."
         ),
     )
-    p_browse.add_argument(
-        "name", nargs="?", help="Exact entry name or explicit workspace-relative manifest path"
-    )
+    p_browse.add_argument("name", nargs="?", help="Manifest name or path")
     p_browse.add_argument("--search", help="Case-insensitive text filter")
     p_browse.add_argument("--tag", action="append", default=[], help="Required tag (repeatable)")
     p_browse.add_argument("--category", help="Exact authored category")
     p_browse.add_argument(
-        "--include-partials", action="store_true", help="Include declared reusable fragments"
+        "--include-partials", action="store_true",
+        help="Include partials, the manifests written to be included by other manifests",
     )
     p_browse.add_argument("--limit", type=int, help="Maximum inventory rows (positive integer)")
     p_browse.add_argument(
-        "--output", choices=("plain", "json"), default="plain", help="Private output format"
+        "--output", choices=("plain", "json"), default="plain",
+        help="Private output format (default: plain)",
     )
     p_browse.add_argument(
-        "--source", action=_SingleValueOption,
-        help="Published descriptive index source: github:OWNER/REPO[@REF] or repository URL"
+        "--source", action=_SingleValueOption, metavar="SOURCE[@REF]",
+        help=(
+            f"{_SOURCE_HELP} whose published index to read. Add @REF or use --ref "
+            "for a branch, tag or commit."
+        ),
     )
     p_browse.add_argument(
         "--ref", action=_SingleValueOption,
-        help="Source branch, tag or commit (default: repository default branch)",
+        help="Branch, tag or commit for --source (default: the repository's default branch)",
     )
     p_browse.add_argument(
         "--auth", choices=("anonymous", "cli"), action=_SingleValueOption, default="anonymous",
-        help="Remote read access: anonymous or configured GitHub CLI authentication",
+        help=(
+            "How --source reads the repository: anonymous (default), or cli to use "
+            "your GitHub CLI (`gh`) authentication. Not Azure CLI."
+        ),
     )
     cache_mode = p_browse.add_mutually_exclusive_group()
     cache_mode.add_argument(
@@ -1977,14 +2090,14 @@ Examples:
     )
     p_inputs = subparsers.add_parser(
         "inputs",
-        help="Inspect typed inputs for a selected deployment",
+        help="Inspect the typed inputs of a manifest",
         description=(
             "Inspect the declared input contract. Complete answers preview "
             "one resolved Site without writing it. --example writes an "
             "incomplete answer file, and --save-site explicitly keeps a Site."
         ),
     )
-    p_inputs.add_argument("manifest", help="Exact manifest name or explicit manifest path")
+    p_inputs.add_argument("manifest", help="Manifest name or path")
     p_inputs.add_argument(
         "--output", choices=("plain", "json"), default="plain",
         help="Input contract and optional private Site preview format (default: plain)",
@@ -1999,7 +2112,7 @@ Examples:
     )
     p_inputs.add_argument(
         "--input", dest="input_values", action="append", metavar="NAME=VALUE",
-        help="Typed non-secret answer (repeatable, overrides --input-file)",
+        help="Typed answer that is not secret (repeatable, overrides --input-file)",
     )
     p_inputs.add_argument(
         "--save-site", type=Path, action=_SingleValueOption, metavar="FILE",
@@ -2016,7 +2129,7 @@ Examples:
 
     p_sites = subparsers.add_parser(
         "sites",
-        help="List available sites",
+        help="List and inspect Sites",
         description=(
             "List selected Site configuration from the operator project or local workspace. Plain output "
             "shows several Sites one per line. Pass a positional name (filename or internal `name:`) "
@@ -2028,8 +2141,8 @@ Examples:
         nargs="?",
         default=None,
         help=(
-            "Optional site name to scope to (filename without extension, "
-            "or the internal `name:` field). Equivalent to `-l name=<NAME>`."
+            "Site to show: its filename without extension, or its internal "
+            "`name:` field. Equivalent to `-l name=<NAME>`."
         ),
     )
     p_sites.add_argument(
@@ -2054,8 +2167,8 @@ Examples:
         default="plain",
         help=(
             "Private inspection format: plain display, YAML Site documents, or "
-            "a JSON array. Sensitive-key masking is not publication safety "
-            "(default: plain)."
+            "a JSON array. Masking sensitive keys does not make output safe to "
+            "publish (default: plain)."
         ),
     )
 
@@ -2065,11 +2178,11 @@ Examples:
         help="Validate manifest structure and static references",
         description=(
             "Validate manifest syntax, files, and static references. "
-            "Use `siteops plan <manifest> --describe` for the compile-free "
-            "plan shape."
+            "Use `siteops plan MANIFEST --describe` for the plan shape "
+            "without compiling."
         ),
     )
-    p_validate.add_argument("manifest", help="Exact manifest name or explicit manifest path")
+    p_validate.add_argument("manifest", help="Manifest name or path")
     p_validate.add_argument(
         "-l",
         "--selector",
@@ -2088,7 +2201,7 @@ Examples:
             "without executing it."
         ),
     )
-    p_plan.add_argument("manifest", help="Exact manifest name or explicit manifest path")
+    p_plan.add_argument("manifest", help="Manifest name or path")
     p_plan.add_argument(
         "-l",
         "--selector",
@@ -2101,8 +2214,8 @@ Examples:
         "--describe",
         action="store_true",
         help=(
-            "Show the compile-free plan shape without executable preflight "
-            "(default: false)."
+            "Show the plan shape without compiling templates or checking "
+            "local tools (default: false)."
         ),
     )
     p_plan.add_argument(
@@ -2112,11 +2225,7 @@ Examples:
         action=_SingleValueOption,
         default=None,
         metavar="N",
-        help=(
-            "Max concurrent sites recorded in the plan. Accepts a positive "
-            "integer, or 'max' / 'auto' / '0' for unlimited. Overrides the "
-            "manifest setting."
-        ),
+        help=f"{_PARALLEL_HELP} Recorded in the plan.",
     )
     p_plan.add_argument(
         "--output",
@@ -2138,21 +2247,21 @@ Examples:
     # deploy command
     p_deploy = subparsers.add_parser(
         "deploy",
-        help="Deploy manifest to target sites",
+        help="Deploy a manifest to its Sites",
         description=(
-            "Prepare and review deployment to one or more sites, then confirm "
+            "Prepare and review deployment to one or more Sites, then confirm "
             "execution of that same plan. Use --yes for unattended deployment. "
             "Ctrl-C asks the run to stop and waits for the calls already in "
             "progress to return or reach their own timeout."
         ),
     )
-    p_deploy.add_argument("manifest", help="Exact manifest name or explicit manifest path")
+    p_deploy.add_argument("manifest", help="Manifest name or path")
     p_deploy.add_argument(
         "--yes",
         action="store_true",
         help=(
-            "Approve deployment without an interactive prompt. Validation, "
-            "source approval and target prerequisites still apply."
+            "Confirm deployment without an interactive prompt. Validation, "
+            "approved source checks and target prerequisites still apply."
         ),
     )
     p_deploy.add_argument(
@@ -2170,10 +2279,7 @@ Examples:
         action=_SingleValueOption,
         default=None,
         metavar="N",
-        help=(
-            "Max concurrent sites. Accepts a positive integer, or 'max' / "
-            "'auto' / '0' for unlimited. Overrides the manifest setting."
-        ),
+        help=_PARALLEL_HELP,
     )
     p_deploy.add_argument(
         "--output",
@@ -2201,7 +2307,7 @@ Examples:
         )
         command.add_argument(
             "--input", dest="input_values", action="append", metavar="NAME=VALUE",
-            help="Typed non-secret answer (repeatable, overrides --input-file)",
+            help="Typed answer that is not secret (repeatable, overrides --input-file)",
         )
         command.add_argument(
             "--offline-content", dest="offline", action="store_true",
@@ -2210,11 +2316,20 @@ Examples:
     for command in (p_plan, p_deploy, p_validate, p_inputs):
         command.add_argument(
             "--source", dest="content_source", action=_SingleValueOption, metavar="SOURCE@RELEASE",
-            help="Use a verified published release directly, from an approved source name or provider locator",
+            help=(
+                f"{_SOURCE_HELP}, with @RELEASE. Uses that verified published release "
+                "directly instead of a workspace pin."
+            ),
         )
 
-    p_project = subparsers.add_parser("project", help="Inspect or explicitly pin a project's workspace source")
-    project_commands = p_project.add_subparsers(dest="project_command", required=True)
+    p_project = subparsers.add_parser(
+        "project", help="Pin or show a project's published release",
+        description=(
+            "Pin a verified published release for an operator project, or show the "
+            "current pin. Project Sites are not changed."
+        ),
+    )
+    project_commands = p_project.add_subparsers(dest="project_command")
     for name, help_text in (
         ("pin", "Acquire an explicit release and atomically record its workspace selection"),
         ("show", "Show the recorded workspace selection without acquiring or verifying package content"),
@@ -2230,33 +2345,39 @@ Examples:
         command = project_commands.add_parser(name, help=help_text, description=description)
         command.add_argument("directory", nargs="?", type=Path, default=Path("."),
                              metavar="DIRECTORY", help="Operator project directory (default: current directory)")
-        command.add_argument("--output", choices=("plain", "json"), default="plain")
+        command.add_argument("--output", choices=("plain", "json"), default="plain",
+                             help="Output format (default: plain)")
         if name == "pin":
-            command.add_argument("--source",
+            command.add_argument("--source", metavar="SOURCE[@RELEASE]",
                                  action=_SingleValueOption,
-                                 help="Workspace source: github:OWNER/REPO[@RELEASE]. Omit when global --approved-source NAME selects it")
+                                 help=f"{_SOURCE_HELP} to pin. Add @RELEASE or use --release. "
+                                      "Omit it when global --approved-source NAME selects the source.")
             command.add_argument("--release", metavar="RELEASE",
                                  action=_SingleValueOption,
-                                 help="Published release tag (or include @RELEASE in --source)")
+                                 help="Published release tag (or add @RELEASE to --source)")
             command.add_argument("--release-workspace", metavar="PATH",
                                  action=_SingleValueOption,
                                  help="Workspace path listed in the release descriptor, required when several are listed")
 
     p_source = subparsers.add_parser(
-        "source", help="Inspect, enroll or remove consumer-approved sources",
-        description="Manage independent consumer source approval outside projects and workspace packages.",
+        "source", help="Enroll, inspect or remove approved sources",
+        description=(
+            "Manage approved sources: the publishers whose verified releases Site Ops "
+            "accepts. Approved sources are kept in your user configuration, outside "
+            "projects and packages."
+        ),
     )
-    source_commands = p_source.add_subparsers(dest="source_command", required=True)
+    source_commands = p_source.add_subparsers(dest="source_command")
     for name, help_text in (
-        ("enroll", "Enroll or renew a consumer-approved source"),
+        ("enroll", "Enroll or renew an approved source"),
         ("show", "Inspect one approved source in a private destination"),
         ("list", "List approved source names in a private destination"),
-        ("remove", "Remove one approval without changing a workspace pin"),
+        ("remove", "Remove one approved source without changing a workspace pin"),
     ):
         description = help_text
         if name == "enroll":
             description += (
-                ". Without trust files, Site Ops approves the publisher's releases built from "
+                ". Without trust files, Site Ops accepts the publisher's releases built from "
                 "its main branch for 30 days, using the current trusted root from GitHub CLI. "
                 "Rerun to renew. For a custom policy, supply global --trust-policy FILE and "
                 "--trusted-root FILE before 'source enroll'."
@@ -2264,22 +2385,26 @@ Examples:
         command = source_commands.add_parser(name, help=help_text, description=description)
         if name != "list":
             command.add_argument(
-                "name", metavar="NAME", help="Lowercase name in private user configuration",
+                "name", metavar="NAME",
+                help="Approved source name: lowercase letters, digits and hyphens",
             )
         if name == "enroll":
             command.add_argument(
-                "--source", action=_SingleValueOption,
-                help="Approved repository: github:OWNER/REPO (default: the publisher already "
+                "--source", action=_SingleValueOption, metavar="github:OWNER/REPO",
+                help="Repository to enroll, without a release (default: the publisher already "
                      "enrolled as NAME, otherwise the official Scale Kit publisher)",
             )
 
     p_index = subparsers.add_parser(
-        "index", help="Build a public content index and separate source bindings",
-        description="Generate deterministic index files in the selected workspace. No remote publication.",
+        "index", help="For content authors: build a public content index",
+        description=(
+            "For content authors: generate deterministic index files in the selected "
+            "local workspace. Nothing is published remotely."
+        ),
     )
     p_index.add_argument(
         "--public", action="store_true",
-        help="Approve the selected authored descriptions for public indexing (required)",
+        help="Publish the authored descriptions in the index (required)",
     )
     p_index.add_argument(
         "--for-source", choices=("github",), help="Include optional freshness identities for a source adapter"
@@ -2288,24 +2413,43 @@ Examples:
         "--check", action="store_true", help="Compare generated files without writing them"
     )
 
-    p_cache = subparsers.add_parser("cache", help="Inspect cached storage or remove a selected entry")
-    cache_commands = p_cache.add_subparsers(dest="cache_command", required=True)
+    p_cache = subparsers.add_parser(
+        "cache", help="Inspect or remove cached content",
+        description=(
+            "Inspect the private content cache, or remove one entry. "
+            "SITEOPS_CACHE_DIR selects the cache directory."
+        ),
+    )
+    cache_commands = p_cache.add_subparsers(dest="cache_command")
     for name, help_text in (
         ("list", "List cached storage without verifying content or contacting sources"),
         ("remove", "Remove one cached entry, refusing active use and preserving project configuration"),
     ):
         command = cache_commands.add_parser(name, help=help_text, description=help_text)
-        command.add_argument("--output", choices=("plain", "json"), default="plain")
+        command.add_argument("--output", choices=("plain", "json"), default="plain",
+                             help="Output format (default: plain)")
         if name == "list":
             command.add_argument("--kind", choices=("package", "proof", "metadata"),
                                  help="Limit inspection to one cache entry kind")
             command.add_argument("--id", help="Complete cache entry ID, used with --kind")
             command.add_argument("--limit", type=int, default=100, help="Maximum rows to inspect (default: 100)")
         else:
-            command.add_argument("kind", choices=("package", "proof", "metadata"))
+            command.add_argument("kind", choices=("package", "proof", "metadata"),
+                                 help="Cache entry kind, as shown by cache list")
             command.add_argument("id", help="Complete lowercase entry ID from cache list")
 
-    args = parser.parse_args()
+    args, extras = parser.parse_known_args()
+    if extras:
+        hint = _global_option_hint(parser, args, extras)
+        if hint is not None:
+            parser.exit(2, f"{parser.prog}: error: {hint}\n")
+        parser.error(f"unrecognized arguments: {' '.join(extras)}")
+    for group, group_parser in (
+        (None, parser), ("project", p_project), ("source", p_source), ("cache", p_cache),
+    ):
+        if args.command == group and (group is None or getattr(args, f"{group}_command") is None):
+            group_parser.print_help(sys.stderr)
+            sys.exit(2)
     if hasattr(args, "_single_values_seen"):
         del args._single_values_seen
     if args.command == "deploy":
@@ -2398,7 +2542,7 @@ Examples:
         )
         exit_code = 130
     except (FileNotFoundError, ValueError) as error:
-        detail = str(error) if isinstance(error, ArtifactError) or not is_redaction_enabled() else "Command preparation failed."
+        detail = _error_text(error) if isinstance(error, ArtifactError) or not is_redaction_enabled() else "Command preparation failed."
         print(f"Error: {_multiline_text(detail)}", file=sys.stderr)
         if isinstance(error, ManifestSelectionError) and not is_redaction_enabled():
             for choice in error.paths:

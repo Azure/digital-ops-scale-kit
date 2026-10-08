@@ -71,6 +71,55 @@ def _invoke(argv):
     return stopped.value.code
 
 
+@pytest.mark.parametrize("output", ["plain", "json"])
+def test_input_inspection_reads_the_manifest_header_in_every_format(
+    guided_workspace, tmp_path, capsys, output,
+):
+    manifest = guided_workspace / "manifests" / "test-manifest.yaml"
+    document = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+    document["steps"].append({"include": "missing-partial.yaml"})
+    manifest.write_text(yaml.safe_dump(document), encoding="utf-8")
+    selection = ["-w", str(guided_workspace), "inputs", str(manifest), "--output", output]
+    assert _invoke(selection) == 0
+    inspected = capsys.readouterr().out
+    if output == "json":
+        assert [field["name"] for field in json.loads(inspected)["inputs"]] == [
+            "siteName", "subscription", "location",
+        ]
+    else:
+        assert inspected.startswith(f"Inputs for {document['name']}:\n")
+    answers = _input_file(tmp_path / "answers.yaml")
+    assert _invoke([*selection, "--input-file", str(answers)]) == 1
+    assert "missing-partial.yaml" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("redacted", [False, True])
+def test_unknown_input_is_named_with_the_nearest_input_unless_redacted(
+    guided_workspace, capsys, monkeypatch, redacted,
+):
+    monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1" if redacted else "0")
+    assert _invoke([
+        "-w", str(guided_workspace), "inputs", _manifest(guided_workspace), "--input", "locaton=eastus",
+    ]) == 1
+    error = capsys.readouterr().err
+    assert error.startswith("Error: Inline inputs contain an unknown input")
+    assert ("'locaton'. Did you mean 'location'?" in error) is not redacted
+
+
+def test_example_onto_an_existing_file_reports_a_plain_message(
+    guided_workspace, tmp_path, capsys, monkeypatch,
+):
+    monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "0")
+    target = tmp_path / "answers.yaml"
+    target.write_text("keep\n", encoding="utf-8")
+    assert _invoke([
+        "-w", str(guided_workspace), "inputs", _manifest(guided_workspace), "--example", str(target),
+    ]) == 1
+    error = capsys.readouterr().err
+    assert error == f"Error: {target} already exists. Choose a new file name.\n"
+    assert target.read_text(encoding="utf-8") == "keep\n"
+
+
 def _interactive_console(monkeypatch):
     for name in ("CI", "GITHUB_ACTIONS", "TF_BUILD"):
         monkeypatch.delenv(name, raising=False)
@@ -144,20 +193,21 @@ def test_top_level_help_leads_with_single_site_answers(capsys):
             main()
     assert stopped.value.code == 0
     help_text = capsys.readouterr().out
-    assert help_text.index("plan aio-install --input") < help_text.index(
-        "inputs aio-install --example"
+    assert help_text.index("siteops source enroll official") < help_text.index(
+        'deploy aio-install --source "official@<release>"'
     )
-    assert help_text.index("plan aio-install --input") < help_text.index(
+    assert help_text.index('deploy aio-install --source "official@<release>"') < help_text.index(
         "plan aio-install -l name=plant-two,name=plant-three"
     )
     for verb in ("plan", "deploy"):
         example = next(
-            line for line in help_text.splitlines() if f" {verb} aio-install " in line
+            line for line in help_text.splitlines()
+            if f" {verb} aio-install " in line and "--input" in line
         )
         assert "--read-resources" not in example
         assert '--input "cluster=<Arc-cluster-resource-ID>"' in example
         assert "--input-file" not in example
-    assert "deploy aio-install -l name=plant-two,name=plant-three" in help_text
+    assert "--project ./factory plan aio-install -l name=plant-two,name=plant-three" in help_text
 
 
 def test_inputs_help_explains_read_only_preview(capsys):
@@ -787,7 +837,8 @@ def test_saved_site_is_normal_config_and_not_overwritten(
     capsys.readouterr()
     assert _invoke(args) == 1
     error = capsys.readouterr().err.lower()
-    assert ("could not be loaded" if redacted else "exists") in error
+    assert "already exists" in error
+    assert (str(site_file).lower() in error) is not redacted
     assert site_file.read_bytes() == saved_bytes
 
 

@@ -450,7 +450,7 @@ def _allocate_arc_port_slot() -> int:
         raise RuntimeError(
             f"No Arc proxy slot is free. At most {ARC_PROXY_MAX_SLOTS} proxies run "
             f"at once, so a manifest with a kubectl or wait step cannot deploy to "
-            f"more than {ARC_PROXY_MAX_SLOTS} sites concurrently. Lower `parallel:` "
+            f"more than {ARC_PROXY_MAX_SLOTS} Sites at once. Lower `parallel:` "
             f"in the manifest, or pass `--parallel {ARC_PROXY_MAX_SLOTS}`."
         )
 

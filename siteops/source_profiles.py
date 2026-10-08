@@ -43,8 +43,31 @@ logger = logging.getLogger(__name__)
 
 
 class SourceProfileError(ArtifactError):
-    def __init__(self, message: str, *, code: str = "source.profile-invalid"):
+    def __init__(
+        self, message: str, *, code: str = "source.profile-invalid", private_message: str | None = None,
+    ):
         super().__init__(message, code=code)
+        self.private_message = private_message
+
+
+def _not_enrolled(name: str, *, removal: bool = False) -> SourceProfileError:
+    if removal:
+        return SourceProfileError(
+            "The approved source is not enrolled. Run `siteops source list` to see enrolled names.",
+            code="source.profile-missing",
+            private_message=(
+                f"Approved source '{name}' is not enrolled. "
+                "Run `siteops source list` to see enrolled names."
+            ),
+        )
+    return SourceProfileError(
+        "The approved source is not enrolled. Run `siteops source enroll NAME`.",
+        code="source.profile-missing",
+        private_message=(
+            f"Approved source '{name}' is not enrolled. Run `siteops source enroll {name}`. "
+            "Add --source github:OWNER/REPO to enroll a publisher other than the official one."
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -140,7 +163,7 @@ def read_source(name: str, *, require_valid: bool = True) -> ApprovedSource:
     name = _name(name)
     directory = source_root() / name
     if not directory.is_dir():
-        raise SourceProfileError("Approved source not found.", code="source.profile-missing")
+        raise _not_enrolled(name)
     check_cache_ancestors(directory)
     check_private_node(directory, directory=True)
     record = load_artifact_json(_bytes(directory / _PROFILE, _MAX_PROFILE),
@@ -322,12 +345,16 @@ def _identity(policy: GitHubArtifactPolicy) -> tuple:
             policy.signer_workflow, policy.builder_workflow, policy.runner_environment)
 
 
-def default_source(name: str) -> str:
-    """Renew an existing name with its enrolled publisher. New names use the official one."""
+def existing_source(name: str) -> ApprovedSource | None:
+    """Read an enrolled approval without requiring current validity, or None when absent.
+
+    Enrollment renews an existing name with this record's publisher. New names
+    use the official one.
+    """
     directory = source_root() / _name(name)
     if directory.exists() or directory.is_symlink():
-        return read_source(name, require_valid=False).reference
-    return OFFICIAL_SOURCE
+        return read_source(name, require_valid=False)
+    return None
 
 
 def enroll_standard_source(name: str, source: str = OFFICIAL_SOURCE) -> ApprovedSource:
@@ -373,10 +400,26 @@ def list_sources() -> tuple[str, ...]:
     return tuple(sorted(names))
 
 
+def sources_for(reference: str) -> tuple[str, ...]:
+    """Name the readable approvals enrolled for one publisher repository."""
+    root = source_root()
+    if not root.is_dir():
+        return ()
+    names = []
+    for directory in sorted(root.iterdir()):
+        try:
+            source = read_source(directory.name, require_valid=False)
+        except (ArtifactError, OSError):
+            continue
+        if source.reference.casefold() == reference.casefold():
+            names.append(source.name)
+    return tuple(names)
+
+
 def remove_source(name: str) -> None:
     directory = source_root() / _name(name)
     if not directory.is_dir():
-        raise SourceProfileError("Approved source not found.", code="source.profile-missing")
+        raise _not_enrolled(name, removal=True)
     check_cache_ancestors(directory)
     check_private_node(directory, directory=True)
     if {path.name for path in directory.iterdir()} != {_PROFILE, _POLICY, _ROOT}:

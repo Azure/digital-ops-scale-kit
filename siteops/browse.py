@@ -817,7 +817,7 @@ def select_entries(
                 filename_match=filename_match,
             )
         except ManifestSelectionError as error:
-            diagnostics.append(BrowseDiagnostic(error.code, str(error)))
+            diagnostics.append(BrowseDiagnostic(error.code, error.private_message or str(error)))
             matches = tuple(
                 candidates_by_path[path] for path in error.paths if path in candidates_by_path
             ) if error.code == "lookup.ambiguous" else ()

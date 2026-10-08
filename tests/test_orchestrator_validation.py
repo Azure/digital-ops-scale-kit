@@ -75,7 +75,7 @@ class TestValidation:
             yaml.dump(manifest_data, f)
 
         errors = orchestrator.validate(manifest_path)
-        assert any("No sites matched" in e for e in errors)
+        assert any("No Sites matched" in e for e in errors)
 
     def test_validate_generic_manifest_passes(self, complete_workspace):
         """A manifest with no `sites:` and no `selector:` is a valid library
@@ -153,8 +153,8 @@ class TestValidation:
         # Parse error must surface.
         assert any("may only appear once" in e for e in errors)
         # The "matched no sites" diagnostic must NOT also surface.
-        assert not any("matched no sites" in e for e in errors)
-        assert not any("No sites matched" in e for e in errors)
+        assert not any("matched no Sites" in e for e in errors)
+        assert not any("No Sites matched" in e for e in errors)
 
     def test_validate_non_selector_value_error_still_shows_no_match(
         self, complete_workspace
@@ -177,7 +177,7 @@ class TestValidation:
         # workspace.
         errors = orchestrator.validate(manifest_path, selector="environment=nope")
         # Rich diagnostic surfaces.
-        assert any("matched no sites" in e for e in errors)
+        assert any("matched no Sites" in e for e in errors)
 
     def test_validate_unresolved_site_in_manifest_returns_error_not_traceback(
         self, complete_workspace
@@ -979,7 +979,7 @@ steps:
         )
 
         errors = orchestrator.validate(manifest_path)
-        assert any("did not resolve for site 'test-site'" in e for e in errors)
+        assert any("did not resolve for Site 'test-site'" in e for e in errors)
 
 
 class TestStepOutputReferenceValidation:
@@ -1573,7 +1573,7 @@ steps:
         orchestrator = Orchestrator(tmp_workspace)
         errors = orchestrator.validate(manifest_path)
 
-        assert any("subscription-level site" in e for e in errors)
+        assert any("subscription-level Site" in e for e in errors)
         assert any("subscription-scoped steps" in e for e in errors)
 
     def test_subscription_step_with_subscription_site(self, tmp_workspace, sample_bicep_template):
@@ -1607,7 +1607,7 @@ steps:
         errors = orchestrator.validate(manifest_path)
 
         # Should not have subscription-level site errors
-        assert not any("subscription-level site" in e for e in errors)
+        assert not any("subscription-level Site" in e for e in errors)
 
     def test_multiple_subscription_sites_same_subscription(self, tmp_workspace, sample_bicep_template):
         """Error when multiple subscription-level sites exist for same subscription."""
@@ -1703,7 +1703,7 @@ steps:
         errors = orchestrator.validate(manifest_path)
 
         # Should not have subscription-level site errors
-        assert not any("subscription-level site" in e for e in errors)
+        assert not any("subscription-level Site" in e for e in errors)
         assert not any("multiple subscription-level sites" in e.lower() for e in errors)
         # Subscription-level sites should NOT trigger "missing resourceGroup" for RG-scoped steps
         assert not any("missing 'resourceGroup'" in e for e in errors)
@@ -1783,7 +1783,7 @@ steps:
         errors = orchestrator.validate(manifest_path)
 
         # Should NOT error because the subscription step would be skipped anyway
-        assert not any("subscription-level site" in e for e in errors)
+        assert not any("subscription-level Site" in e for e in errors)
 
     def test_subscription_step_required_when_condition_true(
         self, tmp_workspace, sample_bicep_template
@@ -1826,7 +1826,7 @@ steps:
         errors = orchestrator.validate(manifest_path)
 
         # SHOULD error because the subscription step would execute
-        assert any("subscription-level site" in e for e in errors)
+        assert any("subscription-level Site" in e for e in errors)
 
     def test_subscription_step_required_when_any_site_condition_true(
         self, tmp_workspace, sample_bicep_template
@@ -1883,7 +1883,7 @@ steps:
         errors = orchestrator.validate(manifest_path)
 
         # SHOULD error because at least one site would execute the subscription step
-        assert any("subscription-level site" in e for e in errors)
+        assert any("subscription-level Site" in e for e in errors)
 
     def test_subscription_step_multiple_steps_all_skipped(
         self, tmp_workspace, sample_bicep_template
@@ -1931,4 +1931,4 @@ steps:
         errors = orchestrator.validate(manifest_path)
 
         # Should NOT error because all subscription steps would be skipped
-        assert not any("subscription-level site" in e for e in errors)
+        assert not any("subscription-level Site" in e for e in errors)

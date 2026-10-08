@@ -18,7 +18,13 @@ from typing import Any, BinaryIO
 
 
 class ArtifactError(ValueError):
-    """An artifact failure with a value-safe message and stable category."""
+    """An artifact failure with a value-safe message and stable category.
+
+    `private_message`, when set, names local values such as a source name for
+    output that is not redacted.
+    """
+
+    private_message: str | None = None
 
     def __init__(self, message: str, *, code: str = "artifact.invalid"):
         super().__init__(message)

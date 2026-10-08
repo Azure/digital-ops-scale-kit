@@ -11,12 +11,13 @@ import textwrap
 
 from siteops.browse import BrowseResult, ContentEntry, TypedAnswer
 from siteops.manifest_selection import explicit_manifest_reference, is_explicit_manifest_path
-from siteops.terminal import BULLET
+from siteops.terminal import BULLET, line_width
 from siteops.terminal import sanitize as _text
 from siteops.terminal import wrap as _wrap
 
 _PLAIN_WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
 _ITEM = f"  {BULLET} "
+_MIN_SUMMARY_WIDTH = 24
 _RESOURCE_LABELS = {"microsoft.kubernetes/connectedclusters": "Arc-cluster"}
 
 
@@ -90,7 +91,7 @@ def _typed_inputs_line(entry: ContentEntry, target: str | None) -> list[str]:
         return []
     command = (
         f"`siteops inputs {_shell_word(target)}`" if target is not None
-        else "`siteops inputs` with this entry's path"
+        else "`siteops inputs` with this manifest's path"
     )
     if typed.status == "declared":
         text = f"Typed inputs: declared ({typed.count}). Run {command}."
@@ -157,7 +158,7 @@ def _card(
     if guidance.inputs is None:
         lines.append("  Input guidance is not documented. This does not mean no inputs are required.")
     elif not guidance.inputs:
-        lines.append("  The author declares no input guidance for this entry.")
+        lines.append("  The author declares no input guidance for this manifest.")
     else:
         for item in guidance.inputs:
             details = [_text(item.type), item.requirement]
@@ -180,7 +181,7 @@ def _card(
             "", "Remote metadata cannot validate typed inputs.",
         ))
         lines.extend(_wrap(
-            "Pin an approved workspace or choose reviewed local content before "
+            "Pin a release from an approved source or choose reviewed local content before "
             "using `siteops inputs`.",
             indent="",
         ))
@@ -217,12 +218,12 @@ def _card(
     elif guidance.role != "standalone":
         lines.extend((
             "", "Review the source and its composition context before using its path with plan.",
-            "This entry is not declared as a standalone operator choice.",
+            "This manifest is not declared as a standalone operator choice.",
         ))
     elif target is None:
         lines.extend((
             "", "Copyable commands are withheld for paths containing control or shell metacharacters.",
-            "Use a safely named entry, or the canonical paths in private JSON.",
+            "Use a safely named manifest, or the canonical paths in private JSON.",
         ))
     else:
         lines.extend(_next_commands(entry, target, project=project is not None))
@@ -262,24 +263,28 @@ def render_browse_plain(result: BrowseResult) -> str:
         lines.extend(_card(result.entries[0], local=local, project=project))
     else:
         lines.append(
-            f"Deployment content: {len(result.entries)} shown, {result.matched} matches, "
-            f"{result.discovered} {'headers read' if local else 'indexed entries'}."
+            f"Manifests: {len(result.entries)} shown, {result.matched} matches, "
+            f"{result.discovered} {'headers read' if local else 'indexed manifests'}."
         )
         ambiguous = any(item.code == "lookup.ambiguous" for item in result.diagnostics)
+        width = line_width()
         for entry in result.entries:
             label = entry.guidance.category or entry.guidance.role
             if entry.guidance.category and entry.guidance.role != "standalone":
                 label += ", " + entry.guidance.role
+            prefix = f"  {_text(entry.name)} [{_text(label)}] "
             summary = " ".join((entry.guidance.outcome or entry.description).split())
-            summary = textwrap.shorten(_text(summary), width=68, placeholder="...")
-            lines.append(f"  {_text(entry.name)} [{_text(label)}] {summary}".rstrip())
+            summary = textwrap.shorten(
+                _text(summary), width=max(width - len(prefix), _MIN_SUMMARY_WIDTH), placeholder="...",
+            )
+            lines.append(f"{prefix}{summary}".rstrip())
             if ambiguous or entry.name_ambiguous is not False or entry.guidance.role == "partial":
                 lines.append(f"    {_text(explicit_manifest_reference(entry.path))}")
         if not result.entries and not result.diagnostics:
             lines.append(
-                "  No matching entries. Use an explicit path for a custom layout."
+                "  No matching manifests. Use an explicit path for a custom layout."
                 if local or project is not None else
-                "  No published entries match. Clear filters or select another indexed workspace."
+                "  No published manifests match. Clear filters or select another indexed workspace."
             )
         if result.matched > len(result.entries):
             lines.append("  More matches are available. Omit --limit or narrow the filters.")
@@ -300,5 +305,7 @@ def render_browse_plain(result: BrowseResult) -> str:
         lines.extend(("", "Inspection is incomplete:"))
         for diagnostic in result.diagnostics:
             location = f" ({_text(diagnostic.path)})" if diagnostic.path else ""
-            lines.append(f"  {diagnostic.code}: {diagnostic.summary}{location}")
+            lines.extend(_wrap(
+                f"{_text(diagnostic.summary)}{location}", indent=_ITEM, hanging="    ",
+            ))
     return "\n".join(lines) + "\n"

@@ -256,7 +256,7 @@ def report_parameter_selection_error(error: Exception) -> str:
     if is_redaction_enabled():
         return (
             "Parameter file selection failed. Re-run locally with output "
-            "redaction disabled for site and path details."
+            "redaction disabled for Site and path details."
         )
     return str(error)
 
@@ -296,7 +296,7 @@ def report_site_load_error(error: Exception) -> str:
     if is_redaction_enabled():
         return (
             "Site configuration could not be loaded. Re-run locally with "
-            "output redaction disabled for site and path details."
+            "output redaction disabled for Site and path details."
         )
     return str(error)
 

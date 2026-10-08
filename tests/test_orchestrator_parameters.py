@@ -1386,7 +1386,7 @@ steps:
 
         assert errors == [
             "Parameter file selection failed. Re-run locally with output "
-            "redaction disabled for site and path details."
+            "redaction disabled for Site and path details."
         ]
 
     def _composition_workspace(self, tmp_path):

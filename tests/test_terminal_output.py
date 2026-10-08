@@ -70,7 +70,7 @@ def test_validation_errors_escape_authored_text(complete_workspace, capsys):
 
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert "x Validation failed with 1 error(s):" in captured.err
+    assert "Error: Validation failed with 1 error(s):" in captured.err
     assert "  - Step 'a\\u001b[2J\\u001b[31m\\u202e\\u0007' failed.\n    Detail\n" in captured.err
     assert all(character == "\n" or character.isprintable() for character in captured.err)
 

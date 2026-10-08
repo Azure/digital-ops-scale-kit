@@ -1775,7 +1775,7 @@ def test_plain_plan_marks_steps_run_or_skipped_across_a_fleet():
     counts = "Operations: 6 total, 4 to run, 2 skipped"
     assert counts in private
     assert counts in public
-    assert "Execution: Parallel (max 3 concurrent)" in private
+    assert "Execution: up to 3 Sites at once" in private
     assert private.isascii() and public.isascii()
 
 
@@ -1892,7 +1892,7 @@ def test_plain_plan_escapes_terminal_controls_in_authored_and_site_text():
         assert "\\u001b[2J" in text
     assert "\\u202e" in rendered[0]
     assert "\\u000d" in rendered[0]
-    assert "    warning: First\\u001b[2J" in rendered[0]
+    assert "    Warning: First\\u001b[2J" in rendered[0]
     assert "\n      Second\n" in rendered[0]
 
 
@@ -1939,6 +1939,20 @@ def test_not_executable_message_keeps_one_diagnostic_as_its_own_text():
     assert error.message(redacted=False) == "Step 'a' is invalid."
     assert error.message(redacted=True) == "Manifest validation failed."
     assert str(error) == "Step 'a' is invalid."
+
+
+@pytest.mark.parametrize("code", [
+    "capability.bicep-compiler.missing", "compilation.tool-missing", "compilation.tool-unavailable",
+])
+def test_published_bicep_compiler_failures_name_the_tool_and_fix(code):
+    from siteops.reporting import _PUBLISHABLE_RUN_DIAGNOSTICS as RUN_DIAGNOSTICS
+
+    published = _not_executable(_capability_error(code, "Private detail.")).message(redacted=True)
+    assert published == (
+        "Azure CLI (`az`) with Bicep is required for Bicep template steps. Install Azure CLI "
+        "from https://aka.ms/installazurecli, run `az bicep install`, then rerun the command."
+    )
+    assert RUN_DIAGNOSTICS[code][1] == published
 
 
 def test_not_executable_message_is_bounded():

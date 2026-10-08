@@ -25,7 +25,7 @@ from typing import Any, Callable, Iterable, Iterator
 
 import yaml
 
-from siteops import yamlio
+from siteops import terminal, yamlio
 from siteops.artifacts import ArtifactError
 from siteops.compilation import (
     CompilationFailure,
@@ -76,6 +76,7 @@ from siteops.models import (
     Site,
     WaitStep,
     _normalize_site_identifier,
+    _read_manifest_spec,
     _validate_resource,
     format_when_condition,
     parse_selector,
@@ -245,7 +246,7 @@ _CAPABILITY_SUMMARIES = {
         "Azure CLI (`az`) is required for deployment and wait steps."
     ),
     CapabilityKind.BICEP_COMPILER: (
-        "A Bicep compiler is required for Bicep template steps."
+        "Azure CLI (`az`) with Bicep is required for Bicep template steps."
     ),
     CapabilityKind.KUBECTL: "kubectl is required for kubectl steps.",
     CapabilityKind.ARC_PROXY: (
@@ -259,8 +260,9 @@ _CAPABILITY_REMEDIES = {
         f"from {AZURE_CLI_INSTALL_URL}, then rerun the command."
     ),
     CapabilityKind.BICEP_COMPILER: (
-        "Install the required local deployment tool, then rerun executable "
-        "planning."
+        "Bicep templates compile through Azure CLI. Install it from "
+        f"{AZURE_CLI_INSTALL_URL}, run `az bicep install`, then rerun the "
+        "command."
     ),
     CapabilityKind.KUBECTL: (
         f"Install kubectl from {_KUBECTL_INSTALL_URL}, then rerun the command."
@@ -276,7 +278,7 @@ _CAPABILITY_PURPOSES = {
     CapabilityKind.ARM_CONTROL_PLANE: (
         "Azure CLI to submit ARM deployments or read resource tags"
     ),
-    CapabilityKind.BICEP_COMPILER: "a Bicep compiler to compile the template",
+    CapabilityKind.BICEP_COMPILER: "Azure CLI with Bicep to compile the template",
     CapabilityKind.KUBECTL: "kubectl to apply manifests to the cluster",
     CapabilityKind.ARC_PROXY: (
         "Azure CLI and its connectedk8s extension to reach the cluster "
@@ -287,7 +289,10 @@ _CAPABILITY_INSTALL_HINTS = {
     CapabilityKind.ARM_CONTROL_PLANE: (
         f"Installation instructions are at {AZURE_CLI_INSTALL_URL}."
     ),
-    CapabilityKind.BICEP_COMPILER: None,
+    CapabilityKind.BICEP_COMPILER: (
+        f"Installation instructions are at {AZURE_CLI_INSTALL_URL}. After "
+        "installing, run `az bicep install`."
+    ),
     CapabilityKind.KUBECTL: (
         f"Installation instructions are at {_KUBECTL_INSTALL_URL}."
     ),
@@ -298,7 +303,7 @@ _CAPABILITY_INSTALL_HINTS = {
 }
 _CAPABILITY_LABELS = {
     CapabilityKind.ARM_CONTROL_PLANE: "Azure CLI (`az`)",
-    CapabilityKind.BICEP_COMPILER: "a Bicep compiler",
+    CapabilityKind.BICEP_COMPILER: "Azure CLI with Bicep",
     CapabilityKind.KUBECTL: "kubectl",
     CapabilityKind.ARC_PROXY: "Azure CLI with the connectedk8s extension",
 }
@@ -949,6 +954,14 @@ class Orchestrator:
             input_path_guard=self._guard_manifest_input,
         )
 
+    def manifest_name(self, path: Path) -> str:
+        """Read the selected manifest's name from its header, without expanding includes."""
+        _, name, _ = _read_manifest_spec(
+            self._require_manifest_path(path),
+            input_path_guard=self._guard_manifest_input,
+        )
+        return str(name)
+
     def _require_bound_manifest_model(
         self,
         manifest: Manifest,
@@ -1016,7 +1029,7 @@ class Orchestrator:
             resolved = Path(candidate).resolve()
             if not resolved.is_dir():
                 raise FileNotFoundError(
-                    f"Extra trusted site directory not found: {candidate}"
+                    f"Extra trusted Site directory not found: {candidate}"
                 )
             if self._materialized_package is not None:
                 try:
@@ -1032,12 +1045,12 @@ class Orchestrator:
                     )
             if resolved == primary:
                 raise ValueError(
-                    f"Extra site dir '{candidate}' is the workspace's "
+                    f"Extra Site dir '{candidate}' is the workspace's "
                     f"sites/ directory, which is already included by default."
                 )
             if resolved == overlay:
                 raise ValueError(
-                    f"Extra site dir '{candidate}' is the workspace's "
+                    f"Extra Site dir '{candidate}' is the workspace's "
                     f"sites.local/ directory. Registering it as trusted "
                     f"would allow overlays to inject inheritance, so it is "
                     f"refused for security."
@@ -1232,9 +1245,9 @@ class Orchestrator:
                 existing = dir_basenames.get(basename)
                 if existing is not None:
                     raise ValueError(
-                        f"Two site files in `{sites_dir}` share basename "
+                        f"Two Site files in `{sites_dir}` share basename "
                         f"`{basename}`: `{existing}` and `{path}`. Every "
-                        f"basename must be unique within a trusted sites "
+                        f"basename must be unique within a trusted Site "
                         f"directory so `-l name={basename}` resolves "
                         f"unambiguously. Rename one of the files."
                     )
@@ -1254,7 +1267,7 @@ class Orchestrator:
                             f"matches are valid only when the relative "
                             f"path also matches (overlay). Different "
                             f"relative paths would let `-l name={basename}` "
-                            f"refer to two distinct sites. Rename one of "
+                            f"refer to two distinct Sites. Rename one of "
                             f"the files."
                         )
                 # First trusted dir wins on basename and relative path
@@ -1278,7 +1291,7 @@ class Orchestrator:
                 raise ValueError(
                     f"Site `{path}` declares `name: {internal_name}` "
                     f"which collides with file basename `{collider.name}`. "
-                    f"Each site identity must resolve to exactly one file. "
+                    f"Each Site identity must resolve to exactly one file. "
                     f"If `{path.name}` is a copy you forgot to update, "
                     f"change its `name:` field to `{path.stem}`. Otherwise "
                     f"rename one of the files."
@@ -1293,7 +1306,7 @@ class Orchestrator:
             existing = internal_name_to_path.get(internal_name)
             if existing is not None and existing.resolve() != path.resolve():
                 raise ValueError(
-                    f"Two sites declare the same `name: {internal_name}`: "
+                    f"Two Sites declare the same `name: {internal_name}`: "
                     f"`{existing}` and `{path}`. Site names must be "
                     f"unique across the workspace."
                 )
@@ -1451,9 +1464,9 @@ class Orchestrator:
         # join before any model exists to validate it.
         if not isinstance(inherits_value, str):
             raise ValueError(
-                f"'inherits' in site '{self._origin_label(child_path)}' must be "
+                f"'inherits' in Site '{self._origin_label(child_path)}' must be "
                 f"text naming one parent file, got "
-                f"{type(inherits_value).__name__}. A site has a single "
+                f"{type(inherits_value).__name__}. A Site has a single "
                 f"inheritance chain, so chain the parents instead of listing them."
             )
 
@@ -1694,7 +1707,7 @@ class Orchestrator:
                             )
                             if overlay_name != existing_name:
                                 raise ValueError(
-                                    f"Overlay {path} cannot rename the site "
+                                    f"Overlay {path} cannot rename the Site "
                                     f"({existing_name!r} -> {overlay_name!r}). "
                                     f"Site identity is established by the base "
                                     f"file. Use `inherits:` or rename the base "
@@ -2040,7 +2053,7 @@ class Orchestrator:
                 # names, so published output uses one generic diagnostic.
                 reportable = report_site_load_error(e)
                 logger.warning(
-                    f"Failed to load site '{site_name_for_output(name)}': "
+                    f"Failed to load Site '{site_name_for_output(name)}': "
                     f"{reportable}"
                 )
                 skipped.append((name, reportable))
@@ -2048,10 +2061,13 @@ class Orchestrator:
         if skipped:
             import sys
 
-            print(f"\n\u26a0 Skipped {len(skipped)} site(s) due to errors:", file=sys.stderr)
+            print(
+                f"\n{terminal.WARNING} Skipped {len(skipped)} Site(s) due to errors:",
+                file=sys.stderr,
+            )
             for name, error in skipped:
                 print(
-                    f"  \u2022 {site_name_for_output(name)}: {error}",
+                    f"  {terminal.BULLET} {site_name_for_output(name)}: {error}",
                     file=sys.stderr,
                 )
             print(file=sys.stderr)
@@ -2314,24 +2330,24 @@ class Orchestrator:
 
         if "{{" in resolved:
             raise ParameterSelectionError(
-                f"{tier} parameter path '{declared}' did not resolve for site "
-                f"'{site.name}' (resolved to '{resolved}'). The site does not "
-                f"carry the property the path selects on. Add it to the site or "
-                f"to the site it inherits from."
+                f"{tier} parameter path '{declared}' did not resolve for Site "
+                f"'{site.name}' (resolved to '{resolved}'). The Site does not "
+                f"carry the property the path selects on. Add it to the Site or "
+                f"to the Site it inherits from."
             )
 
         resolved_path = Path(resolved)
         if resolved_path.is_absolute():
             raise ParameterSelectionError(
                 f"{tier} parameter path '{declared}' resolved to "
-                f"'{resolved}' for site '{site.name}', but site-selected "
+                f"'{resolved}' for Site '{site.name}', but site-selected "
                 "parameter paths must be relative to the workspace."
             )
 
         if ".." in resolved_path.parts:
             raise ParameterSelectionError(
                 f"{tier} parameter path '{declared}' resolved to "
-                f"'{resolved}' for site '{site.name}', but site-selected "
+                f"'{resolved}' for Site '{site.name}', but site-selected "
                 "parameter paths must not contain '..' path segments."
             )
 
@@ -2342,15 +2358,15 @@ class Orchestrator:
         except ValueError as exc:
             raise ParameterSelectionError(
                 f"{tier} parameter path '{declared}' resolved to "
-                f"'{resolved}' for site '{site.name}', which resolves outside "
+                f"'{resolved}' for Site '{site.name}', which resolves outside "
                 "the workspace."
             ) from exc
 
         if not full_path.is_file():
             raise ParameterSelectionError(
                 f"{tier} parameter path '{declared}' resolved to "
-                f"'{resolved}' for site '{site.name}', which does not exist. "
-                f"Check the value the site selects for a typo, or add the file."
+                f"'{resolved}' for Site '{site.name}', which does not exist. "
+                f"Check the value the Site selects for a typo, or add the file."
             )
 
     def _kubectl_file_validation_error(
@@ -2649,7 +2665,7 @@ class Orchestrator:
                     raise ParameterSelectionError(
                         "Manifest parameter sources "
                         f"{previous_path!r} and {resolved_path!r} resolve to "
-                        f"'{resolved_path}' more than once for site "
+                        f"'{resolved_path}' more than once for Site "
                         f"'{site.name}'{detail}. Select each source once."
                     )
                 resolved_sources[full_path] = (resolved_path, collections)
@@ -3058,9 +3074,9 @@ class Orchestrator:
         # Check scope/site level compatibility
         is_sub_level = site.is_subscription_level
         if step.scope == "subscription" and not is_sub_level:
-            return "subscription-scoped step, site has resource group"
+            return "Runs at subscription scope. This Site has a resource group."
         if step.scope == "resourceGroup" and is_sub_level:
-            return "resourceGroup-scoped step, site has no resource group"
+            return "Runs in a resource group. This Site has none."
 
         return None
 
@@ -3289,11 +3305,11 @@ class Orchestrator:
                 names = ", ".join(missing)
                 raise FileNotFoundError(
                     f"Site files not found for manifest '{manifest.name}': {names}. "
-                    f"Create those site YAML files under `sites/`, or fix the site names listed in the manifest."
+                    f"Create those Site YAML files under `sites/`, or fix the Site names listed in the manifest."
                 )
             if duplicates:
                 logger.warning(
-                    f"Manifest '{manifest.name}' names the same site more than once "
+                    f"Manifest '{manifest.name}' names the same Site more than once "
                     f"({', '.join(duplicates)}). Deploying it once."
                 )
             return sites
@@ -3319,7 +3335,7 @@ class Orchestrator:
         `cli_selector` is None.
         """
         if not cli_selector:
-            return "No sites matched the manifest's targeting."
+            return "No Sites matched the manifest's targeting."
         try:
             sel = parse_selector(cli_selector)
         except SelectorParseError as e:
@@ -3329,14 +3345,14 @@ class Orchestrator:
             if self.skipped_sites:
                 names = ", ".join(name for name, _ in self.skipped_sites)
                 return (
-                    f"No site could be loaded, so CLI selector "
+                    f"No Site could be loaded, so CLI selector "
                     f"`-l {cli_selector}` has nothing to match. "
-                    f"{len(self.skipped_sites)} site file(s) were rejected "
-                    f"({names}). Fix those files rather than adding a new site."
+                    f"{len(self.skipped_sites)} Site file(s) were rejected "
+                    f"({names}). Fix those files rather than adding a new Site."
                 )
             return (
-                f"No sites in workspace. CLI selector `-l {cli_selector}` "
-                f"cannot match. Add a site file under `sites/` or pass "
+                f"No Sites in workspace. CLI selector `-l {cli_selector}` "
+                f"cannot match. Add a Site file under `sites/` or pass "
                 f"`--extra-sites-dir` to point at one."
             )
         parts: list[str] = []
@@ -3347,7 +3363,7 @@ class Orchestrator:
                 if missing:
                     parts.append(
                         f"`name={','.join(missing)}` not found. Workspace "
-                        f"site names: {', '.join(names_in_ws)}."
+                        f"Site names: {', '.join(names_in_ws)}."
                     )
                 else:
                     # Names matched. Another selector key must have filtered
@@ -3355,7 +3371,7 @@ class Orchestrator:
                     # not get a generic "no match".
                     matched = ",".join(requested)
                     parts.append(
-                        f"`name={matched}` matched a workspace site but "
+                        f"`name={matched}` matched a workspace Site but "
                         f"another selector key filtered it out."
                     )
             else:
@@ -3365,7 +3381,7 @@ class Orchestrator:
                 requested_str = ",".join(requested)
                 if not values_in_ws:
                     parts.append(
-                        f"`{key}={requested_str}` requested but no site "
+                        f"`{key}={requested_str}` requested but no Site "
                         f"declares the `{key}` label."
                     )
                 else:
@@ -3378,9 +3394,9 @@ class Orchestrator:
                         f"`{key}` values: {shown}."
                     )
         if not parts:
-            return f"CLI selector `-l {cli_selector}` matched no sites."
+            return f"CLI selector `-l {cli_selector}` matched no Sites."
         return (
-            f"CLI selector `-l {cli_selector}` matched no sites. " + " ".join(parts)
+            f"CLI selector `-l {cli_selector}` matched no Sites. " + " ".join(parts)
         )
 
     def validate(
@@ -3449,7 +3465,7 @@ class Orchestrator:
             # diagnostic pass) but suppress the no-match diagnostic
             # below since the parse error is the higher-signal cause.
             errors.append(
-                "Invalid site selector."
+                "Invalid Site selector."
                 if is_redaction_enabled()
                 else str(e)
             )
@@ -3474,7 +3490,7 @@ class Orchestrator:
         ):
             errors.append(
                 "The selected target set is incomplete. "
-                "Fix sites that could not be loaded or narrow the selector."
+                "Fix Sites that could not be loaded or narrow the selector."
             )
         assert sites is not None
         if not sites and (manifest.sites or manifest.site_selector or selector):
@@ -3482,12 +3498,12 @@ class Orchestrator:
                 # Rich diagnostic when CLI selector knocked everything
                 # out and the selector itself parsed cleanly.
                 errors.append(
-                    "CLI selector matched no sites."
+                    "CLI selector matched no Sites."
                     if is_redaction_enabled()
                     else self.explain_no_match(selector)
                 )
             elif not selector:
-                errors.append("No sites matched the specified criteria")
+                errors.append("No Sites matched the specified criteria")
 
         # Validate manifest-level parameter files
         if sites:
@@ -3620,7 +3636,7 @@ class Orchestrator:
                         if not isinstance(resolved_path, str):
                             errors.append(
                                 f"Kubectl file path '{declared_path}' "
-                                "resolved to a non-string value for site "
+                                "resolved to a non-string value for Site "
                                 f"'{site.name}' (step: {step.name})"
                             )
                             continue
@@ -3629,7 +3645,7 @@ class Orchestrator:
                         ):
                             errors.append(
                                 f"Kubectl file path '{declared_path}' did "
-                                f"not resolve for site '{site.name}' "
+                                f"not resolve for Site '{site.name}' "
                                 f"(step: {step.name})"
                             )
                             continue
@@ -3789,15 +3805,15 @@ class Orchestrator:
                         if len(rg_level_sites) > 3:
                             site_names += f"... and {len(rg_level_sites) - 3} more"
                         errors.append(
-                            f"Subscription '{_reportable_subscription(sub_id)}' has RG-level sites ({site_names}) "
-                            f"but no subscription-level site for subscription-scoped steps"
+                            f"Subscription '{_reportable_subscription(sub_id)}' has RG-level Sites ({site_names}) "
+                            f"but no subscription-level Site for subscription-scoped steps"
                         )
                 elif len(sub_level_sites) > 1:
                     # Multiple subscription-level sites for same subscription
                     site_names = ", ".join(s.name for s in sub_level_sites)
                     errors.append(
-                        f"Subscription '{_reportable_subscription(sub_id)}' has multiple subscription-level sites: {site_names}. "
-                        f"Only one subscription-level site per subscription is allowed."
+                        f"Subscription '{_reportable_subscription(sub_id)}' has multiple subscription-level Sites: {site_names}. "
+                        f"Only one subscription-level Site per subscription is allowed."
                     )
 
         if is_redaction_enabled():
@@ -4397,7 +4413,7 @@ class Orchestrator:
             except ValueError as error:
                 raise ValueError(
                     f"Wait step '{step.name}' condition is invalid after "
-                    f"site resolution: {error}"
+                    f"Site resolution: {error}"
                 ) from error
         details = ArmTagWaitOperation(
             input_status=InputStatus.PREPARED,
@@ -5115,10 +5131,10 @@ class Orchestrator:
                     return self._invalid_preparation(
                         [
                             f"The selected target set is incomplete. "
-                            f"{len(self.skipped_sites)} site(s) could not "
+                            f"{len(self.skipped_sites)} Site(s) could not "
                             "be loaded: "
                             + ", ".join(name for name, _ in self.skipped_sites)
-                            + ". Fix those files or select explicit sites."
+                            + ". Fix those files or select explicit Sites."
                         ],
                         intent,
                         code="plan.target-set-incomplete",
@@ -5143,15 +5159,15 @@ class Orchestrator:
                     self.explain_no_match(selector)
                     if selector
                     else (
-                        "No sites matched the specified criteria. "
+                        "No Sites matched the specified criteria. "
                         f"Manifest selector: {manifest.site_selector}"
                     )
                     if manifest.site_selector
-                    else "No sites matched the specified criteria."
+                    else "No Sites matched the specified criteria."
                 ],
                 intent,
                 code="plan.targeting.empty",
-                summary="No sites matched the selected criteria.",
+                summary="No Sites matched the selected criteria.",
             )
         errors = self.validate(
             manifest_path,
@@ -5216,7 +5232,7 @@ class Orchestrator:
                             summary=(
                                 "Parameter file selection failed. Set "
                                 "SITEOPS_REDACT_OUTPUT=0, then rerun the "
-                                "command locally for site and path details."
+                                "command locally for Site and path details."
                             ),
                             detail=str(error),
                         )
@@ -5524,7 +5540,7 @@ class Orchestrator:
                 or details.parameters is None
             ):
                 raise ValueError(
-                    f"Deployment step '{operation.identity.step}' on site "
+                    f"Deployment step '{operation.identity.step}' on Site "
                     f"'{operation.identity.target}' has no prepared "
                     "parameters."
                 )
@@ -5541,7 +5557,7 @@ class Orchestrator:
             if details.template_unit_key is None:
                 raise ValueError(
                     f"Deployment step '{operation.identity.step}' on "
-                    f"site '{operation.identity.target}' has no prepared "
+                    f"Site '{operation.identity.target}' has no prepared "
                     "template unit."
                 )
             template_unit = plan.template_unit(
@@ -5600,7 +5616,7 @@ class Orchestrator:
         if isinstance(details, KubectlOperation):
             if details.input_status is not InputStatus.PREPARED:
                 raise ValueError(
-                    f"Kubectl step '{operation.identity.step}' on site "
+                    f"Kubectl step '{operation.identity.step}' on Site "
                     f"'{operation.identity.target}' has no prepared inputs."
                 )
             cluster_name = self._resolved_plan_string(
@@ -5680,7 +5696,7 @@ class Orchestrator:
 
         if details.input_status is not InputStatus.PREPARED:
             raise ValueError(
-                f"Wait step '{operation.identity.step}' on site "
+                f"Wait step '{operation.identity.step}' on Site "
                 f"'{operation.identity.target}' has no prepared inputs."
             )
         resource_id = self._resolved_plan_string(
@@ -6293,7 +6309,7 @@ class Orchestrator:
 
             logger.info(
                 f"Deploying '{plan.manifest_name}' to "
-                f"{len(plan.targets)} site(s) "
+                f"{len(plan.targets)} Site(s) "
                 f"(parallel: {ParallelConfig(plan.max_parallel_sites)})"
             )
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
@@ -6315,8 +6331,8 @@ class Orchestrator:
                         raise MultipleSubscriptionSitesError(
                             f"Subscription "
                             f"'{_reportable_subscription(target.subscription)}' "
-                            f"has multiple subscription-level sites: {names}. "
-                            "Only one subscription-level site per subscription "
+                            f"has multiple subscription-level Sites: {names}. "
+                            "Only one subscription-level Site per subscription "
                             "is allowed."
                         )
                     subscription_targets[target.subscription] = target

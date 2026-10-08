@@ -644,7 +644,7 @@ steps: []
         Orchestrator(tmp_workspace).show_plan(manifest_path)
 
         output = capsys.readouterr().out
-        assert "No sites matched" in output
+        assert "No Sites matched" in output
         assert "private-site" not in output
 
     def test_a_local_empty_plan_keeps_the_selector(

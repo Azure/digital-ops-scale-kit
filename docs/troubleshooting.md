@@ -5,6 +5,35 @@ Common issues and solutions. For problems while installing Site Ops, see
 
 ## Deployment commands and published content
 
+### "is a global option. Put it before the command"
+
+```
+siteops: error: -w is a global option. Put it before the command: siteops -w PATH plan ...
+```
+
+**Cause**: A global option came after the command name. `-w`/`--workspace`,
+`--project`, `--approved-source`, `--trust-policy`, `--trusted-root`,
+`--extra-sites-dir` and `-v` select content, trust and logging for the whole
+invocation, so Site Ops accepts them only before the command. The message
+names every misplaced global option.
+
+**Solution**: Nothing was read. Move the options before the command, for
+example `siteops -w workspaces/iot-operations plan aio-install`.
+
+### "Manifest not found"
+
+```
+Error: Manifest not found. Did you mean 'aio-install'? Run `siteops browse` to list manifests, or use an explicit path.
+```
+
+**Cause**: No manifest in the selected workspace or release has that name.
+When a manifest name is close, Site Ops suggests it. Redacted output omits the
+suggestion.
+
+**Solution**: Use the suggested name, list the manifests with
+`siteops browse`, or pass an explicit path such as
+`./manifests/custom/manifest.yaml`.
+
 ### "Noninteractive deployment requires --yes"
 
 ```
@@ -16,8 +45,8 @@ JSON output, redacted output, a CI environment (`CI`, `GITHUB_ACTIONS` or
 `TF_BUILD` set), or an input or error stream that is not a terminal.
 
 **Solution**: Nothing was read or deployed. Review the plan with
-`siteops plan`, then rerun `deploy` with `--yes` once unattended execution is
-approved.
+`siteops plan`, then rerun `deploy` with `--yes` when you confirm unattended
+execution.
 
 ### "Direct content requires explicit Site inputs"
 
@@ -75,18 +104,78 @@ Error: The approved source policy has expired. Inspect it with `siteops source s
 publisher. For a custom policy, follow
 [renew a custom policy](projects.md#use-a-custom-policy).
 
-### "Approved source not found"
+### "Approved source '...' is not enrolled"
 
 ```
-Error: Approved source not found.
+Error: Approved source 'official' is not enrolled. Run `siteops source enroll official`. Add --source github:OWNER/REPO to enroll a publisher other than the official one.
+Error: Approved source 'official' is not enrolled. Run `siteops source list` to see enrolled names.
 ```
 
-**Cause**: No source is enrolled under the name used in `--source NAME@<release>`
-or `--approved-source NAME`. The error code is `source.profile-missing`.
+**Cause**: No source is enrolled under the name used in `--source NAME@<release>`,
+`--approved-source NAME` or `siteops source show NAME`, which print the first
+message, or in `siteops source remove NAME`, which prints the second. The error
+code is `source.profile-missing`. Redacted output omits the name.
 
 **Solution**: Run `siteops source list` to see the enrolled names, or enroll
 the official publisher with `siteops source enroll NAME`. See
 [approved sources](projects.md#use-an-approved-source).
+
+### "Verified content requires an approved source"
+
+```
+Error: Verified content from github:Azure/digital-ops-scale-kit requires an approved source. Approved source 'official' is enrolled for github:Azure/digital-ops-scale-kit: put --approved-source official before the command.
+```
+
+**Cause**: A command used a workspace pin, `project pin` or a
+`--source github:OWNER/REPO@<release>` locator without an approved source or
+trust files. The error code is `project.trust-required`. When a source is
+enrolled for that publisher, the message names it. For a locator it suggests
+`--source official@<release>` instead. When none is enrolled, it shows the
+`siteops source enroll NAME --source github:OWNER/REPO` command. Redacted
+output omits the publisher and source names.
+
+**Solution**: Add the named approved source as the message shows, or enroll
+one first. Independent `--trust-policy` and `--trusted-root` files are an
+alternative.
+
+### "The approved source does not match the selected workspace source"
+
+```
+Error: Approved source 'fork' does not match the selected workspace source: it is enrolled for github:example/fork, not github:Azure/digital-ops-scale-kit. Approved source 'official' is enrolled for github:Azure/digital-ops-scale-kit: put --approved-source official before the command.
+```
+
+**Cause**: `--approved-source NAME` names a source enrolled for a different
+publisher than the project pin or `--source` locator.
+
+**Solution**: Use the approved source the message names, or enroll one for
+that publisher.
+
+### "Choose one approved source"
+
+```
+Error: Choose one approved source: --source NAME@RELEASE or --approved-source NAME, not both.
+```
+
+**Cause**: The command named an approved source twice: in
+`--source NAME@<release>` and in global `--approved-source NAME`.
+
+**Solution**: Keep `--source NAME@<release>` for a direct release. Use global
+`--approved-source NAME` only with a project pin, `project pin` or a
+`--source github:OWNER/REPO@<release>` locator.
+
+### "apply only to a workspace pin or --source content"
+
+```
+Error: --approved-source, --trust-policy and --trusted-root apply only to a workspace pin or --source content, not to a local workspace.
+Error: --offline-content applies only to a workspace pin, not to a local workspace.
+```
+
+**Cause**: Trust options were given with local content selected by `-w` or
+local workspace discovery. Local content is not verified, so the options have
+no effect there. The same applies to `--offline-content`.
+
+**Solution**: Remove the options, or select verified content with
+`--project DIRECTORY` or `--source NAME@<release>`.
 
 ### "The existing source approval differs"
 
@@ -110,7 +199,7 @@ needs Azure CLI and which accounts work.
 ### "Azure CLI (`az`) was not found on PATH"
 
 ```
-error: Azure CLI (`az`) was not found on PATH. Install Azure CLI and retry. Step 'aio-instance' needs Azure CLI to submit ARM deployments or read resource tags. Installation instructions are at https://aka.ms/installazurecli.
+Error: Azure CLI (`az`) was not found on PATH. Install Azure CLI and retry. Step 'aio-instance' needs Azure CLI to submit ARM deployments or read resource tags. Installation instructions are at https://aka.ms/installazurecli.
 ```
 
 **Cause**: `siteops plan` or `siteops deploy` selected deployment, wait or
@@ -126,7 +215,7 @@ run `az extension add --name connectedk8s`. Then rerun the command.
 ### "The Azure CLI connectedk8s extension is not installed"
 
 ```
-error: The Azure CLI connectedk8s extension is not installed. Step 'opc-plc-simulator' needs Azure CLI and its connectedk8s extension to reach the cluster through `az connectedk8s proxy`. Run `az extension add --name connectedk8s`, then rerun the command.
+Error: The Azure CLI connectedk8s extension is not installed. Step 'opc-plc-simulator' needs Azure CLI and its connectedk8s extension to reach the cluster through `az connectedk8s proxy`. Run `az extension add --name connectedk8s`, then rerun the command.
 ```
 
 **Cause**: A selected `kubectl` step reaches its cluster through
@@ -140,6 +229,19 @@ and Azure CLI installs the extension on first use instead.
 
 **Solution**: Nothing ran. Run `az extension add --name connectedk8s`, then
 rerun the command.
+
+### "Azure CLI (`az`) with Bicep is required for Bicep template steps"
+
+```
+Azure CLI (`az`) with Bicep is required for Bicep template steps. Install Azure CLI from https://aka.ms/installazurecli, run `az bicep install`, then rerun the command.
+```
+
+**Cause**: `siteops plan` or `siteops deploy` compiles Bicep templates through
+Azure CLI, and its Bicep compiler is missing or could not run. Redacted output
+and publishable JSON print this text. Local output names the steps and the
+observed cause.
+
+**Solution**: Nothing ran. Run `az bicep install`, then rerun the command.
 
 ### "The target subscription is not visible to the account signed in to Azure CLI"
 
@@ -161,7 +263,7 @@ command.
 ### "Azure CLI 2.70.0 or newer is required"
 
 ```
-error: Azure CLI 2.69.0 was found. Azure CLI 2.70.0 or newer is required. Run `az upgrade`, then retry.
+Error: Azure CLI 2.69.0 was found. Azure CLI 2.70.0 or newer is required. Run `az upgrade`, then retry.
 ```
 
 **Cause**: `plan` or `deploy` selected steps that use Azure CLI, and the
@@ -207,30 +309,58 @@ after `inputs.resource.` names the reason, and the message ends with its fix.
 **Solution**: Nothing was planned or deployed. Apply the fix, then rerun the
 same command.
 
+## Typed inputs
+
+### "contain an unknown input"
+
+```
+Error: Inline inputs contain an unknown input 'clster'. Did you mean 'cluster'?
+```
+
+**Cause**: An `--input NAME=VALUE` name, or a name under `values:` in an
+`--input-file` (reported as `Input values contain ...`), is not declared by
+the manifest. Redacted output omits the name and the suggestion.
+
+**Solution**: Use the suggested name, or run `siteops inputs MANIFEST` to list
+the declared inputs.
+
+### "already exists. Choose a new file name"
+
+```
+Error: ./aio-inputs.yaml already exists. Choose a new file name.
+Error: The directory for ./answers/aio-inputs.yaml does not exist.
+```
+
+**Cause**: `inputs --example FILE` or `inputs --save-site FILE` never replaces
+an existing file or creates a directory. Redacted output omits the path.
+
+**Solution**: Choose a new file name or an existing directory.
+
 ## Validation errors
 
-### "Site file not found"
+### "Site files not found for manifest"
 
 ```
-Error: Site file not found: munich-dev (searched sites/)
+Error: Site files not found for manifest 'aio-install': munich-dev. Create those Site YAML files under `sites/`, or fix the Site names listed in the manifest.
 ```
 
-**Cause**: Site file doesn't exist or has wrong name.
+**Cause**: A name in the manifest's `sites:` list matches no Site file.
+`siteops sites NAME` reports `Error: No Sites matched the selector: name=NAME`
+for the same cause.
 
-**Solution**: Check `sites/` directory. The site basename, relative path, or internal `name:` must match the identifier referenced in the manifest. See [targeting.md](targeting.md) for the identity model.
+**Solution**: Check `sites/` directory. The Site basename, relative path, or internal `name:` must match the identifier referenced in the manifest. See [targeting.md](targeting.md) for the identity model.
 
-### "CLI selector matched no sites"
+### "CLI selector matched no Sites"
 
 ```
-Error: CLI selector `-l environment=prdo` matched no sites.
-`environment=prdo` requested. Workspace `environment` values: 'dev', 'prod', 'sample', 'staging'.
+Error: CLI selector `-l environment=prdo` matched no Sites. `environment=prdo` requested. Workspace `environment` values: 'dev', 'prod', 'sample', 'staging'.
 ```
 
-**Cause**: A typo in `-l/--selector`, or the requested label value does not exist on any site.
+**Cause**: A typo in `-l/--selector`, or the requested label value does not exist on any Site.
 
-**Solution**: The diagnostic lists the workspace's actual values for each requested key. Fix the typo or update the site labels. See [targeting.md](targeting.md) for the no-match diagnostic and selector grammar.
+**Solution**: The diagnostic lists the workspace's actual values for each requested key. Fix the typo or update the Site labels. See [targeting.md](targeting.md) for the no-match diagnostic and selector grammar.
 
-### "Template file not found"
+### "Template not found"
 
 ```
 Error: Template not found: templates/missing.bicep
@@ -240,7 +370,7 @@ Error: Template not found: templates/missing.bicep
 
 **Solution**: Paths are relative to workspace directory. Verify the path exists.
 
-### "Step references unknown step"
+### "references unknown step"
 
 ```
 Error: Step 'aio-instance' references unknown step 'schema-reg' in parameters/p.yaml
@@ -252,14 +382,14 @@ Error: Step 'aio-instance' references unknown step 'schema-reg' in parameters/p.
 
 ### Site looks wrong after inheritance / overlay
 
-When a site's resolved values disagree with what you expect (wrong location, missing label, an overlay in `sites.local/` or an extras dir not taking effect), preview the fully-resolved shape:
+When a Site's resolved values disagree with what you expect (wrong location, missing label, an overlay in `sites.local/` or an extras dir not taking effect), preview the fully-resolved shape:
 
 ```
 siteops -w <workspace> sites <name> --output yaml
 ```
 
-The output is the resolved site as a single YAML document, with
-`resourceGroup` omitted for subscription-scoped sites. To see which file
+The output is the resolved Site as a single YAML document, with
+`resourceGroup` omitted for Sites without a resource group. To see which file
 contributed each value, use `siteops -w <workspace> sites <name> --show-sources`
 with the default plain output.
 
@@ -304,7 +434,7 @@ alternative, which keeps the decision in Azure rather than on the cluster.
 
 ### Partial deployment failure
 
-**Cause**: One step failed, stopping the site deployment.
+**Cause**: One step failed, stopping the deployment to that Site.
 
 **Solution**:
 
@@ -429,13 +559,13 @@ siteops -w workspaces/iot-operations plan manifests/aio-install/manifest.yaml --
 # Show every value's source file (post inherit + overlay merge)
 siteops -w workspaces/iot-operations sites <name> --show-sources
 
-# Print the fully-resolved site as YAML
+# Print the fully resolved Site as YAML
 siteops -w workspaces/iot-operations sites <name> --output yaml
 
 # Check Azure CLI authentication
 az account show
 ```
 
-For an explicitly approved deployment, follow the
+For an explicitly confirmed deployment, follow the
 [run output guide](run-output.md). Deployment changes the selected targets,
 so use a bounded selector and review its plan before unattended execution.
