@@ -155,8 +155,8 @@ class TestCmdValidate:
 
         assert exit_code == 0
         captured = capsys.readouterr()
-        assert "✓" in captured.out
-        assert "valid" in captured.out.lower()
+        assert "+ Manifest is valid: test-manifest" in captured.out
+        assert captured.out.isascii()
 
     def test_validate_manifest_not_found(self, complete_workspace, capsys):
         """Test validate with missing manifest returns exit code 1."""
@@ -221,7 +221,7 @@ class TestCmdValidate:
         assert exit_code == 0
         captured = capsys.readouterr()
         assert "Preflight: not performed" in captured.out
-        assert "DEPLOYMENT PLAN" in captured.out
+        assert "Deployment plan: test-manifest" in captured.out
         assert "Sites" in captured.out
         assert "Steps" in captured.out
 
@@ -556,7 +556,7 @@ class TestCmdValidate:
         assert exit_code == 1
         captured = capsys.readouterr()
         assert "Template not found" in captured.out
-        assert "DEPLOYMENT PLAN" not in captured.out
+        assert "Deployment plan:" not in captured.out
 
     def test_validate_with_selector(self, complete_workspace):
         """Test validate passes selector to orchestrator."""
@@ -598,7 +598,7 @@ class TestCmdSites:
         assert exit_code == 0
         captured = capsys.readouterr()
         assert "test-site" in captured.out
-        assert "Available Sites" in captured.out
+        assert "Sites (1)" in captured.out
 
     def test_sites_with_selector(self, multi_site_workspace, capsys):
         """Test filtering sites by selector."""
@@ -1869,13 +1869,31 @@ class TestPrintValue:
         assert "deepValue: found" in captured.out
 
     def test_print_simple_list(self, capsys):
-        """Test printing a simple list (inline)."""
+        """Simple lists use inline YAML spelling rather than Python reprs."""
         from siteops.cli import _print_value
 
         _print_value({"items": ["a", "b", "c"]}, indent=0)
 
         captured = capsys.readouterr()
-        assert "items: ['a', 'b', 'c']" in captured.out
+        assert "items: [a, b, c]" in captured.out
+
+    def test_print_uses_yaml_scalars(self, capsys):
+        from siteops.cli import _print_value
+
+        _print_value(
+            {"enabled": False, "on": True, "unset": None, "empty": "", "text": "2608", "nested": {}},
+            indent=0,
+        )
+
+        output = capsys.readouterr().out.splitlines()
+        assert output == [
+            "enabled: false",
+            "on: true",
+            "unset: null",
+            "empty: ''",
+            "text: '2608'",
+            "nested: {}",
+        ]
 
     def test_print_complex_list(self, capsys):
         """Test printing a list of dictionaries."""
@@ -2930,6 +2948,50 @@ class TestDeployResultOutput:
         ]
         assert "private-site" not in captured.out
         assert "private/path" not in captured.out
+        execute.assert_not_called()
+
+    @pytest.mark.parametrize("redacted", [False, True])
+    def test_plain_preparation_failure_lists_every_blocking_diagnostic(
+        self, complete_workspace, capsys, monkeypatch, redacted
+    ):
+        from siteops.orchestrator import Orchestrator
+
+        monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1" if redacted else "0")
+        orchestrator = Orchestrator(complete_workspace)
+        manifest = complete_workspace / "manifests" / "test-manifest.yaml"
+        failure = PlanBuildResult(
+            status=PlanStatus.INVALID,
+            executable=False,
+            plan=None,
+            diagnostics=tuple(
+                PlanDiagnostic(
+                    code=code,
+                    severity=DiagnosticSeverity.ERROR,
+                    summary="Missing.",
+                    detail=detail,
+                )
+                for code, detail in (
+                    ("capability.arm-control-plane.missing", "Azure CLI was not found on PATH."),
+                    ("capability.arc-proxy.missing", "Run `az extension add --name connectedk8s`."),
+                )
+            ),
+            intent=PlanIntent.EXECUTABLE,
+        )
+
+        with (
+            patch.object(orchestrator, "build_plan", return_value=failure),
+            patch.object(orchestrator, "execute_plan") as execute,
+        ):
+            exit_code = cmd_deploy(
+                self._args(complete_workspace, manifest, output="plain"), orchestrator,
+            )
+
+        error = capsys.readouterr().err
+        assert exit_code == 1
+        assert "Error: The deployment plan has 2 blocking problems:\n  - " in error
+        assert "`az extension add --name connectedk8s`" in error
+        assert ("https://aka.ms/installazurecli" in error) is redacted
+        assert ("Azure CLI was not found on PATH." in error) is not redacted
         execute.assert_not_called()
 
     def test_real_preparation_failure_emits_invalid_json_before_compilation(

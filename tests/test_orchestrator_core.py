@@ -664,14 +664,13 @@ class TestPlanParallelDisplay:
         manifest_path = (
             complete_workspace / "manifests" / "test-manifest.yaml"
         )
-        border = "═" * 60
 
         orchestrator.show_plan(manifest_path)
 
         assert capsys.readouterr().out == (
-            f"{border}\n"
-            "  DEPLOYMENT PLAN: test-manifest\n"
-            f"{border}\n"
+            "\n"
+            "  Deployment plan: test-manifest\n"
+            "  ------------------------------\n"
             "\n"
             "  Test manifest\n"
             "\n"
@@ -679,32 +678,61 @@ class TestPlanParallelDisplay:
             "  Templates and deployment capabilities were not checked.\n"
             "\n"
             "  Sites (1):\n"
-            "    • test-site (eastus)\n"
+            "    test-site (eastus)\n"
             "      Subscription: 00000000-0000-0000-0000-000000000000\n"
             "      Resource group: rg-test\n"
             "\n"
-            "  Parallel: sequential\n"
-            "\n"
             "  Steps (1):\n"
-            "    1. deploy-storage (resourceGroup)\n"
-            "       └─ templates/test.bicep\n"
+            "    + 1. deploy-storage (resourceGroup)\n"
+            "         templates/test.bicep\n"
             "\n"
-            f"{border}\n"
-            "  Total: 1 operation(s)\n"
-            f"{border}\n"
+            "  Operations: 1 total, 1 to run\n"
             "\n"
         )
 
-    def test_plan_shows_parallel_config(self, complete_workspace, capsys):
-        """Test that show_plan output shows parallel configuration."""
+    def _two_site_plan(self, workspace, parallel):
+        (workspace / "sites" / "second-site.yaml").write_text(
+            "apiVersion: siteops/v1\nkind: Site\nname: second-site\n"
+            "subscription: 00000000-0000-0000-0000-000000000000\n"
+            "resourceGroup: rg-second\nlocation: westus\n",
+            encoding="utf-8",
+        )
+        manifest_path = workspace / "manifests" / "parallel-plan.yaml"
+        manifest_path.write_text(
+            "apiVersion: siteops/v1\nkind: Manifest\nname: parallel-plan\n"
+            f"sites: [test-site, second-site]\nparallel: {parallel}\n"
+            "steps:\n  - name: step1\n    template: templates/test.bicep\n",
+            encoding="utf-8",
+        )
+        return manifest_path
+
+    @pytest.mark.parametrize(
+        ("parallel", "expected"),
+        [
+            (3, "Execution: Parallel (max 3 concurrent)"),
+            (1, "Execution: Sequential (one site at a time)"),
+            (0, "Execution: Parallel (all sites concurrently)"),
+        ],
+    )
+    def test_fleet_plan_shows_parallel_config(
+        self, complete_workspace, capsys, parallel, expected,
+    ):
         orchestrator = Orchestrator(complete_workspace)
 
+        orchestrator.show_plan(self._two_site_plan(complete_workspace, parallel))
+
+        output = capsys.readouterr().out
+        assert expected in output
+        assert "Operations: 2 total, 2 to run" in output
+
+    def test_single_site_plan_hides_parallel_config(self, complete_workspace, capsys):
+        orchestrator = Orchestrator(complete_workspace)
         manifest_path = complete_workspace / "manifests" / "parallel-plan.yaml"
         manifest_path.write_text(
             """
 apiVersion: siteops/v1
 kind: Manifest
-name: parallel-plan
+name: one-site-plan
 sites: [test-site]
 parallel: 3
 steps:
@@ -715,45 +743,10 @@ steps:
 
         orchestrator.show_plan(manifest_path)
 
-        captured = capsys.readouterr()
-        # Check for parallel info in output - be flexible about exact format
-        assert "Parallel" in captured.out or "parallel" in captured.out.lower()
-        assert "3" in captured.out or "max 3" in captured.out
-
-    def test_plan_shows_sequential(self, complete_workspace, capsys):
-        """Test that show_plan output shows sequential mode."""
-        orchestrator = Orchestrator(complete_workspace)
-        manifest_path = complete_workspace / "manifests" / "test-manifest.yaml"
-
-        orchestrator.show_plan(manifest_path)
-
-        captured = capsys.readouterr()
-        # Check for parallel info - sequential is default
-        assert "Parallel" in captured.out or "sequential" in captured.out.lower()
-
-    def test_plan_shows_unlimited(self, complete_workspace, capsys):
-        """Test that show_plan output shows unlimited mode."""
-        orchestrator = Orchestrator(complete_workspace)
-
-        manifest_path = complete_workspace / "manifests" / "unlimited-plan.yaml"
-        manifest_path.write_text(
-            """
-apiVersion: siteops/v1
-kind: Manifest
-name: unlimited-plan
-sites: [test-site]
-parallel: 0
-steps:
-  - name: step1
-    template: templates/test.bicep
-"""
-        )
-
-        orchestrator.show_plan(manifest_path)
-
-        captured = capsys.readouterr()
-        # Check for unlimited indicator
-        assert "Parallel" in captured.out or "unlimited" in captured.out.lower()
+        output = capsys.readouterr().out
+        assert "Parallel" not in output
+        assert "Execution:" not in output
+        assert "Sequential" not in output
 
 
 class TestStepSiteCompatibility:

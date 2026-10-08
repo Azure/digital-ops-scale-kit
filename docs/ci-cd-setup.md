@@ -1,8 +1,10 @@
 # CI/CD Setup
 
 This guide covers CI/CD configuration for automated testing and deployments.
-Deployments need Azure CLI, and deployments that contain kubectl operations
-also require `kubectl`. The platforms install the Site Ops engine differently:
+Deployment steps, wait steps and resource reads need Azure CLI. `kubectl`
+steps also need `kubectl` and the Azure CLI connectedk8s extension, as
+described in [Azure CLI and az login](install-siteops.md#azure-cli-and-az-login).
+The platforms install the Site Ops engine differently:
 
 | Platform | Location | Engine installation | Role |
 |----------|----------|---------------------|------|

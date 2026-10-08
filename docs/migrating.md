@@ -43,7 +43,8 @@ Start with the changes that affect your workflow:
 | Installed Site Ops with `pip install -e .` | [Reinstall, or install an identified release](#site-ops-installation). |
 | Run `deploy` from a script or pipeline | Add [`--yes`](#deployment-confirmation). |
 | Preview with `deploy --dry-run` or `validate --plan` | Use [`siteops plan`](#plan-replaces-preview-options). |
-| Use `sites --render` or run `sites` in CI | Review [site inspection](#inspect-sites). |
+| Use `sites --render`, read plain `sites` output or run `sites` in CI | Review [site inspection](#inspect-sites). |
+| Match text in plain `validate` output | Review [plain output](#plain-output). |
 | Reference shipped manifests, partials or dataflow sets by path | Update [workspace content paths](#workspace-content-paths). |
 | Pass a manifest filename without a directory | Review [manifest names and paths](#manifest-names-and-paths). |
 | Rely on the workspace default AIO release | Review the [2608 default](#default-aio-release). |
@@ -118,11 +119,24 @@ siteops -w <workspace> sites --output json
 
 YAML writes one document per site. JSON always writes an array.
 
+Plain `sites` output lists several Sites one per line with name, location,
+resource group and labels. Use `sites NAME`, `--show-sources` or
+`--output yaml` for full resolved values. Plain values use YAML spelling,
+such as `false` and `[basic-routing]`.
+
 When `GITHUB_ACTIONS` or `TF_BUILD` is set, or `SITEOPS_REDACT_OUTPUT` enables
 redaction, `sites` no longer prints a masked listing. It reports
 `Site inspection output is private` and exits with code 1. Set
 `SITEOPS_REDACT_OUTPUT=0` only for an authorized private destination. See
 [inspection output details](site-configuration.md#inspection-output-details).
+
+### Plain output
+
+Plain output uses ASCII markers: `+` succeeded or runs, `x` failed or blocked,
+`-` skipped or not run and `?` unconfirmed. `validate` reports
+`+ Manifest is valid: NAME` with the manifest name rather than its file name,
+and writes validation errors to stderr. Scripts should test the exit code
+rather than this text.
 
 ### Workspace content paths
 

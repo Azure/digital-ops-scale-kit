@@ -79,7 +79,7 @@ def test_formats_use_the_same_sorted_resolved_sites(workspace, capsys, output):
         "nested": [{"name": "item", "clientSecret": "***"}],
     }
     assert "hidden" not in captured.out
-    assert "Available Sites" not in captured.out
+    assert "Sites (" not in captured.out
     assert orchestrator.load_site("z-site").parameters["password"] == "hidden-from-display"
 
 
@@ -169,7 +169,8 @@ def test_parser_routes_explicit_formats(workspace, monkeypatch, capsys, output):
     assert exit_info.value.code == 0
     captured = capsys.readouterr()
     if output == "plain":
-        assert "Available Sites" in captured.out
+        assert "Sites (1)" in captured.out
+        assert "  z-site\n" in captured.out
     else:
         assert _documents(captured.out, output)[0]["name"] == "z-site"
 
@@ -202,3 +203,66 @@ def test_json_rejects_values_it_cannot_preserve(workspace, capsys, value):
         assert math.isnan(preserved)
     else:
         assert preserved == value
+
+
+def test_plain_lists_several_sites_on_one_line_each(workspace, capsys):
+    assert cmd_sites(_args("plain"), Orchestrator(workspace)) == 0
+
+    lines = capsys.readouterr().out.splitlines()
+    rows = [line for line in lines if line.startswith(("  a-site", "  z-site"))]
+    assert len(rows) == 2
+    assert rows[0].split() == ["a-site", "eastus", "(subscription)"]
+    assert rows[1].split() == ["z-site", "eastus", "synthetic-group", "environment=dev"]
+    assert any(line.split() == ["Name", "Location", "Resource", "group", "Labels"] for line in lines)
+    output = "\n".join(lines)
+    assert "Sites (2)" in output
+    assert "siteops sites NAME" in output
+    for detail in ("subscription:", "properties:", "parameters:", "overlay", "***"):
+        assert detail not in output
+
+
+@pytest.mark.parametrize("target", [{"name": "z-site"}, {"selector": "environment=dev"}])
+def test_plain_shows_one_selected_site_in_full_with_yaml_values(workspace, capsys, target):
+    assert cmd_sites(_args("plain", **target), Orchestrator(workspace)) == 0
+
+    output = capsys.readouterr().out
+    for line in (
+        "    subscription:   synthetic-subscription",
+        "    resourceGroup:  synthetic-group",
+        "      environment: dev",
+        "      enabled: false",
+        "      count: 0",
+        "      unset: null",
+        "      selected: overlay",
+        "      password: ***",
+        "          clientSecret: ***",
+    ):
+        assert line + "\n" in output
+    assert "False" not in output and "None" not in output
+    assert "siteops sites NAME" not in output
+    assert "hidden" not in output
+
+
+def test_show_sources_keeps_full_detail_for_every_site(workspace, capsys):
+    assert cmd_sites(_args("plain", show_sources=True), Orchestrator(workspace)) == 0
+
+    output = capsys.readouterr().out
+    assert output.count("    subscription:   synthetic-subscription") == 2
+    assert "# sites/base.yaml" in output
+    assert "siteops sites NAME" not in output
+
+
+@pytest.mark.parametrize("target", [{}, {"name": "z-site"}])
+def test_plain_site_output_escapes_terminal_controls(workspace, capsys, target):
+    (workspace / "sites.local" / "z-site.yaml").write_text(
+        yaml.safe_dump({
+            "labels": {"note": "red\x1b[31m\x1b[2Jtext"},
+            "parameters": {"selected": "value\x1b]0;title\x07", "key\u202e": "x"},
+        }),
+        encoding="utf-8",
+    )
+    assert cmd_sites(_args("plain", **target), Orchestrator(workspace)) == 0
+
+    output = capsys.readouterr().out
+    assert "\x1b" not in output and "\x07" not in output and "\u202e" not in output
+    assert "\\u001b" in output or "\\e" in output

@@ -102,6 +102,100 @@ silently.
 other publisher under a new name, or run `siteops source remove NAME` first
 if you intend to replace it.
 
+## Azure CLI errors
+
+[Azure CLI and az login](install-siteops.md#azure-cli-and-az-login) lists what
+needs Azure CLI and which accounts work.
+
+### "Azure CLI (`az`) was not found on PATH"
+
+```
+error: Azure CLI (`az`) was not found on PATH. Install Azure CLI and retry. Step 'aio-instance' needs Azure CLI to submit ARM deployments or read resource tags. Installation instructions are at https://aka.ms/installazurecli.
+```
+
+**Cause**: `siteops plan` or `siteops deploy` selected deployment, wait or
+`kubectl` steps, and no `az` executable is on `PATH`. For a `kubectl` step the
+message says the step needs Azure CLI and its connectedk8s extension. JSON
+plans report `capability.arm-control-plane.missing` or
+`capability.arc-proxy.missing` with the same fix.
+
+**Solution**: Nothing ran. Install Azure CLI from
+https://aka.ms/installazurecli and open a new shell. For `kubectl` steps, also
+run `az extension add --name connectedk8s`. Then rerun the command.
+
+### "The Azure CLI connectedk8s extension is not installed"
+
+```
+error: The Azure CLI connectedk8s extension is not installed. Step 'opc-plc-simulator' needs Azure CLI and its connectedk8s extension to reach the cluster through `az connectedk8s proxy`. Run `az extension add --name connectedk8s`, then rerun the command.
+```
+
+**Cause**: A selected `kubectl` step reaches its cluster through
+`az connectedk8s proxy`. Before anything runs, `siteops plan` and
+`siteops deploy` ask Azure CLI whether the extension is installed, and it is
+not. The `kubectl` steps are blocked. When Azure CLI is set to install
+extensions without a prompt, through
+`az config set extension.use_dynamic_install=yes_without_prompt` or the
+`AZURE_EXTENSION_USE_DYNAMIC_INSTALL` environment variable, the plan proceeds
+and Azure CLI installs the extension on first use instead.
+
+**Solution**: Nothing ran. Run `az extension add --name connectedk8s`, then
+rerun the command.
+
+### "The target subscription is not visible to the account signed in to Azure CLI"
+
+```
+The target subscription is not visible to the account signed in to Azure CLI. No deployment was started. Run `az account list` to see the subscriptions this account can use, or run `az login` with an account that can access the subscription. Azure CLI reported: ERROR: Subscription '<subscription>' not found. Check the spelling and casing and try again.
+```
+
+**Cause**: The Site's `subscription` is not among the subscriptions of the
+account signed in to Azure CLI. Azure CLI rejects the request before sending
+it, so the step fails rather than reporting an unconfirmed result. A reported
+`Profile has tenant-level account only` means the account can sign in to the
+tenant but can use no subscription. A wait step reports the same cause.
+
+**Solution**: Run `az account list` and look for the Site's subscription. If
+it is missing, sign in with an account that can access it, assign the service
+principal a role on it, or correct `subscription` in the Site. Then rerun the
+command.
+
+### "Azure CLI asked for template parameters that have no value"
+
+```
+Azure CLI asked for template parameters that have no value, and Site Ops runs it without input. No deployment was started. Add values for them to the step's parameter files or the Site's parameters, then retry. Azure CLI reported: ERROR: Missing input parameters: location
+```
+
+**Cause**: A template parameter without a default has no value in the step's
+parameter files or the Site's `parameters`. Azure CLI stops to ask for it
+before sending the deployment. Site Ops gives Azure CLI no input, so the step
+fails at once. On Windows the message quotes the question instead, such as
+`Azure CLI asked: Please provide string value for 'location'`.
+
+**Solution**: Add the named parameters to the step's parameter files or the
+Site's `parameters`, review the plan with `siteops plan`, then rerun the
+command.
+
+### "Input '...' read failed"
+
+```
+Error: inputs.resource.not-logged-in: Input 'cluster' read failed. The selected Azure CLI session is not signed in. Run `az login`, then retry.
+```
+
+**Cause**: `inputs --read-resources`, or `plan` and `deploy` with a resource
+ID answer, read the resource through Azure CLI before planning. The code
+after `inputs.resource.` names the reason, and the message ends with its fix.
+
+| Code | Fix |
+|---|---|
+| `tool-missing` | Install Azure CLI from https://aka.ms/installazurecli and make sure `az` is on `PATH`. |
+| `not-logged-in` | Run `az login`. |
+| `subscription-missing` | Run `az account list`, or sign in with an account that can access the subscription. |
+| `forbidden` | Ask for a role that grants read access to the resource, such as Reader. |
+| `not-found` | Check the resource ID. |
+| `timeout` | Check network access to Azure. |
+
+**Solution**: Nothing was planned or deployed. Apply the fix, then rerun the
+same command.
+
 ## Validation errors
 
 ### "Site file not found"
@@ -251,11 +345,53 @@ target. See [run-output.md](run-output.md).
 ### "Failed to establish Arc proxy"
 
 **Cause**: Arc cluster unreachable or Cluster Connect not enabled.
+An earlier log line names the cause, as described in the entries below.
 
 **Solution**:
 
 1. Verify cluster is connected: `az connectedk8s show -n <cluster> -g <rg>`
 2. Enable Cluster Connect: `az connectedk8s enable-features -n <cluster> -g <rg> --features cluster-connect`
+
+### "Arc proxy needs the Azure CLI connectedk8s extension"
+
+```
+Arc proxy needs the Azure CLI connectedk8s extension. Run `az extension add --name connectedk8s`, then retry. Azure CLI reported: ERROR: The command requires the extension connectedk8s. ...
+```
+
+**Cause**: `az connectedk8s proxy` exited because the extension is missing.
+Site Ops gives Azure CLI no input, so Azure CLI cannot offer to install the
+extension and exits instead of waiting.
+
+**Solution**: Run `az extension add --name connectedk8s`, then rerun the
+command. `siteops plan` reports the same condition before anything runs.
+
+### "Arc proxy did not open local port"
+
+```
+Arc proxy did not open local port 47021 within 180s. Check network access to Azure, that the cluster has cluster connect enabled, and that the account signed in to Azure CLI can reach it.
+```
+
+**Cause**: `az connectedk8s proxy` kept running but never accepted
+connections on its local port. On first use it also downloads its proxy
+binary, which needs network access.
+
+**Solution**: Check the cluster with
+`az connectedk8s show -n <cluster> -g <rg>`, enable cluster connect as shown
+above, and confirm that the account signed in to Azure CLI can access the
+cluster resource. Then retry.
+
+### "Arc proxy opened local port ... but did not become responsive"
+
+```
+Arc proxy opened local port 47021 but did not become responsive within 180s. Check that the cluster is reachable and that the account signed in to Azure CLI can use cluster connect.
+```
+
+**Cause**: The proxy listened locally, but `kubectl` could not reach the
+cluster's API server through it before the deadline.
+
+**Solution**: Confirm the cluster is connected and its agents are healthy with
+`az connectedk8s show -n <cluster> -g <rg>`. Check that the account can use
+cluster connect on the cluster, then retry.
 
 ### "Connection refused" during Arc proxy setup
 

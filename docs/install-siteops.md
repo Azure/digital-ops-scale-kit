@@ -421,7 +421,26 @@ Python aliases.
 Installing the CLI does not authenticate to Azure or deploy resources. Review
 workspace content separately, then select it with `--source SOURCE@RELEASE`,
 an operator project or `-w`. Azure CLI, Bicep and kubectl requirements depend
-on the operations you select.
+on the operations you select, as described in
+[Azure CLI and az login](#azure-cli-and-az-login).
+
+### Azure CLI and az login
+
+Site Ops currently makes every Azure call through Azure CLI (`az`), using the
+account you signed in with `az login`. `siteops plan` and `siteops deploy`
+check the tools the selected steps need and name any missing tool with its
+fix. `siteops validate` and `siteops browse` need no Azure tools.
+
+| What the selected steps do | What you need |
+|---|---|
+| Deployment steps, wait steps, and resource reads such as `inputs --read-resources` or resource ID answers to `plan` and `deploy` | [Azure CLI](https://aka.ms/installazurecli). Bicep templates in local content compile with `az bicep build`. |
+| `kubectl` steps on a cluster connected through Azure Arc | Azure CLI with the connectedk8s extension (`az extension add --name connectedk8s`), and kubectl. The cluster needs cluster connect enabled, and the account needs [Kubernetes permissions](ci-cd-setup.md#kubernetes-rbac-for-arc-proxy-operations). On first use, `az connectedk8s proxy` downloads its proxy binary. |
+
+Any `az login` mode works: an interactive user, device code, a service
+principal with a secret or certificate, a managed identity, or federated
+credentials in CI as shown in [CI/CD setup](ci-cd-setup.md). Each Site's
+subscription must be visible to that account. Run `az account list` to check
+before deploying.
 
 ## Install the release wheel
 

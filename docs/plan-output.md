@@ -73,6 +73,57 @@ options.
 A library manifest without a target set can be checked with `validate`.
 Pass a selector to plan that library against specific sites.
 
+## Read a plain plan
+
+A plain plan marks each authored step for the selected Sites. This example is
+shortened:
+
+```text
+  Deployment plan: aio-install
+  ----------------------------
+  Selector: name=munich-dev
+
+  Deploy the Azure IoT Operations platform with optional secret sync.
+
+  Preflight: not performed
+  Templates and deployment capabilities were not checked.
+
+  Sites (1):
+    munich-dev (germanywestcentral)
+      Subscription: 00000000-0000-0000-0000-000000000000
+      Resource group: rg-iot-munich-dev
+
+  Steps (9):
+    - 1. global-edge-site (subscription): skipped
+         templates/edge-site/subscription.bicep
+         Reason: subscription-scoped step, site has resource group
+    + 3. schema-registry (resourceGroup)
+         templates/deps/schema-registry.bicep
+
+  Operations: 9 total, 5 to run, 4 skipped
+```
+
+`+` marks a step that runs, `-` a step that is skipped and `x` a step that is
+blocked. When several Sites are selected, a step that does not run for every
+Site says how many skip it, for example `skipped for 2 of 3 Sites`. A
+`Reason:` line says why, such as a `when:` condition that is false for that
+Site. `Operations:` counts one operation per selected Site and step, and the
+redacted plain plan reports the same counts.
+
+The plan shows the first paragraph of the manifest description, and
+`siteops browse NAME` shows the authored guidance. An `Execution:` line
+describes parallelism when more than one Site is selected.
+
+Before the plan, stderr names the manifest by its path in the workspace and,
+for verified content, its source in one `Source:` line. Executable preparation
+prints `Preparing executable deployment plan...` and then reports elapsed time
+while compilation and tool checks continue.
+
+Plain output uses the same ASCII markers as [run output](run-output.md) and no
+color. Text from manifests and Site files is shown with control characters
+escaped as `\uXXXX`. Prose wraps to the terminal width, up to 100 columns, and
+at a fixed width when output is redirected.
+
 ## Emit JSON
 
 Choose JSON output:
@@ -141,8 +192,7 @@ When redaction is enabled, plain plans render the same allowlisted fields as
 the publishable JSON projection. They show status, intent, aggregate activity,
 and generic diagnostics rather than manifest names, descriptions, individual
 steps, paths, conditions, or target details. Authorized local plain output
-retains its detailed view when redaction is disabled, including authored
-multiline descriptions on separate lines.
+retains its detailed view when redaction is disabled.
 
 For CI publication, capture the explicit publishable JSON from stdout.
 Progress and diagnostic logs on stderr are a separate stream, not part of the

@@ -1239,7 +1239,9 @@ def test_invalid_executable_plan_states_that_nothing_will_run():
     assert "Executable: no" in rendered
     assert "Submission: source (compilation observed, not enforced)" in rendered
     assert "No operations will be submitted from this plan." in rendered
-    assert "Blocked: 1" in rendered
+    assert "Operations: 1 total, 0 to run, 1 blocked" in rendered
+    assert "    x 1. " in rendered
+    assert "Reason: A required capability is unavailable." in rendered
 
 
 def test_describe_plan_discloses_missing_preflight():
@@ -1633,7 +1635,13 @@ def test_redacted_plain_omits_authored_operation_values(intent, kind, invalid):
     assert f"Status: {document['status']}" in published
     assert f"Intent: {document['intent']}" in published
     assert f"Sites: {document['summary']['targetCount']} selected" in published
-    assert f"Proposed: {document['summary']['dispositions']['execute']} execute" in published
+    dispositions = document["summary"]["dispositions"]
+    counts = (
+        f"Operations: {document['summary']['operationCount']} total, "
+        f"{dispositions['execute']} to run"
+    )
+    assert counts in published
+    assert counts in private
     if invalid:
         assert "Plan processing reported a diagnostic." in published
 
@@ -1718,3 +1726,228 @@ def test_local_describe_plan_omits_submission_claim():
 
     assert document["intent"] == "describe"
     assert "submission" not in document["plan"]
+
+
+def _skipped(operation: PreparedOperation, detail: str) -> PreparedOperation:
+    return PreparedOperation(
+        identity=operation.identity,
+        step=operation.step,
+        disposition=PlanDisposition.SKIP,
+        details=operation.details,
+        skip_reason=PlanSkipReason(code=SkipReasonCode.CONDITION_FALSE, detail=detail),
+    )
+
+
+def _gated_plan(names: tuple[str, ...]) -> PlanBuildResult:
+    condition = "Condition not met: {{ site.properties.enabled }}"
+    targets = []
+    for name in names:
+        always = _operation(target=name, step="always", sequence=1)
+        gated = _operation(target=name, step="gated", sequence=2)
+        targets.append(_target(
+            always, gated if name == "munich" else _skipped(gated, condition), name=name,
+        ))
+    return PlanBuildResult(
+        status=PlanStatus.PLANNED,
+        executable=False,
+        plan=DeploymentPlan(
+            manifest_name="install",
+            source_path=Path("manifests/install.yaml"),
+            intent=PlanIntent.DESCRIBE,
+            description=None,
+            max_parallel_sites=3,
+            steps=tuple(operation.step for operation in targets[0].operations),
+            targets=tuple(targets),
+        ),
+    )
+
+
+def test_plain_plan_marks_steps_run_or_skipped_across_a_fleet():
+    result = _gated_plan(("munich", "seattle", "tokyo"))
+
+    private = render_plain_plan(result, redacted=False)
+    public = render_plain_plan(result, redacted=True)
+
+    assert "    + 1. always (resourceGroup)\n" in private
+    assert "    + 2. gated (resourceGroup): skipped for 2 of 3 Sites\n" in private
+    assert private.count("Reason: Condition not met: {{ site.properties.enabled }}") == 1
+    assert "[when:" not in private
+    counts = "Operations: 6 total, 4 to run, 2 skipped"
+    assert counts in private
+    assert counts in public
+    assert "Execution: Parallel (max 3 concurrent)" in private
+    assert private.isascii() and public.isascii()
+
+
+def test_plain_plan_says_when_a_step_is_skipped_for_every_site():
+    private = render_plain_plan(_gated_plan(("seattle", "tokyo")), redacted=False)
+
+    assert "    - 2. gated (resourceGroup): skipped for all 2 Sites\n" in private
+    assert "Operations: 4 total, 2 to run, 2 skipped" in private
+
+
+def test_plain_plan_for_one_site_marks_skips_and_hides_parallelism():
+    result = _gated_plan(("seattle",))
+
+    private = render_plain_plan(result, redacted=False)
+
+    assert "    + 1. always (resourceGroup)\n" in private
+    assert "    - 2. gated (resourceGroup): skipped\n" in private
+    assert "Operations: 2 total, 1 to run, 1 skipped" in private
+    assert "Operations: 2 total, 1 to run, 1 skipped" in render_plain_plan(result, redacted=True)
+    assert "Parallel" not in private
+    assert "Execution:" not in private
+
+
+def test_plain_plan_shows_the_first_description_paragraph_only():
+    target = _target()
+    result = PlanBuildResult(
+        status=PlanStatus.PLANNED,
+        executable=False,
+        plan=DeploymentPlan(
+            manifest_name="install",
+            source_path=Path("manifests/install.yaml"),
+            intent=PlanIntent.DESCRIBE,
+            description=(
+                "Install the platform.\nAdd optional features per Site.\n\n"
+                "See samples/other/manifest.yaml for a composed example."
+            ),
+            max_parallel_sites=1,
+            steps=(target.operations[0].step,),
+            targets=(target,),
+        ),
+    )
+
+    rendered = render_plain_plan(result, redacted=False, width=40)
+
+    assert "\n  Install the platform. Add optional\n  features per Site.\n" in rendered
+    assert "samples/other" not in rendered
+
+
+def test_plain_plan_escapes_terminal_controls_in_authored_and_site_text():
+    hostile = "\x1b[2J\x1b[31m\u202e\r"
+    name = f"munich{hostile}"
+    operation = _skipped(
+        _operation(target=name, step=f"deploy{hostile}"), f"Condition {hostile}",
+    )
+    target = PreparedTarget(
+        name=name,
+        kind=TargetKind.RESOURCE_GROUP,
+        subscription=f"sub{hostile}",
+        resource_group=f"rg{hostile}",
+        location=f"eastus{hostile}",
+        operations=(operation,),
+    )
+    plan = DeploymentPlan(
+        manifest_name=f"install{hostile}",
+        source_path=Path("manifests/install.yaml"),
+        intent=PlanIntent.DESCRIBE,
+        description=f"About{hostile}",
+        max_parallel_sites=1,
+        steps=(operation.step,),
+        targets=(target,),
+        cli_selector=f"name={hostile}",
+    )
+    diagnostic = PlanDiagnostic(
+        code="private.warning",
+        severity=DiagnosticSeverity.WARNING,
+        summary="Warning.",
+        detail=f"First{hostile}\nSecond",
+    )
+    rendered = [
+        render_plain_plan(
+            PlanBuildResult(
+                status=PlanStatus.PLANNED, executable=False, plan=plan,
+                diagnostics=(diagnostic,),
+            ),
+            redacted=False,
+        ),
+        render_plain_plan(
+            PlanBuildResult(
+                status=PlanStatus.PLANNED, executable=False,
+                plan=DeploymentPlan(
+                    manifest_name=f"install{hostile}",
+                    source_path=Path("manifests/install.yaml"),
+                    intent=PlanIntent.DESCRIBE, description=None,
+                    max_parallel_sites=1, steps=(), targets=(),
+                    cli_selector=f"name={hostile}",
+                ),
+            ),
+            redacted=False,
+        ),
+        render_plain_plan(
+            PlanBuildResult(
+                status=PlanStatus.INVALID, executable=False, plan=None,
+                diagnostics=(PlanDiagnostic(
+                    code="validation.failed", severity=DiagnosticSeverity.ERROR,
+                    summary="Manifest validation failed.", detail=f"Bad{hostile}",
+                ),),
+            ),
+            redacted=False,
+        ),
+    ]
+
+    for text in rendered:
+        assert all(character == "\n" or character.isprintable() for character in text)
+        assert "\\u001b[2J" in text
+    assert "\\u202e" in rendered[0]
+    assert "\\u000d" in rendered[0]
+    assert "    warning: First\\u001b[2J" in rendered[0]
+    assert "\n      Second\n" in rendered[0]
+
+
+def _capability_error(code: str, detail: str) -> PlanDiagnostic:
+    return PlanDiagnostic(
+        code=code, severity=DiagnosticSeverity.ERROR, summary="Missing.", detail=detail,
+    )
+
+
+def _not_executable(*diagnostics: PlanDiagnostic):
+    from siteops.planning import PlanNotExecutableError
+
+    return PlanNotExecutableError(PlanBuildResult(
+        status=PlanStatus.INVALID, executable=False, plan=None,
+        diagnostics=diagnostics, intent=PlanIntent.EXECUTABLE,
+    ))
+
+
+def test_not_executable_message_lists_every_blocking_diagnostic():
+    error = _not_executable(
+        _capability_error("capability.arm-control-plane.missing", "Azure CLI was not found."),
+        PlanDiagnostic(
+            code="private.warning", severity=DiagnosticSeverity.WARNING,
+            summary="Warning.", detail="Unrelated warning.",
+        ),
+        _capability_error("capability.arc-proxy.missing", "Install connectedk8s.\nThen rerun."),
+    )
+
+    assert error.message(redacted=False) == (
+        "The deployment plan has 2 blocking problems:\n"
+        "  - Azure CLI was not found.\n"
+        "  - Install connectedk8s.\n"
+        "    Then rerun."
+    )
+    published = error.message(redacted=True)
+    assert "https://aka.ms/installazurecli" in published
+    assert "`az extension add --name connectedk8s`" in published
+    assert "Unrelated warning" not in published
+
+
+def test_not_executable_message_keeps_one_diagnostic_as_its_own_text():
+    error = _not_executable(_capability_error("validation.failed", "Step 'a' is invalid."))
+
+    assert error.message(redacted=False) == "Step 'a' is invalid."
+    assert error.message(redacted=True) == "Manifest validation failed."
+    assert str(error) == "Step 'a' is invalid."
+
+
+def test_not_executable_message_is_bounded():
+    error = _not_executable(*(
+        _capability_error("validation.failed", f"Problem {index}.") for index in range(7)
+    ))
+
+    lines = error.message(redacted=False).splitlines()
+    assert lines[0] == "The deployment plan has 7 blocking problems:"
+    assert lines[1:6] == [f"  - Problem {index}." for index in range(5)]
+    assert lines[6] == "  2 more not shown. `siteops plan` lists every diagnostic."
+    assert error.message(redacted=True) == "Manifest validation failed."

@@ -203,6 +203,18 @@ class TestClassifyAzError:
             # A missing subscription is a configuration error rather than a
             # resource that might yet appear, and the permanent set names it.
             ("SubscriptionNotFound: subscription was not recognized", "permanent"),
+            # Azure CLI refuses a subscription its account cannot see before
+            # sending anything, so the failure is definite.
+            (
+                "ERROR: Subscription '00000000-0000-0000-0000-000000000001' not "
+                "found. Check the spelling and casing and try again.",
+                "permanent",
+            ),
+            (
+                "ERROR: Subscription '00000000-0000-0000-0000-000000000001' not "
+                "found. Profile has tenant-level account only.",
+                "permanent",
+            ),
             ("ERROR: status code: 429 TooManyRequests", "transient"),
             ("ERROR: status code: 503 ServiceUnavailable", "transient"),
             ("Command timed out after 60s", "transient"),

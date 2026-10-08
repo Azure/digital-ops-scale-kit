@@ -40,8 +40,12 @@ _MAX_STDERR_BYTES = 32 * 1024
 _CREATE_SUSPENDED = 0x00000004
 _ERROR_CODES = (
     (
+        # Azure CLI's local "Subscription '<id>' not found." includes the
+        # variant for an account that has tenant access only.
         re.compile(
-            rb"SubscriptionNotFound|InvalidSubscriptionId|subscription (?:was |is )?not found",
+            rb"SubscriptionNotFound|InvalidSubscriptionId|"
+            rb"subscription (?:'[^'\r\n]*' )?(?:was |is )?not found|"
+            rb"tenant-level account only",
             re.IGNORECASE,
         ),
         "SUBSCRIPTION_MISSING",

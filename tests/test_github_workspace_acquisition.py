@@ -422,7 +422,8 @@ def test_public_project_pin_and_plan_use_existing_site_configuration(project_cli
     document = json.loads(output.out)
     assert document["status"] == "planned"
     assert "operator-sub" in output.out
-    assert "Package SHA-256:" in output.err
+    assert "Source: github:example/content @ release-7, workspace" in output.err
+    assert "Package SHA-256:" not in output.err
     assert state.engines[-1]["site_config_root"] == state.root
     assert state.engines[-1]["materialized_package"].manifest_relative_path == "manifests/storage.yaml"
     assert state.github.downloads == downloads

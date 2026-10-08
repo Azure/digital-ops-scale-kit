@@ -26,6 +26,7 @@ whichever configuration root is selected.
 | Target multiple specific sites at the CLI | `siteops deploy <manifest> -l name=<a>,name=<b>` |
 | Pin the manifest to a labeled cohort | Set `selector:` in the manifest |
 | Hard-code the target list for a manifest | Set `sites:` in the manifest |
+| List configured Sites with location, resource group and labels | `siteops -w <workspace> sites` |
 | Preview a fully-resolved site (post inherit + overlay) | `siteops -w <workspace> sites <name> --output yaml` |
 | Inspect resolved sites in private automation | `siteops -w <workspace> sites --output json` |
 | See where every value in a resolved site came from | `siteops -w <workspace> sites <name> --show-sources` |
@@ -45,9 +46,12 @@ the same resolved sites and sorts them by name.
 
 | Format | Output shape |
 |---|---|
-| `plain` | Human-readable site details |
+| `plain` | One line per Site (name, location, resource group and labels) when several match. Full resolved detail for one Site, or for every match with `--show-sources` |
 | `yaml` | One `Site` document per match, separated by `---` for multiple sites |
 | `json` | One array of `Site` objects, including when only one site matches |
+
+Run `siteops sites NAME` to see one Site's resolved configuration in plain
+output. Values use YAML spelling, such as `false`, `null` and `[a, b]`.
 
 Use `--show-sources` with the default plain output to see where each value
 came from:
@@ -627,5 +631,7 @@ sites/
 ```
 
 Each concrete site declares a single `inherits:` parent. The intermediate `SiteTemplate` files capture the cross-cutting axes so that adding a new region or environment is a one-file change instead of N edits across N regions.
+
+For an AIO fleet, use one resource group per AIO instance. Each Site deploys into its `resourceGroup`, which is its Arc cluster's resource group, so connect each cluster in its own resource group. Set `resourceGroup` on each concrete Site, not in a shared `SiteTemplate`.
 
 > Validate the resolved shape with `siteops -w <workspace> sites <name> --output yaml` before committing the new template chain.

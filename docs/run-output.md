@@ -23,12 +23,34 @@ or Azure access. For preparation without execution, use `plan`.
 
 Progress lines and logs go to stderr while the run is in flight. For a direct
 published source, fixed messages name release resolution, missing-content
-download, verification and plan preparation phases. They do not expose a
-percentage or turn stderr into publishable output. Waiting operations report
-elapsed time at most once per minute, not invented completion progress.
+download, verification and plan preparation phases. While preparation compiles
+templates and checks local tools, a line reports elapsed time after 10 seconds
+and then every 30 seconds. These lines do not expose a percentage or turn
+stderr into publishable output. Waiting operations report elapsed time at most
+once per minute, not invented completion progress.
 The final summary is the record of what happened, not a prediction.
 
 ## Read the summary
+
+A successful run ends like this:
+
+```text
+  Deployment summary
+  ------------------
+
+  + seattle-dev  succeeded  2/2 ops  44.5s
+  + munich-dev   succeeded  2/2 ops  41.0s
+
+  Result: all deployment operations succeeded in 46.1s
+  Sites: 2 total, 2 succeeded
+  Operations: 4 total, 4 succeeded
+```
+
+A successful result means every deployment operation the plan selected to run
+completed for its Site. For AIO, [check the result](guided-inputs.md#check-the-result)
+on the cluster before adding a workload.
+
+A run that does not succeed names the incomplete work and the next step:
 
 ```text
   Deployment summary
@@ -40,7 +62,6 @@ The final summary is the record of what happened, not a prediction.
   Result: failed in 76.5s
   Sites: 2 total, 1 succeeded, 1 failed
   Operations: 5 total, 3 succeeded, 1 failed, 1 not run
-  Readiness and functionality: not assessed.
 
   Incomplete
   ----------
@@ -54,8 +75,10 @@ The final summary is the record of what happened, not a prediction.
 Rows size themselves to the sites in the run rather than to a fixed table. A
 name longer than the column keeps its own line, so a target identity is never
 truncated. Markers are plain ASCII (`+` succeeded, `x` failed, `-` did not
-run, `?` unconfirmed) and no color or cursor control is emitted, so the
-summary reads the same in a terminal, a redirected file, and a CI log.
+run, `?` unconfirmed), the same set that [plan output](plan-output.md) uses,
+and no color or cursor control is emitted. Prose wraps to the terminal width,
+up to 100 columns, and at a fixed width in a redirected file or CI log. Site,
+step and error text is shown with control characters escaped as `\uXXXX`.
 
 The `Next:` line appears only when there is something to do. Inspect affected
 resources before deciding to deploy again. Unconfirmed work takes priority
@@ -80,9 +103,6 @@ Every prepared operation is accounted for, including work that never started.
 
 A site carries the same set of values, aggregated from its operations. A run
 adds `invalid`, which means preparation failed and nothing was executed.
-Every final result reports readiness and functionality as `not-assessed`.
-Provider deployment success alone does not establish AIO workload health
-or Secret Sync materialization.
 
 `unknown` means an operation's final effect or observation could not be
 confirmed. This includes ambiguous submission, lost observation, and a
@@ -118,7 +138,6 @@ manifest, are reported on stderr without a result document.
 ```json
 {
   "apiVersion": "siteops/v1alpha1",
-  "assessments": {"readiness": "not-assessed", "functionality": "not-assessed"},
   "diagnostics": [],
   "engine": {"name": "siteops", "version": "1.0.0b1"},
   "exitCode": 0,

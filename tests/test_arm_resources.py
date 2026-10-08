@@ -443,6 +443,16 @@ def test_cli_rejects_missing_or_malformed_related_ids(controlled_process, body):
         (b"(AuthorizationFailed) status code: 403", "FORBIDDEN"),
         (b"Please run 'az login' to setup account.", "NOT_LOGGED_IN"),
         (b"(SubscriptionNotFound) Subscription not found", "SUBSCRIPTION_MISSING"),
+        (
+            b"ERROR: Subscription '00000000-0000-0000-0000-000000000001' not found. "
+            b"Check the spelling and casing and try again.",
+            "SUBSCRIPTION_MISSING",
+        ),
+        (
+            b"ERROR: Subscription '00000000-0000-0000-0000-000000000001' not found. "
+            b"Profile has tenant-level account only.",
+            "SUBSCRIPTION_MISSING",
+        ),
         (b"An unexpected error occurred", "FAILED"),
     ],
 )
@@ -453,7 +463,23 @@ def test_cli_errors_are_closed_without_stderr_or_input_values(controlled_process
     with pytest.raises(ArmResourceError) as error:
         arm_resources_azure_cli.AzureCliArmReader().read(reference())
     assert error.value.code == code
-    assert_safe(error, RESOURCE_ID, "credential", "very-private", "12345678-1234-1234-1234")
+    assert_safe(
+        error, RESOURCE_ID, "credential", "very-private", "12345678-1234-1234-1234",
+        "00000000-0000-0000-0000-000000000001",
+    )
+
+
+@pytest.mark.parametrize(
+    ("code", "remedy"),
+    [
+        ("TOOL_MISSING", "https://aka.ms/installazurecli"),
+        ("NOT_LOGGED_IN", "Run `az login`"),
+        ("FORBIDDEN", "read access"),
+        ("SUBSCRIPTION_MISSING", "not visible to the account signed in to Azure CLI"),
+    ],
+)
+def test_read_errors_carry_their_remedy(code, remedy):
+    assert remedy in str(ArmResourceError(code))
 
 
 @pytest.mark.parametrize(

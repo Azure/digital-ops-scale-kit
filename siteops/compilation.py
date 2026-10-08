@@ -860,6 +860,7 @@ def _run_command(
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         prepare_process_args(argv),
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         encoding="utf-8",

@@ -6,12 +6,12 @@
 from __future__ import annotations
 
 import json
-import textwrap
 import threading
 from collections import Counter
 from typing import Any, TextIO
 
-from siteops.planning import PlanProjection
+from siteops import terminal
+from siteops.planning import PUBLISHABLE_CAPABILITY_SUMMARIES, PlanProjection
 from siteops.results import (
     OperationResult,
     OperationStatus,
@@ -25,6 +25,9 @@ from siteops.results import (
     SiteResult,
     SiteStatus,
 )
+from siteops.terminal import heading as _heading
+from siteops.terminal import sanitize
+from siteops.terminal import wrap as _wrap
 
 _API_VERSION = "siteops/v1alpha1"
 _KIND = "DeploymentRun"
@@ -43,22 +46,10 @@ _PUBLISHABLE_RUN_DIAGNOSTICS = {
         "run.progress-reporting-failed",
         "Progress reporting stopped before execution completed.",
     ),
-    "capability.arc-proxy.missing": (
-        "run.capability-unavailable",
-        "A required local deployment capability is unavailable.",
-    ),
-    "capability.arm-control-plane.missing": (
-        "run.capability-unavailable",
-        "A required local deployment capability is unavailable.",
-    ),
-    "capability.bicep-compiler.missing": (
-        "run.capability-unavailable",
-        "A required local deployment capability is unavailable.",
-    ),
-    "capability.kubectl.missing": (
-        "run.capability-unavailable",
-        "A required local deployment capability is unavailable.",
-    ),
+    **{
+        code: ("run.capability-unavailable", summary)
+        for code, summary in PUBLISHABLE_CAPABILITY_SUMMARIES.items()
+    },
     "composition.invalid": (
         "run.preparation-invalid",
         "Preparation failed before execution started.",
@@ -218,10 +209,6 @@ def _base_document(
 ) -> dict[str, Any]:
     return {
         "apiVersion": _API_VERSION,
-        "assessments": {
-            "readiness": "not-assessed",
-            "functionality": "not-assessed",
-        },
         "engine": {
             "name": "siteops",
             "version": engine_version,
@@ -322,21 +309,27 @@ def serialize_run_json(
     return json.dumps(document, indent=2, sort_keys=True) + "\n"
 
 
-_LINE_WIDTH = 72
 _NAME_COLUMN_LIMIT = 24
 _STATUS_COLUMN = 9
 
-# Plain ASCII markers keep the summary readable on a basic terminal and on a
-# Windows console that is not using a Unicode code page. No color or cursor
-# control is emitted, because this text is as likely to be redirected into a
-# log or an artifact as it is to reach a terminal.
+# Status markers come from the shared ASCII set. No color or cursor control
+# is emitted, because this text is as likely to be redirected into a log or
+# an artifact as it is to reach a terminal.
 _SITE_MARKERS = {
-    SiteStatus.SUCCEEDED: "+",
-    SiteStatus.FAILED: "x",
-    SiteStatus.SKIPPED: "-",
-    SiteStatus.NOT_RUN: "-",
-    SiteStatus.CANCELLED: "-",
-    SiteStatus.UNKNOWN: "?",
+    SiteStatus.SUCCEEDED: terminal.SUCCEEDED,
+    SiteStatus.FAILED: terminal.FAILED,
+    SiteStatus.SKIPPED: terminal.NOT_RUN,
+    SiteStatus.NOT_RUN: terminal.NOT_RUN,
+    SiteStatus.CANCELLED: terminal.NOT_RUN,
+    SiteStatus.UNKNOWN: terminal.UNKNOWN,
+}
+_OPERATION_MARKERS = {
+    OperationStatus.SUCCEEDED: terminal.SUCCEEDED,
+    OperationStatus.FAILED: terminal.FAILED,
+    OperationStatus.SKIPPED: terminal.NOT_RUN,
+    OperationStatus.NOT_RUN: terminal.NOT_RUN,
+    OperationStatus.CANCELLED: terminal.NOT_RUN,
+    OperationStatus.UNKNOWN: terminal.UNKNOWN,
 }
 
 
@@ -347,34 +340,6 @@ def _status_word(value: str) -> str:
 
 def _plural(count: int | None, word: str) -> str:
     return f"{count} {word}" if count == 1 else f"{count} {word}s"
-
-
-def _heading(title: str, *, blank_after: bool = True) -> list[str]:
-    lines = ["", f"  {title}", f"  {'-' * len(title)}"]
-    if blank_after:
-        lines.append("")
-    return lines
-
-
-def _wrap(
-    text: str,
-    *,
-    indent: str = "  ",
-    hanging: str | None = None,
-) -> list[str]:
-    """Wrap prose at a fixed width, keeping identifiers in one piece.
-
-    The width is fixed rather than read from the terminal so the same run
-    renders identically in a terminal, a redirected file, and a CI log.
-    """
-    return textwrap.wrap(
-        text,
-        width=_LINE_WIDTH,
-        initial_indent=indent,
-        subsequent_indent=hanging if hanging is not None else indent,
-        break_long_words=False,
-        break_on_hyphens=False,
-    ) or [f"{indent}{text}"]
 
 
 def _packed_lines(
@@ -389,11 +354,12 @@ def _packed_lines(
     `textwrap` breaks on any space, which would strand a count away from the
     status it counts. Packing whole items keeps `1 not run` readable.
     """
+    width = terminal.line_width()
     lines: list[str] = []
     current = f"{indent}{head}"
     for item in items:
         piece = f", {item}"
-        if len(current) + len(piece) <= _LINE_WIDTH:
+        if len(current) + len(piece) <= width:
             current = f"{current}{piece}"
             continue
         lines.append(f"{current},")
@@ -416,7 +382,12 @@ def _counts_line(label: str, section: dict[str, Any]) -> list[str]:
 def _totals_lines(result: RunResult, *, elapsed: bool) -> list[str]:
     """Render the aggregate counts from the same summary the JSON publishes."""
     summary = _summary_document(result)
-    headline = f"  Result: {_status_word(result.status.value)}"
+    outcome = (
+        "all deployment operations succeeded"
+        if _succeeded(result)
+        else _status_word(result.status.value)
+    )
+    headline = f"  Result: {outcome}"
     if elapsed:
         headline = f"{headline} in {result.elapsed:.1f}s"
     return [
@@ -424,6 +395,10 @@ def _totals_lines(result: RunResult, *, elapsed: bool) -> list[str]:
         *_counts_line("Sites", summary["sites"]),
         *_counts_line("Operations", summary["operations"]),
     ]
+
+
+def _succeeded(result: RunResult) -> bool:
+    return result.status is RunStatus.SUCCEEDED and not result.interrupted
 
 
 def _no_work_line(result: RunResult) -> str | None:
@@ -504,7 +479,6 @@ def _render_publishable_plain(result: RunResult) -> str:
     document = _publishable_document(result, engine_version="")
     lines = _heading("Deployment summary")
     lines.extend(_totals_lines(result, elapsed=False))
-    lines.append("  Readiness and functionality: not assessed.")
     no_work = _no_work_line(result)
     if no_work is not None:
         lines.append(no_work)
@@ -514,7 +488,7 @@ def _render_publishable_plain(result: RunResult) -> str:
         for diagnostic in document["diagnostics"]:
             lines.extend(
                 _wrap(
-                    f"{diagnostic['severity']}: {diagnostic['summary']}",
+                    sanitize(f"{diagnostic['severity']}: {diagnostic['summary']}"),
                     indent="    ",
                     hanging="      ",
                 )
@@ -523,7 +497,7 @@ def _render_publishable_plain(result: RunResult) -> str:
     if next_action is not None:
         lines.extend(["", *_wrap(next_action)])
     lines.append("")
-    return "\n".join(lines) + "\n"
+    return "\n".join(sanitize(line) for line in lines) + "\n"
 
 
 def _operation_progress(site: SiteResult) -> str:
@@ -547,9 +521,9 @@ def _operation_progress(site: SiteResult) -> str:
 def _name_column_width(sites: tuple[SiteResult, ...]) -> int:
     """Size the name column to the sites that fit, never by truncating one."""
     lengths = [
-        len(site.target)
+        len(sanitize(site.target))
         for site in sites
-        if len(site.target) <= _NAME_COLUMN_LIMIT
+        if len(sanitize(site.target)) <= _NAME_COLUMN_LIMIT
     ]
     return max(lengths, default=0)
 
@@ -560,9 +534,10 @@ def _site_row(site: SiteResult, width: int) -> list[str]:
         f"{_operation_progress(site)}  {site.elapsed:.1f}s"
     )
     marker = _SITE_MARKERS[site.status]
-    if len(site.target) > width:
-        return [f"  {marker} {site.target}", f"      {detail}"]
-    return [f"  {marker} {site.target:<{width}}  {detail}"]
+    target = sanitize(site.target)
+    if len(target) > width:
+        return [f"  {marker} {target}", f"      {detail}"]
+    return [f"  {marker} {target:<{width}}  {detail}"]
 
 
 def _incomplete_lines(result: RunResult) -> list[str]:
@@ -581,8 +556,8 @@ def _incomplete_lines(result: RunResult) -> list[str]:
             if reason is not None
             else _status_word(site.status.value)
         )
-        lines.append(f"  {_SITE_MARKERS[site.status]} {site.target}")
-        lines.extend(_wrap(detail, indent="      "))
+        lines.append(f"  {_SITE_MARKERS[site.status]} {sanitize(site.target)}")
+        lines.extend(_wrap(sanitize(detail), indent="      "))
         for operation in site.operations:
             if (
                 operation.status is OperationStatus.UNKNOWN
@@ -590,8 +565,10 @@ def _incomplete_lines(result: RunResult) -> list[str]:
             ):
                 lines.extend(
                     _wrap(
-                        f"{operation.identity.step}: unconfirmed deployment "
-                        f"{operation.deployment_name}",
+                        sanitize(
+                            f"{operation.identity.step}: unconfirmed deployment "
+                            f"{operation.deployment_name}"
+                        ),
                         indent="      ",
                     )
                 )
@@ -604,7 +581,8 @@ def render_plain_run(result: RunResult, *, redacted: bool) -> str:
     Rows size themselves to the sites in hand instead of a fixed wide table,
     and a name longer than the column keeps its own line rather than being
     cut, because a truncated target name is no longer an identity an operator
-    can act on.
+    can act on. Target, step and reason text is shown with control
+    characters escaped.
     """
     if redacted:
         return _render_publishable_plain(result)
@@ -616,7 +594,6 @@ def render_plain_run(result: RunResult, *, redacted: bool) -> str:
     if result.sites:
         lines.append("")
     lines.extend(_totals_lines(result, elapsed=True))
-    lines.append("  Readiness and functionality: not assessed.")
     no_work = _no_work_line(result)
     if no_work is not None:
         lines.append(no_work)
@@ -627,8 +604,10 @@ def render_plain_run(result: RunResult, *, redacted: bool) -> str:
         for diagnostic in result.diagnostics:
             lines.extend(
                 _wrap(
-                    f"{diagnostic.severity.value}: "
-                    f"{diagnostic.private_detail or diagnostic.summary}",
+                    sanitize(
+                        f"{diagnostic.severity.value}: "
+                        f"{diagnostic.private_detail or diagnostic.summary}"
+                    ),
                     indent="    ",
                     hanging="      ",
                 )
@@ -637,7 +616,8 @@ def render_plain_run(result: RunResult, *, redacted: bool) -> str:
     if next_action is not None:
         lines.extend(["", *_wrap(next_action)])
     lines.append("")
-    return "\n".join(lines) + "\n"
+    return "\n".join(sanitize(line) for line in lines) + "\n"
+
 
 class TextProgressReporter:
     """Serialize human progress writes to one text stream."""
@@ -651,20 +631,26 @@ class TextProgressReporter:
     def _target(self, event: ProgressEvent) -> str:
         if self._redacted:
             return "<site>"
-        return event.target or (
+        return sanitize(event.target or (
             event.operation.target
             if event.operation is not None
             else "<site>"
-        )
+        ))
 
     def _step(self, event: ProgressEvent) -> str:
         if self._redacted:
             return "<step>"
-        return (
+        return sanitize(
             event.operation.step
             if event.operation is not None
             else "<step>"
         )
+
+    def message(self, text: str) -> None:
+        """Write one fixed status line, serialized with semantic progress."""
+        with self._lock:
+            self._stream.write(sanitize(text) + "\n")
+            self._stream.flush()
 
     def __call__(self, event: ProgressEvent) -> None:
         with self._lock:
@@ -718,14 +704,7 @@ class TextProgressReporter:
                 f"({kind})...\n"
             )
         if event.kind is ProgressEventKind.OPERATION_FINISHED:
-            symbol = {
-                OperationStatus.SUCCEEDED: "+",
-                OperationStatus.FAILED: "x",
-                OperationStatus.SKIPPED: "-",
-                OperationStatus.NOT_RUN: "-",
-                OperationStatus.CANCELLED: "-",
-                OperationStatus.UNKNOWN: "?",
-            }[event.operation_status]
+            symbol = _OPERATION_MARKERS[event.operation_status]
             suffix = ""
             if event.reason is not None:
                 detail = (
@@ -733,7 +712,7 @@ class TextProgressReporter:
                     if self._redacted
                     else event.reason.local_message()
                 )
-                suffix = f": {detail}"
+                suffix = f": {sanitize(detail)}"
             return (
                 f"[{self._target(event)}] {symbol} {self._step(event)}"
                 f"{suffix}\n"
@@ -745,12 +724,12 @@ class TextProgressReporter:
             )
         if event.kind is ProgressEventKind.TARGET_BLOCKED:
             return (
-                f"[{self._target(event)}] - blocked: "
-                f"{event.reason.summary if event.reason else 'not run'}\n"
+                f"[{self._target(event)}] {terminal.NOT_RUN} blocked: "
+                f"{sanitize(event.reason.summary) if event.reason else 'not run'}\n"
             )
         if event.kind is ProgressEventKind.TARGET_FINISHED:
             status = event.site_status
-            marker = _SITE_MARKERS[status] if status is not None else "-"
+            marker = _SITE_MARKERS[status] if status is not None else terminal.NOT_RUN
             word = (
                 _status_word(status.value)
                 if status is not None

@@ -501,6 +501,50 @@ def test_guided_resource_read_failure_stops_before_plan_or_execution(
             assert result["status"] == "invalid"
 
 
+@pytest.mark.parametrize("command", ["inputs", "plan", "deploy"])
+@pytest.mark.parametrize("output", ["plain", "json"])
+@pytest.mark.parametrize(
+    ("read_error", "remedy"),
+    [
+        ("TOOL_MISSING", "https://aka.ms/installazurecli"),
+        ("NOT_LOGGED_IN", "Run `az login`"),
+        ("FORBIDDEN", "read access"),
+        ("SUBSCRIPTION_MISSING", "not visible to the account signed in to Azure CLI"),
+    ],
+)
+def test_resource_read_failure_shows_its_remedy(
+    guided_workspace, tmp_path, capsys, command, output, read_error, remedy,
+):
+    workspace = _resource_workspace(guided_workspace)
+    answers = _resource_answers(tmp_path / "answers.yaml")
+
+    class Reader:
+        identity = SimpleNamespace(name="azure-cli", version=None)
+
+        def read(self, ref, *, facts=frozenset()):
+            raise ArmResourceError(read_error)
+
+    args = ["-w", str(workspace), command, _manifest(workspace), "--input-file", str(answers)]
+    if output == "json":
+        args.extend(["--output", "json"])
+    if command == "inputs":
+        args.append("--read-resources")
+    if command == "deploy":
+        args.append("--yes")
+    if command == "plan":
+        args.append("--describe")
+    with (
+        patch("siteops.cli.new_arm_reader", return_value=Reader()),
+        patch.object(Orchestrator, "build_plan", side_effect=AssertionError("No plan")),
+        patch.object(Orchestrator, "execute_plan", side_effect=AssertionError("No execution")),
+    ):
+        assert _invoke(args) == 1
+    captured = capsys.readouterr()
+    assert f"inputs.resource.{read_error.lower().replace('_', '-')}" in captured.out + captured.err
+    assert remedy in captured.out + captured.err
+    assert _CLUSTER_ID not in captured.out + captured.err
+
+
 def test_cancelled_reader_setup_is_not_reported_as_provider_unavailable(
     guided_workspace, tmp_path, capsys,
 ):
@@ -1042,13 +1086,15 @@ def test_manifest_without_contract_accepts_complete_site_only(
     ]
 
 
-def test_multiline_plan_description_keeps_each_line_in_the_plan(complete_workspace, capsys):
+def test_plan_shows_the_first_description_paragraph_as_prose(complete_workspace, capsys):
     path = Path(_manifest(complete_workspace))
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
-    document["description"] = "First line.\nSecond line."
+    document["description"] = "First line.\nSecond line.\n\nLater paragraph."
     path.write_text(yaml.safe_dump(document), encoding="utf-8")
     assert _invoke(["-w", str(complete_workspace), "plan", str(path), "--describe"]) == 0
-    assert "\n  First line.\n  Second line.\n" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "\n  First line. Second line.\n" in output
+    assert "Later paragraph." not in output
 
 
 @pytest.mark.parametrize("entry", ["aio-install", "secretsync"])

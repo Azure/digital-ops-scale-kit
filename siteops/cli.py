@@ -24,6 +24,9 @@ import os
 import signal
 import sys
 import threading
+import time
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from pathlib import Path
 from types import FrameType
@@ -31,7 +34,7 @@ from typing import Any, Callable
 
 import yaml
 
-from siteops import __version__
+from siteops import __version__, terminal
 from siteops.arm_resources import ArmResourceError, new_arm_reader
 from siteops.artifacts import ArtifactError
 from siteops.browse import (
@@ -42,7 +45,6 @@ from siteops.browse import (
     inspect_content,
     validate_browse_options,
 )
-from siteops.browse_output import _text as _content_text
 from siteops.browse_output import render_browse_plain, serialize_browse_json
 from siteops.command_context import (
     acquire_release,
@@ -112,6 +114,7 @@ from siteops.sanitize import (
     report_parameter_selection_error,
     report_site_load_error,
 )
+from siteops.terminal import sanitize as _content_text
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -156,7 +159,7 @@ def _command_manifest(args: argparse.Namespace) -> Path | None:
                 "lookup.missing", "Manifest not found.", (str(path),)
             )
     except (ManifestSelectionError, BrowseError) as error:
-        print(f"Error: {error}", file=sys.stderr)
+        print(f"Error: {_multiline_text(str(error))}", file=sys.stderr)
         if isinstance(error, ManifestSelectionError) and error.paths and not is_redaction_enabled():
             print("Explicit paths:", file=sys.stderr)
             for choice in error.paths:
@@ -164,8 +167,16 @@ def _command_manifest(args: argparse.Namespace) -> Path | None:
         return None
     if isinstance(args.manifest, str) and not is_explicit_manifest_path(args.manifest):
         if not is_redaction_enabled():
-            print(f"Manifest: {_content_text(str(path))}", file=sys.stderr)
+            print(f"Manifest: {_content_text(_workspace_relative(path, args.workspace))}", file=sys.stderr)
     return path
+
+
+def _workspace_relative(path: Path, workspace: Path | None) -> str:
+    """Name a resolved manifest by its workspace path rather than an absolute one."""
+    try:
+        return path.resolve().relative_to(Path(workspace).resolve()).as_posix()
+    except (TypeError, ValueError, OSError):
+        return path.name
 
 
 def _progress(args: argparse.Namespace) -> TextProgressReporter:
@@ -174,6 +185,45 @@ def _progress(args: argparse.Namespace) -> TextProgressReporter:
         reporter = TextProgressReporter(sys.stderr, redacted=is_redaction_enabled())
         args._progress_reporter = reporter
     return reporter
+
+
+_HEARTBEAT_FIRST_SECONDS = 10.0
+_HEARTBEAT_INTERVAL_SECONDS = 30.0
+
+
+@contextmanager
+def _preparation_heartbeat(args: argparse.Namespace) -> Iterator[None]:
+    """Report elapsed preparation time while executable planning is silent.
+
+    The first line follows a short delay and later lines are at most one per
+    interval. The worker is joined before the block exits, including on
+    interruption.
+    """
+    reporter = _progress(args)
+    stop = threading.Event()
+    started = time.monotonic()
+
+    def beat() -> None:
+        delay = _HEARTBEAT_FIRST_SECONDS
+        while not stop.wait(delay):
+            reporter.message(
+                "Still preparing: compiling templates and checking local tools, "
+                f"{time.monotonic() - started:.0f}s elapsed."
+            )
+            delay = _HEARTBEAT_INTERVAL_SECONDS
+
+    worker = threading.Thread(target=beat, name="siteops-preparation-heartbeat")
+    worker.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        worker.join()
+
+
+def _multiline_text(text: str) -> str:
+    """Escape control characters in multiline text while keeping its line breaks."""
+    return "\n".join(terminal.sanitize_lines(text))
 
 
 def _context_options(args: argparse.Namespace) -> dict[str, Any]:
@@ -223,13 +273,9 @@ def cmd_project(args: argparse.Namespace) -> int:
             require_separate_cache(root, cache_root)
             previous = read_pin(root) if pin_exists(root) else None
             cache = WorkspaceCache(cache_root)
-            print(
-                "Resolving and verifying the selected workspace release; "
-                "fetching missing package bytes may take time.",
-                file=sys.stderr, flush=True,
-            )
             selected = acquire_release(
                 request, cache, policy, trusted_root, workspace=args.release_workspace,
+                progress=_progress(args),
             )
             pin = WorkspacePin(selected)
             write_pin(root, pin, expected_previous=previous.sha256 if previous else None)
@@ -280,6 +326,10 @@ def cmd_source(args: argparse.Namespace) -> int:
                 )
             source = args.source or default_source(args.name)
             if args.trust_policy is None:
+                print(
+                    "Reading the current GitHub trusted root with the GitHub CLI...",
+                    file=sys.stderr, flush=True,
+                )
                 result = enroll_standard_source(args.name, source)
             else:
                 from siteops.workspace_cache import default_cache_root
@@ -528,11 +578,14 @@ def _validation_failure_result(
 
 def _write_plain_validation_errors(errors: list[str]) -> None:
     print(
-        f"\n✗ Validation failed with {len(errors)} error(s):\n",
+        f"\n{terminal.FAILED} Validation failed with {len(errors)} error(s):\n",
         file=sys.stderr,
     )
     for error in errors:
-        print(f"  • {error}", file=sys.stderr)
+        first, *rest = terminal.sanitize_lines(error)
+        print(f"  {terminal.BULLET} {first}", file=sys.stderr)
+        for line in rest:
+            print(f"    {line}", file=sys.stderr)
     print(file=sys.stderr)
 
 
@@ -746,7 +799,10 @@ def _resolve_typed_site(
                 if references else reader.read(resource.ref, facts=resource.required_facts)
             )
         except ArmResourceError as error:
-            raise ResourceReadError(error.code.lower().replace("_", "-"), f"Input '{name}' read failed.") from None
+            # The error text is fixed per code and carries the remedy.
+            raise ResourceReadError(
+                error.code.lower().replace("_", "-"), f"Input '{name}' read failed. {error}"
+            ) from None
         contract.validate_resource_observation(resource, bound, observations[name])
         if (
             getattr(args, "command", None) == "deploy"
@@ -943,7 +999,7 @@ def cmd_inputs(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
                     print("Use --example FILE to write an incomplete answer file.")
             print("Review prerequisites and effects with `siteops browse`.")
     except (OSError, ValueError, yaml.YAMLError) as error:
-        print(f"Error: {_guided_error_detail(error)}", file=sys.stderr)
+        print(f"Error: {_multiline_text(_guided_error_detail(error))}", file=sys.stderr)
         return 130 if _is_cancelled_read(error) else 1
     return 0
 
@@ -975,25 +1031,26 @@ def cmd_plan(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     if explicit_site is not None:
         _announce_explicit_site(args, explicit_site)
     try:
+        site_options = {"sites": [explicit_site]} if explicit_site is not None else {}
         if intent is PlanIntent.EXECUTABLE:
             _progress(args)(ProgressEvent(
                 kind=ProgressEventKind.PHASE_STARTED, phase=ProgressPhase.PREPARATION,
             ))
-        site_options = {"sites": [explicit_site]} if explicit_site is not None else {}
-        result = orchestrator.build_plan(
-            manifest_path,
-            selector,
-            intent=intent,
-            parallel_override=getattr(args, "parallel", None),
-            **site_options,
-        )
+        with _preparation_heartbeat(args) if intent is PlanIntent.EXECUTABLE else nullcontext():
+            result = orchestrator.build_plan(
+                manifest_path,
+                selector,
+                intent=intent,
+                parallel_override=getattr(args, "parallel", None),
+                **site_options,
+            )
     except (CompositionError, ParameterSelectionError) as error:
         detail = (
             report_composition_error(error)
             if isinstance(error, CompositionError)
             else report_parameter_selection_error(error)
         )
-        print(f"\nError: {detail}\n", file=sys.stderr)
+        print(f"\nError: {_multiline_text(detail)}\n", file=sys.stderr)
         return 1
     except NoTargetingError:
         result = PlanBuildResult(
@@ -1117,7 +1174,7 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
             result = preparation_failure_result(failed)
             _write_run_result(result, json_output=True, projection=projection)
             return result.exit_code
-        print(f"Error: {_guided_error_detail(error)}", file=sys.stderr)
+        print(f"Error: {_multiline_text(_guided_error_detail(error))}", file=sys.stderr)
         return 1
     if explicit_site is not None:
         _announce_explicit_site(args, explicit_site)
@@ -1129,18 +1186,21 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
             kind=ProgressEventKind.PHASE_STARTED, phase=ProgressPhase.PREPARATION,
         ))
         site_options = {"sites": [explicit_site]} if explicit_site is not None else {}
-        prepared = orchestrator.build_plan(
-            manifest_path,
-            selector=getattr(args, "selector", None),
-            parallel_override=getattr(args, "parallel", None),
-            intent=PlanIntent.EXECUTABLE,
-            **site_options,
-        )
+        with _preparation_heartbeat(args):
+            prepared = orchestrator.build_plan(
+                manifest_path,
+                selector=getattr(args, "selector", None),
+                parallel_override=getattr(args, "parallel", None),
+                intent=PlanIntent.EXECUTABLE,
+                **site_options,
+            )
         if not prepared.executable:
             raise PlanNotExecutableError(prepared)
         if not getattr(args, "yes", False) and prepared.plan.targets:
             _require_interactive_deployment(args)
-            rendered = render_plain_plan(prepared, redacted=False)
+            rendered = render_plain_plan(
+                prepared, redacted=False, width=terminal.line_width(sys.stderr),
+            )
             print("\n".join(_content_text(line) for line in rendered.split("\n")), file=sys.stderr, end="")
             print("Deploy this plan? [y/N] ", file=sys.stderr, end="", flush=True)
             if sys.stdin.readline().strip().casefold() not in {"y", "yes"}:
@@ -1172,7 +1232,7 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
             if isinstance(e, CompositionError)
             else report_parameter_selection_error(e)
         )
-        print(f"\nError: {detail}\n", file=sys.stderr)
+        print(f"\nError: {_multiline_text(detail)}\n", file=sys.stderr)
         return 1
     except PlanNotExecutableError as e:
         if json_output:
@@ -1181,7 +1241,7 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
             return result.exit_code
         print(
             f"\nError: "
-            f"{e.message(redacted=is_redaction_enabled())}\n",
+            f"{_multiline_text(e.message(redacted=is_redaction_enabled()))}\n",
             file=sys.stderr,
         )
         return 1
@@ -1202,7 +1262,7 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
             if is_redaction_enabled()
             else str(e)
         )
-        print(f"\nError: {detail}\n", file=sys.stderr)
+        print(f"\nError: {_multiline_text(detail)}\n", file=sys.stderr)
         return 1
     finally:
         if restore_signal_handler is not None:
@@ -1274,7 +1334,7 @@ def cmd_validate(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         _write_plain_validation_errors(errors)
         return 1
 
-    print(f"\n✓ Manifest is valid: {manifest_path.name}\n")
+    print(f"\n{terminal.SUCCEEDED} Manifest is valid: {_content_text(manifest.name)}\n")
     if explicit_site is None and not selector and not manifest.sites and not manifest.site_selector:
         print(
             "  Note: library manifest (no `sites:` or `selector:`). "
@@ -1296,7 +1356,7 @@ def _origin_suffix(prov: dict[str, str] | None, key: str) -> str:
     origin = prov.get(key)
     if origin is None:
         return ""
-    return f"  # {origin}"
+    return f"  # {_content_text(origin)}"
 
 
 # Substrings (case-insensitive) that mark a config key as carrying a secret.
@@ -1352,6 +1412,22 @@ def _redact_sensitive(value: Any, key: Any = None) -> Any:
     return value
 
 
+def _yaml_value(value: Any) -> str:
+    """Show a value on one line as YAML writes it inline, such as `false` or `[a, b]`."""
+    if isinstance(value, str) and value == _REDACTED:
+        return value
+    try:
+        text = yaml.safe_dump(
+            value, default_flow_style=True, allow_unicode=True,
+            width=2**31 - 1, sort_keys=False,
+        ).removesuffix("\n").removesuffix("\n...")
+    except yaml.YAMLError:
+        text = str(value)
+    if "\n" in text:
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    return _content_text(text)
+
+
 def _print_value(
     value: Any,
     indent: int = 6,
@@ -1360,8 +1436,9 @@ def _print_value(
 ) -> None:
     """Recursively print a value with proper indentation.
 
-    When `prov` is provided, every leaf line is appended with a
-    `# <origin>` comment showing the source file the value came from.
+    Scalars and simple lists use inline YAML spelling. When `prov` is
+    provided, every leaf line is appended with a `# <origin>` comment showing
+    the source file the value came from.
 
     Args:
         value: The value to print (can be dict, list, or scalar)
@@ -1373,37 +1450,31 @@ def _print_value(
     if isinstance(value, dict):
         for k, v in value.items():
             sub_key = f"{key_prefix}.{k}" if key_prefix else k
-            if isinstance(v, dict):
-                print(f"{prefix}{k}:")
+            label = _content_text(str(k))
+            if isinstance(v, dict) and v:
+                print(f"{prefix}{label}:")
                 _print_value(v, indent + 2, prov=prov, key_prefix=sub_key)
-            elif isinstance(v, list):
-                origin = _origin_suffix(prov, sub_key)
-                if len(v) == 0:
-                    print(f"{prefix}{k}: []{origin}")
-                elif all(isinstance(item, (str, int, float, bool, type(None))) for item in v):
-                    # Simple list - print inline
-                    print(f"{prefix}{k}: {v}{origin}")
-                else:
-                    # Complex list - print each item
-                    print(f"{prefix}{k}:{origin}")
-                    for i, item in enumerate(v):
-                        if isinstance(item, dict):
-                            print(f"{prefix}  [{i}]:")
-                            _print_value(item, indent + 4, prov=prov, key_prefix=f"{sub_key}.{i}")
-                        else:
-                            print(f"{prefix}  - {item}")
+            elif isinstance(v, list) and v and not all(
+                isinstance(item, (str, int, float, bool, type(None))) for item in v
+            ):
+                print(f"{prefix}{label}:{_origin_suffix(prov, sub_key)}")
+                for i, item in enumerate(v):
+                    if isinstance(item, dict):
+                        print(f"{prefix}  [{i}]:")
+                        _print_value(item, indent + 4, prov=prov, key_prefix=f"{sub_key}.{i}")
+                    else:
+                        print(f"{prefix}  - {_yaml_value(item)}")
             else:
-                origin = _origin_suffix(prov, sub_key)
-                print(f"{prefix}{k}: {v}{origin}")
+                print(f"{prefix}{label}: {_yaml_value(v)}{_origin_suffix(prov, sub_key)}")
     elif isinstance(value, list):
         for i, item in enumerate(value):
             if isinstance(item, dict):
                 print(f"{prefix}[{i}]:")
                 _print_value(item, indent + 2)
             else:
-                print(f"{prefix}- {item}")
+                print(f"{prefix}- {_yaml_value(item)}")
     else:
-        print(f"{prefix}{value}")
+        print(f"{prefix}{_yaml_value(value)}")
 
 
 def _site_document(site: Site) -> dict[str, Any]:
@@ -1438,14 +1509,37 @@ def _require_json_mapping_keys(value: Any) -> None:
             _require_json_mapping_keys(item)
 
 
+def _site_rows(sites: list[Site]) -> list[str]:
+    """One aligned line per Site: name, location, resource group and labels."""
+    rows = [("Name", "Location", "Resource group", "Labels")]
+    for site in sites:
+        rows.append((
+            _content_text(site.name),
+            _content_text(site.location),
+            _content_text(site.resource_group) if site.resource_group else "(subscription)",
+            _content_text(", ".join(
+                f"{key}={value}" for key, value in sorted(site.labels.items())
+            )),
+        ))
+    widths = [max(len(row[column]) for row in rows) for column in range(3)]
+    return [
+        "  " + "  ".join(
+            (*(row[column].ljust(widths[column]) for column in range(3)), row[3])
+        ).rstrip()
+        for row in rows
+    ]
+
+
 def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     """List available sites in the workspace.
 
     A bare `siteops sites` lists every site. Pass a positional `name`
     (filename without extension, or the internal `name:` field) to
     scope to one site, equivalent to `-l name=<NAME>`. Every format uses the
-    same inheritance and overlay resolution. YAML emits one Site document
-    per match, while JSON emits one array regardless of the match count.
+    same inheritance and overlay resolution. Plain output lists several
+    Sites one per line and shows one selected Site, or every Site with
+    `--show-sources`, in full. YAML emits one Site document per match,
+    while JSON emits one array regardless of the match count.
     These are private inspection views with sensitive-key masking, not
     publication projections or lossless exports.
     """
@@ -1476,7 +1570,7 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
             selector = parse_selector(selector_str)
         except ValueError as e:
             detail = "Invalid site selector." if is_redaction_enabled() else str(e)
-            print(f"\nError: {detail}\n", file=sys.stderr)
+            print(f"\nError: {_multiline_text(detail)}\n", file=sys.stderr)
             return 1
         # Use filter_sites for parity with deploy: trusted-file fast
         # path resolves path-form names like `regions/eu/munich-dev`.
@@ -1486,13 +1580,13 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
             # `sites` is the command an operator reaches for to find out why a
             # site was rejected, so it has to report that rather than raise
             # through as a traceback.
-            print(f"\nError: {report_site_load_error(e)}\n", file=sys.stderr)
+            print(f"\nError: {_multiline_text(report_site_load_error(e))}\n", file=sys.stderr)
             return 1
     else:
         try:
             sites = orchestrator.load_all_sites()
         except (ValueError, FileNotFoundError) as e:
-            print(f"\nError: {report_site_load_error(e)}\n", file=sys.stderr)
+            print(f"\nError: {_multiline_text(report_site_load_error(e))}\n", file=sys.stderr)
             return 1
 
     if not sites:
@@ -1504,7 +1598,7 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
             names = (
                 "<site identities omitted>"
                 if is_redaction_enabled()
-                else ", ".join(name for name, _ in orchestrator.skipped_sites)
+                else ", ".join(_content_text(name) for name, _ in orchestrator.skipped_sites)
             )
             print(
                 f"\nError: no site could be loaded. "
@@ -1521,7 +1615,7 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
             message = (
                 "No sites matched selector."
                 if is_redaction_enabled()
-                else f"No sites matched selector: {selector_str}"
+                else f"No sites matched selector: {_content_text(selector_str)}"
             )
             print(f"\n{message}\n", file=sys.stderr)
             return 1
@@ -1573,16 +1667,22 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         args, show_sources, "sites", "--show-sources", "the source file of each value"
     )
 
-    # Display header
-    print()
-    print("═" * 60)
-    print(f"  Available Sites ({len(sites)})")
+    ordered = sorted(sites, key=lambda s: s.name)
+    for line in terminal.heading(f"Sites ({len(ordered)})", blank_after=False):
+        print(line)
     if selector_str:
-        print(f"  (filtered by: {selector_str})")
-    print("═" * 60)
+        print(f"  Selector: {_content_text(selector_str)}")
     print()
 
-    for site in sorted(sites, key=lambda s: s.name):
+    if len(ordered) > 1 and not show_sources:
+        for line in _site_rows(ordered):
+            print(line)
+        print()
+        print("  Run `siteops sites NAME` for the resolved configuration of one Site.")
+        print()
+        return 0
+
+    for site in ordered:
         # With --show-sources, re-load with provenance so each leaf line
         # can be annotated with the source file the value came from
         # (after inherits + overlay merge). Skipped otherwise
@@ -1592,21 +1692,25 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
             try:
                 _, prov = orchestrator.load_site_with_provenance(site.name)
             except (FileNotFoundError, ValueError) as e:
-                print(f"  {site.name}  # provenance unavailable: {e}")
+                print(f"  {_content_text(site.name)}  # provenance unavailable: {_content_text(str(e))}")
                 continue
 
-        print(f"  {site.name}")
-        print(f"    subscription:   {site.subscription}{_origin_suffix(prov, 'subscription')}")
-        print(
-            f"    resourceGroup:  {site.resource_group}"
-            f"{_origin_suffix(prov, 'resourceGroup')}"
-        )
-        print(f"    location:       {site.location}{_origin_suffix(prov, 'location')}")
+        print(f"  {_content_text(site.name)}")
+        print(f"    subscription:   {_yaml_value(site.subscription)}{_origin_suffix(prov, 'subscription')}")
+        if site.resource_group:
+            print(
+                f"    resourceGroup:  {_yaml_value(site.resource_group)}"
+                f"{_origin_suffix(prov, 'resourceGroup')}"
+            )
+        print(f"    location:       {_yaml_value(site.location)}{_origin_suffix(prov, 'location')}")
 
         if site.labels:
             print("    labels:")
             for key, value in sorted(site.labels.items()):
-                print(f"      {key}: {value}{_origin_suffix(prov, f'labels.{key}')}")
+                print(
+                    f"      {_content_text(str(key))}: {_yaml_value(value)}"
+                    f"{_origin_suffix(prov, f'labels.{key}')}"
+                )
 
         if site.properties:
             print("    properties:")
@@ -1914,8 +2018,9 @@ Examples:
         "sites",
         help="List available sites",
         description=(
-            "List selected Site configuration from the operator project or local workspace. Pass a positional name "
-            "(filename or internal `name:`) to scope to one site."
+            "List selected Site configuration from the operator project or local workspace. Plain output "
+            "shows several Sites one per line. Pass a positional name (filename or internal `name:`) "
+            "to show one Site's resolved configuration."
         ),
     )
     p_sites.add_argument(
@@ -2266,11 +2371,8 @@ Examples:
                     else:
                         print(
                             f"Source: {_content_text(selected.source.reference)} "
-                            f"@ {_content_text(selected.source.release)}\n"
-                            f"Workspace: {_content_text(selected.entry.workspace)}\n"
-                            f"Kit: {_content_text(selected.entry.kit_id)} {_content_text(selected.entry.kit_version)}\n"
-                            f"Revision: {_content_text(selected.source.revision)}\n"
-                            f"Package SHA-256: {selected.entry.package.sha256}",
+                            f"@ {_content_text(selected.source.release)}, "
+                            f"workspace {_content_text(selected.entry.workspace)} (verified package)",
                             file=sys.stderr,
                         )
                 else:
@@ -2297,7 +2399,7 @@ Examples:
         exit_code = 130
     except (FileNotFoundError, ValueError) as error:
         detail = str(error) if isinstance(error, ArtifactError) or not is_redaction_enabled() else "Command preparation failed."
-        print(f"Error: {detail}", file=sys.stderr)
+        print(f"Error: {_multiline_text(detail)}", file=sys.stderr)
         if isinstance(error, ManifestSelectionError) and not is_redaction_enabled():
             for choice in error.paths:
                 print(f"Explicit path: {_content_text(explicit_manifest_reference(choice))}", file=sys.stderr)

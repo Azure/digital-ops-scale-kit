@@ -335,8 +335,11 @@ operation remains deferred until that output resolves.
 | `when` | no | Condition. See [Conditional steps](#conditional-steps). |
 
 Site Ops reaches the cluster through an `az connectedk8s proxy` session that
-it opens for the step. `plan` checks that `kubectl` and Azure CLI are
-available on the machine running Site Ops.
+it opens for the step. `plan` and `deploy` check that `kubectl`, Azure CLI and
+its connectedk8s extension are available on the machine running Site Ops. The
+cluster also needs cluster connect enabled, and the account signed in to Azure
+CLI needs Kubernetes permissions for the step. See
+[Azure CLI and az login](install-siteops.md#azure-cli-and-az-login).
 
 Authored local paths must remain inside the workspace, and URLs must use
 HTTPS. When the content comes from a verified workspace package, `files` must

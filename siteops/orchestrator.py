@@ -33,6 +33,8 @@ from siteops.compilation import (
     PreparedTemplateUnit,
     TemplateCompilationSession,
     TemplateKind,
+    ToolIdentity,
+    VersionProvenance,
     detect_template_kind,
 )
 from siteops.composition import (
@@ -47,11 +49,15 @@ from siteops.composition import (
     report_composition_error,
 )
 from siteops.executor import (
+    AZURE_CLI_INSTALL_URL,
+    CONNECTEDK8S_INSTALL_COMMAND,
     HTTPS_URL_PATTERN,
     AzCliExecutor,
+    AzureCliExtensionStatus,
     DeploymentResult,
     KubectlResult,
     WaitResult,
+    probe_azure_cli_extension,
 )
 from siteops.models import (
     CONDITION_PATTERN,
@@ -224,6 +230,94 @@ FOR_EACH_SITE_PROPERTY_PATTERN = re.compile(
 
 # Result type that can be a deployment, kubectl, or wait result
 StepResult = DeploymentResult | KubectlResult | WaitResult
+
+_KUBECTL_INSTALL_URL = "https://kubernetes.io/docs/tasks/tools/"
+
+# The Arc proxy runs through Azure CLI's connectedk8s extension, so its
+# provider is recorded with the extension version, as Bicep is.
+ARC_PROXY_PROVIDER = "azure-cli-connectedk8s"
+
+# Fixed text for every output destination: what each capability is needed for,
+# and how to provide it. Local plain output adds the step names and the
+# observed cause.
+_CAPABILITY_SUMMARIES = {
+    CapabilityKind.ARM_CONTROL_PLANE: (
+        "Azure CLI (`az`) is required for deployment and wait steps."
+    ),
+    CapabilityKind.BICEP_COMPILER: (
+        "A Bicep compiler is required for Bicep template steps."
+    ),
+    CapabilityKind.KUBECTL: "kubectl is required for kubectl steps.",
+    CapabilityKind.ARC_PROXY: (
+        "Azure CLI (`az`) and its connectedk8s extension are required for "
+        "kubectl steps."
+    ),
+}
+_CAPABILITY_REMEDIES = {
+    CapabilityKind.ARM_CONTROL_PLANE: (
+        "Deployment steps and wait steps run through Azure CLI. Install it "
+        f"from {AZURE_CLI_INSTALL_URL}, then rerun the command."
+    ),
+    CapabilityKind.BICEP_COMPILER: (
+        "Install the required local deployment tool, then rerun executable "
+        "planning."
+    ),
+    CapabilityKind.KUBECTL: (
+        f"Install kubectl from {_KUBECTL_INSTALL_URL}, then rerun the command."
+    ),
+    CapabilityKind.ARC_PROXY: (
+        "kubectl steps reach their cluster through "
+        "`az connectedk8s proxy`. Install Azure CLI from "
+        f"{AZURE_CLI_INSTALL_URL}, run `{CONNECTEDK8S_INSTALL_COMMAND}`, then "
+        "rerun the command."
+    ),
+}
+_CAPABILITY_PURPOSES = {
+    CapabilityKind.ARM_CONTROL_PLANE: (
+        "Azure CLI to submit ARM deployments or read resource tags"
+    ),
+    CapabilityKind.BICEP_COMPILER: "a Bicep compiler to compile the template",
+    CapabilityKind.KUBECTL: "kubectl to apply manifests to the cluster",
+    CapabilityKind.ARC_PROXY: (
+        "Azure CLI and its connectedk8s extension to reach the cluster "
+        "through `az connectedk8s proxy`"
+    ),
+}
+_CAPABILITY_INSTALL_HINTS = {
+    CapabilityKind.ARM_CONTROL_PLANE: (
+        f"Installation instructions are at {AZURE_CLI_INSTALL_URL}."
+    ),
+    CapabilityKind.BICEP_COMPILER: None,
+    CapabilityKind.KUBECTL: (
+        f"Installation instructions are at {_KUBECTL_INSTALL_URL}."
+    ),
+    CapabilityKind.ARC_PROXY: (
+        f"Installation instructions are at {AZURE_CLI_INSTALL_URL}. After "
+        f"installing, run `{CONNECTEDK8S_INSTALL_COMMAND}`."
+    ),
+}
+_CAPABILITY_LABELS = {
+    CapabilityKind.ARM_CONTROL_PLANE: "Azure CLI (`az`)",
+    CapabilityKind.BICEP_COMPILER: "a Bicep compiler",
+    CapabilityKind.KUBECTL: "kubectl",
+    CapabilityKind.ARC_PROXY: "Azure CLI with the connectedk8s extension",
+}
+
+
+def _steps_needing(required_by: tuple[OperationIdentity, ...]) -> str:
+    """Name the steps that need a capability, as a sentence subject."""
+    names = list(dict.fromkeys(identity.step for identity in required_by))
+    quoted = [f"'{name}'" for name in names]
+    if len(quoted) == 1:
+        return f"Step {quoted[0]} needs"
+    if len(quoted) > 3:
+        return f"Steps {', '.join(quoted[:3])} and {len(quoted) - 3} more need"
+    return f"Steps {', '.join(quoted[:-1])} and {quoted[-1]} need"
+
+
+def _capability_unavailable_detail(kinds: set[CapabilityKind]) -> str:
+    labels = [_CAPABILITY_LABELS[kind] for kind in CapabilityKind if kind in kinds]
+    return f"A required local tool is unavailable: {', '.join(labels)}."
 
 
 def _provider_completion_unknown(result: StepResult) -> bool:
@@ -4372,18 +4466,57 @@ class Orchestrator:
     @staticmethod
     def _capability_diagnostic(
         capability: CapabilityKind,
-        failure: CompilationFailure,
+        cause: str,
+        required_by: tuple[OperationIdentity, ...],
+        *,
+        remedy: str | None = None,
     ) -> PlanDiagnostic:
+        """Say which tool is missing, which steps need it, and how to fix it.
+
+        `cause` is the observed local fact. The summary and serialized detail
+        are fixed text, so every output destination can carry them.
+        """
+        if remedy is None:
+            remedy = _CAPABILITY_INSTALL_HINTS[capability]
+        purpose = (
+            f"{_steps_needing(required_by)} "
+            f"{_CAPABILITY_PURPOSES[capability]}."
+        )
         return PlanDiagnostic(
             code=f"capability.{capability.value}.missing",
             severity=DiagnosticSeverity.ERROR,
-            summary="A required local capability is unavailable.",
-            detail=failure.detail,
-            serialized_detail=(
-                "Install the required local deployment tool, then rerun "
-                "executable planning."
+            summary=_CAPABILITY_SUMMARIES[capability],
+            detail=" ".join(
+                part for part in (cause, purpose, remedy) if part
             ),
+            serialized_detail=_CAPABILITY_REMEDIES[capability],
         )
+
+    def _resolve_arc_proxy(
+        self,
+        azure_cli: ToolIdentity,
+    ) -> tuple[CapabilityStatus, CapabilityProviderIdentity | None]:
+        """Check once that Azure CLI has the connectedk8s extension.
+
+        The check reads local extension metadata only. An inconclusive result
+        stays unknown rather than blocking the plan.
+        """
+        probe = probe_azure_cli_extension(azure_cli.resolved_path)
+        if probe.status is AzureCliExtensionStatus.MISSING:
+            return CapabilityStatus.MISSING, None
+        provider = CapabilityProviderIdentity(
+            name=ARC_PROXY_PROVIDER,
+            version=probe.version,
+            version_provenance=(
+                VersionProvenance.KNOWN
+                if probe.version is not None
+                else VersionProvenance.UNKNOWN
+            ),
+            executable_path=azure_cli.resolved_path,
+        )
+        if probe.status is AzureCliExtensionStatus.INSTALLED:
+            return CapabilityStatus.AVAILABLE, provider
+        return CapabilityStatus.UNKNOWN, provider
 
     def _resolve_plan_capabilities(
         self,
@@ -4405,6 +4538,20 @@ class Orchestrator:
         ] = {}
         arm_control_plane_available = True
 
+        def mark_missing(
+            kind: CapabilityKind,
+            required_by: tuple[OperationIdentity, ...],
+        ) -> None:
+            capabilities.append(
+                PlanCapability(
+                    kind=kind,
+                    status=CapabilityStatus.MISSING,
+                    required_by=required_by,
+                )
+            )
+            for identity in required_by:
+                unavailable.setdefault(identity, set()).add(kind)
+
         for kind in CapabilityKind:
             required_by = requirements.get(kind)
             if not required_by:
@@ -4419,34 +4566,53 @@ class Orchestrator:
                 outcome = session.resolve_azure_cli()
 
             if isinstance(outcome, CompilationFailure):
-                capabilities.append(
-                    PlanCapability(
-                        kind=kind,
-                        status=CapabilityStatus.MISSING,
-                        required_by=required_by,
-                    )
-                )
-                for identity in required_by:
-                    unavailable.setdefault(identity, set()).add(kind)
+                mark_missing(kind, required_by)
                 if (
                     kind is not CapabilityKind.BICEP_COMPILER
                     or arm_control_plane_available
                 ):
                     diagnostics.append(
-                        self._capability_diagnostic(kind, outcome)
+                        self._capability_diagnostic(
+                            kind,
+                            outcome.detail or outcome.summary,
+                            required_by,
+                        )
                     )
                 if kind is CapabilityKind.ARM_CONTROL_PLANE:
                     arm_control_plane_available = False
                 continue
 
+            if kind is CapabilityKind.ARC_PROXY:
+                status, provider = self._resolve_arc_proxy(outcome)
+                if status is CapabilityStatus.MISSING:
+                    mark_missing(kind, required_by)
+                    diagnostics.append(
+                        self._capability_diagnostic(
+                            kind,
+                            "The Azure CLI connectedk8s extension is not "
+                            "installed.",
+                            required_by,
+                            remedy=(
+                                f"Run `{CONNECTEDK8S_INSTALL_COMMAND}`, then "
+                                "rerun the command."
+                            ),
+                        )
+                    )
+                    continue
+                capabilities.append(
+                    PlanCapability(
+                        kind=kind,
+                        status=status,
+                        required_by=required_by,
+                        provider=provider,
+                    )
+                )
+                continue
+
             capabilities.append(
                 PlanCapability(
                     kind=kind,
-                    status=(
-                        CapabilityStatus.UNKNOWN
-                        if kind is CapabilityKind.ARC_PROXY
-                        else CapabilityStatus.AVAILABLE
-                    ),
+                    status=CapabilityStatus.AVAILABLE,
                     required_by=required_by,
                     provider=CapabilityProviderIdentity.from_tool(
                         outcome
@@ -4744,9 +4910,10 @@ class Orchestrator:
                                     code=(
                                         SkipReasonCode.CAPABILITY_UNAVAILABLE
                                     ),
-                                    detail=(
-                                        "A required local capability is "
-                                        "unavailable."
+                                    detail=_capability_unavailable_detail(
+                                        unavailable_capabilities[
+                                            operation.identity
+                                        ]
                                     ),
                                 ),
                             )
@@ -4791,9 +4958,10 @@ class Orchestrator:
                                 code=(
                                     SkipReasonCode.CAPABILITY_UNAVAILABLE
                                 ),
-                                detail=(
-                                    "A required local capability is "
-                                    "unavailable."
+                                detail=_capability_unavailable_detail(
+                                    unavailable_capabilities[
+                                        operation.identity
+                                    ]
                                 ),
                             ),
                         )
@@ -6025,10 +6193,13 @@ class Orchestrator:
                 or capability.provider is None
             ):
                 continue
-            if capability.kind in {
-                CapabilityKind.ARM_CONTROL_PLANE,
-                CapabilityKind.ARC_PROXY,
-            } and capability.provider.name == "azure-cli":
+            if (
+                capability.kind is CapabilityKind.ARM_CONTROL_PLANE
+                and capability.provider.name == "azure-cli"
+            ) or (
+                capability.kind is CapabilityKind.ARC_PROXY
+                and capability.provider.name in {"azure-cli", ARC_PROXY_PROVIDER}
+            ):
                 candidate = capability.provider.executable_path
                 if candidate is None:
                     raise ValueError(

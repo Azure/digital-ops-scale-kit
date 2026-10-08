@@ -337,7 +337,9 @@ def test_pin_rejects_cache_overlap_before_directory_creation(tmp_path, monkeypat
     assert WorkspaceCache(cache.root).root == cache.root
 
 
-def test_pin_reports_progress_before_cold_acquisition(tmp_path, monkeypatch, capsys):
+def test_pin_reports_acquisition_phases(tmp_path, monkeypatch, capsys):
+    from siteops.results import ProgressEvent, ProgressEventKind, ProgressPhase
+
     target = tmp_path / "factory"
     monkeypatch.setenv("SITEOPS_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.setattr(sys, "argv", [
@@ -348,10 +350,9 @@ def test_pin_reports_progress_before_cold_acquisition(tmp_path, monkeypatch, cap
     ])
 
     def stop_acquisition(*args, **kwargs):
-        progress = capsys.readouterr().err
-        assert "Resolving and verifying" in progress
-        assert "may take time" in progress
-        assert str(target) not in progress
+        progress = acquirer.call_args.kwargs["progress"]
+        for phase in (ProgressPhase.RESOLUTION, ProgressPhase.DOWNLOAD, ProgressPhase.VERIFICATION):
+            progress(ProgressEvent(kind=ProgressEventKind.PHASE_STARTED, phase=phase))
         raise ProjectError("Fixture acquisition stopped.")
 
     with (
@@ -363,3 +364,11 @@ def test_pin_reports_progress_before_cold_acquisition(tmp_path, monkeypatch, cap
         with pytest.raises(SystemExit) as stopped:
             cli.main()
     assert stopped.value.code == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err.splitlines()[:3] == [
+        "Resolving the selected release...",
+        "Downloading missing content...",
+        "Checking source approval and content integrity...",
+    ]
+    assert str(target) not in output.err
