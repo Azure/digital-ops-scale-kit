@@ -41,6 +41,7 @@ Start with the changes that affect your workflow:
 | If you... | What to change |
 |---|---|
 | Installed Site Ops with `pip install -e .` | [Reinstall, or install an identified release](#site-ops-installation). |
+| Deploy with Azure CLI older than 2.70.0 | Run `az upgrade`. See [Azure CLI version](#azure-cli-version). |
 | Run `deploy` from a script or pipeline | Add [`--yes`](#deployment-confirmation). |
 | Preview with `deploy --dry-run` or `validate --plan` | Use [`siteops plan`](#plan-replaces-preview-options). |
 | Use `sites --render`, read plain `sites` output or run `sites` in CI | Review [site inspection](#inspect-sites). |
@@ -68,6 +69,21 @@ engine instead, use the command from the selected release:
 release wheel, or the [verified bootstrap](install-siteops.md#bootstrap-from-https).
 Deactivate or uninstall the editable installation first, then confirm the
 version with `siteops --version`.
+
+### Azure CLI version
+
+v1.0.0b6 accepted any Azure CLI version. `plan` and `deploy` now require Azure
+CLI 2.70.0 or newer for steps that use Azure CLI, the same minimum that the
+connectedk8s and azure-iot-ops extensions require. An older version blocks
+those steps before anything is submitted:
+
+```text
+error: Azure CLI 2.69.0 was found. Azure CLI 2.70.0 or newer is required. Run `az upgrade`, then retry.
+```
+
+`validate` and `browse` do not check Azure CLI. Deployments now run with
+`--no-prompt`, so a template parameter without a value fails at once instead
+of waiting for console input.
 
 ### Deployment confirmation
 

@@ -281,12 +281,11 @@ def _is_missing_parameter_prompt(stdout: str, stderr: str) -> bool:
 
 
 def _missing_parameter_message(stdout: str, stderr: str) -> str:
-    """Explain a deployment Azure CLI held back to ask for parameter values."""
+    """Explain a deployment that failed because template parameters have no value."""
     parts = [
-        "Azure CLI asked for template parameters that have no value, and Site "
-        "Ops runs it without input. No deployment was started. Add values for "
-        "them to the step's parameter files or the Site's parameters, then "
-        "retry."
+        "Template parameters have no value, so the deployment was rejected "
+        "before any resource changed. Add values for them to the step's "
+        "parameter files or the Site's parameters, then retry."
     ]
     asked = [match.group(0) for match in _AZ_PARAMETER_PROMPT_PATTERN.finditer(stdout or "")]
     if asked:
@@ -1653,7 +1652,8 @@ class AzCliExecutor:
             # stale in-memory OIDC assertion across the token-refresh boundary. Do NOT
             # replace the show poll below with `az deployment ... wait`: that is itself a
             # single long-lived process and reintroduces the same failure.
-            submit_args = create_args + ["--no-wait"]
+            # --no-prompt makes a missing parameter an error instead of a console prompt.
+            submit_args = create_args + ["--no-wait", "--no-prompt"]
 
             if self.dry_run:
                 # Log the intended submit. Never submit or poll in dry-run.
@@ -1740,7 +1740,8 @@ class AzCliExecutor:
             if ok:
                 return True, None
             if _is_missing_parameter_prompt(stdout, stderr):
-                # Azure CLI asks before it sends anything, so this is definite.
+                # Azure CLI names missing parameters before Azure Resource Manager
+                # validates the template, so no resource changed and this is definite.
                 return False, DeploymentResult(
                     success=False,
                     step_name=step_name,

@@ -433,14 +433,16 @@ fix. `siteops validate` and `siteops browse` need no Azure tools.
 
 | What the selected steps do | What you need |
 |---|---|
-| Deployment steps, wait steps, and resource reads such as `inputs --read-resources` or resource ID answers to `plan` and `deploy` | [Azure CLI](https://aka.ms/installazurecli). Bicep templates in local content compile with `az bicep build`. |
+| Deployment steps, wait steps, and resource reads such as `inputs --read-resources` or resource ID answers to `plan` and `deploy` | [Azure CLI](https://aka.ms/installazurecli) 2.70.0 or newer. Bicep templates in local content compile with `az bicep build`. |
 | `kubectl` steps on a cluster connected through Azure Arc | Azure CLI with the connectedk8s extension (`az extension add --name connectedk8s`), and kubectl. The cluster needs cluster connect enabled, and the account needs [Kubernetes permissions](ci-cd-setup.md#kubernetes-rbac-for-arc-proxy-operations). On first use, `az connectedk8s proxy` downloads its proxy binary. |
 
 Any `az login` mode works: an interactive user, device code, a service
 principal with a secret or certificate, a managed identity, or federated
 credentials in CI as shown in [CI/CD setup](ci-cd-setup.md). Each Site's
 subscription must be visible to that account. Run `az account list` to check
-before deploying.
+before deploying. Run `az upgrade` when `siteops plan` reports an older
+Azure CLI. The connectedk8s and azure-iot-ops extensions require the same
+minimum version.
 
 ## Install the release wheel
 

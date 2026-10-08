@@ -17,10 +17,14 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, TypeAlias
 
+from packaging.version import InvalidVersion, Version
+
 from siteops.process_args import prepare_process_args
 from siteops.runtime import RuntimePathError, RuntimePaths, prepare_root
 
 DEFAULT_COMPILATION_TIMEOUT_SECONDS = 300
+# The connectedk8s and azure-iot-ops extensions require this Azure CLI core version too.
+MINIMUM_AZURE_CLI_VERSION = "2.70.0"
 _NO_CONFIGURATION_DIGEST = "none"
 _ARM_JSON_COMPILER_FINGERPRINT = "arm-json"
 _BICEP_VERSION_PATTERN = re.compile(
@@ -49,6 +53,14 @@ CommandRunner: TypeAlias = Callable[
     subprocess.CompletedProcess[str],
 ]
 ToolResolver: TypeAlias = Callable[[str], str | None]
+
+
+def _version_below(version: str, minimum: str) -> bool:
+    """Compare a reported tool version. An unreadable version is not treated as too old."""
+    try:
+        return Version(version) < Version(minimum)
+    except InvalidVersion:
+        return False
 
 
 def resolve_tool_from_path(name: str) -> str | None:
@@ -1162,6 +1174,17 @@ class TemplateCompilationSession:
                 detail=(
                     "Azure CLI was found, but `az version` did not complete "
                     "successfully. Repair the installation and retry."
+                ),
+            )
+            return self._azure_cli
+        if version is not None and _version_below(version, MINIMUM_AZURE_CLI_VERSION):
+            self._azure_cli = CompilationFailure(
+                code=CompilationFailureCode.TOOL_UNAVAILABLE,
+                summary=f"Azure CLI {MINIMUM_AZURE_CLI_VERSION} or newer is required.",
+                detail=(
+                    f"Azure CLI {version} was found. Azure CLI "
+                    f"{MINIMUM_AZURE_CLI_VERSION} or newer is required. Run "
+                    "`az upgrade`, then retry."
                 ),
             )
             return self._azure_cli

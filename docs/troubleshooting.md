@@ -158,17 +158,28 @@ it is missing, sign in with an account that can access it, assign the service
 principal a role on it, or correct `subscription` in the Site. Then rerun the
 command.
 
-### "Azure CLI asked for template parameters that have no value"
+### "Azure CLI 2.70.0 or newer is required"
 
 ```
-Azure CLI asked for template parameters that have no value, and Site Ops runs it without input. No deployment was started. Add values for them to the step's parameter files or the Site's parameters, then retry. Azure CLI reported: ERROR: Missing input parameters: location
+error: Azure CLI 2.69.0 was found. Azure CLI 2.70.0 or newer is required. Run `az upgrade`, then retry.
+```
+
+**Cause**: `plan` or `deploy` selected steps that use Azure CLI, and the
+installed Azure CLI is older than 2.70.0. Nothing was submitted.
+
+**Solution**: Run `az upgrade`, or install a current release from
+https://aka.ms/installazurecli, then rerun the command.
+
+### "Template parameters have no value"
+
+```
+Template parameters have no value, so the deployment was rejected before any resource changed. Add values for them to the step's parameter files or the Site's parameters, then retry. Azure CLI reported: WARNING: Missing input parameters: location
 ```
 
 **Cause**: A template parameter without a default has no value in the step's
-parameter files or the Site's `parameters`. Azure CLI stops to ask for it
-before sending the deployment. Site Ops gives Azure CLI no input, so the step
-fails at once. On Windows the message quotes the question instead, such as
-`Azure CLI asked: Please provide string value for 'location'`.
+parameter files or the Site's `parameters`. Site Ops runs Azure CLI without
+prompts, so Azure CLI names the missing parameters and Azure Resource Manager
+rejects the template before any resource changes.
 
 **Solution**: Add the named parameters to the step's parameter files or the
 Site's `parameters`, review the plan with `siteops plan`, then rerun the

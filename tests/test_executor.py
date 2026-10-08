@@ -694,10 +694,10 @@ class TestDeployResourceGroup:
             )
 
         assert result.success is True
-        assert "--no-wait" in calls[0]
+        assert "--no-wait" in calls[0] and "--no-prompt" in calls[0]
         assert calls[0][:3] == ["deployment", "group", "create"]
         assert calls[1][:3] == ["deployment", "group", "show"]
-        assert "--no-wait" not in calls[1]
+        assert "--no-wait" not in calls[1] and "--no-prompt" not in calls[1]
 
     def test_deploy_resource_group_failure(self, tmp_workspace, sample_bicep_template, monkeypatch):
         executor = AzCliExecutor(workspace=tmp_workspace)
@@ -3303,8 +3303,8 @@ class TestMissingParameterPrompt:
         assert result.success is False
         assert result.unconfirmed is None
         assert result.error.startswith(
-            "Azure CLI asked for template parameters that have no value, and "
-            "Site Ops runs it without input. No deployment was started."
+            "Template parameters have no value, so the deployment was rejected "
+            "before any resource changed."
         )
         assert "location" in result.error
 
