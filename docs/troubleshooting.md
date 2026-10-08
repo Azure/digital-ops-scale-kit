@@ -1,10 +1,110 @@
 # Troubleshooting
 
-Common issues and solutions.
+Common issues and solutions. For problems while installing Site Ops, see
+[installation problems](install-siteops.md#common-problems).
+
+## Deployment commands and published content
+
+### "Noninteractive deployment requires --yes"
+
+```
+siteops: error: Noninteractive deployment requires --yes. Use `plan` to inspect without deploying.
+```
+
+**Cause**: `deploy` ran without `--yes` where it cannot ask for confirmation:
+JSON output, redacted output, a CI environment (`CI`, `GITHUB_ACTIONS` or
+`TF_BUILD` set), or an input or error stream that is not a terminal.
+
+**Solution**: Nothing was read or deployed. Review the plan with
+`siteops plan`, then rerun `deploy` with `--yes` once unattended execution is
+approved.
+
+### "Direct content requires explicit Site inputs"
+
+```
+siteops: error: Direct content requires explicit Site inputs or --project for configured targets.
+```
+
+**Cause**: `plan`, `deploy` or `validate` used `--source SOURCE@RELEASE`
+without `--input`, `--input-file`, `--site-file` or `--project`. Example Sites
+inside a published release are not deployment targets.
+
+**Solution**: Supply the target with `--input` or `--input-file` as shown in
+[guided inputs](guided-inputs.md), pass a complete `--site-file`, or add
+`--project DIRECTORY` to use your configured Sites.
+
+### "Workspace pin not found"
+
+```
+Error: Workspace pin not found. Use project pin to select a package, or -w to select local content.
+```
+
+**Cause**: The selected project has no `siteops.pin`, and the command selected
+neither local content with `-w` nor a release with `--source`.
+
+**Solution**: Pin a release with `siteops project pin`, as described in
+[operator projects](projects.md#run-project-pin), or select content
+explicitly with `-w` or `--source`.
+
+### "GitHub CLI 2.95 or newer is required"
+
+```
+Error: GitHub CLI 2.95 or newer is required for detached verification.
+```
+
+**Cause**: Site Ops verifies every use of published workspace content with
+GitHub CLI, and no `gh` executable is on `PATH`. Related errors report an
+unsupported version or a `gh` executable that other users can change.
+
+**Solution**: Install GitHub CLI 2.95 or newer from https://cli.github.com or
+your approved channel, in a location that only you or administrators can
+change. No GitHub login is needed.
+
+### "The approved source policy has expired"
+
+```
+Error: The approved source policy has expired. Inspect it with `siteops source show NAME`. Renew a standard approval with `siteops source enroll NAME`. For a custom policy, remove the name and enroll it again with reviewed trust files.
+```
+
+**Cause**: The approval for the source name in `--source NAME@<release>` or
+`--approved-source NAME` is older than its policy allows. The error code is
+`source.profile-expired`. Approvals created by `siteops source enroll` last
+30 days.
+
+**Solution**: Run `siteops source enroll NAME` again to renew it with the same
+publisher. For a custom policy, follow
+[renew a custom policy](projects.md#use-a-custom-policy).
+
+### "Approved source not found"
+
+```
+Error: Approved source not found.
+```
+
+**Cause**: No source is enrolled under the name used in `--source NAME@<release>`
+or `--approved-source NAME`. The error code is `source.profile-missing`.
+
+**Solution**: Run `siteops source list` to see the enrolled names, or enroll
+the official publisher with `siteops source enroll NAME`. See
+[approved sources](projects.md#use-an-approved-source).
+
+### "The existing source approval differs"
+
+```
+Error: The existing source approval differs. Remove it before enrolling changed trust.
+```
+
+**Cause**: `siteops source enroll NAME` would change the publisher or release
+identity that `NAME` already approves. Site Ops never replaces trust
+silently.
+
+**Solution**: Inspect the record with `siteops source show NAME`. Enroll the
+other publisher under a new name, or run `siteops source remove NAME` first
+if you intend to replace it.
 
 ## Validation errors
 
-### "Site not found"
+### "Site file not found"
 
 ```
 Error: Site file not found: munich-dev (searched sites/)
@@ -18,7 +118,7 @@ Error: Site file not found: munich-dev (searched sites/)
 
 ```
 Error: CLI selector `-l environment=prdo` matched no sites.
-`environment=prdo` requested. Workspace `environment` values: 'dev', 'prod', 'staging'.
+`environment=prdo` requested. Workspace `environment` values: 'dev', 'prod', 'sample', 'staging'.
 ```
 
 **Cause**: A typo in `-l/--selector`, or the requested label value does not exist on any site.

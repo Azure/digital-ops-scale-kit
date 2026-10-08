@@ -5,7 +5,7 @@ Per-deployment-target YAML files (`kind: Site` and `kind: SiteTemplate`).
 ## Files
 
 - **`base-site.yaml`**: `kind: SiteTemplate`. The shared base holds release selection, labels, common parameters and deployment options. Concrete Sites supply target subscription and location.
-- **`<site>.yaml`**: `kind: Site`. A deployable target. Names match `<region>-<env>` for RG-scoped sites or `<tenant>-global` for subscription-scoped.
+- **`<site>.yaml`**: `kind: Site`. A deployable target. Names match `<city>-<env>` for RG-scoped sites or `<tenant>-global` for subscription-scoped.
 - **`shared/`**: additional `kind: SiteTemplate` files for partial reuse (e.g. `germany.yaml`, `usa-east.yaml`).
 - **`catalog-basic.yaml` and `catalog-composition.yaml`**: deployable sample
   sites for the beginner and advanced resource-set walkthroughs under
@@ -21,4 +21,4 @@ Per-deployment-target YAML files (`kind: Site` and `kind: SiteTemplate`).
 ## Authoring tips
 
 - Preview the fully-resolved site (after inheritance + overlays) with `siteops -w workspaces/iot-operations sites <name> --output yaml`.
-- Keep environment- or region-specific values in intermediate `SiteTemplate` files under `shared/` to avoid duplicating env config across `<region>-dev.yaml` and `<region>-prod.yaml` pairs.
+- Keep environment- or region-specific values in intermediate `SiteTemplate` files under `shared/` to avoid duplicating env config across `<city>-dev.yaml` and `<city>-prod.yaml` pairs.

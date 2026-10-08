@@ -5,11 +5,14 @@ This workspace applies the generic Site Ops engine to
 It contains executable manifests, Bicep templates, release pins, site
 conventions, reusable resource definitions, and samples.
 
-Installing Site Ops does not acquire this workspace. Select a complete
-approved release directly with `--source SOURCE@RELEASE`, or retain a
-workspace pin in an operator project for repeatable use. Both use the
-ordinary Site Ops planner without requiring a clone. A local checkout
-remains available with `-w workspaces/iot-operations`.
+Installing Site Ops does not include this workspace. Use it in one of these
+ways:
+
+- Deploy a published release directly with `--source SOURCE@RELEASE`.
+- Pin a release in an operator project for repeatable use.
+- Run from a local checkout with `-w workspaces/iot-operations`.
+
+The published routes need no clone.
 
 ## Start with one target
 
@@ -22,13 +25,14 @@ Arc cluster ID and the release selected by its instructions:
 siteops deploy aio-install --source "official@<release>" --input "cluster=<Arc-cluster-resource-ID>"
 ```
 
-Deploy prepares a plan and asks for confirmation in a private terminal.
+Deploy prepares and displays a plan, then asks for confirmation in an
+interactive terminal.
 A project pin and separate plan are optional. Add
 `--input enableSecretSync=true` only after confirming the cluster's OIDC
 and workload-identity prerequisites.
 
-For a local checkout with a
-reusable Site, follow the [configured-Site guide](../../docs/getting-started.md).
+For a local checkout with a reusable Site, follow
+[Deploy AIO from a local checkout](../../docs/getting-started.md).
 It prepares a `sites.local/` overlay for one existing Arc-connected cluster,
 inspects the target, validates the manifest, reviews an executable plan,
 and only then deploys. Both use the same manifest and executor.
@@ -53,11 +57,6 @@ See [browsing](../../docs/browse-content.md) for filtering, private JSON and the
 configured-Site deployment journey. Each entry owns its operator guide and
 optional descriptive `entry.yaml`. These are not package verification or
 deployment-readiness evidence.
-
-The generated `siteops-index.json` presents approved descriptions to remote
-browsers. `siteops-index.inputs.json` holds separate source freshness
-bindings. Follow [index publication](../../docs/remote-content.md#publish-descriptions-from-a-workspace)
-when updating those artifacts. Neither file is an execution package.
 
 | Goal | Entry point | Read first |
 |---|---|---|
@@ -93,20 +92,25 @@ mutation. `deploy` creates or updates provider resources. See
 
 | Directory | Purpose |
 |---|---|
-| `sites/` | Committed deployment targets and inherited defaults |
+| [`sites/`](sites/README.md) | Committed deployment targets and inherited defaults |
 | `sites.local/` | Gitignored local overlays |
-| `manifests/` | Core entry directories and shared `_partials/` |
-| `contracts/` | Composition identities and reference rules |
-| `parameters/` | Shared defaults, release pins and step wiring |
-| `resource-sets/` | Reusable Site-selected workload definitions |
-| `templates/` | Bicep and target-delivered implementation content |
-| `samples/` | Deployable examples with their own prerequisites |
+| [`manifests/`](manifests/README.md) | Core entry directories and shared `_partials/` |
+| [`contracts/`](contracts/README.md) | Composition identities and reference rules |
+| [`parameters/`](parameters/README.md) | Shared defaults, release pins and step wiring |
+| [`resource-sets/`](resource-sets/README.md) | Reusable Site-selected workload definitions |
+| [`templates/`](templates/README.md) | Bicep and target-delivered implementation content |
+| [`samples/`](samples/README.md) | Deployable examples with their own prerequisites |
 
 Sites can live below nested directories, but basenames must remain unique
 within a trusted site directory. Workspace labels and fields under
 `properties` are conventions of this content. The Site Ops engine does not
 assign AIO meaning to names such as `environment`, `aioRelease`, or
 `deployOptions`.
+
+The generated `siteops-index.json` presents approved descriptions to remote
+browsers. `siteops-index.inputs.json` holds separate source freshness
+bindings. Follow [index publication](../../docs/remote-content.md#publish-descriptions-from-a-workspace)
+when updating those artifacts. Neither file is an execution package.
 
 For the engine and workspace ownership boundary, see the
 [repository and workspace guide](../../docs/repository-guide.md).

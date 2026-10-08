@@ -46,5 +46,6 @@ implementation.
    beside the public entry.
 4. Add a standalone entry point at `manifests/<operation>/manifest.yaml` that includes
    the partial and then waits on the completion tag the worker writes.
-5. Register the manifest in the deploy dropdowns on both CI platforms.
+5. Add the manifest to the `manifest` choices in `.github/workflows/deploy.yaml`
+   and `.pipelines/deploy.yaml`.
 6. Add a row to the operations table above.

@@ -163,8 +163,8 @@ The default example is
 complete IoT Operations workspace and the selected engine from the chosen
 source commit. Choose
 `.github/release-examples/combined-preview/release.json` to preview engine
-artifacts under a content tag. Examples are accepted only for a dry run and
-never trigger publication when merged.
+artifacts under a content tag. Examples are accepted only by a release preview
+and never trigger publication when merged.
 
 For the default example, the CI preview performs real builds and signing, but
 it cannot publish and cannot be promoted into a release. Once the repository
@@ -278,9 +278,9 @@ exact admitted plan, engine, workspaces and inventory for the manual
 That path installs the selected engine outside checkout, seeds the normal
 operator project, coordinates two live hosts, and requires bound deployment,
 readiness and cleanup receipts. It does not rebuild candidate assets.
-This standalone workflow does not yet wire all required live scenarios into
-the publication gate. Final release approval still requires that integration
-and evidence from the unchanged candidate.
+The Release workflow does not run this path or other live scenarios. Before
+approving publication, confirm the required live evidence for the same
+unchanged candidate.
 
 ## Prepare the real release files
 

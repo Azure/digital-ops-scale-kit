@@ -46,6 +46,13 @@ artifact SHA-256 from an approved source resolver. Source resolution is not
 implemented by this verifier. A package, release-note body, or verifier policy
 echo cannot supply the consumer's publisher policy.
 
+`siteops source enroll NAME` without trust files writes this shape for the
+publisher's standard release contract: `sourceRef` `refs/heads/main`,
+`signerWorkflow` `.github/workflows/_workspace-distribution.yaml`,
+`builderWorkflow` `.github/workflows/release.yaml` and `runnerEnvironment`
+`self-hosted`, valid for 30 days. Supply your own policy when your publisher
+or approval period differs. See [approved sources](projects.md#use-an-approved-source).
+
 `runnerEnvironment` is required. Choose `github-hosted` or `self-hosted`
 according to your independently approved publisher policy. There is no
 inference from the downloaded proof and no acceptance of both classes through

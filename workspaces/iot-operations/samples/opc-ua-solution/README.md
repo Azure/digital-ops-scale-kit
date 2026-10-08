@@ -49,13 +49,17 @@ See `template.bicep` for the full parameter list.
 ## Deploy
 
 ```bash
-siteops -w workspaces/iot-operations deploy samples/opc-ua-solution/manifest.yaml -l environment=dev
+siteops -w workspaces/iot-operations plan samples/opc-ua-solution/manifest.yaml -l name=<site>
+siteops -w workspaces/iot-operations deploy samples/opc-ua-solution/manifest.yaml -l name=<site>
 ```
+
+Replace `<site>` with the configured Site. The explicit selector replaces the
+manifest's `environment=dev` default.
 
 For a fresh-cluster combined install + sample, use the composed wrapper:
 
 ```bash
-siteops -w workspaces/iot-operations deploy samples/aio-with-opc-ua/manifest.yaml -l environment=dev
+siteops -w workspaces/iot-operations deploy samples/aio-with-opc-ua/manifest.yaml -l name=<site>
 ```
 
 ## Verifying the result

@@ -6,8 +6,10 @@ With an [operator project](projects.md), `--project DIRECTORY` selects its
 `sites` and `sites.local` directories independently from the content
 workspace. An explicit `-w PATH` selects local development content while
 retaining those project Sites. Without a project, the workspace owns Site
-configuration as described below. Extra trusted Site directories retain their
-existing rules.
+configuration as described below. This page calls the directory that supplies
+`sites/` and `sites.local/` the configuration root: the project when one is
+selected, otherwise the workspace. Extra trusted Site directories add to
+whichever configuration root is selected.
 
 ## Quick decision table
 
@@ -16,9 +18,9 @@ existing rules.
 | Supply one complete Site without storing it in the workspace | Pass `--site-file FILE` to `validate`, `plan`, or `deploy` |
 | Answer a selected deployment's typed inputs | Use [`siteops inputs`](guided-inputs.md), then pass `--input-file FILE` or repeat `--input NAME=VALUE` |
 | Preview a resolved Site without writing it | Use `siteops inputs <manifest> --input-file FILE` with complete answers |
-| Add a new deployable site | Drop `my-site.yaml` under `workspace/sites/` (any subdir) or an extras dir |
-| Share a reusable template across sites | Put it in `workspace/sites/<name>.yaml` (same dir) or `workspace/sites/shared/<name>.yaml` (subdir) and reference via `inherits:` |
-| Override a committed site at runtime without a PR | Put `my-site.yaml` in `workspace/sites.local/` (overlay merges, `inherits:` stripped) |
+| Add a new deployable site | Drop `my-site.yaml` under the configuration root's `sites/` (any subdir) or an extras dir |
+| Share a reusable template across sites | Put it in `sites/<name>.yaml` (same dir) or `sites/shared/<name>.yaml` (subdir) and reference via `inherits:` |
+| Override a committed site at runtime without a PR | Put `my-site.yaml` in the configuration root's `sites.local/` (overlay merges, `inherits:` stripped) |
 | Inject a site from CI without touching the workspace | Register a dir via `SITEOPS_EXTRA_SITES_DIRS` / `--extra-sites-dir` and drop `my-site.yaml` in it |
 | Target one specific site at the CLI | `siteops deploy <manifest> -l name=<site-name>` |
 | Target multiple specific sites at the CLI | `siteops deploy <manifest> -l name=<a>,name=<b>` |
@@ -112,18 +114,24 @@ still checked.
 ```yaml
 apiVersion: siteops/v1
 kind: Site
-name: germany-subscription
+name: contoso-global
+inherits: base-site.yaml
 
 subscription: "00000000-0000-0000-0000-000000000000"
-location: germanywestcentral
-# No resourceGroup → subscription-level site
+location: eastus
+# No resourceGroup, so this is a subscription-level site
 
 labels:
-  environment: dev
   scope: subscription      # Workspace convention for selectors
+  country: US
+  city: Redmond
+
+properties:
+  deployOptions:
+    enableGlobalSite: true  # Gates the subscription-scoped edge site step
 
 parameters:
-  edgeSiteName: germany-edge-site
+  siteName: contoso-edge-site
 ```
 
 ## Labels vs Parameters vs Properties
@@ -132,9 +140,9 @@ Sites have three ways to attach data, each serving a different purpose:
 
 | Field | Data Type | Filtering | Conditionals | Template Access |
 |-------|-----------|-----------|--------------|-----------------|
-| `labels` | Flat strings only | ✅ `-l "key=value"` | ✅ `when:` | `{{ site.labels.X }}` |
-| `parameters` | Any structure | ❌ | ❌ | `{{ site.parameters.X }}` |
-| `properties` | Any structure | ❌ | ✅ `when:` | `{{ site.properties.X.Y }}` |
+| `labels` | Flat strings only | Yes, `-l "key=value"` | Yes, `when:` | `{{ site.labels.X }}` |
+| `parameters` | Any structure | No | No | `{{ site.parameters.X }}` |
+| `properties` | Any structure | No | Yes, `when:` | `{{ site.properties.X.Y }}` |
 
 ### Labels
 
@@ -171,13 +179,13 @@ Use parameters for:
 
 #### Top-level vs namespaced parameters
 
-Siteops hands a `site.parameters` entry to a template only when its top-level
+Site Ops hands a `site.parameters` entry to a template only when its top-level
 key matches one of the template's `param` names. A nested block reaches a
 template only if the template declares a matching object parameter (such as
 `param brokerConfig`). Otherwise each nested field must be mapped to a
 top-level `param` in a `parameters/inputs/*.yaml` file.
 
-Two habits keep this predictable:
+These habits keep this predictable:
 
 - A value used by more than one layer belongs at the top level, as one key the
   layers cannot disagree on. `clusterName` is shared: the AKS Edge Essentials
@@ -200,7 +208,7 @@ parameters:
 
 Free-form site state read by manifests and templates via
 `{{ site.properties.<path> }}` substitution and `when:` conditions.
-Open schema. Siteops does not enforce field names or shapes. The
+Open schema. Site Ops does not enforce field names or shapes. The
 workspace defines its own conventions.
 
 ```yaml
@@ -212,7 +220,7 @@ properties:
   aioRelease: "2608"
 
   # Ordered resource sets. Each list item names a YAML file in the matching
-  # `parameters/` subdirectory. Omit an area for no selection, or use [] to
+  # `resource-sets/<area>/` directory. Omit an area for no selection, or use [] to
   # clear an inherited list. Deselecting a set does not delete resources.
   resourceSets:
     devices:
@@ -245,7 +253,7 @@ properties:
 Use properties for:
 
 - Capability toggles, gated via `when:` or passed through to a template (`deployOptions.*`)
-- Path-selection keys the engine reads (`aioRelease` picks one release file, and each list under `resourceSets` selects ordered files from the matching `parameters/` subdirectory)
+- Path-selection keys the engine reads (`aioRelease` picks one release file, and each list under `resourceSets` selects ordered files from the matching `resource-sets/<area>/` directory)
 - Free-form data structures consumed via `{{ site.properties.X }}`
 
 > **Template values go in `parameters:`. Capability toggles are the one
@@ -256,13 +264,13 @@ Use properties for:
 
 ### What siteops enforces vs what the workspace conventions are
 
-The siteops engine has a deliberately narrow contract over a site
+The Site Ops engine has a deliberately narrow contract over a site
 file. Knowing where the boundary sits tells you what you can rename
 when forking the workspace:
 
 | Layer | Owned by | What it cares about |
 |---|---|---|
-| YAML and preparation mechanics | siteops engine | Top-level fields (`name`, `subscription`, `resourceGroup`, `location`, `labels`, `inherits`, `parameters`, `properties`), selector parsing on `labels`, supported site-value substitutions, and executable filtering against an acquired template schema. |
+| YAML and preparation mechanics | Site Ops engine | Top-level fields (`name`, `subscription`, `resourceGroup`, `location`, `labels`, `inherits`, `parameters`, `properties`), selector parsing on `labels`, supported site-value substitutions, and executable filtering against an acquired template schema. |
 | Field semantics | The workspace | The names of fields under `properties:` (`aioRelease`, `deployOptions`, the `enable*`/`allow*` toggle prefixes, etc.) and the names of label keys used in selectors (`environment`, `country`, `scope`, etc.). |
 
 Anything in the second row is a convention you can rename for your own
@@ -325,6 +333,28 @@ A file that declares `spec` and also carries flat-shape fields at the top level
 is reported as mixing the two shapes. Pick one: move the fields under
 `metadata` and `spec`, or remove `spec` and keep everything at the top level.
 
+The envelope shape puts `name`, `description` and `labels` under `metadata`,
+and the target fields under `spec`:
+
+```yaml
+apiVersion: siteops/v1
+kind: Site
+metadata:
+  name: munich-dev
+  labels:
+    environment: dev
+spec:
+  subscription: "00000000-0000-0000-0000-000000000000"
+  resourceGroup: rg-iot-munich-dev
+  location: germanywestcentral
+  parameters:
+    clusterName: munich-dev-arc
+```
+
+Keep one shape across an `inherits` chain. The check runs on merged data, so a
+flat parent with an envelope child, or the reverse, is also reported as mixing
+the two shapes.
+
 What is inside `labels`, `properties`, and `parameters` stays **open**, because
 those hold workspace-defined content and the engine stays out of it. A key in
 there that nothing reads is a different problem, and the workspace's own test
@@ -347,7 +377,7 @@ itself a declared template parameter. Executable preparation filters a
 top-level name that the acquired template does not accept and reports any
 required parameter that remains missing.
 
-Three cases fail rather than resolve. A name that cannot be resolved, a
+These cases fail rather than resolve: a name that cannot be resolved, a
 template that resolves to a whole object or list, and two names that resolve to
 the same string. The last is rejected rather than letting one overwrite the
 other.
@@ -367,10 +397,10 @@ when: "{{ site.labels.environment == 'prod' }}"
 
 ### Rule of thumb
 
-- Need to filter sites? → **Labels** (strings only)
-- Need in `when` conditionals? → **Labels** (string comparison) or **Properties** (truthy check)
-- Goes into Bicep templates? → **Parameters**
-- Structured metadata (tags, arrays, deployment options)? → **Properties**
+- Need to filter sites? Use **labels** (strings only).
+- Need a `when` condition? Use **labels** (string comparison) or **properties** (truthy check).
+- Goes into Bicep templates? Use **parameters**.
+- Structured metadata (tags, arrays, deployment options)? Use **properties**.
 
 ## Site overlays
 
@@ -381,7 +411,7 @@ sites/           # Base definitions (committed to git)
 sites.local/     # Overrides (gitignored)
 ```
 
-**Merge order**: `sites/` → `sites.local/` (later values override earlier)
+**Merge order**: `sites/`, then `sites.local/` (later values override earlier)
 
 ```yaml
 # sites/munich-dev.yaml (committed)
@@ -401,7 +431,7 @@ resourceGroup: real-resource-group
 
 ## Extra trusted site directories
 
-In addition to the workspace's `sites/` directory, Site Ops can search
+In addition to the configuration root's `sites/` directory, Site Ops can search
 one or more extra trusted directories for site files. Files in these
 directories are treated exactly like files in `sites/`: they are
 discoverable by `siteops sites`, they can declare `inherits`, and they
@@ -435,7 +465,7 @@ the env var was ignored.
 inherits target → sites/ → <extra dirs, in listed order> → sites.local/
 ```
 
-Extras cannot collide with the workspace's own `sites/` or `sites.local/` directories. The orchestrator rejects both at construction time. Registering `sites.local/` as trusted is specifically refused because it would let overlays inject inheritance and break the overlay security invariant.
+Extras cannot collide with the configuration root's own `sites/` or `sites.local/` directories. Site Ops rejects both when it starts. Registering `sites.local/` as trusted is specifically refused because it would let overlays inject inheritance and break the overlay security invariant.
 
 ### Discovery walks subdirectories
 
@@ -521,23 +551,24 @@ parameters:
 
 Resolution is relative to the **child file's own directory**. The only
 exception is the bare-filename fallback (row 1 below), which lets an
-extras-dir site inherit a workspace-owned template without copying it.
+extras-dir site inherit a template from the configuration root without copying it.
 
 | Form | Example | Resolves to |
 |---|---|---|
-| Bare filename | `inherits: base-site.yaml` | `./base-site.yaml` next to the child, then fallback to `<workspace>/sites/base-site.yaml` |
+| Bare filename | `inherits: base-site.yaml` | `./base-site.yaml` next to the child, then fallback to `<configuration-root>/sites/base-site.yaml` |
 | Subpath | `inherits: shared/usa-east.yaml` | `<child-dir>/shared/usa-east.yaml` |
 | Parent / sibling | `inherits: ../base-site.yaml` | `<child-dir>/../base-site.yaml` |
 | Absolute | `inherits: /abs/path/tpl.yaml` | Used as-is |
 
-The fallback searches `<workspace>/sites/` only (never across extras
-dirs), so there is no implicit shared-template namespace between trusted
-directories.
+The fallback searches only the configuration root's `sites/`: the project's
+with `--project`, otherwise the workspace's. It never searches extras dirs or
+`sites.local/`, so there is no implicit shared-template namespace between
+trusted directories.
 
 > **Trust model.** `inherits:` is author-trusted and not filesystem-sandboxed.
 > It may point to a sibling `shared/` dir or an absolute path. The control is
-> *who may author files in trusted sites locations* (`workspace/sites/` and
-> extras dirs). Anyone who can write an `inherits:` value can already set any
+> *who may author files in trusted sites locations* (`sites/` under the
+> configuration root, and extras dirs). Anyone who can write an `inherits:` value can already set any
 > other site field. `sites.local/` overlays strip `inherits:`, so runtime
 > overlays cannot introduce new inheritance targets.
 
@@ -545,14 +576,14 @@ directories.
 
 | Aspect | `kind: Site` | `kind: SiteTemplate` |
 |--------|--------------|----------------------|
-| Can be deployed | ✅ Yes | ❌ No |
-| Can be inherited from | ✅ Yes | ✅ Yes |
-| Requires subscription/location | ✅ Yes | ❌ No |
-| Discovered by `siteops sites` | ✅ Yes | ❌ No |
+| Can be deployed | Yes | No |
+| Can be inherited from | Yes | Yes |
+| Requires subscription/location | Yes | No |
+| Discovered by `siteops sites` | Yes | No |
 
 ### Merge order with inheritance
 
-`inherits target` → `sites/` → `<extra trusted dirs>` → `sites.local/`
+`inherits target`, then `sites/`, then `<extra trusted dirs>`, then `sites.local/`
 
 Inherited values are overridden by child site values. Nested objects (labels, parameters, properties) merge recursively. See [Extra trusted site directories](#extra-trusted-site-directories) for how extra dirs participate in the chain.
 
@@ -560,18 +591,21 @@ Inherited values are overridden by child site values. Nested objects (labels, pa
 
 ## Site selection from a manifest
 
-A manifest's target sites resolve from three sources: CLI `-l/--selector`
-(overrides everything), manifest `sites:` (explicit name list), and manifest
-`selector:` (label expression). A manifest with none of the three is a library
-or partial. It can be checked with `validate`, but `plan` and `deploy` require
-`-l` to supply targets.
+A manifest's target sites resolve from CLI `-l/--selector` (overrides
+everything), manifest `sites:` (explicit name list), or manifest `selector:`
+(label expression). A manifest with none of these is a library or partial. It
+can be checked with `validate`, while `plan` and `deploy` require `-l` or one
+explicit Site supplied with `--site-file`, `--input-file`, or `--input`. An
+explicit Site cannot be combined with `-l`.
 
 ```bash
-siteops deploy manifests/aio-install/manifest.yaml                           # uses manifest selector
-siteops deploy manifests/aio-install/manifest.yaml -l environment=dev        # CLI overrides manifest
-siteops deploy manifests/aio-install/manifest.yaml -l name=munich-dev        # single site
-siteops deploy manifests/aio-install/manifest.yaml -l name=a,name=b          # multi-site (name OR-combines)
+siteops plan aio-install                           # uses manifest selector
+siteops plan aio-install -l environment=dev        # CLI overrides manifest
+siteops plan aio-install -l name=munich-dev        # single site
+siteops plan aio-install -l name=a,name=b          # multi-site (name OR-combines)
 ```
+
+`deploy` accepts the same selection once the plan is right.
 
 `-l` is repeatable. Distinct keys AND-combine. Repeated `name=` values OR-combine. Any other duplicate key is an error. Path-form names (`-l name=regions/eu/munich`) work for nested site files. See [targeting.md](targeting.md) for the full grammar, the no-match diagnostic, and the validation rules.
 

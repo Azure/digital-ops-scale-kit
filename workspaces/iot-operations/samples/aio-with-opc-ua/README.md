@@ -7,11 +7,24 @@ The manifest composes existing partials, so there is no template or input
 file under this directory. See `manifest.yaml` for the post-flatten step
 sequence and `samples/README.md` for the rules every composition follows.
 
+## Prerequisites
+
+- An existing cluster connected to Azure Arc and a configured Site, as described in the
+  [install guide](../../manifests/aio-install/README.md#configure-the-target).
+- The permissions to create role assignments and the Kubernetes RBAC listed in the
+  [OPC UA sample prerequisites](../opc-ua-solution/README.md#prerequisites).
+  This composition installs AIO itself, so the existing installation
+  requirement there does not apply.
+
 ## Deploy
 
 ```bash
-siteops -w workspaces/iot-operations deploy samples/aio-with-opc-ua/manifest.yaml -l environment=dev
+siteops -w workspaces/iot-operations plan samples/aio-with-opc-ua/manifest.yaml -l name=<site>
+siteops -w workspaces/iot-operations deploy samples/aio-with-opc-ua/manifest.yaml -l name=<site>
 ```
+
+Replace `<site>` with the configured Site. The explicit selector replaces the
+manifest's `environment=dev` default.
 
 ## Verifying the result
 

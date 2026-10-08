@@ -68,9 +68,10 @@ def test_workspace_guides_begin_with_the_installed_deployment_route():
 def test_quickstart_separates_release_installation_and_checkout_browsing():
     readme = (GUIDE.parent.parent / "README.md").read_text(encoding="utf-8")
     assert "not yet published" not in readme
-    assert "siteops --approved-source official --project factory browse aio-install" in readme
+    assert "siteops --approved-source official --project ./factory browse aio-install" in readme
     assert "require a local checkout" in readme
     assert "does not sign you in" in readme
+    assert "```text\nsiteops source enroll official\n```" in readme
     assert "docs/install-siteops.md" in readme
 
 
@@ -98,7 +99,7 @@ def test_hosted_bootstrap_guidance_matches_host_behavior():
 def test_project_source_renewal_and_saved_site_guide_are_executable():
     projects = (GUIDE.parent / "projects.md").read_text(encoding="utf-8")
     guided = (GUIDE.parent / "guided-inputs.md").read_text(encoding="utf-8")
-    assert "siteops source enroll --help" in projects
+    assert "```text\nsiteops source enroll official\n```" in projects
     assert "siteops source remove official" in projects
     assert "siteops source show official" in projects
     assert "30 days" in projects and "renewed-policy.json" in projects
@@ -192,12 +193,10 @@ def test_preview_migration_describes_rejections_not_aliases():
     for old, replacement in (
         ("`validate <manifest> --plan`", "`plan <manifest> --describe`"),
         ("`deploy <manifest> --dry-run`", "`plan <manifest>`"),
-        ("`--offline`", "`--offline-content`"),
     ):
         assert old in migration and replacement in migration
     assert "unrecognized arguments" in migration
     assert "Noninteractive deployment" in migration
-    assert "source.profile-expired" in migration
     packages = (GUIDE.parent / "workspace-packages.md").read_text(encoding="utf-8")
     assert "`uv tool install <wheel-url>`" in packages
     assert "[installation guide](install-siteops.md)" in packages

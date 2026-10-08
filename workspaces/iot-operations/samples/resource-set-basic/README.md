@@ -70,7 +70,7 @@ valid ARM declaration.
 Microsoft's
 [MQTT client walkthrough](https://learn.microsoft.com/azure/iot-operations/manage-mqtt-broker/howto-test-connection)
 shows how to run an authenticated client inside the cluster. The
-`resource-set-samples` input in the
+`resource-set-samples` value of the `tests` input in the
 [E2E workflow](../../../../docs/e2e-testing.md) performs the same proof with a
 run-specific payload: it subscribes first, publishes under the sample source
 prefix, and requires that payload at the destination.

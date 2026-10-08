@@ -3,7 +3,8 @@
 A manifest can splice another manifest's steps into its own step list using a step-level `include:` directive. This makes one manifest viewable two ways: standalone, or as a partial composed into a larger pipeline.
 
 ```yaml
-# samples/aio-with-opc-ua/manifest.yaml
+# Simplified from samples/aio-with-opc-ua/manifest.yaml, which also sets a
+# selector, attaches parameters at manifest level, and adds a gated Secret Sync include.
 apiVersion: siteops/v1
 kind: Manifest
 name: aio-with-opc-ua
@@ -19,7 +20,7 @@ Include paths are resolved relative to the including manifest's directory. From 
 
 After resolution, the parent's step list is a flat sequence of every step the included manifests contribute, in declared order, interleaved with any inline steps the parent defines.
 
-The standalone-vs-partial distinction matters for composition. Compositions should include the leaf `_partial.yaml`s, not standalone `manifest.yaml`s. Standalone manifests can repeat prerequisites such as `resolve-aio`, which causes a flattened step-name collision. See [Standalone manifests vs partials](#standalone-manifests-vs-partials) and `workspaces/<workspace>/samples/README.md`.
+The standalone-vs-partial distinction matters for composition. Compositions should include the leaf `_partial.yaml`s, not standalone `manifest.yaml`s. Standalone manifests can repeat prerequisites such as `resolve-aio`, which causes a flattened step-name collision. See [Standalone manifests vs partials](#standalone-manifests-vs-partials) and [Composing samples](../workspaces/iot-operations/samples/README.md#composing-samples).
 
 ## Step shape
 
@@ -49,7 +50,7 @@ steps:
 
 If a spliced step already has its own `when:`, the include cannot also set one. Combining two `when:` expressions is not supported. Consolidate into a single condition on either side.
 
-If the included manifest defines manifest-level `parameters:`, the include cannot set `when:`. Manifest-level parameters apply unconditionally to every parent step at deploy time, so a gated include contributing parameters would silently affect ungated parent steps. Either drop the include's `when:` or move parameters onto the included manifest's individual steps.
+If the included manifest, or any manifest it includes, defines manifest-level `parameters:`, the include cannot set `when:`. Manifest-level parameters apply unconditionally to every parent step at deploy time, so a gated include contributing parameters would silently affect ungated parent steps. Either drop the include's `when:` or move parameters onto the included manifest's individual steps.
 
 ## Recursive includes
 

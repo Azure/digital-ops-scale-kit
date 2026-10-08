@@ -54,8 +54,12 @@ namespace. Adjust both when the install uses a different namespace.
 ## Deploy
 
 ```bash
-siteops -w workspaces/iot-operations deploy samples/dataflow-sample/manifest.yaml -l environment=dev
+siteops -w workspaces/iot-operations plan samples/dataflow-sample/manifest.yaml -l name=<site>
+siteops -w workspaces/iot-operations deploy samples/dataflow-sample/manifest.yaml -l name=<site>
 ```
+
+Replace `<site>` with the configured Site. The explicit selector replaces the
+manifest's `environment=dev` default.
 
 The dataflow carries whatever assets publish. For real telemetry through it, deploy `samples/opc-ua-solution/manifest.yaml` first to bring up a simulated asset, then deploy this sample.
 

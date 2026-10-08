@@ -16,12 +16,16 @@ remediation) is in the [upgrade guide](../../../../manifests/aksee-upgrade/READM
 ## Regenerate the launcher
 
 After editing `worker.ps1` or `launcher-template.ps1`, regenerate both launcher
-variants with an ABSOLUTE `-ScriptDir` (a relative path mis-resolves the sources
-and the parse check falsely errors):
+variants:
 
 ```powershell
-powershell -File "<abs>\Build-Launcher.ps1" -ScriptDir "<abs>"
+cd workspaces/iot-operations/templates/host-ops/aksee-upgrade/scripts
+.\Build-Launcher.ps1
 ```
+
+The generator reads its sources from its own directory by default. If you pass
+`-ScriptDir`, use an absolute path, because a relative path resolves the
+sources incorrectly and the parse check then reports a false error.
 
 The generator parse-checks both variants and exits non-zero on parse or inline-size failure. The
 minified launcher is what the Bicep inlines. `scriptUri` delivery is an

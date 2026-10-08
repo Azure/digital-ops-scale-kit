@@ -27,4 +27,5 @@ Implementations of host-side bootstrap for Azure IoT Operations targets. Each im
 5. Keep implementation guidance beside the source, and give the public entry its operator guide covering prerequisites, configuration, deployment, monitoring and recovery.
 6. Add `manifests/<name>-bootstrap/manifest.yaml` with the implementation partial and a `type: wait` step for the worker's completion tag. Keep input wiring under `parameters/inputs/<name>-bootstrap.yaml`. Launcher registration alone does not establish cluster readiness.
 7. Optionally add a composition sample at `samples/aio-with-<name>-bootstrap/` that demonstrates bootstrap + AIO install in one deploy.
-8. Add this row to the implementations table above.
+8. Add each new manifest, including any composition sample, to the `manifest` choices in `.github/workflows/deploy.yaml` and `.pipelines/deploy.yaml`.
+9. Add this row to the implementations table above.

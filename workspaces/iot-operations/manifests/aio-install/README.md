@@ -3,8 +3,8 @@
 Install AIO on an existing Arc-connected Kubernetes cluster. For a first
 deployment with an approved workspace package, follow
 [guided inputs](../../../../docs/guided-inputs.md) to construct one
-explicit Site. For a local checkout or configured fleet, use the
-[configured-Site guide](../../../../docs/getting-started.md) to prepare
+explicit Site. For a local checkout or configured fleet, follow
+[Deploy AIO from a local checkout](../../../../docs/getting-started.md) to prepare
 an authorized Site overlay. Both routes execute this same manifest.
 
 Use [aio-upgrade](../aio-upgrade/README.md) for in-place version changes.

@@ -52,8 +52,12 @@ replace them.
 ## Deploy
 
 ```bash
-siteops -w workspaces/iot-operations deploy samples/asset-sample/manifest.yaml -l environment=dev
+siteops -w workspaces/iot-operations plan samples/asset-sample/manifest.yaml -l name=<site>
+siteops -w workspaces/iot-operations deploy samples/asset-sample/manifest.yaml -l name=<site>
 ```
+
+Replace `<site>` with the configured Site. The explicit selector replaces the
+manifest's `environment=dev` default.
 
 ## Selecting the same set per site instead
 
@@ -70,7 +74,7 @@ properties:
 ```
 
 ```bash
-siteops -w workspaces/iot-operations deploy manifests/aio-resources/manifest.yaml -l environment=dev
+siteops -w workspaces/iot-operations deploy manifests/aio-resources/manifest.yaml -l name=<site>
 ```
 
 The definitions are identical on both routes. Only the manifest that selects

@@ -51,6 +51,15 @@ When a manifest pulls in others via `include:` (see [manifest-includes.md](manif
 | `{{ site.properties.X[0] }}` | Array indexing |
 | `{{ steps.X.outputs.Y }}` | Output from step X |
 
+Write each site variable with one space inside each pair of braces, as shown.
+`{{site.name}}` is not substituted, and a value the template accepts then fails
+preparation with `contains an unresolved or unsupported template`.
+
+When a whole value is a single `{{ site.properties.X }}` or
+`{{ site.parameters.X }}` reference, it keeps the referenced type, so a list or
+mapping reaches the template as a list or mapping. Embedded in a longer string,
+the reference is converted to text.
+
 An optional label can be the complete value of a parameter mapping member:
 
 ```yaml
@@ -77,6 +86,11 @@ parameters:
 After substitution, the path must be relative to the workspace, contain no `..` path segments, and
 resolve to a file inside the workspace. A fixed path without a template may still be absolute when
 a trusted runtime supplies the file.
+
+Every attached parameter file must exist. A missing fixed file fails validation with
+`Manifest parameter file not found` or, at step level, `Parameter file not found`. A site-selected
+path fails with an error naming the site, either because the site does not carry the property the
+path reads or because the resolved file does not exist.
 
 ## Output chaining
 
@@ -130,10 +144,12 @@ The consuming template has to declare the parameter. Auto-filtering removes a
 chained value whose name the template does not accept. Executable preparation
 also reports any required template parameter that remains absent.
 
-**Resolution priority:**
-
-1. Per-site step outputs (from RG-scoped steps)
-2. Subscription outputs (from subscription-scoped steps, matched by site's subscription)
+Step names are unique across the flattened manifest, so each reference names
+one producer. A reference to a subscription-scoped step resolves from that
+step's run for the site's subscription. A reference to an RG-scoped step
+resolves from the same site's run. The subscription-level site must be
+selected in the same command. See
+[Two-phase deployment](manifest-reference.md#two-phase-deployment).
 
 ## Auto-filtering
 

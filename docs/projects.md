@@ -72,7 +72,8 @@ Prepare these inputs:
   [artifact verifier](artifact-verification.md).
 - A published release containing a complete workspace package, detached proof
   and [workspace release descriptor](workspace-sources.md).
-- A local consumer policy and independently provisioned trusted root.
+- An [approved source](#use-an-approved-source), or a local consumer policy
+  and independently provisioned trusted root.
 - Your configured Sites in the project directory.
 
 Configured Sites are optional for entries with a typed input contract. You
@@ -91,41 +92,72 @@ its deployment qualification evidence for your targets. Package compatibility
 and catalog loading do not establish workload health.
 
 Replace the source and release placeholders below with an approved release.
-The examples assume `policy.json` and `trusted-root.json` are your independently
+The examples assume `policy.json` and `trusted-root.jsonl` are your independently
 trusted local inputs, and that the package contains a manifest named `storage`.
-Global options go before the command:
+An [approved source](#use-an-approved-source) can replace both files with
+`--approved-source NAME`. Global options go before the command:
 
 ```text
-siteops --trust-policy policy.json --trusted-root trusted-root.json project pin ./factory --source github:<owner>/<repository> --release <release>
+siteops --trust-policy policy.json --trusted-root trusted-root.jsonl project pin ./factory --source github:<owner>/<repository> --release <release>
 siteops project show ./factory
 siteops --project ./factory sites
-siteops --project ./factory --trust-policy policy.json --trusted-root trusted-root.json plan storage -l name=one
+siteops --project ./factory --trust-policy policy.json --trusted-root trusted-root.jsonl plan storage -l name=one
 ```
 
 The workspace pin identifies the whole workspace. Each command still selects
 its manifest by the existing exact name/path rules.
 
-## Use an approved source
+If a release contains several workspaces, add
+`--release-workspace <path-from-the-release>` to `project pin`.
+The command requires an explicit published release and uses anonymous source
+access. Policy and root files remain outside the content cache and are
+supplied independently on package use. The workspace pin cannot select them.
+Project and cache directories must occupy separate directory trees.
+Appending `@<release>` to the source is also supported as shorthand instead
+of `--release`.
 
-An operator can explicitly enroll a named public release source in private
-user configuration. It records independently supplied policy and trusted
-root bytes outside the project and content cache:
+The `--auth cli` option applies only to descriptive `browse --source`
+metadata. Authenticated package acquisition is not implemented.
+
+After reviewing the plan, deploy with the same project, trust inputs and
+target selection:
 
 ```text
-siteops --trust-policy policy.json --trusted-root trusted-root.json source enroll official --source github:Azure/digital-ops-scale-kit
+siteops --project ./factory --trust-policy policy.json --trusted-root trusted-root.jsonl deploy storage -l name=one
+```
+
+Deployment prepares again. These commands do not promise execution of a saved
+plan from a previous invocation. Provider operations can create or update
+resources and incur charges.
+
+## Use an approved source
+
+An approved source is a name in your private user configuration that records
+which publisher you trust and how its releases must be built. Enroll the
+official publisher once, under any lowercase name:
+
+```text
+siteops source enroll official
 siteops source show official
 siteops --approved-source official project pin ./factory --release <approved-release>
 siteops --approved-source official --project ./factory browse aio-install
 ```
 
-The [bootstrap scripts](install-siteops.md#choose-an-installation-route) can
-offer that enrollment when the operator explicitly chooses
-`--enroll-source official` or `-EnrollSource official`. This does not
+Without trust files, `source enroll` writes the publisher's standard release
+policy: releases built from its `refs/heads/main` branch by the
+`release.yaml` workflow, signed by `_workspace-distribution.yaml` on a
+self-hosted runner. The approval lasts 30 days and uses the current GitHub
+trusted root, read through GitHub CLI without a login. Add
+`--source github:<owner>/<repository>` to approve a different publisher
+that follows the same release contract.
+
+The [bootstrap scripts](install-siteops.md#choose-an-installation-route) run
+the same enrollment when the operator explicitly chooses
+`--enroll-source official` or `-EnrollSource official`. Enrollment does not
 sign in to GitHub or Azure. Use `siteops source list` to inspect the names.
-Use `siteops source enroll --help` for the trust file options. In redacted
-CI output, explicit enrollment and removal report only success or failure,
-without echoing the source name. Inspect records with `show` or `list` only
-in an authorized private destination.
+In redacted CI output, explicit enrollment and removal report only success
+or failure, without echoing the source name. Inspect records with `show` or
+`list` only in an authorized private destination.
 The approved source selects the repository and its verification files only
 when `--approved-source NAME` is passed. It does not change a project's pin
 or select a deployment target. An explicit `--source` on `project pin` must
@@ -144,17 +176,38 @@ but later package use requires another explicitly selected approval.
 Source records are private user configuration. Package use still checks
 current policy validity, trusted-root identity, source selection, package
 provenance and byte integrity. An expired approval reports
-`source.profile-expired`: run `siteops source show NAME` privately, then
-remove and re-enroll that name using reviewed policy and trusted-root files.
-There is no automatic renewal. Metadata-only `browse --source NAME` may
-still resolve the enrolled repository when execution approval expires. It
-does not restore trust. Keep the explicit policy/root route above for
-environments managing those files separately.
+`source.profile-expired`, and there is no automatic renewal. Metadata-only
+`browse --source NAME` may still resolve the enrolled repository after the
+approval expires. It does not restore trust.
 
-The bootstrap-generated approval lasts 30 days. Before it expires, review
-the publisher and a renewed policy and trusted root from independent,
-approved sources. Inspect the existing record and replace that exact name
-only when the new trust files are ready:
+### Renew an approval
+
+Run the same enrollment again before or after the approval expires:
+
+```text
+siteops source enroll official
+```
+
+Renewal keeps the publisher already enrolled under that name, so you can
+omit `--source`. It writes a new 30 day policy with the current trusted
+root, and only when the publisher and release identity are unchanged. A
+name enrolled with a different publisher or a custom policy reports
+`The existing source approval differs` and is left as it was.
+
+### Use a custom policy
+
+To manage the policy and trusted root yourself, supply both files before
+`source enroll`. The examples assume `policy.json` and `trusted-root.jsonl`
+were reviewed and provisioned independently:
+
+```text
+siteops --trust-policy policy.json --trusted-root trusted-root.jsonl source enroll official --source github:Azure/digital-ops-scale-kit
+```
+
+The [artifact verification guide](artifact-verification.md#github-policy)
+describes the policy format. Rerunning with the same files keeps the
+existing approval and does not extend it. To renew a custom policy, inspect
+the record, then replace that exact name when the reviewed files are ready:
 
 ```text
 siteops source show official
@@ -162,33 +215,11 @@ siteops source remove official
 siteops --trust-policy renewed-policy.json --trusted-root renewed-root.jsonl source enroll official --source github:Azure/digital-ops-scale-kit
 ```
 
-Removal leaves the project pin in place but package use fails closed until
-you enroll the reviewed replacement. Enrollment does not extend an expired
-policy automatically. Keep these commands and their files in a private
-operator environment.
-
-If a release contains several workspaces, add
-`--release-workspace <path-from-the-release>` to `project pin`.
-The command requires an explicit published release and uses anonymous source
-access. Policy and root files remain outside the content cache and are
-supplied independently on package use. The workspace pin cannot select them.
-Project and cache directories must occupy separate directory trees.
-Appending `@<release>` to the source is also supported as shorthand instead
-of `--release`.
-
-The `--auth cli` option applies only to descriptive `browse --source`
-metadata. Authenticated package acquisition is not implemented.
-
-After reviewing the plan, deploy with the same project, trust inputs and
-target selection:
-
-```text
-siteops --project ./factory --trust-policy policy.json --trusted-root trusted-root.json deploy storage -l name=one
-```
-
-Deployment prepares again. These commands do not promise execution of a saved
-plan from a previous invocation. Provider operations can create or update
-resources and incur charges.
+Removal leaves the project pin in place, but package use fails closed until
+you enroll the replacement. Keep these commands and their files in a private
+operator environment. You can also pass `--trust-policy` and
+`--trusted-root` directly on `project pin`, `plan` and `deploy`, as shown in
+[Run `project pin`](#run-project-pin), without enrolling a name.
 
 ## Reuse and change a workspace pin
 

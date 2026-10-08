@@ -1,6 +1,6 @@
 # aio-with-aksee-bootstrap
 
-Composes the AKS Edge Essentials host bootstrap with the AIO fundamentals install. Demonstrates the composed shape for bare-Arc-onboarded-Windows-VM to AIO in a single deploy.
+Composes the AKS Edge Essentials host bootstrap with the AIO fundamentals install. Demonstrates the composed shape that takes a Windows VM onboarded to Azure Arc to AIO in a single deploy.
 
 ## Single deploy
 
@@ -12,17 +12,19 @@ finishes.
 
 A `type: wait` step sits between the bootstrap and AIO fundamentals. It polls
 the `siteops.bootstrap.state` tag on the Arc machine resource. The wait checks
-state only and does not compare the bootstrap run ID. The whole chain runs from
-one command:
+state only and does not compare the bootstrap run ID. Review the plan, then one
+deploy command runs the whole chain:
 
 ```bash
-siteops -w workspaces/iot-operations deploy samples/aio-with-aksee-bootstrap/manifest.yaml -l environment=dev
+siteops -w workspaces/iot-operations plan samples/aio-with-aksee-bootstrap/manifest.yaml -l name=<site>
+siteops -w workspaces/iot-operations deploy samples/aio-with-aksee-bootstrap/manifest.yaml -l name=<site>
 ```
 
-The deploy blocks at `wait-for-bootstrap` until the state tag reports success
-or failure. The timeout is 60 minutes and the poll interval is 30 seconds. See
-[`../../templates/host-bootstrap/aksee/README.md`](../../templates/host-bootstrap/aksee/README.md)
-for VM-side monitor commands.
+Replace `<site>` with the configured Site. The deploy blocks at
+`wait-for-bootstrap` until the state tag reports success or failure. The
+timeout is 60 minutes and the poll interval is 30 seconds. See the
+[bootstrap monitor commands](../../manifests/aksee-bootstrap/README.md#monitor)
+for progress on the VM.
 
 ## What this sample does
 
@@ -37,7 +39,7 @@ additional `include:` directives or a larger composition.
 
 ## Prerequisites
 
-The bootstrap prerequisites apply (Arc-onboarded VM, the Arc machine managed identity granted access on the resource group, resource providers registered). See [`../../templates/host-bootstrap/aksee/README.md`](../../templates/host-bootstrap/aksee/README.md) for the one-time setup walkthrough, including the tag-write permission the wait step depends on.
+The bootstrap prerequisites apply (Arc-onboarded VM, the Arc machine managed identity granted access on the resource group, resource providers registered). See the [bootstrap prerequisites](../../manifests/aksee-bootstrap/README.md#prerequisites-per-target-vm-one-time) for the one-time setup walkthrough, and the [bootstrap state tag](../../manifests/aksee-bootstrap/README.md#bootstrap-state-tag) for the tag-write permission the wait step depends on.
 
 The site must carry both the `aksee` parameter section the bootstrap needs and any per-release AIO parameters the fundamentals expect (`properties.aioRelease` pointing at a file under `parameters/aio-releases/`).
 
@@ -46,6 +48,6 @@ The wait step and worker both target the Arc machine resource named by
 
 ## Variants
 
-- **Bootstrap only:** `siteops deploy manifests/aksee-bootstrap/manifest.yaml` stops after the cluster is Arc-connected and prepared for an AIO deployment. It does not install AIO.
+- **Bootstrap only:** `siteops -w workspaces/iot-operations deploy manifests/aksee-bootstrap/manifest.yaml -l name=<site>` stops after the cluster is Arc-connected and prepared for an AIO deployment. It does not install AIO.
 - **Bootstrap + AIO + sample workload:** add another `include:` to a sample partial (e.g., `../opc-ua-solution/_partial.yaml`) to land an OPC UA solution on top.
 - **Bootstrap + AIO + secret sync:** add `../../manifests/_partials/_resolve-aio.yaml` and `../../manifests/_partials/_secretsync.yaml` after the fundamentals step.

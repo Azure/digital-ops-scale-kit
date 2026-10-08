@@ -19,8 +19,7 @@ review submits no operations. `--yes` explicitly approves unattended, CI or
 JSON execution without printing the full private plan or bypassing
 validation, source trust or target prerequisites. Without `--yes`, a
 noninteractive invocation exits with argparse usage error 2 before content
-or Azure access. For preparation without execution, use `plan`. The former
-`deploy --dry-run` spelling is removed.
+or Azure access. For preparation without execution, use `plan`.
 
 Progress lines and logs go to stderr while the run is in flight. For a direct
 published source, fixed messages name release resolution, missing-content

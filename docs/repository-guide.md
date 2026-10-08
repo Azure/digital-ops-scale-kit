@@ -12,6 +12,7 @@ adding workspace content, or reviewing a change that crosses both layers.
 | IoT Operations content | `workspaces/iot-operations/` | AIO releases, manifests, templates, site conventions, resource definitions, and samples |
 | Tests | `tests/` | Local engine and workspace assertions, workflow checks, packaging checks, and opt-in live scenarios |
 | Delivery | `.github/` and `.pipelines/` | CI, deployment, integration, and release automation |
+| Build and release tooling | `scripts/` and `releases/` | Engine and workspace package builders, installation bootstraps, CI helpers, and reviewed release declarations |
 | Operator guidance | `README.md` and `docs/` | Getting started, operation, reference, migration, and release guidance |
 
 Keep Azure IoT Operations meaning in the workspace. Add engine behavior only
@@ -23,6 +24,13 @@ names, assumptions, or release policy.
 Browsing and execution have separate responsibilities. `browse` reads
 descriptive content without loading Site values. A remote browse consumes a
 published index tied to one source revision, not a remote execution filesystem.
+
+Each command first selects its content and Site configuration. `-w PATH`
+selects a local workspace. `--project DIRECTORY` supplies operator Sites and an
+optional workspace pin, and `--source SOURCE@RELEASE` selects a verified
+published release. Packaged content is verified, read from the protected
+cache, and deployed with the ARM JSON its producer compiled. `inputs` can
+instead construct one Site from a manifest's typed input contract.
 
 Preparation and deployment follow one shared command path:
 
@@ -41,6 +49,11 @@ Preparation and deployment follow one shared command path:
 executable preparation without Azure or Kubernetes mutation. `deploy`
 prepares and executes. Deployment completion remains distinct from workload
 readiness and functional verification.
+
+Supporting commands manage the state those commands read. `project` inspects
+or pins a project's workspace source, `source` inspects, enrolls or removes
+approved sources, `index` builds a public content index, and `cache` inspects
+cached storage or removes a selected entry.
 
 ## Workspace anatomy
 
@@ -95,20 +108,19 @@ publishable projections for CI artifacts and summaries.
 
 ### Separate content and Site configuration
 
-Internal acquisition callers can bind an operator Site configuration root
-independently of deployment content. Its primary `sites/`, `sites.local/`,
-inheritance fallback and Site provenance labels then use that configuration
-root. Manifests, templates and parameter libraries remain under the content
-workspace.
+`--project DIRECTORY` selects an operator project. Its `sites/`,
+`sites.local/`, inheritance fallback and Site provenance labels then come from
+the project, while manifests, templates and parameter libraries come from the
+local workspace selected with `-w` or from the project's pinned package.
+Without a project, a local workspace supplies both. Direct `--source` use
+without a project accepts only an explicit Site from `--site-file`,
+`--input-file` or `--input`. See [operator projects](projects.md).
 
 Extra trusted Site directories augment the selected configuration root.
 They are not a substitute for separating operator targets from packaged
-examples. An empty operator root does not fall back to content-owned Sites.
-The caller owns this root selection, not the package's metadata.
-
-Ordinary local CLI commands retain their existing single-workspace behavior.
-This separate-root boundary does not introduce a new CLI flag or a public
-Python SDK.
+examples. An empty operator root does not fall back to Sites owned by the content,
+and Sites shipped inside a package remain content rather than deployment
+targets. Package metadata cannot select the configuration root.
 
 ## Contributor route
 

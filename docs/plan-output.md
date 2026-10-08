@@ -64,10 +64,11 @@ Use `--describe` for the faster compile-free shape:
 siteops -w <workspace> plan <manifest> --describe
 ```
 
-`validate --plan` and `deploy --dry-run` are removed. Use `plan --describe`
-for the compile-free shape or `plan` for executable preparation without
-deployment. Bare `validate` remains a structural check for library
-manifests without targets. It has no plan-only `--output` or `--projection`.
+Use `plan --describe` for the compile-free shape or `plan` for executable
+preparation without deployment. Bare `validate` remains a structural check
+for library manifests without targets. It has no plan-only `--output` or
+`--projection`. The [migration guide](migrating.md) lists replaced preview
+options.
 
 A library manifest without a target set can be checked with `validate`.
 Pass a selector to plan that library against specific sites.

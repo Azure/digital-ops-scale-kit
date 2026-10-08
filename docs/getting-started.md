@@ -31,13 +31,9 @@ for later cleanup.
 
 ## 1. Get the CLI and workspace
 
-Choose a [Scale Kit release](https://github.com/Azure/digital-ops-scale-kit/releases)
-that provides installation assets or links to a compatible Site Ops release.
-Use an installation route that the selected engine release actually publishes:
-the [verified bundle or direct wheel](install-siteops.md), a bootstrap script
-with its proof when available, or your managed software channel. A verified
-bootstrap route authenticates the script before execution. Match the engine
-version required by this content.
+Choose a [Scale Kit release](https://github.com/Azure/digital-ops-scale-kit/releases).
+Install the Site Ops engine that its release notes name by following
+[Install Site Ops](install-siteops.md).
 Then confirm the command is available:
 
 ```bash
@@ -109,8 +105,8 @@ inherited settings.
 Check the configuration and prepare a plan:
 
 ```bash
-siteops -w workspaces/iot-operations validate manifests/aio-install/manifest.yaml -l name=munich-dev
-siteops -w workspaces/iot-operations plan manifests/aio-install/manifest.yaml -l name=munich-dev
+siteops -w workspaces/iot-operations validate aio-install -l name=munich-dev
+siteops -w workspaces/iot-operations plan aio-install -l name=munich-dev
 ```
 
 `validate` checks structure without compilation. `plan` also compiles templates
@@ -126,7 +122,7 @@ deploy only this site:
 
 ```bash
 az login
-siteops -w workspaces/iot-operations deploy manifests/aio-install/manifest.yaml -l name=munich-dev
+siteops -w workspaces/iot-operations deploy aio-install -l name=munich-dev
 ```
 
 Deployment applies the selected operations. Failure or interruption can leave
@@ -148,11 +144,11 @@ need.
 
 Configure the other sites and give them labels that describe how you want to
 target them. You can keep the same manifest and select the fleet with
-`-l "environment=prod"`, as in the repository's opening example.
+`-l "environment=prod"`.
 Review the wider selection first:
 
 ```bash
-siteops -w workspaces/iot-operations plan manifests/aio-install/manifest.yaml -l "environment=prod"
+siteops -w workspaces/iot-operations plan aio-install -l "environment=prod"
 ```
 
 After review, use `deploy` with the same manifest and selector. See

@@ -74,11 +74,11 @@ properties:
   aioRelease: "2608"    # must match parameters/aio-releases/2608.yaml
 ```
 
-If not specified, the site inherits whatever `base-site.yaml` declares (`"2608"` today).
+If not specified, the site inherits the value from its parent template. Every committed site in this workspace inherits `base-site.yaml`, directly or through a shared template, and `base-site.yaml` declares `"2608"`. A manifest that loads the release file fails preparation for a site that carries no `aioRelease` at all, reporting that the site does not carry the property the path selects on.
 
 ## Available releases
 
-Every file in `workspaces/iot-operations/parameters/aio-releases/` is a shipped release. At time of writing:
+Every file in `workspaces/iot-operations/parameters/aio-releases/` is a shipped release:
 
 | Release | `aioApiVersion` | `adrApiVersion` | Notes |
 |------|-----------------|-----------------|-------|
@@ -115,7 +115,7 @@ This applies to every resource area a site selects through `properties.resourceS
 
 ### Supported upgrade paths
 
-Azure IoT Operations supports upgrade to any patch of the same minor version, or to the next minor version. Other transitions (downgrades, multi-minor jumps, preview/GA crossings) require uninstall and reinstall. See [Upgrade Azure IoT Operations](https://learn.microsoft.com/en-us/azure/iot-operations/deploy-iot-ops/howto-upgrade) for the authoritative rules.
+Azure IoT Operations supports upgrade to any patch of the same minor version, or to the next minor version. Other transitions (downgrades, multi-minor jumps, preview/GA crossings) require uninstall and reinstall. See [Upgrade Azure IoT Operations](https://learn.microsoft.com/azure/iot-operations/deploy-iot-ops/howto-upgrade) for the authoritative rules.
 
 The optional E2E workflow can exercise selected adjacent-release upgrades,
 such as `2607` to `2608`. A passing dispatch establishes its selected
@@ -126,7 +126,7 @@ certification for another cluster or upgrade path.
 
 Sample templates under `samples/<name>/template.bicep` (e.g. `samples/opc-ua-solution/template.bicep`) pin every `Microsoft.IoTOperations/*` and `Microsoft.DeviceRegistry/*` reference to the **oldest supported** API version in the matrix above. They rely on RP backward-compatibility so a single file works against every shipped release. Bump these pins only when the oldest supported API version is removed from the matrix, not on every release. The workspace test `test_samples_pin_to_oldest_api_version` enforces this.
 
-This policy applies to samples. The platform fundamentals (`templates/aio/` top level, `templates/deps/`) and the config-driven catalog templates under `templates/aio/dataflows/` both use the per-version dispatch described under "Adding a new AIO release", so a site's resources are written at the API version its release ships. Adding a release that introduces an API version therefore means adding a catalog module too, which `tests/workspace/test_aio_dispatch_shape.py` checks. See [resource-catalog.md](resource-catalog.md).
+This policy applies to samples. The platform fundamentals (`templates/aio/` top level, `templates/deps/`) and the config-driven catalog templates under `templates/aio/dataflows/` and `templates/aio/assets/` use the per-version dispatch described under "Adding a new AIO release", so a site's resources are written at the API version its release ships. Adding a release that introduces an API version therefore means adding a catalog module too, which `tests/workspace/test_aio_dispatch_shape.py` checks. See [resource-catalog.md](resource-catalog.md).
 
 ## Adding a new AIO release
 
@@ -140,9 +140,11 @@ This policy applies to samples. The platform fundamentals (`templates/aio/` top 
    - `templates/aio/upgrade/deploy-release-resources.bicep`: add the matching conditional module.
    - Add `templates/aio/modules/instance-<YYYY-MM-DD>.bicep`, `resolve-instance-<YYYY-MM-DD>.bicep`, and `update-instance-<YYYY-MM-DD>.bicep`. Seed them from the previous API version, then apply every verified schema change for the new API.
    - Add `templates/aio/upgrade/modules/deploy-release-resources-<YYYY-MM-DD>.bicep` with the same public parameter surface as the earlier generation modules.
+   - `templates/aio/dataflows/main.bicep`: extend `@allowed` on `param aioApiVersion` and add a `module dataflows_<YYYY>` block. Add `templates/aio/dataflows/modules/dataflows-<YYYY-MM-DD>.bicep` by copying the newest module and changing every API version literal in it.
 3. **If `adrApiVersion` is new**, extend the ADR dispatch:
    - `templates/deps/adr-ns.bicep`: add to `@allowed` on `param adrApiVersion`, add a new conditional `module ns_<YYYY>` block, fold the previously-newest version into an explicit equality.
    - Add `templates/deps/modules/adr-ns-<YYYY-MM-DD>.bicep` by copying the previous version verbatim and changing the API version string.
+   - `templates/aio/assets/main.bicep`: extend `@allowed` on `param adrApiVersion` and add a `module assets_<YYYY>` block. Add `templates/aio/assets/modules/assets-<YYYY-MM-DD>.bicep` by copying the newest module and changing every API version literal in it.
 4. **If neither API version is new**, no API-dispatch Bicep changes are needed,
    and parameter auto-filtering forwards the new extension versions. Extend
    `aioReleaseConfiguration` and the existing
@@ -170,7 +172,7 @@ When a release reaches end-of-life (tied to AIO's official support window), drop
 
 1. **Remove the release YAML.** Delete `parameters/aio-releases/<release>.yaml`. Git history preserves the values for future reference.
 2. **Verify no site still pins the removed release.** Run `pytest tests/workspace/ -q`. `test_all_sites_aio_releases_have_config_files` fails fast on any site that references the missing YAML. Update those sites to a supported release.
-3. **Remove orphaned API-version Bicep modules.** If no remaining release uses a given `aioApiVersion` or `adrApiVersion`, the corresponding per-version modules (`instance-<YYYY-MM-DD>.bicep`, `update-instance-<YYYY-MM-DD>.bicep`, `adr-ns-<YYYY-MM-DD>.bicep`) and their `@allowed` + conditional dispatch entries can be removed. Leave them if any supported release still uses the API version.
+3. **Remove orphaned API-version Bicep modules.** If no remaining release uses a given `aioApiVersion` or `adrApiVersion`, the corresponding per-version modules and their `@allowed` + conditional dispatch entries can be removed. For `aioApiVersion` these are `instance-<YYYY-MM-DD>.bicep`, `resolve-instance-<YYYY-MM-DD>.bicep`, `update-instance-<YYYY-MM-DD>.bicep`, `upgrade/modules/deploy-release-resources-<YYYY-MM-DD>.bicep` and `dataflows/modules/dataflows-<YYYY-MM-DD>.bicep`. For `adrApiVersion` they are `adr-ns-<YYYY-MM-DD>.bicep` and `assets/modules/assets-<YYYY-MM-DD>.bicep`. Leave them if any supported release still uses the API version.
 4. **Update sample template API pins if needed.** Samples under `samples/<name>/template.bicep` pin to the **oldest supported** API version. If removing the EOL release leaves a newer oldest-supported version, bump the pins. `test_samples_pin_to_oldest_api_version` enforces this.
 5. **Remove the release from the E2E matrix.** Update any documentation, CI workflow defaults, or release-notes recipes that named the EOL release.
 
@@ -178,7 +180,7 @@ A site pinned to a removed release now fails at workflow prep (`aio-releases ent
 
 ## Validation summary
 
-Release misconfigurations surface at four points:
+Release misconfigurations surface at these points:
 
 | Layer | Check | When it runs |
 |-------|-------|--------------|

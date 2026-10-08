@@ -131,7 +131,7 @@ catalog/catalog-composition/azure-iot-operations/data/catalog-composition/resour
 Use an in-cluster MQTT client to observe those topics. The boiler asset also
 demonstrates OPC UA node identifiers from the simulator's boiler model.
 
-The `resource-set-samples` input in the
+The `resource-set-samples` value of the `tests` input in the
 [E2E workflow](../../../../docs/e2e-testing.md) automates this proof on a fresh
 cluster. It waits for the simulator trust job, checks the projected device,
 asset, endpoint, profile, and dataflow resources, waits for dataflow health

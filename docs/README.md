@@ -1,12 +1,12 @@
 # Documentation
 
-Use this page to choose the shortest route for the task in front of you. New
-operators can [install Site Ops](install-siteops.md), then use
-[guided inputs](guided-inputs.md) with a compatible published workspace.
-For a local checkout and reusable Site
-file, use the [configured-Site guide](getting-started.md). A separate plan
-is optional: an interactive deploy reviews and confirms its own prepared
-plan before execution. Health verification remains separate.
+Use this page to find the guide for your task. New here?
+[Install Site Ops](install-siteops.md), then deploy AIO to one existing
+cluster with [guided inputs](guided-inputs.md). For a local checkout and a
+reusable Site file, use the [local checkout guide](getting-started.md). A
+separate plan is optional because an interactive deploy reviews and
+confirms its own prepared plan. Check workload health separately after
+deployment.
 
 ## Start with installed Site Ops
 
@@ -25,6 +25,7 @@ plan before execution. Health verification remains separate.
 | Use configured Sites with packaged or local content | [Operator projects](projects.md) |
 | Inspect storage or remove a cached entry safely | [Cache maintenance](cache.md) |
 | Diagnose a failed command or provider operation | [Troubleshooting](troubleshooting.md) |
+| Fix an installation problem | [Installation problems](install-siteops.md#common-problems) |
 
 Installing the CLI does not acquire a workspace or approve a source. Follow
 the selected release's installation and source instructions. With a compatible

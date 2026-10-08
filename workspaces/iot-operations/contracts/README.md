@@ -15,6 +15,6 @@ template receives them.
 Site Ops interprets only the generic path and identity grammar. Azure IoT
 Operations names and reference semantics remain in this workspace.
 
-Resource-set authors normally edit files under `parameters/`, not this
+Resource-set authors normally edit files under `resource-sets/`, not this
 contract. Change the contract when a new resource kind or provider reference
 joins the catalog.

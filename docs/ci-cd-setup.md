@@ -1,14 +1,13 @@
 # CI/CD Setup
 
 This guide covers CI/CD configuration for automated testing and deployments.
-Site Ops runs anywhere Python and Azure CLI are available. Deployments that
-contain kubectl operations also require `kubectl`. This project provides a
-primary GitHub Actions implementation and an Azure Pipelines reference.
+Deployments need Azure CLI, and deployments that contain kubectl operations
+also require `kubectl`. The platforms install the Site Ops engine differently:
 
-| Platform | Location | Status |
-|----------|----------|--------|
-| [GitHub Actions](#github-actions) | `.github/workflows/` | Primary |
-| [Azure DevOps](#azure-devops) | `.pipelines/` | Reference implementation |
+| Platform | Location | Engine installation | Role |
+|----------|----------|---------------------|------|
+| [GitHub Actions](#github-actions) | `.github/workflows/` | pip installs the selected checkout in editable mode, or the optional `siteops-source` pip specification. Neither route verifies a signed release. | Deployment from a repository checkout, CI, and every Site Ops and Scale Kit release |
+| [Azure DevOps](#azure-devops) | `.pipelines/` | The verified bootstrap installs the signed engine selected by a release, unless `siteopsSource` or `installDev` is selected explicitly | Consumer deployment, including reusable templates referenced from another repository |
 
 Azure Pipelines is a consumer surface: install an identified Site Ops engine,
 select deployment content and configuration, then plan, deploy and check
@@ -20,7 +19,7 @@ to the GitHub Actions release workflows, not these ADO deployment pipelines.
 
 1. Azure subscription with resources to deploy
 2. GitHub repository with Actions enabled **or** Azure DevOps project with Pipelines enabled
-3. Azure AD application for OIDC / Workload Identity Federation
+3. Microsoft Entra application for OIDC or Workload Identity Federation
 
 ## GitHub Actions
 
@@ -28,7 +27,7 @@ to the GitHub Actions release workflows, not these ADO deployment pipelines.
 
 | Workflow | Trigger | Purpose |
 |----------|---------|---------|
-| `ci.yaml` | Push, pull request, manual | Lint Python, run unit tests, validate Bicep templates, and validate manifests |
+| `ci.yaml` | Push, pull request, manual | Lint Python, run unit tests, run the Linux (Ubuntu 26.04) and Windows bootstrap tests, and validate Bicep templates and manifests. Manual run modes add the [release checks](releasing.md#choose-the-right-workflow). |
 | `deploy.yaml` | Manual (`workflow_dispatch`) | Deploy infrastructure to Azure |
 | `_siteops-deploy.yaml` | Called by deploy.yaml | Reusable deployment logic |
 | `integration-test.yaml` | Manual (`workflow_dispatch`) | Run the integration pytest suite against an environment that was previously deployed via `deploy.yaml` |
@@ -38,7 +37,7 @@ to the GitHub Actions release workflows, not these ADO deployment pipelines.
 
 OIDC (OpenID Connect) allows GitHub Actions to authenticate to Azure without storing secrets. Examples use bash syntax.
 
-#### 1. Create Azure AD application
+#### 1. Create a Microsoft Entra application
 
 ```bash
 # Create app registration
@@ -142,8 +141,8 @@ Go to **Settings → Secrets and variables → Actions** and add:
 
 | Secret | Required | Description |
 |--------|----------|-------------|
-| `AZURE_CLIENT_ID` | Yes | Azure AD application client ID |
-| `AZURE_TENANT_ID` | Yes | Azure AD tenant ID |
+| `AZURE_CLIENT_ID` | Yes | Microsoft Entra application client ID |
+| `AZURE_TENANT_ID` | Yes | Microsoft Entra tenant ID |
 | `AZURE_SUBSCRIPTION_ID` | Yes | Default subscription for OIDC login |
 | `SITE_OVERRIDES` | No | JSON object with per-site overrides (see below) |
 
@@ -223,7 +222,7 @@ Override subscription, resource group, and parameters per site. Supports nested 
 ```
 
 > **Note:** `SITE_OVERRIDES` is stored as a secret for access control (admin-only modification).
-> Individual override values are masked in pipeline logs to prevent exposure (`::add-mask::` on GHA, `##vso[task.setvariable issecret=true]` on ADO).
+> Individual override values are masked in pipeline logs to prevent exposure (`::add-mask::` on GHA, `##vso[task.setsecret]` on ADO).
 
 ## Running Deployments
 
@@ -236,7 +235,10 @@ CI runs automatically on pushes to main and PRs that modify:
 - `tests/**`
 - `scripts/**`
 - `pyproject.toml`
-- `.github/workflows/**` and `.github/actions/**` on GitHub Actions, or `.pipelines/**` on Azure Pipelines
+- `.pipelines/**`
+- On GitHub Actions only: `.github/workflows/**`, `.github/actions/**`,
+  `.github/release-examples/**`, `releases/**/release.json` and
+  `releases/**/notes.md`
 
 Can also be triggered manually from **Actions → CI → Run workflow** (GHA) or **Pipelines → CI → Run pipeline** (ADO).
 
@@ -252,6 +254,7 @@ Can also be triggered manually from **Actions → CI → Run workflow** (GHA) or
    - **Environment**: `dev`, `staging`, or `prod`
    - **Selector**: Additional site filter (optional, e.g., `region=eastus`)
    - **Dry run**: Have the wrapper prepare an executable plan without invoking `deploy`
+   - **Site Ops install source**: Optional pip specification for the engine. Empty installs the selected checkout in editable mode.
 5. Click **"Run workflow"**
 
 ### Deploy via GitHub CLI
@@ -303,13 +306,20 @@ The iot-operations workspace demonstrates key Site Ops capabilities:
 
 ### Site configuration
 
-| Site | Environment | `enableSecretSync` |
-|------|-------------|--------------------|
+| Site | Environment | Suggested `enableSecretSync` |
+|------|-------------|------------------------------|
 | munich-dev | dev | optional |
 | seattle-dev | dev | optional |
 | munich-prod | prod | recommended |
 | seattle-prod | prod | recommended |
 | chicago-staging | staging | off |
+
+Committed Sites inherit `enableSecretSync: false` from `base-site.yaml`. Set
+`properties.deployOptions.enableSecretSync` on a Site or overlay to follow
+these suggestions, after confirming the cluster's OIDC issuer and workload
+identity. The committed Sites use placeholder subscriptions, so configure
+[`SITE_OVERRIDES`](#site-overrides) or commit real target values before running
+the demo.
 
 ### Running the demo
 
@@ -346,9 +356,9 @@ gh workflow run deploy.yaml -f workspace="iot-operations" -f manifest="samples/a
 │     deploy.yaml         │   │          ci.yaml            │
 │  (workflow_dispatch)    │   │  (push + pull_request)      │
 └───────────┬─────────────┘   ├─────────────────────────────┤
-            │                 │  • Unit Tests               │
+            │                 │  • Lint and Unit Tests      │
+            │                 │  • Bootstrap Tests          │
             │                 │  • Manifest Validation      │
-            │                 │  • Executable-plan Tests    │
             ▼                 └─────────────────────────────┘
 ┌─────────────────────────────────────────────────────────────┐
 │               _siteops-deploy.yaml (reusable)               │
@@ -402,6 +412,7 @@ See [ADO architecture](#ado-architecture) for the Azure DevOps equivalent.
 | Feature | GitHub Actions | Azure DevOps |
 |---------|---------------|--------------|
 | **Authentication** | OIDC (no stored credentials, short-lived tokens) | WIF service connection (token managed by `AzureCLI@2`) |
+| **Engine Installation** | pip installs the checkout in editable mode, or the `siteops-source` specification. No signed release verification. | Verified bootstrap installs the signed engine selected by a release. `siteopsSource` and `installDev` are explicit pip alternatives. |
 | **Environment Protection** | Required approvals for staging/prod | Approval checks on ADO environments |
 | **Input Validation** | Rejects traversal markers and unsupported selector characters | Same validation logic in pipeline scripts |
 | **Site Name Sanitization** | `SITE_OVERRIDES` keys validated against `^[a-zA-Z0-9_-]+$` | Same |
@@ -564,10 +575,23 @@ jobs:
     with:
       manifest: manifests/my-service.yaml
       environment: dev
-    secrets: inherit
+    secrets:
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      SITE_OVERRIDES: ${{ secrets.SITE_OVERRIDES }}
+      SITE_SELECTOR: environment=dev
 ```
 
-**Azure DevOps**: create a new pipeline that uses the stage template:
+The reusable workflow receives its Site selector through the optional
+`SITE_SELECTOR` secret, because a selector can contain Site names or private
+label values. Without it, the manifest's own `selector` applies.
+`deploy.yaml` uses it to pass the environment selector and any additional
+selector.
+
+**Azure DevOps**: create a new pipeline that uses the stage template. The
+`selector` parameter works the same way, and an empty value uses the
+manifest's own `selector`:
 
 ```yaml
 trigger:
@@ -592,6 +616,7 @@ stages:
       serviceConnection: azure-siteops
       keepAzSessionActive: true  # WIF connections only.
       manifest: manifests/my-service.yaml
+      selector: environment=dev
       environment: dev
       release: '<reviewed-release>'
       sourceCommit: '<full-release-source-commit>'
@@ -605,7 +630,7 @@ stages:
 |-------|---------|-------------|
 | `python-version` | `3.11` | Python version to install |
 | `install-dev` | `false` | Include dev dependencies (pytest, pytest-cov) |
-| `siteops-source` | (empty) | pip install spec for siteops. Empty = local editable install. Set to `git+https://github.com/.../digital-ops-scale-kit@<ref>` to pin a release. |
+| `siteops-source` | (empty) | pip installation specification, such as `git+https://github.com/<owner>/digital-ops-scale-kit@<tag>`. Empty installs the checkout in editable mode. pip installs the named source directly and does not verify a signed release. |
 
 ```yaml
 - uses: ./.github/actions/setup-siteops
@@ -646,6 +671,9 @@ stages:
 | `.pipelines/templates/siteops-deploy.yaml` | Stage template: deployment logic | Called by deploy.yaml |
 | `.pipelines/templates/siteops-validate.yaml` | Stage template: structural consumer validation without Azure authentication | Referenced by consumer pipelines |
 | `.pipelines/templates/setup-siteops.yaml` | Steps template: install Python + siteops | Called by all pipelines |
+| `.pipelines/templates/siteops-context.yaml` | Variables template: caller and automation checkout roots, the automation repository identity and output redaction | Used by the stage templates |
+| `.pipelines/templates/siteops-checkout.yaml` | Steps template: checks out the caller repository and, for a referenced template, the automation repository | Used by the stage templates |
+| `.pipelines/templates/siteops-inputs.yaml` | Steps template: validates paths and target selection, then generates `sites.local/` from `SITE_OVERRIDES` | Used by the stage templates |
 | `.pipelines/validate-pipelines.yaml` | Maintainer qualification: full template previews, hosted consumer smoke and one combined report | Manual only |
 | `.pipelines/templates/consumer-smoke.yaml` | Maintainer stages using the ordinary consumer-validation template with fixture content | Called by maintainer qualification |
 
@@ -719,7 +747,13 @@ the signed engine reference and the engine's own bundle provenance.
 ADO only downloads and verifies these assets. It needs no signing key or
 release-publication permission. Each job uses fresh installation state
 under the agent's temporary directory, separate from any preinstalled
-Site Ops tool. Use Ubuntu 24.04 agents for this template route.
+Site Ops tool.
+
+Use a Linux x64 agent based on glibc, such as `ubuntu-24.04`. The bootstrap
+requires `curl` and GitHub CLI 2.95 or newer on PATH, and runs GitHub CLI
+with telemetry disabled. It does not use sudo or install operating system
+packages. Some distribution packages of GitHub CLI are older than 2.95, so
+check the version on self-hosted agents.
 
 The deployment identity can remain scoped to existing target resource
 groups. Installation does not log in to Azure, grant permissions, create
@@ -832,6 +866,8 @@ Same as GitHub Actions, see [Assign Azure roles](#3-assign-azure-roles). The ser
    - **Dry run**: Prepare the executable plan without deploying
    - **Refresh Azure WIF session**: Enable for the WIF service connection after reviewing the task's experimental setting above
    - **Engine or content release** and **Full source commit**: Required together when running an untagged checkout, unless an explicit pip engine source is selected
+   - **Explicit pip engine source**: Optional pip specification that replaces the verified release installation
+   - **Complete Site file**: Optional Site file in this checkout, used instead of a selector
 5. Click **"Run"**
 
 #### Deploy via Azure CLI
@@ -865,9 +901,9 @@ az pipelines run \
 │    deploy.yaml           │   │         ci.yaml             │
 │    (manual trigger)      │   │    (push + pull_request)    │
 └───────────┬──────────────┘   ├─────────────────────────────┤
+            │                  │  • Lint                     │
             │                  │  • Unit Tests               │
             │                  │  • Manifest Validation      │
-            │                  │  • Executable-plan Tests    │
             ▼                  └─────────────────────────────┘
 ┌─────────────────────────────────────────────────────────────┐
 │            siteops-deploy.yaml (stage template)             │
@@ -1034,7 +1070,7 @@ not establish that live token lifecycle.
 
 ### Per-environment migration
 
-The deploy pipeline uses object parameter lookup tables for service connections and variable groups. To split per-environment (separate identities and secrets):
+The deploy and integration pipelines use object parameter lookup tables for service connections and variable groups. To use separate identities and secrets for each environment, edit the same defaults in `.pipelines/deploy.yaml` and `.pipelines/integration-test.yaml`:
 
 ```yaml
 # .pipelines/deploy.yaml: edit these defaults:

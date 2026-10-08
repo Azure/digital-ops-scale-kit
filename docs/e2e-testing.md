@@ -162,8 +162,7 @@ The regular PR CI job runs native copied-command, symlink-rejection and
 unsafe-path controls, with required symlink capability. Neither Windows check
 builds a Site Ops release or claims a verified
 engine installation, Azure deployment or a normal Windows desktop session.
-Signed bundle installation remains a distinct qualification gate. The
-bootstrap does not install packages with WinGet.
+Signed bundle installation remains a distinct qualification gate.
 
 ## How it fits together
 
@@ -250,7 +249,7 @@ Create a GitHub Environment (for example, `dev`) and set these secrets:
 
 `AZURE_CLIENT_OID` is the SP's directory object ID. The e2e job binds it to namespace-admin on `azure-iot-operations` so kubectl steps that traverse the Arc proxy (e.g. the OPC PLC simulator) succeed. If unset, the workflow falls back to a Microsoft Graph lookup, which requires the SP to have `Directory.Read.All`.
 
-`DEBUG_USER_OID` is a human user (or group) AAD object ID. When set, the e2e job binds it to `cluster-admin` on the runner k3s so you can inspect the live cluster via `az connectedk8s proxy -n <cluster> -g <rg>`. Pair with `skip-teardown: true` and/or `keep-cluster-alive-minutes` to keep the cluster around long enough to debug.
+`DEBUG_USER_OID` is a human user (or group) Microsoft Entra object ID. When set, the e2e job binds it to `cluster-admin` on the runner k3s so you can inspect the live cluster via `az connectedk8s proxy -n <cluster> -g <rg>`. Pair with `skip-teardown: true` and/or `keep-cluster-alive-minutes` to keep the cluster around long enough to debug.
 
 ```bash
 gh secret set AZURE_CLIENT_ID       --env dev --body "<app-client-id>"
@@ -267,6 +266,7 @@ From the **Actions** tab, dispatch **E2E Tests** with the defaults to run a sing
 
 | Input | Typical value | Notes |
 |-------|--------------|-------|
+| `scenario` | `aio` | `aio` runs the AIO matrix described on this page. `fleet` and `fleet-cleanup` run [fleet qualification](#qualify-one-exact-candidate-across-two-sites). `windows-installer-preflight` runs the [Windows runner check](#check-a-windows-runner-before-installer-qualification). |
 | `aio-releases` | `2608` or `2607,2608` | Comma-separated. Ephemeral fans out in parallel. Persistent serializes cells in the same RG. See [aio-releases.md](aio-releases.md) for how releases are defined and pinned. |
 | `environment` | `dev` | GitHub Environment whose secrets/approvers apply. |
 | `location` | `eastus2` | ephemeral mode only. Persistent derives from the RG. |
@@ -280,6 +280,9 @@ From the **Actions** tab, dispatch **E2E Tests** with the defaults to run a sing
 | `secret-sync-modes` | `enabled` or `enabled,disabled` | Matrix modes for Secret Sync and workload identity. Use `enabled,disabled` with `tests=aio-upgrade` to qualify upgrade behavior with and without the OIDC profile. |
 | `published-release` | empty or an exact tag | Empty keeps the checkout-source integration suite. A tag selects the bounded verified published-package mode below. |
 | `published-source-sha` | empty or a full commit | Required with `published-release`. Must be the exact commit targeted by the published tag. |
+| `published-journey` | `configured` | Applies only with `published-release`. `configured` deploys a configured Site, and `guided` deploys one guided Site. See below. |
+| `fleet-candidate` | empty | Fleet scenarios only. The exact **Fleet qualification selection** JSON from the release producer's admission summary. |
+| `fleet-original-run`, `fleet-original-attempt` | empty | `fleet-cleanup` only. The original acceptance workflow run ID and attempt. |
 
 Qualify both AIO upgrade optionality paths in one dispatch:
 
@@ -421,7 +424,7 @@ public release identities and aggregate counts, not Azure resource IDs.
 
 Local runs target your own k3s (or any Arc-connected) cluster against your own subscription. The renderer is cross-platform Python. No `envsubst` or bash required.
 
-Set three required env vars. Three more are auto-computed on first use.
+Set the required variables. The renderer fills in defaults for the optional ones.
 
 | Variable | Required | Default |
 |----------|----------|---------|

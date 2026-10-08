@@ -86,17 +86,21 @@ Optional fields:
 
 | Field | Default | Source |
 |---|---|---|
-| `aksEdgeMsiUrl` | latest K3s build (`base-site`) | A Microsoft-published versioned AKS EE MSI URL to pin a specific release. |
+| `aksee.aksEdgeMsiUrl` | latest K3s build (`base-site`) | A Microsoft-published versioned AKS EE MSI URL to pin a specific release. |
 
 ## Run
 
 ```bash
 # Standalone host bootstrap (stops after Arc connection and AIO prerequisites)
-siteops -w workspaces/iot-operations deploy manifests/aksee-bootstrap/manifest.yaml -l environment=dev
+siteops -w workspaces/iot-operations plan manifests/aksee-bootstrap/manifest.yaml -l name=<site>
+siteops -w workspaces/iot-operations deploy manifests/aksee-bootstrap/manifest.yaml -l name=<site>
 
 # Or bootstrap + AIO install in one deploy
-siteops -w workspaces/iot-operations deploy samples/aio-with-aksee-bootstrap/manifest.yaml -l environment=dev
+siteops -w workspaces/iot-operations deploy samples/aio-with-aksee-bootstrap/manifest.yaml -l name=<site>
 ```
+
+Replace `<site>` with the configured Site. The explicit selector replaces the
+manifest's `environment=dev` default.
 
 The Run Command step completes when the launcher returns `REGISTERED`. The
 manifest then waits for the worker's state tag, so the complete `siteops deploy`
@@ -313,8 +317,8 @@ The worker Authenticode-verifies each installer MSI (AKS Edge Essentials, Azure 
 
 ## Run directly (advanced)
 
-The scalekit path delivers the launcher via Bicep + Arc Run Command. For debugging or one-off use without scalekit, the full launcher script can run directly on the VM. See `scripts/README.md` for the dev workflow.
+Site Ops delivers the launcher through Bicep and Arc Run Command. For debugging or one-off use without Site Ops, the full launcher script can run directly on the VM. See the [script build workflow](../../templates/host-bootstrap/aksee/scripts/README.md) for the development workflow.
 
 ## Known limitations
 
-- The Run Command resource returns `executionState=Succeeded` the moment the launcher returns `REGISTERED`, NOT when the worker reaches `phase=99 status=succeeded`. Use the [bootstrap state tag](#bootstrap-state-tag) to gate downstream pipeline steps on actual bootstrap completion.
+- The Run Command resource returns `executionState=Succeeded` the moment the launcher returns `REGISTERED`, not when the worker reaches `phase=99 status=succeeded`. Use the [bootstrap state tag](#bootstrap-state-tag) to gate downstream pipeline steps on actual bootstrap completion.

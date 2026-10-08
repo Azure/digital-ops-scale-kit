@@ -6,7 +6,9 @@ composition or workload pattern.
 Samples perform real provider operations. They can create billable resources,
 need target-specific permissions, and may assume an existing AIO installation.
 Choose a sample from [the workspace table](#samples-in-this-workspace), read
-its prerequisites, and prepare one explicit site before running it.
+its prerequisites, and prepare one explicit site before running it. The
+[guide for configured Sites](../../../docs/getting-started.md) shows how to prepare
+a `sites.local/` overlay for one existing cluster.
 
 Use `siteops -w workspaces/iot-operations browse --category sample` to explore
 the examples. Each entry's optional `entry.yaml` keeps descriptive guidance
@@ -54,7 +56,7 @@ samples/<name>/
 ## File conventions
 
 - **`manifest.yaml`** is the user-facing entry point. Composes `_partial.yaml` plus any prerequisite steps the standalone deployment needs (e.g., `_resolve-aio.yaml` reads names from an existing AIO instance).
-- **`_partial.yaml`** holds only the steps that ARE the sample. The leading `_` marks it as an internal partial not intended for direct deployment. Composed by `manifest.yaml` and by compositional samples.
+- **`_partial.yaml`** holds only the steps that make up the sample. The leading `_` marks it as an internal partial not intended for direct deployment. Composed by `manifest.yaml` and by compositional samples.
 - **`template.bicep`** is the sample's deployment template. Pinned to the oldest supported AIO and ADR API versions per `docs/aio-releases.md` (Sample template API-version policy).
 - **`inputs.yaml`** wires upstream step outputs into the sample's step parameters. Co-located with the sample (not in the workspace-root `parameters/inputs/` dir). Attaches at step level, since chaining belongs to one consumer.
 - **Declaration files** hold operator-authored values such as a `secrets` array or resource definitions. Attach them at manifest level so several steps can read one source. Ordinary values remain overridable through `site.parameters`. Composed resource definitions change through `properties.resourceSets`. Keep declarations separate from `inputs.yaml` even when the same step consumes both. See `docs/parameter-resolution.md` (Choosing an attachment tier).
@@ -112,10 +114,10 @@ Omit `_resolve-aio.yaml` when the composition has no downstream consumer of the 
 |---|---|---|---|
 | `secretsync-sample/` | Bundle | Synchronizing Key Vault secrets to the cluster | inputs + declaration + partial, over `templates/secretsync/` |
 | `opc-ua-solution/` | Bundle | A full solution in Bicep: device, asset, dataflow, and cloud egress | template + inputs + partial |
-| `dataflow-sample/` | Composition | Declaring dataflows in YAML | declaration + `_resolve-aio` + `manifests/_dataflows`, over `templates/aio/dataflows/` |
-| `asset-sample/` | Composition | Declaring Device Registry devices and assets in YAML | `resource-sets/devices/site-devices.yaml` + `resource-sets/assets/site-assets.yaml` + `_resolve-aio` + `manifests/_assets`, over `templates/aio/assets/` |
+| `dataflow-sample/` | Composition | Declaring dataflows in YAML | declaration + `_resolve-aio` + `manifests/_partials/_dataflows`, over `templates/aio/dataflows/` |
+| `asset-sample/` | Composition | Declaring Device Registry devices and assets in YAML | `resource-sets/devices/site-devices.yaml` + `resource-sets/assets/site-assets.yaml` + `_resolve-aio` + `manifests/_partials/_assets`, over `templates/aio/assets/` |
 | `resource-set-basic/` | Composition | Selecting one reusable set from a site | `sites/catalog-basic.yaml` + `manifests/_partials/_aio-resources.yaml` |
-| `resource-set-composition/` | Composition | Inheritance, shared and external providers, independent assets, and cross-set dataflow references | `sites/shared/catalog-composition.yaml` + `sites/catalog-composition.yaml` + `manifests/_partials/_aio-resources.yaml` |
+| `resource-set-composition/` | Composition | Inheritance, shared and external providers, independent assets, and cross-set dataflow references | `sites/shared/catalog-composition.yaml` + `sites/catalog-composition.yaml` + `_external-provider` + `manifests/_partials/_aio-resources.yaml` |
 | `aio-with-opc-ua/` | Composition | Installing the platform and a full solution in one deploy | `_aio-fundamentals` + `_resolve-aio` + `_secretsync` (gated) + `opc-ua-solution/_partial` |
 | `aio-with-aksee-bootstrap/` | Composition | Bringing up a host before installing AIO | `host-bootstrap/aksee/_partial` + a wait on the bootstrap tag + `_aio-fundamentals` |
 

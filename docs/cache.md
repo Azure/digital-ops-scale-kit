@@ -2,8 +2,14 @@
 
 Use cache commands to inspect retained storage, reclaim space, or remove one
 corrupt entry before restoring its exact content. They operate on the
-[Site Ops cache root](workspace-packages.md#internal-workspace-cache), selected
-by `SITEOPS_CACHE_DIR` or the platform default.
+[Site Ops cache root](workspace-packages.md#internal-workspace-cache).
+`SITEOPS_CACHE_DIR` selects it explicitly and must be an absolute path.
+Otherwise it is:
+
+| Platform | Default cache root |
+|---|---|
+| Windows | `%LOCALAPPDATA%\siteops\cache` |
+| Linux | `$XDG_CACHE_HOME/siteops` when that variable is an absolute path, otherwise `~/.cache/siteops` |
 
 ```text
 siteops cache list

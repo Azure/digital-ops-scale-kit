@@ -33,6 +33,26 @@ steps:
     when: "{{ site.labels.condition == 'true' }}"
 ```
 
+## Manifest fields
+
+| Field | Required | Behavior |
+|-------|----------|----------|
+| `apiVersion` | no | `siteops/v1`, the default when omitted. |
+| `kind` | no | `Manifest` when present. |
+| `name` | no | Manifest name. Defaults to the filename without its extension. |
+| `description` | no | Free text describing the manifest. |
+| `sites` | no | Site names or relative Site paths to target. When both `sites:` and `selector:` are set, `sites:` is used. |
+| `selector` | no | Label selector, such as `environment=dev`. `siteSelector` is a deprecated spelling that logs a warning. Declaring both spellings is an error. |
+| `parallel` | no | Concurrent Sites. See [Parallel execution](#parallel-execution). |
+| `parameters` | no | Parameter sources applied to every step. See [Manifest-level parameters](#manifest-level-parameters). |
+| `parameterCompositions` | no | Workspace contracts for composed parameter collections. |
+| `steps` | yes | Ordered steps. Validation reports `Manifest has no steps defined` when the list is empty or missing. |
+
+Any other key at the top level is rejected with a `did you mean` hint. A
+manifest may instead use the envelope shape: `apiVersion` and `kind` at the
+top, `name`, `description` and `labels` under `metadata`, and every other
+field under `spec`.
+
 ## Site selection
 
 | Method | Behavior |
@@ -43,10 +63,10 @@ steps:
 
 ```bash
 # Overrides manifest selection, deploys to all prod sites.
-siteops deploy manifest.yaml -l environment=prod
+siteops -w workspaces/iot-operations deploy aio-install -l environment=prod
 
 # Multi-site CLI selection (name OR-combines).
-siteops deploy manifest.yaml -l name=munich-dev,name=seattle-dev
+siteops -w workspaces/iot-operations deploy aio-install -l name=munich-dev,name=seattle-dev
 ```
 
 A manifest with neither `sites:` nor `selector:` is a library or partial.
@@ -109,8 +129,7 @@ declared. Defaults, then answer files, then inline answers contribute
 values. A conditional row may use
 `when: {input: featureEnabled, equals: true}` to require it only when a
 previously declared unconditional controller has that value. Contracts
-declaring `sensitive: true` are rejected in this initial route until protected
-values can be preserved across planning and reporting without disclosure.
+declaring `sensitive: true` are rejected.
 Author only mappings that ordinary Site parsing and actual deployment
 preparation accept. Do not map two inputs onto the same Site field.
 
@@ -217,8 +236,7 @@ boolean input. An active prerequisite must be verified by an explicit
 read or input resolution fails before deployment. Neither fact proves
 readiness or secret materialization. The selected workspace declares
 resource types and allowed mappings. Site Ops selects the read provider
-and the operator's configured Azure identity. A later SDK reader can
-use the same contract and pinned ARM API version.
+and the operator's configured Azure identity.
 
 `siteops inputs <manifest>` shows the contract and can write an incomplete
 answer file for the operator. Conditional fields are omitted from the example
@@ -307,8 +325,23 @@ operation remains deferred until that output resolves.
     - configs/local-manifest.yaml
 ```
 
+| Field | Required | Behavior |
+|-------|----------|----------|
+| `type` | yes | `kubectl`. |
+| `operation` | yes | `apply`, the only supported operation. |
+| `arc.name` | yes | Name of the Arc cluster. Supports site variables. |
+| `arc.resourceGroup` | yes | Resource group of the cluster. Supports site variables. |
+| `files` | yes | Nonempty list of workspace paths or HTTPS URLs to apply. |
+| `when` | no | Condition. See [Conditional steps](#conditional-steps). |
+
+Site Ops reaches the cluster through an `az connectedk8s proxy` session that
+it opens for the step. `plan` checks that `kubectl` and Azure CLI are
+available on the machine running Site Ops.
+
 Authored local paths must remain inside the workspace, and URLs must use
-HTTPS. Site-selected local files are required only for sites where the step's
+HTTPS. When the content comes from a verified workspace package, `files` must
+name package paths, and HTTPS URLs are rejected before any tool runs.
+Site-selected local files are required only for sites where the step's
 condition applies. Fully resolved cluster names, resource groups, and file
 values are checked during executable preparation. Values derived from prior
 operation outputs remain deferred until execution.
@@ -321,7 +354,7 @@ run. Use it when a prior step starts asynchronous work whose completion is not
 reflected in the deployment's own result. A timeout or a terminal failure fails
 the step, which skips the site's remaining steps.
 
-The first supported condition type is `arm-tag`: poll a tag on an ARM resource
+The supported condition type is `arm-tag`: poll a tag on an ARM resource
 until it reaches an expected value.
 
 ```yaml
@@ -353,6 +386,9 @@ Behavior notes:
 - The wait checks the condition once before sleeping, so an already-satisfied condition returns on the first poll.
 - A permanent error (authorization failure, resource not found, malformed `resourceId`) fails the step fast rather than polling for the full timeout. Transient errors (throttling, 5xx, network) keep polling.
 - A timeout or failure message reports the last observed tag value and the last underlying error.
+- These authoring errors fail when the manifest loads: a `failurePattern` that
+  also matches `expectedValue`, and a `pollIntervalSeconds` longer than
+  `timeoutMinutes`.
 - `siteops plan` never polls. `deploy` waits only during execution, after
   preparing and confirming the plan. Fully resolved values use
   the same scalar and success-versus-failure-pattern checks as execution.
@@ -407,8 +443,10 @@ Control step execution based on site labels or properties:
 
 Truthy evaluation:
 
-- `true` → runs step
-- `false`, `""`, `"false"`, `"0"`, `0`, `[]`, `{}` → skips step
+- Runs the step: `true`, a nonempty string other than `false` or `0` in any
+  letter case, a nonzero number, or a nonempty list or mapping.
+- Skips the step: a missing label or property, `false`, `""`, `"false"`, `"0"`, `0`,
+  `[]`, or `{}`.
 
 The structured `any` form takes a non-empty list of the atomic expressions
 above. Invalid structured conditions fail manifest loading.
@@ -417,12 +455,18 @@ above. Invalid structured conditions fail manifest loading.
 
 | Value | Behavior |
 |-------|----------|
-| `parallel: 1` | Sequential (default) |
-| `parallel: true` | Unlimited concurrency |
+| `parallel: 1` or `parallel: false` | Sequential (default) |
+| `parallel: true` or `parallel: 0` | Unlimited concurrency |
 | `parallel: 5` | Up to 5 sites concurrently |
+| `parallel: {sites: 5}` | Object form of the same limit |
 
-CLI override: `siteops plan manifest.yaml -p 5` or
-`siteops deploy manifest.yaml -p 5`
+CLI override: `-p` accepts a positive integer, or `max`, `auto` or `0` for
+unlimited concurrency, and replaces the manifest setting:
+
+```bash
+siteops -w workspaces/iot-operations plan aio-install -p 5
+siteops -w workspaces/iot-operations deploy aio-install -p 5
+```
 
 ## Deployment scopes
 
@@ -437,7 +481,7 @@ When a manifest contains `scope: subscription` steps, Site Ops uses two-phase de
 
 **Phase 1**: subscription-scoped steps:
 - Groups selected sites by subscription
-- Finds the subscription-level site for each subscription
+- Finds the subscription-level site among the selected sites for each subscription
 - Executes subscription-scoped steps once per subscription
 - Caches outputs keyed by subscription ID
 
@@ -445,6 +489,16 @@ When a manifest contains `scope: subscription` steps, Site Ops uses two-phase de
 - Executes for all RG-level sites (parallelizable)
 - Subscription-level sites are skipped (no resource group)
 - Can reference Phase 1 outputs via cross-scope chaining
+
+Select the subscription-level site in the same command as the RG-level sites,
+for example `-l name=contoso-global,name=munich-dev`. A selector such as
+`environment=dev` matches only sites carrying that label. When a
+subscription-scoped step would run and no subscription-level site is selected
+for that subscription, validation reports this error:
+
+```text
+Subscription '<subscription>' has RG-level sites (<sites>) but no subscription-level site for subscription-scoped steps
+```
 
 ```yaml
 steps:

@@ -61,7 +61,7 @@ dataflows:
 
 The contents of each `properties` block are the resource provider's own schema. See the [AIO dataflow REST API reference](https://learn.microsoft.com/rest/api/iotoperations/) for the full property set of each type.
 
-AIO creates a `default` endpoint and a `default` profile alongside the instance, so a declaration references those without supplying them. Do not declare an endpoint or a profile named `default`. The instance template owns both, and a second writer full-PUTs the resource, so each deploy discards what the other set. For the endpoint that also stops every dataflow sourcing `endpointRef: default` from moving data. The workspace tests reject either name.
+AIO creates a `default` endpoint and a `default` profile alongside the instance, so a declaration references those without supplying them. Do not declare an endpoint or a profile named `default`. The instance template owns both, and a second writer full-PUTs the resource, so each deploy discards what the other set. For the endpoint that also stops every dataflow sourcing `endpointRef: default` from moving data. Validation and planning reject either name with `is provider-owned and cannot be written by a resource set`.
 
 ## Where a declaration's values come from
 
@@ -95,7 +95,7 @@ dataflow set and the `default` resources created with the AIO instance.
 
 ## Composing with other steps
 
-`manifests/_partials/_dataflows.yaml` is a partial, so a manifest that already installs AIO can add dataflows without a second deploy. `manifests/aio-resources/manifest.yaml` composes it that way, gated on the site's selected set.
+`manifests/_partials/_dataflows.yaml` is a partial, so a manifest that already installs AIO can add dataflows without a second deploy. `manifests/_partials/_aio-resources.yaml`, which the `aio-resources` entry includes, composes it that way, gated on the site's selected set.
 
 `_dataflows.yaml` carries no manifest-level parameters, which is what lets a composing manifest gate it and supply the declaration. A sample composes it the same way, attaching its declaration on its own manifest, as `samples/dataflow-sample/` does.
 

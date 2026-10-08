@@ -13,6 +13,7 @@ The cluster-side SecretSync controller resolves each SecretSync, exchanges its O
 ## Prerequisites
 
 - AIO must be installed on the target cluster. Run `aio-install` first.
+- The connected cluster must already have an OIDC issuer and workload identity enabled. This sample runs Secret Sync enablement, which depends on both.
 - The site's `aioRelease` must point to a release config under `parameters/aio-releases/`.
 
 ## Configure before deploying
@@ -106,8 +107,12 @@ The remaining configuration is still private inspection output.
 ## Deploy
 
 ```bash
-siteops -w workspaces/iot-operations deploy samples/secretsync-sample/manifest.yaml -l environment=dev
+siteops -w workspaces/iot-operations plan samples/secretsync-sample/manifest.yaml -l name=<site>
+siteops -w workspaces/iot-operations deploy samples/secretsync-sample/manifest.yaml -l name=<site>
 ```
+
+Replace `<site>` with the configured Site. The explicit selector replaces the
+manifest's `environment=dev` default.
 
 The defaults shipped in `secrets.yaml` are placeholder values intended for a first-run smoke test against a throwaway environment. Override them per the section above before deploying anywhere you care about.
 
@@ -123,7 +128,7 @@ The integration test `tests/integration/test_sync_secrets_manifest.py` asserts e
 
 ## Removing a secret
 
-Remove its entry from `secrets` and re-deploy. The SPC will be PUT without that entry, so the cluster-side controller stops syncing it. Note that Bicep Incremental mode does NOT delete the corresponding `Microsoft.SecretSyncController/secretSyncs` ARM resource. To fully clean up:
+Remove its entry from `secrets` and re-deploy. The SPC will be PUT without that entry, so the cluster-side controller stops syncing it. Bicep incremental mode does not delete the corresponding `Microsoft.SecretSyncController/secretSyncs` ARM resource. To fully clean up:
 
 ```bash
 az resource delete --ids <secretSyncResourceId>

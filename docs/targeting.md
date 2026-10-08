@@ -31,9 +31,12 @@ deployment require `-l` or an explicit Site.
 selector: "environment=dev"    # shipped default scope
 ```
 
+The examples on this page use `plan`, which previews the selection without
+deploying. `deploy` accepts the same selectors.
+
 ```bash
-siteops deploy manifests/aio-install/manifest.yaml                    # all env=dev sites
-siteops deploy manifests/aio-install/manifest.yaml -l name=munich-dev # only munich-dev
+siteops plan manifests/aio-install/manifest.yaml                    # all env=dev sites
+siteops plan manifests/aio-install/manifest.yaml -l name=munich-dev # only munich-dev
 ```
 
 The default `environment=dev` selects every matching Site, including one
@@ -50,14 +53,14 @@ The following label examples are illustrative. Define the referenced labels
 on your Sites, or substitute keys and values from your own inventory.
 
 ```bash
-siteops deploy manifests/aio-install/manifest.yaml -l environment=prod,region=eu
+siteops plan manifests/aio-install/manifest.yaml -l environment=prod,region=eu
 # Selects sites where labels.environment == "prod" AND labels.region == "eu".
 ```
 
 `-l` is repeatable. Each invocation contributes `key=value` pairs that AND-combine with the others.
 
 ```bash
-siteops deploy manifests/aio-install/manifest.yaml -l environment=prod -l region=eu
+siteops plan manifests/aio-install/manifest.yaml -l environment=prod -l region=eu
 # Equivalent to the comma-joined form above.
 ```
 
@@ -66,15 +69,15 @@ siteops deploy manifests/aio-install/manifest.yaml -l environment=prod -l region
 `name=` is the one selector key whose duplicate values OR-combine. Multi-site selection happens through repeated `name=` values.
 
 ```bash
-siteops deploy manifests/aio-install/manifest.yaml -l name=munich-dev,name=seattle-dev
+siteops plan manifests/aio-install/manifest.yaml -l name=munich-dev,name=seattle-dev
 # Targets exactly munich-dev OR seattle-dev.
 ```
 
 Duplicate values for any other key raise an error pointing at the conflict, since this is almost always a typo:
 
 ```bash
-siteops deploy manifests/aio-install/manifest.yaml -l env=dev -l env=prod
-# Error: Selector key `env` may only appear once. Selectors AND across
+siteops plan manifests/aio-install/manifest.yaml -l env=dev -l env=prod
+# error: Selector key `env` may only appear once. Selectors AND across
 # keys, so duplicating a key would always match zero sites. Only `name=`
 # supports multiple values (OR-combined).
 ```
@@ -84,8 +87,8 @@ siteops deploy manifests/aio-install/manifest.yaml -l env=dev -l env=prod
 For sites under nested `sites/` subdirectories, `name=` accepts both the basename (filename without extension) and the relative path under the trusted dir. Both forms resolve to the same site.
 
 ```bash
-siteops deploy manifests/aio-install/manifest.yaml -l name=munich-dev
-siteops deploy manifests/aio-install/manifest.yaml -l name=regions/eu/munich-dev
+siteops plan manifests/aio-install/manifest.yaml -l name=munich-dev
+siteops plan manifests/aio-install/manifest.yaml -l name=regions/eu/munich-dev
 # Both target the file at `sites/regions/eu/munich-dev.yaml`.
 ```
 
@@ -122,11 +125,11 @@ steps:
 ```
 
 ```bash
-siteops deploy manifests/diagnostics.yaml -l name=munich-prod
+siteops plan manifests/diagnostics.yaml -l name=munich-prod
 # Works. CLI supplies the targeting the manifest deferred.
 
-siteops deploy manifests/diagnostics.yaml
-# Error: Manifest 'diagnostics' has no targeting. Add `sites:` or `selector:`
+siteops plan manifests/diagnostics.yaml
+# error: Manifest 'diagnostics' has no targeting. Add `sites:` or `selector:`
 # to the manifest, or pass `-l <key>=<value>` on the CLI.
 ```
 
@@ -134,17 +137,17 @@ Partials (filename prefixed `_`) compose into other manifests via `include:`. Th
 
 ## No-match diagnostic
 
-When a CLI selector matches zero sites, `deploy` exits non-zero with a diagnostic that lists what the workspace actually contains for each requested key. The diagnostic catches typos at the moment the operator runs the command.
+When a CLI selector matches zero sites, `plan` and `deploy` exit nonzero with a diagnostic that lists what the workspace actually contains for each requested key. The diagnostic catches typos at the moment the operator runs the command.
 
 ```bash
-siteops deploy manifests/aio-install/manifest.yaml -l environment=prdo
-# Error: CLI selector `-l environment=prdo` matched no sites.
-# `environment=prdo` requested. Workspace `environment` values: 'dev', 'prod', 'staging'.
+siteops plan manifests/aio-install/manifest.yaml -l environment=prdo
+# error: CLI selector `-l environment=prdo` matched no sites.
+# `environment=prdo` requested. Workspace `environment` values: 'dev', 'prod', 'sample', 'staging'.
 ```
 
 ```bash
-siteops deploy manifests/aio-install/manifest.yaml -l name=does-not-exist
-# Error: CLI selector `-l name=does-not-exist` matched no sites.
+siteops plan manifests/aio-install/manifest.yaml -l name=does-not-exist
+# error: CLI selector `-l name=does-not-exist` matched no sites.
 # `name=does-not-exist` not found. Workspace site names:
 # <available-site-1>, <available-site-2>.
 ```
@@ -152,7 +155,7 @@ siteops deploy manifests/aio-install/manifest.yaml -l name=does-not-exist
 When the site name matches but another selector key knocks it out, the diagnostic says so:
 
 ```bash
-siteops deploy manifests/aio-install/manifest.yaml -l name=munich-dev,environment=prod
+siteops plan manifests/aio-install/manifest.yaml -l name=munich-dev,environment=prod
 # `name=munich-dev` matched a workspace site but another selector key
 # filtered it out.
 ```
@@ -172,7 +175,7 @@ preflight.
   `sites`, `selector`, `siteSelector`, `parallel`, `parameters`,
   `parameterCompositions`, `steps`). `siteSelector` is the deprecated
   spelling of `selector` and is still accepted.
-- **Selector parse errors** (duplicate non-`name` keys, malformed pairs) are surfaced as validation errors. They no longer mask other manifest issues. The operator sees every problem in one pass.
+- **Selector parse errors** (duplicate non-`name` keys, malformed pairs) are surfaced as validation errors alongside other manifest issues, so you see every problem in one pass.
 - **Library manifests pass validation** because no targeting is structurally OK. Add `-l` when running `validate` to exercise the resolve path against real sites.
 
 ## Pitfalls

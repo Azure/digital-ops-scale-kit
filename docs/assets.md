@@ -133,11 +133,11 @@ refers to its device by name through `deviceRef`, and ARM does not model that
 relationship, so each per-version module expresses the ordering with
 `dependsOn`.
 
-Across families, `manifests/aio-resources/manifest.yaml` runs the asset step before the dataflow step, so a dataflow whose source names an asset finds it already there.
+Across families, `manifests/_partials/_aio-resources.yaml`, which the `aio-resources` entry includes, runs the asset step before the dataflow step, so a dataflow whose source names an asset finds it already there.
 
 ## Composing with other steps
 
-`manifests/_partials/_assets.yaml` is a partial, so a manifest that already installs AIO can add devices and assets without a second deploy. `manifests/aio-resources/manifest.yaml` gates it when either selection list is non-empty, and `samples/asset-sample/` composes it alongside `_resolve-aio.yaml` as a standalone deploy.
+`manifests/_partials/_assets.yaml` is a partial, so a manifest that already installs AIO can add devices and assets without a second deploy. `manifests/_partials/_aio-resources.yaml` gates it when either selection list is non-empty, and `samples/asset-sample/` composes it alongside `_resolve-aio.yaml` as a standalone deploy.
 
 `_assets.yaml` carries no manifest-level parameters, which is what lets a composing manifest gate it and supply the declaration.
 

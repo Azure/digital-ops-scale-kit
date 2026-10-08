@@ -48,8 +48,8 @@ clone, saved Site or project pin.
 
 ### Install Site Ops
 
-Follow the selected release's generated installation instructions, using a
-compatible engine and complete IoT Operations workspace.
+Use the selected release's generated installation instructions. They install
+the Site Ops engine only.
 
 | Your environment | Installation route |
 |---|---|
@@ -58,30 +58,42 @@ compatible engine and complete IoT Operations workspace.
 
 For independent script provenance before any installer code runs, use the
 [verified bootstrap entry](docs/install-siteops.md#verify-the-bootstrap-script).
-When choosing the bootstrap, add `--enroll-source official` or
-`-EnrollSource official` to approve the official content source explicitly.
-The bootstrap needs `curl` and GitHub CLI 2.95 or newer, and reports when
+Site Ops uses GitHub CLI 2.95 or newer, without a login, to verify published
+content. The bootstrap also needs it, along with `curl`, and reports when
 Azure CLI is missing.
-Other installation routes use [independent source enrollment](docs/projects.md#use-an-approved-source).
 Installing the CLI alone does not acquire or approve workspace content.
+
+### Approve the official content source
+
+Approve the official publisher once, under a name you choose. This example
+uses `official`:
+
+```text
+siteops source enroll official
+```
+
+This approves releases that the official publisher builds from its main
+branch, for 30 days. Run the same command again to renew. The bootstrap
+does the same when you add `--enroll-source official` or
+`-EnrollSource official`. See [approved sources](docs/projects.md#use-an-approved-source)
+for other publishers and custom policies.
 
 ### Deploy AIO
 
-Use an authorized Azure CLI identity and the source/version identified by
-your release instructions. `official` is an independently approved consumer
-alias, not authority supplied by downloaded content. Replace the cluster
+Use an authorized Azure CLI identity and the release named by your release
+instructions. `official` is the source name you approved independently
+above, not authority supplied by downloaded content. Replace the cluster
 placeholder with its full ARM resource ID:
 
 ```text
 siteops deploy aio-install --source "official@<release>" --input "cluster=<Arc-cluster-resource-ID>"
 ```
 
-Deploy prepares an executable plan once, displays its target and operation
-scope in a private terminal, asks for confirmation, then executes that same
-plan. Declared resource-ID answers authorize bounded Azure reads. Publisher
-trust, read access and permission to deploy remain separate. For CI, JSON
-output or any unattended invocation, pass `--yes` to approve execution
-explicitly. It does not bypass validation or source approval. The command
+The command reads the cluster to fill in its subscription, resource group
+and region. In a private terminal, it shows the targets and operations of
+one prepared plan and asks for confirmation before executing that plan. For
+CI, JSON output or any other unattended run, pass `--yes` to approve
+execution. Validation and source approval still apply. The command
 does not sign you in, and deployment can incur charges. Follow the
 [outcome check](docs/guided-inputs.md#check-the-result) after deployment.
 
@@ -96,13 +108,13 @@ when you want a separate preview. It is not a prerequisite for deployment.
 
 ### Scale out on the same model
 
-Save Sites for repeatable fleet selection
-and optionally pin a release in an operator project. Review only the new
-targets before deploying them:
+[Save Sites](docs/guided-inputs.md#keep-a-site-for-later) for repeatable
+fleet selection and optionally pin a release in an operator project. Review
+only the new targets before deploying them:
 
 ```text
-siteops --approved-source official project pin factory --release <release>
-siteops --approved-source official --project factory plan aio-install -l name=plant-two,name=plant-three
+siteops --approved-source official project pin ./factory --release <release>
+siteops --approved-source official --project ./factory plan aio-install -l name=plant-two,name=plant-three
 ```
 
 Deploy the same selector only after confirming it excludes already installed
@@ -120,7 +132,7 @@ With a pinned approved workspace, browse its packaged content without a
 checkout:
 
 ```bash
-siteops --approved-source official --project factory browse aio-install
+siteops --approved-source official --project ./factory browse aio-install
 ```
 
 The following `-w` commands require a local checkout. Inspect local

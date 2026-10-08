@@ -145,7 +145,7 @@ Core operations and samples share this convention.
 apiVersion: siteops/v1alpha1
 kind: DeploymentEntry
 role: standalone
-category: operation
+category: core
 tags: [storage]
 documentation: [README.md]
 outcome: Create a storage account in the selected resource group.
@@ -187,7 +187,7 @@ the inspector.
 Conventional discovery covers YAML manifests beneath `manifests` and
 `manifest.yaml`, `manifest.yml` and underscore partials beneath `samples`.
 In a nested `manifests/` directory, `inputs.yaml` is a discoverable manifest
-unless the same directory has `manifest.yaml` or `manifest.yml`; alongside
+unless the same directory has `manifest.yaml` or `manifest.yml`. Alongside
 either of those names, it is reserved for that manifest's typed input
 contract. To browse an actual manifest named `inputs.yaml` in that ambiguous
 layout, list its path explicitly in `content.yaml`.

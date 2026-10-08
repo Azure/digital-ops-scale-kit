@@ -81,7 +81,7 @@ A family deploys as one step, named for the family: `asset-resources`, `dataflow
 
 One step per family rather than one per resource kind keeps a fleet deploy to one round trip per family per site, and keeps the step namespace small. Step names are a flat global namespace after include flattening, and a collision is a parse error.
 
-Families run in the order `manifests/aio-resources/manifest.yaml` lists them, which is how a reference that crosses families is satisfied. Assets deploy before dataflows, so a dataflow naming an asset as its source finds it already there.
+Families run in the order `manifests/_partials/_aio-resources.yaml` includes them, which is how a reference that crosses families is satisfied. Assets deploy before dataflows, so a dataflow naming an asset as its source finds it already there.
 
 ## Select resource sets per site
 
@@ -230,8 +230,9 @@ and step.
 1. Add the resource collection and its identity to
    `contracts/aio-catalog.yaml`, plus any provider reference rules.
 2. Add `resource-sets/<area>/` for reusable sets.
-3. Add a typed parameter source to `manifests/aio-resources/manifest.yaml`, naming the
-   collections that area may contribute.
+3. Add a typed parameter source to `manifests/_partials/_aio-resources.yaml`,
+   naming the collections that area may contribute. The
+   `manifests/aio-resources/manifest.yaml` entry includes that partial.
 4. Add or update the gated family partial and its versioned Bicep entry point.
    Keep `parameters/inputs/catalog.yaml` attached at step level so resolved
    parent names reach the deployment.
@@ -248,7 +249,7 @@ and step.
 2. Add its name to the matching ordered list under
    `properties.resourceSets.<area>`.
 3. Prepare the deployment with
-   `siteops plan manifests/aio-resources/manifest.yaml -l <selector>`.
+   `siteops -w workspaces/iot-operations plan aio-resources -l <selector>`.
 4. Run the workspace tests with `pytest tests/workspace/ -q`, which check name uniqueness, reference resolution, required fields, and validity at every supported API version.
 
 ## See also

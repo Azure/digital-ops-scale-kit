@@ -1,21 +1,24 @@
-# Supply one Site with typed inputs
+# Deploy AIO with guided inputs
 
-One explicit Site can be built in memory from typed answers, without a
-project pin, saved Site, generated answer file or separate plan command.
-Install a compatible Site Ops build and select a release containing the
-complete AIO workspace and its typed input contract. The source/version
-comes from your selected release instructions. `official` denotes an
-independently enrolled consumer source, not an approval supplied by the
-package. See [source enrollment](projects.md#use-an-approved-source).
-Independent `--trust-policy` and `--trusted-root` files can select a
-provider locator instead. Source approval does not sign in to Azure or
-approve deployment.
+Deploy Azure IoT Operations to one existing Arc-connected cluster with a
+single command. Site Ops builds one explicit Site in memory from typed
+answers, without a project pin, saved Site, generated answer file or
+separate plan command.
 
 | Your goal | Start here |
 |---|---|
 | Install AIO on an existing Arc cluster | [AIO installation](#install-aio-from-an-existing-cluster) |
 | Install AIO and enable Secret Sync together | [Combined installation](#install-aio-with-secret-sync) |
 | Enable Secret Sync without reinstalling AIO | [Existing-instance enablement](#enable-secret-sync-on-an-existing-instance) |
+
+Install a compatible Site Ops build and select a release containing the
+complete AIO workspace and its typed input contract. The source and release
+come from your selected release instructions. `official` is the name you
+enrolled with `siteops source enroll official`, not an approval supplied by
+the package. See [approved sources](projects.md#use-an-approved-source).
+Independent `--trust-policy` and `--trusted-root` files can select a
+provider locator instead. Source approval does not sign in to Azure or
+approve deployment.
 
 Existing local `-w` workspaces and configured Sites remain supported. There
 is no required migration to a project pin or typed answers. Use
@@ -71,7 +74,9 @@ maximum of 59 characters. Existing saved Sites retain their names.
 Environment and country labels are optional. Add `--input environment=dev`
 or `--input country=US` when you want those labels and resource tags.
 Omitted values create neither labels nor tags. The default AIO release is
-2608, cert-manager is enabled, and Secret Sync is disabled.
+2608, cert-manager is enabled, and Secret Sync is disabled. To list every
+optional input, such as `enableCertManager` and `brokerMemoryProfile`, run
+`siteops inputs aio-install` with the same `--source`.
 
 ## Use an answer file instead
 
@@ -113,6 +118,15 @@ include a private display of the Site and its defaults. In CI and other
 redacted destinations, the command reports resolution status without
 publishing Site values.
 
+For a short command without secrets, supply the same named answers with repeated
+`--input NAME=VALUE` options on `inputs`, `plan` or `deploy`. Inline answers override
+the input file. `--input-file` selects exactly one answer file. Repeating
+that option is an error, not a way to select several Sites. Strings and
+strict `true` or `false` booleans are parsed
+according to the selected contract. Do not put secrets in process arguments
+or shell history. Input contracts that declare sensitive inputs are
+rejected. Duplicate and unknown answer names fail.
+
 ## Use an existing resource ID
 
 The ID must identify an existing
@@ -128,9 +142,9 @@ previous plan's observation as current.
 not Azure target reads or deployment. Direct `--source` instead requires
 online release resolution, even if its verified content is already cached.
 
-### Install AIO with Secret Sync
+## Install AIO with Secret Sync
 
-To enable Secret Sync during that same AIO deployment, set
+To enable Secret Sync during the guided AIO deployment, set
 `enableSecretSync: true` in the answer file, or add
 `--input enableSecretSync=true` to the deploy command. This guided route
 requires the cluster ID. Its bounded read checks prerequisites without an
@@ -148,16 +162,7 @@ a different resource group. Omit it to create a new vault. A successful
 resource read establishes those reported settings at that moment, not
 cluster readiness, federation success or secret materialization.
 
-For a short non-secret command, supply the same named answers with repeated
-`--input NAME=VALUE` options on `inputs`, `plan` or `deploy`. Inline answers override
-the input file. `--input-file` selects exactly one answer file. Repeating
-that option is an error, not a way to select several Sites. Strings and
-strict `true` or `false` booleans are parsed
-according to the selected contract. Do not put secrets in process arguments
-or shell history. The initial typed route rejects contracts with protected
-inputs. Duplicate and unknown answer names fail.
-
-### Manual targets without resource reads
+## Manual targets without resource reads
 
 Omit `cluster` and provide `siteName`, `subscription`, `resourceGroup`,
 `location` and `clusterName` instead. Use the same inline or file route

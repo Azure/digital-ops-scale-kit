@@ -34,7 +34,7 @@ and host-implementation partials stay beside the material they compose.
 
 1. Put a shared fragment at `_partials/_<topic>.yaml`. Keep implementation-local fragments with their owner.
 2. Set `kind: Manifest`. The engine has no separate Partial kind.
-3. Include only the steps that ARE the topic. Do not pull prerequisites. The parent decides ordering.
+3. Include only the steps that make up the topic. Do not pull prerequisites. The parent decides ordering.
 4. If the partial needs values from upstream steps, reference them as `{{ steps.<name>.outputs.<key> }}` and document the expected upstream step in the description.
 
 See [manifest includes](../../../docs/manifest-includes.md) for the full contract.

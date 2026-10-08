@@ -25,10 +25,10 @@ The enablement template (`enable-secretsync.bicep`) creates:
 
 ## How it works
 
-Secret sync enablement uses a two-step pipeline:
+Secret sync enablement uses a two-step pipeline, with steps named `resolve-aio` and `secretsync`:
 
 ```
-resolve-aio                          enable-secretsync
+resolve-aio                          secretsync
 ┌──────────────────────────┐         ┌──────────────────────────────────┐
 │ Read-only instance lookup │────────▶│ Create MI, KV, FIC, SPC,        │
 │                           │ output  │ role assignments, instance update│
@@ -39,7 +39,7 @@ resolve-aio                          enable-secretsync
 └──────────────────────────┘         └──────────────────────────────────┘
 ```
 
-`resolve-aio.bicep` is read-only and outputs everything downstream needs. `enable-secretsync.bicep` receives those values via [output chaining](parameter-resolution.md#output-chaining) and provisions the secret sync resources. The split keeps `enable-secretsync.bicep` portable across naming conventions.
+`resolve-aio.bicep` is read-only and outputs everything downstream needs. The `secretsync` step deploys `enable-secretsync.bicep`, which receives those values via [output chaining](parameter-resolution.md#output-chaining) and provisions the secret sync resources. Later steps read its outputs as `{{ steps.secretsync.outputs.<name> }}`. The split keeps `enable-secretsync.bicep` portable across naming conventions.
 
 ### Output chaining
 
@@ -99,10 +99,10 @@ properties:
 Then deploy with `aio-install` as usual. The resolve-aio and secretsync steps run automatically after the AIO instance is configured:
 
 ```bash
-siteops -w workspaces/iot-operations deploy manifests/aio-install/manifest.yaml -l "name=my-site"
+siteops -w workspaces/iot-operations deploy aio-install -l "name=my-site"
 ```
 
-Both steps are gated by a `when` condition and only run for sites that have `enableSecretSync: true`.
+Both steps are gated by a `when` condition on their includes in `aio-install` and only run for sites that have `enableSecretSync: true`.
 
 ### Option 2: Standalone day-2 enablement (existing instances)
 
@@ -117,7 +117,7 @@ Use the standalone manifest to enable secret sync on instances that are already 
 siteops -w workspaces/iot-operations deploy manifests/secretsync/manifest.yaml -l "name=my-site"
 ```
 
-The standalone `secretsync` entry runs the same two steps (resolve-aio → enable-secretsync) without the full AIO installation pipeline.
+The standalone `secretsync` entry runs the same `resolve-aio` and `secretsync` steps without the full AIO installation pipeline. It has no `enableSecretSync` gate.
 
 ### CI/CD
 
@@ -227,7 +227,7 @@ uniqueness because the template does not reject duplicates at deployment time.
 
 The `secretValues` parameter is decorated with `@secure()` so ARM does not record values in deployment history or outputs. This protection does not make shell arguments safe. Provide values via:
 
-- **`sites.local/`** parameter overrides (gitignored), the standard siteops pattern for local development
+- **`sites.local/`** parameter overrides (gitignored), the standard Site Ops pattern for local development
 - **The `SITE_OVERRIDES` secret** populated from GitHub Actions secrets or Azure DevOps variable groups
 
 ### Adding as a manifest step
@@ -316,7 +316,7 @@ These modules use Bicep's **module boundary** pattern: runtime resource IDs pass
 
 ### "condition not met" (steps skipped)
 
-The resolve-aio and secretsync steps have `when: "{{ site.properties.deployOptions.enableSecretSync }}"`. Ensure your site (or its base template) sets this to `true`:
+In `aio-install`, the includes that add the resolve-aio and secretsync steps carry `when: "{{ site.properties.deployOptions.enableSecretSync }}"`. The standalone `secretsync` entry has no such gate. Ensure your site (or its base template) sets this to `true`:
 
 ```yaml
 properties:

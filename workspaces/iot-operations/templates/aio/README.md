@@ -1,7 +1,7 @@
 # templates/aio/
 
 Templates for the Azure IoT Operations resource provider. This is the largest
-template area, and it holds three structurally different kinds of subdirectory.
+template area, and it holds structurally different kinds of content.
 Knowing which kind you are in tells you how to add to it.
 
 | Kind | Example | Shape |
