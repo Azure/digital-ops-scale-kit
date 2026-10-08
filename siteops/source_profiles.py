@@ -161,8 +161,9 @@ def read_source(name: str, *, require_valid: bool = True) -> ApprovedSource:
         raise SourceProfileError("The approved source policy does not match its enrollment.")
     if require_valid and policy.valid_until <= datetime.now(timezone.utc):
         raise SourceProfileError(
-            "The approved source policy has expired. Inspect it with `siteops source show NAME`, "
-            "then remove and enroll that name again with reviewed policy and trusted-root files.",
+            "The approved source policy has expired. Inspect it with `siteops source show NAME`. "
+            "Renew a standard approval with `siteops source enroll NAME`. For a custom policy, "
+            "remove the name and enroll it again with reviewed trust files.",
             code="source.profile-expired",
         )
     return result
@@ -263,6 +264,14 @@ def standard_release_policy(repository: str, trusted_root_sha256: str) -> bytes:
 def _identity(policy: GitHubArtifactPolicy) -> tuple:
     return (policy.policy_id, policy.version, policy.repository.casefold(), policy.source_ref,
             policy.signer_workflow, policy.builder_workflow, policy.runner_environment)
+
+
+def default_source(name: str) -> str:
+    """Renew an existing name with its enrolled publisher. New names use the official one."""
+    directory = source_root() / _name(name)
+    if directory.exists() or directory.is_symlink():
+        return read_source(name, require_valid=False).reference
+    return OFFICIAL_SOURCE
 
 
 def enroll_standard_source(name: str, source: str = OFFICIAL_SOURCE) -> ApprovedSource:

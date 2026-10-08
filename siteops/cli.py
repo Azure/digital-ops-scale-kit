@@ -257,7 +257,7 @@ def cmd_source(args: argparse.Namespace) -> int:
     """Manage consumer-approved source trust independently of projects."""
     from siteops.github_attestation import load_github_policy
     from siteops.source_profiles import (
-        OFFICIAL_SOURCE,
+        default_source,
         enroll_source,
         enroll_standard_source,
         list_sources,
@@ -273,12 +273,12 @@ def cmd_source(args: argparse.Namespace) -> int:
         if args.project is not None or args.workspace is not None or args.approved_source is not None:
             raise ProjectError("Source enrollment is user configuration, not a project or workspace selection.")
         if args.source_command == "enroll":
-            source = args.source or OFFICIAL_SOURCE
             if (args.trust_policy is None) != (args.trusted_root is None):
                 raise ProjectError(
                     "Supply both --trust-policy and --trusted-root, or neither for the "
                     "publisher's standard release policy."
                 )
+            source = args.source or default_source(args.name)
             if args.trust_policy is None:
                 result = enroll_standard_source(args.name, source)
             else:
@@ -2164,7 +2164,8 @@ Examples:
         if name == "enroll":
             command.add_argument(
                 "--source", action=_SingleValueOption,
-                help="Approved repository: github:OWNER/REPO (default: the official Scale Kit publisher)",
+                help="Approved repository: github:OWNER/REPO (default: the publisher already "
+                     "enrolled as NAME, otherwise the official Scale Kit publisher)",
             )
 
     p_index = subparsers.add_parser(

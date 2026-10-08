@@ -204,7 +204,7 @@ def test_expired_enrollment_can_be_inspected_and_removed(inputs):
         read_source("approved")
     assert error.value.code == "source.profile-expired"
     assert "source show NAME" in str(error.value)
-    assert "remove" in str(error.value) and "enroll" in str(error.value)
+    assert "siteops source enroll NAME" in str(error.value) and "remove" in str(error.value)
     assert selected.policy.read_bytes() == updated
     assert read_source("approved", require_valid=False).name == "approved"
     assert list_sources() == ("approved",)
@@ -460,6 +460,21 @@ def test_standard_enrollment_approves_main_branch_releases_and_renews(inputs, mo
     assert renewed.trusted_root.read_bytes() == b'{"root":2}\n'
     assert renewed.root_sha256 != first.root_sha256
     assert list_sources() == ("core",)
+
+
+def test_source_enroll_renews_an_existing_name_with_its_enrolled_publisher(inputs, monkeypatch, capsys):
+    _standard_root(monkeypatch, b'{"root":1}\n', b'{"root":2}\n')
+    for argv in (
+        ["siteops", "source", "enroll", "fork", "--source", "github:example/content"],
+        ["siteops", "source", "enroll", "fork"],
+    ):
+        monkeypatch.setattr(sys, "argv", argv)
+        with pytest.raises(SystemExit) as stopped:
+            cli.main()
+        output = capsys.readouterr()
+        assert stopped.value.code == 0, output.err
+        assert "Approved source fork: github:example/content." in output.out
+    assert read_source("fork").trusted_root.read_bytes() == b'{"root":2}\n'
 
 
 def test_standard_enrollment_never_replaces_different_trust(inputs, monkeypatch):
