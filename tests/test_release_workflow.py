@@ -1428,6 +1428,21 @@ def test_install_notes_bind_downloads_and_commands_to_the_selected_release(candi
     assert "Invoke-WebRequest" not in notes and "urllib.request" not in notes
     assert "uv 0.12.20" in notes
     assert "uv-managed CPython" in notes
+    routes, details = notes.split(
+        "<details><summary>Provenance, verification and maintenance</summary>\n\n", 1,
+    )
+    details = details.split("\n\n</details>", 1)[0]
+    assert "```" not in details
+    assert "Expected publisher" not in routes and "Source commit" not in routes
+    for identity in (
+        f"Expected publisher: `{REPO}`", f"Source commit: `{SHA}`",
+        f'Source ref: `{candidate["plan"]["source"]["ref"]}`',
+        "Expected provenance runner class: `self-hosted`",
+        f"https://github.com/{REPO}/blob/{SHA}/docs/install-siteops.md#verify-the-bootstrap-script",
+        f"https://github.com/{REPO}/blob/{SHA}/docs/install-siteops.md#choose-an-installation-route",
+        *(base + name for name in ENGINE_ASSETS),
+    ):
+        assert identity in details
     guide = (ROOT / "docs" / "install-siteops.md").read_text(encoding="utf-8")
     for argument in (
         "--python 3.11.16", "--managed-python", "--no-build",
@@ -1506,6 +1521,9 @@ def test_generated_bootstrap_entries_bind_the_full_selection(candidate, runner, 
         assert "az login" not in block and "gh auth" not in block
     assert "not independent publisher authentication" in notes
     assert "before any installer code runs" in notes
+    details = notes.split("<details><summary>Provenance, verification and maintenance</summary>", 1)[1]
+    assert f"Expected calling workflow: `{caller}`" in details
+    assert notes.index("```powershell") < notes.index("<details>")
 
 
 @pytest.mark.parametrize("builder", [

@@ -31,15 +31,15 @@ class RenderingError(ValueError):
 
 def bootstrap_commands(
     tag: str, source: dict[str, str], scripts: dict[str, ReleaseAsset], downloads: str, caller: str,
-) -> list[str]:
-    """Render complete downloads bound to the reviewed script bytes and source."""
+) -> tuple[list[str], list[str]]:
+    """Render complete downloads bound to the reviewed script bytes and source, and their caveats."""
     if re.fullmatch(r"(?:siteops/)?v[0-9][0-9A-Za-z._-]{0,100}", tag) is None:
         raise RenderingError("The bootstrap requires a supported exact release tag.")
     if not source["ref"].startswith("refs/heads/"):
         raise RenderingError("The bootstrap requires an exact source branch.")
     repository, commit, source_ref = source["repository"], source["commit"], source["ref"]
     bash, powershell = scripts["siteops-bootstrap.sh"], scripts["siteops-bootstrap.ps1"]
-    return [
+    commands = [
         "Linux x64 with glibc, including Ubuntu and Azure Cloud Shell:",
         f"""```bash
 (
@@ -88,20 +88,20 @@ def bootstrap_commands(
   }}
 }}
 ```""",
-        "These commands download the complete script into a fresh private directory and "
+    ]
+    details = [
+        "The bootstrap commands download the complete script into a fresh private directory and "
         "check its size and digest before execution. The digest binds the script to these "
         "reviewed instructions. It is not independent publisher authentication. "
         "The initial script trusts this release's HTTPS delivery. "
         "The script separately authenticates the engine ZIP before extracting its installer helper.",
-        "Review the proposed tool changes when prompted. These commands install the engine only. "
-        "They need `curl` and GitHub CLI 2.95 or newer and never use administrator rights. "
         "Source enrollment is a separate choice: "
         "add `--enroll-source NAME` or `-EnrollSource NAME` only for an approved source. "
-        "For the official Azure/digital-ops-scale-kit publisher, the guided examples use `official`. "
-        "Azure authentication and deployment remain separate.",
+        "For the official Azure/digital-ops-scale-kit publisher, the guided examples use `official`.",
         "The PowerShell execution policy setting applies only to the child process. "
         "An organization policy may require an approved managed installation instead.",
     ]
+    return commands, details
 
 
 def render_notes(
@@ -179,7 +179,12 @@ def render_notes(
         f'uv tool install "{downloads}{wheel}" '
         '--python 3.11.16 --managed-python --no-build --system-certs'
     )
-    bootstrap = []
+    bootstrap: list[str] = []
+    bootstrap_details: list[str] = []
+    identity = (
+        f"Expected publisher: `{repository}`. Source commit: `{source['commit']}`. "
+        f"Source ref: `{source['ref']}`."
+    )
     if all(name in native_names for name in scripts):
         callers = [
             name for name in ("release.yaml", "ci.yaml")
@@ -187,32 +192,48 @@ def render_notes(
         ]
         if len(callers) != 1:
             raise RenderingError("The release calling workflow does not match the selected source.")
-        bootstrap = [
-            "### Bootstrap without uv",
-            f"Expected calling workflow: `{callers[0]}`.",
-        ]
+        identity += f" Expected calling workflow: `{callers[0]}`."
+        bootstrap = ["### Bootstrap without uv"]
         if runner_environment == "self-hosted":
-            bootstrap.extend(bootstrap_commands(
+            commands, bootstrap_details = bootstrap_commands(
                 plan["release"]["tag"], source,
                 {asset.name: asset for asset in native if asset.name in scripts},
                 downloads, callers[0],
-            ))
+            )
+            bootstrap.append(
+                "Use this route when uv is not installed, or when you want the verified installation "
+                "archive. It needs `curl` and GitHub CLI 2.95 or newer, never uses administrator "
+                "rights, and asks before changing tools.",
+            )
+            bootstrap.extend(commands)
         else:
             bootstrap.append(
                 "The bootstrap requires the approved `self-hosted` provenance policy. "
                 "Use the release wheel with approved tooling for this runner class.",
             )
     paragraphs = [
-        f"Package version: `{engine_version}`.",
+        f"Package version: `{engine_version}`. "
+        "Installing the CLI does not authenticate to Azure or deploy resources.",
         "### Already have uv",
-        "**Prerequisite:** uv 0.12.20 from an approved channel. "
-        "The command uses uv-managed CPython and can provision it when needed. "
-        "Use a supported Windows x64 or Linux x64 host. "
-        "Configure an approved package index that serves the runtime dependencies as wheels.",
-        "Install the versioned wheel from this release. Runtime dependencies come from your configured package index as wheels. "
-        "To name it explicitly, add `--default-index <your approved index>`. "
-        "uv does not read pip configuration.",
+        "Use this route on a supported Windows x64 or Linux x64 host with uv 0.12.20 from an "
+        "approved channel and a package index that serves the runtime dependencies as wheels. "
+        "The command uses uv-managed CPython and can provision it when needed.",
         f"```console\n{command}\n```",
+        *bootstrap,
+        "<details><summary>Provenance, verification and maintenance</summary>",
+        identity + f" Expected provenance runner class: `{runner_environment}`. "
+        "The runner class does not identify a particular pool. "
+        "Use these values with the guide verification policy.",
+        "For publisher provenance before any installer code runs, review this release tag, "
+        "publisher, source commit and source ref against your approved selection. "
+        f"[Verify the versioned script and its detached proof]({script_guide}) "
+        "with those identities before running it. HTTPS download alone does not authenticate "
+        "the publisher. If the guide's example publisher, source ref, workflows or runner "
+        "differ from this release, use this release's reviewed provenance values instead.",
+        *bootstrap_details,
+        "Runtime dependencies come from your configured package index as wheels when you use "
+        "the wheel command. To name it explicitly, add `--default-index <your approved index>`. "
+        "uv does not read pip configuration. "
         "To replace or repair an existing online installation, review the selection and rerun with `--reinstall`. "
         "Confirm the result with `siteops --version` and `siteops --help`.",
         "The installation ZIP and standalone wheel each have a detached attestation proof "
@@ -222,27 +243,14 @@ def render_notes(
         "from stable private storage, "
         f"follow the [verified installation guide]({guide}). "
         "The engine path downloads the ZIP and its detached proof, authenticates the ZIP before extraction, "
-        "then invokes native uv only after independent payload admission.",
-        f"Expected publisher: `{repository}`. Source commit: `{source['commit']}`. "
-        f"Source ref: `{source['ref']}`. Use these values with the guide verification policy. "
+        "then invokes native uv only after independent payload admission. "
         "The guide also describes switching between online and verified installations.",
-        f"Expected provenance runner class: `{runner_environment}`. "
-        "The runner class does not identify a particular pool.",
-        *bootstrap,
-        "For publisher provenance before any installer code runs, review this release tag, "
-        "publisher, source commit and source ref against your approved selection. "
-        f"[Verify the versioned script and its detached proof]({script_guide}) "
-        "with those identities before running it. HTTPS download alone does not authenticate "
-        "the publisher. If the guide's example publisher, source ref, workflows or runner "
-        "differ from this release, use this release's reviewed provenance values instead.",
-        "The bootstrap owns provenance and complete payload validation. "
-        "Native uv owns the tool environment and ordinary installation lifecycle.",
         f"Release assets: [{wheel}]({downloads}{wheel}), "
         f"[{wheel}{attestation_suffix}]({downloads}{wheel}{attestation_suffix}), "
         f"[{archive_name}]({downloads}{archive_name}), and "
         f"[{archive_name}{attestation_suffix}]({downloads}{archive_name}{attestation_suffix})."
         + bootstrap_links + " Use these assets instead of the generated source archives.",
-        "Installing the CLI does not authenticate to Azure or deploy resources.",
+        "</details>",
         "Existing local `-w` workspaces and configured-Site fleet selectors remain supported. "
         "`siteops inputs` and explicit typed answers are optional for manifests with a typed "
         "input contract. A project pin selects content, not operator Site configuration.",
