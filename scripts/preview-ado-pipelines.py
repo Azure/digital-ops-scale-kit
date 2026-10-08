@@ -12,6 +12,7 @@ import ssl
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
@@ -158,7 +159,11 @@ def cases(integration_source: str | None = None) -> list[Case]:
     selected.append(Case(
         "deploy-wif-session", "deploy", {"keepAzSessionActive": True}, "environment=dev",
     ))
-    selected.append(Case("deploy-site-file", "deploy", {"siteFile": "operator/site.yaml", "dryRun": True}))
+    selected.append(Case(
+        "deploy-site-file", "deploy",
+        {"environment": "prod", "siteFile": "operator/site.yaml", "dryRun": True},
+        "environment=prod",
+    ))
     for sample in ("resource-set-basic", "resource-set-composition"):
         for custom in (False, True):
             selected.append(Case(
@@ -251,7 +256,49 @@ def _mapping(value: object) -> dict:
     return value
 
 
-def validate_expansion(case: Case, text: str, connections: dict[str, str]) -> None:
+class EnvironmentSetting(NamedTuple):
+    connection: str
+    group: str
+
+
+_SETTING_CONDITION = re.compile(r"\$\{\{ if eq\(parameters\.environment, '([a-z]+)'\) \}\}")
+
+
+def environment_settings(text: str) -> dict[str, EnvironmentSetting]:
+    """Read the committed Environment settings block that pairs each environment with its resources."""
+    try:
+        document = yaml.safe_load(text)
+    except (yaml.YAMLError, RecursionError):
+        raise PreviewError("A committed pipeline is not supported YAML.") from None
+    variables = document.get("variables") if isinstance(document, dict) else None
+    settings: dict[str, EnvironmentSetting] = {}
+    for item in variables if isinstance(variables, list) else []:
+        condition = next(iter(item), None) if isinstance(item, dict) and len(item) == 1 else None
+        match = _SETTING_CONDITION.fullmatch(condition) if isinstance(condition, str) else None
+        if match is None:
+            continue
+        entries = item[condition]
+        rows = entries if isinstance(entries, list) else []
+        groups = [row.get("group") for row in rows if isinstance(row, dict) and set(row) == {"group"}]
+        connections = [
+            row.get("value") for row in rows
+            if isinstance(row, dict) and set(row) == {"name", "value"}
+            and row.get("name") == "siteopsServiceConnection"
+        ]
+        names = (*groups, *connections)
+        if (match[1] in settings or len(rows) != 2 or len(groups) != 1 or len(connections) != 1
+                or any(not isinstance(name, str) or not name.strip()
+                       or any(character in name for character in "\r\n$") for name in names)):
+            raise PreviewError("Each environment setting needs one variable group and one service connection.")
+        settings[match[1]] = EnvironmentSetting(connections[0], groups[0])
+    if set(settings) != set(ENVIRONMENTS):
+        raise PreviewError("The environment settings must map each environment exactly once.")
+    return settings
+
+
+def validate_expansion(
+    case: Case, text: str, settings: dict[str, EnvironmentSetting] | None = None,
+) -> None:
     """Check the service expansion without printing private YAML or evaluating expressions."""
     try:
         document = yaml.safe_load(text)
@@ -305,18 +352,23 @@ def validate_expansion(case: Case, text: str, connections: dict[str, str]) -> No
         _one(nodes, "displayName", "Run unit tests")
         return
     environment = case.parameters.get("environment", "dev")
+    if not settings or environment not in settings:
+        raise PreviewError("The committed environment settings do not cover the requested case.")
+    connection, group = settings[environment]
     job = _one(nodes, "deployment", "siteops_deploy" if case.pipeline == "deploy" else "integration_test")
     actual_environment = job.get("environment")
     if isinstance(actual_environment, dict):
         actual_environment = actual_environment.get("name")
     if actual_environment != environment:
         raise PreviewError("The expanded deployment selected a different approval environment.")
+    if {node.get("group") for node in nodes if "group" in node} != {group}:
+        raise PreviewError("The expanded pipeline selected a different variable group.")
     task = _one(
         nodes, "displayName",
         "Prepare executable plan and deploy" if case.pipeline == "deploy" else "Run integration tests",
     )
     inputs = _mapping(task.get("inputs", {}))
-    if inputs.get("azureSubscription") != connections[environment] or inputs.get("scriptType") != "bash":
+    if inputs.get("azureSubscription") != connection or inputs.get("scriptType") != "bash":
         raise PreviewError("The expanded task selected a different service connection or shell.")
     if not _boolean(inputs.get("keepAzSessionActive", False), case.parameters.get("keepAzSessionActive", False)):
         raise PreviewError("The expanded task changed the requested WIF session refresh setting.")
@@ -392,7 +444,6 @@ def _template_parameter(value: object) -> str:
 
 def qualify(
     client: AdoClient, pipeline_id: int, repository: str, ref: str, commit: str,
-    connections: dict[str, str], groups: dict[str, str],
 ) -> dict:
     """Use this qualification definition to preview the exact committed entry points."""
     if (not re.fullmatch(r"refs/heads/[A-Za-z0-9._/-]+", ref) or ".." in ref
@@ -400,14 +451,11 @@ def qualify(
         raise PreviewError("Select a branch and its exact full source commit.")
     if type(pipeline_id) is not int or pipeline_id <= 0:
         raise PreviewError("Select the positive qualification pipeline ID.")
-    for mapping in (connections, groups):
-        if not isinstance(mapping, dict) or set(mapping) != set(ENVIRONMENTS) or any(
-            not isinstance(value, str) or not value.strip()
-            or any(character in value for character in "\r\n") for value in mapping.values()
-        ):
-            raise PreviewError("Provide explicit service connection and variable group mappings.")
     expected_repository = _repository(repository)
     documents = source_documents(commit)
+    settings = {
+        name: environment_settings(documents[name]) for name in PIPELINES if name != "ci"
+    }
     definition = client.request(pipeline_id)
     source = _mapping(definition.get("repository"))
     process = _mapping(definition.get("process"))
@@ -420,8 +468,6 @@ def qualify(
     selected = cases(documents["integration"])
     for case in selected:
         parameters = dict(case.parameters) if case.override is None else {}
-        if case.pipeline != "ci":
-            parameters.update(serviceConnections=connections, secretGroups=groups)
         payload = {
             "previewRun": True,
             "resources": {"repositories": {"self": {"refName": ref, "version": commit}}},
@@ -436,7 +482,7 @@ def qualify(
             text = document.get("finalYaml")
             if not isinstance(text, str) or not text.strip() or len(text.encode("utf-8")) > MAX_RESPONSE:
                 raise PreviewError("The preview service returned no bounded final YAML.")
-            validate_expansion(case, text, connections)
+            validate_expansion(case, text, settings.get(case.pipeline))
         except PreviewError as error:
             raise PreviewError(f"{case.name}: {error}") from None
         request_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -461,8 +507,7 @@ def main() -> int:
         report = qualify(
             client, int(os.environ["SYSTEM_DEFINITIONID"]),
             os.environ["BUILD_REPOSITORY_URI"], os.environ["BUILD_SOURCEBRANCH"],
-            os.environ["BUILD_SOURCEVERSION"], json.loads(os.environ["ADO_PREVIEW_CONNECTIONS"]),
-            json.loads(os.environ["ADO_PREVIEW_GROUPS"]),
+            os.environ["BUILD_SOURCEVERSION"],
         )
         with args.output.open("x", encoding="utf-8") as stream:
             json.dump(report, stream, indent=2)

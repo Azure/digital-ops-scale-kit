@@ -7,9 +7,11 @@ flag determine the set of configured Sites.
 
 ## Precedence
 
-An explicit Site replaces the manifest's `sites:` list or selector, and cannot
-be combined with `-l`. For configured Sites, resolution chooses the first
-present source in this order:
+An explicit Site replaces the manifest's `sites:` list or selector. With an
+explicit Site, `-l` selects no other Sites. Instead, the explicit Site must
+match every term, as described in
+[Label requirements for an explicit Site](#label-requirements-for-an-explicit-site).
+For configured Sites, resolution chooses the first present source in this order:
 
 1. **CLI `-l`** if provided. Replaces manifest targeting entirely.
 2. **Manifest `sites:`** explicit list of Site names. When a manifest sets
@@ -20,7 +22,7 @@ present source in this order:
 Resource ID answers on `plan` and `deploy` authorize the declared, bounded
 Azure reads needed to construct one Site. `inputs` requires
 `--read-resources` to read resources while previewing or saving a Site. Typed answers
-cannot be combined with `--site-file` or `-l`. See
+cannot be combined with `--site-file`. See
 [guided inputs](guided-inputs.md) for the provider read and privacy boundary.
 
 A manifest with all three configured targeting sources empty is allowed as a
@@ -111,6 +113,37 @@ Each deployable Site is reachable by three identifiers, all of which work in `-l
 **Basename uniqueness.** Within any one trusted directory, every Site basename must be unique across all subdirectories. The orchestrator rejects collisions at load time so `-l name=<basename>` always resolves to one file. Collisions across directories are valid only when the relative path also matches (the overlay pattern).
 
 **Path normalization.** Path identifiers are normalized: backslashes become forward slashes, `..` and `./` segments are rejected, leading or trailing `/` is rejected. These rules apply to both manifest `sites:` entries and `-l name=` values.
+
+## Label requirements for an explicit Site
+
+Add `-l` to `plan`, `deploy`, or `validate` with `--site-file`, `--input-file`,
+or `--input` to confirm that the explicit Site is the one you intend. The
+command proceeds only when the Site matches every term:
+
+```bash
+siteops plan aio-install --site-file ./plant-one.yaml -l environment=prod
+# Deployment plan is unavailable.
+#   Error: Site 'plant-one' does not match -l environment=prod (its environment label is dev).
+```
+
+Terms use the [selector grammar](#selector-grammar) and its duplicate key
+rules. Each label term requires that label value. `name=` compares the
+Site's `name:` field, and repeated `name=` values accept any of the listed
+names. A mismatch stops the command before plan preparation, and before any
+Azure resource read when the answers already fix the Site's name and labels.
+A name or label that a resource read supplies is checked once the read
+completes, still before preparation. Without `-l`, the explicit Site is used
+as supplied.
+
+With output redaction enabled, the error omits names and values:
+
+```text
+Error: The Site does not match the -l label requirement. Check its name and labels against each -l term.
+```
+
+JSON output reports the code `plan.targeting.conflict`. The
+[Azure Pipelines deploy pipeline](ci-cd-setup.md#deploy-via-ado-ui) uses this
+requirement to keep a Site file within the selected environment.
 
 ## Library and partial manifests
 

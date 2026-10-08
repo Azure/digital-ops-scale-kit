@@ -61,6 +61,8 @@ Start with the changes that affect your workflow:
 | Author sites, manifests or parameter files | Review [preparation checks](#preparation-checks), [empty site mappings](#empty-site-mappings) and [parameter file selection](#parameter-file-selection). |
 | Write `when: ""` on a step or include | Omit `when:` or set it to `null`. See [empty conditions](#empty-conditions). |
 | Use the Azure Pipelines templates | Choose an [engine selection](#azure-pipelines-templates). |
+| Queue `.pipelines/deploy.yaml` with `siteopsSource` | Set `release` and `sourceCommit` instead. See [Azure Pipelines templates](#azure-pipelines-templates). |
+| Set `serviceConnections` or `secretGroups` in the Azure Pipelines deploy or integration pipeline | Move the names into the [Environment settings block](#azure-pipelines-environment-settings). |
 | Call the reusable GitHub Actions workflow | Pass the selector [as a secret](#github-actions-workflows). |
 | Run Windows batch launchers such as `az.cmd` | Review [literal tool arguments](#windows-tool-arguments). |
 | Clean up `.siteops/tmp` | Review [temporary files](#temporary-files). |
@@ -436,7 +438,7 @@ Choose one route:
   the pipeline's own repository or the repository resource named by
   `templateRepository`.
 - Set `release` and `sourceCommit`, adding `repository` for a fork.
-- Set `siteopsSource` to an explicit pip source, as before.
+- Set `siteopsSource` to an explicit pip source in reviewed YAML.
 - Set `installDev: true` on `setup-siteops.yaml` for a contributor checkout.
 
 These routes are mutually exclusive. The release route requires a Linux agent.
@@ -444,8 +446,27 @@ If you maintain copied templates, update their scripts and helper files
 together. See the
 [consumer example](ci-cd-setup.md#reference-the-deployment-template-from-another-repository).
 
+`.pipelines/deploy.yaml` no longer offers `siteopsSource` when you queue a
+run, and Azure Pipelines rejects a run request that still sets it. Select the
+engine with the `release` and `sourceCommit` run parameters, or queue the
+pipeline from a release tag. A custom engine source belongs in reviewed YAML,
+as the `siteopsSource` parameter of `templates/siteops-deploy.yaml`.
+
 `dryRun` now prepares an executable plan with `plan` rather than running
 `deploy --dry-run`, and deployment passes `--yes`.
+
+### Azure Pipelines environment settings
+
+In v1.0.0b6, `.pipelines/deploy.yaml` and `.pipelines/integration-test.yaml`
+read each environment's service connection and variable group from the
+`serviceConnections` and `secretGroups` parameter defaults. Both pipelines
+now read them from an Environment settings block under `variables`, and a
+queued run chooses only the environment. Move your names from the old
+defaults into the block in each file, as shown in
+[Environment settings](ci-cd-setup.md#environment-settings). Azure Pipelines
+rejects a run request that still sets `serviceConnections` or
+`secretGroups`. The integration pipeline's `environment` parameter now
+accepts only `dev`, `staging` and `prod`, the environments the block maps.
 
 ### GitHub Actions workflows
 

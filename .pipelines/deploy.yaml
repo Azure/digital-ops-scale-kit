@@ -1,5 +1,7 @@
 # Deploy pipeline: Manual deployment trigger
 # Azure Pipelines counterpart to .github/workflows/deploy.yaml
+# Set each environment's service connection and variable group in the
+# Environment settings block under variables.
 
 name: $(Date:yyyyMMdd)$(Rev:.r) · ${{ parameters.environment }} · ${{ parameters.manifest }}${{ iif(parameters.dryRun, ' (dry-run)', '') }}
 
@@ -56,10 +58,9 @@ parameters:
     type: boolean
     default: false
 
-  - name: siteopsSource
-    displayName: Explicit pip engine source (otherwise use the selected release)
-    type: string
-    default: ' '
+  # Operators select the engine only as a verified release. A custom
+  # engine source belongs in reviewed YAML, as the siteopsSource
+  # parameter of templates/siteops-deploy.yaml.
   - name: release
     displayName: Engine or content release (empty uses this checkout's tag)
     type: string
@@ -69,32 +70,32 @@ parameters:
     type: string
     default: ' '
   - name: siteFile
-    displayName: Complete Site file in this checkout (instead of a selector)
+    displayName: Complete Site file in this checkout, labeled for the target environment
     type: string
     default: ' '
-
-  # Per-environment lookup tables. To split resources per environment,
-  # change the values below. No structural changes needed.
-  - name: serviceConnections
-    displayName: Service connection per environment
-    type: object
-    default:
-      dev: azure-siteops
-      staging: azure-siteops
-      prod: azure-siteops
-
-  - name: secretGroups
-    displayName: Variable group per environment
-    type: object
-    default:
-      dev: siteops-secrets
-      staging: siteops-secrets
-      prod: siteops-secrets
 
 variables:
   - name: SITE_OVERRIDES
     value: ''
-  - group: ${{ parameters.secretGroups[parameters.environment] }}
+
+  # Environment settings: one service connection and variable group per
+  # environment. Edit the names here. A queued run chooses only the
+  # environment, so it cannot pair one environment's approvals with another
+  # environment's identity or secrets. Add a block for each value you add to
+  # the environment parameter.
+  - ${{ if eq(parameters.environment, 'dev') }}:
+    - group: siteops-secrets
+    - name: siteopsServiceConnection
+      value: azure-siteops
+  - ${{ if eq(parameters.environment, 'staging') }}:
+    - group: siteops-secrets
+    - name: siteopsServiceConnection
+      value: azure-siteops
+  - ${{ if eq(parameters.environment, 'prod') }}:
+    - group: siteops-secrets
+    - name: siteopsServiceConnection
+      value: azure-siteops
+
   - name: PYTHONUNBUFFERED
     value: '1'
   # Engine output reaches this pipeline's logs and artifacts, which are public.
@@ -142,10 +143,6 @@ stages:
                   fi
                   ;;
               esac
-              if [[ -n "${SITE_FILE//[[:space:]]/}" && -n "${SELECTOR//[[:space:]]/}" ]]; then
-                echo "##vso[task.logissue type=error]Choose siteFile or selector, not both."
-                exit 1
-              fi
 
               SUMMARY_FILE="$(Build.ArtifactStagingDirectory)/deploy-config.md"
               echo "### Deployment Configuration" > "$SUMMARY_FILE"
@@ -158,27 +155,28 @@ stages:
               echo "| Dry Run | \`$DRY_RUN\` |" >> "$SUMMARY_FILE"
               echo "##vso[task.uploadsummary]$SUMMARY_FILE"
             displayName: Write deployment summary
-            # Free-form params (selector) are routed through env vars rather
-            # than interpolated into the script body so a parameter containing
-            # shell metachars cannot break out of the command.
+            # Parameters are routed through env vars rather than interpolated
+            # into the script body so a value containing shell metachars
+            # cannot break out of the command.
             env:
               ENV: ${{ parameters.environment }}
               WORKSPACE_DIR: workspaces/${{ parameters.workspace }}
               MANIFEST_REL: ${{ parameters.manifest }}
               DRY_RUN: ${{ parameters.dryRun }}
-              SITE_FILE: ${{ parameters.siteFile }}
-              SELECTOR: ${{ parameters.selector }}
 
   - template: templates/siteops-deploy.yaml
     parameters:
-      serviceConnection: ${{ parameters.serviceConnections[parameters.environment] }}
+      serviceConnection: ${{ variables.siteopsServiceConnection }}
       keepAzSessionActive: ${{ parameters.keepAzSessionActive }}
       workspace: workspaces/${{ parameters.workspace }}
       manifest: ${{ parameters.manifest }}
       environment: ${{ parameters.environment }}
+      # A Site file replaces the configured Sites. The selector below still
+      # applies as a label requirement, so a Site file for another
+      # environment fails before Site Ops uses this environment's identity.
       ${{ if not(in(parameters.siteFile, '', ' ')) }}:
         siteFile: ${{ parameters.siteFile }}
-      ${{ elseif eq(parameters.manifest, 'samples/resource-set-basic/manifest.yaml') }}:
+      ${{ if eq(parameters.manifest, 'samples/resource-set-basic/manifest.yaml') }}:
         ${{ if not(in(parameters.selector, '', ' ')) }}:
           selector: environment=sample,sample=resource-set-basic,${{ parameters.selector }}
         ${{ else }}:
@@ -195,5 +193,3 @@ stages:
       dryRun: ${{ parameters.dryRun }}
       release: ${{ parameters.release }}
       sourceCommit: ${{ parameters.sourceCommit }}
-      ${{ if not(in(parameters.siteopsSource, '', ' ')) }}:
-        siteopsSource: ${{ parameters.siteopsSource }}

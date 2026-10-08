@@ -21,11 +21,11 @@ parameters:
     type: string
     default: ''
   - name: selector
-    displayName: Site selector
+    displayName: Site selector, or the labels a Site file must carry
     type: string
     default: ''
   - name: siteFile
-    displayName: Complete Site file relative to the caller checkout (exclusive with selector)
+    displayName: Complete Site file relative to the caller checkout, used instead of configured Sites
     type: string
     default: ''
   - name: dryRun
@@ -33,7 +33,7 @@ parameters:
     type: boolean
     default: false
   - name: siteopsSource
-    displayName: Explicit pip source (empty selects the released engine)
+    displayName: Explicit pip source, set only in reviewed YAML (empty selects the released engine)
     type: string
     default: ''
   - name: release

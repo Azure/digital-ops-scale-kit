@@ -23,8 +23,10 @@ Azure or confirm deployment.
 Existing local `-w` workspaces and configured Sites remain supported. There
 is no required migration to a project pin or typed answers. Use
 `siteops inputs` when a manifest declares a typed contract and you want one
-explicit Site without first configuring it. Do not combine `--input-file`, `--input`
-or `--site-file` targeting with an `-l` selector for configured Sites. Saved Sites
+explicit Site without first configuring it. With `--input-file`, `--input`
+or `--site-file`, `-l` selects no configured Sites. It names labels the
+explicit Site must carry, as described in
+[targeting](targeting.md#label-requirements-for-an-explicit-site). Saved Sites
 can later be selected with the same explicit fleet selectors as before.
 
 ## Install AIO from an existing cluster
@@ -352,8 +354,12 @@ bounded `name=` selector above so a previously deployed Site is not
 reinstalled.
 
 An explicit Site replaces the manifest's default selector or `sites:` list.
-Combining `--site-file`, `--input-file`, or `--input` with `-l` fails rather than
-joining another Site. If a manifest does not declare typed inputs,
+With `--site-file`, `--input-file`, or `--input`, `-l` never adds another
+Site. The explicit Site must match every `-l` term, otherwise the command
+stops before preparing a plan. For example,
+`siteops plan aio-install --source "official@<release>" --input-file ./plant.yaml -l environment=prod`
+proceeds only when those answers set the `environment` input to `prod`. If a
+manifest does not declare typed inputs,
 use a complete Site file or the workflow for configured Sites. `browse` remains
 descriptive: it never treats authored guidance as an executable input schema.
 

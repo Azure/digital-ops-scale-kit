@@ -9,7 +9,7 @@ The platforms install the Site Ops engine differently:
 | Platform | Location | Engine installation | Role |
 |----------|----------|---------------------|------|
 | [GitHub Actions](#github-actions) | `.github/workflows/` | pip installs the selected checkout in editable mode, or the optional `siteops-source` pip specification. Neither route verifies a signed release. | Deployment from a repository checkout, CI, and every Site Ops and Scale Kit release |
-| [Azure DevOps](#azure-devops) | `.pipelines/` | The verified bootstrap installs the signed engine selected by a release, unless `siteopsSource` or `installDev` is selected explicitly | Consumer deployment, including reusable templates referenced from another repository |
+| [Azure DevOps](#azure-devops) | `.pipelines/` | The verified bootstrap installs the signed engine selected by a release, unless reviewed YAML selects `siteopsSource` or `installDev` explicitly | Consumer deployment, including reusable templates referenced from another repository |
 
 The GitHub Actions deploy workflow is a route for this repository and its
 forks. It deploys workspace content from the checkout and installs the Site
@@ -418,7 +418,7 @@ See [ADO architecture](#ado-architecture) for the Azure DevOps equivalent.
 | Feature | GitHub Actions | Azure DevOps |
 |---------|---------------|--------------|
 | **Authentication** | OIDC (no stored credentials, tokens with a short lifetime) | WIF service connection (token managed by `AzureCLI@2`) |
-| **Engine Installation** | pip installs the checkout in editable mode, or the `siteops-source` specification. No signed release verification. | Verified bootstrap installs the signed engine selected by a release. `siteopsSource` and `installDev` are explicit pip alternatives. |
+| **Engine Installation** | pip installs the checkout in editable mode, or the `siteops-source` specification. No signed release verification. | Verified bootstrap installs the signed engine selected by a release. `siteopsSource` and `installDev` are explicit pip alternatives, set in reviewed YAML rather than at queue time. |
 | **Environment Protection** | Required approvals for staging/prod | Approval checks on ADO environments |
 | **Input Validation** | Rejects traversal markers and unsupported selector characters | Same validation logic in pipeline scripts |
 | **Site Name Sanitization** | `SITE_OVERRIDES` keys validated against `^[a-zA-Z0-9_-]+$` | Same |
@@ -650,7 +650,7 @@ stages:
 |-----------|---------|-------------|
 | `pythonVersion` | `'3.11'` | Python version to install |
 | `installDev` | `false` | Explicit editable checkout installation with development dependencies. Used by contributor CI. |
-| `siteopsSource` | (empty) | Explicit pip installation spec, such as an exact tagged VCS source or wheel. Not the verified bundle route. |
+| `siteopsSource` | (empty) | Explicit pip installation spec, such as an exact tagged VCS source or wheel. Not the verified bundle route. Set it in reviewed YAML, not as a runtime parameter. |
 | `release`, `sourceCommit` | (empty) | An explicit engine/content release and full source commit. Otherwise use the exact tagged template repository selection. |
 | `repository` | (empty) | Publisher for an explicit release selection. Defaults to `Azure/digital-ops-scale-kit`. Inferred selection uses the template repository. |
 | `templateRepository` | `self` | Automation repository alias. The consumer stage templates supply its runtime ref/version and checkout. |
@@ -767,15 +767,24 @@ create groups or enroll content sources. Manifest operations determine any
 additional scope needed.
 
 For one standalone Site, pass `siteFile: operator/site.yaml` to either
-stage instead of `selector`. Its path is relative to the caller checkout.
-Supplying both is an error. A manifest remains required. For a fleet, keep
-the existing inventory and selector semantics.
+stage. Its path is relative to the caller checkout, and the file replaces
+the configured Sites. A `selector` passed with it selects no other Sites.
+The Site must match every selector term instead, otherwise Site Ops stops
+before preparing a plan. If operators choose the file at queue time, also
+pass the selector for the approval environment, such as
+`selector: environment=dev` with `environment: dev`, so a Site file for
+another environment cannot run with this environment's identity. A manifest
+remains required. For a fleet, keep the existing inventory and selector
+semantics.
 
 With `templateRepository: self`, a tagged checkout can select its release.
 A branch checkout or copied template must instead provide `release` and
 `sourceCommit`, or explicitly select `siteopsSource`. The release pair
 uses the same verified bootstrap. `siteopsSource` remains an ordinary pip
 installation through your approved feed, including exact tagged VCS sources.
+Set it only in reviewed YAML. The deployment job installs that source
+before the Azure task runs with the service connection, so do not expose it
+as a runtime parameter.
 Do not combine release, source and `installDev` selections.
 
 Older releases without the signed reference require their explicit engine
@@ -793,7 +802,8 @@ In ADO → **Project settings → Service connections → New → Azure Resource
 - **Automatic**: creates the Entra app registration and federated credential for you
 - **Manual**: reuse the existing app registration from GitHub Actions OIDC setup (same `APP_ID`)
 
-The service connection name is referenced in the deploy pipeline. Default: `azure-siteops`.
+The deploy and integration pipelines name the service connection in their
+[Environment settings](#environment-settings) block. Default: `azure-siteops`.
 
 > **Reusing the GitHub Actions app registration:** If you already configured OIDC for GitHub Actions (section above), you can reuse that same app registration. Create a new federated credential for ADO. The issuer and subject claims are different from GitHub's. The Azure roles are shared.
 
@@ -825,7 +835,8 @@ In ADO → **Pipelines → Library → + Variable group**:
 |----------------|----------|------|-------------|
 | `siteops-secrets` | `SITE_OVERRIDES` | Secret | JSON object, same format as the GitHub secret (see [Site overrides](#site-overrides)) |
 
-The pipelines at the top level default `SITE_OVERRIDES` to empty before loading
+The [Environment settings](#environment-settings) block names the group for
+each environment. The pipelines at the top level default `SITE_OVERRIDES` to empty before loading
 the group, so a missing optional value leaves committed Sites in use.
 Callers of reusable templates should likewise define an empty default or
 provide the secret through their own variable group. Mask registration
@@ -867,14 +878,18 @@ Same as GitHub Actions, see [Assign Azure roles](#3-assign-azure-roles). The ser
 4. Fill in parameters:
    - **Workspace**: `iot-operations`
    - **Manifest**: path relative to the workspace root (e.g., `manifests/aio-install/manifest.yaml`, `samples/opc-ua-solution/manifest.yaml`, `samples/aio-with-opc-ua/manifest.yaml`)
-   - **Target environment**: `dev`, `staging`, or `prod`
+   - **Target environment**: `dev`, `staging`, or `prod`. It selects the approval environment, and the [Environment settings](#environment-settings) block pairs it with its service connection and variable group. A queued run cannot choose those separately.
    - **Additional site selector**: e.g., `country=US,name=seattle-dev` (optional)
    - **Prepare executable plan only**: Stop after the publishable plan without deploying
    - **Refresh Azure WIF session**: Enable for the WIF service connection after reviewing the task's experimental setting above
-   - **Engine or content release** and **Full source commit**: Required together when running an untagged checkout, unless an explicit pip engine source is selected
-   - **Explicit pip engine source**: Optional pip specification that replaces the verified release installation
-   - **Complete Site file**: Optional Site file in this checkout, used instead of a selector
+   - **Engine or content release** and **Full source commit**: Required together when running an untagged checkout. When you queue a run, the engine selection accepts only a verified release. Set a custom engine source in reviewed YAML with the `siteopsSource` template parameter.
+   - **Complete Site file**: Optional Site file in this checkout, deployed instead of the configured Sites. The environment selector still applies, so the Site must carry `environment=<target environment>` and match any additional selector. For a resource set sample, the Site needs `environment=sample` and `sample=<sample name>` instead.
 5. Click **"Run"**
+
+A Site file labeled for another environment stops before any plan is
+prepared. The plan summary reports
+`The Site does not match the -l label requirement.` See
+[troubleshooting](troubleshooting.md#does-not-match--l).
 
 #### Deploy via Azure CLI
 
@@ -976,25 +991,42 @@ Scale Kit maintainers qualify these templates with
 `.pipelines/validate-pipelines.yaml`, as described in
 [Qualify the Azure Pipelines templates](releasing.md#qualify-the-azure-pipelines-templates).
 
-### Migrate to separate environments
+### Environment settings
 
-The deploy and integration pipelines use object parameter lookup tables for service connections and variable groups. To use separate identities and secrets for each environment, edit the same defaults in `.pipelines/deploy.yaml` and `.pipelines/integration-test.yaml`:
+`.pipelines/deploy.yaml` and `.pipelines/integration-test.yaml` pair each
+environment with one service connection and one variable group in an
+**Environment settings** block under `variables`. A queued run chooses only
+the environment, so a `dev` run always uses the dev resources, and only a
+`prod` run, with its environment approvals, reaches the prod service
+connection and secrets. Names in the block are compiled into the run and
+cannot be changed when you queue it.
+
+By default every environment uses `azure-siteops` and `siteops-secrets`. To
+use separate identities and secrets, edit the names in both files and
+create the matching ADO resources:
 
 ```yaml
-# .pipelines/deploy.yaml: edit these defaults:
-- name: serviceConnections
-  type: object
-  default:
-    dev: azure-siteops-dev         # ← separate service connection
-    staging: azure-siteops-staging
-    prod: azure-siteops-prod
+variables:
+  - name: SITE_OVERRIDES
+    value: ''
 
-- name: secretGroups
-  type: object
-  default:
-    dev: siteops-secrets-dev       # ← separate variable group
-    staging: siteops-secrets-staging
-    prod: siteops-secrets-prod
+  # Environment settings: one service connection and variable group per
+  # environment.
+  - ${{ if eq(parameters.environment, 'dev') }}:
+    - group: siteops-secrets-dev
+    - name: siteopsServiceConnection
+      value: azure-siteops-dev
+  - ${{ if eq(parameters.environment, 'staging') }}:
+    - group: siteops-secrets-staging
+    - name: siteopsServiceConnection
+      value: azure-siteops-staging
+  - ${{ if eq(parameters.environment, 'prod') }}:
+    - group: siteops-secrets-prod
+    - name: siteopsServiceConnection
+      value: azure-siteops-prod
 ```
 
-No structural pipeline changes needed. Just edit defaults and create the corresponding ADO resources.
+Keep the block after the `SITE_OVERRIDES` default, so the selected group can
+supply a value. To add an environment, add it to the `environment`
+parameter's `values` and add a block for it. Authorize each pipeline to use
+the service connections and variable groups it names.

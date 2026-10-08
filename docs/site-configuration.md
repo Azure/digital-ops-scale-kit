@@ -604,8 +604,10 @@ A manifest's Sites resolve from the first present source in this order: CLI
 `selector:` targets the listed Sites without applying the selector. A
 manifest with none of these is a library or partial. It
 can be checked with `validate`, while `plan` and `deploy` require `-l` or one
-explicit Site supplied with `--site-file`, `--input-file`, or `--input`. An
-explicit Site cannot be combined with `-l`.
+explicit Site supplied with `--site-file`, `--input-file`, or `--input`. With
+an explicit Site, `-l` is a requirement that Site must satisfy rather than a
+selection. See
+[targeting](targeting.md#label-requirements-for-an-explicit-site).
 
 ```bash
 siteops plan aio-install                           # uses manifest selector

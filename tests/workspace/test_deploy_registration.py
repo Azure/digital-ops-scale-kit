@@ -258,12 +258,14 @@ def _run_delivery_plan_script(
 def test_ado_single_site_is_forwarded_to_plan_and_deploy(tmp_path, dry_run):
     result, _, _, calls = _run_delivery_plan_script(
         "azure-pipelines", tmp_path, plan_exit=0, valid_document=True,
-        dry_run=dry_run, site_file="operator/site.yaml",
+        dry_run=dry_run, site_file="operator/site.yaml", selector="environment=prod",
     )
     assert result.returncode == 0, result.stdout + result.stderr
     commands = calls.read_text().splitlines()
     assert len(commands) == (1 if dry_run else 2)
-    assert all("--site-file operator/site.yaml" in command and " -l " not in command for command in commands)
+    assert all(
+        "-l environment=prod --site-file operator/site.yaml" in command for command in commands
+    )
 
 
 def _github_manifest_options() -> list[str]:

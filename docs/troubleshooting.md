@@ -424,6 +424,28 @@ Error: CLI selector `-l environment=prdo` matched no Sites. `environment=prdo` r
 
 **Solution**: The diagnostic lists the workspace's actual values for each requested key. Fix the typo or update the Site labels. See [targeting.md](targeting.md) for the no-match diagnostic and selector grammar.
 
+### "does not match -l"
+
+```
+Error: Site 'plant-one' does not match -l environment=prod (its environment label is dev).
+Error: The Site does not match the -l label requirement. Check its name and labels against each -l term.
+```
+
+**Cause**: The command received one explicit Site through `--site-file`,
+`--input-file` or `--input`, together with `-l`. With an explicit Site, every
+`-l` term is a requirement: each label must have the requested value, and
+`name=` must match the Site's `name:` field. The Azure Pipelines deploy
+pipeline always passes its environment selector with `siteFile`, for
+example `-l environment=prod`. In that pipeline, this error means the Site
+file is labeled for another environment. Redacted output, including
+pipeline plan summaries, reports the second form with the code
+`plan.targeting.conflict`. No plan is prepared and nothing is deployed.
+
+**Solution**: Select the environment the Site is labeled for, or use a Site
+labeled for the selected environment. To see which term differs, run the
+same `siteops plan` command locally with `SITEOPS_REDACT_OUTPUT=0`. See
+[label requirements](targeting.md#label-requirements-for-an-explicit-site).
+
 ### "Template not found"
 
 ```

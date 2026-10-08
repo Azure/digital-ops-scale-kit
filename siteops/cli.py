@@ -73,8 +73,10 @@ from siteops.models import (
     MultipleSubscriptionSitesError,
     NoTargetingError,
     ParameterSelectionError,
+    SelectorParseError,
     Site,
     _merge_selector_strings,
+    parse_selector,
 )
 from siteops.orchestrator import Orchestrator
 from siteops.planning import (
@@ -757,15 +759,16 @@ def _explicit_site(
                 "nothing-to-read", "Supply a declared resource ID with --input or --input-file."
             )
         return None
-    if getattr(args, "selector", None):
-        raise ExplicitSiteConflict("An explicit Site cannot be combined with -l/--selector.")
+    requirement = _site_requirement(args)
     if site_file:
         if input_file or inline:
             raise ExplicitSiteConflict(
                 "--site-file cannot be combined with --input-file or --input."
             )
         _require_operator_file_path(site_file, args)
-        return load_direct_site(site_file)
+        site = load_direct_site(site_file)
+        _require_site_match(requirement, site.name, site.labels)
+        return site
     if input_file is not None:
         _require_operator_file_path(input_file, args)
     contract = load_contract(
@@ -779,8 +782,55 @@ def _explicit_site(
         )
     site, _ = _resolve_typed_site(
         contract, args, manifest_path=manifest_path, orchestrator=orchestrator,
+        requirement=requirement,
     )
+    _require_site_match(requirement, site.name, site.labels)
     return site
+
+
+def _site_requirement(args: argparse.Namespace) -> dict[str, list[str]]:
+    """Parse `-l` as the labels an explicit Site must carry."""
+    try:
+        return parse_selector(getattr(args, "selector", None))
+    except SelectorParseError as error:
+        conflict = ExplicitSiteConflict("Invalid Site selector.")
+        conflict.private_message = str(error)
+        raise conflict from None
+
+
+def _require_site_match(
+    requirement: dict[str, list[str]],
+    name: str | None,
+    labels: dict[str, Any],
+    pending: frozenset[str] = frozenset(),
+) -> None:
+    """Reject an explicit Site unless its name and labels satisfy every `-l` term.
+
+    A None name and the label keys in `pending` are not known yet, so they are
+    checked once the Site is complete.
+    """
+    unmet = []
+    for key, values in requirement.items():
+        if key == "name":
+            if name is not None and name not in values:
+                unmet.append((key, values))
+        elif key not in pending and labels.get(key) not in values:
+            unmet.append((key, values))
+    if not unmet:
+        return
+    error = ExplicitSiteConflict(
+        "The Site does not match the -l label requirement. "
+        "Check its name and labels against each -l term."
+    )
+    terms = ",".join(f"{key}={value}" for key, values in unmet for value in values)
+    reasons = [
+        f"its {key} label is {labels[key]}" if key in labels else f"it has no {key} label"
+        for key, _ in unmet if key != "name"
+    ]
+    subject = "The Site" if name is None else f"Site '{name}'"
+    detail = f" ({', '.join(reasons)})" if reasons else ""
+    error.private_message = f"{subject} does not match -l {terms}{detail}."
+    raise error
 
 
 def _prepared_sites_line(args: argparse.Namespace, count: int, *, explicit: bool) -> str:
@@ -827,6 +877,7 @@ def _resolve_typed_site(
     *,
     manifest_path: Path,
     orchestrator: Orchestrator,
+    requirement: dict[str, list[str]] | None = None,
 ) -> tuple[Site, dict[str, Any] | None]:
     bound = contract.bind(values_file=args.input_file, inline=args.input_values)
     if not bound.resources:
@@ -844,6 +895,8 @@ def _resolve_typed_site(
         raise ResourceReadError(
             "read-required", "Use inputs --read-resources to preview or save a Site from resource IDs."
         )
+    if requirement:
+        _require_site_match(requirement, *contract.known_identity(bound))
     orchestrator.load_manifest(manifest_path)
     try:
         reader = new_arm_reader()
@@ -1633,8 +1686,6 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
 
     # Filter by selector if provided
     if selector_str:
-        from siteops.models import parse_selector
-
         try:
             selector = parse_selector(selector_str)
         except ValueError as e:
@@ -1913,6 +1964,10 @@ _SELECTOR_HELP = (
     "Duplicate `name=` values OR-combine. Any other duplicate key is an "
     "error. `name=` accepts the basename, the relative path under a trusted "
     "`sites/` directory, or the file's internal `name:` field."
+)
+_TARGET_SELECTOR_HELP = (
+    f"{_SELECTOR_HELP} With --site-file, --input-file or --input, the explicit "
+    "Site must match every term instead, and `name=` compares its `name:` field."
 )
 
 # One description of what --source accepts. Each command adds what it selects.
@@ -2210,7 +2265,7 @@ def main() -> None:
         action="append",
         default=None,
         metavar="KEY=VALUE",
-        help=_SELECTOR_HELP,
+        help=_TARGET_SELECTOR_HELP,
     )
 
     # plan command
@@ -2229,7 +2284,7 @@ def main() -> None:
         action="append",
         default=None,
         metavar="KEY=VALUE",
-        help=_SELECTOR_HELP,
+        help=_TARGET_SELECTOR_HELP,
     )
     p_plan.add_argument(
         "--describe",
@@ -2291,7 +2346,7 @@ def main() -> None:
         action="append",
         default=None,
         metavar="KEY=VALUE",
-        help=_SELECTOR_HELP,
+        help=_TARGET_SELECTOR_HELP,
     )
     p_deploy.add_argument(
         "-p",

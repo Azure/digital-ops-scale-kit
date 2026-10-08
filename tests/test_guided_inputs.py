@@ -259,6 +259,40 @@ def test_resource_name_default_retains_overrides_and_manual_route(tmp_path):
     assert contract.describe()["inputs"][0]["defaultFromResource"] == "cluster"
 
 
+def test_known_identity_holds_back_values_that_a_read_supplies(tmp_path):
+    resource = (
+        "/subscriptions/00000000-0000-0000-0000-000000000001/"
+        "resourceGroups/rg-first/providers/Microsoft.Kubernetes/connectedClusters/arc-first"
+    )
+    named = _named_resource_contract(tmp_path / "named")
+    assert named.known_identity(named.bind(inline=[f"cluster={resource}"])) == (None, {}, frozenset())
+    assert named.known_identity(
+        named.bind(inline=["siteName=my-site", f"cluster={resource}"]),
+    ) == ("my-site", {}, frozenset())
+
+    manifest, _ = _manifest_and_contract(
+        tmp_path / "labeled",
+        fields=[
+            _field("siteName", "name"), *_manual_resource_fields(), _field("region", "labels.region"),
+            _resource_role(derive={
+                "subscription": "subscription", "resourceGroup": "resourceGroup",
+                "location": "region", "name": "clusterName",
+            }),
+        ],
+        defaults={"labels": {"environment": "dev"}},
+    )
+    labeled = load_contract(manifest)
+    bound = labeled.bind(inline=["siteName=one", "location=eastus", f"cluster={resource}"])
+    assert labeled.known_identity(bound) == ("one", {"environment": "dev"}, frozenset({"region"}))
+    manual = labeled.bind(inline=[
+        "siteName=one", "subscription=00000000-0000-0000-0000-000000000001",
+        "resourceGroup=rg-first", "location=eastus", "clusterName=arc-first", "region=eu",
+    ])
+    site = labeled.build_site(manual)
+    assert labeled.known_identity(manual) == (site.name, site.labels, frozenset())
+    assert site.labels == {"environment": "dev", "region": "eu"}
+
+
 @pytest.mark.parametrize("name", ["", "UPPER", "has space", "-start", "end-", "x" * 60])
 def test_declared_name_constraints_reject_unsupported_override_before_reads(tmp_path, name):
     contract = _named_resource_contract(tmp_path)

@@ -293,8 +293,11 @@ deployment identity.
    Pipelines YAML file** and the reviewed source branch. Save the definition
    before running it. An existing definition pointing at this path can be
    reused.
-2. Configure the agent's approved Python package feed and the real
-   `serviceConnections` and `secretGroups` name mappings to preview.
+2. Configure the agent's approved Python package feed. Template expansion
+   uses the service connection and variable group names in the Environment
+   settings blocks of `.pipelines/deploy.yaml` and
+   `.pipelines/integration-test.yaml`. The preview checks that each
+   environment selects its own pair.
    A `PIP_INDEX_URL` pipeline variable can select the approved feed when
    required by your organization. On this qualification pipeline only,
    allow **Edit build pipeline** for the project build service identity,

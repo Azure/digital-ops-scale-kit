@@ -1089,6 +1089,39 @@ class InputContract:
             _assign(data, field.site_path, values[field.name])
         return Site.from_data(data, source="guided inputs", default_name="guided-site")
 
+    def known_identity(
+        self, bound: BoundInputs,
+    ) -> tuple[str | None, dict[str, Any], frozenset[str]]:
+        """Return the Site name and labels fixed by answers before any resource read.
+
+        The name is None while a selected resource read still supplies it or no
+        answer sets it. The returned label keys are those a read still supplies.
+        """
+        selected = self.resource_fields(bound)
+        derived = {target for field in selected for _, target in field.resource.derive}
+        if self.name_from_resource in {field.name for field in selected}:
+            derived.update(field.name for field in self.fields if field.site_path == ("name",))
+        data = copy.deepcopy(self._site_defaults)
+        name_pending = False
+        pending: set[str] = set()
+        for field in self.fields:
+            path = field.site_path
+            if field.resource is not None or path is None or path[0] not in {"name", "labels"}:
+                continue
+            if field.name in bound.active_values:
+                _assign(data, path, bound.active_values[field.name])
+            elif field.name in derived and path == ("name",):
+                name_pending = True
+            elif field.name in derived:
+                pending.add(path[1])
+        name = data.get("name")
+        labels = data.get("labels")
+        return (
+            None if name_pending or not isinstance(name, str) else name,
+            dict(labels) if isinstance(labels, dict) else {},
+            frozenset(pending),
+        )
+
     def resolve(
         self, values_file: Path | None = None, inline: list[str] | None = None,
     ) -> Site:

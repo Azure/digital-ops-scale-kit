@@ -21,10 +21,6 @@ steps:
         echo "##vso[task.logissue type=error]Invalid selector format"
         exit 1
       fi
-      if [[ -n "$SITE_FILE" && -n "$SELECTOR" ]]; then
-        echo "##vso[task.logissue type=error]Choose siteFile or selector, not both."
-        exit 1
-      fi
       if [[ ! -d "$WORKSPACE" || ( -n "$SITE_FILE" && ! -f "$SITE_FILE" ) ]]; then
         echo "##vso[task.logissue type=error]The selected workspace or Site file is unavailable."
         exit 1

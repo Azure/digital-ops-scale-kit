@@ -20,8 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SOURCE = "a" * 40
 REF = "refs/heads/validation"
 REPOSITORY = "https://github.com/example/repository"
-CONNECTIONS = {name: f"private-{name}-connection" for name in ("dev", "staging", "prod")}
-GROUPS = {name: f"private-{name}-group" for name in CONNECTIONS}
+SETTINGS = {name: (f"private-{name}-connection", f"private-{name}-group") for name in ("dev", "staging", "prod")}
 PIPELINE_ID = 10
 
 
@@ -44,7 +43,7 @@ def preview(preview_module, monkeypatch):
     return preview_module
 
 
-def _expanded(case):
+def _expanded(case, settings=SETTINGS):
     if case.name.startswith("consumer-validate-"):
         return {"stages": [{"stage": "validate", "jobs": [{"job": "siteops_validate", "steps": [
             {"displayName": "Install Site Ops", "env": {
@@ -76,6 +75,7 @@ def _expanded(case):
             ]},
         ]}
     env = case.parameters.get("environment", "dev")
+    connection, group = settings[env]
     deploy = case.pipeline == "deploy"
     task_env = (
         {"SELECTOR": case.selector, "DRY_RUN": case.parameters.get("dryRun", False),
@@ -85,11 +85,14 @@ def _expanded(case):
         {"MANIFEST": case.parameters.get("manifest", "all"),
          "INTEGRATION_SKIP_CLEANUP": case.parameters.get("skipCleanup", False)}
     )
-    return {"jobs": [{
+    return {"variables": [
+        {"name": "SITE_OVERRIDES", "value": ""}, {"group": group},
+        {"name": "siteopsServiceConnection", "value": connection},
+    ], "jobs": [{
         "deployment": "siteops_deploy" if deploy else "integration_test",
         "environment": {"name": env}, "strategy": {"runOnce": {"deploy": {"steps": [{
             "displayName": "Prepare executable plan and deploy" if deploy else "Run integration tests",
-            "inputs": {"azureSubscription": CONNECTIONS[env], "scriptType": "bash",
+            "inputs": {"azureSubscription": connection, "scriptType": "bash",
                        "keepAzSessionActive": case.parameters.get("keepAzSessionActive", False),
                        "inlineScript": "siteops deploy --yes" + (" --site-file target.yaml" if case.parameters.get("siteFile") else "")},
             "env": task_env,
@@ -98,6 +101,11 @@ def _expanded(case):
 
 
 def _client(preview, fault=""):
+    committed = {
+        name: preview.environment_settings((ROOT / path).read_text(encoding="utf-8"))
+        for name, path in preview.PIPELINES.items() if name != "ci"
+    }
+
     class Client:
         def __init__(self):
             self.calls = []
@@ -118,14 +126,14 @@ def _client(preview, fault=""):
             if fault == "empty-yaml":
                 return {"finalYaml": ""}
             case = next(self.cases)
-            return {"finalYaml": yaml.safe_dump(_expanded(case))}
+            return {"finalYaml": yaml.safe_dump(_expanded(case, committed.get(case.pipeline, SETTINGS)))}
 
     return Client()
 
 
 def test_preview_binds_every_request_to_the_exact_source_and_retains_only_safe_receipts(preview):
     client = _client(preview)
-    report = preview.qualify(client, PIPELINE_ID, REPOSITORY, REF, SOURCE, CONNECTIONS, GROUPS)
+    report = preview.qualify(client, PIPELINE_ID, REPOSITORY, REF, SOURCE)
     assert client.calls[0] == (PIPELINE_ID, None)
     selected = preview.cases()
     assert len(client.calls[1:]) == len(selected) == len(report["cases"])
@@ -144,10 +152,8 @@ def test_preview_binds_every_request_to_the_exact_source_and_retains_only_safe_r
             for name, value in case.parameters.items():
                 expected = ("true" if value else "false") if isinstance(value, bool) else value
                 assert values[name] == expected
-            if case.pipeline != "ci":
-                assert set(values) == set(case.parameters) | {"serviceConnections", "secretGroups"}
-                assert yaml.safe_load(values["serviceConnections"]) == CONNECTIONS
-                assert yaml.safe_load(values["secretGroups"]) == GROUPS
+            assert set(values) == set(case.parameters)
+            assert not {"serviceConnections", "secretGroups"} & set(values)
     receipt = json.dumps(report)
     assert report["sourceCommit"] == SOURCE
     assert report["expectedCases"] == [case.name for case in selected]
@@ -194,7 +200,7 @@ def test_generated_overrides_lead_each_item_with_its_type_key(preview):
 def test_preview_refuses_unbound_definitions_and_absent_expansion(preview, fault):
     client = _client(preview, fault)
     with pytest.raises(preview.PreviewError):
-        preview.qualify(client, PIPELINE_ID, REPOSITORY, REF, SOURCE, CONNECTIONS, GROUPS)
+        preview.qualify(client, PIPELINE_ID, REPOSITORY, REF, SOURCE)
     assert len(client.calls) == (1 if fault in {"repo", "path", "id"} else 2)
 
 
@@ -219,7 +225,84 @@ def test_preview_checks_actual_expanded_deployment_inputs(preview, fault):
     else:
         step["template"] = "unexpanded.yaml"
     with pytest.raises(preview.PreviewError):
-        preview.validate_expansion(case, yaml.safe_dump(document), CONNECTIONS)
+        preview.validate_expansion(case, yaml.safe_dump(document), SETTINGS)
+
+
+@pytest.mark.parametrize("selector", [None, "", "environment=dev"])
+def test_preview_requires_the_environment_label_requirement_with_a_site_file(preview, selector):
+    case = next(case for case in preview.cases() if case.name == "deploy-site-file")
+    assert case.parameters["siteFile"] and case.parameters["environment"] != "dev"
+    assert case.selector == f"environment={case.parameters['environment']}"
+    document = _expanded(case)
+    preview.validate_expansion(case, yaml.safe_dump(document), SETTINGS)
+    step = document["jobs"][0]["strategy"]["runOnce"]["deploy"]["steps"][0]
+    if selector is None:
+        del step["env"]["SELECTOR"]
+    else:
+        step["env"]["SELECTOR"] = selector
+    with pytest.raises(preview.PreviewError, match="deployment inputs"):
+        preview.validate_expansion(case, yaml.safe_dump(document), SETTINGS)
+
+
+@pytest.mark.parametrize("pipeline", ["deploy", "integration"])
+def test_environment_settings_read_each_committed_block(preview, pipeline):
+    text = (ROOT / preview.PIPELINES[pipeline]).read_text(encoding="utf-8")
+    assert preview.environment_settings(text) == {
+        name: ("azure-siteops", "siteops-secrets") for name in ("dev", "staging", "prod")
+    }
+
+
+_PROD_BLOCK = """  - ${{ if eq(parameters.environment, 'prod') }}:
+    - group: siteops-secrets
+    - name: siteopsServiceConnection
+      value: azure-siteops
+"""
+
+
+@pytest.mark.parametrize("replacement", [
+    "",
+    _PROD_BLOCK.replace("'prod'", "'staging'"),
+    _PROD_BLOCK.replace("    - group: siteops-secrets\n", ""),
+    _PROD_BLOCK + "    - group: other-secrets\n",
+    _PROD_BLOCK.replace("value: azure-siteops", "value: $(prodConnection)"),
+    _PROD_BLOCK.replace("value: azure-siteops", "value: ''"),
+    _PROD_BLOCK.replace("siteopsServiceConnection", "otherConnection"),
+])
+def test_environment_settings_require_one_group_and_connection_per_environment(preview, replacement):
+    text = (ROOT / preview.PIPELINES["deploy"]).read_text(encoding="utf-8").replace("\r\n", "\n")
+    assert text.count(_PROD_BLOCK) == 1
+    with pytest.raises(preview.PreviewError, match="environment"):
+        preview.environment_settings(text.replace(_PROD_BLOCK, replacement))
+
+
+def test_incomplete_environment_settings_stop_before_service_access(preview, monkeypatch):
+    documents = preview.source_documents(SOURCE)
+    documents["integration"] = documents["integration"].replace("\r\n", "\n").replace(_PROD_BLOCK, "")
+    monkeypatch.setattr(preview, "source_documents", lambda commit: documents)
+    client = _client(preview)
+    with pytest.raises(preview.PreviewError, match="environment settings"):
+        preview.qualify(client, PIPELINE_ID, REPOSITORY, REF, SOURCE)
+    assert client.calls == []
+
+
+@pytest.mark.parametrize("pipeline", ["deploy", "integration"])
+@pytest.mark.parametrize("fault", ["other-connection", "other-group", "extra-group", "no-group"])
+def test_preview_requires_the_environments_own_connection_and_group(preview, pipeline, fault):
+    case = next(case for case in preview.cases()
+                if case.pipeline == pipeline and case.parameters.get("environment") == "prod")
+    document = _expanded(case)
+    preview.validate_expansion(case, yaml.safe_dump(document), SETTINGS)
+    step = document["jobs"][0]["strategy"]["runOnce"]["deploy"]["steps"][0]
+    if fault == "other-connection":
+        step["inputs"]["azureSubscription"] = SETTINGS["dev"][0]
+    elif fault == "other-group":
+        document["variables"][1]["group"] = SETTINGS["dev"][1]
+    elif fault == "extra-group":
+        document["variables"].append({"group": SETTINGS["dev"][1]})
+    else:
+        del document["variables"][1]
+    with pytest.raises(preview.PreviewError, match="service connection|variable group"):
+        preview.validate_expansion(case, yaml.safe_dump(document), SETTINGS)
 
 
 @pytest.mark.parametrize("pipeline", ["deploy", "integration"])
@@ -230,13 +313,13 @@ def test_preview_checks_the_requested_wif_session_refresh(preview, pipeline, ena
     assert selected, "Both enabled and default-disabled paths need service preview coverage."
     case = selected[0]
     document = _expanded(case)
-    preview.validate_expansion(case, yaml.safe_dump(document), CONNECTIONS)
+    preview.validate_expansion(case, yaml.safe_dump(document), SETTINGS)
     inputs = document["jobs"][0]["strategy"]["runOnce"]["deploy"]["steps"][0]["inputs"]
     inputs["keepAzSessionActive"] = str(enabled)
-    preview.validate_expansion(case, yaml.safe_dump(document), CONNECTIONS)
+    preview.validate_expansion(case, yaml.safe_dump(document), SETTINGS)
     inputs["keepAzSessionActive"] = not enabled
     with pytest.raises(preview.PreviewError, match="session refresh"):
-        preview.validate_expansion(case, yaml.safe_dump(document), CONNECTIONS)
+        preview.validate_expansion(case, yaml.safe_dump(document), SETTINGS)
 
 
 @pytest.mark.parametrize("fault", [None, "azure", "release", "site-file"])
@@ -252,9 +335,9 @@ def test_preview_qualifies_lightweight_consumer_validation(preview, fault):
         job["steps"][1]["env"]["SITE_FILE"] = "other.yaml"
     if fault:
         with pytest.raises(preview.PreviewError):
-            preview.validate_expansion(case, yaml.safe_dump(document), CONNECTIONS)
+            preview.validate_expansion(case, yaml.safe_dump(document), SETTINGS)
     else:
-        preview.validate_expansion(case, yaml.safe_dump(document), CONNECTIONS)
+        preview.validate_expansion(case, yaml.safe_dump(document), SETTINGS)
 
 
 class Response(io.BytesIO):
@@ -493,8 +576,6 @@ def test_preview_command_publishes_a_receipt_only_after_all_cases_pass(
         "BUILD_REPOSITORY_URI": REPOSITORY,
         "BUILD_SOURCEBRANCH": REF,
         "BUILD_SOURCEVERSION": SOURCE,
-        "ADO_PREVIEW_CONNECTIONS": json.dumps(CONNECTIONS),
-        "ADO_PREVIEW_GROUPS": json.dumps(GROUPS),
     }
     if fault == "malformed-config":
         environment["SYSTEM_DEFINITIONID"] = "private-malformed-configuration"
@@ -538,7 +619,7 @@ def test_preview_authentication_is_confined_to_the_selected_ado_origin(preview, 
 def test_invalid_pipeline_selection_never_reaches_the_service(preview, pipeline_id):
     client = _client(preview)
     with pytest.raises(preview.PreviewError):
-        preview.qualify(client, pipeline_id, REPOSITORY, REF, SOURCE, CONNECTIONS, GROUPS)
+        preview.qualify(client, pipeline_id, REPOSITORY, REF, SOURCE)
     assert client.calls == []
 
 
@@ -548,7 +629,7 @@ def test_malformed_expansion_fields_fail_with_fixed_diagnostics(preview, field):
     document = _expanded(case)
     document["jobs"][0]["strategy"]["runOnce"]["deploy"]["steps"][0][field] = "private-malformed"
     with pytest.raises(preview.PreviewError) as caught:
-        preview.validate_expansion(case, yaml.safe_dump(document), CONNECTIONS)
+        preview.validate_expansion(case, yaml.safe_dump(document), SETTINGS)
     assert "private-malformed" not in str(caught.value)
 
 
@@ -556,7 +637,7 @@ def test_malformed_expansion_fields_fail_with_fixed_diagnostics(preview, field):
 def test_preview_bounds_recursive_and_oversized_yaml_structures(preview, recursive):
     text = "jobs: &loop [*loop]" if recursive else yaml.safe_dump({"jobs": [{}] * 20001})
     with pytest.raises(preview.PreviewError, match="structure limits"):
-        preview.validate_expansion(preview.cases()[0], text, CONNECTIONS)
+        preview.validate_expansion(preview.cases()[0], text, SETTINGS)
 
 
 def test_preview_structure_limits_accept_the_boundary_and_reject_the_next_node(preview):
@@ -574,7 +655,7 @@ def test_preview_structure_limits_accept_the_boundary_and_reject_the_next_node(p
 def test_validation_pipeline_is_manual_and_has_no_deployment_identity():
     source = yaml.safe_load((ROOT / ".pipelines" / "validate-pipelines.yaml").read_text())
     assert source["trigger"] == source["pr"] == "none"
-    assert "pipelineIds" not in {parameter["name"] for parameter in source["parameters"]}
+    assert "parameters" not in source
     stage = next(stage for stage in source["stages"] if stage.get("stage") == "preview")
     steps = stage["jobs"][0]["steps"]
     assert not any(step.get("task", "").startswith("AzureCLI@") for step in steps)
@@ -676,7 +757,7 @@ def test_source_read_failure_stops_before_service_access(preview, monkeypatch):
     monkeypatch.setattr(preview, "source_documents", fail)
     client = _client(preview)
     with pytest.raises(preview.PreviewError, match="source"):
-        preview.qualify(client, PIPELINE_ID, REPOSITORY, REF, SOURCE, CONNECTIONS, GROUPS)
+        preview.qualify(client, PIPELINE_ID, REPOSITORY, REF, SOURCE)
     assert client.calls == []
 
 

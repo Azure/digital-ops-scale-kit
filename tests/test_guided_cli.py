@@ -759,19 +759,217 @@ def test_validate_checks_explicit_site_without_configured_selection(
     assert "Manifest is valid" in capsys.readouterr().out
 
 
-def test_mixed_explicit_and_fleet_target_fails_before_execution(
-    guided_workspace, tmp_path, capsys,
+def _with_site_defaults(workspace: Path, defaults: dict) -> Path:
+    path = contract_path(workspace / "manifests" / "test-manifest.yaml")
+    contract = yaml.safe_load(path.read_text(encoding="utf-8"))
+    contract["siteDefaults"] = defaults
+    path.write_text(yaml.safe_dump(contract), encoding="utf-8")
+    return workspace
+
+
+def _explicit_route(route: str, workspace: Path, tmp_path: Path) -> list[str]:
+    """Supply Site 'one', labeled environment=dev, through one explicit route."""
+    if route == "site-file":
+        site_file = tmp_path / "one.yaml"
+        site_file.write_text(yaml.safe_dump({
+            "apiVersion": "siteops/v1", "kind": "Site", "name": "one",
+            "subscription": "00000000-0000-0000-0000-000000000001", "location": "eastus",
+            "labels": {"environment": "dev"},
+        }), encoding="utf-8")
+        return ["--site-file", str(site_file)]
+    _with_site_defaults(workspace, {"labels": {"environment": "dev"}})
+    if route == "input-file":
+        return ["--input-file", str(_input_file(tmp_path / "answers.yaml"))]
+    return [
+        "--input", "siteName=one", "--input", "subscription=00000000-0000-0000-0000-000000000001",
+        "--input", "location=eastus",
+    ]
+
+
+def _command_args(command: str) -> list[str]:
+    return {"plan": ["--describe"], "deploy": ["--yes"], "validate": []}[command]
+
+
+@pytest.mark.parametrize("command", ["plan", "deploy", "validate"])
+@pytest.mark.parametrize("route", ["site-file", "input-file", "input"])
+def test_label_requirement_admits_a_matching_explicit_site(
+    guided_workspace, tmp_path, capsys, command, route,
 ):
-    answers = _input_file(tmp_path / "answers.yaml")
-    assert _invoke([
-        "-w", str(guided_workspace), "deploy", "--yes", _manifest(guided_workspace),
-        "--input-file", str(answers), "-l", "name=test-site",
-        "--output", "json",
-    ]) == 1
-    output = json.loads(capsys.readouterr().out)
-    assert output["status"] != "succeeded"
-    assert output["diagnostics"][0]["code"] == "plan.targeting.conflict"
-    assert "selector" in output["diagnostics"][0]["summary"].lower()
+    explicit = _explicit_route(route, guided_workspace, tmp_path)
+    with (
+        patch.object(Orchestrator, "build_plan", autospec=True, side_effect=Orchestrator.build_plan) as build,
+        patch.object(Orchestrator, "execute_plan", return_value=SimpleNamespace(exit_code=0)) as execute,
+        patch("siteops.cli._write_run_result"),
+    ):
+        assert _invoke([
+            "-w", str(guided_workspace), command, _manifest(guided_workspace),
+            *_command_args(command), *explicit, "-l", "environment=dev", "-l", "name=two,name=one",
+        ]) == 0
+    output = capsys.readouterr()
+    if command == "validate":
+        assert "Manifest is valid" in output.out
+        return
+    assert [site.name for site in build.call_args.kwargs["sites"]] == ["one"]
+    assert execute.called is (command == "deploy")
+
+
+@pytest.mark.parametrize("command", ["plan", "deploy", "validate"])
+@pytest.mark.parametrize("route", ["site-file", "input-file", "input"])
+@pytest.mark.parametrize(("selectors", "message"), [
+    (["environment=prod"], "Site 'one' does not match -l environment=prod (its environment label is dev)."),
+    (["name=two,name=three"], "Site 'one' does not match -l name=two,name=three."),
+    (
+        ["environment=dev", "region=eu", "name=one"],
+        "Site 'one' does not match -l region=eu (it has no region label).",
+    ),
+    (
+        ["name=two,environment=prod,region=eu"],
+        "Site 'one' does not match -l name=two,environment=prod,region=eu "
+        "(its environment label is dev, it has no region label).",
+    ),
+])
+def test_label_requirement_rejects_a_mismatch_before_preparation(
+    guided_workspace, tmp_path, capsys, monkeypatch, command, route, selectors, message,
+):
+    monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "0")
+    explicit = _explicit_route(route, guided_workspace, tmp_path)
+    with (
+        patch.object(Orchestrator, "build_plan", side_effect=AssertionError("No preparation")),
+        patch.object(Orchestrator, "validate", side_effect=AssertionError("No preparation")),
+        patch.object(Orchestrator, "execute_plan", side_effect=AssertionError("No execution")),
+    ):
+        assert _invoke([
+            "-w", str(guided_workspace), command, _manifest(guided_workspace),
+            *_command_args(command), *explicit,
+            *[argument for selector in selectors for argument in ("-l", selector)],
+        ]) == 1
+    output = capsys.readouterr()
+    assert message in output.out + output.err
+    if command == "deploy":
+        assert output.err == f"Error: {message}\n"
+
+
+@pytest.mark.parametrize("redacted", [False, True])
+def test_label_requirement_parses_before_reading_the_site(
+    guided_workspace, tmp_path, capsys, monkeypatch, redacted,
+):
+    monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1" if redacted else "0")
+    with patch("siteops.cli.load_direct_site", side_effect=AssertionError("No Site read")):
+        assert _invoke([
+            "-w", str(guided_workspace), "deploy", "--yes", _manifest(guided_workspace),
+            "--site-file", str(tmp_path / "absent.yaml"), "-l", "environment=dev", "-l", "environment=prod",
+        ]) == 1
+    error = capsys.readouterr().err
+    assert error == (
+        "Error: Invalid Site selector.\n" if redacted
+        else "Error: Selector key `environment` may only appear once. Selectors AND across keys, "
+        "so duplicating a key would always match zero Sites. Only `name=` supports multiple "
+        "values (OR-combined).\n"
+    )
+
+
+@pytest.mark.parametrize("command", ["plan", "deploy"])
+def test_redacted_label_requirement_mismatch_names_no_site_values(
+    guided_workspace, tmp_path, capsys, monkeypatch, command,
+):
+    monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1")
+    site_file = tmp_path / "private.yaml"
+    site_file.write_text(yaml.safe_dump({
+        "apiVersion": "siteops/v1", "kind": "Site", "name": "PRIVATE_SITE_NAME",
+        "subscription": "00000000-0000-0000-0000-000000000001", "location": "eastus",
+        "labels": {"environment": "PRIVATE_LABEL_VALUE"},
+    }), encoding="utf-8")
+    with patch.object(Orchestrator, "build_plan", side_effect=AssertionError("No preparation")):
+        assert _invoke([
+            "-w", str(guided_workspace), command, _manifest(guided_workspace),
+            *_command_args(command), "--site-file", str(site_file),
+            "-l", "environment=PRIVATE_SELECTOR_VALUE", "--output", "json",
+        ]) == 1
+    output = capsys.readouterr()
+    assert json.loads(output.out)["diagnostics"] == [{
+        "code": "plan.targeting.conflict",
+        "severity": "error",
+        "summary": (
+            "The Site does not match the -l label requirement. "
+            "Check its name and labels against each -l term."
+        ),
+    }]
+    assert "PRIVATE" not in output.out + output.err
+
+
+@pytest.mark.parametrize(("defaults", "selector"), [
+    ({}, "name=two"),
+    ({"labels": {"environment": "dev"}}, "environment=prod"),
+])
+def test_label_requirement_fails_before_any_resource_read(
+    guided_workspace, tmp_path, capsys, monkeypatch, defaults, selector,
+):
+    monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "0")
+    workspace = _with_site_defaults(_resource_workspace(guided_workspace), defaults)
+    answers = _resource_answers(tmp_path / "answers.yaml")
+    with (
+        patch("siteops.cli.new_arm_reader", side_effect=AssertionError("No Azure read")),
+        patch.object(Orchestrator, "build_plan", side_effect=AssertionError("No preparation")),
+    ):
+        assert _invoke([
+            "-w", str(workspace), "plan", _manifest(workspace), "--describe",
+            "--input-file", str(answers), "-l", selector,
+        ]) == 1
+    assert "Site 'one' does not match -l " + selector in capsys.readouterr().out
+
+
+def _region_label_workspace(workspace: Path) -> Path:
+    """Derive a `region` label from the cluster's observed location."""
+    path = contract_path(workspace / "manifests" / "test-manifest.yaml")
+    contract = yaml.safe_load(path.read_text(encoding="utf-8"))
+    contract["inputs"].extend([
+        {"name": "region", "type": "string", "description": "Region label.", "sitePath": "labels.region"},
+        {
+            "name": "cluster", "type": "azureResourceId", "required": False,
+            "description": "Existing cluster.",
+            "resource": {"type": "Microsoft.Kubernetes/connectedClusters",
+                         "apiVersion": "2024-07-15-preview"},
+            "derive": {"location": "region"},
+        },
+    ])
+    path.write_text(yaml.safe_dump(contract), encoding="utf-8")
+    return workspace
+
+
+@pytest.mark.parametrize(("region", "expected"), [("eastus", 0), ("westus", 1)])
+def test_label_supplied_by_a_read_is_required_before_preparation(
+    guided_workspace, tmp_path, capsys, monkeypatch, region, expected,
+):
+    monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "0")
+    workspace = _region_label_workspace(guided_workspace)
+    reads = []
+
+    class Reader:
+        identity = SimpleNamespace(name="azure-cli", version=None)
+
+        def read(self, ref, *, facts=frozenset()):
+            reads.append(ref.resource_id)
+            return ArmResourceObservation(
+                _CLUSTER_ID, "Microsoft.Kubernetes/connectedClusters", "eastus", "arc-first", {},
+            )
+
+    with (
+        patch("siteops.cli.new_arm_reader", return_value=Reader()),
+        patch.object(Orchestrator, "build_plan", autospec=True, side_effect=Orchestrator.build_plan) as build,
+    ):
+        assert _invoke([
+            "-w", str(workspace), "plan", _manifest(workspace), "--describe",
+            "--input", "siteName=one", "--input", "subscription=00000000-0000-0000-0000-000000000001",
+            "--input", "location=eastus", "--input", f"cluster={_CLUSTER_ID}",
+            "-l", "name=one", "-l", f"region={region}",
+        ]) == expected
+    assert reads == [_CLUSTER_ID]
+    assert build.called is (expected == 0)
+    if expected:
+        assert (
+            "Site 'one' does not match -l region=westus (its region label is eastus)."
+            in capsys.readouterr().out
+        )
 
 
 def test_missing_inputs_have_actionable_machine_diagnostic(

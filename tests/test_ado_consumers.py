@@ -212,11 +212,13 @@ def test_contributor_pipelines_request_development_installation_explicitly():
 
 
 @pytest.mark.parametrize("site_file,selector,expected", [
-    ("", "environment=dev", 0), ("target.yaml", "", 0), ("target.yaml", "environment=dev", 1),
-    ("missing.yaml", "", 1),
+    ("", "environment=dev", 0), ("target.yaml", "", 0), ("target.yaml", "environment=dev", 0),
+    ("missing.yaml", "", 1), ("operator/../target.yaml", "environment=dev", 1),
+    ("target.yaml", "environment=dev;id", 1),
 ])
 def test_site_file_and_selector_validation_is_explicit(tmp_path, site_file, selector, expected):
     (tmp_path / "workspace").mkdir()
+    (tmp_path / "operator").mkdir()
     (tmp_path / "target.yaml").write_text("{}")
     result = run_script(step(TEMPLATES / "siteops-inputs.yaml", "Validate inputs")["script"], tmp_path, {
         "WORKSPACE": "workspace", "MANIFEST": "manifests/install.yaml",
@@ -225,9 +227,14 @@ def test_site_file_and_selector_validation_is_explicit(tmp_path, site_file, sele
     assert result.returncode == expected
 
 
-@pytest.mark.parametrize("site_file", ["", "operator files/site.yaml"])
+@pytest.mark.parametrize("site_file,selector", [
+    ("", "environment=dev"), ("operator files/site.yaml", ""),
+    ("operator files/site.yaml", "environment=dev"),
+])
 @pytest.mark.parametrize("exit_code", [0, 17])
-def test_structural_validation_preserves_target_arguments_and_diagnostics(tmp_path, site_file, exit_code):
+def test_structural_validation_preserves_target_arguments_and_diagnostics(
+    tmp_path, site_file, selector, exit_code,
+):
     (tmp_path / "bin").mkdir()
     write_executable(tmp_path / "bin/siteops", """#!/usr/bin/env bash
 printf '%s\\n' "$@" > arguments
@@ -236,12 +243,13 @@ exit "$EXPECTED_EXIT"
 """)
     result = run_script(step(TEMPLATES / "siteops-validate.yaml", "Validate caller content")["script"], tmp_path, {
         "WORKSPACE": "caller workspace", "MANIFEST": "manifests/custom.yaml", "SITE_FILE": site_file,
-        "SELECTOR": "" if site_file else "environment=dev", "EXPECTED_EXIT": str(exit_code),
+        "SELECTOR": selector, "EXPECTED_EXIT": str(exit_code),
         "STATE_PARENT": bash_path(tmp_path),
     }, shell_options=())
     assert result.returncode == exit_code
     expected = ["-w", "caller workspace", "validate", "manifests/custom.yaml"]
-    expected += ["--site-file", site_file] if site_file else ["-l", "environment=dev"]
+    expected += ["-l", selector] if selector else []
+    expected += ["--site-file", site_file] if site_file else []
     assert (tmp_path / "arguments").read_text().splitlines() == expected
     assert "PRIVATE_DIAGNOSTIC" not in result.stdout + result.stderr
 
