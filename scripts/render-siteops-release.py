@@ -29,6 +29,22 @@ class RenderingError(ValueError):
     """Candidate presentation metadata is incomplete or invalid."""
 
 
+OFFICIAL_REPOSITORY = "Azure/digital-ops-scale-kit"
+
+
+def source_enrollment(repository: str, source_ref: str, builder_identity: str, runner_environment: str) -> str | None:
+    """Return the standard approval command when this build matches the standard release policy."""
+    standard_builder = f"https://github.com/{repository}/.github/workflows/release.yaml@refs/heads/main"
+    if runner_environment != "self-hosted" or source_ref != "refs/heads/main" or builder_identity != standard_builder:
+        return None
+    if repository.casefold() == OFFICIAL_REPOSITORY.casefold():
+        return "siteops source enroll official"
+    name = re.sub(r"[^a-z0-9-]+", "-", repository.split("/", 1)[0].lower()).strip("-")[:40]
+    if re.fullmatch(r"[a-z][a-z0-9-]{0,39}", name) is None:
+        name = "publisher"
+    return f"siteops source enroll {name} --source github:{repository}"
+
+
 def bootstrap_commands(
     tag: str, source: dict[str, str], scripts: dict[str, ReleaseAsset], downloads: str, caller: str,
 ) -> tuple[list[str], list[str]]:
@@ -136,9 +152,9 @@ def render_notes(
             "This release contains complete workspace packages. Each package has a detached "
             "attestation proof containing signed provenance evidence. "
             f"Follow the [workspace pin guidance]({project_guide}) to run "
-            "`siteops project pin` with `--release` for this release. Supply the trust "
-            "policy and trusted roots independently. The routing descriptor cannot select "
-            "them.\n\n"
+            "`siteops project pin` with `--release` for this release. Use an approved source, or "
+            "supply the trust policy and trusted roots independently. The routing descriptor "
+            "cannot select either.\n\n"
             + "\n".join(f"- [{asset.name}]({downloads}{asset.name})" for asset in workspace)
             + "\n\nWorkspace qualification used the selected installed engine to check package "
             "compatibility, protected cache use, and guarded catalog loading. It did not compare "
@@ -211,6 +227,14 @@ def render_notes(
                 "The bootstrap requires the approved `self-hosted` provenance policy. "
                 "Use the release wheel with approved tooling for this runner class.",
             )
+    enrollment = source_enrollment(repository, source["ref"], builder_identity, runner_environment)
+    approve = [
+        "### Approve the content source",
+        "After installing with either route, approve this publisher's content once. "
+        "Run the same command again to renew the 30 day approval. "
+        "Enrollment does not sign in to GitHub or Azure.",
+        f"```console\n{enrollment}\n```",
+    ] if enrollment else []
     paragraphs = [
         f"Package version: `{engine_version}`. "
         "Installing the CLI does not authenticate to Azure or deploy resources.",
@@ -220,6 +244,7 @@ def render_notes(
         "The command uses uv-managed CPython and can provision it when needed.",
         f"```console\n{command}\n```",
         *bootstrap,
+        *approve,
         "<details><summary>Provenance, verification and maintenance</summary>",
         identity + f" Expected provenance runner class: `{runner_environment}`. "
         "The runner class does not identify a particular pool. "

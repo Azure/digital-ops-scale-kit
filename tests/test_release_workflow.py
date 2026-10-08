@@ -1524,6 +1524,34 @@ def test_generated_bootstrap_entries_bind_the_full_selection(candidate, runner, 
     details = notes.split("<details><summary>Provenance, verification and maintenance</summary>", 1)[1]
     assert f"Expected calling workflow: `{caller}`" in details
     assert notes.index("```powershell") < notes.index("<details>")
+    enrollment = f"```console\nsiteops source enroll example --source github:{REPO}\n```"
+    if caller == "release.yaml":
+        assert notes.index("```powershell") < notes.index(enrollment) < notes.index("<details>")
+        assert "renew the 30 day approval" in notes
+    else:
+        assert "### Approve the content source" not in notes and "source enroll" not in notes.split("<details>", 1)[0]
+
+
+@pytest.mark.parametrize(("repository", "ref", "builder", "runner_class", "expected"), [
+    ("Azure/digital-ops-scale-kit", "refs/heads/main", "release.yaml", "self-hosted",
+     "siteops source enroll official"),
+    ("azure/Digital-Ops-Scale-Kit", "refs/heads/main", "release.yaml", "self-hosted",
+     "siteops source enroll official"),
+    ("digimaun/digital-ops-scale-kit", "refs/heads/main", "release.yaml", "self-hosted",
+     "siteops source enroll digimaun --source github:digimaun/digital-ops-scale-kit"),
+    ("Contoso_Ops/content", "refs/heads/main", "release.yaml", "self-hosted",
+     "siteops source enroll contoso-ops --source github:Contoso_Ops/content"),
+    ("9lives/content", "refs/heads/main", "release.yaml", "self-hosted",
+     "siteops source enroll publisher --source github:9lives/content"),
+    ("example/publisher", "refs/heads/other", "release.yaml", "self-hosted", None),
+    ("example/publisher", "refs/heads/main", "ci.yaml", "self-hosted", None),
+    ("example/publisher", "refs/heads/main", "release.yaml", "github-hosted", None),
+])
+def test_source_enrollment_matches_the_standard_release_policy_only(
+    renderer, repository, ref, builder, runner_class, expected,
+):
+    identity = f"https://github.com/{repository}/.github/workflows/{builder}@{ref}"
+    assert renderer.source_enrollment(repository, ref, identity, runner_class) == expected
 
 
 @pytest.mark.parametrize("builder", [
@@ -1549,6 +1577,7 @@ def test_hosted_runner_notes_do_not_offer_incompatible_bootstrap(candidate, runn
     assert "uv tool install" in notes
     assert "```bash" not in notes and "```powershell" not in notes
     assert "bootstrap requires the approved `self-hosted` provenance policy" in notes
+    assert "### Approve the content source" not in notes
 
 
 @pytest.mark.parametrize("case", [
