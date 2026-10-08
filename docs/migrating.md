@@ -15,17 +15,22 @@ references describe the current configuration rules.
 
 ## Before you migrate
 
-Run the listing against your workspace before changing anything:
+With the release you run now, list your Sites and validate each manifest you
+deploy before changing anything:
 
 ```bash
 siteops -w <workspace> sites
+siteops -w <workspace> validate <manifest>
 ```
 
-Resolve any reported site-loading errors, then plan each manifest you deploy:
+Resolve any reported Site loading or validation errors. Then install the new
+release, apply the sections below, and plan each manifest you deploy:
 
 ```bash
 siteops -w <workspace> plan <manifest> -l <selector>
 ```
+
+`plan` arrives with v1.0.0b7, so run it with the new engine.
 
 ## To v1.0.0b7
 
@@ -41,16 +46,20 @@ Start with the changes that affect your workflow:
 | If you... | What to change |
 |---|---|
 | Installed Site Ops with `pip install -e .` | [Reinstall, or install an identified release](#site-ops-installation). |
+| Check the installed release with `siteops --version` | Expect the [engine version](#reported-version), `1.0.0b1` with a build suffix. |
 | Deploy with Azure CLI older than 2.70.0 | Run `az upgrade`. See [Azure CLI version](#azure-cli-version). |
+| Run `plan` or `deploy` for Bicep or kubectl steps | Install the [local tools](#local-tool-checks) those steps use. |
 | Run `deploy` from a script or pipeline | Add [`--yes`](#deployment-confirmation). |
 | Preview with `deploy --dry-run` or `validate --plan` | Use [`siteops plan`](#plan-replaces-preview-options). |
 | Use `sites --render`, read plain `sites` output or run `sites` in CI | Review [site inspection](#inspect-sites). |
 | Match text in plain output or error messages | Review [plain output](#plain-output) and [error messages](#error-messages). |
+| Repeat an option such as `-w`, or shorten option names | Review [option spelling](#option-spelling). |
 | Reference shipped manifests, partials or dataflow sets by path | Update [workspace content paths](#workspace-content-paths). |
 | Pass a manifest filename without a directory | Review [manifest names and paths](#manifest-names-and-paths). |
 | Rely on the workspace default AIO release | Review the [2608 default](#default-aio-release). |
 | Select dataflow sets or read catalog step outputs | Update [resource sets](#resource-sets) and [catalog step outputs](#catalog-step-outputs). |
 | Author sites, manifests or parameter files | Review [preparation checks](#preparation-checks), [empty site mappings](#empty-site-mappings) and [parameter file selection](#parameter-file-selection). |
+| Write `when: ""` on a step or include | Omit `when:` or set it to `null`. See [empty conditions](#empty-conditions). |
 | Use the Azure Pipelines templates | Choose an [engine selection](#azure-pipelines-templates). |
 | Call the reusable GitHub Actions workflow | Pass the selector [as a secret](#github-actions-workflows). |
 | Run Windows batch launchers such as `az.cmd` | Review [literal tool arguments](#windows-tool-arguments). |
@@ -70,6 +79,20 @@ release wheel, or the [verified bootstrap](install-siteops.md#bootstrap-from-htt
 Deactivate or uninstall the editable installation first, then confirm the
 version with `siteops --version`.
 
+### Reported version
+
+`siteops --version` reports the Site Ops engine version, which is separate
+from the Scale Kit release. The v1.0.0b7 release keeps the engine at
+`1.0.0b1`, and an engine installed from that release adds a build suffix,
+for example:
+
+```text
+siteops 1.0.0b1+build.12345.1.gabcdef123456
+```
+
+An editable installation from a clone at the v1.0.0b7 tag reports
+`siteops 1.0.0b1`. See [Use the installed CLI](install-siteops.md#use-the-installed-cli).
+
 ### Azure CLI version
 
 v1.0.0b6 accepted any Azure CLI version. `plan` and `deploy` now require Azure
@@ -84,6 +107,30 @@ Error: Azure CLI 2.69.0 was found. Azure CLI 2.70.0 or newer is required. Run `a
 `validate` and `browse` do not check Azure CLI. Deployments now run with
 `--no-prompt`, so a template parameter without a value fails at once instead
 of waiting for console input.
+
+### Local tool checks
+
+v1.0.0b6 found a missing tool when the step that needed it ran. `plan` and
+`deploy` now check the tools that the selected steps use before anything is
+submitted:
+
+| Steps | Local tools |
+|---|---|
+| Deployment and wait steps | Azure CLI 2.70.0 or newer |
+| Bicep template steps | Azure CLI with Bicep, installed with `az bicep install` |
+| kubectl steps | kubectl, and the Azure CLI connectedk8s extension, installed with `az extension add --name connectedk8s` |
+
+A missing tool blocks the steps that use it, which report
+`A required local tool is unavailable`. The diagnostic names the step and the
+fix, for example:
+
+```text
+Error: The Azure CLI connectedk8s extension is not installed. Step 'apply' needs Azure CLI and its connectedk8s extension to reach the cluster through `az connectedk8s proxy`. Run `az extension add --name connectedk8s`, then rerun the command.
+```
+
+`validate` and `plan --describe` run without these tools. See
+[Azure CLI errors](troubleshooting.md#azure-cli-errors) for the Azure CLI
+messages.
 
 ### Deployment confirmation
 
@@ -154,6 +201,22 @@ Plain output uses ASCII markers: `+` succeeded or runs, `x` failed or blocked,
 and writes validation errors to stderr. Scripts should test the exit code
 rather than this text.
 
+`deploy` progress and summary lines use new text:
+
+| v1.0.0b6 | v1.0.0b7 |
+|---|---|
+| `[Phase 1] Subscription-scoped steps: N subscription(s)` | `[Phase 1] Steps at subscription scope: N Sites` |
+| `[Phase 2] Resource group-scoped steps: N site(s)` | `[Phase 2] Steps in resource groups: N Sites` |
+| `[Parallel] Deploying to N sites (N concurrent)` | `[Parallel] Deploying to N Sites (N concurrent)` |
+| `Deployment Summary` | `Deployment summary` |
+| `Total: N succeeded, N failed (N sites)` and `Duration: Ns` | `Result: all deployment operations succeeded in Ns`, then `Sites:` and `Operations:` counts |
+
+A run without steps at subscription scope starts with
+`[Execution] Prepared Sites: N Sites`. With `--yes`, `deploy` reports
+`Prepared N Sites for deployment.` before it runs. `plan --describe` notes
+`Plan shape only.` above its Sites. See [run output](run-output.md) and
+[plan output](plan-output.md).
+
 ### Error messages
 
 Plain errors start with `Error:`. `cache` and `index` errors no longer start
@@ -168,6 +231,21 @@ A global option after the command still fails with usage error 2. Instead of
 ```text
 siteops: error: -w is a global option. Put it before the command: siteops -w PATH plan ...
 ```
+
+### Option spelling
+
+v1.0.0b6 kept the last value of a repeated option and accepted a unique
+prefix of an option name, such as `--sel` for `--selector`. Both now stop
+with usage error 2:
+
+```text
+siteops: error: argument -w/--workspace: may be supplied only once
+siteops: error: unrecognized arguments: --sel
+```
+
+Give options that take one value, such as `-w`, `--project`, `--source`,
+`--input-file` and `--parallel`, only once, and spell option names in full.
+Options documented as repeatable, such as `-l`, accept several values.
 
 ### Workspace content paths
 
@@ -189,8 +267,10 @@ Update custom commands, workflow and pipeline manifest selections, and fixed
 parameter source paths. Recompute relative `include` paths from each including
 file's directory. Sample directories keep their paths.
 
-There are no forwarding manifests at the old paths, so an old path reports
-`Manifest not found.` A file move does not delete or recreate Azure resources.
+There are no forwarding manifests at the old paths. An old path reports
+`Manifest not found.` and suggests the nearest current manifest, for example
+`Did you mean 'aio-install' (manifests/aio-install/manifest.yaml)?`. A file
+move does not delete or recreate Azure resources.
 
 ### Manifest names and paths
 
@@ -303,6 +383,13 @@ custom resources when verifying provider state.
 `labels:`, `properties:`, or `parameters:` is normalized as an empty mapping
 before inheritance merge. Use an explicit field value, such as
 `resourceSets.dataflows: []`, when a child needs to clear supported state.
+
+### Empty conditions
+
+v1.0.0b6 treated `when: ""` as no condition and ran the step. `validate`,
+`plan` and `deploy` now report `Invalid 'when' condition syntax on step 'NAME'`,
+or `on include of 'FILE'` for an include. For a step that always runs, omit
+`when:` or set it to `null`.
 
 ### Parameter file selection
 

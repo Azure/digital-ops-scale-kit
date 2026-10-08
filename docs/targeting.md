@@ -8,12 +8,13 @@ flag determine the set of configured Sites.
 ## Precedence
 
 An explicit Site replaces the manifest's `sites:` list or selector, and cannot
-be combined with `-l`. For configured Sites, CLI `-l/--selector` overrides
-the manifest. Inside a manifest, `sites:` and `selector:` are mutually
-exclusive. Resolution chooses the first present source in this order:
+be combined with `-l`. For configured Sites, resolution chooses the first
+present source in this order:
 
 1. **CLI `-l`** if provided. Replaces manifest targeting entirely.
-2. **Manifest `sites:`** explicit list of Site names.
+2. **Manifest `sites:`** explicit list of Site names. When a manifest sets
+   both `sites:` and `selector:`, Site Ops targets the listed Sites and does
+   not apply the selector.
 3. **Manifest `selector:`** label expression filter.
 
 Resource ID answers on `plan` and `deploy` authorize the declared, bounded

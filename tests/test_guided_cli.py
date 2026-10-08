@@ -1196,7 +1196,12 @@ def test_aio_input_inspection_explains_resource_alternative(capsys):
     assert "read-resources" in output
     normalized = " ".join(output.split())
     assert "inputs --read-resources" in normalized
-    assert "plan and deploy read supplied IDs" in normalized
+    assert (
+        "Resource route: supply cluster. Site Ops reads cluster to derive the other required inputs. "
+        "Preview or save the Site with inputs --read-resources. "
+        "The plan and deploy commands read the ID themselves."
+    ) in normalized
+    assert "Leave " not in normalized
     assert "workload identity" in output
     assert "Active when enableSecretSync=true" in output
 
@@ -1219,6 +1224,7 @@ def test_aio_plain_preview_shows_effective_defaults(capsys):
     assert "enableSecretSync: false" in output
     assert "enableCertManager: true" in output
     assert "siteName (string, required)" not in output
+    assert "Preview only. Add --save-site FILE to keep this Site." in output
 
 
 def test_aio_inputs_prepare_one_explicit_target_without_example_site(capsys):
@@ -1242,7 +1248,18 @@ def test_aio_inputs_prepare_one_explicit_target_without_example_site(capsys):
     ]
     assert document["plan"]["manifest"]["manifestSelector"] is None
     assert document["plan"]["manifest"]["targetSelection"] == "explicit-site"
-    assert "replaces manifest targeting" in output.err
+    assert "plant-one" not in output.err and "Target:" not in output.err
+    assert _invoke([
+        "-w", str(workspace), "plan", "aio-install", "--describe",
+        "--input", "siteName=plant-one",
+        "--input", "subscription=00000000-0000-0000-0000-000000000001",
+        "--input", "resourceGroup=rg-existing",
+        "--input", "location=eastus",
+        "--input", "clusterName=existing-arc",
+    ]) == 0
+    plain = capsys.readouterr()
+    assert "  Site selection: explicit Site (replaces manifest targeting)\n" in plain.out
+    assert "Target" not in plain.out + plain.err
     dispositions = {
         operation["identity"]["step"]: operation["disposition"]
         for operation in document["plan"]["targets"][0]["operations"]
@@ -1273,6 +1290,48 @@ def test_aio_enabled_without_cluster_observation_fails_before_planning(capsys):
         ]) == 1
     document = json.loads(capsys.readouterr().out)
     assert document["diagnostics"][0]["code"] == "inputs.resource.requirement-unverified"
+    assert document["diagnostics"][0]["summary"] == (
+        "inputs.resource.requirement-unverified: With `enableSecretSync=true`, supply "
+        "`--input cluster=<Arc-cluster-resource-ID>` so Site Ops can read the cluster's "
+        "OIDC issuer and workload identity settings."
+    )
+
+
+def test_secretsync_names_its_missing_resource_input_before_prerequisites(capsys):
+    workspace = Path(__file__).resolve().parents[1] / "workspaces" / "iot-operations"
+    with (
+        patch("siteops.cli.new_arm_reader", side_effect=AssertionError("No provider read")),
+        patch.object(Orchestrator, "build_plan", side_effect=AssertionError("No plan")),
+    ):
+        assert _invoke([
+            "-w", str(workspace), "plan", "secretsync", "--describe", "--input", "siteName=plant-one",
+        ]) == 1
+        output = capsys.readouterr()
+        assert _invoke([
+            "-w", str(workspace), "plan", "secretsync", "--describe", "--input", "siteName=plant-one",
+            "--output", "json",
+        ]) == 1
+    message = (
+        "Missing required input 'instance'. Supply `--input instance=<AIO-instance-resource-ID>` "
+        "so Site Ops can read the cluster's OIDC issuer and workload identity settings."
+    )
+    assert f"Error: {message}" in output.out
+    assert "connectedClusters." not in output.out + output.err
+    diagnostic = json.loads(capsys.readouterr().out)["diagnostics"][0]
+    assert diagnostic["code"] == "inputs.invalid"
+    assert diagnostic["summary"].startswith(message)
+
+
+def test_missing_manual_answer_names_the_resource_route(capsys):
+    workspace = Path(__file__).resolve().parents[1] / "workspaces" / "iot-operations"
+    with patch.object(Orchestrator, "build_plan", side_effect=AssertionError("No plan")):
+        assert _invoke([
+            "-w", str(workspace), "plan", "aio-install", "--describe", "--input", "enableSecretSync=true",
+        ]) == 1
+    assert (
+        "Error: Missing required input 'siteName'. Supply it, or supply "
+        "`--input cluster=<Arc-cluster-resource-ID>` to derive it."
+    ) in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("workload_ready", [False, True])
@@ -1324,6 +1383,10 @@ def test_aio_enabled_observes_prerequisites_before_one_plan(
         assert dispositions["secretsync"] == "execute"
     else:
         assert document["diagnostics"][0]["code"] == "inputs.resource.requirement-unmet"
+        assert document["diagnostics"][0]["summary"] == (
+            "inputs.resource.requirement-unmet: The cluster read for input 'cluster' "
+            "does not report workload identity enabled."
+        )
 
 
 @pytest.mark.parametrize(
@@ -1928,8 +1991,8 @@ def test_existing_secret_sync_example_needs_only_instance_and_reuses_cluster_sit
     assert contract.example()["values"] == {"instance": None}
     assert _invoke(["-w", str(workspace), "inputs", "secretsync"]) == 0
     text = capsys.readouterr().out
-    assert "Resource route: fill instance." in text
-    assert "fill siteName" not in text
+    assert "Resource route: supply instance." in text
+    assert "supply siteName" not in text
 
 
 def test_existing_secret_sync_file_route_keeps_optional_vault_and_cluster_site_identity(tmp_path, capsys):

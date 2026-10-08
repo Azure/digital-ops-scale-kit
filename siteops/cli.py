@@ -29,7 +29,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext
 from dataclasses import replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import FrameType
 from typing import Any, Callable
 
@@ -66,6 +66,7 @@ from siteops.manifest_selection import (
     ManifestSelectionError,
     explicit_manifest_reference,
     is_explicit_manifest_path,
+    nearest_manifest,
     select_manifest_path,
 )
 from siteops.models import (
@@ -152,6 +153,29 @@ def _error_text(error: BaseException) -> str:
     return private if private and not is_redaction_enabled() else str(error)
 
 
+def _missing_manifest_path(manifest: str | Path, workspace: Path | None) -> ManifestSelectionError:
+    """Suggest the closest current manifest for an explicit path that does not exist."""
+    error = ManifestSelectionError(
+        "lookup.missing", "Manifest not found. Run `siteops browse` to list manifests.",
+    )
+    selected = PurePosixPath(str(manifest).replace("\\", "/"))
+    token = selected.parent.name if selected.stem == "manifest" else selected.stem
+    if workspace is None or not token:
+        return error
+    try:
+        reader = ContentReader(workspace)
+        entries = [(entry.name, entry.path) for entry in reader.inventory() if entry.guidance.role != "partial"]
+    except (BrowseError, ArtifactError, OSError):
+        return error
+    nearest = nearest_manifest(token, entries)
+    if nearest is not None:
+        error.private_message = (
+            f"Manifest not found. Did you mean '{nearest[0]}' "
+            f"({explicit_manifest_reference(nearest[1])})? Run `siteops browse` to list manifests."
+        )
+    return error
+
+
 def _command_manifest(args: argparse.Namespace) -> Path | None:
     try:
         binding = getattr(args, "package_binding", None)
@@ -162,9 +186,7 @@ def _command_manifest(args: argparse.Namespace) -> Path | None:
             return path
         path = resolve_manifest_path(args.manifest, args.workspace)
         if not path.is_file():
-            raise ManifestSelectionError(
-                "lookup.missing", "Manifest not found.", (str(path),)
-            )
+            raise _missing_manifest_path(args.manifest, args.workspace)
     except (ManifestSelectionError, BrowseError) as error:
         print(f"Error: {_multiline_text(_error_text(error))}", file=sys.stderr)
         if isinstance(error, ManifestSelectionError) and error.paths and not is_redaction_enabled():
@@ -261,6 +283,12 @@ def cmd_project(args: argparse.Namespace) -> int:
             if args.trust_policy is not None or args.trusted_root is not None or args.approved_source is not None:
                 raise ProjectError("Project show reads a selection without applying trust options.")
             root = project_root(args.directory)
+            if not pin_exists(root):
+                raise ProjectError(
+                    "Workspace pin not found. Create one with "
+                    "`siteops project pin DIRECTORY --source SOURCE@RELEASE`.",
+                    code="project.pin-missing",
+                )
             pin = read_pin(root).pin
         else:
             from siteops.workspace_cache import WorkspaceCache, default_cache_root
@@ -442,7 +470,7 @@ def cmd_cache(args: argparse.Namespace) -> int:
                 print(json.dumps(listing.document(), ensure_ascii=True, sort_keys=True, indent=2))
             else:
                 print(f"Cache: {_content_text(str(listing.root))}")
-                print("Storage inventory only. Integrity and publisher trust are not evaluated.")
+                print("Storage inventory. Site Ops verifies integrity and publisher trust when it uses a package.")
                 if not listing.initialized:
                     print("The cache has not been initialized.")
                 for entry in listing.entries:
@@ -463,7 +491,8 @@ def cmd_cache(args: argparse.Namespace) -> int:
             }, ensure_ascii=True, sort_keys=True, indent=2))
         else:
             print(f"Removed cached {removed.kind} {removed.identity}. Bytes: {removed.stored_bytes}.")
-            print("Workspace pins, Site configuration and trust inputs are unchanged.")
+            print("Removal changes only the cache. To restore the entry, repeat a command that uses it "
+                  "without --offline-content.")
         return 0
     except ArtifactError as error:
         print(f"Error: {_multiline_text(str(error))}", file=sys.stderr)
@@ -489,14 +518,14 @@ def cmd_browse(args: argparse.Namespace) -> int:
 
             request = resolve_source_request(args.source, release=args.ref, for_inspection=True)
             result = inspect_github(
-                request.reference, args.name, ref=request.release, workspace=args.workspace, auth=args.auth,
+                request.reference, args.name, ref=request.release, workspace=args.workspace,
                 search=args.search, tags=tuple(args.tag), category=args.category,
                 include_partials=args.include_partials, limit=args.limit,
                 refresh=args.refresh, offline=args.offline,
             )
         else:
-            if args.ref or args.auth != "anonymous" or args.refresh:
-                raise ValueError("--ref, --auth and --refresh apply only to --source.")
+            if args.ref or args.refresh:
+                raise ValueError("--ref and --refresh apply only to --source.")
             with open_command_context(**_context_options(args)) as context:
                 result = inspect_content(
                     context.workspace, args.name, search=args.search, tags=tuple(args.tag),
@@ -754,13 +783,12 @@ def _explicit_site(
     return site
 
 
-def _announce_explicit_site(args: argparse.Namespace, site: Site) -> None:
-    identity = "a private Site" if is_redaction_enabled() else _content_text(site.name)
-    source = "a Site file" if getattr(args, "site_file", None) else "typed inputs"
-    print(
-        f"Target: {identity} from {source} (replaces manifest targeting).",
-        file=sys.stderr,
-    )
+def _prepared_sites_line(args: argparse.Namespace, count: int, *, explicit: bool) -> str:
+    """Summarize prepared Sites when deployment proceeds without showing the plan."""
+    if explicit:
+        source = "a Site file" if getattr(args, "site_file", None) else "typed inputs"
+        return f"Prepared 1 Site from {source} for deployment."
+    return f"Prepared {count} Site{'' if count == 1 else 's'} for deployment."
 
 
 def _site_for_file(site: Site) -> dict[str, Any]:
@@ -951,7 +979,7 @@ def cmd_inputs(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
                 else:
                     print(f"One Site resolved for {manifest_name}. Private Site values are withheld.")
                 if not args.save_site:
-                    print("No Site file written. Use --save-site FILE to keep it.")
+                    print("Preview only. Add --save-site FILE to keep this Site.")
             else:
                 print(f"Inputs for {manifest_name}:")
                 required = [
@@ -967,10 +995,10 @@ def cmd_inputs(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
                         name for name in required if name not in derived and name != resource["name"]
                     ] + [resource["name"]]
                     for line in _wrap(
-                        f"Resource route: fill {_content_text(', '.join(supplied))}. "
-                        f"Leave {_content_text(', '.join(name for name in required if name in derived))} "
-                        "empty. Use inputs --read-resources to preview or save a Site. "
-                        "plan and deploy read supplied IDs.",
+                        f"Resource route: supply {_content_text(', '.join(supplied))}. "
+                        f"Site Ops reads {_content_text(resource['name'])} to derive the other "
+                        "required inputs. Preview or save the Site with inputs --read-resources. "
+                        "The plan and deploy commands read the ID themselves.",
                     ):
                         print(line)
                 for field in description["inputs"]:
@@ -1070,8 +1098,6 @@ def cmd_plan(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         result = _explicit_site_failure(args, error, intent=intent)
         _write_plan_result(result, json_output=json_output, projection=projection)
         return 130 if _is_cancelled_read(error) else 1
-    if explicit_site is not None:
-        _announce_explicit_site(args, explicit_site)
     try:
         site_options = {"sites": [explicit_site]} if explicit_site is not None else {}
         if intent is PlanIntent.EXECUTABLE:
@@ -1218,8 +1244,6 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
             return result.exit_code
         print(f"Error: {_multiline_text(_guided_error_detail(error))}", file=sys.stderr)
         return 1
-    if explicit_site is not None:
-        _announce_explicit_site(args, explicit_site)
 
     restore_signal_handler: Callable[[], None] | None = None
     execution_started = False
@@ -1249,7 +1273,10 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
                 print("Deployment cancelled. No operations were submitted.", file=sys.stderr)
                 return 130
         else:
-            print(f"Prepared {len(prepared.plan.targets)} target(s) for deployment.", file=sys.stderr)
+            print(
+                _prepared_sites_line(args, len(prepared.plan.targets), explicit=explicit_site is not None),
+                file=sys.stderr,
+            )
         revalidate = getattr(args, "revalidate_content", None)
         if revalidate is not None:
             revalidate()
@@ -1263,7 +1290,7 @@ def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         )
     except KeyboardInterrupt:
         print(
-            "Execution was interrupted. Inspect the targets before retrying."
+            "Execution was interrupted. Inspect the Sites before retrying."
             if execution_started else "Deployment cancelled. No operations were submitted.",
             file=sys.stderr,
         )
@@ -1927,6 +1954,7 @@ Environment:
   SITEOPS_WAIT_MAX_CONSECUTIVE_ERRORS
                             Polling errors in a row that stop a wait step
                             (default 10).
+  GH_TOKEN                  Optional GitHub token for source metadata requests.
   LOCALAPPDATA (Windows), XDG_CONFIG_HOME and XDG_CACHE_HOME
                             Locate approved sources and the default cache.
 """
@@ -2072,13 +2100,6 @@ def main() -> None:
     p_browse.add_argument(
         "--ref", action=_SingleValueOption,
         help="Branch, tag or commit for --source (default: the repository's default branch)",
-    )
-    p_browse.add_argument(
-        "--auth", choices=("anonymous", "cli"), action=_SingleValueOption, default="anonymous",
-        help=(
-            "How --source reads the repository: anonymous (default), or cli to use "
-            "your GitHub CLI (`gh`) authentication. Not Azure CLI."
-        ),
     )
     cache_mode = p_browse.add_mutually_exclusive_group()
     cache_mode.add_argument(
@@ -2299,7 +2320,7 @@ def main() -> None:
     for command in (p_plan, p_deploy, p_validate):
         command.add_argument(
             "--site-file", type=Path, action=_SingleValueOption, metavar="FILE",
-            help="Complete standalone Site file selecting exactly one target",
+            help="Complete standalone Site file, used as the only Site instead of manifest targeting",
         )
         command.add_argument(
             "--input-file", type=Path, action=_SingleValueOption, metavar="FILE",
@@ -2462,7 +2483,7 @@ def main() -> None:
         and args.command in {"plan", "deploy", "validate"} and args.project is None
         and not (args.site_file or args.input_file or args.input_values)
     ):
-        parser.error("Direct content requires explicit Site inputs or --project for configured targets.")
+        parser.error("Direct content requires explicit Site inputs or --project for configured Sites.")
 
     # Flatten repeatable -l/--selector (action="append" gives a list) into
     # a single comma-joined string. Joining is safe because parse_selector

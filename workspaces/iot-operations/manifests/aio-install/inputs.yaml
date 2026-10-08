@@ -11,7 +11,7 @@ siteDefaults:
 inputs:
   - name: siteName
     type: string
-    description: Optional name override with a cluster ID. Required for manual targets.
+    description: Optional name override with a cluster ID. Required for a manual Site.
     sitePath: name
     format: dnsLabel
     maxLength: 59
@@ -51,7 +51,7 @@ inputs:
   - name: cluster
     type: azureResourceId
     required: false
-    description: Existing Arc cluster resource ID. Read it to derive the target fields.
+    description: Existing Arc cluster resource ID. Site Ops reads it to derive the Site fields.
     resource:
       type: Microsoft.Kubernetes/connectedClusters
       apiVersion: 2024-07-15-preview

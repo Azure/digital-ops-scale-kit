@@ -91,17 +91,26 @@ published source that implements the workspace release contract and review
 its deployment qualification evidence for your Sites. Package compatibility
 and catalog loading do not establish workload health.
 
-Replace the source and release placeholders below with a reviewed release.
-The examples assume `policy.json` and `trusted-root.jsonl` are your independently
-trusted local inputs, and that the package contains a manifest named `storage`.
-An [approved source](#use-an-approved-source) can replace both files with
-`--approved-source NAME`. Global options go before the command:
+Replace `<release>` below with a reviewed release. The examples use the
+official source, enrolled as described in
+[Use an approved source](#use-an-approved-source), and a configured Site
+named `one`. Global options go before the command:
+
+```text
+siteops --approved-source official project pin ./factory --release <release>
+siteops project show ./factory
+siteops --project ./factory sites
+siteops --approved-source official --project ./factory plan aio-install -l name=one
+```
+
+To verify with local trust files instead, replace `--approved-source official`
+with `--trust-policy policy.json --trusted-root trusted-root.jsonl`, and name
+the publisher with `--source` on `project pin`. Both files must be
+independently trusted local inputs:
 
 ```text
 siteops --trust-policy policy.json --trusted-root trusted-root.jsonl project pin ./factory --source github:<owner>/<repository> --release <release>
-siteops project show ./factory
-siteops --project ./factory sites
-siteops --project ./factory --trust-policy policy.json --trusted-root trusted-root.jsonl plan storage -l name=one
+siteops --project ./factory --trust-policy policy.json --trusted-root trusted-root.jsonl plan <manifest> -l name=one
 ```
 
 The workspace pin identifies the whole workspace. Each command still selects
@@ -109,21 +118,21 @@ its manifest by the existing exact name/path rules.
 
 If a release contains several workspaces, add
 `--release-workspace <path-from-the-release>` to `project pin`.
-The command requires an explicit published release and uses anonymous source
-access. Policy and root files remain outside the content cache and are
+The command requires an explicit published release. It reads release
+metadata without credentials, or with `GH_TOKEN` when set, and downloads
+release files without credentials, as described in
+[source access](remote-content.md#public-and-authorized-source-access).
+Policy and root files remain outside the content cache and are
 supplied independently on package use. The workspace pin cannot select them.
 Project and cache directories must occupy separate directory trees.
 Appending `@<release>` to the source is also supported as shorthand instead
 of `--release`.
 
-The `--auth cli` option applies only to descriptive `browse --source`
-metadata. Package acquisition always uses anonymous access.
-
-After reviewing the plan, deploy with the same project, trust inputs and
-Site selection:
+After reviewing the plan, deploy with the same project, approved source or
+trust files, and Site selection:
 
 ```text
-siteops --project ./factory --trust-policy policy.json --trusted-root trusted-root.jsonl deploy storage -l name=one
+siteops --approved-source official --project ./factory deploy aio-install -l name=one
 ```
 
 Deployment prepares again. These commands do not promise execution of a saved

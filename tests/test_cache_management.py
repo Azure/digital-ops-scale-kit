@@ -305,6 +305,33 @@ def test_cli_inventory_and_removal_are_private_parseable_and_source_free(stored,
     assert path_for(stored, "package").exists()
 
 
+def test_cli_plain_inventory_and_removal_state_what_they_did(stored, monkeypatch, capsys):
+    monkeypatch.setenv("SITEOPS_CACHE_DIR", str(stored.cache.root))
+    monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "0")
+    code, output = invoke(monkeypatch, capsys, ["cache", "list"])
+    assert code == 0
+    assert output.out.splitlines()[1] == (
+        "Storage inventory. Site Ops verifies integrity and publisher trust when it uses a package."
+    )
+    code, output = invoke(monkeypatch, capsys, ["cache", "remove", "metadata", stored.ids["metadata"]])
+    assert code == 0
+    assert output.out.splitlines()[-1] == (
+        "Removal changes only the cache. To restore the entry, repeat a command that uses it "
+        "without --offline-content."
+    )
+    assert " not " not in output.out
+
+
+def test_cli_existing_empty_cache_directory_is_reported_uninitialized(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "selected"
+    root.mkdir(mode=0o700)
+    monkeypatch.setenv("SITEOPS_CACHE_DIR", str(root))
+    monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "0")
+    code, output = invoke(monkeypatch, capsys, ["cache", "list"])
+    assert code == 0 and "The cache has not been initialized." in output.out
+    assert not list(root.iterdir())
+
+
 def test_cli_redaction_precedes_cache_creation(tmp_path, monkeypatch, capsys):
     root = tmp_path / "cache"
     monkeypatch.setenv("SITEOPS_CACHE_DIR", str(root))

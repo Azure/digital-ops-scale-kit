@@ -35,6 +35,15 @@ def explicit_manifest_reference(path: str) -> str:
     return path if is_explicit_manifest_path(path) else "./" + path
 
 
+def nearest_manifest(selection: str, candidates: Iterable[tuple[str, str]]) -> tuple[str, str] | None:
+    """Return the closest manifest name and its canonical path, if any is close."""
+    paths: dict[str, str] = {}
+    for name, path in candidates:
+        paths.setdefault(name, path)
+    nearest = difflib.get_close_matches(selection, sorted(paths), n=1)
+    return (nearest[0], paths[nearest[0]]) if nearest else None
+
+
 def select_manifest_path(
     selection: str,
     candidates: Iterable[tuple[str, str]],
@@ -64,7 +73,7 @@ def select_manifest_path(
             "lookup.missing",
             "Manifest not found. Run `siteops browse` to list manifests, or use an explicit path.",
         )
-        nearest = difflib.get_close_matches(selection, sorted({name for name, _ in candidates}), n=1)
+        nearest = nearest_manifest(selection, candidates)
         if nearest:
             error.private_message = (
                 f"Manifest not found. Did you mean '{nearest[0]}'? Run `siteops browse` to "

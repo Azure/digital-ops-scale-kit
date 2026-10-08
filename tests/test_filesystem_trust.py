@@ -12,8 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from siteops import cache_filesystem, github_attestation, github_source
-from siteops.browse import BrowseError
+from siteops import cache_filesystem, github_attestation
 from siteops.cache_filesystem import CacheError, check_trusted_executable
 from siteops.github_attestation import VerificationError
 
@@ -132,11 +131,17 @@ def test_runtime_verifier_refuses_an_untrusted_github_cli(monkeypatch, tmp_path)
         github_attestation._resolve_verifier()
 
 
-def test_cli_transport_refuses_an_untrusted_github_cli(monkeypatch, tmp_path):
-    tool = tmp_path / ("gh.exe" if os.name == "nt" else "gh")
-    tool.write_bytes(b"tool")
-    monkeypatch.setattr(github_source, "resolve_tool_from_path", lambda _name: str(tool))
-    monkeypatch.setattr(github_source, "check_trusted_executable", _untrusted)
-    with pytest.raises(BrowseError) as error:
-        github_source._resolve_gh()
-    assert error.value.diagnostic.code == "github.tool-untrusted"
+def test_runtime_verifier_resolution_ignores_cwd_and_relative_path_entries(tmp_path, monkeypatch):
+    cwd = tmp_path / "content"
+    trusted = tmp_path / "tools"
+    cwd.mkdir()
+    trusted.mkdir()
+    filename = "gh.exe" if os.name == "nt" else "gh"
+    for root in (cwd, trusted):
+        executable = root / filename
+        executable.write_bytes(b"fixture")
+        executable.chmod(0o755)
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("PATH", os.pathsep.join((".", str(trusted))))
+    monkeypatch.setenv("PATHEXT", ".EXE")
+    assert github_attestation._resolve_verifier() == str((trusted / filename).resolve())

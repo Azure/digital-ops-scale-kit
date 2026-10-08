@@ -65,6 +65,20 @@ def _unresolved_paths(value, path: str = "") -> list[str]:
     return found
 
 
+_TEMPLATE_EXPRESSION = re.compile(r"\{\{\s*(.*?)\s*\}\}")
+_LABEL_READ = re.compile(r"site\.labels\.([A-Za-z0-9_-]+)")
+
+
+def _reads_only_absent_labels(leftover: str, labels: set[str]) -> bool:
+    """True when every expression left in `leftover` reads a label the Site lacks."""
+    expressions = _TEMPLATE_EXPRESSION.findall(leftover)
+    return bool(expressions) and all(
+        (match := _LABEL_READ.fullmatch(expression)) is not None
+        and match.group(1) not in labels
+        for expression in expressions
+    )
+
+
 def _selection_keys() -> list[str]:
     """The public `resourceSets` keys the catalog reads.
 
@@ -249,12 +263,26 @@ class TestPerSiteResolution:
 
         A variable naming a label only some sites carry fails at deployment
         resolution for the others. Committed definitions should fail here
-        first, before reaching that runtime boundary.
+        first, before reaching that runtime boundary. Sample Sites carry only
+        sample labels, so fleet selectors skip them. A fleet label read stays
+        unresolved on a sample Site, and every other variable must resolve.
         """
+        sample_labels = {
+            site.name: set(site.labels)
+            for site in orchestrator.load_all_sites()
+            if site.labels.get("environment") == "sample"
+        }
+        assert sample_labels, "No sample Site found, so the exemption below checks nothing."
         failures: list[str] = []
         for _, set_path, per_site in self._resolved_declarations(workspace, orchestrator):
             for site_name, resolved in per_site.items():
                 leftovers = _unresolved_paths(resolved)
+                if site_name in sample_labels:
+                    leftovers = [
+                        leftover
+                        for leftover in leftovers
+                        if not _reads_only_absent_labels(leftover, sample_labels[site_name])
+                    ]
                 if leftovers:
                     failures.append(
                         f"{set_path.relative_to(workspace)} for site "

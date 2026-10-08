@@ -11,11 +11,15 @@ The platforms install the Site Ops engine differently:
 | [GitHub Actions](#github-actions) | `.github/workflows/` | pip installs the selected checkout in editable mode, or the optional `siteops-source` pip specification. Neither route verifies a signed release. | Deployment from a repository checkout, CI, and every Site Ops and Scale Kit release |
 | [Azure DevOps](#azure-devops) | `.pipelines/` | The verified bootstrap installs the signed engine selected by a release, unless `siteopsSource` or `installDev` is selected explicitly | Consumer deployment, including reusable templates referenced from another repository |
 
-Azure Pipelines is a consumer surface: install an identified Site Ops engine,
-select workspace content and Site configuration, then plan, deploy and check
-outcomes. Its reusable templates can be referenced from another repository.
-Building, signing and publishing Site Ops or Scale Kit release assets belongs
-to the GitHub Actions release workflows, not these ADO deployment pipelines.
+The GitHub Actions deploy workflow is a route for this repository and its
+forks. It deploys workspace content from the checkout and installs the Site
+Ops engine from that checkout, or from an explicit `siteops-source` pip
+specification. The Azure Pipelines templates install an identified release
+engine through the verified bootstrap, select workspace content and Site
+configuration, then plan, deploy and check outcomes. Other repositories can
+reference these templates. Building, signing and publishing Site Ops or Scale
+Kit release assets belongs to the GitHub Actions release workflows, not these
+ADO deployment pipelines.
 
 ## Prerequisites
 
@@ -968,107 +972,9 @@ identity. A deployment dry run still authenticates and can perform planning
 reads or compiler acquisition. Qualify that boundary and actual deployment
 only with the corresponding approval and scoped Sites.
 
-### Run maintainer ADO qualification
-
-This harness is for Scale Kit maintainers qualifying the templates that
-customers use. Customers use the consumer pipelines and reusable templates
-documented above, with their own content and deployment identity.
-
-1. Register `.pipelines/validate-pipelines.yaml` once using **Existing Azure
-   Pipelines YAML file** and the reviewed source branch. Save the definition
-   before running it. An existing definition pointing at this path can be
-   reused.
-2. Configure the agent's approved Python package feed and the real
-   `serviceConnections` and `secretGroups` name mappings to preview.
-   A `PIP_INDEX_URL` pipeline variable can select the approved feed when
-   required by your organization. On this qualification pipeline only,
-   allow **Edit build pipeline** for the project build service identity,
-   `<project> Build Service (<organization>)`. Template previews submit
-   pipeline YAML through `yamlOverride`, which requires that permission.
-   Keep the identity's other permissions inherited. The build identity also
-   needs read access to its definition and source repository, plus the
-   resource authorization required for template expansion. This
-   qualification does not need Azure resource roles.
-3. Queue one approved run bound to the selected branch and full commit,
-   then inspect its qualification summary and `ado-qualification` artifact.
-
-The preview stage discovers its own definition through `System.DefinitionId`
-and verifies the repository and qualification pipeline path. CI, deployment
-and integration definitions do not need to be registered separately.
-The controller requires a clean checkout at the selected commit and reads
-the pipeline YAML from committed Git blobs. It submits those documents through
-`yamlOverride`, with that same branch and commit bound to every template
-expansion. All pipeline documents share the qualification pipeline's
-`.pipelines` directory, preserving relative template resolution.
-
-The full preview matrix covers setup options, environment mappings,
-planning versus deployment, selectors, Site files, resource set samples
-and every integration phase. Both default and enabled WIF session refresh
-are expanded. These requests use only the dedicated `/preview` endpoint
-and never execute the deployment or integration jobs.
-
-The consumer stages run independently of the preview stage, so a preview
-failure does not suppress runtime evidence. Available agent capacity
-determines whether the lanes execute concurrently. The Site file case still
-follows a successful selector case.
-
-Both consumer stages use the ordinary setup and validation templates.
-Each installs the selected checkout with a noneditable pip installation
-and runs `validate`, which does not compile, against real fixtures under
-`tests/fixtures/ado-consumer`. One case selects a workspace Site by label.
-The other uses a standalone Site file outside the workspace inventory.
-The fixture includes its referenced ARM JSON and synthetic Site values.
-These stages have no Azure task, variable group or mapped preview token.
-
-The final stage waits for both lanes and reads native job outcomes without
-polling or queueing other pipelines. All required jobs must return
-`Succeeded`, and the complete preview receipt must match the selected
-source. Failed, canceled, skipped,
-missing or partially successful jobs cannot produce a passing report.
-The report includes the identity of the selected source installation and the preview
-case inventory with input and expansion digests. Reports are published
-only after the reporter creates its own safe output, including failed
-qualification results. A canceled run can prevent the reporting stage from
-starting, so a missing report is not qualification evidence.
-
-The recorded source commit identifies this pipeline's checkout. Retain a
-reviewed mapping that shows source equivalence for a mirror or snapshot, and
-keep the original publisher identity for verifying signed releases.
-
-Run only reviewed pipeline source with the explicitly mapped
-`System.AccessToken`. The harness has no automatic PR trigger, interactive
-login or pipeline creation. Expanded YAML, resource names and raw
-service diagnostics are not published. HTTP failures retain the status code
-and an allowlisted service exception category. When the service reports an
-unlisted exception type whose key has the form of a .NET class name, the
-diagnostic also names that type. Messages and other unknown or unreadable
-details remain undisclosed. These categories describe the server response, not a
-proven cause, and do not trigger retries or a fallback to the execution endpoint.
-
-The preview step is the only step that receives `System.AccessToken`.
-Its job installs just the runtime requirements locked by hash as binary
-wheels, without a cache, into a private virtual environment. It runs the
-controller with `-E -s -B` so Python environment variables, user packages
-and bytecode writes stay out of the process that holds the token. Keep **Limit job
-authorization scope to current project** enabled and restrict who can edit
-or queue this pipeline to maintainers.
-
-A complete passing run qualifies template expansion and the explicit
-consumer checks that install from source for that candidate. Verified release
-installation, separate caller/tooling repository checkouts, executable
-planning, deployment and WIF renewal remain separately scoped qualification.
-Release production remains in GitHub Actions.
-
-A separate rehearsal in a customer repository should use the reusable
-template example above and confirm both checkouts, engine origin, workspace selection
-and configured overrides. Local tests exercise those script/path boundaries.
-Only a separately approved hosted run qualifies repository service
-connections, agent tasks and Azure authentication. A preview success does
-not establish those outcomes. For WIF refresh, retain the actual task version
-and run long enough to exercise token renewal and a subsequent authorized
-Azure operation. Confirm refresh failure is visible and the final task result
-preserves any deployment failure. Local controls and template previews do
-not establish that live token lifecycle.
+Scale Kit maintainers qualify these templates with
+`.pipelines/validate-pipelines.yaml`, as described in
+[Qualify the Azure Pipelines templates](releasing.md#qualify-the-azure-pipelines-templates).
 
 ### Migrate to separate environments
 

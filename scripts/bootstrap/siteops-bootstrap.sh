@@ -478,7 +478,7 @@ if [[ -n "$enroll_name" ]]; then
   if [[ "${SITEOPS_REDACT_OUTPUT:-0}" == 1 ]]; then
     stage "An explicitly selected source will be enrolled after installation."
   else
-    stage "Source $enroll_name will approve $repository with a time-limited policy after installation."
+    stage "Source $enroll_name will enroll $repository with an expiring policy after installation."
   fi
 fi
 if $dry_run; then
@@ -491,7 +491,7 @@ if ! $approve; then
   [[ "$answer" == y || "$answer" == Y ]] || fail "Installation was not approved."
 fi
 if [[ -n "$enroll_name" ]] && ! $approve; then
-  read -r -p "Enroll this publisher as an approved consumer source? [y/N] " answer
+  read -r -p "Enroll this publisher as an approved source? [y/N] " answer
   [[ "$answer" == y || "$answer" == Y ]] || fail "Source enrollment was not approved."
 fi
 
@@ -679,10 +679,10 @@ if [[ -n "$reference_download" ]]; then
 fi
 if [[ -n "$enroll_name" ]]; then
   if [[ "${SITEOPS_REDACT_OUTPUT:-0}" == 1 ]]; then
-    stage "Installed siteops $version with an approved source. Authenticate to Azure separately."
+    stage "Installed Site Ops $version with an approved source. Authenticate to Azure separately."
   else
-    stage "Installed siteops $version with approved source $enroll_name. Authenticate to Azure separately."
+    stage "Installed Site Ops $version with approved source $enroll_name. Authenticate to Azure separately."
   fi
 else
-  stage "Installed siteops $version. Authenticate to Azure and approve a workspace source separately."
+  stage "Installed Site Ops $version. Next, authenticate to Azure and enroll a content source, for example siteops source enroll official."
 fi

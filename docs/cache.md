@@ -17,9 +17,9 @@ siteops cache list --kind package
 siteops cache list --output json
 ```
 
-Inspection makes no source requests and does not run a provenance verifier.
-It reports storage layout, not content integrity or publisher trust. A
-`stored` entry still needs ordinary verification before use.
+Inspection makes no source requests and reports a storage inventory. Site Ops
+verifies integrity and publisher trust when it uses a package, including one
+listed as `stored`.
 
 ## Run `cache list`
 
@@ -33,10 +33,11 @@ IDs are complete lowercase values from the inventory. Metadata IDs identify
 records, not their payload digests or a project name. The commands do not
 accept filesystem paths as entry IDs.
 
-Storage states are `stored`, `incomplete`, `busy`, `missing` or `unavailable`.
-Byte counts are logical file sizes, not filesystem allocation measurements.
-Busy or unavailable entries have unknown size. Inspection reports an entry
-as busy rather than racing a running operation or receipt update.
+Each entry reports `Storage: STATE. Bytes: N.` Storage states are `stored`,
+`incomplete`, `busy`, `missing` or `unavailable`. Byte counts are logical file
+sizes, not filesystem allocation measurements. Busy or unavailable entries
+report `Bytes: unknown.` Inspection reports an entry as busy rather than
+racing a running operation or receipt update.
 
 The default list limit is 100. Narrow a large inventory or inspect one entry:
 
@@ -45,10 +46,11 @@ siteops cache list --kind proof --limit 20
 siteops cache list --kind metadata --id <complete-entry-id>
 ```
 
-The result reports matching and shown counts, with `hasMore` in JSON.
-Inspection has explicit entry, node and depth bounds. An unavailable entry
-reports its issue code and makes the command return nonzero. The cache root
-is not created merely to inspect an empty cache.
+Plain output reports `N shown, M matching entries.` When more entries match,
+it suggests `--kind`, `--id` or `--limit`. JSON reports the same counts
+with `hasMore`. Inspection has explicit entry, node and depth bounds. An
+unavailable entry reports `Issue:` with its code and makes the command return
+nonzero. Inspection never creates the cache root.
 
 ## Run `cache remove`
 
@@ -59,6 +61,9 @@ siteops cache remove package <complete-package-sha256>
 siteops cache remove proof <complete-proof-sha256>
 siteops cache remove metadata <complete-metadata-entry-id>
 ```
+
+A successful removal reports `Removed cached KIND ID. Bytes: N.` and states
+that removal changes only the cache.
 
 Removal requires the entry's exclusive lease. An active operation reports
 `cache.busy` and leaves the entry untouched. Package removal includes its

@@ -11,6 +11,7 @@ import hashlib
 import http.client
 import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -19,16 +20,13 @@ import time
 import unicodedata
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Any, BinaryIO, Callable
 from urllib.parse import quote, urlsplit
 
-from siteops.artifacts import ArtifactError
 from siteops.browse import BrowseError
-from siteops.cache_filesystem import check_trusted_executable
-from siteops.compilation import resolve_tool_from_path
 from siteops.process_capture import BoundedCapture as _BoundedCapture
 
 UNTRUSTED_GH = (
@@ -48,6 +46,9 @@ _MAX_TREE_ENTRIES = 20_000
 _RELEASE_ASSET_PAGE_SIZE = 100
 _MAX_RELEASE_ASSETS = 256
 _MAX_TAG_DEPTH = 8
+_TOKEN_VARIABLE = "GH_TOKEN"
+_MAX_TOKEN_CHARACTERS = 4096
+_MAX_RESET_DISTANCE_SECONDS = 24 * 60 * 60
 logger = logging.getLogger(__name__)
 
 _SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
@@ -402,8 +403,71 @@ def _validate_route(route: object) -> str:
     return route
 
 
-def _classify_status(status: int, headers: Any = None, detail: bytes = b"") -> BrowseError:
-    lower_detail = detail.lower()
+@dataclass(frozen=True)
+class _EnvironmentToken:
+    """A GitHub.com token from GH_TOKEN. The value never appears in repr."""
+
+    value: str = field(repr=False)
+
+
+def _environment_token() -> _EnvironmentToken | None:
+    """Read the optional API token from GH_TOKEN only.
+
+    GITHUB_TOKEN is not read, because Codespaces and other tools set it
+    automatically rather than as a choice for Site Ops.
+    """
+    value = os.environ.get(_TOKEN_VARIABLE, "").strip()
+    if not value:
+        return None
+    if len(value) > _MAX_TOKEN_CHARACTERS or any(not 33 <= ord(character) <= 126 for character in value):
+        raise _error(
+            "github.auth",
+            "GH_TOKEN must contain one GitHub token without spaces or control characters.",
+        )
+    return _EnvironmentToken(value)
+
+
+def _reset_epoch(headers: dict[str, str], now: float) -> int | None:
+    """Return when GitHub reports that requests are accepted again, if plausible."""
+    candidates = []
+    for name, relative in (("x-ratelimit-reset", False), ("retry-after", True)):
+        value = headers.get(name)
+        if isinstance(value, str) and 0 < len(value) <= 20 and value.isascii() and value.isdigit():
+            candidates.append(int(value) + (math.ceil(now) if relative else 0))
+    if not candidates:
+        return None
+    reset = max(candidates)
+    return reset if abs(reset - now) <= _MAX_RESET_DISTANCE_SECONDS else None
+
+
+def _rate_limit_summary(headers: dict[str, str], *, token: bool) -> str:
+    now = time.time()
+    reset = _reset_epoch(headers, now)
+    summary = "GitHub API rate limit was reached"
+    summary += " for the token in GH_TOKEN." if token else "."
+    if reset is None:
+        retry = "Retry later"
+    else:
+        moment = datetime.fromtimestamp(math.ceil(reset / 60) * 60, timezone.utc)
+        minutes = math.ceil((reset - now) / 60)
+        summary += f" It resets at {moment:%H:%M} UTC"
+        summary += f" (in {minutes} minute{'' if minutes == 1 else 's'})." if minutes > 0 else "."
+        retry = "Retry after that time"
+    if token:
+        return f"{summary} {retry}."
+    if os.environ.get("GITHUB_TOKEN", "").strip():
+        return (
+            f"{summary} {retry}, or use the token in GITHUB_TOKEN for Site Ops with "
+            '`export GH_TOKEN="$GITHUB_TOKEN"`.'
+        )
+    return (
+        f"{summary} {retry}, or set GH_TOKEN to a GitHub token with public read access, "
+        "for example `export GH_TOKEN=$(gh auth token)`."
+    )
+
+
+def _classify_status(status: int, headers: Any = None, *, token: bool = False) -> BrowseError:
+    """Map an HTTP status to a safe error. `token` is true when GH_TOKEN was sent."""
     normalized = {key.casefold(): value for key, value in headers.items()} if headers else {}
     remaining = normalized.get("x-ratelimit-remaining")
     retry_after = normalized.get("retry-after")
@@ -414,18 +478,13 @@ def _classify_status(status: int, headers: Any = None, detail: bytes = b"") -> B
             "github.not-found",
             "GitHub repository, reference, or object was not found or is not accessible.",
         )
-    if status == 429 or (
-        status == 403
-        and (
-            remaining == "0"
-            or retry_after is not None
-            or b"rate limit" in lower_detail
-            or b"secondary rate" in lower_detail
-        )
-    ):
+    if status == 429 or (status == 403 and (remaining == "0" or retry_after is not None)):
+        return _error("github.rate-limit", _rate_limit_summary(normalized, token=token))
+    if status in {401, 403} and token:
         return _error(
-            "github.rate-limit",
-            "GitHub API rate limit was reached. Retry after the limit resets.",
+            "github.auth",
+            "GitHub did not accept the token in GH_TOKEN for this read. Use a token that can read "
+            "the repository, or unset GH_TOKEN to read public sources anonymously.",
         )
     if status in {401, 403}:
         return _error(
@@ -473,7 +532,12 @@ def _decode_json(payload: bytes) -> Any:
         raise _error("github.invalid-data", "GitHub returned invalid JSON data.") from None
 
 
-def _anonymous_request(route: str) -> Any:
+def _anonymous_request(route: str, token: _EnvironmentToken | None = None) -> Any:
+    """Send one GET to the fixed API origin without following redirects.
+
+    An optional environment token is sent only on this request, as a header
+    that urllib never copies to a redirected request. Redirects are rejected.
+    """
     route = _validate_route(route)
     url = f"{_API_ROOT}{route}"
     request = urllib.request.Request(
@@ -485,6 +549,11 @@ def _anonymous_request(route: str) -> Any:
         },
         method="GET",
     )
+    sent = token is not None
+    if token is not None:
+        if urlsplit(url).hostname != "api.github.com":
+            raise _error("github.invalid-data", "GitHub API route is invalid.")
+        request.add_unredirected_header("Authorization", f"Bearer {token.value}")
     opener = urllib.request.build_opener(
         urllib.request.ProxyHandler(),
         _RejectRedirects(),
@@ -503,12 +572,12 @@ def _anonymous_request(route: str) -> Any:
             if not isinstance(status, int) or isinstance(status, bool):
                 raise _error("github.invalid-data", "GitHub returned an invalid HTTP status.")
             if not 200 <= status < 300:
-                raise _classify_status(status, getattr(response, "headers", None))
+                raise _classify_status(status, getattr(response, "headers", None), token=sent)
             payload = response.read(_MAX_RESPONSE_BYTES + 1)
     except BrowseError:
         raise
     except urllib.error.HTTPError as error:
-        mapped = _classify_status(error.code, error.headers)
+        mapped = _classify_status(error.code, error.headers, token=sent)
         try:
             error.close()
         finally:
@@ -555,34 +624,6 @@ def _close_process_pipes(process: subprocess.Popen[bytes]) -> None:
                 stream.close()
             except OSError:
                 logger.warning("A GitHub CLI output stream could not be closed.")
-
-
-def _resolve_gh() -> str:
-    executable = resolve_tool_from_path("gh.exe" if os.name == "nt" else "gh")
-    if executable is None:
-        raise _error(
-            "github.tool-missing",
-            "GitHub CLI is required for auth='cli'. Install gh and configure github.com.",
-        )
-    try:
-        resolved = Path(executable).resolve(strict=True)
-    except OSError:
-        raise _error(
-            "github.tool-missing",
-            "GitHub CLI executable could not be resolved.",
-        ) from None
-    if not resolved.is_absolute() or not resolved.is_file():
-        raise _error(
-            "github.tool-missing",
-            "GitHub CLI executable could not be resolved.",
-        )
-    if os.name == "nt" and resolved.suffix.casefold() != ".exe":
-        raise _error("github.tool-missing", "Use an installed gh.exe binary, not a shell wrapper.")
-    try:
-        check_trusted_executable(resolved)
-    except (ArtifactError, OSError, RuntimeError):
-        raise _error("github.tool-untrusted", UNTRUSTED_GH) from None
-    return str(resolved)
 
 
 def _run_gh(argv: list[str], *, timeout: float = _CLI_TIMEOUT_SECONDS) -> tuple[int, bytes, bytes]:
@@ -655,147 +696,36 @@ def _run_gh(argv: list[str], *, timeout: float = _CLI_TIMEOUT_SECONDS) -> tuple[
         _close_process_pipes(process)
 
 
-def _split_cli_response(payload: bytes) -> tuple[list[int], dict[str, str], bytes]:
-    statuses: list[int] = []
-    final_headers: dict[str, str] = {}
-    remaining = payload
-    while remaining.startswith(b"HTTP/"):
-        line_end = remaining.find(b"\n")
-        if line_end < 0:
-            raise _error("github.invalid-data", "GitHub CLI returned invalid response headers.")
-        status_line = remaining[:line_end].rstrip(b"\r")
-        match = re.fullmatch(rb"HTTP/\S+\s+([0-9]{3})(?:\s+.*)?", status_line)
-        if match is None:
-            raise _error("github.invalid-data", "GitHub CLI returned invalid response headers.")
-        separator = re.search(rb"\r?\n\r?\n", remaining)
-        if separator is None:
-            raise _error("github.invalid-data", "GitHub CLI returned invalid response headers.")
-        statuses.append(int(match.group(1)))
-        final_headers = {}
-        for line in remaining[line_end + 1 : separator.start()].splitlines():
-            if not line:
-                continue
-            if b":" not in line:
-                raise _error(
-                    "github.invalid-data",
-                    "GitHub CLI returned invalid response headers.",
-                )
-            name, value = line.split(b":", 1)
-            try:
-                final_headers[name.decode("ascii").strip()] = value.decode("ascii").strip()
-            except UnicodeError:
-                raise _error(
-                    "github.invalid-data",
-                    "GitHub CLI returned invalid response headers.",
-                ) from None
-        remaining = remaining[separator.end() :]
-    if not statuses:
-        raise _error("github.invalid-data", "GitHub CLI did not return HTTP response metadata.")
-    return statuses, final_headers, remaining
-
-
-def _status_from_cli_error(stderr: bytes) -> int | None:
-    match = re.search(
-        rb"(?:HTTP/\S+\s+|\(HTTP\s+|HTTP\s+)([0-9]{3})",
-        stderr,
-        re.IGNORECASE,
-    )
-    return int(match.group(1)) if match is not None else None
-
-
-def _cli_request(route: str) -> Any:
-    route = _validate_route(route)
-    executable = _resolve_gh()
-    argv = [
-        executable,
-        "api",
-        "--hostname",
-        "github.com",
-        "--method",
-        "GET",
-        "--include",
-        "--header",
-        f"Accept: {_ACCEPT}",
-        "--header",
-        f"X-GitHub-Api-Version: {GITHUB_API_VERSION}",
-        route,
-    ]
-    return_code, stdout, stderr = _run_gh(argv)
-
-    try:
-        statuses, headers, payload = _split_cli_response(stdout)
-    except BrowseError:
-        if return_code == 0:
-            raise
-        status = _status_from_cli_error(stderr)
-        if status is not None:
-            raise _classify_status(status, detail=stderr)
-        lower_error = stderr.lower()
-        if b"timed out" in lower_error or b"timeout" in lower_error:
-            raise _error("github.timeout", "GitHub CLI read timed out.") from None
-        if any(
-            marker in lower_error
-            for marker in (b"auth login", b"authentication", b"not logged", b"oauth token")
-        ):
-            raise _error(
-                "github.auth",
-                "GitHub CLI is not authenticated for the requested repository read.",
-            ) from None
-        raise _error(
-            "github.network",
-            "GitHub CLI could not complete the read-only API request.",
-        ) from None
-
-    if any(300 <= status < 400 for status in statuses):
-        raise _classify_status(next(status for status in statuses if 300 <= status < 400))
-    status = statuses[-1]
-    if not 200 <= status < 300:
-        raise _classify_status(status, headers=headers, detail=stderr)
-    if return_code != 0:
-        lower_error = stderr.lower()
-        if b"timed out" in lower_error or b"timeout" in lower_error:
-            raise _error("github.timeout", "GitHub CLI read timed out.")
-        if any(
-            marker in lower_error
-            for marker in (b"auth login", b"authentication", b"not logged", b"oauth token")
-        ):
-            raise _error(
-                "github.auth",
-                "GitHub CLI is not authenticated for the requested repository read.",
-            )
-        raise _error(
-            "github.network",
-            "GitHub CLI could not complete the read-only API request.",
-        )
-    return _decode_json(payload)
-
-
 class GitHubClient:
-    """Read bounded repository, release, tree and blob metadata from GitHub."""
+    """Read bounded repository, release, tree and blob metadata from GitHub.
+
+    Requests use direct HTTPS to the GitHub API. When GH_TOKEN is set at
+    construction, those requests carry that token. GITHUB_TOKEN is not read.
+    """
 
     def __init__(
         self,
         reference: GitHubReference,
         *,
-        auth: str = "anonymous",
         transport: Transport | None = None,
     ):
         if not isinstance(reference, GitHubReference):
             raise TypeError("reference must be a GitHubReference")
-        if auth not in {"anonymous", "cli"}:
-            raise ValueError("auth must be 'anonymous' or 'cli'")
         if transport is not None and not callable(transport):
             raise TypeError("transport must be callable")
         self.reference = reference
-        self.auth = auth
         self._transport = transport
+        self._token = _environment_token() if transport is None else None
+
+    @property
+    def access(self) -> str:
+        """Name the access mode for cache scopes, without credential material."""
+        return "anonymous" if self._token is None else "token"
 
     def _request(self, route: str) -> Any:
         if self._transport is not None:
             return self._transport(_validate_route(route))
-        if self.auth == "cli":
-            return _cli_request(route)
-        return _anonymous_request(route)
+        return _anonymous_request(route, self._token)
 
     def _repository_route(self) -> str:
         owner = quote(self.reference.owner, safe="")
@@ -916,32 +846,20 @@ class GitHubClient:
     def resolve_commit(self) -> str:
         """Resolve the configured reference or repository default branch to a commit."""
         selected_ref = self.reference.ref
-        if selected_ref is None or self.auth == "cli":
+        if selected_ref is None:
             repository = self._request(self._repository_route())
             if not isinstance(repository, dict):
                 raise _error(
                     "github.invalid-data",
                     "GitHub returned invalid repository metadata.",
                 )
-            if self.auth == "cli":
-                # gh can follow redirects before returning its final response.
-                full_name = repository.get("full_name")
-                if not isinstance(full_name, str):
-                    raise _error("github.invalid-data", "GitHub did not identify the repository.")
-                expected = f"{self.reference.owner}/{self.reference.repository}"
-                if full_name.casefold() != expected.casefold():
-                    raise _error(
-                        "github.repository-moved",
-                        "The repository has moved. Use its current owner and repository name.",
-                    )
-            if selected_ref is None:
-                try:
-                    selected_ref = _validate_ref(repository.get("default_branch"))
-                except BrowseError:
-                    raise _error(
-                        "github.invalid-data",
-                        "GitHub returned an invalid default branch.",
-                    ) from None
+            try:
+                selected_ref = _validate_ref(repository.get("default_branch"))
+            except BrowseError:
+                raise _error(
+                    "github.invalid-data",
+                    "GitHub returned an invalid default branch.",
+                ) from None
 
         route = f"{self._repository_route()}/commits/{quote(selected_ref, safe='')}"
         commit = self._request(route)

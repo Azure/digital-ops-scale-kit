@@ -91,15 +91,15 @@ markers. A manifest with steps at subscription scope runs in two phases, and
 each phase starts with its own line. This example is shortened:
 
 ```text
-  [Phase 1] Steps at subscription scope: 1 target
+  [Phase 1] Steps at subscription scope: 1 Site
 [contoso-global] starting
 [contoso-global] > global-edge-site (deployment)...
 [contoso-global] + global-edge-site
 [contoso-global] + succeeded in 21.3s
 
-  [Phase 2] Steps in resource groups: 2 targets
+  [Phase 2] Steps in resource groups: 2 Sites
 
-  [Parallel] Deploying to 2 targets (2 concurrent)
+  [Parallel] Deploying to 2 Sites (2 concurrent)
 [munich-dev] starting
 [munich-dev] > schema-registry (deployment)...
 [munich-dev] + schema-registry
@@ -107,7 +107,7 @@ each phase starts with its own line. This example is shortened:
 ```
 
 A manifest without steps at subscription scope starts with
-`[Execution] Prepared targets: N targets` instead. The `[Parallel]` line
+`[Execution] Prepared Sites: N Sites` instead. The `[Parallel]` line
 appears when more than one Site deploys at once. Redacted output shows
 `<site>` in place of each Site name.
 

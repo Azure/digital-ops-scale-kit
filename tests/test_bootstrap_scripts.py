@@ -750,6 +750,45 @@ def test_bootstrap_preview_keeps_source_names_private_in_redacted_output():
     assert "private-name" not in result.stdout + result.stderr
 
 
+def test_bootstrap_messages_use_enrollment_and_product_terms():
+    expected = (
+        "will enroll {repository} with an expiring policy after installation.",
+        "Enroll this publisher as an approved source? [y/N]",
+        "Installed Site Ops $version with approved source {name}. Authenticate to Azure separately.",
+        "Installed Site Ops $version. Next, authenticate to Azure and enroll a content source, "
+        "for example siteops source enroll official.",
+    )
+    for path, repository, name in (
+        (SCRIPTS / "siteops-bootstrap.sh", "$repository", "$enroll_name"),
+        (SCRIPTS / "siteops-bootstrap.ps1", "$Repository", "$EnrollSource"),
+    ):
+        script = path.read_text(encoding="utf-8")
+        for line in expected:
+            assert line.format(repository=repository, name=name) in script, (path.name, line)
+        for retired in ("will approve", "approved consumer source", "approve a workspace source",
+                        "Installed siteops"):
+            assert retired not in script, (path.name, retired)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="PowerShell preview runs on Windows.")
+def test_powershell_preview_names_the_enrollment(tmp_path):
+    if shutil.which("gh") is None:
+        pytest.skip("GitHub CLI is unavailable.")
+    result = subprocess.run(
+        [
+            "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+            str(SCRIPTS / "siteops-bootstrap.ps1"),
+            "-Release", "siteops/v1.0.0b1", "-SourceCommit", SOURCE_SHA,
+            "-EnrollSource", "demo", "-DryRun",
+        ],
+        env={**os.environ, "SITEOPS_REDACT_OUTPUT": "0", "LOCALAPPDATA": str(tmp_path / "state")},
+        capture_output=True, text=True, timeout=20,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Source demo will enroll Azure/digital-ops-scale-kit with an expiring policy" in result.stdout
+    assert "approve" not in result.stdout
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="The Linux preview runs on the Linux runner.")
 def test_bash_preview_and_unattended_refusal_do_not_acquire_tools(tmp_path):
     tools = tmp_path / "tools"

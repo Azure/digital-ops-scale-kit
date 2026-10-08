@@ -184,11 +184,15 @@ def read_source(name: str, *, require_valid: bool = True) -> ApprovedSource:
     ):
         raise SourceProfileError("The approved source policy does not match its enrollment.")
     if require_valid and policy.valid_until <= datetime.now(timezone.utc):
+        renewal = (
+            "Inspect it with `siteops source show {0}`. Renew a standard enrollment with "
+            "`siteops source enroll {0}`. For a custom policy, remove the name and enroll it "
+            "again with reviewed trust files."
+        )
         raise SourceProfileError(
-            "The approved source policy has expired. Inspect it with `siteops source show NAME`. "
-            "Renew a standard approval with `siteops source enroll NAME`. For a custom policy, "
-            "remove the name and enroll it again with reviewed trust files.",
+            "The approved source policy has expired. " + renewal.format("NAME"),
             code="source.profile-expired",
+            private_message="The approved source policy has expired. " + renewal.format(name),
         )
     return result
 
@@ -299,17 +303,20 @@ def _replace_source(name: str, source: str, policy_file: Path, root_file: Path) 
             os.rename(fresh, current)
         except OSError:
             os.rename(previous, current)
-            raise SourceProfileError("The approved source could not be renewed. The previous approval is unchanged.") from None
+            raise SourceProfileError("The approved source could not be renewed. The previous enrollment remains in effect.") from None
         try:
             renewed = read_source(name)
         except (OSError, ArtifactError):
             _discard(current)
             os.rename(previous, current)
-            raise SourceProfileError("The approved source could not be renewed. The previous approval is unchanged.") from None
+            raise SourceProfileError("The approved source could not be renewed. The previous enrollment remains in effect.") from None
         _discard(previous)
         return renewed
     except OSError:
-        raise SourceProfileError("The approved source could not be renewed. Inspect it with `siteops source show NAME`.") from None
+        raise SourceProfileError(
+            "The approved source could not be renewed. Inspect it with `siteops source show NAME`.",
+            private_message=f"The approved source could not be renewed. Inspect it with `siteops source show {name}`.",
+        ) from None
     finally:
         if (holding / "new").exists():
             _discard(holding / "new")

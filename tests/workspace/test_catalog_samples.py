@@ -4,7 +4,7 @@ from pathlib import Path
 
 import yaml
 
-from siteops.models import Manifest
+from siteops.models import Manifest, parse_selector
 
 _BASIC_MANIFEST = Path("samples/resource-set-basic/manifest.yaml")
 _ADVANCED_MANIFEST = Path("samples/resource-set-composition/manifest.yaml")
@@ -60,6 +60,25 @@ class TestSharedCatalogPartial:
 
         assert "catalog-basic" not in selected
         assert "catalog-composition" not in selected
+
+    def test_sample_sites_carry_only_sample_labels(self, orchestrator):
+        """Fleet selectors such as `country=US` select no sample Site."""
+        for name, sample in (
+            ("catalog-basic", "resource-set-basic"),
+            ("catalog-composition", "resource-set-composition"),
+        ):
+            assert orchestrator.load_site(name).labels == {
+                "environment": "sample",
+                "managedBy": "siteops-sample",
+                "sample": sample,
+            }
+
+        for selector in ("country=US", "city=Seattle", "region=americas", "managedBy=siteops"):
+            selected = {
+                site.name for site in orchestrator.filter_sites(parse_selector(selector))
+            }
+            assert selected, selector
+            assert not selected & {"catalog-basic", "catalog-composition"}, selector
 
 
 class TestBeginnerResourceSetSample:

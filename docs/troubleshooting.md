@@ -26,9 +26,16 @@ example `siteops -w workspaces/iot-operations plan aio-install`.
 Error: Manifest not found. Did you mean 'aio-install'? Run `siteops browse` to list manifests, or use an explicit path.
 ```
 
-**Cause**: No manifest in the selected workspace or release has that name.
-When a manifest name is close, Site Ops suggests it. Redacted output omits the
-suggestion.
+An explicit path that does not exist, such as the earlier
+`manifests/aio-install.yaml`, names the closest current manifest and its path:
+
+```
+Error: Manifest not found. Did you mean 'aio-install' (manifests/aio-install/manifest.yaml)? Run `siteops browse` to list manifests.
+```
+
+**Cause**: No manifest in the selected workspace or release has that name or
+path. When a manifest name is close, Site Ops suggests it. Redacted output
+omits the suggestion.
 
 **Solution**: Use the suggested name, list the manifests with
 `siteops browse`, or pass an explicit path such as
@@ -51,14 +58,14 @@ execution.
 ### "Direct content requires explicit Site inputs"
 
 ```
-siteops: error: Direct content requires explicit Site inputs or --project for configured targets.
+siteops: error: Direct content requires explicit Site inputs or --project for configured Sites.
 ```
 
 **Cause**: `plan`, `deploy` or `validate` used `--source SOURCE@RELEASE`
 without `--input`, `--input-file`, `--site-file` or `--project`. Example Sites
 inside a published release are not deployment targets.
 
-**Solution**: Supply the target with `--input` or `--input-file` as shown in
+**Solution**: Supply the Site with `--input` or `--input-file` as shown in
 [guided inputs](guided-inputs.md), pass a complete `--site-file`, or add
 `--project DIRECTORY` to use your configured Sites.
 
@@ -66,6 +73,12 @@ inside a published release are not deployment targets.
 
 ```
 Error: Workspace pin not found. Use project pin to select a package, or -w to select local content.
+```
+
+`siteops project show` reports the same condition with only the pin command:
+
+```
+Error: Workspace pin not found. Create one with `siteops project pin DIRECTORY --source SOURCE@RELEASE`.
 ```
 
 **Cause**: The selected project has no `siteops.pin`, and the command selected
@@ -89,15 +102,49 @@ unsupported version or a `gh` executable that other users can change.
 your approved channel, in a location that only you or administrators can
 change. No GitHub login is needed.
 
+### "GitHub API rate limit was reached"
+
+```
+Error: GitHub API rate limit was reached. It resets at 17:36 UTC (in 24 minutes). Retry after that time, or set GH_TOKEN to a GitHub token with public read access, for example `export GH_TOKEN=$(gh auth token)`.
+```
+
+**Cause**: `--source`, `project pin` and `browse --source` read release and
+repository metadata from the GitHub API. Without credentials, GitHub limits
+these requests for each IP address, and everyone behind a shared address
+shares that limit, for example on a corporate network, Cloud Shell or
+Codespaces. The error code is `github.rate-limit`. `browse --source` adds a
+suggestion to use `--offline-content` with previously cached metadata.
+
+**Solution**: Retry after the reported time, or set `GH_TOKEN` so the
+requests use the limit of your own account:
+
+```bash
+export GH_TOKEN=$(gh auth token)
+```
+
+```powershell
+$env:GH_TOKEN = gh auth token
+```
+
+Any GitHub token that can read public repositories works. Site Ops sends it
+only to `https://api.github.com` and downloads release files without it.
+Site Ops ignores `GITHUB_TOKEN`. When that variable is set, for example in
+Codespaces, the message instead suggests choosing its token explicitly with
+`export GH_TOKEN="$GITHUB_TOKEN"`. When the message names the token in
+`GH_TOKEN`, that token's own limit was reached, so retry after the reported
+time. See
+[source access](remote-content.md#public-and-authorized-source-access).
+
 ### "The approved source policy has expired"
 
 ```
-Error: The approved source policy has expired. Inspect it with `siteops source show NAME`. Renew a standard approval with `siteops source enroll NAME`. For a custom policy, remove the name and enroll it again with reviewed trust files.
+Error: The approved source policy has expired. Inspect it with `siteops source show official`. Renew a standard enrollment with `siteops source enroll official`. For a custom policy, remove the name and enroll it again with reviewed trust files.
 ```
 
-**Cause**: The approval for the source name in `--source NAME@<release>` or
-`--approved-source NAME` is older than its policy allows. The error code is
-`source.profile-expired`. Approvals created by `siteops source enroll` last
+**Cause**: The enrollment for the source name in `--source NAME@<release>` or
+`--approved-source NAME` is older than its policy allows. The message names
+that source, and redacted output shows `NAME` instead. The error code is
+`source.profile-expired`. Enrollments created by `siteops source enroll` last
 30 days.
 
 **Solution**: Run `siteops source enroll NAME` again to renew it with the same
@@ -324,6 +371,23 @@ the manifest. Redacted output omits the name and the suggestion.
 **Solution**: Use the suggested name, or run `siteops inputs MANIFEST` to list
 the declared inputs.
 
+### "Missing required input" or "so Site Ops can read the cluster's"
+
+```
+Error: Missing required input 'instance'. Supply `--input instance=<AIO-instance-resource-ID>` so Site Ops can read the cluster's OIDC issuer and workload identity settings.
+Error: inputs.resource.requirement-unverified: With `enableSecretSync=true`, supply `--input cluster=<Arc-cluster-resource-ID>` so Site Ops can read the cluster's OIDC issuer and workload identity settings.
+```
+
+**Cause**: The manifest needs an answer that was not supplied. Secret Sync
+needs the cluster's OIDC issuer and workload identity settings, so
+`secretsync`, and `aio-install` with `enableSecretSync=true`, need a resource
+ID that Site Ops reads before planning, even when the other answers are
+complete. The error codes are `inputs.invalid` and
+`inputs.resource.requirement-unverified`.
+
+**Solution**: Add the named `--input`, or run `siteops inputs MANIFEST` to list
+the required answers. See [guided inputs](guided-inputs.md).
+
 ### "already exists. Choose a new file name"
 
 ```
@@ -448,9 +512,9 @@ fresh plan rather than resuming only unfinished operations.
 
 ### Ctrl-C does not return the prompt right away
 
-**Cause**: A stop request reaches waiting code immediately, but a call already
-running in a child process is not interrupted. Site Ops waits for it rather
-than abandoning scratch files and observed outcomes.
+**Cause**: During execution, a stop request reaches waiting code immediately,
+but a call already running in a child process is not interrupted. Site Ops
+waits for it rather than abandoning scratch files and observed outcomes.
 
 **Solution**: Wait for the call in flight. The bounds are 60 seconds for one
 deployment state read, 5 minutes for a deployment submission, and 10 minutes
@@ -459,10 +523,10 @@ An interrupted execution prints its final result and exits `130`. Stopping
 locally does not cancel accepted Azure work, so inspect unconfirmed effects
 before deciding to deploy again.
 
-A request during preparation lets preparation finish, including any
-remaining template compilations. If preparation succeeds, no deployment
-operation starts. Preparation failures are still reported normally.
-The per-call timeouts above do not bound the whole preparation phase.
+During preparation or the confirmation prompt, Ctrl-C cancels the command
+before any operation is submitted and exits `130`. `deploy` reports
+`Deployment cancelled. No operations were submitted.` Local tool cleanup,
+such as stopping a template compilation, can delay the return.
 
 ### An operation reports "unknown"
 

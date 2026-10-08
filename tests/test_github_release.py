@@ -68,21 +68,18 @@ def no_external_calls(monkeypatch):
         pytest.fail("The release metadata fixture attempted an external call.")
 
     monkeypatch.setattr(github, "_anonymous_request", blocked)
-    monkeypatch.setattr(github, "_cli_request", blocked)
 
 
-def resolve(transport, *, auth="anonymous"):
+def resolve(transport):
     return GitHubClient(
-        GitHubReference("example", "content", TAG),
-        auth=auth, transport=transport,
+        GitHubReference("example", "content", TAG), transport=transport,
     ).resolve_release()
 
 
 @pytest.mark.parametrize("annotated", [False, True])
-@pytest.mark.parametrize("auth", ["anonymous", "cli"])
-def test_explicit_release_uses_exact_tag_namespace_and_complete_asset_identity(annotated, auth):
+def test_explicit_release_uses_exact_tag_namespace_and_complete_asset_identity(annotated):
     transport = ReleaseTransport(annotated=annotated)
-    release = resolve(transport, auth=auth)
+    release = resolve(transport)
     assert release.repository_id == 41
     assert release.release_id == 7
     assert release.source_commit == COMMIT

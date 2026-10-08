@@ -204,6 +204,10 @@ class PlanNotExecutableError(ValueError):
 
 
 _BLOCKING_MESSAGE_LIMIT = 5
+_DESCRIBE_NOTE = (
+    "Plan shape only. Run `siteops plan` without --describe to compile templates "
+    "and check local tools."
+)
 
 
 class PlanValueResolutionError(ValueError):
@@ -1422,7 +1426,7 @@ def render_plain_plan(
 
     if plan.intent is PlanIntent.EXECUTABLE:
         binding_description = {
-            CompilationBinding.OBSERVED_NOT_ENFORCED: "compilation observed, not enforced",
+            CompilationBinding.OBSERVED_NOT_ENFORCED: "local compilation recorded",
             CompilationBinding.PACKAGE_ARTIFACT: "package artifact",
         }[plan.compilation_binding]
         lines.extend(
@@ -1442,16 +1446,11 @@ def render_plain_plan(
                 "  No operations will be submitted from this plan."
             )
     else:
-        lines.extend(
-            (
-                "",
-                "  Preflight: not performed",
-                "  Templates and deployment capabilities were not checked.",
-            )
-        )
+        lines.append("")
+        lines.extend(terminal.wrap(_DESCRIBE_NOTE, width=width))
 
     if plan.target_selection == "explicit-site":
-        lines.extend(("", "  Target selection: explicit Site (replaces manifest targeting)"))
+        lines.extend(("", "  Site selection: explicit Site (replaces manifest targeting)"))
     lines.extend(("", f"  Sites ({len(plan.targets)}):"))
     for target in plan.targets:
         lines.extend((
@@ -1558,12 +1557,7 @@ def _render_publishable_plan(document: Mapping[str, Any]) -> str:
         "  Executable: yes" if document["executable"] else "  Executable: no",
     ]
     if document["intent"] == PlanIntent.DESCRIBE.value:
-        lines.extend(
-            (
-                "  Preflight: not performed",
-                "  Templates and deployment capabilities were not checked.",
-            )
-        )
+        lines.append(f"  {_DESCRIBE_NOTE}")
     elif not document["executable"]:
         lines.append("  No operations will be submitted from this plan.")
     lines.extend(

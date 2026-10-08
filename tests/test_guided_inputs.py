@@ -538,12 +538,16 @@ def test_related_resource_prerequisites_are_checked_before_site_construction(tmp
 def test_manual_answers_cannot_bypass_active_related_resource_prerequisite(tmp_path):
     manifest, _ = _linked_contract(tmp_path)
     contract = load_contract(manifest)
-    with pytest.raises(ValueError, match="requirement-unverified.*'instance'"):
+    with pytest.raises(ValueError) as rejected:
         contract.resolve(inline=[
             "siteName=manual", "subscription=00000000-0000-0000-0000-000000000001",
             "resourceGroup=rg-first", "location=eastus", "clusterName=cluster-one",
             "instanceName=machine-one",
         ])
+    assert str(rejected.value) == (
+        "inputs.resource.requirement-unverified: Supply `--input instance=<instance-resource-ID>` "
+        "so Site Ops can read the cluster's workload identity settings."
+    )
 
 
 def test_inactive_related_prerequisite_preserves_manual_route(tmp_path):
@@ -692,8 +696,20 @@ def test_enabled_resource_requirement_needs_cluster_read_before_site_constructio
         "resourceGroup=rg-first", "location=eastus", "clusterName=arc-first",
     ]
     assert contract.resolve(inline=manual).properties["deployOptions"]["enableSecretSync"] is False
-    with pytest.raises(ValueError, match="requirement-unverified"):
+    with pytest.raises(ValueError, match="requirement-unverified") as rejected:
         contract.bind(inline=[*manual, "enableSecretSync=true"])
+    assert str(rejected.value).endswith(
+        "With `enableSecretSync=true`, supply `--input cluster=<Arc-cluster-resource-ID>` "
+        "so Site Ops can read the cluster's OIDC issuer and workload identity settings."
+    )
+
+
+def test_every_supported_resource_fact_has_plain_text():
+    from siteops import guided_inputs
+
+    supported = set().union(*guided_inputs._RESOURCE_FACTS.values())
+    assert set(guided_inputs._FACT_TEXT) == supported
+    assert {kind.casefold() for kind in guided_inputs._RESOURCE_FACTS} <= set(guided_inputs._RESOURCE_TEXT)
 
 
 def test_inactive_resource_does_not_enforce_its_unconditional_requirement(tmp_path):
@@ -1182,6 +1198,21 @@ def test_multiple_dependents_can_share_an_unconditional_controller(tmp_path):
     }
 
 
+def test_missing_controller_is_reported_in_separate_sentences(tmp_path):
+    manifest, _ = _manifest_and_contract(
+        tmp_path,
+        fields=[
+            _field("subscription", "subscription", default="sub"),
+            _field("location", "location", default="eastus"),
+            _field("enable", "properties.enable", type="boolean"),
+            _field("first", "properties.first", when={"input": "enable", "equals": True}),
+        ],
+    )
+    with pytest.raises(ValueError) as rejected:
+        load_contract(manifest).resolve()
+    assert str(rejected.value) == "Input 'enable' is missing. It controls conditional input 'first'."
+
+
 def test_missing_required_name_is_safe_guided_error(tmp_path):
     from siteops.guided_inputs import GuidedInputError
 
@@ -1530,7 +1561,7 @@ def test_direct_site_file_rejects_inheritance_without_loading_a_parent(tmp_path,
             "name: child\nsubscription: sub\nlocation: eastus\n",
             encoding="utf-8",
         )
-    with pytest.raises(ValueError, match="inherits"):
+    with pytest.raises(ValueError, match=r"^A direct Site file cannot use inherits\. Provide a complete Site\.$"):
         load_direct_site(child)
     child.write_text(
         "apiVersion: siteops/v1\nkind: Site\nname: child\n"

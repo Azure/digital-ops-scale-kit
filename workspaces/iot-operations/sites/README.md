@@ -9,7 +9,8 @@ Site files (`kind: Site` and `kind: SiteTemplate`), one for each deployment targ
 - **`shared/`**: additional `kind: SiteTemplate` files for shared settings (for example `germany.yaml`, `usa-east.yaml`).
 - **`catalog-basic.yaml` and `catalog-composition.yaml`**: deployable sample
   Sites for the beginner and advanced resource set walkthroughs under
-  `samples/`.
+  `samples/`. They carry only sample labels, so fleet selectors such as
+  `country=US` skip them.
 
 ## Conventions
 

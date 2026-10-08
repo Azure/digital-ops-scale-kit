@@ -25,9 +25,10 @@ planner itself reads no Azure resources, so without such an answer,
 planning makes no Azure reads. `validate` never reads them. `inputs`, which
 only inspects, requires `--read-resources` to preview or save a Site from an ID.
 
-Ordinary local workspaces submit source Bicep, which Azure CLI may compile
-again. Their plans record observed compilation identity, not a guarantee that
-ARM will receive those exact compiled bytes.
+Ordinary local workspaces submit source Bicep. Their plans record the
+compilation identity observed during preparation, and Azure CLI may compile
+the source again at submission. Plain output identifies this mode as
+`Submission: source (local compilation recorded)`.
 
 An internal binding to a materialized package uses the ARM JSON mapped by its
 producer instead. Its `local-private` plan records `submission.mode: arm-json`,
@@ -88,8 +89,8 @@ and is shortened:
   and Device Registry namespace. Set `enableSecretSync` to true to also
   enable Secret Sync.
 
-  Preflight: not performed
-  Templates and deployment capabilities were not checked.
+  Plan shape only. Run `siteops plan` without --describe to compile
+  templates and check local tools.
 
   Sites (2):
     munich-dev (germanywestcentral)
@@ -123,7 +124,7 @@ selected, an `Execution:` line shows how many Sites deploy at once:
 `one Site at a time`, `all Sites at once` or `up to N Sites at once`.
 A `Selector:` line follows the heading when you pass `-l`.
 
-A plan without `--describe` replaces the `Preflight:` lines with `Status:`,
+A plan without `--describe` replaces the `Plan shape only.` lines with `Status:`,
 `Executable:` and `Submission:` lines. Problems found while planning are
 listed under `Diagnostics:`, each labeled `Error:` or `Warning:`. When no plan
 can be prepared, the output is `Deployment plan is unavailable.` followed by

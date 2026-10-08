@@ -820,7 +820,7 @@ if ($EnrollSource) {
     if ($env:SITEOPS_REDACT_OUTPUT -eq '1') {
         Stage 'An explicitly selected source will be enrolled after installation.'
     } else {
-        Stage "Source $EnrollSource will approve $Repository with a time-limited policy after installation."
+        Stage "Source $EnrollSource will enroll $Repository with an expiring policy after installation."
     }
 }
 if ($DryRun) {
@@ -832,7 +832,7 @@ if (-not $Yes) {
         Fail 'In automation, pass -Yes after reviewing the changes.'
     }
     if ($EnrollSource -and -not $Yes) {
-        if ((Read-Host 'Enroll this publisher as an approved consumer source? [y/N]') -cnotin @('y', 'Y')) {
+        if ((Read-Host 'Enroll this publisher as an approved source? [y/N]') -cnotin @('y', 'Y')) {
             Fail 'Source enrollment was not approved.'
         }
     }
@@ -1053,12 +1053,12 @@ try {
     }
     if ($EnrollSource) {
         if ($env:SITEOPS_REDACT_OUTPUT -eq '1') {
-            Stage "Installed siteops $version with an approved source. Authenticate to Azure separately."
+            Stage "Installed Site Ops $version with an approved source. Authenticate to Azure separately."
         } else {
-            Stage "Installed siteops $version with approved source $EnrollSource. Authenticate to Azure separately."
+            Stage "Installed Site Ops $version with approved source $EnrollSource. Authenticate to Azure separately."
         }
     } else {
-        Stage "Installed siteops $version. Authenticate to Azure and approve a workspace source separately."
+        Stage "Installed Site Ops $version. Next, authenticate to Azure and enroll a content source, for example siteops source enroll official."
     }
 }
 finally {

@@ -110,7 +110,7 @@ def test_selected_card_distinguishes_advice_from_input_contract(tmp_path):
     )
     remote_plain = render_browse_plain(remote)
     assert "Pin a release from an approved source" in remote_plain
-    assert "Remote metadata cannot validate typed inputs" in remote_plain
+    assert "Typed inputs are checked when you run `siteops inputs`, `plan` or `deploy`." in remote_plain
     assert "Typed inputs:" not in remote_plain
 
 
@@ -295,8 +295,25 @@ def test_inventory_diagnostics_show_text_without_codes(tmp_path):
 def test_heading_states_the_inspection_boundary_without_outcome_claims(tmp_path):
     _entry(tmp_path)
     local = render_browse_plain(inspect_content(tmp_path, "example"))
-    assert "Private inspection. Package not verified. No plan is prepared.\n" in local
+    assert "Private inspection of local content.\n" in local
+    assert " not " not in local.split("\n\n", 1)[0]
     assert "outcome" not in local.split("\n\n", 1)[0]
+    assert "  No Sites or selector declared. Pass -l or typed inputs when planning.\n" in local
+    _entry(tmp_path, "targeted", selector="name=one")
+    targeted = " ".join(render_browse_plain(inspect_content(tmp_path, "targeted")).split())
+    assert "`siteops plan` selects Sites from the manifest targeting. -l or typed inputs replace it." in targeted
+    assert "Targets have not been resolved" not in local + targeted
+
+
+def test_heading_names_verified_and_published_sources(tmp_path):
+    _entry(tmp_path)
+    result = inspect_content(tmp_path, "example")
+    verified = replace(result, source=BrowseSource("package", "github:example/kit", verification="verified"))
+    remote = replace(result, source=BrowseSource("remote", "github:example/kit"))
+    assert "\nPrivate inspection of a verified package.\n" in render_browse_plain(verified)
+    assert (
+        "\nPrivate inspection of published descriptions. Deployment verifies the package first.\n"
+    ) in render_browse_plain(remote)
 
 
 def test_aio_guidance_distinguishes_typed_defaults_and_packaged_tools(monkeypatch):

@@ -306,7 +306,7 @@ scenario_journey() {
     die "Site Ops is not bound to the concrete managed runtime."
   [[ "$(installed_version "$bin")" == "siteops $first_version" ]] ||
     die "The installed command reports another build."
-  grep -qF "Installed siteops $first_version with approved source demo." "$logs/install.out" ||
+  grep -qF "Installed Site Ops $first_version with approved source demo." "$logs/install.out" ||
     die "The installation did not report the enrolled build."
   grep -qF "Azure CLI was not found. Install it before deploying:" "$logs/install.out" ||
     die "A missing Azure CLI was not reported."

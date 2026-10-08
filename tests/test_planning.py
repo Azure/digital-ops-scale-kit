@@ -1237,14 +1237,14 @@ def test_invalid_executable_plan_states_that_nothing_will_run():
 
     assert "Status: invalid" in rendered
     assert "Executable: no" in rendered
-    assert "Submission: source (compilation observed, not enforced)" in rendered
+    assert "Submission: source (local compilation recorded)" in rendered
     assert "No operations will be submitted from this plan." in rendered
     assert "Operations: 1 total, 0 to run, 1 blocked" in rendered
     assert "    x 1. " in rendered
     assert "Reason: A required capability is unavailable." in rendered
 
 
-def test_describe_plan_discloses_missing_preflight():
+def test_describe_plan_names_the_executable_preparation_command():
     target = _target()
     result = PlanBuildResult(
         status=PlanStatus.PLANNED,
@@ -1260,10 +1260,13 @@ def test_describe_plan_discloses_missing_preflight():
         ),
     )
 
-    rendered = render_plain_plan(result, redacted=False)
+    rendered = render_plain_plan(result, redacted=False, width=200)
 
-    assert "Preflight: not performed" in rendered
-    assert "deployment capabilities were not checked" in rendered
+    assert (
+        "  Plan shape only. Run `siteops plan` without --describe to compile templates "
+        "and check local tools.\n"
+    ) in rendered
+    assert " not " not in rendered
 
 
 @pytest.mark.parametrize("kind", [TargetKind.RESOURCE_GROUP, TargetKind.SUBSCRIPTION])

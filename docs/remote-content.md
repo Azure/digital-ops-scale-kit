@@ -62,8 +62,9 @@ siteops browse --source github:<owner>/<repository> --refresh
 siteops browse --source github:<owner>/<repository> --offline-content
 ```
 
-Keep the same `--ref`, `--auth` and source workspace selection across these
-commands. A fully cached commit can also be selected directly:
+Keep the same `--ref`, `GH_TOKEN` setting and source workspace selection
+across these commands. A fully cached commit can also be selected
+directly:
 
 ```bash
 siteops browse --source github:<owner>/<repository> --ref <full-commit-sha> --offline-content
@@ -112,33 +113,61 @@ route for offline content and repeatable fleets.
 
 ## Public and authorized source access
 
-Public reads use anonymous HTTPS by default. Private repositories and higher
-authenticated rate limits can use an already configured GitHub CLI:
+Site Ops reads public sources over HTTPS without credentials by default.
+GitHub limits API requests without credentials for each IP address, and
+everyone behind the same address shares that limit, for example on a
+corporate network, Cloud Shell or Codespaces. To use the higher limit of
+your own account, set `GH_TOKEN` before running Site Ops:
 
 ```bash
-siteops browse --source github:<owner>/<repository> --auth cli
+export GH_TOKEN=$(gh auth token)
 ```
 
-This mode sends required source requests through `gh api` using configured
-authentication. It does not extract tokens, inspect personal credential
-stores, change login or fall back to another credential source after failure.
+```powershell
+$env:GH_TOKEN = gh auth token
+```
 
-`--auth cli` applies only to descriptive metadata browsing. Package
-acquisition for `project pin` always uses anonymous source access.
+Any GitHub token that can read public repositories is enough for public
+sources. Site Ops sends the `GH_TOKEN` value only on its requests to
+`https://api.github.com`, never to another host or on a redirect, and does
+not store or print it. A rejected token fails with an error that names
+`GH_TOKEN` rather than retrying without credentials. Unset `GH_TOKEN` to
+read without credentials.
 
-Anonymous and CLI access use separate cache scopes. Retained data belongs to
-the current operating system user and stays available locally after the
-original read. Reuse does not confirm the current GitHub login or repository
-permission. Use `--refresh` when a fresh source access check is required.
-No credential or token is stored in the metadata cache.
+Site Ops does not read tokens that GitHub CLI stores. It also ignores
+`GITHUB_TOKEN`, which Codespaces and other tools set automatically. To use
+the token in `GITHUB_TOKEN`, choose it explicitly:
 
-The GitHub CLI executable is resolved only from absolute PATH entries, not
-implicitly from the content directory. Because `gh api` can follow redirects,
-authenticated reads also confirm the repository's returned identity. A moved
-repository requires its current owner and name rather than a silent switch.
+```bash
+export GH_TOKEN="$GITHUB_TOKEN"
+```
+
+See GitHub's
+[rate limits for the REST API](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api).
+
+Direct `--source SOURCE@RELEASE` and `project pin` read release metadata
+through the API, then download the workspace descriptor, package and proof
+from the release download URL,
+`https://github.com/<owner>/<repository>/releases/download/<tag>/<file>`.
+These downloads send no credentials and do not count toward the API limit.
+Each file must match the size and SHA-256 that the API reports for that
+release asset before Site Ops uses it.
+
+To browse a private repository, set `GH_TOKEN` to a token that can read it.
+Package downloads send no credentials, so an acquired package must come from
+a public repository.
+
+Reads without credentials and reads with `GH_TOKEN` use separate cache
+scopes. Retained data belongs to the current operating system user and stays
+available locally after the original read. Reuse relies on that earlier read.
+Use `--refresh` when a fresh source access check is required. No credential
+or token is stored in the metadata cache.
+
+Site Ops rejects API redirects, so a moved repository requires its current
+owner and name.
 
 Source access is separate from permission to deploy Azure or Kubernetes
-resources. Error responses and tool output are not echoed as raw diagnostics.
+resources. Error responses are not echoed as raw diagnostics.
 Oversized or truncated responses fail explicitly.
 
 ## Understand what the preview establishes
@@ -149,8 +178,9 @@ effective Site inputs, deployment authorization or workload health.
 
 Remote cards intentionally omit authored targeting from the public index.
 They report that targeting is unavailable rather than claiming that no
-selector or Sites were declared. They also omit executable plan/deploy suggestions because this
-command has not acquired a complete deployable workspace.
+selector or Sites were declared. They also omit plan and deploy commands,
+because remote browsing reads published descriptions only. Deployment
+downloads and verifies the package.
 
 Read the operator guide at the displayed revision. With an approved source
 that you enrolled independently and a published release,

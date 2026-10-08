@@ -24,8 +24,9 @@ Site Ops, the CLI that runs them across your selected Sites.
 - **See what happened at each Site.** Run Sites concurrently with failure
   isolation, and distinguish completed, failed, and skipped operations.
 
-The same workspace and commands work locally and in CI/CD. Site Ops runs on
-demand, with no persistent orchestration service to operate.
+The same `plan` and `deploy` commands run locally and in CI/CD, where the
+shipped pipelines select a workspace in your repository with `-w`. Site Ops
+runs on demand, with no persistent orchestration service to operate.
 
 ## Scale Kit and Site Ops
 

@@ -132,16 +132,18 @@ GitHub metadata authentication.
 
 The internal `download_workspace_release` context resolves a GitHub release,
 downloads its descriptor and binds the selected workspace before requesting
-the package and proof. Each request addresses the observed asset ID through
-the GitHub API. Download locations are constructed by the adapter rather than
-read from the descriptor, with redirects restricted to the API and supported
-GitHub asset origins.
+the package and proof. Each download uses the release download URL on
+`https://github.com` for the observed tag and asset name, and the asset must
+belong to the observed release snapshot. Its bytes must match the size and
+SHA-256 from the observed asset listing. Download locations are constructed
+by the adapter rather than read from the descriptor, with redirects
+restricted to `https://github.com` and supported GitHub asset origins.
+Release metadata requests to `https://api.github.com` carry `GH_TOKEN` when
+it is set. `GITHUB_TOKEN` is not read, and downloads send no credentials.
 
 Package and proof files remain opaque and available only within that context.
-A failed proof download also cleans up the temporary package. Configured CLI
-authentication is rejected explicitly for this acquisition path rather than
-silently changed to anonymous access. Retained proofs and cache orchestration
-use the internal acquisition boundary below.
+A failed proof download also cleans up the temporary package. Retained proofs
+and cache orchestration use the internal acquisition boundary below.
 
 ## Acquisition and workspace pin reuse
 
@@ -151,7 +153,8 @@ an independently provisioned trusted root. The approved repository, policy
 expiry and root identity are checked before source resolution.
 
 `acquire` resolves the explicit release and its descriptor, then reuses valid
-cached bytes or downloads the missing proof and package by observed asset ID.
+cached bytes or downloads the missing proof and package from the observed
+release.
 The package must pass the existing detached provenance verifier before
 extraction. Source revision, workspace, package identity and version must agree
 with the selection before cache publication.

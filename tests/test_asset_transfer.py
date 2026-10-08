@@ -494,6 +494,7 @@ def test_native_transfer_is_private_opaque_and_independent_of_workspace_imports(
 ):
     origin, _, observed, _ = https_source
     monkeypatch.setenv("GH_TOKEN", "test-source-token")
+    monkeypatch.setenv("GITHUB_TOKEN", "test-source-token")
     monkeypatch.setenv("SSLKEYLOGFILE", str(tmp_path / "tls-keys"))
     monkeypatch.setenv("PYTHONPATH", str(tmp_path))
     (tmp_path / "sitecustomize.py").write_text("raise AssertionError('workspace import')\n")
@@ -511,7 +512,9 @@ def test_native_transfer_is_private_opaque_and_independent_of_workspace_imports(
     argv, kwargs = observed_processes[1][0]
     assert argv == [sys.executable, "-I", "-S", str(transfer._WORKER)]
     assert kwargs["shell"] is False
-    assert all(key.lower() not in {"gh_token", "pythonpath", "sslkeylogfile"} for key in kwargs["env"])
+    assert all(
+        key.lower() not in {"gh_token", "github_token", "pythonpath", "sslkeylogfile"} for key in kwargs["env"]
+    )
     assert len(observed) == 1
     assert "Authorization" not in observed[0][1]
     assert observed[0][1]["Accept-Encoding"] == "identity"

@@ -39,7 +39,7 @@ class CachedGitHubClient:
         self.observation: SourceObservation | None = None
         self._scope = json.dumps({
             "repository": f"{self.reference.owner}/{self.reference.repository}".casefold(),
-            "access": client.auth,
+            "access": client.access,
         }, sort_keys=True, separators=(",", ":"))
 
     def _key(self, kind: str, identity: str) -> MetadataKey:

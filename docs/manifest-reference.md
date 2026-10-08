@@ -55,11 +55,16 @@ field under `spec`.
 
 ## Site selection
 
+Site Ops uses the first present source in this order: CLI `-l`, then the
+manifest's `sites:`, then its `selector:`. A manifest that sets both
+`sites:` and `selector:` targets the listed Sites without applying the
+selector.
+
 | Method | Behavior |
 |--------|----------|
+| CLI `-l` flag | Overrides `sites:` and `selector:`. Repeatable. `name=` may carry multiple values (combined with OR) |
 | `sites:` list | Deploy to named Sites only |
 | `selector:` | Deploy to all Sites matching label |
-| CLI `-l` flag | Overrides manifest selection. Repeatable. `name=` may carry multiple values (combined with OR) |
 
 ```bash
 # Overrides manifest selection, deploys to all prod sites.

@@ -1527,9 +1527,11 @@ def test_generated_bootstrap_entries_bind_the_full_selection(candidate, runner, 
     enrollment = f"```console\nsiteops source enroll example --source github:{REPO}\n```"
     if caller == "release.yaml":
         assert notes.index("```powershell") < notes.index(enrollment) < notes.index("<details>")
-        assert "renew the 30 day approval" in notes
+        assert "### Enroll the content source" in notes
+        assert "renew the 30 day enrollment" in notes
+        assert "approval" not in notes.split("<details>", 1)[0]
     else:
-        assert "### Approve the content source" not in notes and "source enroll" not in notes.split("<details>", 1)[0]
+        assert "### Enroll the content source" not in notes and "source enroll" not in notes.split("<details>", 1)[0]
 
 
 @pytest.mark.parametrize(("repository", "ref", "builder", "runner_class", "expected"), [
@@ -1552,6 +1554,30 @@ def test_source_enrollment_matches_the_standard_release_policy_only(
 ):
     identity = f"https://github.com/{repository}/.github/workflows/{builder}@{ref}"
     assert renderer.source_enrollment(repository, ref, identity, runner_class) == expected
+
+
+@pytest.mark.parametrize(("workspaces", "enrollment", "expected"), [
+    (["workspaces/iot-operations"], "siteops source enroll official",
+     'siteops deploy aio-install --source "official@v1.0.0b7" --input "cluster=<Arc-cluster-resource-ID>"'),
+    (["workspaces/iot-operations"], "siteops source enroll contoso --source github:contoso/kit",
+     'siteops deploy aio-install --source "contoso@v1.0.0b7" --input "cluster=<Arc-cluster-resource-ID>"'),
+    (["workspaces/iot-operations", "workspaces/other"], None,
+     'siteops -w workspaces/iot-operations deploy aio-install --source "<approved-source>@v1.0.0b7" '
+     '--input "cluster=<Arc-cluster-resource-ID>"'),
+    (["workspaces/other"], "siteops source enroll official",
+     'siteops deploy <manifest> --source "official@v1.0.0b7" --input-file <answers.yaml>'),
+])
+def test_workspace_notes_lead_with_one_deploy_command_for_the_enrolled_name(
+    renderer, workspaces, enrollment, expected,
+):
+    plan = {
+        "release": {"tag": "v1.0.0b7"},
+        "workspaces": [
+            {"workspace": path, "id": "azure.iot-operations" if path.endswith("iot-operations") else "other.kit"}
+            for path in workspaces
+        ],
+    }
+    assert renderer.workspace_deploy_command(plan, enrollment) == expected
 
 
 @pytest.mark.parametrize("builder", [
@@ -1577,7 +1603,7 @@ def test_hosted_runner_notes_do_not_offer_incompatible_bootstrap(candidate, runn
     assert "uv tool install" in notes
     assert "```bash" not in notes and "```powershell" not in notes
     assert "bootstrap requires the approved `self-hosted` provenance policy" in notes
-    assert "### Approve the content source" not in notes
+    assert "### Enroll the content source" not in notes
 
 
 @pytest.mark.parametrize("case", [
@@ -1804,6 +1830,17 @@ def test_complete_workspace_candidate_reaches_only_the_approved_publication_set(
     assert "## Workspace content" in notes and "siteops-workspaces.json" in notes
     assert f"https://github.com/{REPO}/blob/{SHA}/docs/projects.md#run-project-pin" in notes
     assert "`siteops project pin` with `--release`" in notes
+    workspace_section = notes.split("## Workspace content", 1)[1]
+    tag = candidate["plan"]["release"]["tag"]
+    deploy = f'siteops deploy <manifest> --source "example@{tag}" --input-file <answers.yaml>'
+    assert workspace_section.index(deploy) < workspace_section.index("For a repeatable fleet")
+    if not built:
+        assert f"```console\nsiteops source enroll example --source github:{REPO}\n{deploy}\n```" in notes
+    assert workspace_section.rstrip().endswith(
+        "Workspace qualification used the selected installed engine to check package "
+        "compatibility, protected cache use, and guarded catalog loading."
+    )
+    assert "did not" not in workspace_section and "authorize targets" not in notes
     (root / "release-bundle").rename(root / "review-native")
     candidate["native_directory"] = "review-native"
     shutil.copytree(root / "release-payload", root / "release-bundle")

@@ -293,7 +293,7 @@ function Test-Verify {
         assert not (tmp_path / "tools" / "siteops").exists()
         return
     assert first.returncode == 0, first.stdout + first.stderr
-    assert f"Installed siteops {manifest.version}" in first.stdout
+    assert f"Installed Site Ops {manifest.version}" in first.stdout
     receipt = tmp_path / "tools" / "siteops" / "uv-receipt.toml"
     identity = receipt.stat().st_mtime_ns, receipt.read_bytes()
     assert log.read_text().splitlines().count("download") == 4

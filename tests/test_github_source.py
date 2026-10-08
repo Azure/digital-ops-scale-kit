@@ -5,9 +5,10 @@ import base64
 import hashlib
 import io
 import json
-import os
 import subprocess
 import urllib.error
+import urllib.parse
+import urllib.request
 
 import pytest
 
@@ -45,6 +46,12 @@ def _no_unexpected_external_calls(monkeypatch):
 
     monkeypatch.setattr(github_source.urllib.request, "build_opener", blocked)
     monkeypatch.setattr(github_source.subprocess, "Popen", blocked)
+
+
+@pytest.fixture(autouse=True)
+def _no_host_token(monkeypatch):
+    for name in ("GH_TOKEN", "GITHUB_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.mark.parametrize(
@@ -107,10 +114,10 @@ def test_reference_rejects_invalid_refs(ref):
 def test_constructor_is_side_effect_free_and_keeps_reference():
     reference = GitHubReference.parse("github:owner/repo")
 
-    client = GitHubClient(reference, auth="cli")
+    client = GitHubClient(reference)
 
     assert client.reference is reference
-    assert client.auth == "cli"
+    assert client.access == "anonymous"
 
 
 def test_resolve_commit_uses_repository_default_branch_and_encoded_route():
@@ -413,6 +420,8 @@ def test_anonymous_transport_uses_fixed_headers_host_timeout_and_no_redirects(mo
     assert response.timeout == github_source._NETWORK_TIMEOUT_SECONDS
     assert any(isinstance(handler, urllib.request.ProxyHandler) for handler in observed_handlers)
     assert any(isinstance(handler, github_source._RejectRedirects) for handler in observed_handlers)
+    assert not response.request.has_header("Authorization")
+    assert client.access == "anonymous"
 
 
 @pytest.mark.parametrize(
@@ -514,12 +523,8 @@ class _Process:
         return self.returncode
 
 
-def _install_cli(monkeypatch, tmp_path, process):
-    executable = tmp_path / "gh.exe"
-    executable.write_bytes(b"test")
+def _install_process(monkeypatch, process):
     calls = []
-
-    monkeypatch.setattr(github_source, "resolve_tool_from_path", lambda _name: str(executable))
 
     def popen(argv, **kwargs):
         calls.append((argv, kwargs))
@@ -529,109 +534,19 @@ def _install_cli(monkeypatch, tmp_path, process):
     return calls
 
 
-def _included(status, payload=b"{}", reason=b"OK"):
-    return b"HTTP/2.0 " + str(status).encode() + b" " + reason + b"\r\nX-Test: 1\r\n\r\n" + payload
+def test_github_cli_runs_without_a_shell_and_returns_its_output(monkeypatch):
+    calls = _install_process(monkeypatch, _Process(b"verified", stderr=b"note"))
 
-
-def test_cli_transport_uses_absolute_argv_and_parses_bounded_json(monkeypatch, tmp_path):
-    process = _Process(_included(200, b'{"sha":"' + COMMIT.encode() + b'"}'))
-    calls = _install_cli(monkeypatch, tmp_path, process)
-    client = GitHubClient(GitHubReference.parse("github:owner/repo", "main"), auth="cli")
-
-    assert client._request("/repos/owner/repo/commits/main")["sha"] == COMMIT
+    assert github_source._run_gh(["gh", "version"]) == (0, b"verified", b"note")
     argv, kwargs = calls[0]
-    assert argv[0] == str((tmp_path / "gh.exe").resolve())
-    assert argv[1:6] == ["api", "--hostname", "github.com", "--method", "GET"]
-    assert argv[-1] == "/repos/owner/repo/commits/main"
-    assert "auth" not in argv
+    assert argv == ["gh", "version"]
     assert kwargs["shell"] is False
     assert kwargs["stdin"] is subprocess.DEVNULL
     assert kwargs["stdout"] is subprocess.PIPE
     assert kwargs["stderr"] is subprocess.PIPE
 
 
-@pytest.mark.parametrize(
-    ("status", "stderr", "code"),
-    [
-        (401, b"secret token rejected", "github.auth"),
-        (403, b"API rate limit exceeded for secret identity", "github.rate-limit"),
-        (404, b"private repository name", "github.not-found"),
-        (503, b"internal payload", "github.network"),
-    ],
-)
-def test_cli_transport_maps_http_failures_without_exposing_stderr(
-    monkeypatch, tmp_path, status, stderr, code
-):
-    headers = b"X-RateLimit-Remaining: 0\r\n" if code == "github.rate-limit" else b""
-    output = (
-        b"HTTP/2.0 "
-        + str(status).encode()
-        + b" Error\r\n"
-        + headers
-        + b"\r\n{}"
-    )
-    process = _Process(output, stderr=stderr, returncode=1)
-    _install_cli(monkeypatch, tmp_path, process)
-    client = GitHubClient(GitHubReference.parse("github:owner/repo"), auth="cli")
-
-    with pytest.raises(BrowseError) as error:
-        client._request("/repos/owner/repo")
-
-    _assert_code(error, code)
-    assert stderr.decode() not in str(error.value)
-
-
-@pytest.mark.parametrize(
-    ("stderr", "code"),
-    [
-        (b"please run gh auth login with secret", "github.auth"),
-        (b"request timed out after secret", "github.timeout"),
-        (b"connection failed with secret", "github.network"),
-        (b"gh: Not Found (HTTP 404) secret", "github.not-found"),
-    ],
-)
-def test_cli_transport_classifies_failures_without_included_headers(
-    monkeypatch, tmp_path, stderr, code
-):
-    process = _Process(b"", stderr=stderr, returncode=1)
-    _install_cli(monkeypatch, tmp_path, process)
-    client = GitHubClient(GitHubReference.parse("github:owner/repo"), auth="cli")
-
-    with pytest.raises(BrowseError) as error:
-        client._request("/repos/owner/repo")
-
-    _assert_code(error, code)
-    assert b"secret" not in str(error.value).encode()
-
-
-def test_cli_transport_reports_missing_tool_without_fallback(monkeypatch):
-    monkeypatch.setattr(github_source, "resolve_tool_from_path", lambda _name: None)
-    client = GitHubClient(GitHubReference.parse("github:owner/repo"), auth="cli")
-
-    with pytest.raises(BrowseError) as error:
-        client._request("/repos/owner/repo")
-
-    _assert_code(error, "github.tool-missing")
-
-
-def test_cli_transport_reports_executable_start_failure(monkeypatch, tmp_path):
-    executable = tmp_path / "gh.exe"
-    executable.write_bytes(b"test")
-    monkeypatch.setattr(github_source, "resolve_tool_from_path", lambda _name: str(executable))
-    monkeypatch.setattr(
-        github_source.subprocess,
-        "Popen",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(FileNotFoundError()),
-    )
-    client = GitHubClient(GitHubReference.parse("github:owner/repo"), auth="cli")
-
-    with pytest.raises(BrowseError) as error:
-        client._request("/repos/owner/repo")
-
-    _assert_code(error, "github.tool-missing")
-
-
-def test_cli_transport_runs_gh_without_telemetry(monkeypatch):
+def test_github_cli_runs_without_telemetry_and_reports_start_failure(monkeypatch):
     started = {}
 
     def refuse(*_args, **kwargs):
@@ -640,67 +555,47 @@ def test_cli_transport_runs_gh_without_telemetry(monkeypatch):
 
     monkeypatch.setenv("GH_TELEMETRY", "enabled")
     monkeypatch.setattr(github_source.subprocess, "Popen", refuse)
-    with pytest.raises(BrowseError):
+    with pytest.raises(BrowseError) as error:
         github_source._run_gh(["gh", "version"])
 
+    _assert_code(error, "github.tool-missing")
     assert started["env"]["GH_TELEMETRY"] == "false"
 
 
-def test_cli_transport_rejects_redirects_and_invalid_json(monkeypatch, tmp_path):
-    process = _Process(_included(302, b"secret redirect"))
-    _install_cli(monkeypatch, tmp_path, process)
-    client = GitHubClient(GitHubReference.parse("github:owner/repo"), auth="cli")
-    with pytest.raises(BrowseError) as error:
-        client._request("/repos/owner/repo")
-    _assert_code(error, "github.redirect")
-
-    process.stdout = io.BytesIO(_included(200, b"not json"))
-    process.stderr = io.BytesIO()
-    with pytest.raises(BrowseError) as error:
-        client._request("/repos/owner/repo")
-    _assert_code(error, "github.invalid-data")
-
-
-def test_cli_transport_bounds_stdout_stderr_and_elapsed_time(monkeypatch, tmp_path):
+def test_github_cli_bounds_stdout_stderr_and_elapsed_time(monkeypatch):
     monkeypatch.setattr(github_source, "_MAX_RESPONSE_BYTES", 4)
-    process = _Process(b"more than four")
-    _install_cli(monkeypatch, tmp_path, process)
-    client = GitHubClient(GitHubReference.parse("github:owner/repo"), auth="cli")
+    _install_process(monkeypatch, _Process(b"more than four"))
     with pytest.raises(BrowseError) as error:
-        client._request("/repos/owner/repo")
+        github_source._run_gh(["gh", "attestation"])
     _assert_code(error, "github.response-limit")
 
     monkeypatch.setattr(github_source, "_MAX_RESPONSE_BYTES", 8 * 1024 * 1024)
     monkeypatch.setattr(github_source, "_MAX_STDERR_BYTES", 4)
-    process.stdout = io.BytesIO(b"")
-    process.stderr = io.BytesIO(b"secret stderr")
-    process.returncode = 1
+    _install_process(monkeypatch, _Process(b"", stderr=b"secret stderr", returncode=1))
     with pytest.raises(BrowseError) as error:
-        client._request("/repos/owner/repo")
+        github_source._run_gh(["gh", "attestation"])
     _assert_code(error, "github.response-limit")
     assert "secret" not in str(error.value)
 
     monkeypatch.setattr(github_source, "_MAX_STDERR_BYTES", 64 * 1024)
-    monkeypatch.setattr(github_source, "_CLI_TIMEOUT_SECONDS", 0.01)
     hanging = _Process(b"", hangs=True)
-    _install_cli(monkeypatch, tmp_path, hanging)
+    _install_process(monkeypatch, hanging)
     with pytest.raises(BrowseError) as error:
-        client._request("/repos/owner/repo")
+        github_source._run_gh(["gh", "attestation"], timeout=0.01)
     _assert_code(error, "github.timeout")
     assert hanging.terminated
 
 
-def test_cli_cancellation_terminates_the_owned_process(monkeypatch, tmp_path):
+def test_github_cli_cancellation_terminates_the_owned_process(monkeypatch):
     process = _Process(b"", hangs=True)
-    _install_cli(monkeypatch, tmp_path, process)
+    _install_process(monkeypatch, process)
 
     def cancel(_seconds):
         raise KeyboardInterrupt
 
     monkeypatch.setattr(github_source.time, "sleep", cancel)
-    client = GitHubClient(GitHubReference.parse("github:owner/repo"), auth="cli")
     with pytest.raises(KeyboardInterrupt):
-        client.resolve_commit()
+        github_source._run_gh(["gh", "attestation"])
     assert process.terminated or process.killed
 
 
@@ -721,66 +616,237 @@ def test_api_json_rejects_duplicate_identity_fields(monkeypatch):
     _assert_code(error, "github.invalid-data")
 
 
-def test_gh_resolution_ignores_cwd_and_relative_path_entries(tmp_path, monkeypatch):
-    cwd = tmp_path / "content"
-    trusted = tmp_path / "tools"
-    cwd.mkdir()
-    trusted.mkdir()
-    filename = "gh.exe" if os.name == "nt" else "gh"
-    for root in (cwd, trusted):
-        executable = root / filename
-        executable.write_bytes(b"fixture")
-        executable.chmod(0o755)
-    monkeypatch.chdir(cwd)
-    monkeypatch.setenv("PATH", os.pathsep.join((".", str(trusted))))
-    monkeypatch.setenv("PATHEXT", ".EXE")
-    assert github_source._resolve_gh() == str((trusted / filename).resolve())
-
-
-@pytest.mark.parametrize("ref", [None, "main"])
-def test_authenticated_resolution_rejects_a_followed_repository_transfer(ref):
-    calls = []
-
-    def transport(route):
-        calls.append(route)
-        if route == "/repos/owner/repo":
-            return {"full_name": "other/transferred", "default_branch": "main"}
-        return {"sha": COMMIT}
-
-    client = GitHubClient(GitHubReference("owner", "repo", ref), auth="cli", transport=transport)
-    with pytest.raises(BrowseError) as failure:
-        client.resolve_commit()
-    assert failure.value.diagnostic.code == "github.repository-moved"
-    assert calls == ["/repos/owner/repo"]
-
-
-def test_authenticated_resolution_accepts_the_same_repository_identity():
-    calls = []
-
-    def transport(route):
-        calls.append(route)
-        if route == "/repos/owner/repo":
-            return {"full_name": "Owner/Repo", "default_branch": "main"}
-        return {"sha": COMMIT}
-
-    client = GitHubClient(
-        GitHubReference("owner", "repo", "main"), auth="cli", transport=transport
-    )
-    assert client.resolve_commit() == COMMIT
-    assert calls == ["/repos/owner/repo", "/repos/owner/repo/commits/main"]
-
-
-def test_live_cli_output_limit_terminates_then_kills_when_needed(monkeypatch, tmp_path):
+def test_github_cli_output_limit_terminates_then_kills_when_needed(monkeypatch):
     class Uncooperative(_Process):
         def terminate(self):
             self.terminated = True
             raise OSError("fixture")
 
     process = Uncooperative(b"too much output", hangs=True)
-    _install_cli(monkeypatch, tmp_path, process)
+    _install_process(monkeypatch, process)
     monkeypatch.setattr(github_source, "_MAX_RESPONSE_BYTES", 4)
-    client = GitHubClient(GitHubReference("owner", "repo"), auth="cli")
     with pytest.raises(BrowseError) as failure:
-        client._request("/repos/owner/repo")
+        github_source._run_gh(["gh", "attestation"])
     assert failure.value.diagnostic.code == "github.response-limit"
     assert process.terminated and process.killed
+
+
+TOKEN = "ghp_SyntheticSentinelValue0123456789"
+NOW = 1_800_000_000
+ANONYMOUS_LIMIT = (
+    "GitHub API rate limit was reached. It resets at 08:23 UTC (in 23 minutes). Retry after that time, "
+    "or set GH_TOKEN to a GitHub token with public read access, for example "
+    "`export GH_TOKEN=$(gh auth token)`."
+)
+
+
+def _capture_opener(monkeypatch, result):
+    opener = _Opener(result)
+    monkeypatch.setattr(github_source.urllib.request, "build_opener", lambda *_handlers: opener)
+    return opener
+
+
+@pytest.mark.parametrize("variables", [
+    {"GH_TOKEN": TOKEN},
+    {"GH_TOKEN": f"  {TOKEN}\n"},
+    {"GH_TOKEN": TOKEN, "GITHUB_TOKEN": "other-token"},
+])
+def test_environment_token_is_sent_only_as_an_unredirected_api_header(monkeypatch, variables):
+    for name, value in variables.items():
+        monkeypatch.setenv(name, value)
+    url = "https://api.github.com/repos/owner/repo"
+    response = _Response(url, b"{}")
+    _capture_opener(monkeypatch, response)
+    client = GitHubClient(GitHubReference.parse("github:owner/repo"))
+
+    assert client._request("/repos/owner/repo") == {}
+    request = response.request
+    assert urllib.parse.urlsplit(request.full_url).hostname == "api.github.com"
+    assert request.unredirected_hdrs == {"Authorization": f"Bearer {TOKEN}"}
+    assert "Authorization" not in request.headers
+    assert client.access == "token"
+    assert TOKEN not in repr(client._token) and TOKEN not in repr(vars(client))
+
+
+@pytest.mark.parametrize("value", [TOKEN, "not a valid token"])
+def test_github_token_alone_is_not_read_or_sent(monkeypatch, value):
+    monkeypatch.setenv("GITHUB_TOKEN", value)
+    url = "https://api.github.com/repos/owner/repo"
+    response = _Response(url, b"{}")
+    _capture_opener(monkeypatch, response)
+    client = GitHubClient(GitHubReference.parse("github:owner/repo"))
+
+    assert client._request("/repos/owner/repo") == {}
+    assert client.access == "anonymous" and client._token is None
+    assert not response.request.has_header("Authorization")
+    assert response.request.unredirected_hdrs == {}
+    assert all(value not in item for _, item in response.request.header_items())
+
+
+def test_environment_token_is_not_copied_to_a_redirected_request(monkeypatch):
+    monkeypatch.setenv("GH_TOKEN", TOKEN)
+    url = "https://api.github.com/repos/owner/repo"
+    response = _Response(url, b"{}")
+    _capture_opener(monkeypatch, response)
+    GitHubClient(GitHubReference.parse("github:owner/repo"))._request("/repos/owner/repo")
+
+    followed = urllib.request.HTTPRedirectHandler().redirect_request(
+        response.request, io.BytesIO(), 302, "Found", {}, "https://objects.githubusercontent.com/x",
+    )
+    assert followed is not None
+    assert not followed.has_header("Authorization")
+    assert github_source._RejectRedirects().redirect_request(
+        response.request, io.BytesIO(), 302, "Found", {}, "https://example.com/x",
+    ) is None
+
+
+def test_redirect_with_environment_token_is_rejected_without_a_second_request(monkeypatch):
+    monkeypatch.setenv("GH_TOKEN", TOKEN)
+    url = "https://api.github.com/repos/owner/repo"
+    redirect = urllib.error.HTTPError(url, 302, "Found", {"Location": "https://example.com/x"}, io.BytesIO())
+    opener = _capture_opener(monkeypatch, redirect)
+    opened = []
+    original = opener.open
+    opener.open = lambda request, timeout: opened.append(request) or original(request, timeout)
+
+    with pytest.raises(BrowseError) as error:
+        GitHubClient(GitHubReference.parse("github:owner/repo"))._request("/repos/owner/repo")
+
+    _assert_code(error, "github.redirect")
+    assert len(opened) == 1
+
+
+def test_environment_token_is_never_sent_to_another_host(monkeypatch):
+    monkeypatch.setenv("GH_TOKEN", TOKEN)
+    monkeypatch.setattr(github_source, "_API_ROOT", "https://example.com")
+    client = GitHubClient(GitHubReference.parse("github:owner/repo"))
+    with pytest.raises(BrowseError) as error:
+        client._request("/repos/owner/repo")
+    _assert_code(error, "github.invalid-data")
+    assert TOKEN not in str(error.value)
+
+
+def test_injected_transport_does_not_read_the_environment_token(monkeypatch):
+    monkeypatch.setenv("GH_TOKEN", TOKEN)
+    routes = []
+    client = GitHubClient(GitHubReference("owner", "repo"), transport=lambda route: routes.append(route) or {})
+    assert client.access == "anonymous"
+    client._request("/repos/owner/repo")
+    assert routes == ["/repos/owner/repo"]
+
+
+@pytest.mark.parametrize("value", [f"{TOKEN} extra", f"{TOKEN}\nX-Injected: 1", "t\u00f6ken", "x" * 4097])
+def test_invalid_environment_token_names_the_variable_without_its_value(monkeypatch, value):
+    monkeypatch.setenv("GH_TOKEN", value)
+    with pytest.raises(BrowseError) as error:
+        GitHubClient(GitHubReference("owner", "repo"))
+    _assert_code(error, "github.auth")
+    assert str(error.value) == "GH_TOKEN must contain one GitHub token without spaces or control characters."
+    assert value not in str(error.value) and TOKEN not in str(error.value)
+
+
+@pytest.mark.parametrize(("failure", "code"), [
+    (urllib.error.HTTPError("https://api.github.com/x", 401, TOKEN, {}, io.BytesIO()), "github.auth"),
+    (urllib.error.HTTPError("https://api.github.com/x", 403, TOKEN, {}, io.BytesIO()), "github.auth"),
+    (urllib.error.HTTPError("https://api.github.com/x", 404, TOKEN, {}, io.BytesIO()), "github.not-found"),
+    (urllib.error.HTTPError(
+        "https://api.github.com/x", 403, TOKEN,
+        {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": str(NOW + 23 * 60)}, io.BytesIO(),
+    ), "github.rate-limit"),
+    (urllib.error.HTTPError("https://api.github.com/x", 503, TOKEN, {}, io.BytesIO()), "github.network"),
+    (urllib.error.URLError(TOKEN), "github.network"),
+    (TimeoutError(TOKEN), "github.timeout"),
+])
+def test_environment_token_never_appears_in_errors_or_logs(monkeypatch, caplog, failure, code):
+    caplog.set_level("DEBUG")
+    monkeypatch.setenv("GH_TOKEN", TOKEN)
+    monkeypatch.setenv("GITHUB_TOKEN", "ghs_SyntheticAutomaticSentinel")
+    monkeypatch.setattr(github_source.time, "time", lambda: NOW)
+    _capture_opener(monkeypatch, failure)
+    with pytest.raises(BrowseError) as error:
+        GitHubClient(GitHubReference.parse("github:owner/repo"))._request("/repos/owner/repo")
+    _assert_code(error, code)
+    for text in (str(error.value), repr(error.value), json.dumps(error.value.diagnostic.document()), caplog.text):
+        assert TOKEN not in text and "ghs_SyntheticAutomaticSentinel" not in text
+    assert error.value.__cause__ is None and error.value.__suppress_context__
+
+
+@pytest.mark.parametrize("variables", [{"GH_TOKEN": TOKEN}, {"GH_TOKEN": TOKEN, "GITHUB_TOKEN": "other-token"}])
+def test_rejected_environment_token_names_gh_token_without_falling_back(monkeypatch, variables):
+    for name, value in variables.items():
+        monkeypatch.setenv(name, value)
+    opener = _capture_opener(monkeypatch, urllib.error.HTTPError(
+        "https://api.github.com/x", 401, "Bad credentials", {}, io.BytesIO(),
+    ))
+    opened = []
+    original = opener.open
+    opener.open = lambda request, timeout: opened.append(request) or original(request, timeout)
+    with pytest.raises(BrowseError) as error:
+        GitHubClient(GitHubReference.parse("github:owner/repo"))._request("/repos/owner/repo")
+    assert str(error.value) == (
+        "GitHub did not accept the token in GH_TOKEN for this read. Use a token that can read the "
+        "repository, or unset GH_TOKEN to read public sources anonymously."
+    )
+    assert len(opened) == 1
+
+
+@pytest.mark.parametrize(("status", "headers"), [
+    (403, {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": str(NOW + 23 * 60)}),
+    (429, {"x-ratelimit-reset": str(NOW + 23 * 60)}),
+])
+def test_anonymous_rate_limit_reports_reset_time_and_token_option(monkeypatch, status, headers):
+    monkeypatch.setattr(github_source.time, "time", lambda: NOW)
+    _capture_opener(monkeypatch, urllib.error.HTTPError(
+        "https://api.github.com/x", status, "rate limited", headers, io.BytesIO(),
+    ))
+    with pytest.raises(BrowseError) as error:
+        GitHubClient(GitHubReference.parse("github:owner/repo"))._request("/repos/owner/repo")
+    _assert_code(error, "github.rate-limit")
+    assert str(error.value) == ANONYMOUS_LIMIT
+
+
+def test_rate_limit_suggests_choosing_an_automatic_github_token_without_printing_it(monkeypatch):
+    sentinel = "ghs_SyntheticAutomaticSentinel"
+    monkeypatch.setenv("GITHUB_TOKEN", sentinel)
+    monkeypatch.setattr(github_source.time, "time", lambda: NOW)
+    opener = _capture_opener(monkeypatch, urllib.error.HTTPError(
+        "https://api.github.com/x", 403, "rate limited",
+        {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": str(NOW + 23 * 60)}, io.BytesIO(),
+    ))
+    opened = []
+    original = opener.open
+    opener.open = lambda request, timeout: opened.append(request) or original(request, timeout)
+    with pytest.raises(BrowseError) as error:
+        GitHubClient(GitHubReference.parse("github:owner/repo"))._request("/repos/owner/repo")
+    assert str(error.value) == (
+        "GitHub API rate limit was reached. It resets at 08:23 UTC (in 23 minutes). Retry after that time, "
+        'or use the token in GITHUB_TOKEN for Site Ops with `export GH_TOKEN="$GITHUB_TOKEN"`.'
+    )
+    assert sentinel not in json.dumps(error.value.diagnostic.document())
+    assert not opened[0].has_header("Authorization")
+
+
+@pytest.mark.parametrize(("headers", "token", "expected"), [
+    ({"retry-after": "90"}, False,
+     "GitHub API rate limit was reached. It resets at 08:02 UTC (in 2 minutes). Retry after that time, "
+     "or set GH_TOKEN to a GitHub token with public read access, for example "
+     "`export GH_TOKEN=$(gh auth token)`."),
+    ({}, False,
+     "GitHub API rate limit was reached. Retry later, or set GH_TOKEN to a GitHub token with public "
+     "read access, for example `export GH_TOKEN=$(gh auth token)`."),
+    ({"x-ratelimit-reset": "not-a-time"}, True,
+     "GitHub API rate limit was reached for the token in GH_TOKEN. Retry later."),
+    ({"x-ratelimit-reset": str(NOW + 30)}, True,
+     "GitHub API rate limit was reached for the token in GH_TOKEN. "
+     "It resets at 08:01 UTC (in 1 minute). Retry after that time."),
+    ({"x-ratelimit-reset": str(NOW - 10)}, True,
+     "GitHub API rate limit was reached for the token in GH_TOKEN. "
+     "It resets at 08:00 UTC. Retry after that time."),
+    ({"x-ratelimit-reset": str(NOW + 3 * 24 * 60 * 60)}, True,
+     "GitHub API rate limit was reached for the token in GH_TOKEN. Retry later."),
+])
+def test_rate_limit_summary_variants(monkeypatch, headers, token, expected):
+    monkeypatch.setattr(github_source.time, "time", lambda: NOW)
+    error = github_source._classify_status(429, headers, token=token)
+    assert error.diagnostic.code == "github.rate-limit"
+    assert str(error) == expected

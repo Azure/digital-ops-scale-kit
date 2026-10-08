@@ -18,7 +18,10 @@ from siteops.terminal import wrap as _wrap
 _PLAIN_WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
 _ITEM = f"  {BULLET} "
 _MIN_SUMMARY_WIDTH = 24
-_RESOURCE_LABELS = {"microsoft.kubernetes/connectedclusters": "Arc-cluster"}
+_RESOURCE_LABELS = {
+    "microsoft.kubernetes/connectedclusters": "Arc-cluster",
+    "microsoft.iotoperations/instances": "AIO-instance",
+}
 
 
 def _prose(value: str) -> list[str]:
@@ -152,8 +155,9 @@ def _card(
     if entry.sites:
         lines.extend(_wrap("Named Sites: " + ", ".join(_text(site) for site in entry.sites)))
     if entry.targeting_known and not entry.selector and not entry.sites:
-        lines.append("  No targets declared. Supply an explicit selector when planning.")
-    lines.append("  Targets have not been resolved. A CLI selector replaces manifest targeting.")
+        lines.extend(_wrap("No Sites or selector declared. Pass -l or typed inputs when planning."))
+    else:
+        lines.extend(_wrap("`siteops plan` selects Sites from the manifest targeting. -l or typed inputs replace it."))
     lines.extend(("", "Authored Site input guidance (descriptive only)"))
     if guidance.inputs is None:
         lines.append("  Input guidance is not documented. This does not mean no inputs are required.")
@@ -178,7 +182,7 @@ def _card(
             lines.extend(_typed_inputs_line(entry, target))
     elif guidance.role == "standalone":
         lines.extend((
-            "", "Remote metadata cannot validate typed inputs.",
+            "", "Typed inputs are checked when you run `siteops inputs`, `plan` or `deploy`.",
         ))
         lines.extend(_wrap(
             "Pin a release from an approved source or choose reviewed local content before "
@@ -206,9 +210,11 @@ def _card(
     lines.extend(_prose(guidance.coverage or "Unknown. Missing guidance is not an empty contract."))
     _section(lines, "Read more", guidance.documentation or None)
     if not local and project is None:
-        lines.extend((
-            "", "Remote preview only. Deployable workspace content has not been acquired.",
-            "Read the pinned guide. Plan and deploy require a complete, reviewed local workspace.",
+        lines.append("")
+        lines.extend(_wrap(
+            "Read the pinned guide. Plan and deploy use a release from an approved source "
+            "or reviewed local content.",
+            indent="",
         ))
     elif project is not None and guidance.role != "standalone":
         lines.extend((
@@ -255,8 +261,9 @@ def render_browse_plain(result: BrowseResult) -> str:
         heading += f"\nProject: {_text(project)}"
     lines = [
         heading,
-        "Private inspection. Package verified. No plan is prepared."
-        if verified else "Private inspection. Package not verified. No plan is prepared.",
+        "Private inspection of a verified package." if verified
+        else "Private inspection of local content." if local
+        else "Private inspection of published descriptions. Deployment verifies the package first.",
         "",
     ]
     if result.selected and len(result.entries) == 1:

@@ -30,10 +30,11 @@ class RenderingError(ValueError):
 
 
 OFFICIAL_REPOSITORY = "Azure/digital-ops-scale-kit"
+AIO_WORKSPACE_ID = "azure.iot-operations"
 
 
 def source_enrollment(repository: str, source_ref: str, builder_identity: str, runner_environment: str) -> str | None:
-    """Return the standard approval command when this build matches the standard release policy."""
+    """Return the standard enrollment command when this build matches the standard release policy."""
     standard_builder = f"https://github.com/{repository}/.github/workflows/release.yaml@refs/heads/main"
     if runner_environment != "self-hosted" or source_ref != "refs/heads/main" or builder_identity != standard_builder:
         return None
@@ -43,6 +44,18 @@ def source_enrollment(repository: str, source_ref: str, builder_identity: str, r
     if re.fullmatch(r"[a-z][a-z0-9-]{0,39}", name) is None:
         name = "publisher"
     return f"siteops source enroll {name} --source github:{repository}"
+
+
+def workspace_deploy_command(plan: dict[str, Any], enrollment: str | None) -> str:
+    """Render the direct deployment command for this release, using the enrollment name shown."""
+    source = enrollment.split()[3] if enrollment else "<approved-source>"
+    selection = f'--source "{source}@{plan["release"]["tag"]}"'
+    requests = plan.get("workspaces") or []
+    aio = next((request for request in requests if request["id"] == AIO_WORKSPACE_ID), None)
+    if aio is None:
+        return f"siteops deploy <manifest> {selection} --input-file <answers.yaml>"
+    workspace = f"-w {aio['workspace']} " if len(requests) > 1 else ""
+    return f'siteops {workspace}deploy aio-install {selection} --input "cluster=<Arc-cluster-resource-ID>"'
 
 
 def bootstrap_commands(
@@ -141,25 +154,38 @@ def render_notes(
     repository = source["repository"]
     home = "https://github.com/" + repository
     notes = authored.rstrip() + "\n\n## Install Site Ops\n\n"
+    enrollment = source_enrollment(repository, source["ref"], builder_identity, runner_environment)
     workspace_notes = ""
     if workspace:
         downloads = home + "/releases/download/" + urllib.parse.quote(plan["release"]["tag"], safe="") + "/"
         project_guide = (
             home + "/blob/" + source["commit"] + "/docs/projects.md#run-project-pin"
         )
+        aio = any(request["id"] == AIO_WORKSPACE_ID for request in plan.get("workspaces") or [])
+        target = (
+            "deploy Azure IoT Operations to an existing cluster connected to Azure Arc"
+            if aio else "deploy a manifest"
+        )
+        commands = [workspace_deploy_command(plan, enrollment)]
+        if enrollment is None:
+            lead = f"After you enroll this publisher with reviewed trust files, {target} directly from this release:"
+        elif engine["bundle"]:
+            lead = f"After you enroll the content source, {target} directly from this release:"
+        else:
+            lead = f"Enroll the content source once, then {target} directly from this release:"
+            commands.insert(0, enrollment)
         workspace_notes = (
             "\n\n## Workspace content\n\n"
             "This release contains complete workspace packages. Each package has a detached "
-            "attestation proof containing signed provenance evidence. "
-            f"Follow the [workspace pin guidance]({project_guide}) to run "
+            "attestation proof containing signed provenance evidence.\n\n"
+            f"{lead}\n\n```console\n" + "\n".join(commands) + "\n```\n\n"
+            f"For a repeatable fleet, follow the [workspace pin guidance]({project_guide}) to run "
             "`siteops project pin` with `--release` for this release. Use an approved source, or "
             "supply the trust policy and trusted roots independently. The routing descriptor "
             "cannot select either.\n\n"
             + "\n".join(f"- [{asset.name}]({downloads}{asset.name})" for asset in workspace)
             + "\n\nWorkspace qualification used the selected installed engine to check package "
-            "compatibility, protected cache use, and guarded catalog loading. It did not compare "
-            "executable deployment plans, authorize targets, deploy resources, or evaluate "
-            "workload health.\n"
+            "compatibility, protected cache use, and guarded catalog loading.\n"
         )
     if not engine["bundle"]:
         tag = engine["releaseTag"]
@@ -227,12 +253,11 @@ def render_notes(
                 "The bootstrap requires the approved `self-hosted` provenance policy. "
                 "Use the release wheel with approved tooling for this runner class.",
             )
-    enrollment = source_enrollment(repository, source["ref"], builder_identity, runner_environment)
-    approve = [
-        "### Approve the content source",
-        "After installing with either route, approve this publisher's content once. "
-        "Run the same command again to renew the 30 day approval. "
-        "Enrollment does not sign in to GitHub or Azure.",
+    enroll = [
+        "### Enroll the content source",
+        "After installing with either route, enroll this publisher's content source once. "
+        "Run the same command again to renew the 30 day enrollment. "
+        "Enrollment works without signing in to GitHub or Azure.",
         f"```console\n{enrollment}\n```",
     ] if enrollment else []
     paragraphs = [
@@ -244,7 +269,7 @@ def render_notes(
         "The command uses uv-managed CPython and can provision it when needed.",
         f"```console\n{command}\n```",
         *bootstrap,
-        *approve,
+        *enroll,
         "<details><summary>Provenance, verification and maintenance</summary>",
         identity + f" Expected provenance runner class: `{runner_environment}`. "
         "The runner class does not identify a particular pool. "
@@ -370,8 +395,7 @@ def render_summary(plan: dict[str, Any], notes: str, values: Mapping[str, str]) 
             "It does not select trust policy or trusted roots.\n",
             "The selected installed engine consumed the frozen workspace packages on every "
             "declared target. Qualification checked package compatibility, protected cache use, "
-            "and guarded catalog loading. It did not compare executable deployment plans, "
-            "authorize targets, deploy resources, or evaluate workload health.\n",
+            "and guarded catalog loading.\n",
             f"[Download the complete release payload]({values['ARTIFACT_URL']})\n",
             f"Frozen publication inventory SHA-256: `{values['ASSET_LIST_SHA']}`",
         ])

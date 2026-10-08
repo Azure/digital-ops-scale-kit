@@ -598,9 +598,11 @@ Inherited values are overridden by child Site values. Nested objects (labels, pa
 
 ## Site selection from a manifest
 
-A manifest's Sites resolve from CLI `-l/--selector` (overrides
-everything), manifest `sites:` (explicit name list), or manifest `selector:`
-(label expression). A manifest with none of these is a library or partial. It
+A manifest's Sites resolve from the first present source in this order: CLI
+`-l/--selector`, manifest `sites:` (explicit name list), then manifest
+`selector:` (label expression). A manifest that sets both `sites:` and
+`selector:` targets the listed Sites without applying the selector. A
+manifest with none of these is a library or partial. It
 can be checked with `validate`, while `plan` and `deploy` require `-l` or one
 explicit Site supplied with `--site-file`, `--input-file`, or `--input`. An
 explicit Site cannot be combined with `-l`.

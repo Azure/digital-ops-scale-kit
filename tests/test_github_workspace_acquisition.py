@@ -54,7 +54,6 @@ def github(tmp_path, monkeypatch):
         datetime(2026, 1, 1, tzinfo=timezone.utc), False, assets,
     )
     client = Mock(spec=GitHubClient)
-    client.auth = "anonymous"
     client.reference = reference
     client.resolve_release.return_value = release
     roots = tmp_path / "roots.jsonl"
@@ -116,7 +115,8 @@ def github(tmp_path, monkeypatch):
 
     @contextmanager
     def download(url, expected, *, origins, staging_parent):
-        assert url.endswith(f"/releases/assets/{next(a.identifier for a in assets if a.name == expected.name)}")
+        assert url == source.release_asset_url(release, next(a for a in assets if a.name == expected.name))
+        assert url.startswith("https://github.com/example/content/releases/download/release-7/")
         assert staging_parent == fixture.cache.root / "staging"
         assert origins == source._ASSET_ORIGINS
         state.downloads.append(expected.name)
@@ -327,15 +327,6 @@ def test_pinned_source_facts_remain_bound_to_policy_and_provenance(github, chang
     assert len(github.downloads) == 3
 
 
-def test_cli_auth_is_not_substituted_during_acquisition(github):
-    github.client.auth = "cli"
-    with pytest.raises(ArtifactError) as caught:
-        github.flow.acquire(github.client)
-    assert caught.value.code == "source.auth-unsupported"
-    assert github.downloads == []
-    assert github.calls == []
-
-
 @pytest.fixture
 def project_cli(github, tmp_path, monkeypatch):
     root = tmp_path / "operator"
@@ -460,10 +451,10 @@ def test_public_project_browse_does_not_suggest_an_unverified_cache_path(project
         "--project", str(state.root), *state.trust, "browse", "storage",
     ])
     assert code == 0, output
-    assert "Package verified" in output.out
+    assert "Private inspection of a verified package." in output.out
     assert "same project" in output.out
     assert str(state.github.fixture.cache.root) not in output.out
-    assert "Remote preview only" not in output.out
+    assert "Plan and deploy use a release from an approved source" not in " ".join(output.out.split())
     assert state.engines == []
 
 

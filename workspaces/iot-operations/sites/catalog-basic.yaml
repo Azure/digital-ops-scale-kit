@@ -9,10 +9,11 @@ subscription: "00000000-0000-0000-0000-000000000000"
 resourceGroup: rg-iot-catalog-basic
 location: westus2
 
+# Sample labels only, so fleet selectors such as country=US skip this Site.
+# managedBy overrides the siteops value inherited from base-site.yaml.
 labels:
   environment: sample
-  country: US
-  city: Seattle
+  managedBy: siteops-sample
   sample: resource-set-basic
 
 properties:

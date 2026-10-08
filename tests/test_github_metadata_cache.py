@@ -62,9 +62,9 @@ def remote(tmp_path):
     return state
 
 
-def client(remote, *, ref=None, auth="anonymous", refresh=False, offline=False):
+def client(remote, *, ref=None, refresh=False, offline=False):
     return CachedGitHubClient(
-        GitHubClient(GitHubReference("example", "kit", ref), auth=auth, transport=remote.request),
+        GitHubClient(GitHubReference("example", "kit", ref), transport=remote.request),
         remote.cache, refresh=refresh, offline=offline,
     )
 
@@ -172,16 +172,29 @@ def test_rate_limit_failure_preserves_cache_but_requires_explicit_offline_select
     assert remote.routes == []
 
 
-def test_authentication_modes_do_not_share_retained_private_observations(remote):
-    private = inspect(remote, auth="cli")
-    assert private.status == "complete"
+def test_environment_token_reads_use_their_own_scope_and_store_no_token(remote, monkeypatch):
+    token = "ghp_SyntheticCacheSentinel0123456789"
+    sent = []
+
+    def request(route, credential=None):
+        sent.append(credential)
+        return remote.request(route)
+
+    monkeypatch.setattr(github_source, "_anonymous_request", request)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setenv("GH_TOKEN", token)
+    live = GitHubClient(GitHubReference("example", "kit"))
+    assert live.access == "token"
+    tokened = inspect_github("github:example/kit", client=CachedGitHubClient(live, remote.cache))
+    assert tokened.status == "complete"
+    assert sent and all(credential.value == token for credential in sent)
+    monkeypatch.delenv("GH_TOKEN")
     remote.routes.clear()
     anonymous = inspect(remote, offline=True)
-    assert anonymous.status == "invalid"
     assert anonymous.diagnostics[0].code == "cache.metadata-missing"
     assert remote.routes == []
-    retained = inspect(remote, auth="cli", offline=True)
-    assert retained.entries == private.entries and remote.routes == []
+    records = [path for path in remote.cache.root.rglob("*") if path.is_file()]
+    assert records and all(token.encode() not in path.read_bytes() for path in records)
 
 
 def test_reference_default_is_distinct_from_a_branch_named_null(remote):
@@ -270,8 +283,8 @@ def test_unicode_tree_cache_keeps_the_source_utf8_byte_budget(remote, monkeypatc
 
 def test_actual_cli_cache_modes_are_parseable_and_do_not_load_sites(remote, monkeypatch, capsys):
     native = github_source.GitHubClient
-    monkeypatch.setattr(github_source, "GitHubClient", lambda reference, auth: native(
-        reference, auth=auth, transport=remote.request,
+    monkeypatch.setattr(github_source, "GitHubClient", lambda reference: native(
+        reference, transport=remote.request,
     ))
     monkeypatch.setattr(source_metadata_cache, "SourceMetadataCache", lambda: remote.cache)
     monkeypatch.setattr(cli, "Orchestrator", Mock(side_effect=AssertionError("Loaded Sites.")))

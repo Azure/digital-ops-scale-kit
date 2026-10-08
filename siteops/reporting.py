@@ -687,12 +687,12 @@ class TextProgressReporter:
                 ProgressPhase.RESOURCE_GROUP: (
                     "[Phase 2] Steps in resource groups"
                 ),
-                ProgressPhase.TARGETS: "[Execution] Prepared targets",
+                ProgressPhase.TARGETS: "[Execution] Prepared Sites",
             }[event.phase]
-            return f"\n  {label}: {_plural(event.target_count, 'target')}\n"
+            return f"\n  {label}: {_plural(event.target_count, 'Site')}\n"
         if event.kind is ProgressEventKind.BATCH_STARTED:
             return (
-                f"\n  [Parallel] Deploying to {event.target_count} targets "
+                f"\n  [Parallel] Deploying to {_plural(event.target_count, 'Site')} "
                 f"({event.worker_count} concurrent)\n"
             )
         if event.kind is ProgressEventKind.TARGET_STARTED:

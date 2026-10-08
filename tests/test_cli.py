@@ -220,7 +220,7 @@ class TestCmdValidate:
 
         assert exit_code == 0
         captured = capsys.readouterr()
-        assert "Preflight: not performed" in captured.out
+        assert "Plan shape only. Run `siteops plan` without --describe" in captured.out
         assert "Deployment plan: test-manifest" in captured.out
         assert "Sites" in captured.out
         assert "Steps" in captured.out
@@ -1403,13 +1403,14 @@ class TestMainArgumentParsing:
         (["--help"], "Environment:\n  SITEOPS_REDACT_OUTPUT"),
         (["--help"], "SITEOPS_CACHE_DIR"),
         (["--help"], "SITEOPS_EXTRA_SITES_DIRS"),
+        (["--help"], "  GH_TOKEN                  Optional GitHub token for source metadata requests."),
         (["--help"], "Redaction is on by default when GITHUB_ACTIONS or"),
         (["project", "--help"], "Pin a verified published release"),
         (["project", "show", "--help"], "Output format (default: plain)"),
         (["cache", "--help"], "SITEOPS_CACHE_DIR selects the cache directory"),
         (["cache", "remove", "--help"], "Cache entry kind, as shown by cache list"),
         (["index", "--help"], "For content authors:"),
-        (["browse", "--help"], "GitHub CLI (`gh`)"),
+        (["browse", "--help"], "Resolve the remote reference again before browsing"),
         (["browse", "--help"], "Include partials"),
         (["plan", "--help"], "0, max or auto for no limit"),
     ])
@@ -1496,7 +1497,6 @@ class TestMainArgumentParsing:
     @pytest.mark.parametrize("arguments", [
         ["browse", "--source", "github:example/one", "--source", "github:example/two"],
         ["browse", "--ref", "first", "--ref", "second"],
-        ["browse", "--auth", "anonymous", "--auth", "cli"],
         ["project", "pin", "--source", "github:example/one", "--source", "github:example/two"],
         ["project", "pin", "--release", "v1", "--release", "v2"],
         ["project", "pin", "--release-workspace", "one", "--release-workspace", "two"],
@@ -1516,6 +1516,16 @@ class TestMainArgumentParsing:
                 main()
         assert stopped.value.code == 2
         assert "only once" in capsys.readouterr().err
+
+    def test_browse_auth_option_is_rejected_before_any_read(self, capsys):
+        with (
+            patch.object(sys, "argv", ["siteops", "browse", "--source", "github:example/one", "--auth", "cli"]),
+            patch("siteops.cli.cmd_browse", side_effect=AssertionError("No remote read")),
+        ):
+            with pytest.raises(SystemExit) as stopped:
+                main()
+        assert stopped.value.code == 2
+        assert "unrecognized arguments: --auth" in capsys.readouterr().err
 
     @pytest.mark.parametrize("command", ["plan", "deploy"])
     def test_repeated_parallel_cap_does_not_silently_change_fleet_concurrency(

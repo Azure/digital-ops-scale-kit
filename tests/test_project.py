@@ -171,8 +171,22 @@ def test_missing_pin_has_no_source_or_local_workspace_fallback(tmp_path, monkeyp
         with context(project=root, discover=discover):
             pytest.fail("Missing pin was accepted.")
     assert caught.value.code == "project.pin-missing"
+    assert "-w to select local content" in str(caught.value)
     discover.assert_not_called()
     command_context.WorkspaceCache.assert_not_called()
+
+
+def test_project_show_without_a_pin_suggests_only_project_pin(tmp_path, monkeypatch, capsys):
+    root = project_root(tmp_path / "project", create=True)
+    monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "0")
+    monkeypatch.setattr(sys, "argv", ["siteops", "project", "show", str(root)])
+    with pytest.raises(SystemExit) as stopped:
+        cli.main()
+    assert stopped.value.code == 1
+    assert capsys.readouterr().err == (
+        "Error: Workspace pin not found. Create one with "
+        "`siteops project pin DIRECTORY --source SOURCE@RELEASE`.\n"
+    )
 
 
 def test_local_override_uses_project_sites_without_reading_or_changing_the_pin(pinned, tmp_path, monkeypatch):

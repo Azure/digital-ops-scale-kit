@@ -26,6 +26,7 @@ from siteops.results import (
     OutcomeReasonCode,
     ProgressEvent,
     ProgressEventKind,
+    ProgressPhase,
     RunDiagnostic,
     RunDiagnosticSeverity,
     RunResult,
@@ -529,6 +530,19 @@ def test_plain_rendering_separates_local_and_publishable_details():
     assert "private-site" not in public
     assert "private-provider-error" not in public
     assert "1 failed" in public
+
+
+def test_text_progress_reporter_counts_sites():
+    stream = io.StringIO()
+    reporter = TextProgressReporter(stream, redacted=False)
+    reporter(ProgressEvent(kind=ProgressEventKind.PHASE_STARTED, phase=ProgressPhase.SUBSCRIPTION, target_count=1))
+    reporter(ProgressEvent(kind=ProgressEventKind.PHASE_STARTED, phase=ProgressPhase.TARGETS, target_count=2))
+    reporter(ProgressEvent(kind=ProgressEventKind.BATCH_STARTED, target_count=2, worker_count=2))
+    assert stream.getvalue().splitlines() == [
+        "", "  [Phase 1] Steps at subscription scope: 1 Site",
+        "", "  [Execution] Prepared Sites: 2 Sites",
+        "", "  [Parallel] Deploying to 2 Sites (2 concurrent)",
+    ]
 
 
 def test_text_progress_reporter_serializes_complete_lines():

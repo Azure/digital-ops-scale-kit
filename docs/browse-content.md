@@ -27,8 +27,8 @@ the separate Site construction and planning step.
 
 For a published remote catalog, use `browse --source`. See
 [remote browsing](remote-content.md) for pinned GitHub sources, authorized
-reads and publication of source indexes. Remote preview does not acquire
-deployable workspace content.
+reads and publication of source indexes. Remote browsing reads published
+descriptions only. Deployment downloads and verifies the package.
 
 After pinning a verified workspace in an operator project, omit `-w` and
 browse the acquired package with the same approved source:

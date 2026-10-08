@@ -228,8 +228,12 @@ def test_expired_enrollment_can_be_inspected_and_removed(inputs):
     with pytest.raises(SourceProfileError, match="expired") as error:
         read_source("approved")
     assert error.value.code == "source.profile-expired"
-    assert "source show NAME" in str(error.value)
-    assert "siteops source enroll NAME" in str(error.value) and "remove" in str(error.value)
+    assert error.value.private_message == (
+        "The approved source policy has expired. Inspect it with `siteops source show approved`. "
+        "Renew a standard enrollment with `siteops source enroll approved`. For a custom policy, "
+        "remove the name and enroll it again with reviewed trust files."
+    )
+    assert str(error.value) == error.value.private_message.replace("approved`", "NAME`")
     assert selected.policy.read_bytes() == updated
     assert read_source("approved", require_valid=False).name == "approved"
     assert list_sources() == ("approved",)
