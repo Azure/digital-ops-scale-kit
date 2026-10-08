@@ -8,12 +8,12 @@ description: |
   releaseTrain, and identity.
 
   Reads target versions from parameters/aio-releases/<release>.yaml, the same
-  source aio-install.yaml uses for the initial deployment. Operators select the
-  target version per site via site.properties.aioRelease (re-pin the site to
-  the new release, then run this manifest). A separate ordered step deploys
-  release-required resources after the Arc extension updates complete.
-  The AIO instance ARM resource has no writable version property and is not
-  mutated.
+  source the aio-install manifest uses for the initial deployment. Operators
+  select the target version per site via site.properties.aioRelease (pin
+  the site to the new release, then run this manifest). A separate ordered
+  step deploys the resources the new release requires after the Arc
+  extension updates complete. The AIO instance ARM resource has no writable
+  version property and is not mutated.
 
   cert-manager is upgraded only when the site declares
   `deployOptions.enableCertManager: true`. Sites that delegate cert-manager

@@ -27,7 +27,7 @@
           "resource-sets"
         ]
       },
-      "name": "aio-resource-steps",
+      "name": "aio-resources-steps",
       "path": "manifests/_partials/_aio-resources.yaml",
       "role": "partial"
     },
@@ -95,7 +95,7 @@
     {
       "guidance": {
         "category": "core",
-        "coverage": "Covers existing-cluster installation through configured Sites or typed single-Site answers. This is descriptive guidance, not the executable input contract or a target readiness assessment. Observe workload functionality separately.",
+        "coverage": "Covers installation on an existing cluster through configured Sites or typed answers for one Site. After deployment, check AIO services before adding a workload.",
         "documentation": [
           "manifests/aio-install/README.md"
         ],
@@ -407,17 +407,21 @@
     {
       "guidance": {
         "category": "sample",
-        "coverage": "Composition synopsis. The guides own detailed configuration and release-dependent functional limits. No readiness or telemetry observation is performed by browsing.",
+        "coverage": "Composition synopsis. The guides own detailed configuration, functional limits for each release and the telemetry checks after deployment.",
         "documentation": [
           "samples/aio-with-opc-ua/README.md"
         ],
         "effects": [
           "Combines platform installation, simulated equipment, Device Registry resources, a dataflow and Event Hub resources.",
+          "Applies the external simulator manifest to the cluster with kubectl. Browsing does not read that manifest.",
           "Creates billable resources and role assignments. Deployment does not establish telemetry delivery."
         ],
         "outcome": "Install AIO and the composed OPC UA-to-cloud example on a fresh cluster.",
         "prerequisites": [
           "A prepared Arc-connected cluster, configured Site and both installation and solution permissions.",
+          "Azure CLI with the connectedk8s extension, and kubectl. The simulator step applies a Kubernetes manifest through the Arc cluster connect proxy.",
+          "Azure access to the Arc cluster through cluster connect, and Kubernetes RBAC in the cluster for the simulator objects, as listed in the OPC UA sample prerequisites.",
+          "Outbound access to raw.githubusercontent.com. The simulator manifest is downloaded from a pinned commit during deployment.",
           "Review the selected release's connector limitations and the solution's simulator input."
         ],
         "removal": [
@@ -505,7 +509,7 @@
           "opc-ua"
         ]
       },
-      "name": "opc-ua-solution",
+      "name": "opc-ua-solution-steps",
       "path": "samples/opc-ua-solution/_partial.yaml",
       "role": "partial"
     },
@@ -524,7 +528,9 @@
         "outcome": "Deploy a simulated OPC UA-to-Event Hub solution on an existing AIO instance.",
         "prerequisites": [
           "An existing AIO instance, configured Site, deployment permissions and Arc Kubernetes access.",
-          "Review the selected release's connector limitations and the commit-pinned external simulator document."
+          "Azure CLI with the connectedk8s extension, and kubectl. The simulator step applies a Kubernetes manifest through the Arc cluster connect proxy.",
+          "Outbound access to raw.githubusercontent.com for the simulator manifest pinned to a commit.",
+          "Review the selected release's connector limitations and that external simulator manifest."
         ],
         "removal": [
           "Follow the guide's Azure-resource and simulator cleanup, preserving shared infrastructure."
@@ -663,6 +669,7 @@
         "outcome": "Demonstrate inherited selections, managed and external providers, and cross-resource composition.",
         "prerequisites": [
           "An existing AIO installation and the configured catalog-composition Site.",
+          "Azure CLI with the connectedk8s extension, and kubectl. The simulator step applies a local Kubernetes manifest through the Arc cluster connect proxy.",
           "Review the guide's simulator, resource permissions and external-provider ownership."
         ],
         "removal": [
@@ -735,7 +742,7 @@
           "bootstrap"
         ]
       },
-      "name": "aksee-bootstrap",
+      "name": "aksee-bootstrap-step",
       "path": "templates/host-bootstrap/aksee/_partial.yaml",
       "role": "partial"
     },
@@ -751,7 +758,7 @@
           "upgrade"
         ]
       },
-      "name": "aksee-upgrade",
+      "name": "aksee-upgrade-step",
       "path": "templates/host-ops/aksee-upgrade/_partial.yaml",
       "role": "partial"
     }

@@ -1,6 +1,6 @@
 apiVersion: siteops/v1
 kind: Manifest
-name: aksee-upgrade
+name: aksee-upgrade-step
 description: |
   AKS Edge Essentials in-place upgrade step. Delivers and runs the upgrade launcher
   on the target Arc-onboarded Windows VM via Arc Run Command. The launcher

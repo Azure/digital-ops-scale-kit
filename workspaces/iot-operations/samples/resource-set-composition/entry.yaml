@@ -7,6 +7,7 @@ documentation: [README.md]
 outcome: Demonstrate inherited selections, managed and external providers, and cross-resource composition.
 prerequisites:
   - An existing AIO installation and the configured catalog-composition Site.
+  - Azure CLI with the connectedk8s extension, and kubectl. The simulator step applies a local Kubernetes manifest through the Arc cluster connect proxy.
   - Review the guide's simulator, resource permissions and external-provider ownership.
 effects:
   - Applies a local simulator and Bicep-owned provider before the selected catalog resources.

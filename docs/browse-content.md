@@ -12,12 +12,15 @@ siteops -w workspaces/iot-operations browse --tag mqtt
 siteops -w workspaces/iot-operations browse --category sample --search "resource set"
 ```
 
-`browse` reads manifest headers and optional authored guidance. It does not
-load Sites or overlays, expand includes, read parameter values, compile
-templates, probe deployment tools, contact services or perform deployment.
+`browse` reads manifest headers and optional authored guidance. For one
+selected entry, it also reads the typed input contract beside the manifest,
+if there is one. It does not load Sites or overlays, expand includes, read
+parameter values, compile templates, probe deployment tools, contact
+services or perform deployment.
 It works with an explicitly selected workspace that has no configured Sites.
-The card's authored Site input guidance is descriptive. For an entry with
-an executable typed input contract, use
+The card's authored Site input guidance is descriptive. Its `Typed inputs`
+line reports whether the entry declares an executable typed input contract
+and how many inputs it declares. When it does, run
 `siteops -w workspaces/iot-operations inputs aio-install` after browsing
 to see the required answers. [Guided inputs](guided-inputs.md) describes
 the separate Site construction and planning step.
@@ -98,7 +101,9 @@ siteops -w workspaces/iot-operations plan aio-install -l name=catalog-basic
 siteops -w workspaces/iot-operations deploy aio-install -l name=catalog-basic
 ```
 
-After assessing AIO readiness, inspect and apply the workload:
+After you check the deployed AIO services with the
+[AIO health check](guided-inputs.md#check-the-result), inspect and apply the
+workload:
 
 ```bash
 siteops -w workspaces/iot-operations browse resource-set-basic
@@ -113,8 +118,16 @@ or planning.
 
 Always review the actual plan before deploying. A CLI selector replaces
 manifest targeting. `deploy` prepares again, rather than consuming the
-previous preview as a saved plan. Deployment completion, readiness and the
-sample's MQTT canary are separate outcomes.
+previous preview as a saved plan. A successful deployment means the
+deployment operations completed. Check the AIO services and the sample's
+MQTT canary as their guides describe.
+
+The card ends with suggested commands. They use the entry name when it is
+unique, and the explicit path otherwise. When the entry declares a typed
+input contract, the suggestions start with `inputs` and the shortest typed
+route, such as `--input 'cluster=<Arc-cluster-resource-ID>'` for `aio-install`.
+The route for a configured Site, with `-l 'name=<site>'`, follows. Add the `-w`,
+project or source options you used with `browse`.
 
 Generated command suggestions are labeled for PowerShell on Windows and a
 POSIX shell elsewhere. PowerShell suggestions are not Command Prompt
@@ -237,6 +250,11 @@ The `local-private` projection label describes the authorized output
 destination, not whether the content source is local or remote.
 `nameInventoryComplete` distinguishes complete name discovery from descriptive
 metadata quality. A null value means no name inventory was performed.
+For one selected local or project entry, `typedInputs` reports the contract
+`status` (`declared`, `none` or `unreadable`), the declared input `count`
+and the smallest set of `answers` that constructs one Site. Each answer has
+its `name`, `type` and, for a resource ID, the Azure `resourceType` it must
+identify. `typedInputs` is null for inventory rows and remote previews.
 
 A local clone or materialized directory does not become a verified package
 because of its location. Browsing does not inspect Git remotes or claim

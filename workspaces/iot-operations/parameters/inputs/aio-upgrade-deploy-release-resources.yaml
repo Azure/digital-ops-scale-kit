@@ -1,4 +1,4 @@
-# Fan-in inputs into the deploy-release-resources step of aio-upgrade.yaml.
+# Fan-in inputs into the deploy-release-resources step of the aio-upgrade manifest.
 # See docs/parameter-resolution.md for the inputs/outputs convention.
 # aioInstanceName comes from the manifest-level common parameter file.
 

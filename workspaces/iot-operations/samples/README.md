@@ -69,7 +69,7 @@ samples/<name>/
 3. Add `inputs.yaml` with `{{ steps.X.outputs.Y }}` references for any values the template needs from upstream steps.
 4. Add a declaration file for any operator-authored values the sample ships defaults for, and attach it at manifest level in step 6.
 5. Add `_partial.yaml` containing the sample steps (no `resolve-aio`, no other prerequisites).
-6. Add `manifest.yaml`. For a sample that needs `resolve-aio`, include `_resolve-aio.yaml` from `manifests/` and then include `_partial.yaml`.
+6. Add `manifest.yaml`. For a sample that needs `resolve-aio`, include `_resolve-aio.yaml` from `manifests/_partials/` and then include `_partial.yaml`.
 7. Optionally add an integration test under `tests/integration/test_<name>_manifest.py`.
 8. Optionally compose into `samples/<combo>/manifest.yaml` to demonstrate the sample alongside other deployments. See the next section.
 

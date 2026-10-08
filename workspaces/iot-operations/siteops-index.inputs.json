@@ -27,7 +27,7 @@
     "templates/host-bootstrap/aksee/_partial.yaml",
     "templates/host-ops/aksee-upgrade/_partial.yaml"
   ],
-  "indexDigest": "e2aee988ff9bcae821e4a789267a69b2c5fa253ae51936506ef4b344fa8a7e20",
+  "indexDigest": "d2e1982d5d3c31b27556ea007e8ba853c70ac79e4fdb6740902a7cb21d4ba40c",
   "inputs": [
     {
       "digests": {
@@ -63,9 +63,9 @@
     },
     {
       "digests": {
-        "git-blob-sha1": "8a847a66caf439cc4c67018b1f168efeb01867a5",
-        "git-blob-sha1-crlf": "111ba1bc19459acf66e0916caf370b04af4c9b62",
-        "sha256": "ac350eaeb2474e5e00a11a53f5e39a42e16e70577509a3287df43df1e05e7349"
+        "git-blob-sha1": "bcddb2bc1d8971082ae6229507c133f6ab249c6f",
+        "git-blob-sha1-crlf": "ab0216f653bd85065bbaa6ea7bf6875ede19d381",
+        "sha256": "a2541f269df30ef65e21e341593b6c1241c248c0db6d8dfb4c1292c6fd1356b5"
       },
       "path": "manifests/_partials/_aio-resources.yaml"
     },
@@ -135,9 +135,9 @@
     },
     {
       "digests": {
-        "git-blob-sha1": "361255a5687f0c8f7c0c272f1074136fe14339b7",
-        "git-blob-sha1-crlf": "483b841e4b5b7abfcf16f59aee48bb5445693260",
-        "sha256": "e91c7f50f6aec50996898a3e936a95758f54a6751fabc09a28f7e5d92139acf5"
+        "git-blob-sha1": "39a9bff419f4bb099db59cbe210a5436a3700e18",
+        "git-blob-sha1-crlf": "1b85c179d2e8beee170eaaee74f793e9924c65b8",
+        "sha256": "70b7f5d05e64165300cd7cf4788a774654f04ae0a2ffd01b104ec9fd7f0e4865"
       },
       "path": "manifests/aio-install/entry.yaml"
     },
@@ -175,9 +175,9 @@
     },
     {
       "digests": {
-        "git-blob-sha1": "ed6be16b59444bba0832239146baece31938cbc7",
-        "git-blob-sha1-crlf": "bf0cbef1058d4792a4afe706d4f807c0b7768ec6",
-        "sha256": "43794924535c8563c839b2e41d35448db244701ff3fa9dd41807451b16002e7c"
+        "git-blob-sha1": "285c61ffb3100659da98e6437a995b60df78e137",
+        "git-blob-sha1-crlf": "d1d857edff0994f0f8297dd5533d02a29a333f20",
+        "sha256": "df63a32340a2b07fd4830497cfda33bf5b303800b18d6432fbcfa8e8db8ca1b3"
       },
       "path": "manifests/aio-upgrade/manifest.yaml"
     },
@@ -247,17 +247,17 @@
     },
     {
       "digests": {
-        "git-blob-sha1": "473a2586b0afb7a6caac2e05b3b90c8ca253a03e",
-        "git-blob-sha1-crlf": "25cbcff0d7451ea4a6029acaac501ca9a761ee5a",
-        "sha256": "d288c58a53e7305fee4d1ea16956ad6cc7497eb31695726dbabf0ccecd922380"
+        "git-blob-sha1": "2906ad7cb264348e7426b3f68d99d6083252b625",
+        "git-blob-sha1-crlf": "d9c637e524152278f1306fc0563a6f46aac26ce7",
+        "sha256": "82393ccee24192e0ecbf24f4b99de7909abaa087a5e5b155c0dfd5ccf25e64ba"
       },
       "path": "samples/aio-with-opc-ua/entry.yaml"
     },
     {
       "digests": {
-        "git-blob-sha1": "2db178bf9566a02b88604eca88d3916d98506ac1",
-        "git-blob-sha1-crlf": "4dcfd0f1f9a5b259f04d628759e0180265113e86",
-        "sha256": "401c173b3caab094ac5712d0703296e714ef0f21d9248155c13ed25a760af581"
+        "git-blob-sha1": "d696c9750802f1f7ce13ee0e18c3801ab9b9e107",
+        "git-blob-sha1-crlf": "d47f70fa1ceaaaa04b3dc2d3318e3daff64eb693",
+        "sha256": "e4ce724c2beb1f27d0dfbffbbe70e19e6cf2ec50e6110ac34df1b8da5ce1f928"
       },
       "path": "samples/aio-with-opc-ua/manifest.yaml"
     },
@@ -303,17 +303,17 @@
     },
     {
       "digests": {
-        "git-blob-sha1": "a8474912e5baba1aa226eb5ff87558047ac2dac8",
-        "git-blob-sha1-crlf": "1b3a1097db5de3fd72be7185a69153984b6222c5",
-        "sha256": "c0c256442e53122ada94b3c9154b236cd7342733a54c2c242961a6039b13c14b"
+        "git-blob-sha1": "122367a66d9b00772a82074feb0a23a87dc82f61",
+        "git-blob-sha1-crlf": "93bbfe5c9408eac13743f062940cb8c0382c9a48",
+        "sha256": "835ddb34a3691a0484b9741154031dfa237c2c96a236169476252e5d9a878ca3"
       },
       "path": "samples/opc-ua-solution/_partial.yaml"
     },
     {
       "digests": {
-        "git-blob-sha1": "55f560e04d1f4f9be1f937bb2ad21f6eb3c98dbf",
-        "git-blob-sha1-crlf": "9b13aa6315288256809f3b849af75594cc856662",
-        "sha256": "a9220b1d71612b1b1f35ed34df267a53437bca35c8a786c8a6507f422dc785ef"
+        "git-blob-sha1": "a3abf5745fb2909f507e9d3c5bd3f9a814d1c858",
+        "git-blob-sha1-crlf": "cff8dda3c1230f566ea9010d6fb3ea30a5208ad5",
+        "sha256": "8ce64fdf152d25119b8fa647d44b231fee10f40d113b06039b86a5891da5576c"
       },
       "path": "samples/opc-ua-solution/entry.yaml"
     },
@@ -359,9 +359,9 @@
     },
     {
       "digests": {
-        "git-blob-sha1": "76b821f86f2fb3d10d92d0c6fee28eb0eb79b12d",
-        "git-blob-sha1-crlf": "55f1b087788f5deea9c6d5137fb49578733e4de1",
-        "sha256": "114f1daef6c295d8dd35dbd56e01b04b3912e349fe91ec658764f6c28e0a1c5a"
+        "git-blob-sha1": "e119c71a8f1f05d3e3229347dea73bad194b32de",
+        "git-blob-sha1-crlf": "e0a88c0cdc2f1556af503cbb01e6e3444618f881",
+        "sha256": "7396170ef7e97d30f236f36cc1b743fc75d4639edfc381c71ba4b69ddeab56e2"
       },
       "path": "samples/resource-set-composition/entry.yaml"
     },
@@ -415,9 +415,9 @@
     },
     {
       "digests": {
-        "git-blob-sha1": "49279df8fe2e65dcef266a84a377f6822ee0218c",
-        "git-blob-sha1-crlf": "531287be069471a5a1c2dc6452d3033ce95bd5d6",
-        "sha256": "92734451b0ba79d26a0ff16348f309fff119ca1953bb7897b3e0607e4f771ad4"
+        "git-blob-sha1": "c1b397c6521f2d8e978a6f4fd9cb242a6b31407c",
+        "git-blob-sha1-crlf": "b78bbe37d828cd7f728f24e816bdc31df7d7de19",
+        "sha256": "0f1b33db096eb2988f81cf8b03af940cd4b57adfe0db9c4835b4fe5f232f66da"
       },
       "path": "templates/host-bootstrap/aksee/_partial.yaml"
     },
@@ -431,9 +431,9 @@
     },
     {
       "digests": {
-        "git-blob-sha1": "2c412ea4eab8970f451ecaf61bdae6cfaa83a2de",
-        "git-blob-sha1-crlf": "a0c5faeb2c91df5748d60af43fa322bac4b1887a",
-        "sha256": "cb1d241571b7214f811ed6b8ae7bc32d20b42a1e5e5dec6c7d136683a4e69599"
+        "git-blob-sha1": "d25e9e4d2c5ab14cbae5e0382f35d98c08224e81",
+        "git-blob-sha1-crlf": "a9e3a3fe1903d972831bb6f5284dab95e59750e5",
+        "sha256": "2aa72b8836cda1a3e46bf5f820532b017b6248cccd991d32dc44bbe98cbfdce2"
       },
       "path": "templates/host-ops/aksee-upgrade/_partial.yaml"
     }

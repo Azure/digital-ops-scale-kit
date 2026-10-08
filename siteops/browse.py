@@ -137,6 +137,36 @@ class EntryGuidance:
 
 
 @dataclass(frozen=True)
+class TypedAnswer:
+    name: str
+    type: str
+    resource_type: str | None = None
+
+    def document(self) -> dict[str, Any]:
+        return {"name": self.name, "type": self.type, "resourceType": self.resource_type}
+
+
+@dataclass(frozen=True)
+class TypedInputs:
+    """Whether a selected local manifest has a typed input contract beside it.
+
+    `status` is `declared`, `none` or `unreadable`. `answers` names the
+    smallest set of answers that constructs one Site, with each input type
+    and, for a resource ID, the Azure resource type it must identify.
+    """
+
+    status: str
+    count: int = 0
+    answers: tuple[TypedAnswer, ...] = ()
+
+    def document(self) -> dict[str, Any]:
+        return {
+            "status": self.status, "count": self.count,
+            "answers": [answer.document() for answer in self.answers],
+        }
+
+
+@dataclass(frozen=True)
 class ContentEntry:
     path: str
     name: str
@@ -147,6 +177,7 @@ class ContentEntry:
     metadata_status: str = "absent"
     name_ambiguous: bool | None = None
     targeting_known: bool = True
+    typed_inputs: TypedInputs | None = None
 
     def document(self) -> dict[str, Any]:
         return {
@@ -157,6 +188,7 @@ class ContentEntry:
                 "known": self.targeting_known, "selector": self.selector, "sites": list(self.sites),
             },
             "guidance": self.guidance.document(),
+            "typedInputs": None if self.typed_inputs is None else self.typed_inputs.document(),
         }
 
 
@@ -214,6 +246,7 @@ class BrowseResult:
     matched: int = 0
     name_inventory_complete: bool | None = None
     source: BrowseSource | None = None
+    partials_included: bool = False
 
     @property
     def status(self) -> str:
@@ -547,6 +580,29 @@ class ContentReader:
             ))
         return replace(entry, metadata_status="unavailable")
 
+    def typed_inputs(self, entry: ContentEntry) -> TypedInputs:
+        """Read only the selected manifest's contract sidecar, never answers or Sites."""
+        from siteops.guided_inputs import GuidedInputError, contract_path, load_contract
+
+        try:
+            manifest = self._path(entry.path)
+            if not self._path(contract_path(manifest)).is_file():
+                return TypedInputs("none")
+            contract = load_contract(manifest)
+            if contract is None:
+                return TypedInputs("none")
+            fields = {item.name: item for item in contract.fields}
+            answers = tuple(
+                TypedAnswer(
+                    name, fields[name].type,
+                    None if fields[name].resource is None else fields[name].resource.resource_type,
+                )
+                for name in contract.example()["values"]
+            )
+        except (BrowseError, GuidedInputError, ArtifactError, OSError):
+            return TypedInputs("unreadable")
+        return TypedInputs("declared", len(contract.fields), answers)
+
     def _scan(self) -> set[Path]:
         candidates: set[Path] = set()
         stack = [(self.workspace / name, 0) for name in ("samples", "manifests")]
@@ -685,6 +741,7 @@ def inspect_content(
             return BrowseResult(
                 str(reader.workspace), diagnostics=(error.diagnostic,), selected=True
             )
+        entry = replace(entry, typed_inputs=reader.typed_inputs(entry))
         return BrowseResult(
             str(reader.workspace), (entry,), tuple(reader.diagnostics), True, 1, 1
         )
@@ -702,7 +759,7 @@ def inspect_content(
                 str(reader.workspace), diagnostics=(*reader.diagnostics, error.diagnostic),
                 selected=True,
             )
-    return select_entries(
+    result = select_entries(
         BrowseResult(
             str(reader.workspace), inventory, tuple(reader.diagnostics),
             discovered=len(inventory), name_inventory_complete=reader.names_complete,
@@ -711,6 +768,10 @@ def inspect_content(
         include_partials=include_partials, limit=limit,
         filename_match=filename_match,
     )
+    if result.selected and len(result.entries) == 1:
+        entry = result.entries[0]
+        result = replace(result, entries=(replace(entry, typed_inputs=reader.typed_inputs(entry)),))
+    return result
 
 
 def select_entries(
@@ -766,7 +827,7 @@ def select_entries(
             selected = len(matches) == 1
         return replace(
             result, entries=matches, diagnostics=tuple(diagnostics),
-            selected=selected, matched=len(matches),
+            selected=selected, matched=len(matches), partials_included=include_partials,
         )
     terms = tuple((search or "").casefold().split())
     matches = tuple(
@@ -781,4 +842,7 @@ def select_entries(
             )).casefold() for term in terms)
         )
     )
-    return replace(result, entries=matches[:limit], selected=False, matched=len(matches))
+    return replace(
+        result, entries=matches[:limit], selected=False, matched=len(matches),
+        partials_included=include_partials,
+    )

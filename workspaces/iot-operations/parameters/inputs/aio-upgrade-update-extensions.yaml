@@ -1,6 +1,6 @@
-# Fan-in inputs into the update-extensions step of aio-upgrade.yaml. See
-# docs/parameter-resolution.md for the inputs/outputs convention.
-# Consumed by: update-extensions (in aio-upgrade.yaml)
+# Fan-in inputs into the update-extensions step of the aio-upgrade manifest.
+# See docs/parameter-resolution.md for the inputs/outputs convention.
+# Consumed by: update-extensions (in manifests/aio-upgrade/manifest.yaml)
 
 # Cluster identity for the extension PUTs (each extension is scoped at the
 # connected cluster).

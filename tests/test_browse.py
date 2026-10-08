@@ -94,11 +94,15 @@ def test_selected_card_distinguishes_advice_from_input_contract(tmp_path):
     _entry(tmp_path)
     local = inspect_content(tmp_path, "example")
     plain = render_browse_plain(local)
-    assert "Authored Site input guidance" in plain
-    assert "descriptive, not the executable input contract" in plain
-    assert "siteops inputs" in plain
-    assert "typed answers where available, or select a configured Site" in " ".join(plain.split())
-    assert "Next: choose a configured Site" not in plain
+    assert "Authored Site input guidance (descriptive only)" in plain
+    assert plain.count("descriptive") == 1
+    assert "Typed inputs: none." in plain
+    assert "if the entry declares a contract" not in plain
+    assert "siteops plan example -l 'name=<site>'" in plain
+    assert "siteops inputs" not in plain
+    assert local.document()["entries"][0]["typedInputs"] == {
+        "status": "none", "count": 0, "answers": [],
+    }
 
     remote = replace(
         local,
@@ -107,16 +111,202 @@ def test_selected_card_distinguishes_advice_from_input_contract(tmp_path):
     remote_plain = render_browse_plain(remote)
     assert "Pin an approved workspace" in remote_plain
     assert "Remote metadata cannot validate typed inputs" in remote_plain
+    assert "Typed inputs:" not in remote_plain
 
 
-def test_aio_guidance_distinguishes_typed_defaults_and_packaged_tools():
+_CONTRACT = """\
+apiVersion: siteops.inputs/v1
+kind: SiteInputContract
+nameFromResource: cluster
+inputs:
+  - name: siteName
+    type: string
+    description: Site name.
+    sitePath: name
+  - name: subscription
+    type: string
+    description: Subscription.
+    sitePath: subscription
+  - name: cluster
+    type: azureResourceId
+    required: false
+    description: Cluster ID.
+    resource:
+      type: Microsoft.Kubernetes/connectedClusters
+      apiVersion: 2024-07-15-preview
+    derive:
+      subscription: subscription
+"""
+
+
+@pytest.mark.parametrize("shell", ["PowerShell", "POSIX shell"])
+def test_declared_contract_suggests_the_typed_route_by_name(tmp_path, monkeypatch, shell):
+    _entry(tmp_path).with_name("inputs.yaml").write_text(_CONTRACT, encoding="utf-8")
+    monkeypatch.setattr(browse_output, "_command_shell", lambda: shell)
+    result = inspect_content(tmp_path, "example")
+    plain = render_browse_plain(result)
+    assert "Typed inputs: declared (3). Run `siteops inputs example`." in plain
+    assert "  siteops inputs example\n" in plain
+    assert "  siteops plan example --input 'cluster=<Arc-cluster-resource-ID>'\n" in plain
+    assert "  siteops deploy example --input 'cluster=<Arc-cluster-resource-ID>'\n" in plain
+    assert "For a configured Site, use -l 'name=<site>' instead of --input." in plain
+    assert "siteops -w" not in plain
+    assert str(tmp_path) not in plain.split("\n", 1)[1]
+    assert "manifests/example/manifest.yaml'" not in plain
+    assert result.document()["entries"][0]["typedInputs"] == {
+        "status": "declared", "count": 3, "answers": [{
+            "name": "cluster", "type": "azureResourceId",
+            "resourceType": "Microsoft.Kubernetes/connectedClusters",
+        }],
+    }
+
+
+def test_typed_route_placeholders_follow_the_answer_type(tmp_path, monkeypatch):
+    contract = """\
+apiVersion: siteops.inputs/v1
+kind: SiteInputContract
+inputs:
+  - name: vault
+    type: azureResourceId
+    description: Vault ID.
+    resource:
+      type: Microsoft.KeyVault/vaults
+      apiVersion: "2023-07-01"
+    derive:
+      subscription: subscription
+  - name: subscription
+    type: string
+    required: false
+    description: Subscription.
+    sitePath: subscription
+  - name: region
+    type: string
+    description: Region.
+    sitePath: location
+  - name: enabled
+    type: boolean
+    description: Toggle.
+    sitePath: properties.enabled
+"""
+    _entry(tmp_path).with_name("inputs.yaml").write_text(contract, encoding="utf-8")
+    monkeypatch.setattr(browse_output, "_command_shell", lambda: "POSIX shell")
+    plain = render_browse_plain(inspect_content(tmp_path, "example"))
+    assert (
+        "  siteops plan example --input 'vault=<vault-resource-ID>' --input 'region=<region>' "
+        "--input 'enabled=<true-or-false>'\n"
+    ) in plain
+
+
+@pytest.mark.parametrize(("contents", "status"), [
+    ("apiVersion: siteops.inputs/v1\nkind: SiteInputContract\ninputs: [PRIVATE_SENTINEL]\n", "unreadable"),
+    ("customLocationName: '{{ steps.resolve.outputs.name }}'\n", "none"),
+])
+def test_contract_status_comes_from_the_contract_file(tmp_path, contents, status):
+    path = _entry(tmp_path)
+    path.with_name("inputs.yaml").write_text(contents, encoding="utf-8")
+    for selection in ("example", str(path)):
+        result = inspect_content(tmp_path, selection)
+        assert result.status == "complete"
+        assert result.entries[0].typed_inputs.status == status
+        plain = render_browse_plain(result)
+        assert "PRIVATE_SENTINEL" not in plain + serialize_browse_json(result)
+    if status == "unreadable":
+        assert "Typed inputs: the contract could not be read." in plain
+    else:
+        assert "Typed inputs: none." in plain
+
+
+def test_inventory_rows_do_not_read_input_contracts(tmp_path, monkeypatch):
+    _entry(tmp_path).with_name("inputs.yaml").write_text(_CONTRACT, encoding="utf-8")
+    monkeypatch.setattr(
+        browse.ContentReader, "typed_inputs", lambda *a: pytest.fail("Read a contract"),
+    )
+    result = inspect_content(tmp_path)
+    assert result.document()["entries"][0]["typedInputs"] is None
+
+
+def test_ambiguous_or_path_selected_entries_suggest_explicit_paths(tmp_path, monkeypatch):
+    monkeypatch.setattr(browse_output, "_command_shell", lambda: "POSIX shell")
+    first = _entry(tmp_path, "same", relative="manifests/one/manifest.yaml")
+    _entry(tmp_path, "same", relative="samples/two/manifest.yaml", guidance={"role": "partial"})
+    by_name = render_browse_plain(inspect_content(tmp_path, "same"))
+    assert "siteops plan same -l 'name=<site>'" in by_name
+    by_path = render_browse_plain(inspect_content(tmp_path, str(first)))
+    assert "siteops plan manifests/one/manifest.yaml -l 'name=<site>'" in by_path
+    both = inspect_content(tmp_path, "same", include_partials=True)
+    assert not both.selected
+
+
+def test_option_shaped_names_suggest_the_explicit_path(tmp_path, monkeypatch):
+    monkeypatch.setattr(browse_output, "_command_shell", lambda: "POSIX shell")
+    _entry(tmp_path, "--yes", relative="manifests/odd/manifest.yaml")
+    result = inspect_content(tmp_path, "--yes")
+    assert result.entries[0].name_ambiguous is False
+    plain = render_browse_plain(result)
+    assert "siteops plan manifests/odd/manifest.yaml -l 'name=<site>'" in plain
+    assert "siteops plan --yes" not in plain and "siteops plan '--yes'" not in plain
+
+
+def test_input_rows_hide_unknown_sensitivity(tmp_path):
+    rows = [
+        {"field": "plain", "type": "string", "requirement": "optional", "description": "One."},
+        {"field": "secret", "type": "string", "requirement": "required",
+         "description": "Two.", "sensitivity": "sensitive"},
+        {"field": "named", "type": "string", "requirement": "optional",
+         "description": "Three.", "sensitivity": "non-sensitive"},
+    ]
+    plain = render_browse_plain(inspect_content(tmp_path, str(_entry(tmp_path, guidance={"inputs": rows}))))
+    assert "  - plain (string, optional)\n" in plain
+    assert "  - secret (string, required, sensitive)\n" in plain
+    assert "  - named (string, optional, non-sensitive)\n" in plain
+    assert "sensitivity:" not in plain
+
+
+def test_partial_hint_matches_the_inventory_option(tmp_path):
+    _entry(tmp_path)
+    _entry(tmp_path, "fragment", relative="manifests/_parts/_fragment.yaml", guidance={"role": "partial"})
+    default = render_browse_plain(inspect_content(tmp_path))
+    assert "Use --include-partials to show partials." in default
+    assert "fragments" not in default
+    included = render_browse_plain(inspect_content(tmp_path, include_partials=True))
+    assert "Use --include-partials" not in included
+    assert "Omit --include-partials to hide them." in included
+
+
+def test_heading_states_the_inspection_boundary_without_outcome_claims(tmp_path):
+    _entry(tmp_path)
+    local = render_browse_plain(inspect_content(tmp_path, "example"))
+    assert "Private inspection. Package not verified. No plan is prepared.\n" in local
+    assert "outcome" not in local.split("\n\n", 1)[0]
+
+
+def test_aio_guidance_distinguishes_typed_defaults_and_packaged_tools(monkeypatch):
     root = Path(__file__).resolve().parents[1]
     workspace = root / "workspaces" / "iot-operations"
+    monkeypatch.setattr(browse_output, "_command_shell", lambda: "PowerShell")
     card = render_browse_plain(inspect_content(workspace, "aio-install"))
     assert "environment and country" in card
     assert "typed AIO route defaults to 2608" in card
     assert "compiled ARM JSON" in card
     assert "Authored Site input guidance" in card
+    assert card.count("descriptive") == 1
+    assert "sensitivity" not in card
+    assert "Typed inputs: declared (" in card
+    assert "Run `siteops inputs aio-install`." in card
+    assert "  siteops plan aio-install --input 'cluster=<Arc-cluster-resource-ID>'\n" in card
+    assert "siteops -w" not in card
+
+
+def test_composed_opc_ua_card_states_its_cluster_step_and_download():
+    root = Path(__file__).resolve().parents[1]
+    card = " ".join(render_browse_plain(
+        inspect_content(root / "workspaces" / "iot-operations", "aio-with-opc-ua")
+    ).split())
+    assert "kubectl" in card and "connectedk8s" in card
+    assert "cluster connect" in card and "Kubernetes RBAC" in card
+    assert "raw.githubusercontent.com" in card
+    assert "Typed inputs: none." in card
+    assert "siteops plan aio-with-opc-ua -l" in card
 
 
 def test_typed_input_companion_is_not_another_deployment_entry(tmp_path):

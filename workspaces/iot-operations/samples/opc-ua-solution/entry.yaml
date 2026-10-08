@@ -7,7 +7,9 @@ documentation: [README.md]
 outcome: Deploy a simulated OPC UA-to-Event Hub solution on an existing AIO instance.
 prerequisites:
   - An existing AIO instance, configured Site, deployment permissions and Arc Kubernetes access.
-  - Review the selected release's connector limitations and the commit-pinned external simulator document.
+  - Azure CLI with the connectedk8s extension, and kubectl. The simulator step applies a Kubernetes manifest through the Arc cluster connect proxy.
+  - Outbound access to raw.githubusercontent.com for the simulator manifest pinned to a commit.
+  - Review the selected release's connector limitations and that external simulator manifest.
 effects:
   - Creates Device Registry, Event Hub, role-assignment and dataflow resources and applies the simulator through kubectl.
   - The external simulator document is obtained during execution, outside this local inspection.

@@ -1,6 +1,6 @@
-# Fan-in inputs into the resolve-extensions step of aio-upgrade.yaml. See
-# docs/parameter-resolution.md for the inputs/outputs convention.
-# Consumed by: resolve-extensions (in aio-upgrade.yaml)
+# Fan-in inputs into the resolve-extensions step of the aio-upgrade manifest.
+# See docs/parameter-resolution.md for the inputs/outputs convention.
+# Consumed by: resolve-extensions (in manifests/aio-upgrade/manifest.yaml)
 
 # Cluster identity for direct existing lookup + the resource ID needed to
 # derive the AIO Arc extension name through the shared source-of-truth deriver.

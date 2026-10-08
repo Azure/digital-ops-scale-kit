@@ -1,6 +1,6 @@
 apiVersion: siteops/v1
 kind: Manifest
-name: aksee-bootstrap
+name: aksee-bootstrap-step
 description: |
   AKS Edge Essentials host bootstrap step. Delivers and runs the bootstrap
   launcher on the target Arc-onboarded Windows VM via Arc Run Command. The

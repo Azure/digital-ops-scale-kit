@@ -9,7 +9,7 @@
 # can reference its outputs.
 #
 # Target with: -l scope=subscription   (the default `environment=dev` selector
-# in aio-install.yaml does not match this site, by design.)
+# in the aio-install manifest does not match this site, by design.)
 #
 # AIO-install fields inherited from base-site.yaml (aioRelease, brokerConfig,
 # defaultDataflowInstanceCount, deployOptions.enableSecretSync, etc.) are

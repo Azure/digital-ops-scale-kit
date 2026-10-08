@@ -1,6 +1,6 @@
 apiVersion: siteops/v1
 kind: Manifest
-name: opc-ua-solution
+name: opc-ua-solution-steps
 description: |
   OPC UA solution sample steps without the resolve-aio prerequisite.
 

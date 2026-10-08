@@ -45,8 +45,8 @@ or Azure access. The cluster and resource group must already exist. The
 declared resource-ID answer authorizes bounded reads using your Azure CLI
 identity to derive subscription, resource group, region and cluster name.
 An explicit manual value must agree with those facts. Deployment can create
-or update resources and incur charges. A successful deployment is not a
-workload health check.
+or update resources and incur charges. To check the deployed AIO services
+afterward, see [Check the result](#check-the-result).
 
 For a separate executable preview, run:
 
@@ -212,12 +212,11 @@ for preservation, vault permissions and functional checks.
 
 ## Check the result
 
-The final Site Ops result reports deployment outcomes separately from
-readiness and functionality, which remain `not-assessed`. With Azure CLI
-and its `azure-iot-ops` extension installed, use the existing
-[AIO health check](https://learn.microsoft.com/en-us/cli/azure/iot/ops#az-iot-ops-check)
-to inspect the deployed services. You need authorized Kubernetes access
-and a kubeconfig context for the cluster you just deployed:
+A successful Site Ops result means the deployment operations completed.
+To check the deployed AIO services, use the
+[AIO health check](https://learn.microsoft.com/en-us/cli/azure/iot/ops#az-iot-ops-check).
+It needs Azure CLI with the `azure-iot-ops` extension, authorized Kubernetes
+access and a kubeconfig context for the cluster you just deployed:
 
 ```text
 az iot ops check --context "<target-kubeconfig-context>"
@@ -249,7 +248,8 @@ siteops deploy aio-install --source "official@<release>" --input siteName=plant-
 siteops deploy aio-install --source "official@<release>" --input siteName=plant-2607 --input "cluster=<Arc-ID-B>" --input environment=dev --input country=US --input aioRelease=2607
 ```
 
-Replace the two placeholders with distinct full connected-cluster ARM IDs.
+Replace the two placeholders with the full ARM IDs of two different
+connected clusters, each in its own resource group.
 Each command constructs one Site in memory and selects the corresponding
 release parameters from the verified workspace. Each deploy reviews its own
 plan. These examples leave Secret Sync disabled.
@@ -291,6 +291,10 @@ To reuse a complete standalone Site without saving it into a project, pass
 Site must be complete and cannot inherit from packaged example Sites.
 Configured Sites can continue to use the existing inheritance and overlay
 rules.
+
+Use one resource group per AIO instance. A Site built from a cluster ID
+takes that cluster's resource group, so connect each Arc cluster in its own
+resource group before you save its Site.
 
 For a separate fleet deployment after plant-one already runs AIO, create
 a distinct `fleet-inputs.yaml` answer file. Keep the common answers

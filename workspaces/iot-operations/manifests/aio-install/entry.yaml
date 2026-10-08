@@ -93,4 +93,4 @@ effects:
 removal:
   - Remove created resources deliberately while preserving the existing cluster and other retained resources.
   - There is no automatic rollback or general uninstall entry.
-coverage: Covers existing-cluster installation through configured Sites or typed single-Site answers. This is descriptive guidance, not the executable input contract or a target readiness assessment. Observe workload functionality separately.
+coverage: Covers installation on an existing cluster through configured Sites or typed answers for one Site. After deployment, check AIO services before adding a workload.

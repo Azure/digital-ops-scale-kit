@@ -45,6 +45,10 @@ with explicit `-l name=...` values and use the same selector for deploy.
 Reapplying `aio-install` to an existing AIO Site can overwrite settings
 managed there.
 
+For AIO fleets, use one resource group per AIO instance. Each Site deploys
+into its `resourceGroup`, which is its Arc cluster's resource group, so
+connect each cluster in its own resource group.
+
 ## Selector grammar
 
 A selector is one or more `key=value` pairs joined by commas. Pairs AND-combine across distinct keys.

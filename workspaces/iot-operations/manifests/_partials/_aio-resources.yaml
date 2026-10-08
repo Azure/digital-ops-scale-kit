@@ -1,6 +1,6 @@
 apiVersion: siteops/v1
 kind: Manifest
-name: aio-resource-steps
+name: aio-resources-steps
 description: |
   Internal catalog partial. Resolves the existing AIO instance, expands the
   resource sets selected by each site, and deploys Device Registry resources

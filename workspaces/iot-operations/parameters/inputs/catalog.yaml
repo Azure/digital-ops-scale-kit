@@ -6,7 +6,7 @@
 # cannot be overridden by a site. Definitions live in resource-sets/<area>/<set>.yaml
 # and attach at manifest level.
 # See docs/resource-catalog.md for the authoring contract.
-# Consumed by: the family step in manifests/_<family>.yaml
+# Consumed by: the family step in manifests/_partials/_<family>.yaml
 #
 # Each value is read back from the instance rather than derived from the site
 # name. parameters/common/common.yaml supplies both names by convention, and a

@@ -1,14 +1,36 @@
 """Authored guidance covers the actual workspace without defining execution."""
 
+from urllib.parse import urlsplit
+
 import yaml
 
 from siteops.browse import inspect_content
+from siteops.models import KubectlStep, Manifest
 from tests.workspace.test_manifest_validation import _all_manifest_files
+
+
+def test_kubectl_compositions_disclose_tools_and_downloads(workspace):
+    checked = 0
+    for entry in inspect_content(workspace).entries:
+        manifest = Manifest.from_file(workspace / entry.path, workspace_root=workspace.resolve())
+        kubectl = [step for step in manifest.steps if isinstance(step, KubectlStep)]
+        if not kubectl:
+            continue
+        checked += 1
+        guidance = " ".join((*entry.guidance.prerequisites, *entry.guidance.effects))
+        assert "kubectl" in guidance and "connectedk8s" in guidance, entry.path
+        for step in kubectl:
+            for source in step.files:
+                host = urlsplit(source).hostname
+                if host:
+                    assert host in guidance, f"{entry.path} omits its download from {host}."
+    assert checked
 
 
 def test_inventory_covers_actual_manifests_and_classifies_their_roles(workspace):
     result = inspect_content(workspace, include_partials=True)
     assert not result.diagnostics
+    assert not [entry.path for entry in result.entries if entry.name_ambiguous is not False]
     expected = {
         path.relative_to(workspace).as_posix(): path
         for path in _all_manifest_files(workspace)
