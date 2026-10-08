@@ -477,6 +477,56 @@ def test_source_enroll_renews_an_existing_name_with_its_enrolled_publisher(input
     assert read_source("fork").trusted_root.read_bytes() == b'{"root":2}\n'
 
 
+@pytest.mark.parametrize("failure", ["write", "swap"])
+def test_failed_standard_renewal_keeps_the_previous_approval(inputs, monkeypatch, failure):
+    import siteops.source_profiles as profiles
+    from siteops.source_profiles import enroll_standard_source
+
+    storage, _, _, _ = inputs
+    _standard_root(monkeypatch, b'{"root":1}\n', b'{"root":2}\n')
+    first = enroll_standard_source("core")
+    before = (first.policy.read_bytes(), first.trusted_root.read_bytes())
+    if failure == "write":
+        original, calls = profiles.write_new, 0
+
+        def fail_in_record(path, data):
+            nonlocal calls
+            calls += 1
+            if calls == 4:
+                raise OSError("controlled write failure")
+            original(path, data)
+
+        monkeypatch.setattr(profiles, "write_new", fail_in_record)
+        restore = (profiles, "write_new", original)
+    else:
+        rename = os.rename
+
+        def fail_swap(source, target):
+            if Path(source).name == "new":
+                raise OSError("controlled swap failure")
+            rename(source, target)
+
+        monkeypatch.setattr(profiles.os, "rename", fail_swap)
+        restore = (profiles.os, "rename", rename)
+    with pytest.raises(SourceProfileError, match="could not be"):
+        enroll_standard_source("core")
+    monkeypatch.setattr(*restore)
+    kept = read_source("core")
+    assert (kept.policy.read_bytes(), kept.trusted_root.read_bytes()) == before
+    assert list_sources() == ("core",)
+    assert not list(storage.parent.glob(".renew-*"))
+
+
+def test_successful_standard_renewal_leaves_no_holding_directory(inputs, monkeypatch):
+    from siteops.source_profiles import enroll_standard_source
+
+    storage, _, _, _ = inputs
+    _standard_root(monkeypatch, b'{"root":1}\n', b'{"root":2}\n')
+    enroll_standard_source("core")
+    assert read_source(enroll_standard_source("core").name).trusted_root.read_bytes() == b'{"root":2}\n'
+    assert sorted(path.name for path in storage.parent.iterdir()) == ["sources"]
+
+
 def test_standard_enrollment_never_replaces_different_trust(inputs, monkeypatch):
     from siteops.source_profiles import enroll_standard_source
 

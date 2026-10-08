@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -169,7 +170,9 @@ def read_source(name: str, *, require_valid: bool = True) -> ApprovedSource:
     return result
 
 
-def enroll_source(name: str, source: str, policy_file: Path, root_file: Path) -> ApprovedSource:
+def _checked_inputs(
+    name: str, source: str, policy_file: Path, root_file: Path,
+) -> tuple[str, str, GitHubArtifactPolicy, bytes, bytes]:
     name = _name(name)
     reference = GitHubReference.parse(source)
     if reference.ref is not None:
@@ -177,13 +180,54 @@ def enroll_source(name: str, source: str, policy_file: Path, root_file: Path) ->
     policy = load_github_policy(policy_file)
     policy_bytes = _bytes(policy_file, _MAX_POLICY)
     root_bytes = _bytes(root_file, _MAX_ROOT)
-    root_sha = hashlib.sha256(root_bytes).hexdigest()
     if (
         policy.repository.casefold() != f"{reference.owner}/{reference.repository}".casefold()
-        or policy.trusted_root_sha256 != root_sha
+        or policy.trusted_root_sha256 != hashlib.sha256(root_bytes).hexdigest()
         or policy.valid_until <= datetime.now(timezone.utc)
     ):
         raise SourceProfileError("The source, policy and trusted root do not agree.")
+    return name, f"github:{reference.owner}/{reference.repository}", policy, policy_bytes, root_bytes
+
+
+def _discard(directory: Path) -> None:
+    """Remove a record directory holding only the files an enrollment writes."""
+    failed = False
+    for path in (directory / _PROFILE, directory / _ROOT, directory / _POLICY):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            failed = True
+    try:
+        directory.rmdir()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        failed = True
+    if failed:
+        logger.warning("Approved source enrollment cleanup could not be completed.")
+
+
+def _write_record(directory: Path, name: str, reference: str, policy_bytes: bytes, root_bytes: bytes) -> None:
+    try:
+        make_private_directory(directory)
+    except FileExistsError:
+        raise SourceProfileError("The approved source already exists. Inspect it before changing trust.") from None
+    result = ApprovedSource(
+        name, "github-release/v1", reference,
+        hashlib.sha256(policy_bytes).hexdigest(), hashlib.sha256(root_bytes).hexdigest(), directory,
+    )
+    try:
+        write_new(result.policy, policy_bytes)
+        write_new(result.trusted_root, root_bytes)
+        write_new(directory / _PROFILE, (json.dumps(result.document(), sort_keys=True) + "\n").encode("utf-8"))
+    except (OSError, ArtifactError):
+        _discard(directory)
+        raise SourceProfileError("The approved source could not be recorded.") from None
+
+
+def enroll_source(name: str, source: str, policy_file: Path, root_file: Path) -> ApprovedSource:
+    name, reference, policy, policy_bytes, root_bytes = _checked_inputs(name, source, policy_file, root_file)
+    root_sha = hashlib.sha256(root_bytes).hexdigest()
     root = source_root()
     directory = root / name
     if directory.exists() or directory.is_symlink():
@@ -192,7 +236,7 @@ def enroll_source(name: str, source: str, policy_file: Path, root_file: Path) ->
         # Repeat bootstrap extends the proposed expiry. Retain the existing approval
         # without accepting changed trust or silently ignoring a shorter validity.
         if (
-            existing.reference.casefold() != f"github:{reference.owner}/{reference.repository}".casefold()
+            existing.reference.casefold() != reference.casefold()
             or existing.root_sha256 != root_sha
             or policy.valid_until < previous.valid_until
             or (previous.policy_id, previous.version, previous.repository, previous.source_ref,
@@ -207,37 +251,49 @@ def enroll_source(name: str, source: str, policy_file: Path, root_file: Path) ->
     _private_directory(root.parent)
     _private_directory(root)
     check_cache_ancestors(directory)
+    _write_record(directory, name, reference, policy_bytes, root_bytes)
     try:
-        make_private_directory(directory)
-    except FileExistsError:
-        raise SourceProfileError("The approved source already exists. Inspect it before changing trust.") from None
-    result = ApprovedSource(
-        name, "github-release/v1", f"github:{reference.owner}/{reference.repository}",
-        hashlib.sha256(policy_bytes).hexdigest(), root_sha, directory,
-    )
-    created: list[Path] = []
-    try:
-        write_new(result.policy, policy_bytes)
-        created.append(result.policy)
-        write_new(result.trusted_root, root_bytes)
-        created.append(result.trusted_root)
-        write_new(directory / _PROFILE, (json.dumps(result.document(), sort_keys=True) + "\n").encode("utf-8"))
-        created.append(directory / _PROFILE)
         return read_source(name)
     except (OSError, ArtifactError):
-        cleanup_failed = False
-        for path in reversed(created):
-            try:
-                path.unlink()
-            except OSError:
-                cleanup_failed = True
-        try:
-            directory.rmdir()
-        except OSError:
-            cleanup_failed = True
-        if cleanup_failed:
-            logger.warning("Approved source enrollment cleanup could not be completed.")
+        _discard(directory)
         raise SourceProfileError("The approved source could not be recorded.") from None
+
+
+def _replace_source(name: str, source: str, policy_file: Path, root_file: Path) -> ApprovedSource:
+    """Swap in a renewed approval. The previous record stays usable until the new one is complete."""
+    name, reference, _, policy_bytes, root_bytes = _checked_inputs(name, source, policy_file, root_file)
+    root = source_root()
+    current = root / name
+    check_cache_ancestors(current)
+    check_private_node(current, directory=True)
+    holding = Path(tempfile.mkdtemp(prefix=f".renew-{name}-", dir=root.parent))
+    try:
+        check_private_node(holding, directory=True)
+        fresh, previous = holding / "new", holding / "previous"
+        _write_record(fresh, name, reference, policy_bytes, root_bytes)
+        os.rename(current, previous)
+        try:
+            os.rename(fresh, current)
+        except OSError:
+            os.rename(previous, current)
+            raise SourceProfileError("The approved source could not be renewed. The previous approval is unchanged.") from None
+        try:
+            renewed = read_source(name)
+        except (OSError, ArtifactError):
+            _discard(current)
+            os.rename(previous, current)
+            raise SourceProfileError("The approved source could not be renewed. The previous approval is unchanged.") from None
+        _discard(previous)
+        return renewed
+    except OSError:
+        raise SourceProfileError("The approved source could not be renewed. Inspect it with `siteops source show NAME`.") from None
+    finally:
+        if (holding / "new").exists():
+            _discard(holding / "new")
+        try:
+            holding.rmdir()
+        except OSError:
+            logger.warning("Approved source renewal left a private holding directory for inspection.")
 
 
 def standard_release_policy(repository: str, trusted_root_sha256: str) -> bytes:
@@ -300,7 +356,7 @@ def enroll_standard_source(name: str, source: str = OFFICIAL_SOURCE) -> Approved
                 raise SourceProfileError(
                     "The existing source approval differs. Remove it before enrolling changed trust."
                 )
-            remove_source(name)
+            return _replace_source(name, source, policy_file, root_file)
         return enroll_source(name, source, policy_file, root_file)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
