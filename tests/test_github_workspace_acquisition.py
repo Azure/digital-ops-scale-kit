@@ -347,7 +347,7 @@ def project_cli(github, tmp_path, monkeypatch):
 
     def runner(argv, timeout):
         assert argv[1:] == ("version", "--output", "json")
-        return subprocess.CompletedProcess(argv, 0, stdout='{"azure-cli":"test"}', stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout='{"azure-cli":"2.87.0"}', stderr="")
 
     compilation = TemplateCompilationSession(
         command_runner=runner, tool_resolver=lambda name: str(tmp_path / f"{name}.exe"),

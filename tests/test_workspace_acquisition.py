@@ -291,7 +291,7 @@ def test_non_github_non_aio_pinned_package_uses_the_existing_executor(acquired, 
 
     def runner(argv, timeout):
         assert argv[1:] == ("version", "--output", "json")
-        return subprocess.CompletedProcess(argv, 0, stdout='{"azure-cli":"test"}', stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout='{"azure-cli":"2.87.0"}', stderr="")
 
     session = TemplateCompilationSession(
         command_runner=runner, tool_resolver=lambda name: str(tmp_path / f"{name}.exe"),

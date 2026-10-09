@@ -1018,7 +1018,6 @@ def test_azure_cli_and_bicep_share_one_resolved_tool(tmp_path):
     ("2.70.0", True),
     ("2.87.0", True),
     ("3.0.0b1", True),
-    ("not-a-version", True),
 ])
 def test_azure_cli_below_the_minimum_version_is_refused(tmp_path, reported, accepted):
     def runner(argv, timeout):
@@ -1042,6 +1041,28 @@ def test_azure_cli_below_the_minimum_version_is_refused(tmp_path, reported, acce
         assert resolved.summary == "Azure CLI 2.70.0 or newer is required."
         assert f"Azure CLI {reported} was found" in resolved.detail
         assert "`az upgrade`" in resolved.detail
+
+
+@pytest.mark.parametrize("stdout", [
+    json.dumps({"azure-cli": "not-a-version"}),
+    json.dumps({"azure-cli": ""}),
+    json.dumps({"azure-cli": 2.87}),
+    json.dumps({"azure-cli-core": "2.87.0"}),
+    json.dumps(["2.87.0"]),
+    "not json",
+])
+def test_azure_cli_with_an_unreadable_version_is_refused(tmp_path, stdout):
+    session = TemplateCompilationSession(
+        command_runner=lambda argv, timeout: subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr=""),
+        tool_resolver=lambda name: _tool_path(tmp_path, name),
+    )
+    resolved = session.resolve_azure_cli()
+
+    assert isinstance(resolved, CompilationFailure)
+    assert resolved.code is CompilationFailureCode.TOOL_UNAVAILABLE
+    assert resolved.summary == "Azure CLI 2.70.0 or newer is required."
+    assert resolved.detail.startswith("Azure CLI was found, but its version could not be read.")
+    assert "`az upgrade`" in resolved.detail
 
 
 def test_kubectl_resolution_does_not_run_a_command(tmp_path):

@@ -100,7 +100,7 @@ class _ConsumerRunner:
             return subprocess.CompletedProcess(
                 argv,
                 0,
-                stdout=json.dumps({"azure-cli": "test"}),
+                stdout=json.dumps({"azure-cli": "2.87.0"}),
                 stderr="",
             )
         raise AssertionError("Acquired execution must not invoke Bicep.")

@@ -177,7 +177,7 @@ class _VersionOnlyToolRunner:
             return subprocess.CompletedProcess(
                 argv,
                 0,
-                stdout=json.dumps({"azure-cli": "test"}),
+                stdout=json.dumps({"azure-cli": "2.87.0"}),
                 stderr="",
             )
         if argv[1:] == ("bicep", "version"):

@@ -71,3 +71,27 @@ def test_override_generation_preserves_a_file_created_after_the_existence_check(
     generated, skipped = helper.generate_overlays({"site": {"parameters.value": "new"}}, tmp_path)
     assert generated == [] and skipped == ["site"]
     assert json.loads(path.read_text()) == {"preserved": True}
+
+
+def _load_override_script():
+    spec = importlib.util.spec_from_file_location("override_script_paths", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("flat", [
+    {"parameters.value": "nested", "parameters": "scalar"},
+    {"parameters": "scalar", "parameters.value": "nested"},
+    {"parameters.broker.memoryProfile": "Low", "parameters.broker": {"memoryProfile": "Medium"}},
+    {"parameters.broker": "x", "parameters.broker.memoryProfile": "Low"},
+])
+def test_overlapping_override_paths_are_rejected_in_any_order(flat):
+    with pytest.raises(ValueError, match="conflict"):
+        _load_override_script().expand_dot_notation(flat)
+
+
+def test_sibling_override_paths_expand_together():
+    assert _load_override_script().expand_dot_notation({
+        "parameters.broker.memoryProfile": "Low", "parameters.clusterName": "c", "location": "eastus",
+    }) == {"parameters": {"broker": {"memoryProfile": "Low"}, "clusterName": "c"}, "location": "eastus"}

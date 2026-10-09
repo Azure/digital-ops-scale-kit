@@ -314,10 +314,13 @@ Error: Azure CLI 2.69.0 was found. Azure CLI 2.70.0 or newer is required. Run `a
 ```
 
 **Cause**: `plan` or `deploy` selected steps that use Azure CLI, and the
-installed Azure CLI is older than 2.70.0. Nothing was submitted.
+installed Azure CLI is older than 2.70.0, or `az version` did not report a
+version that Site Ops could read. Nothing was submitted.
 
 **Solution**: Run `az upgrade`, or install a current release from
-https://aka.ms/installazurecli, then rerun the command.
+https://aka.ms/installazurecli. If the message says the version could not be
+read, check that `az version --output json` reports an `azure-cli` version.
+Then rerun the command.
 
 ### "Template parameters have no value"
 

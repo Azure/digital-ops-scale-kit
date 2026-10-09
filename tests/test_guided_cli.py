@@ -1762,7 +1762,7 @@ def _aio_template_session(
 ) -> TemplateCompilationSession:
     def runner(argv: tuple[str, ...], timeout: int) -> subprocess.CompletedProcess[str]:
         if argv[1:] == ("version", "--output", "json"):
-            return subprocess.CompletedProcess(argv, 0, '{"azure-cli":"test"}', "")
+            return subprocess.CompletedProcess(argv, 0, '{"azure-cli":"2.87.0"}', "")
         if argv[1:] == ("bicep", "version"):
             return subprocess.CompletedProcess(argv, 0, "Bicep CLI version test", "")
         if argv[1:3] != ("bicep", "build"):

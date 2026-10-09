@@ -11,10 +11,10 @@ before adding either.
 
 from __future__ import annotations
 
-import shutil
 import sys
 import textwrap
 import unicodedata
+from shutil import get_terminal_size as _terminal_size
 from typing import TextIO
 
 SUCCEEDED = "+"
@@ -61,7 +61,7 @@ def line_width(stream: TextIO | None = None) -> int:
         interactive = False
     if not interactive:
         return REDIRECTED_WIDTH
-    columns = shutil.get_terminal_size((REDIRECTED_WIDTH, 24)).columns
+    columns = _terminal_size((REDIRECTED_WIDTH, 24)).columns
     return max(_MIN_WIDTH, min(columns, MAX_WIDTH))
 
 

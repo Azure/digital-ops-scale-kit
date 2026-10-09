@@ -599,7 +599,7 @@ def test_cached_non_aio_package_uses_existing_planner_and_executor(populated, tm
 
     def command_runner(argv, timeout):
         assert argv[1:] == ("version", "--output", "json")
-        return subprocess.CompletedProcess(argv, 0, stdout='{"azure-cli":"test"}', stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout='{"azure-cli":"2.87.0"}', stderr="")
 
     session = TemplateCompilationSession(
         command_runner=command_runner,

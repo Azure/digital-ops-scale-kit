@@ -2,6 +2,7 @@
 
 import io
 import json
+import os
 import time
 from argparse import Namespace
 from unittest.mock import MagicMock, patch
@@ -43,15 +44,14 @@ def test_markers_are_one_ascii_set():
 
 @pytest.mark.parametrize(("columns", "expected"), [(80, 80), (160, 100), (20, 40)])
 def test_terminal_width_is_capped_on_a_tty(monkeypatch, columns, expected):
-    monkeypatch.setattr(
-        terminal.shutil, "get_terminal_size", lambda fallback: MagicMock(columns=columns),
-    )
+    # Patch the module's own reference so pytest's terminal writer keeps the real function.
+    monkeypatch.setattr(terminal, "_terminal_size", lambda fallback: os.terminal_size((columns, 24)))
     assert terminal.line_width(_Stream(tty=True)) == expected
 
 
 def test_redirected_output_uses_a_fixed_width(monkeypatch):
     monkeypatch.setattr(
-        terminal.shutil, "get_terminal_size", MagicMock(side_effect=AssertionError("Not a terminal")),
+        terminal, "_terminal_size", MagicMock(side_effect=AssertionError("Not a terminal")),
     )
     assert terminal.line_width(_Stream(tty=False)) == terminal.REDIRECTED_WIDTH
     assert terminal.line_width(object()) == terminal.REDIRECTED_WIDTH

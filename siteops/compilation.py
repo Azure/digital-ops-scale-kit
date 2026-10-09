@@ -55,12 +55,14 @@ CommandRunner: TypeAlias = Callable[
 ToolResolver: TypeAlias = Callable[[str], str | None]
 
 
-def _version_below(version: str, minimum: str) -> bool:
-    """Compare a reported tool version. An unreadable version is not treated as too old."""
+def _parsed_version(version: str | None) -> Version | None:
+    """Parse a reported tool version. A missing or unreadable version yields None."""
+    if version is None:
+        return None
     try:
-        return Version(version) < Version(minimum)
+        return Version(version)
     except InvalidVersion:
-        return False
+        return None
 
 
 def resolve_tool_from_path(name: str) -> str | None:
@@ -1177,12 +1179,19 @@ class TemplateCompilationSession:
                 ),
             )
             return self._azure_cli
-        if version is not None and _version_below(version, MINIMUM_AZURE_CLI_VERSION):
+        parsed = _parsed_version(version)
+        # Fail closed: a version that cannot be read cannot be shown to meet the minimum.
+        if parsed is None or parsed < Version(MINIMUM_AZURE_CLI_VERSION):
+            found = (
+                "Azure CLI was found, but its version could not be read."
+                if parsed is None
+                else f"Azure CLI {version} was found."
+            )
             self._azure_cli = CompilationFailure(
                 code=CompilationFailureCode.TOOL_UNAVAILABLE,
                 summary=f"Azure CLI {MINIMUM_AZURE_CLI_VERSION} or newer is required.",
                 detail=(
-                    f"Azure CLI {version} was found. Azure CLI "
+                    f"{found} Azure CLI "
                     f"{MINIMUM_AZURE_CLI_VERSION} or newer is required. Run "
                     "`az upgrade`, then retry."
                 ),
@@ -1192,11 +1201,7 @@ class TemplateCompilationSession:
             provider="azure-cli",
             resolved_path=resolved,
             version=version,
-            version_provenance=(
-                VersionProvenance.KNOWN
-                if version is not None
-                else VersionProvenance.UNKNOWN
-            ),
+            version_provenance=VersionProvenance.KNOWN,
         )
         return self._azure_cli
 

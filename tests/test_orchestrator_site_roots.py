@@ -142,7 +142,7 @@ def test_plan_and_deploy_use_operator_inputs_with_content_templates(roots, tmp_p
 
     def version_only(argv, timeout):
         assert argv[1:] == ("version", "--output", "json")
-        return subprocess.CompletedProcess(argv, 0, '{"azure-cli":"test"}', "")
+        return subprocess.CompletedProcess(argv, 0, '{"azure-cli":"2.87.0"}', "")
 
     monkeypatch.setattr(
         "siteops.orchestrator.TemplateCompilationSession",

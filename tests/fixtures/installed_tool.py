@@ -15,7 +15,7 @@ def main():
     context = json.loads(context_path.read_bytes())
     if name == "az":
         if args == ["version", "--output", "json"]:
-            print('{"azure-cli":"fixture"}')
+            print('{"azure-cli":"2.87.0"}')
             return
         allowed = context.get("allowedRead")
         assert allowed is not None, "Azure reads and deployment commands are forbidden."

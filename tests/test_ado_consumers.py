@@ -215,6 +215,8 @@ def test_contributor_pipelines_request_development_installation_explicitly():
     ("", "environment=dev", 0), ("target.yaml", "", 0), ("target.yaml", "environment=dev", 0),
     ("missing.yaml", "", 1), ("operator/../target.yaml", "environment=dev", 1),
     ("target.yaml", "environment=dev;id", 1),
+    ("/etc/hostname", "environment=dev", 1), ("\\\\server\\share\\site.yaml", "environment=dev", 1),
+    ("C:/agent/site.yaml", "environment=dev", 1), ("c:\\agent\\site.yaml", "environment=dev", 1),
 ])
 def test_site_file_and_selector_validation_is_explicit(tmp_path, site_file, selector, expected):
     (tmp_path / "workspace").mkdir()
@@ -225,6 +227,32 @@ def test_site_file_and_selector_validation_is_explicit(tmp_path, site_file, sele
         "SITE_FILE": site_file, "SELECTOR": selector,
     }, shell_options=())
     assert result.returncode == expected
+
+
+def _github_validate_inputs():
+    flow = yaml.safe_load((ROOT / ".github/workflows/_siteops-deploy.yaml").read_text(encoding="utf-8"))
+    steps = [entry for job in flow["jobs"].values() for entry in job.get("steps", [])]
+    return next(entry["run"] for entry in steps if entry.get("name") == "Validate inputs")
+
+
+@pytest.mark.parametrize("platform", ["ado", "github"])
+@pytest.mark.parametrize("field,value,expected", [
+    ("WORKSPACE", "/opt/content", 1), ("MANIFEST", "/opt/content/manifest.yaml", 1),
+    ("WORKSPACE", "D:\\content", 1), ("MANIFEST", "\\\\server\\share\\manifest.yaml", 1),
+    ("MANIFEST", "manifests/../install.yaml", 1), ("MANIFEST", "manifests/install.yaml", 0),
+])
+def test_workspace_and_manifest_paths_must_be_relative(tmp_path, platform, field, value, expected):
+    (tmp_path / "workspace").mkdir()
+    environment = {"WORKSPACE": "workspace", "MANIFEST": "manifests/install.yaml", "SITE_FILE": "", "SELECTOR": ""}
+    environment[field] = value
+    if platform == "github":
+        script = _github_validate_inputs()
+        environment = {f"INPUT_{name}": entry for name, entry in environment.items()}
+    else:
+        script = step(TEMPLATES / "siteops-inputs.yaml", "Validate inputs")["script"]
+    result = run_script(script, tmp_path, environment, shell_options=())
+    assert result.returncode == expected
+    assert ("must be relative to the checkout" in result.stdout) is bool(expected)
 
 
 @pytest.mark.parametrize("site_file,selector", [

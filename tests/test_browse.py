@@ -915,7 +915,7 @@ def test_non_aio_browse_plan_deploy_uses_configured_site(tmp_path, monkeypatch, 
 
     def version_only(argv, timeout):
         assert argv[1:] == ("version", "--output", "json")
-        return subprocess.CompletedProcess(argv, 0, '{"azure-cli":"test"}', "")
+        return subprocess.CompletedProcess(argv, 0, '{"azure-cli":"2.87.0"}', "")
 
     monkeypatch.setattr(
         "siteops.orchestrator.TemplateCompilationSession",

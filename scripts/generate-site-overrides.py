@@ -48,9 +48,15 @@ def expand_dot_notation(flat: dict) -> dict:
       → {"parameters": {"broker": {"memoryProfile": "Low"}}, "subscription": "abc"}
     """
     nested: dict = {}
-    for key, value in flat.items():
+    for key in flat:
         if not isinstance(key, str) or not key or any(not part for part in key.split(".")):
             raise ValueError("Override keys must be nonempty field paths.")
+    for key in flat:
+        parts = key.split(".")
+        # A parent and its own child cannot both be set, whatever the key order.
+        if any(".".join(parts[:index]) in flat for index in range(1, len(parts))):
+            raise ValueError("Override field paths conflict.")
+    for key, value in flat.items():
         parts = key.split(".")
         current = nested
         for part in parts[:-1]:
