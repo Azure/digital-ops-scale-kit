@@ -1,0 +1,17 @@
+# Maintainer stages exercising the ordinary source-install consumer path.
+stages:
+  - template: siteops-validate.yaml
+    parameters:
+      stageName: validate_selector
+      siteopsSource: $(Build.SourcesDirectory)
+      workspace: tests/fixtures/ado-consumer/workspace
+      manifest: manifests/smoke.yaml
+      selector: environment=smoke
+
+  - template: siteops-validate.yaml
+    parameters:
+      stageName: validate_site_file
+      siteopsSource: $(Build.SourcesDirectory)
+      workspace: tests/fixtures/ado-consumer/workspace
+      manifest: manifests/smoke.yaml
+      siteFile: tests/fixtures/ado-consumer/operator/site.yaml

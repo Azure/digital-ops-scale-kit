@@ -4,12 +4,12 @@ role: standalone
 category: core
 tags: [aio, install, existing-cluster]
 documentation: [README.md]
-outcome: Install AIO platform fundamentals on an existing Arc-connected Kubernetes cluster.
+outcome: Install AIO platform fundamentals on an existing Kubernetes cluster connected to Azure Arc.
 inputs:
   - field: subscription
     type: string
     requirement: required
-    description: Target subscription from a configured Site or typed single-Site answers.
+    description: The Site's subscription, from a configured Site or typed answers for one Site.
     source: sites/catalog-basic.yaml
   - field: resourceGroup
     type: string
@@ -19,19 +19,19 @@ inputs:
   - field: location
     type: string
     requirement: required
-    description: Confirm the real target region. Shared configuration also uses it as cluster location.
+    description: Confirm the Site's real region. Shared configuration also uses it as cluster location.
     source: parameters/common/common.yaml
   - field: parameters.clusterName
     type: string
     requirement: required
-    description: Existing Arc-connected Kubernetes cluster name, not the Site name. A declared cluster resource ID can supply this and the target subscription, resource group and location through an explicit Azure read.
+    description: Name of the existing Kubernetes cluster connected to Azure Arc, not the Site name. A declared cluster resource ID can supply this and the Site's subscription, resource group and location through an explicit Azure read.
     source: templates/aio/instance.bicep
   - field: properties.aioRelease
     type: string
     requirement: required
     sensitivity: non-sensitive
     description: The resolved Site needs an AIO release. The configured example inherits one, while the typed AIO route defaults to 2608.
-    defaultBehavior: Review the effective release in the selected Site before deployment.
+    defaultBehavior: Review the effective AIO release in the selected Site before deployment.
     source: sites/base-site.yaml
   - field: labels
     type: mapping
@@ -49,7 +49,7 @@ inputs:
     type: string
     requirement: optional
     sensitivity: non-sensitive
-    description: Installation can accept a Site override of the shared custom-location name.
+    description: Installation can accept a Site override of the shared custom location name.
     defaultBehavior: The shared fallback derives the name from the Site name.
     source: templates/aio/instance.bicep
   - field: parameters.brokerConfig
@@ -60,7 +60,7 @@ inputs:
   - field: properties.deployOptions
     type: mapping
     requirement: conditional
-    description: Review cert-manager, Edge Site and optional Secret Sync settings. The typed defaults leave Secret Sync disabled. Guided enablement requires an observed cluster reporting OIDC and workload identity before writes. Host flags do not retrofit those features.
+    description: Review cert-manager, Edge Site and optional Secret Sync settings. The typed defaults leave Secret Sync disabled. Guided enablement requires an observed cluster reporting OIDC and workload identity before writes. Host flags do not add those features to an existing cluster.
     source: sites/base-site.yaml
 supplied:
   - step: aio-instance
@@ -80,17 +80,17 @@ supplied:
     description: The instance operation supplies the AIO extension identity's principal.
     source: parameters/outputs/aio-instance.yaml
 prerequisites:
-  - An existing resource group and Arc-connected Kubernetes cluster meeting the selected AIO release's requirements.
-  - Azure CLI for ARM deployment. Source template preparation requires Bicep. Verified workspace packages contain compiled ARM JSON and need no local Bicep compiler for this entry. This manifest contains no kubectl step.
-  - Resource-derived guided inputs require an explicit read by the selected Azure provider using the operator's already configured Azure identity. Source access and deployment authorization remain separate.
-  - An authorized deployment identity, including the required role-assignment permissions. Common guidance is Owner or User Access Administrator plus Contributor.
-  - Enabling Secret Sync requires pre-existing OIDC and workload-identity readiness on the cluster.
+  - An existing resource group and a Kubernetes cluster connected to Azure Arc that meet the selected AIO release's requirements.
+  - Azure CLI for ARM deployment. Source template preparation requires Bicep. Verified workspace packages contain compiled ARM JSON and need no local Bicep compiler for this manifest. This manifest contains no kubectl step.
+  - Guided inputs derived from a resource ID require an explicit read by the selected Azure provider using the operator's already configured Azure identity. Source access and deployment authorization remain separate.
+  - An authorized deployment identity, including the permissions required to create role assignments. Common guidance is Owner or User Access Administrator plus Contributor.
+  - Enabling Secret Sync requires OIDC and workload identity to be ready on the cluster beforehand.
 effects:
   - Creates or updates AIO extensions, instance resources, custom location, ADR namespace, Schema Registry storage and role assignments.
-  - Secret Sync enablement in this same deployment creates or updates identity, federation, vault and Secret Provider Class resources. Subscription-scoped Edge Site work needs an applicable subscription target.
+  - Secret Sync enablement in this same deployment creates or updates identity, federation, vault and Secret Provider Class resources. An Edge Site scoped to the subscription needs a Site at subscription level.
   - Deployment can incur Azure charges and leave partial changes after failure or interruption.
-  - Use the upgrade entry for in-place version changes. Reapplying installation can overwrite operator-managed settings.
+  - Use the upgrade manifest to change versions in place. Reapplying installation can overwrite settings that operators manage.
 removal:
   - Remove created resources deliberately while preserving the existing cluster and other retained resources.
-  - There is no automatic rollback or general uninstall entry.
-coverage: Covers existing-cluster installation through configured Sites or typed single-Site answers. This is descriptive guidance, not the executable input contract or a target readiness assessment. Observe workload functionality separately.
+  - Removal is a manual step. Site Ops does not roll back or uninstall automatically.
+coverage: Covers installation on an existing cluster through configured Sites or typed answers for one Site. After deployment, check AIO services before adding a workload.

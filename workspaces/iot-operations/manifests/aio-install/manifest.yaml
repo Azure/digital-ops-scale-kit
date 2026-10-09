@@ -2,25 +2,29 @@ apiVersion: siteops/v1
 kind: Manifest
 name: aio-install
 description: |
-  Deploy the Azure IoT Operations platform with optional secret sync.
-  Composes `_aio-fundamentals.yaml` and adds workload-identity-backed secret
-  sync when the site enables it.
+  Install Azure IoT Operations on an existing cluster connected to Azure Arc:
+  the AIO extensions, instance, custom location, Schema Registry and Device
+  Registry namespace. Set `enableSecretSync` to true to also enable Secret
+  Sync.
 
-  Optional capabilities (each gated by a site `deployOptions.*` flag):
-    - enableSecretSync        workload-identity-backed secret sync
-    - enableGlobalSite        subscription-scoped edge site (deployed once per subscription)
-    - enableEdgeSite          RG-scoped edge site (deployed per RG)
+  Composes `_aio-fundamentals.yaml` and adds Secret Sync, backed by workload
+  identity, when the Site enables it.
+
+  Optional capabilities (each gated by a Site `deployOptions.*` flag):
+    - enableSecretSync        Secret Sync backed by workload identity
+    - enableGlobalSite        Edge Site scoped to the subscription (deployed once per subscription)
+    - enableEdgeSite          Edge Site scoped to the resource group (deployed once per resource group)
 
   To add a sample on top of this install, see `samples/aio-with-opc-ua/manifest.yaml`
   for an example that composes this install with the OPC UA sample in one
   deploy.
 
-# Max concurrent sites. 0 = unlimited, 1 = serial.
+# Max concurrent Sites. 0 = unlimited, 1 = serial.
 parallel: 3
 
 # Default selector. Override at the CLI with `-l <key>=<value>`.
-# Subscription-scoped sites (e.g. contoso-global) use different labels and are
-# intentionally excluded here. Target them with `-l scope=subscription`.
+# Sites scoped to a subscription (for example contoso-global) use different
+# labels and are intentionally excluded here. Target them with `-l scope=subscription`.
 selector: "environment=dev"
 
 steps:

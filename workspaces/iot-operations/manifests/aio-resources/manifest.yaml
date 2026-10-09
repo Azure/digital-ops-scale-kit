@@ -2,22 +2,25 @@ apiVersion: siteops/v1
 kind: Manifest
 name: aio-resources
 description: |
-  Config-driven AIO workload resources for an existing instance. Each
-  deployment family runs only when the site selects a resource area it serves,
-  so one entry point serves every combination.
+  Apply the devices, assets, dataflow endpoints, profiles and dataflows that
+  each Site selects to an existing Azure IoT Operations instance. A Site
+  selects resource sets under `resourceSets`, and only the selected areas
+  deploy.
 
-  A site composes ordered sets through `properties.resourceSets.<area>`, which
-  resolves to `resource-sets/<area>/<set>.yaml`. An omitted area in the effective
-  site applies nothing. A child site uses an empty list to clear an inherited
+  Each deployment family runs only when the Site selects a resource area it
+  serves, so one manifest serves every combination. A Site composes ordered
+  sets through `properties.resourceSets.<area>`, which resolves to
+  `resource-sets/<area>/<set>.yaml`. An omitted area in the effective Site
+  applies nothing. A child Site uses an empty list to clear an inherited
   selection. Devices and assets share one internally ordered Device Registry
   step. That step runs before dataflows so a dataflow naming an asset finds it
   already there.
 
   Prerequisites:
     - AIO instance must be deployed and running
-    - The site's aioRelease must point to a parameters/aio-releases/<release>.yaml file
+    - The Site's aioRelease must point to a parameters/aio-releases/<release>.yaml file
 
-# Max concurrent sites. 0 = unlimited, 1 = serial.
+# Max concurrent Sites. 0 = unlimited, 1 = serial.
 parallel: 3
 
 # Default selector. Override at the CLI with `-l <key>=<value>`.

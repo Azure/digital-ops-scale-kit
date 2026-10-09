@@ -11,7 +11,7 @@ description: |
   `site.parameters.aioInstanceName` when an install used a different name.
 
   Internal partial (filename prefixed `_`). Not deployed directly. Composed
-  by manifests and samples that add secret sync or capabilities on top of
+  by manifests and samples that add Secret Sync or capabilities on top of
   an existing AIO install.
 
 steps:

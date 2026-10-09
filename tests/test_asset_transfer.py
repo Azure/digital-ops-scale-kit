@@ -25,6 +25,7 @@ from siteops import asset_transfer as transfer
 from siteops.artifacts import ArtifactError
 from siteops.cache_filesystem import check_private_node, make_private_directory
 from siteops.workspace_source import MAX_SOURCE_ARTIFACT_BYTES, ArtifactIdentity
+from tests.shell_helpers import required_openssl
 
 BODY = b"raise AssertionError('Downloaded content is data, not a local script.')\n"
 IDENTITY = ArtifactIdentity("content.zip", len(BODY), hashlib.sha256(BODY).hexdigest())
@@ -276,9 +277,41 @@ def test_native_worker_rejects_invalid_protocol(private_parent, raw):
     assert list(private_parent.iterdir()) == []
 
 
+@pytest.fixture(scope="module")
+def tls_material(tmp_path_factory):
+    """Generate one disposable loopback identity per module run and remove its private key."""
+    directory = tmp_path_factory.mktemp("asset-transfer-tls")
+    directory.chmod(0o700)
+    certificate, key = directory / "certificate.pem", directory / "key.pem"
+    environment = {
+        name: value for name, value in os.environ.items()
+        if name.upper() in {"SYSTEMROOT", "WINDIR", "SYSTEMDRIVE"}
+    }
+    try:
+        try:
+            result = subprocess.run([
+                str(required_openssl()), "req", "-x509", "-newkey", "rsa:2048",
+                "-sha256", "-nodes", "-days", "1", "-config", os.devnull,
+                "-subj", "/CN=localhost",
+                "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1",
+                "-addext", "basicConstraints=critical,CA:TRUE",
+                "-keyout", str(key), "-out", str(certificate),
+            ], cwd=directory, env=environment, stdin=subprocess.DEVNULL,
+                capture_output=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            pytest.fail("OpenSSL could not generate the temporary loopback certificate.", pytrace=False)
+        if result.returncode != 0 or not certificate.is_file() or not key.is_file():
+            pytest.fail("OpenSSL did not generate the temporary loopback certificate and key.", pytrace=False)
+        key.chmod(0o600)
+        yield certificate, key
+    finally:
+        key.unlink(missing_ok=True)
+        certificate.unlink(missing_ok=True)
+
+
 @pytest.fixture
-def https_source(monkeypatch):
-    certificate = Path(__file__).parent / "fixtures" / "localhost-test.pem"
+def https_source(monkeypatch, tls_material):
+    certificate, key = tls_material
     responses = {"/asset": (200, [("Content-Length", str(len(BODY)))], BODY)}
     observed = []
     entered = threading.Event()
@@ -310,7 +343,7 @@ def https_source(monkeypatch):
 
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
-    context.load_cert_chain(certificate)
+    context.load_cert_chain(certificate, key)
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server.socket = context.wrap_socket(server.socket, server_side=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -346,7 +379,7 @@ def observed_processes(monkeypatch):
     assert all(process.poll() is not None for process in processes)
 
 
-def test_https_fixture_sets_tls_floor_before_wrapping_or_listening(monkeypatch):
+def test_https_fixture_sets_tls_floor_before_wrapping_or_listening(monkeypatch, tmp_path):
     context = Mock()
     context.minimum_version = object()
     server = Mock(server_port=1234)
@@ -363,19 +396,21 @@ def test_https_fixture_sets_tls_floor_before_wrapping_or_listening(monkeypatch):
     monkeypatch.setattr(ssl, "SSLContext", Mock(return_value=context))
     monkeypatch.setattr(sys.modules[__name__], "ThreadingHTTPServer", Mock(return_value=server))
     monkeypatch.setattr(threading, "Thread", Mock(return_value=thread))
-    fixture = https_source.__wrapped__(monkeypatch)
+    material = (tmp_path / "certificate.pem", tmp_path / "key.pem")
+    fixture = https_source.__wrapped__(monkeypatch, material)
     try:
         next(fixture)
         thread.start.assert_called_once_with()
     finally:
         fixture.close()
     context.wrap_socket.assert_called_once()
+    context.load_cert_chain.assert_called_once_with(*material)
 
 
-def test_https_fixture_accepts_a_verified_tls12_client(https_source):
+def test_https_fixture_accepts_a_verified_tls12_client(https_source, tls_material):
     origin, _, _, _ = https_source
     parsed = urlsplit(origin)
-    certificate = Path(__file__).parent / "fixtures" / "localhost-test.pem"
+    certificate, _ = tls_material
     context = ssl.create_default_context(cafile=str(certificate))
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.maximum_version = ssl.TLSVersion.TLSv1_2
@@ -389,11 +424,77 @@ def test_https_fixture_accepts_a_verified_tls12_client(https_source):
         connection.close()
 
 
+def test_https_fixture_has_no_committed_private_key():
+    assert not (Path(__file__).parent / "fixtures" / "localhost-test.pem").exists()
+
+
+def test_tls_identity_is_fresh_private_and_removed_after_use(tmp_path_factory):
+    first, second = (tls_material.__wrapped__(tmp_path_factory) for _ in range(2))
+    paths = []
+    try:
+        for fixture in (first, second):
+            paths.append(next(fixture))
+        certificates = [ssl.PEM_cert_to_DER_cert(cert.read_text(encoding="ascii")) for cert, _ in paths]
+        assert hashlib.sha256(certificates[0]).digest() != hashlib.sha256(certificates[1]).digest()
+        for certificate, key in paths:
+            assert certificate != key
+            assert ssl.PEM_HEADER in certificate.read_text(encoding="ascii")
+            if os.name == "posix":
+                assert key.stat().st_mode & 0o777 == 0o600
+                assert key.parent.stat().st_mode & 0o777 == 0o700
+    finally:
+        first.close()
+        second.close()
+    assert all(not path.exists() for pair in paths for path in pair)
+
+
+@pytest.mark.parametrize("fault", ["exit", "timeout", "missing-output"])
+def test_tls_fixture_reports_generation_failure_without_retaining_partial_material(
+    tmp_path_factory, monkeypatch, capsys, fault,
+):
+    paths = []
+    monkeypatch.setattr(sys.modules[__name__], "required_openssl", lambda: Path("fixture-openssl"))
+
+    def generate(arguments, **options):
+        paths.extend(Path(arguments[arguments.index(flag) + 1]) for flag in ("-keyout", "-out"))
+        for path in paths:
+            path.write_bytes(b"synthetic-partial-output")
+        assert options["timeout"] == 30
+        assert options["stdin"] == subprocess.DEVNULL
+        if fault == "timeout":
+            raise subprocess.TimeoutExpired(arguments, 30, stderr=b"private-diagnostic-marker")
+        if fault == "missing-output":
+            paths[-1].unlink()
+        return subprocess.CompletedProcess(arguments, 1 if fault == "exit" else 0,
+                                           b"", b"private-diagnostic-marker")
+
+    monkeypatch.setattr(subprocess, "run", generate)
+    fixture = tls_material.__wrapped__(tmp_path_factory)
+    with pytest.raises(pytest.fail.Exception, match="temporary loopback certificate"):
+        next(fixture)
+    assert all(not path.exists() for path in paths)
+    captured = capsys.readouterr()
+    assert "private-diagnostic-marker" not in captured.out + captured.err
+
+
+def test_https_fixture_rejects_an_untrusted_tls_client(https_source):
+    origin, _, _, _ = https_source
+    parsed = urlsplit(origin)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    connection = http.client.HTTPSConnection(parsed.hostname, parsed.port, context=context, timeout=5)
+    try:
+        with pytest.raises(ssl.SSLCertVerificationError):
+            connection.request("GET", "/asset")
+    finally:
+        connection.close()
+
+
 def test_native_transfer_is_private_opaque_and_independent_of_workspace_imports(
     https_source, private_parent, observed_processes, monkeypatch, tmp_path,
 ):
     origin, _, observed, _ = https_source
     monkeypatch.setenv("GH_TOKEN", "test-source-token")
+    monkeypatch.setenv("GITHUB_TOKEN", "test-source-token")
     monkeypatch.setenv("SSLKEYLOGFILE", str(tmp_path / "tls-keys"))
     monkeypatch.setenv("PYTHONPATH", str(tmp_path))
     (tmp_path / "sitecustomize.py").write_text("raise AssertionError('workspace import')\n")
@@ -411,7 +512,9 @@ def test_native_transfer_is_private_opaque_and_independent_of_workspace_imports(
     argv, kwargs = observed_processes[1][0]
     assert argv == [sys.executable, "-I", "-S", str(transfer._WORKER)]
     assert kwargs["shell"] is False
-    assert all(key.lower() not in {"gh_token", "pythonpath", "sslkeylogfile"} for key in kwargs["env"])
+    assert all(
+        key.lower() not in {"gh_token", "github_token", "pythonpath", "sslkeylogfile"} for key in kwargs["env"]
+    )
     assert len(observed) == 1
     assert "Authorization" not in observed[0][1]
     assert observed[0][1]["Accept-Encoding"] == "identity"

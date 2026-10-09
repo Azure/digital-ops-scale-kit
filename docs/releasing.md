@@ -18,7 +18,7 @@ evidence for an artifact. Each signed artifact has its own proof.
 | **CI** | Code and runner checks, attestation diagnostics, installer checks, or a release preview | No |
 | **Release (approval required)** | Preparing and publishing a reviewed release | Only after the configured reviewer approves |
 
-These entry points share candidate preparation. A CI preview is not a pending
+These workflows share candidate preparation. A CI preview is not a pending
 release and cannot be promoted. A real release prepares its own candidate from
 the reviewed files on `main`.
 
@@ -29,7 +29,7 @@ its layout. Detailed installation and release reports remain in their jobs.
 
 If **Release (approval required)** is not available in Actions, its workflow
 file must first exist on the repository's default branch. Use the already
-registered CI workflow to preview feature-branch changes. Changing the default
+registered CI workflow to preview changes on a feature branch. Changing the default
 branch or pushing the feature directly to `main` is not needed for a preview.
 
 ## Configure release artifact runners
@@ -60,8 +60,8 @@ identities. A pool label or runner class does not establish 1ES membership.
 | Release preparation, engine and workspace builds, signing, descriptor and payload assembly, publication | Configured 1ES pool |
 | Lint, unit tests, template validation, installation and workspace qualification, result summaries | Public GitHub runners |
 
-The admission job requires the expected source commit and a supported entry
-point before allocating release workers. CI requests release workers only for
+The admission job requires the expected source commit and a supported calling
+workflow before allocating release workers. CI requests release workers only for
 explicit `installer-check` or `release-preview` dispatches. The Release workflow
 requires `main`. Pull request events cannot enter the reusable release producers.
 Missing or malformed pool configuration fails explicitly, with no fallback to
@@ -163,8 +163,8 @@ The default example is
 complete IoT Operations workspace and the selected engine from the chosen
 source commit. Choose
 `.github/release-examples/combined-preview/release.json` to preview engine
-artifacts under a content tag. Examples are accepted only for a dry run and
-never trigger publication when merged.
+artifacts under a content tag. Examples are accepted only by a release preview
+and never trigger publication when merged.
 
 For the default example, the CI preview performs real builds and signing, but
 it cannot publish and cannot be promoted into a release. Once the repository
@@ -179,17 +179,17 @@ these steps:
    workspace routing descriptor.
 4. Installs the selected engine from its authenticated lock and checks package
    compatibility, protected cache use, and guarded catalog loading on every
-   declared Windows or Linux Python target. Each target also creates an
+   declared Windows or Linux Python platform. Each platform also creates an
    operator project for the first declared workspace through the installed engine.
 5. Requires all qualification results to identify the same engine, workspace
-   inventory, release plan and project pin, then freezes the complete publication
-   inventory.
+   inventory, release plan and project pin. It signs the generated engine
+   reference and freezes the complete publication inventory.
 6. Admits that frozen payload from the selected producer run and attempt.
    A separate job checks the artifact IDs, complete inventory, exact bytes
    and subject provenance before retaining an admission receipt.
 
 Workspace qualification does not compare executable deployment plans,
-authorize targets, deploy resources, or evaluate workload health. Publication
+authorize deployment, deploy resources, or evaluate workload health. Publication
 remains a separate approval step.
 
 Candidate admission accepts a completed producer even while the surrounding
@@ -198,6 +198,21 @@ the source, caller, run, attempt and selected digests, and explicitly marks
 installation and deployment as not run. It is an input gate for subsequent
 acceptance, not evidence of a fleet deployment or workload readiness.
 Preview admission retains its preview identity and cannot authorize publication.
+
+Content releases that declare workspaces also publish `siteops-engine.json`
+and its detached proof. The signed reference identifies the exact engine
+release, source revision, version, installation bundle and proof selected
+for that content release. Combined prereleases identify their colocated
+engine. Releases with only content identify the existing engine without copying
+or rebuilding its assets.
+
+The reference contains identities, not download URLs, credentials or
+publisher policy. Its signature and the engine bundle's own provenance must
+both satisfy independent consumer policy. It does not replace the unsigned
+`siteops-workspaces.json` routing descriptor, enroll a source or choose
+the newest engine satisfying a compatibility range. A compatible bootstrap
+can consume it through [content release selection](install-siteops.md#install-the-engine-selected-by-a-content-release).
+Direct engine installation commands remain supported.
 
 The default preview's final summary shows one matrix of Python versions and
 platforms, plus a link to the attested release assets. Individual job logs
@@ -222,10 +237,10 @@ configured environment and explicit approval.
 ## Fleet resource ownership
 
 The qualification helpers in `scripts/manage-release-fleet.py` operate on
-two fixed slots rather than accepting arbitrary resource-group names.
+two fixed slots rather than accepting arbitrary resource group names.
 Each operation binds the selected admission receipt, acceptance run/attempt
 and explicit Azure subscription. The public scope binding and Azure resource
-names are derived separately, so the receipt does not disclose target names.
+names are derived separately, so the receipt does not disclose resource group names.
 
 Preflight requires both groups to be absent and records hashes of distinct
 private ownership markers. Retain its ownership receipt durably before
@@ -236,7 +251,7 @@ Creation and cleanup require `--execute`, the ownership receipt and its
 selected digest. These tools use the caller's approved Azure identity and
 do not sign in or grant permissions.
 Take the receipt and expected digest from the trusted qualification run,
-not deployment content. A digest check establishes identity, not authority.
+not workspace content. A digest check establishes identity, not authority.
 
 Creation binds each group through Azure's immutable `managedBy` property.
 An existing group with another value cannot acquire this run's marker
@@ -253,7 +268,7 @@ The ownership receipt supports a separately authorized reconciliation after
 cancellation. Reuse the original candidate, run/attempt and subscription.
 Reconciliation downloads the original receipt by its bound artifact ID with
 digest checking, rather than regenerating its commitments. Then repeat the
-ownership checks. Never substitute a subscription-wide search or general
+ownership checks. Never substitute a search across the subscription or general
 resource janitor. Keep provider diagnostics and allocation state private.
 These helpers do not install Site Ops, deploy AIO or establish workload health.
 
@@ -263,9 +278,116 @@ exact admitted plan, engine, workspaces and inventory for the manual
 That path installs the selected engine outside checkout, seeds the normal
 operator project, coordinates two live hosts, and requires bound deployment,
 readiness and cleanup receipts. It does not rebuild candidate assets.
-This standalone workflow does not yet wire all required live scenarios into
-the publication gate. Final release approval still requires that integration
-and evidence from the unchanged candidate.
+The Release workflow does not run this path or other live scenarios. Before
+approving publication, confirm the required live evidence for the same
+unchanged candidate.
+
+## Qualify the Azure Pipelines templates
+
+This harness qualifies the Azure Pipelines templates that customers use.
+Customers use the consumer pipelines and reusable templates in
+[CI/CD setup](ci-cd-setup.md#azure-devops), with their own content and
+deployment identity.
+
+1. Register `.pipelines/validate-pipelines.yaml` once using **Existing Azure
+   Pipelines YAML file** and the reviewed source branch. Save the definition
+   before running it. An existing definition pointing at this path can be
+   reused.
+2. Configure the agent's approved Python package feed. Template expansion
+   uses the service connection and variable group names in the Environment
+   settings blocks of `.pipelines/deploy.yaml` and
+   `.pipelines/integration-test.yaml`. The preview checks that each
+   environment selects its own pair.
+   A `PIP_INDEX_URL` pipeline variable can select the approved feed when
+   required by your organization. On this qualification pipeline only,
+   allow **Edit build pipeline** for the project build service identity,
+   `<project> Build Service (<organization>)`. Template previews submit
+   pipeline YAML through `yamlOverride`, which requires that permission.
+   Keep the identity's other permissions inherited. The build identity also
+   needs read access to its definition and source repository, plus the
+   resource authorization required for template expansion. This
+   qualification does not need Azure resource roles.
+3. Queue one approved run bound to the selected branch and full commit,
+   then inspect its qualification summary and `ado-qualification` artifact.
+
+The preview stage discovers its own definition through `System.DefinitionId`
+and verifies the repository and qualification pipeline path. CI, deployment
+and integration definitions do not need to be registered separately.
+The controller requires a clean checkout at the selected commit and reads
+the pipeline YAML from committed Git blobs. It submits those documents through
+`yamlOverride`, with that same branch and commit bound to every template
+expansion. All pipeline documents share the qualification pipeline's
+`.pipelines` directory, preserving relative template resolution.
+
+The full preview matrix covers setup options, environment mappings,
+planning versus deployment, selectors, Site files, resource set samples
+and every integration phase. Both default and enabled WIF session refresh
+are expanded. These requests use only the dedicated `/preview` endpoint
+and never execute the deployment or integration jobs.
+
+The consumer stages run independently of the preview stage, so a preview
+failure does not suppress runtime evidence. Available agent capacity
+determines whether the lanes execute concurrently. The Site file case still
+follows a successful selector case.
+
+Both consumer stages use the ordinary setup and validation templates.
+Each installs the selected checkout with a noneditable pip installation
+and runs `validate`, which does not compile, against real fixtures under
+`tests/fixtures/ado-consumer`. One case selects a workspace Site by label.
+The other uses a standalone Site file outside the workspace inventory.
+The fixture includes its referenced ARM JSON and synthetic Site values.
+These stages have no Azure task, variable group or mapped preview token.
+
+The final stage waits for both lanes and reads native job outcomes without
+polling or queueing other pipelines. All required jobs must return
+`Succeeded`, and the complete preview receipt must match the selected
+source. Failed, canceled, skipped,
+missing or partially successful jobs cannot produce a passing report.
+The report includes the identity of the selected source installation and the preview
+case inventory with input and expansion digests. Reports are published
+only after the reporter creates its own safe output, including failed
+qualification results. A canceled run can prevent the reporting stage from
+starting, so a missing report is not qualification evidence.
+
+The recorded source commit identifies this pipeline's checkout. Retain a
+reviewed mapping that shows source equivalence for a mirror or snapshot, and
+keep the original publisher identity for verifying signed releases.
+
+Run only reviewed pipeline source with the explicitly mapped
+`System.AccessToken`. The harness has no automatic PR trigger, interactive
+login or pipeline creation. Expanded YAML, resource names and raw
+service diagnostics are not published. HTTP failures retain the status code
+and an allowlisted service exception category. When the service reports an
+unlisted exception type whose key has the form of a .NET class name, the
+diagnostic also names that type. Messages and other unknown or unreadable
+details remain undisclosed. These categories describe the server response, not a
+proven cause, and do not trigger retries or a fallback to the execution endpoint.
+
+The preview step is the only step that receives `System.AccessToken`.
+Its job installs just the runtime requirements locked by hash as binary
+wheels, without a cache, into a private virtual environment. It runs the
+controller with `-E -s -B` so Python environment variables, user packages
+and bytecode writes stay out of the process that holds the token. Keep **Limit job
+authorization scope to current project** enabled and restrict who can edit
+or queue this pipeline to maintainers.
+
+A complete passing run qualifies template expansion and the explicit
+consumer checks that install from source for that candidate. Qualify verified
+release installation, separate caller and automation checkouts, executable
+planning, deployment and WIF renewal in separately approved hosted runs.
+Release production remains in GitHub Actions.
+
+A separate rehearsal in a customer repository should use the
+[reusable template example](ci-cd-setup.md#reference-the-deployment-template-from-another-repository)
+and confirm both checkouts, engine origin, workspace selection
+and configured overrides. Local tests exercise those script/path boundaries.
+Only a separately approved hosted run qualifies repository service
+connections, agent tasks and Azure authentication. A preview success does
+not establish those outcomes. For WIF refresh, retain the actual task version
+and run long enough to exercise token renewal and a subsequent authorized
+Azure operation. Confirm refresh failure is visible and the final task result
+preserves any deployment failure. Local controls and template previews do
+not establish that live token lifecycle.
 
 ## Prepare the real release files
 
@@ -290,17 +412,16 @@ operator benefit rather than repeating the product name or version.
 Start the notes with `## Highlights` and explain what operators can do with
 this release. Include `## Upgrading` when existing users must take action,
 linking to the applicable migration instructions. The GitHub release title
-already identifies the release, so the notes do not need another top-level
-title.
+already identifies the release, so the notes do not need another title.
 
-Write the changes and release-specific guidance in `notes.md`. The workflow
+Write the changes and guidance specific to the release in `notes.md`. The workflow
 adds **Install Site Ops** automatically. It includes the exact versioned wheel
 URL for native uv, the configured package index policy, and complete Bash
 and PowerShell bootstrap commands bound to the frozen script bytes and
 source identities. It includes the release asset links and verified
-installation guide pinned to the source commit. The HTTPS entry checks
+installation guide pinned to the source commit. The HTTPS route checks
 the script against the reviewed instructions. Independent script provenance
-verification remains a separate entry with its own tooling prerequisite.
+verification remains a separate route with its own tooling prerequisite.
 A content release that references an existing engine links to
 that independently published release. There is no need to copy installation
 commands, source hashes, or download URLs into the authored notes.
@@ -346,8 +467,8 @@ with the pinned runtime wheels, `pylock.toml`, the frozen source's
 content does not need a version change.
 
 The current beta policy still keeps the source package at `1.0.0b1`.
-Do not create another Site Ops beta tag without an approved version-policy
-change.
+Do not create another Site Ops beta tag without an approved change to the
+version policy.
 
 ### Release content against an existing engine
 
@@ -366,7 +487,7 @@ not build an engine bundle or depend on the current engine development version
 on `main`. Confirm content compatibility with the referenced engine as part of
 the release evidence.
 
-The reference is an exact engine release, not a minimum-version range.
+The reference is an exact engine release, not a range with a minimum version.
 Stable content requires a stable referenced engine release. Candidate
 preparation requires its complete native asset set and freezes the GitHub
 digests. Earlier engine releases with four assets (ZIP, standalone
@@ -376,7 +497,7 @@ older release with four assets does not make the bootstrap routes available.
 A release that contains only a ZIP is rejected.
 
 Add reviewed `workspaces` records to publish complete workspace packages
-and their proofs with the content release. Their kit version comes
+and their proofs with the content release. Their package version comes
 from the content tag, while the referenced engine retains its own version
 and assets. See [workspace production](workspace-packages.md#build-workspaces-declared-by-a-release).
 
@@ -411,7 +532,7 @@ a separately released engine instead.
 | `tag` | Required version identity. `v...` releases Scale Kit content, while `siteops/v...` releases the engine independently. |
 | `headline` | Required short description used with the tag to form the release title. |
 | `siteops` | Required for a content release. Choose `{"build": true}` or `{"release": "siteops/v<version>"}`. Omit it for an independent engine release. |
-| `workspaces` | Optional reviewed workspace build inputs for a content release. See [workspace production](workspace-packages.md#build-workspaces-declared-by-a-release). Publication requires every declared package, its proof, and the routing descriptor. |
+| `workspaces` | Optional reviewed workspace build inputs for a content release. See [workspace production](workspace-packages.md#build-workspaces-declared-by-a-release). Publication requires every declared package, its proof, the routing descriptor and the signed engine reference. |
 | `latest` | Optional, defaults to `false`. Set `true` only to designate a stable Scale Kit release as GitHub's Latest release. |
 
 `siteops.build` is a selection, not an on/off switch. `true` includes a fresh
@@ -420,11 +541,11 @@ engine release instead. Independent engine releases always build their own
 assets from the matching source package version.
 
 Prerelease status comes from the tag, with no separate `prerelease` field.
-Versions containing a development, alpha, beta, or release-candidate suffix,
+Versions containing a development, alpha, beta, or release candidate suffix,
 such as `v0.0.2.dev20260912`, `v1.0.0b8`, or `v1.0.0rc1`, are prereleases.
 `v1.0.0` is stable. Stable content must reference a stable engine release.
 
-`latest` controls GitHub's repository-wide Latest badge and
+`latest` controls GitHub's Latest badge for the repository and
 `releases/latest` destination. It does not update installed applications.
 Use `true` when publishing the stable content release you want that destination
 to recommend. Prereleases and independent Site Ops releases cannot take over
@@ -436,7 +557,7 @@ state, not authoring inputs. Keep published release files as historical records
 rather than maintaining a mutable `next release` file.
 
 Notes are plain Markdown. Release files cannot supply local hooks, commands,
-arbitrary repository URLs, or custom note-file paths.
+arbitrary repository URLs, or custom paths for note files.
 
 ## Prepare and review the candidate
 
@@ -462,14 +583,14 @@ Approve tag creation and publication
 Tag A and publish the same qualified bytes
 ```
 
-Use one release folder per release-preparation PR. A push to `main` that
+Use one release folder for each PR that prepares a release. A push to `main` that
 changes `releases/<name>/release.json` or `notes.md` starts preparation,
 normally as the result of merging that PR. Protect `main` with required pull
 requests to enforce the review step. The workflow itself listens for the
 matching push, not a PR event. If several release folders change together,
 automatic selection stops instead of choosing one silently.
 
-Normally, no manual dispatch or SHA entry is needed after merging the release
+Normally, no manual dispatch or SHA input is needed after merging the release
 files. Open the automatically started **Release (approval required)** run to
 review its candidate. Automatic preparation still waits for human approval
 before publication.
@@ -506,7 +627,8 @@ the approved publication list and compares the uploaded identities with that
 list.
 
 When workspaces are declared, the final payload combines their qualified ZIPs,
-proofs and `siteops-workspaces.json` with any engine assets built for this
+proofs, `siteops-workspaces.json` and the signed `siteops-engine.json` reference
+with any engine assets built for this
 release. The referenced engine's files remain in its own release. Candidate
 preparation compares its frozen engine selection with the current native
 inventory, preserving the exact engine that qualified the workspaces.
@@ -531,8 +653,9 @@ environment secrets for the current workflow.
 The workflow checks this after reading an active release file and before
 building its native release assets. It also checks for an existing release or
 conflicting tag before building. The publisher independently rechecks the
-destination after approval. Choose self-review and
-administrator-bypass settings according to repository policy. Previews do not
+destination after approval. Choose whether reviewers can approve their own
+runs and whether administrators can bypass protection, according to
+repository policy. Previews do not
 need this environment.
 
 `siteops-release` is the shared publication gate for both version streams,
@@ -541,8 +664,8 @@ including Scale Kit content releases that reference an existing engine.
 After reviewing the generated summary, an authorized reviewer uses **Review
 deployments**, selects `siteops-release`, then selects **Approve and deploy**.
 This is GitHub's label for allowing the publishing job. It does not deploy
-Azure infrastructure. If self-review is prevented, another reviewer must
-approve the run.
+Azure infrastructure. If reviewers cannot approve their own runs, another
+reviewer must approve the run.
 
 After approval, the workflow:
 
@@ -554,7 +677,7 @@ After approval, the workflow:
    pointing there. It never moves a conflicting tag.
 4. Reauthenticates the ZIP and standalone wheel, confirms their byte identity,
    and reauthenticates each declared workspace package. It compares workspace
-   routing, source, kit and compatibility metadata with the approved
+   routing, source, package identity and compatibility metadata with the approved
    declaration before creating the release with its unchanged payload.
 5. Confirms every uploaded asset digest and verifies GitHub's release
    attestation when immutable releases are enabled.
@@ -564,7 +687,7 @@ occurs in `Azure/digital-ops-scale-kit`. A fork's workflow writes only to that
 fork. Existing releases are never overwritten.
 
 With native installation assets, GitHub CLI creates a draft, uploads the files,
-and then publishes. This temporary draft is not a separate human-review stage.
+and then publishes. This temporary draft is not a separate stage for human review.
 If immutability is enabled, GitHub locks the uploaded assets and tag when
 publication completes. Titles and release notes remain editable through
 GitHub's normal controls. The workflow does not enable immutability itself.
@@ -593,7 +716,7 @@ required) > Run workflow** and enter:
 | Input | Value |
 |---|---|
 | Branch | `main` |
-| `release-file` | A repository-relative path such as `releases/my-release/release.json`, already committed on `main` |
+| `release-file` | A path relative to the repository, such as `releases/my-release/release.json`, already committed on `main` |
 | `expected-source-sha` | The full current commit SHA of `main` |
 
 `release-file` is a path, not an upload or branch selector. This starts the same

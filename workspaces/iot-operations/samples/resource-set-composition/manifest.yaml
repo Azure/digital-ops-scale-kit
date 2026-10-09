@@ -2,8 +2,8 @@ apiVersion: siteops/v1
 kind: Manifest
 name: resource-set-composition
 description: |
-  Advanced resource-set example. Site inheritance selects shared managed and
-  external devices, while the concrete site selects independent asset sets and
+  Advanced resource set example. Site inheritance selects shared managed and
+  external devices, while the concrete Site selects independent asset sets and
   composes a dataflow endpoint, profile, and route from separate sources.
 
 parallel: 1

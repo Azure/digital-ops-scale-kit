@@ -2,25 +2,27 @@ apiVersion: siteops/v1
 kind: Manifest
 name: aksee-bootstrap
 description: |
-  Bootstraps a bare Arc-onboarded Windows VM through AKS Edge Essentials
-  install, single-node K3s cluster, Arc-connected cluster with custom
-  locations enabled, ready for the AIO deploy chain. Delivered via Arc Run
-  Command. Survives the Hyper-V reboot via a Scheduled Task and `state.json`.
-  Per-phase idempotent.
+  Turn a Windows VM onboarded to Azure Arc into an AKS Edge Essentials K3s
+  cluster with a single node, connected to Azure Arc with custom locations
+  enabled and ready for AIO. Optionally enables the OIDC issuer and workload
+  identity that Secret Sync needs.
+
+  Delivered via Arc Run Command. Survives the Hyper-V reboot via a Scheduled
+  Task and `state.json`. Each phase is idempotent.
 
   Use this manifest standalone to bootstrap hosts on its own. To compose
   bootstrap + AIO install in a single deploy, see
   `samples/aio-with-aksee-bootstrap/manifest.yaml`.
 
-  Prerequisites per target VM (one-time):
-    - Server is Arc-connected (e.g., via `OnboardingScript.ps1`).
-    - The Arc machine system-assigned managed identity has access on the
+  Prerequisites for each VM (once):
+    - Server is connected to Azure Arc (for example, via `OnboardingScript.ps1`).
+    - The Arc machine's system-assigned managed identity has access on the
       resource group. The worker authenticates as it for the Phase 3
-      Arc-connect, the AIO feature enablement, and the tag write. No service
+      Arc connection, the AIO feature enablement, and the tag write. No service
       principal is used. Use `Contributor`, or `Kubernetes Cluster - Azure Arc
       Onboarding` plus `Tag Contributor` for least privilege.
 
-# Max concurrent sites. 0 = unlimited, 1 = serial.
+# Max concurrent Sites. 0 = unlimited, 1 = serial.
 parallel: 3
 
 # Default selector. Override at the CLI with `-l <key>=<value>`.

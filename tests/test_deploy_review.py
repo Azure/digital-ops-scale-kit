@@ -145,7 +145,24 @@ def test_execution_interrupt_does_not_claim_no_submission(prepared, capsys):
     assert invoke(["-w", str(workspace), "deploy", str(manifest), "--yes"]) == 130
     output = capsys.readouterr().err
     assert "No operations were submitted" not in output
-    assert "Inspect the targets" in output
+    assert "Execution was interrupted. Inspect the Sites before retrying." in output
+
+
+@pytest.mark.parametrize(("count", "line"), [(1, "Prepared 1 Site for deployment."), (2, "Prepared 2 Sites for deployment.")])
+def test_confirmed_deploy_counts_prepared_sites(prepared, capsys, count, line):
+    workspace, manifest, result, _ = prepared
+    result.plan.targets = (object(),) * count
+    assert invoke(["-w", str(workspace), "deploy", str(manifest), "--yes"]) == 0
+    output = capsys.readouterr().err
+    assert line in output and "target" not in output.casefold()
+
+
+@pytest.mark.parametrize(("site_file", "line"), [
+    (None, "Prepared 1 Site from typed inputs for deployment."),
+    ("site.yaml", "Prepared 1 Site from a Site file for deployment."),
+])
+def test_explicit_site_summary_names_its_source(site_file, line):
+    assert cli._prepared_sites_line(SimpleNamespace(site_file=site_file), 1, explicit=True) == line
 
 
 def test_late_authority_failure_is_a_single_failed_json_result(prepared, capsys):

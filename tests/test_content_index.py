@@ -101,9 +101,9 @@ def test_index_is_deterministic_and_source_neutral(workspace):
     )
     text = render_browse_plain(result)
     assert "approved-feed:sample" in text and "immutable-version" in text
-    assert "Remote preview only" in text
+    assert "Plan and deploy use a release from an approved source" in " ".join(text.split())
     assert "siteops -w" not in text
-    assert "No targets declared" not in text
+    assert "No Sites or selector declared" not in text
     assert result.document()["source"]["verification"] == "not-performed"
 
 

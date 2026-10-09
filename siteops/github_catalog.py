@@ -83,7 +83,6 @@ def inspect_github(
     *,
     ref: str | None = None,
     workspace: Path | str | None = None,
-    auth: str = "anonymous",
     search: str | None = None,
     tags: tuple[str, ...] = (),
     category: str | None = None,
@@ -106,7 +105,7 @@ def inspect_github(
             from siteops.github_source import GitHubClient, GitHubReference
             from siteops.source_metadata_cache import SourceMetadataCache
 
-            live = GitHubClient(GitHubReference.parse(source, ref=ref), auth=auth)
+            live = GitHubClient(GitHubReference.parse(source, ref=ref))
             client = CachedGitHubClient(
                 live, SourceMetadataCache(), refresh=refresh, offline=offline,
             )

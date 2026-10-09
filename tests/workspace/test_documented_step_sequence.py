@@ -1,12 +1,12 @@
 """Tests that a manifest's documented step sequence matches what it deploys.
 
-Several manifests list their post-flatten step sequence in the `description:`
+Several manifests list their flattened step sequence in the `description:`
 field, so a reader can see the order without running `siteops plan --describe`. That
 listing is hand-maintained and has no other guard, which makes it the first thing
 to go stale when includes are added or removed.
 
 The check is opt-in by convention: a manifest participates by writing a
-"Post-flatten step sequence" block of numbered lines. A manifest without one is
+"Flattened step sequence" block of numbered lines. A manifest without one is
 skipped, so this never forces the documentation on anyone.
 """
 
@@ -16,10 +16,10 @@ from siteops.models import Manifest
 from tests.workspace.test_manifest_validation import _all_manifest_files
 
 # `   10. opc-plc-simulator      (gated by enableSecretSync)` -> "opc-plc-simulator"
-_SEQUENCE_HEADING = re.compile(r"post-flatten step sequence", re.IGNORECASE)
+_SEQUENCE_HEADING = re.compile(r"flattened step sequence", re.IGNORECASE)
 _NUMBERED_STEP = re.compile(r"^\s*(\d+)\.\s+(\S+)")
 
-# Manifests documenting a post-flatten sequence today. A heading that changed
+# Manifests documenting a flattened sequence today. A heading that changed
 # would otherwise remove that manifest from this check while the remaining ones
 # keep the test green, which is how a documented sequence goes stale unnoticed.
 # Raise this when a manifest starts documenting one.
@@ -71,7 +71,7 @@ class TestDocumentedStepSequence:
                 )
 
         assert checked >= _DOCUMENTED_SEQUENCE_FLOOR, (
-            f"Only {checked} manifest(s) documented a post-flatten step "
+            f"Only {checked} manifest(s) documented a flattened step "
             f"sequence, down from {_DOCUMENTED_SEQUENCE_FLOOR}. A manifest whose "
             f"heading changed stops being checked here while the others keep "
             f"this test green. Restore the heading, or lower the floor "

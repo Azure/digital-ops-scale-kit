@@ -12,24 +12,65 @@ import ssl
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, Request, build_opener
 
 import yaml
+from source_snapshot import SourceSnapshotError, _git, validate_repository
 
 ROOT = Path(__file__).resolve().parents[1]
+QUALIFICATION_PIPELINE = ".pipelines/validate-pipelines.yaml"
 PIPELINES = {
     "ci": ".pipelines/ci.yaml",
     "deploy": ".pipelines/deploy.yaml",
     "integration": ".pipelines/integration-test.yaml",
 }
 MAX_RESPONSE = 4 * 1024 * 1024
+MAX_ERROR_RESPONSE = 16 * 1024
 ENVIRONMENTS = ("dev", "staging", "prod")
+HTTP_ERROR_CATEGORIES = {
+    "NullReferenceException": "service-null-reference",
+    "System.NullReferenceException": "service-null-reference",
+    "AccessDeniedException": "access-denied",
+    "VssUnauthorizedException": "authentication-rejected",
+    "PipelineValidationException": "yaml-validation",
+    "JsonReaderException": "request-json",
+    "Newtonsoft.Json.JsonReaderException": "request-json",
+    "ArgumentNullException": "missing-argument",
+    "System.ArgumentNullException": "missing-argument",
+}
+SERVICE_EXCEPTION_TYPE = re.compile(r"[A-Z][A-Za-z0-9]{0,95}Exception")
 
 
 class PreviewError(Exception):
     """A fixed diagnostic suitable for a public validation log."""
+
+
+def _http_error_detail(error: HTTPError) -> str:
+    """Describe a service failure by category and class name, never message text."""
+    try:
+        raw = error.read(MAX_ERROR_RESPONSE + 1)
+        if len(raw) > MAX_ERROR_RESPONSE:
+            return "category: diagnostic-unavailable"
+        document = json.loads(raw)
+    except (OSError, ValueError, RecursionError):
+        return "category: diagnostic-unavailable"
+    if not isinstance(document, dict):
+        return "category: diagnostic-unavailable"
+    type_key = document.get("typeKey")
+    names = [type_key]
+    qualified_name = document.get("typeName")
+    if isinstance(qualified_name, str):
+        names.append(qualified_name.split(",", 1)[0].strip())
+    for name in names:
+        if isinstance(name, str) and name in HTTP_ERROR_CATEGORIES:
+            return f"category: {HTTP_ERROR_CATEGORIES[name]}"
+    # An unlisted type key is reported only when it has the shape of a bare .NET exception class name.
+    if isinstance(type_key, str) and SERVICE_EXCEPTION_TYPE.fullmatch(type_key):
+        return f"category: unclassified; service type: {type_key}"
+    return "category: unclassified"
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -77,7 +118,14 @@ class AdoClient:
                 raise PreviewError("The pipeline service response exceeded its size limit.")
             document = json.loads(raw)
         except HTTPError as error:
-            raise PreviewError(f"The pipeline service rejected the request (HTTP {error.code}).") from None
+            detail = _http_error_detail(error)
+            try:
+                error.close()
+            except OSError:
+                detail = "category: diagnostic-unavailable"
+            raise PreviewError(
+                f"The pipeline service rejected the request (HTTP {error.code}; {detail})."
+            ) from None
         except (URLError, OSError, ValueError, RecursionError):
             raise PreviewError("The pipeline service response could not be read.") from None
         if not isinstance(document, dict):
@@ -94,7 +142,7 @@ class Case:
     override: str | None = None
 
 
-def cases() -> list[Case]:
+def cases(integration_source: str | None = None) -> list[Case]:
     """Cover parameter branches rather than every possible parameter combination."""
     selected = [Case("ci", "ci", {})]
     for environment in ENVIRONMENTS:
@@ -111,6 +159,11 @@ def cases() -> list[Case]:
     selected.append(Case(
         "deploy-wif-session", "deploy", {"keepAzSessionActive": True}, "environment=dev",
     ))
+    selected.append(Case(
+        "deploy-site-file", "deploy",
+        {"environment": "prod", "siteFile": "operator/site.yaml", "dryRun": True},
+        "environment=prod",
+    ))
     for sample in ("resource-set-basic", "resource-set-composition"):
         for custom in (False, True):
             selected.append(Case(
@@ -119,13 +172,23 @@ def cases() -> list[Case]:
                  "selector": "country=US" if custom else " "},
                 f"environment=sample,sample={sample}" + (",country=US" if custom else ""),
             ))
-    source = yaml.safe_load((ROOT / PIPELINES["integration"]).read_text(encoding="utf-8"))
-    phases = next(parameter["values"] for parameter in source["parameters"]
-                  if parameter["name"] == "manifest")
-    if not phases or len(phases) != len(set(phases)) or any(
+    try:
+        source = yaml.safe_load(
+            integration_source if integration_source is not None
+            else (ROOT / PIPELINES["integration"]).read_text(encoding="utf-8")
+        )
+    except yaml.YAMLError:
+        raise PreviewError("The integration phase inventory is invalid.") from None
+    parameters = source.get("parameters") if isinstance(source, dict) else None
+    inventories = [
+        parameter.get("values") for parameter in parameters
+        if isinstance(parameter, dict) and parameter.get("name") == "manifest"
+    ] if isinstance(parameters, list) else []
+    phases = inventories[0] if len(inventories) == 1 else None
+    if not isinstance(phases, list) or not phases or any(
         not isinstance(phase, str) or not re.fullmatch(r"[a-z0-9-]+", phase)
         for phase in phases
-    ):
+    ) or len(phases) != len(set(phases)):
         raise PreviewError("The integration phase inventory is invalid.")
     selected.extend(Case(f"integration-{phase}", "integration", {"manifest": phase})
                     for phase in phases)
@@ -134,17 +197,28 @@ def cases() -> list[Case]:
         selected.append(Case(f"integration-{environment}", "integration",
                              {"environment": environment, "skipCleanup": True}))
     for label, options in (
-        ("local", {"enableCache": True, "installDev": False}),
         ("development", {"enableCache": True, "installDev": True}),
         ("external", {"enableCache": False, "siteopsSource": "https://example.invalid/siteops.whl"}),
+        ("release", {"enableCache": False, "release": "v1.0.0b7", "sourceCommit": "a" * 40}),
     ):
         override = yaml.safe_dump({
             "trigger": "none", "pr": "none", "pool": {"vmImage": "ubuntu-24.04"},
             "jobs": [{"job": "setup_preview", "steps": [{
                 "template": "templates/setup-siteops.yaml", "parameters": options,
             }]}],
-        })
+        }, sort_keys=False)
         selected.append(Case(f"setup-{label}", "ci", options, override=override))
+    for label, targeting in (("selector", {"selector": "environment=dev"}), ("site-file", {"siteFile": "operator/site.yaml"})):
+        options = {
+            "workspace": "deployment", "manifest": "manifests/custom.yaml",
+            "release": "v1.0.0b7", "sourceCommit": "a" * 40, **targeting,
+        }
+        override = yaml.safe_dump({
+            "trigger": "none", "pr": "none", "pool": {"vmImage": "ubuntu-24.04"},
+            "variables": {"SITE_OVERRIDES": ""},
+            "stages": [{"template": "templates/siteops-validate.yaml", "parameters": options}],
+        }, sort_keys=False)
+        selected.append(Case(f"consumer-validate-{label}", "ci", options, override=override))
     return selected
 
 
@@ -182,7 +256,49 @@ def _mapping(value: object) -> dict:
     return value
 
 
-def validate_expansion(case: Case, text: str, connections: dict[str, str]) -> None:
+class EnvironmentSetting(NamedTuple):
+    connection: str
+    group: str
+
+
+_SETTING_CONDITION = re.compile(r"\$\{\{ if eq\(parameters\.environment, '([a-z]+)'\) \}\}")
+
+
+def environment_settings(text: str) -> dict[str, EnvironmentSetting]:
+    """Read the committed Environment settings block that pairs each environment with its resources."""
+    try:
+        document = yaml.safe_load(text)
+    except (yaml.YAMLError, RecursionError):
+        raise PreviewError("A committed pipeline is not supported YAML.") from None
+    variables = document.get("variables") if isinstance(document, dict) else None
+    settings: dict[str, EnvironmentSetting] = {}
+    for item in variables if isinstance(variables, list) else []:
+        condition = next(iter(item), None) if isinstance(item, dict) and len(item) == 1 else None
+        match = _SETTING_CONDITION.fullmatch(condition) if isinstance(condition, str) else None
+        if match is None:
+            continue
+        entries = item[condition]
+        rows = entries if isinstance(entries, list) else []
+        groups = [row.get("group") for row in rows if isinstance(row, dict) and set(row) == {"group"}]
+        connections = [
+            row.get("value") for row in rows
+            if isinstance(row, dict) and set(row) == {"name", "value"}
+            and row.get("name") == "siteopsServiceConnection"
+        ]
+        names = (*groups, *connections)
+        if (match[1] in settings or len(rows) != 2 or len(groups) != 1 or len(connections) != 1
+                or any(not isinstance(name, str) or not name.strip()
+                       or any(character in name for character in "\r\n$") for name in names)):
+            raise PreviewError("Each environment setting needs one variable group and one service connection.")
+        settings[match[1]] = EnvironmentSetting(connections[0], groups[0])
+    if set(settings) != set(ENVIRONMENTS):
+        raise PreviewError("The environment settings must map each environment exactly once.")
+    return settings
+
+
+def validate_expansion(
+    case: Case, text: str, settings: dict[str, EnvironmentSetting] | None = None,
+) -> None:
     """Check the service expansion without printing private YAML or evaluating expressions."""
     try:
         document = yaml.safe_load(text)
@@ -193,6 +309,24 @@ def validate_expansion(case: Case, text: str, connections: dict[str, str]) -> No
         raise PreviewError("The expanded pipeline is empty.")
     if any("template" in node for node in nodes):
         raise PreviewError("The service returned unexpanded template references.")
+    if case.name.startswith("consumer-validate-"):
+        _one(nodes, "job", "siteops_validate")
+        if any(node.get("task", "").startswith("AzureCLI") or "environment" in node for node in nodes):
+            raise PreviewError("Structural consumer validation must not acquire Azure deployment authority.")
+        installation = _one(nodes, "displayName", "Install Site Ops")
+        environment = _mapping(installation.get("env"))
+        if (environment.get("SITEOPS_RELEASE") != case.parameters["release"]
+                or environment.get("SITEOPS_SOURCE_COMMIT") != case.parameters["sourceCommit"]):
+            raise PreviewError("Consumer validation changed its selected release.")
+        validation = _one(nodes, "displayName", "Validate caller content")
+        environment = _mapping(validation.get("env"))
+        expected = {
+            "WORKSPACE": case.parameters["workspace"], "MANIFEST": case.parameters["manifest"],
+            "SELECTOR": case.parameters.get("selector", ""), "SITE_FILE": case.parameters.get("siteFile", ""),
+        }
+        if any(environment.get(key) != value for key, value in expected.items()):
+            raise PreviewError("Consumer validation changed its caller content or targeting.")
+        return
     if case.override:
         _one(nodes, "job", "setup_preview")
         installation = _one(nodes, "displayName", "Install Site Ops")
@@ -201,6 +335,9 @@ def validate_expansion(case: Case, text: str, connections: dict[str, str]) -> No
             raise PreviewError("The setup template selected different development dependencies.")
         if environment.get("SITEOPS_SOURCE", "") != case.parameters.get("siteopsSource", ""):
             raise PreviewError("The setup template selected a different installation source.")
+        if (environment.get("SITEOPS_RELEASE", "") != case.parameters.get("release", "")
+                or environment.get("SITEOPS_SOURCE_COMMIT", "") != case.parameters.get("sourceCommit", "")):
+            raise PreviewError("The setup template selected a different release identity.")
         caches = [node for node in nodes if node.get("displayName") == "Cache pip packages"]
         if len(caches) != int(case.parameters["enableCache"]):
             raise PreviewError("The setup cache condition did not match the requested case.")
@@ -215,30 +352,36 @@ def validate_expansion(case: Case, text: str, connections: dict[str, str]) -> No
         _one(nodes, "displayName", "Run unit tests")
         return
     environment = case.parameters.get("environment", "dev")
+    if not settings or environment not in settings:
+        raise PreviewError("The committed environment settings do not cover the requested case.")
+    connection, group = settings[environment]
     job = _one(nodes, "deployment", "siteops_deploy" if case.pipeline == "deploy" else "integration_test")
     actual_environment = job.get("environment")
     if isinstance(actual_environment, dict):
         actual_environment = actual_environment.get("name")
     if actual_environment != environment:
         raise PreviewError("The expanded deployment selected a different approval environment.")
+    if {node.get("group") for node in nodes if "group" in node} != {group}:
+        raise PreviewError("The expanded pipeline selected a different variable group.")
     task = _one(
         nodes, "displayName",
         "Prepare executable plan and deploy" if case.pipeline == "deploy" else "Run integration tests",
     )
     inputs = _mapping(task.get("inputs", {}))
-    if inputs.get("azureSubscription") != connections[environment] or inputs.get("scriptType") != "bash":
+    if inputs.get("azureSubscription") != connection or inputs.get("scriptType") != "bash":
         raise PreviewError("The expanded task selected a different service connection or shell.")
     if not _boolean(inputs.get("keepAzSessionActive", False), case.parameters.get("keepAzSessionActive", False)):
         raise PreviewError("The expanded task changed the requested WIF session refresh setting.")
     task_env = _mapping(task.get("env", {}))
     if case.pipeline == "deploy":
         if (task_env.get("SELECTOR") != case.selector
+                or task_env.get("SITE_FILE", "") != case.parameters.get("siteFile", "")
                 or not _boolean(task_env.get("DRY_RUN"), case.parameters.get("dryRun", False))
                 or task_env.get("MANIFEST") != case.parameters.get(
                     "manifest", "manifests/aio-install/manifest.yaml")):
             raise PreviewError("The expanded deployment inputs differ from the requested case.")
         body = inputs.get("inlineScript", "")
-        if not isinstance(body, str) or "--yes" not in body:
+        if not isinstance(body, str) or "--yes" not in body or (case.parameters.get("siteFile") and "--site-file" not in body):
             raise PreviewError("The expanded deployment omitted unattended consent.")
     elif (task_env.get("MANIFEST") != case.parameters.get("manifest", "all")
           or not _boolean(task_env.get("INTEGRATION_SKIP_CLEANUP"),
@@ -249,68 +392,105 @@ def validate_expansion(case: Case, text: str, connections: dict[str, str]) -> No
 def _repository(value: str) -> str:
     if not isinstance(value, str):
         raise PreviewError("Select an HTTPS source repository without credentials.")
-    url = urlsplit(value)
-    if (url.scheme != "https" or not url.hostname or url.username or url.password
+    try:
+        url = urlsplit(value)
+    except ValueError:
+        raise PreviewError("Select an HTTPS source repository without credentials.") from None
+    organization = url.path.split("/")[1] if url.path.startswith("/") else ""
+    organization_hint = (
+        url.hostname == "dev.azure.com" and bool(organization)
+        and url.username is not None and url.username.casefold() == organization.casefold()
+    )
+    if (url.scheme != "https" or not url.hostname or url.password is not None
+            or (url.username is not None and not organization_hint)
             or url.query or url.fragment):
         raise PreviewError("Select an HTTPS source repository without credentials.")
-    return value.rstrip("/").removesuffix(".git").casefold()
+    canonical = urlunsplit((url.scheme, url.netloc.rsplit("@", 1)[-1], url.path, "", ""))
+    return canonical.rstrip("/").removesuffix(".git").casefold()
+
+
+def source_documents(commit: str) -> dict[str, str]:
+    """Read bounded raw Git blobs after admitting the exact clean checkout."""
+    try:
+        validate_repository(ROOT, commit)
+        documents = {}
+        for name, path in PIPELINES.items():
+            identity = f"{commit}:{path}"
+            size = _git(ROOT, ["--no-replace-objects", "cat-file", "-s", identity])
+            if size.returncode or not size.stdout.strip().isdigit():
+                raise PreviewError("A committed pipeline file could not be inspected.")
+            length = int(size.stdout.strip())
+            if not 0 < length <= MAX_RESPONSE:
+                raise PreviewError("A committed pipeline file is empty or too large.")
+            result = _git(ROOT, ["--no-replace-objects", "cat-file", "blob", identity])
+            if result.returncode or len(result.stdout) != length:
+                raise PreviewError("A committed pipeline file could not be read completely.")
+            documents[name] = result.stdout.decode("utf-8")
+        return documents
+    except (SourceSnapshotError, ValueError):
+        raise PreviewError("The exact clean source checkout could not be read.") from None
+
+
+def _template_parameter(value: object) -> str:
+    """Encode one runtime parameter as a string, the value type the Pipelines API accepts."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, sort_keys=True, separators=(",", ":"))
+    raise PreviewError("Template parameters must be strings, booleans, mappings or lists.")
 
 
 def qualify(
-    client: AdoClient, pipeline_ids: dict[str, int], repository: str, ref: str, commit: str,
-    connections: dict[str, str], groups: dict[str, str],
+    client: AdoClient, pipeline_id: int, repository: str, ref: str, commit: str,
 ) -> dict:
-    """Read the chosen definitions and preview only that exact repository candidate."""
+    """Use this qualification definition to preview the exact committed entry points."""
     if (not re.fullmatch(r"refs/heads/[A-Za-z0-9._/-]+", ref) or ".." in ref
             or not re.fullmatch(r"[0-9a-f]{40}", commit)):
         raise PreviewError("Select a branch and its exact full source commit.")
-    if (not isinstance(pipeline_ids, dict) or set(pipeline_ids) != set(PIPELINES)
-            or any(type(value) is not int or value <= 0 for value in pipeline_ids.values())
-            or len(set(pipeline_ids.values())) != len(PIPELINES)):
-        raise PreviewError("Select distinct positive CI, deploy and integration pipeline IDs.")
-    for mapping in (connections, groups):
-        if not isinstance(mapping, dict) or set(mapping) != set(ENVIRONMENTS) or any(
-            not isinstance(value, str) or not value.strip()
-            or any(character in value for character in "\r\n") for value in mapping.values()
-        ):
-            raise PreviewError("Provide explicit service connection and variable group mappings.")
+    if type(pipeline_id) is not int or pipeline_id <= 0:
+        raise PreviewError("Select the positive qualification pipeline ID.")
     expected_repository = _repository(repository)
-    for name, path in PIPELINES.items():
-        try:
-            definition = client.request(pipeline_ids[name])
-            source = _mapping(definition.get("repository"))
-            process = _mapping(definition.get("process"))
-            filename = process.get("yamlFilename")
-            if (definition.get("id") != pipeline_ids[name]
-                    or _repository(source.get("url", "")) != expected_repository
-                    or not isinstance(filename, str) or filename.lstrip("/") != path):
-                raise PreviewError("The definition does not match the candidate repository and YAML.")
-        except PreviewError as error:
-            raise PreviewError(f"{name} definition: {error}") from None
+    documents = source_documents(commit)
+    settings = {
+        name: environment_settings(documents[name]) for name in PIPELINES if name != "ci"
+    }
+    definition = client.request(pipeline_id)
+    source = _mapping(definition.get("repository"))
+    process = _mapping(definition.get("process"))
+    filename = process.get("yamlFilename")
+    if (definition.get("id") != pipeline_id
+            or _repository(source.get("url", "")) != expected_repository
+            or not isinstance(filename, str) or filename.lstrip("/") != QUALIFICATION_PIPELINE):
+        raise PreviewError("The qualification definition does not match the candidate repository and YAML.")
     receipts = []
-    for case in cases():
+    selected = cases(documents["integration"])
+    for case in selected:
         parameters = dict(case.parameters) if case.override is None else {}
-        if case.pipeline != "ci":
-            parameters.update(serviceConnections=connections, secretGroups=groups)
         payload = {
             "previewRun": True,
             "resources": {"repositories": {"self": {"refName": ref, "version": commit}}},
-            "templateParameters": parameters,
+            "templateParameters": {
+                name: _template_parameter(value) for name, value in parameters.items()
+            },
+            "yamlOverride": case.override if case.override is not None else documents[case.pipeline],
         }
-        if case.override:
-            payload["yamlOverride"] = case.override
         print(f"Previewing {case.name}.", flush=True)
         try:
-            document = client.request(pipeline_ids[case.pipeline], preview=payload)
+            document = client.request(pipeline_id, preview=payload)
             text = document.get("finalYaml")
             if not isinstance(text, str) or not text.strip() or len(text.encode("utf-8")) > MAX_RESPONSE:
                 raise PreviewError("The preview service returned no bounded final YAML.")
-            validate_expansion(case, text, connections)
+            validate_expansion(case, text, settings.get(case.pipeline))
         except PreviewError as error:
             raise PreviewError(f"{case.name}: {error}") from None
+        request_bytes = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
         receipts.append({"case": case.name, "status": "passed",
+                         "inputSha256": hashlib.sha256(request_bytes).hexdigest(),
                          "expandedSha256": hashlib.sha256(text.encode("utf-8")).hexdigest()})
-    return {"sourceCommit": commit, "status": "passed", "cases": receipts}
+    return {"sourceCommit": commit, "status": "passed",
+            "expectedCases": [case.name for case in selected], "cases": receipts}
 
 
 def main() -> int:
@@ -325,10 +505,9 @@ def main() -> int:
             os.environ["SYSTEM_ACCESSTOKEN"],
         )
         report = qualify(
-            client, json.loads(os.environ["ADO_PREVIEW_PIPELINE_IDS"]),
+            client, int(os.environ["SYSTEM_DEFINITIONID"]),
             os.environ["BUILD_REPOSITORY_URI"], os.environ["BUILD_SOURCEBRANCH"],
-            os.environ["BUILD_SOURCEVERSION"], json.loads(os.environ["ADO_PREVIEW_CONNECTIONS"]),
-            json.loads(os.environ["ADO_PREVIEW_GROUPS"]),
+            os.environ["BUILD_SOURCEVERSION"],
         )
         with args.output.open("x", encoding="utf-8") as stream:
             json.dump(report, stream, indent=2)

@@ -2,6 +2,7 @@
 
 import json
 import os
+import subprocess
 import sys
 import time
 from unittest.mock import patch
@@ -145,6 +146,18 @@ def test_native_executable_arguments_remain_unrestricted(value):
     ), 10)
     assert result.returncode == 0
     assert json.loads(result.stdout) == [value]
+
+
+def test_compiler_commands_receive_empty_stdin():
+    result = _run_command((
+        sys.executable, "-c", "import sys; print(repr(sys.stdin.read()))",
+    ), 10)
+    assert result.returncode == 0
+    assert result.stdout.strip() == "''"
+
+    with patch("siteops.compilation.subprocess.run") as run:
+        _run_command((sys.executable, "--version"), 10)
+    assert run.call_args.kwargs["stdin"] is subprocess.DEVNULL
 
 
 @pytest.mark.parametrize("arguments", [[], (), "az --version"])

@@ -77,8 +77,8 @@ def native_inputs() -> dict[str, Path]:
 
 
 @pytest.fixture
-def published(bundle_factory, tmp_path, monkeypatch) -> tuple[Path, Path]:
-    """Publish two helper-bearing bundles whose command records its use."""
+def published(bundle_factory, tmp_path, monkeypatch) -> tuple[Path, Path, Path]:
+    """Publish combined and independently versioned bundles with recording commands."""
     original = native_bundle.write_wheel
 
     def recording(path, **options):
@@ -92,13 +92,9 @@ def published(bundle_factory, tmp_path, monkeypatch) -> tuple[Path, Path]:
         root, manifest = bundle_factory(number, source_sha=source * 40)
         archive, _ = publish_assets(root, manifest, tmp_path / f"release-{number}")
         archives.append(archive)
-    return archives[0], archives[1]
-
-
-def _ubuntu() -> None:
-    text = Path("/etc/os-release").read_text(encoding="utf-8")
-    if "ID=ubuntu" not in text or 'VERSION_ID="24.04"' not in text:
-        pytest.skip("Requires Ubuntu 24.04.")
+    root, manifest = bundle_factory(3, source_sha="d" * 40, version="1.2.3")
+    archive, _ = publish_assets(root, manifest, tmp_path / "release-3")
+    return archives[0], archives[1], archive
 
 
 def _harness(tmp_path, scenario, script, published, native_inputs):
@@ -114,6 +110,7 @@ def _harness(tmp_path, scenario, script, published, native_inputs):
             "TEST_SCENARIO": scenario,
             "TEST_BUNDLE_ARCHIVE": str(published[0]),
             "TEST_REPLACEMENT_ARCHIVE": str(published[1]),
+            "TEST_REFERENCED_ARCHIVE": str(published[2]),
             "TEST_UV_ARCHIVE": str(native_inputs["SITEOPS_TEST_UV_ARCHIVE"]),
             "TEST_PYTHON_ARCHIVE": str(native_inputs["SITEOPS_TEST_UV_PYTHON_ARCHIVE"]),
         },
@@ -129,45 +126,29 @@ def _harness(tmp_path, scenario, script, published, native_inputs):
 @linux_only
 @pytest.mark.parametrize(
     "scenario",
-    ["journey", "root", "storage", "policy", "tools", "runtime"],
+    ["journey", "root", "storage", "policy", "tools", "runtime", "prerequisites", "content"],
 )
-def test_ubuntu_bootstrap_installs_through_native_uv_and_the_shipped_helper(
+def test_linux_bootstrap_installs_through_native_uv_and_the_shipped_helper(
     tmp_path,
     published,
     native_inputs,
     scenario,
 ):
-    _ubuntu()
     _harness(tmp_path, scenario, SCRIPT, published, native_inputs)
 
 
-@linux_only
-def test_managed_azure_linux_bootstrap_uses_native_uv_without_sudo(
-    tmp_path,
-    published,
-    native_inputs,
-):
-    source = SCRIPT.read_text(encoding="utf-8")
-    assert source.count(". /etc/os-release\n") == 1
-    fixture = ROOT / "tests" / "fixtures" / "bootstrap-azurelinux3-os-release"
-    script = tmp_path / "bootstrap.sh"
-    script.write_text(
-        source.replace(". /etc/os-release\n", f'. "{bash_path(fixture)}"\n'),
-        encoding="utf-8",
-    )
-    _harness(tmp_path, "managed", script, published, native_inputs)
-
-
-def _guard(tmp_path: Path, body: str) -> subprocess.CompletedProcess[str]:
+def _guard(tmp_path: Path, body: str, *, private_group: bool) -> subprocess.CompletedProcess[str]:
     source = SCRIPT.read_text(encoding="utf-8")
     functions = []
-    for name in ("trusted_parent", "admit_directory", "admit_file"):
+    for name in ("writers_trusted", "trusted_parent", "admit_directory", "admit_file"):
         found = re.search(rf"(?ms)^{name}\(\) \{{.*?^\}}", source)
         assert found, f"The production {name} guard is missing."
         functions.append(found.group(0))
     script = tmp_path / "guard.sh"
     script.write_text(
-        'set -euo pipefail\numask 077\nuid="$(id -u)"\n' + "\n".join(functions) + "\n" + body,
+        'set -euo pipefail\numask 077\nuid="$(id -u)"\n'
+        + ('private_gid="$(id -g)"\n' if private_group else 'private_gid=""\n')
+        + "\n".join(functions) + "\n" + body,
         encoding="utf-8",
     )
     return subprocess.run(
@@ -181,32 +162,44 @@ def _guard(tmp_path: Path, body: str) -> subprocess.CompletedProcess[str]:
 
 @linux_only
 @pytest.mark.parametrize(
-    ("setup", "check", "accepted"),
+    ("setup", "check", "accepted", "private_group"),
     [
         (
             "mkdir -m 0750 home; mkdir -m 0755 home/.local home/.local/share",
             'admit_directory "$PWD/home/.local/share/siteops" private',
             True,
+            False,
         ),
-        ("mkdir -m 1777 sticky", 'admit_directory "$PWD/sticky/siteops" private', True),
-        ("mkdir -m 0755 existing", 'admit_directory "$PWD/existing" shared', True),
-        ("mkdir -m 0755 existing", 'admit_directory "$PWD/existing" private', False),
-        ("mkdir -m 0777 open", 'admit_directory "$PWD/open/siteops" private', False),
-        ("mkdir -m 0770 group", 'admit_directory "$PWD/group/siteops" shared', False),
-        ("mkdir real; ln -s real alias", 'admit_directory "$PWD/alias/siteops" private', False),
-        ("mkdir a", 'admit_directory "$PWD/a/../b" shared && [[ "$admitted" == "$PWD/b" ]]', True),
-        ("", "admit_directory relative/siteops shared", False),
-        ("", 'admit_directory "$PWD/line"$\'\\n\'"break" shared', False),
-        ("", 'admit_file "$(readlink -e /usr/bin/env)"', True),
-        ("printf x > tool; chmod 0755 tool", 'admit_file "$PWD/tool"', True),
-        ("printf x > tool; chmod 0777 tool", 'admit_file "$PWD/tool"', False),
-        ("printf x > tool; ln -s tool linked", 'admit_file "$PWD/linked"', False),
+        ("mkdir -m 1777 sticky", 'admit_directory "$PWD/sticky/siteops" private', True, False),
+        ("mkdir -m 0755 existing", 'admit_directory "$PWD/existing" shared', True, False),
+        ("mkdir -m 0755 existing", 'admit_directory "$PWD/existing" private', False, False),
+        ("mkdir -m 0777 open", 'admit_directory "$PWD/open/siteops" private', False, False),
+        ("mkdir -m 0770 group", 'admit_directory "$PWD/group/siteops" shared', False, False),
+        # The user's private group adds no other writer; other write never passes.
+        ("mkdir -m 0775 group", 'admit_directory "$PWD/group/siteops" private', True, True),
+        ("mkdir -m 0775 group", 'admit_directory "$PWD/group" shared', True, True),
+        ("mkdir -m 0757 open", 'admit_directory "$PWD/open/siteops" private', False, True),
+        ("printf x > tool; chmod 0775 tool", 'admit_file "$PWD/tool"', True, True),
+        ("printf x > tool; chmod 0775 tool", 'admit_file "$PWD/tool"', False, False),
+        ("mkdir real; ln -s real alias", 'admit_directory "$PWD/alias/siteops" private', False, False),
+        ("mkdir a", 'admit_directory "$PWD/a/../b" shared && [[ "$admitted" == "$PWD/b" ]]', True, False),
+        ("", "admit_directory relative/siteops shared", False, False),
+        ("", 'admit_directory "$PWD/line"$\'\\n\'"break" shared', False, False),
+        ("", 'admit_file "$(readlink -e /usr/bin/env)"', True, False),
+        ("printf x > tool; chmod 0755 tool", 'admit_file "$PWD/tool"', True, False),
+        ("printf x > tool; chmod 0777 tool", 'admit_file "$PWD/tool"', False, True),
+        ("printf x > tool; ln -s tool linked", 'admit_file "$PWD/linked"', False, False),
     ],
 )
-def test_linux_storage_guard_distinguishes_trusted_neighbors(tmp_path, setup, check, accepted):
+def test_linux_storage_guard_distinguishes_trusted_neighbors(
+    tmp_path, setup, check, accepted, private_group,
+):
+    # Fix modes so a login umask such as 0002 cannot change the expected result.
+    tmp_path.chmod(0o700)
     work = tmp_path / "work"
     work.mkdir()
-    result = _guard(work, f"cd {bash_path(work)}\n{setup}\n{check}\necho ADMITTED\n")
+    work.chmod(0o755)
+    result = _guard(work, f"cd {bash_path(work)}\n{setup}\n{check}\necho ADMITTED\n", private_group=private_group)
     assert (result.returncode == 0) is accepted, result.stdout + result.stderr
     assert ("ADMITTED" in result.stdout) is accepted
     if not accepted:
@@ -217,11 +210,12 @@ def test_linux_storage_guard_distinguishes_trusted_neighbors(tmp_path, setup, ch
 def test_linux_bootstrap_admits_uv_storage_and_runtime_before_execution():
     source = SCRIPT.read_text(encoding="utf-8")
     assert "python list" not in source
-    assert source.index('admit_directory "${!name}" shared') < source.index("\nselect_uv\n")
-    assert source.index("\nif $replace; then admit_bound_runtime; fi\n") < source.index(
-        "\nselect_runtime\n",
+    runtime = re.search(r"(?ms)^prepare_runtime\(\) \{.*?^\}", source).group()
+    assert runtime.index('admit_directory "${!name}" shared') < runtime.index("\n  select_uv\n")
+    assert runtime.index("\n  if $replace; then admit_bound_runtime; fi\n") < runtime.index(
+        "\n  select_runtime\n",
     )
-    assert source.index("\nselect_runtime\n") < source.index(
+    assert source.index("\nprepare_runtime\n") < source.index(
         'installer_helper="$(extract_installer_helper)"',
     )
     selection = source.split("select_runtime() {", 1)[1].split("\n}\n", 1)[0]

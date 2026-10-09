@@ -17,10 +17,14 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, TypeAlias
 
+from packaging.version import InvalidVersion, Version
+
 from siteops.process_args import prepare_process_args
 from siteops.runtime import RuntimePathError, RuntimePaths, prepare_root
 
 DEFAULT_COMPILATION_TIMEOUT_SECONDS = 300
+# The connectedk8s and azure-iot-ops extensions require this Azure CLI core version too.
+MINIMUM_AZURE_CLI_VERSION = "2.70.0"
 _NO_CONFIGURATION_DIGEST = "none"
 _ARM_JSON_COMPILER_FINGERPRINT = "arm-json"
 _BICEP_VERSION_PATTERN = re.compile(
@@ -49,6 +53,16 @@ CommandRunner: TypeAlias = Callable[
     subprocess.CompletedProcess[str],
 ]
 ToolResolver: TypeAlias = Callable[[str], str | None]
+
+
+def _parsed_version(version: str | None) -> Version | None:
+    """Parse a reported tool version. A missing or unreadable version yields None."""
+    if version is None:
+        return None
+    try:
+        return Version(version)
+    except InvalidVersion:
+        return None
 
 
 def resolve_tool_from_path(name: str) -> str | None:
@@ -860,6 +874,7 @@ def _run_command(
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         prepare_process_args(argv),
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -1164,15 +1179,29 @@ class TemplateCompilationSession:
                 ),
             )
             return self._azure_cli
+        parsed = _parsed_version(version)
+        # Fail closed: a version that cannot be read cannot be shown to meet the minimum.
+        if parsed is None or parsed < Version(MINIMUM_AZURE_CLI_VERSION):
+            found = (
+                "Azure CLI was found, but its version could not be read."
+                if parsed is None
+                else f"Azure CLI {version} was found."
+            )
+            self._azure_cli = CompilationFailure(
+                code=CompilationFailureCode.TOOL_UNAVAILABLE,
+                summary=f"Azure CLI {MINIMUM_AZURE_CLI_VERSION} or newer is required.",
+                detail=(
+                    f"{found} Azure CLI "
+                    f"{MINIMUM_AZURE_CLI_VERSION} or newer is required. Run "
+                    "`az upgrade`, then retry."
+                ),
+            )
+            return self._azure_cli
         self._azure_cli = ToolIdentity(
             provider="azure-cli",
             resolved_path=resolved,
             version=version,
-            version_provenance=(
-                VersionProvenance.KNOWN
-                if version is not None
-                else VersionProvenance.UNKNOWN
-            ),
+            version_provenance=VersionProvenance.KNOWN,
         )
         return self._azure_cli
 

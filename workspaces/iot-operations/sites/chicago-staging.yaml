@@ -1,7 +1,7 @@
 # Chicago Staging Site
 #
 # Target with: -l environment=staging   (the default `environment=dev` selector
-# in aio-install.yaml does not match this site.)
+# in the aio-install manifest does not match this Site.)
 
 apiVersion: siteops/v1
 kind: Site

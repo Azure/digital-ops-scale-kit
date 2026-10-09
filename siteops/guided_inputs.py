@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import copy
+import difflib
 import hashlib
 import re
 from collections.abc import Mapping
@@ -44,11 +45,42 @@ _RESOURCE_FACTS = {
         "connectedClusters.oidcIssuerAvailable",
     }),
 }
+# Plain text for each supported fact: the setting a read checks and the state Azure must report.
+_FACT_TEXT = {
+    "connectedClusters.workloadIdentityEnabled": ("workload identity", "workload identity enabled"),
+    "connectedClusters.oidcIssuerAvailable": ("OIDC issuer", "an OIDC issuer"),
+}
+# Resource noun and command placeholder label, matching `siteops browse` suggestions.
+_RESOURCE_TEXT = {
+    "microsoft.kubernetes/connectedclusters": ("cluster", "Arc-cluster"),
+    "microsoft.iotoperations/instances": ("instance", "AIO-instance"),
+}
 _OBSERVED_FIELDS = frozenset({"id", "subscription", "resourceGroup", "name", "location"})
 
 
 class GuidedInputError(ValueError):
-    """A guided-input validation failure with no supplied values or local paths."""
+    """A guided-input validation failure with no supplied values or local paths.
+
+    `private_message` may name a supplied input or file for output that is not
+    redacted.
+    """
+
+    private_message: str | None = None
+
+
+def _unknown_input(name: str, declared: list[str], source: str) -> GuidedInputError:
+    error = GuidedInputError(f"{source} contain an unknown input name.")
+    nearest = difflib.get_close_matches(name, declared, n=1)
+    hint = (
+        f"Did you mean '{nearest[0]}'?" if nearest
+        else "Run `siteops inputs MANIFEST` to list the declared inputs."
+    )
+    error.private_message = f"{source} contain an unknown input '{name}'. {hint}"
+    return error
+
+
+def _join_words(items: list[str]) -> str:
+    return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
 
 
 class ResourceInputError(GuidedInputError):
@@ -652,6 +684,48 @@ class InputContract:
             field = next(item for item in self.fields if item.name == source_name)
         return field
 
+    @staticmethod
+    def _resource_answer(field: InputField) -> str:
+        """Format the `--input` an operator supplies for one resource input."""
+        label = _RESOURCE_TEXT.get(field.resource.resource_type.casefold(), (None, field.name))[1]
+        return f"`--input {field.name}=<{label}-resource-ID>`"
+
+    def _read_purpose(
+        self, root: InputField, active_values: Mapping[str, Any],
+    ) -> str:
+        """Name the settings that active prerequisites read through one resource input."""
+        parts = []
+        for field in self._selected_resource_fields({root.name}):
+            settings = sorted({
+                _FACT_TEXT[check.fact][0] for check in field.resource.requires
+                if check.when is None or active_values.get(check.when.input) == check.when.equals
+            })
+            if settings:
+                noun = _RESOURCE_TEXT.get(field.resource.resource_type.casefold(), (field.name,))[0]
+                parts.append(f"the {noun}'s {_join_words(settings)} settings")
+        return f" so Site Ops can read {_join_words(parts)}" if parts else ""
+
+    def _missing_input(self, name: str, active_values: Mapping[str, Any]) -> GuidedInputError:
+        """Name a missing answer and the resource input that can supply it, if any."""
+        field = next(item for item in self.fields if item.name == name)
+        if field.resource is not None:
+            return GuidedInputError(
+                f"Missing required input '{name}'. Supply {self._resource_answer(field)}"
+                f"{self._read_purpose(field, active_values)}."
+            )
+        route = next((
+            root for root in self.fields
+            if root.resource is not None and root.resource.from_resource is None
+            and (root.when is None or active_values.get(root.when.input) == root.when.equals)
+            and name in self.resource_route_fields(root.name)
+        ), None)
+        if route is not None:
+            return GuidedInputError(
+                f"Missing required input '{name}'. Supply it, or supply "
+                f"{self._resource_answer(route)} to derive it."
+            )
+        return GuidedInputError(f"Missing required input '{name}'.")
+
     def bind(
         self, values_file: Path | None = None, inline: list[str] | None = None,
     ) -> BoundInputs:
@@ -663,7 +737,7 @@ class InputContract:
                 raise GuidedInputError("Inline inputs must use NAME=VALUE format.")
             name, value = answer.split("=", 1)
             if name not in fields:
-                raise GuidedInputError("Inline inputs contain an unknown input name.")
+                raise _unknown_input(name, list(fields), "Inline inputs")
             if name in inline_values:
                 raise GuidedInputError(f"Duplicate inline input '{name}'.")
             field = fields[name]
@@ -701,7 +775,7 @@ class InputContract:
             file_values = _mapping(document["values"], "Input values")
             for name, value in file_values.items():
                 if name not in fields:
-                    raise GuidedInputError("Input values contain an unknown input name.")
+                    raise _unknown_input(name, list(fields), "Input values")
                 field = fields[name]
                 if field.resource is not None and field.resource.from_resource is not None:
                     raise GuidedInputError(
@@ -727,7 +801,7 @@ class InputContract:
                 controller = active_values.get(field.when.input, _MISSING)
                 if controller is _MISSING:
                     raise GuidedInputError(
-                        f"Input '{field.when.input}' is missing; it controls conditional "
+                        f"Input '{field.when.input}' is missing. It controls conditional "
                         f"input '{field.name}'."
                     )
                 if controller != field.when.equals:
@@ -802,6 +876,9 @@ class InputContract:
             derivable.update(
                 field.name for field in self.fields if field.site_path == ("name",)
             )
+        for name in missing_required:
+            if name not in active_values and name not in derivable:
+                raise self._missing_input(name, active_values)
         for field in self.fields:
             if field.resource is None:
                 continue
@@ -810,18 +887,23 @@ class InputContract:
                 and active_values.get(field.when.input) != field.when.equals
             ):
                 continue
-            for check in field.resource.requires:
-                if (
-                    check.when is None
-                    or active_values.get(check.when.input) == check.when.equals
-                ) and field.name not in selected_roles:
-                    raise ResourceInputError(
-                        "requirement-unverified",
-                        f"Resource input '{self._source_input(field).name}' must be read for '{check.fact}'.",
-                    )
-        for name in missing_required:
-            if name not in active_values and name not in derivable:
-                raise GuidedInputError(f"Missing required input '{name}'.")
+            active = [
+                check for check in field.resource.requires
+                if check.when is None or active_values.get(check.when.input) == check.when.equals
+            ]
+            if active and field.name not in selected_roles:
+                source = self._source_input(field)
+                condition = next((check.when for check in active if check.when is not None), None)
+                controller = fields[condition.input] if condition is not None else None
+                prefix = (
+                    f"With `{condition.input}={'true' if condition.equals else 'false'}`, supply "
+                    if controller is not None and controller.type == "boolean" and not controller.sensitive
+                    else "Supply "
+                )
+                raise ResourceInputError(
+                    "requirement-unverified",
+                    f"{prefix}{self._resource_answer(source)}{self._read_purpose(source, active_values)}.",
+                )
         return bound
 
     def resource_fields(self, bound: BoundInputs) -> tuple[InputField, ...]:
@@ -929,9 +1011,11 @@ class InputContract:
             ) from None
         for requirement in field.resource.requires:
             if requirement.fact in resource.required_facts and observation.facts.get(requirement.fact) is not True:
+                noun = _RESOURCE_TEXT.get(field.resource.resource_type.casefold(), ("resource",))[0]
                 raise ResourceInputError(
                     "requirement-unmet",
-                    f"Resource input '{field.name}' requirement '{requirement.fact}' was not reported by Azure.",
+                    f"The {noun} read for input '{self._source_input(field).name}' does not report "
+                    f"{_FACT_TEXT[requirement.fact][1]}.",
                 )
 
     def build_site(
@@ -1005,6 +1089,39 @@ class InputContract:
             _assign(data, field.site_path, values[field.name])
         return Site.from_data(data, source="guided inputs", default_name="guided-site")
 
+    def known_identity(
+        self, bound: BoundInputs,
+    ) -> tuple[str | None, dict[str, Any], frozenset[str]]:
+        """Return the Site name and labels fixed by answers before any resource read.
+
+        The name is None while a selected resource read still supplies it or no
+        answer sets it. The returned label keys are those a read still supplies.
+        """
+        selected = self.resource_fields(bound)
+        derived = {target for field in selected for _, target in field.resource.derive}
+        if self.name_from_resource in {field.name for field in selected}:
+            derived.update(field.name for field in self.fields if field.site_path == ("name",))
+        data = copy.deepcopy(self._site_defaults)
+        name_pending = False
+        pending: set[str] = set()
+        for field in self.fields:
+            path = field.site_path
+            if field.resource is not None or path is None or path[0] not in {"name", "labels"}:
+                continue
+            if field.name in bound.active_values:
+                _assign(data, path, bound.active_values[field.name])
+            elif field.name in derived and path == ("name",):
+                name_pending = True
+            elif field.name in derived:
+                pending.add(path[1])
+        name = data.get("name")
+        labels = data.get("labels")
+        return (
+            None if name_pending or not isinstance(name, str) else name,
+            dict(labels) if isinstance(labels, dict) else {},
+            frozenset(pending),
+        )
+
     def resolve(
         self, values_file: Path | None = None, inline: list[str] | None = None,
     ) -> Site:
@@ -1071,7 +1188,7 @@ def load_direct_site(path: Path) -> Site:
     if "inherits" in data or (
         isinstance(data.get("spec"), dict) and "inherits" in data["spec"]
     ):
-        raise GuidedInputError("A direct Site file cannot use inherits; provide a complete Site.")
+        raise GuidedInputError("A direct Site file cannot use inherits. Provide a complete Site.")
     if "apiVersion" in data and not isinstance(data["apiVersion"], str):
         raise GuidedInputError("Site file apiVersion must be text.")
     if data.get("kind") is not None and not isinstance(data["kind"], str):
@@ -1092,4 +1209,13 @@ def write_yaml_exclusive(path: Path, data: dict[str, Any]) -> None:
         raise GuidedInputError("YAML output must contain only supported plain data.") from None
     if len(raw) > _MAX_YAML_BYTES:
         raise GuidedInputError("YAML output exceeds the 128 KiB limit.")
-    write_new(path, raw)
+    try:
+        write_new(path, raw)
+    except FileExistsError:
+        error = GuidedInputError("The output file already exists. Choose a new file name.")
+        error.private_message = f"{path} already exists. Choose a new file name."
+        raise error from None
+    except FileNotFoundError:
+        error = GuidedInputError("The output file's directory does not exist.")
+        error.private_message = f"The directory for {path} does not exist."
+        raise error from None

@@ -26,6 +26,7 @@ from siteops.results import (
     OutcomeReasonCode,
     ProgressEvent,
     ProgressEventKind,
+    ProgressPhase,
     RunDiagnostic,
     RunDiagnosticSeverity,
     RunResult,
@@ -116,19 +117,73 @@ def _private_run() -> RunResult:
     )
 
 
-def test_run_reports_what_was_not_assessed_in_every_projection():
-    result = _private_run()
-    for projection in (PlanProjection.LOCAL_PRIVATE, PlanProjection.PUBLISHABLE):
-        document = json.loads(serialize_run_json(
-            result, projection, engine_version="test",
-        ))
-        assert document["assessments"] == {
-            "readiness": "not-assessed",
-            "functionality": "not-assessed",
+def test_run_results_report_no_readiness_or_functionality_assessment():
+    for result in (_private_run(), _succeeded_run(interrupted=False)):
+        for projection in (PlanProjection.LOCAL_PRIVATE, PlanProjection.PUBLISHABLE):
+            document = json.loads(serialize_run_json(
+                result, projection, engine_version="test",
+            ))
+            assert "assessments" not in document
+        for redacted in (False, True):
+            plain = render_plain_run(result, redacted=redacted).casefold()
+            assert "readiness" not in plain
+            assert "assess" not in plain
+
+
+@pytest.mark.parametrize("redacted", [False, True])
+def test_a_successful_run_says_its_deployment_operations_succeeded(redacted):
+    rendered = render_plain_run(_succeeded_run(interrupted=False), redacted=redacted)
+
+    expected = "Result: all deployment operations succeeded"
+    assert (expected + (" in 1.0s" if not redacted else "")) in rendered
+    assert "Result: succeeded" not in rendered
+    interrupted = render_plain_run(_succeeded_run(interrupted=True), redacted=redacted)
+    assert expected not in interrupted
+    assert "Result: succeeded" in interrupted
+    assert expected not in render_plain_run(_private_run(), redacted=redacted)
+
+
+def test_publishable_capability_diagnostics_name_the_tool_and_remedy():
+    from siteops.planning import (
+        PUBLISHABLE_CAPABILITY_SUMMARIES,
+        DiagnosticSeverity,
+        PlanBuildResult,
+        PlanDiagnostic,
+        PlanIntent,
+        PlanStatus,
+    )
+    from siteops.results import preparation_failure_result
+
+    codes = ("capability.arm-control-plane.missing", "capability.arc-proxy.missing")
+    result = preparation_failure_result(PlanBuildResult(
+        status=PlanStatus.INVALID, executable=False, plan=None, intent=PlanIntent.EXECUTABLE,
+        diagnostics=tuple(
+            PlanDiagnostic(
+                code=code, severity=DiagnosticSeverity.ERROR, summary="Missing.",
+                detail="private-tool-path was not found.",
+            )
+            for code in codes
+        ),
+    ))
+
+    document = json.loads(serialize_run_json(
+        result, PlanProjection.PUBLISHABLE, engine_version="test",
+    ))
+
+    assert document["diagnostics"] == [
+        {
+            "code": "run.capability-unavailable",
+            "severity": "error",
+            "summary": PUBLISHABLE_CAPABILITY_SUMMARIES[code],
         }
-    for redacted in (False, True):
-        plain = render_plain_run(result, redacted=redacted)
-        assert "Readiness and functionality: not assessed." in plain
+        for code in codes
+    ]
+    summaries = " ".join(diagnostic["summary"] for diagnostic in document["diagnostics"])
+    assert "https://aka.ms/installazurecli" in summaries
+    assert "`az extension add --name connectedk8s`" in summaries
+    assert "private-tool-path" not in json.dumps(document)
+    plain = " ".join(render_plain_run(result, redacted=True).split())
+    assert "run `az extension add --name connectedk8s`" in plain
 
 
 @pytest.mark.parametrize("marker", ["GITHUB_ACTIONS", "TF_BUILD"])
@@ -164,10 +219,6 @@ def test_publishable_json_is_an_allowlist_with_complete_counts():
 
     assert document == {
         "apiVersion": "siteops/v1alpha1",
-        "assessments": {
-            "readiness": "not-assessed",
-            "functionality": "not-assessed",
-        },
         "diagnostics": [
             {
                 "code": "run.diagnostic",
@@ -479,6 +530,19 @@ def test_plain_rendering_separates_local_and_publishable_details():
     assert "private-site" not in public
     assert "private-provider-error" not in public
     assert "1 failed" in public
+
+
+def test_text_progress_reporter_counts_sites():
+    stream = io.StringIO()
+    reporter = TextProgressReporter(stream, redacted=False)
+    reporter(ProgressEvent(kind=ProgressEventKind.PHASE_STARTED, phase=ProgressPhase.SUBSCRIPTION, target_count=1))
+    reporter(ProgressEvent(kind=ProgressEventKind.PHASE_STARTED, phase=ProgressPhase.TARGETS, target_count=2))
+    reporter(ProgressEvent(kind=ProgressEventKind.BATCH_STARTED, target_count=2, worker_count=2))
+    assert stream.getvalue().splitlines() == [
+        "", "  [Phase 1] Steps at subscription scope: 1 Site",
+        "", "  [Execution] Prepared Sites: 2 Sites",
+        "", "  [Parallel] Deploying to 2 Sites (2 concurrent)",
+    ]
 
 
 def test_text_progress_reporter_serializes_complete_lines():

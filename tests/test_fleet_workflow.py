@@ -270,7 +270,12 @@ def inputs(tmp_path):
                              FrozenReleaseAssets(SOURCE["repository"], SOURCE["commit"], SOURCE["ref"], native),
                              "1.0.0b1", "c" * 64, (("3.11", "linux-x86_64"),))
     workspaces = FrozenReleaseAssets(SOURCE["repository"], SOURCE["commit"], SOURCE["ref"], workspace_assets)
-    frozen = FrozenReleaseAssets(SOURCE["repository"], SOURCE["commit"], SOURCE["ref"], (*native, *workspace_assets))
+    reference_assets = tuple(asset(directories["inventory"], name) for name in (
+        "siteops-engine.json", "siteops-engine.json.attestation.jsonl",
+    ))
+    frozen = FrozenReleaseAssets(
+        SOURCE["repository"], SOURCE["commit"], SOURCE["ref"], (*native, *workspace_assets, *reference_assets),
+    )
     values = selection()
     documents = {
         "plan": ("plan.json", raw),

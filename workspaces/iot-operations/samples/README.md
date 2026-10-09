@@ -4,22 +4,24 @@ Deployable examples for Azure IoT Operations. Each sample teaches one
 composition or workload pattern.
 
 Samples perform real provider operations. They can create billable resources,
-need target-specific permissions, and may assume an existing AIO installation.
+need permissions on the Site's resources, and may assume an existing AIO installation.
 Choose a sample from [the workspace table](#samples-in-this-workspace), read
-its prerequisites, and prepare one explicit site before running it.
+its prerequisites, and prepare one explicit Site before running it. The
+[guide for configured Sites](../../../docs/getting-started.md) shows how to prepare
+a `sites.local/` overlay for one existing cluster.
 
 Use `siteops -w workspaces/iot-operations browse --category sample` to explore
-the examples. Each entry's optional `entry.yaml` keeps descriptive guidance
+the examples. Each sample's optional `entry.yaml` keeps descriptive guidance
 beside its manifest and README. See [browse](../../../docs/browse-content.md)
 for selection, filtering and private output.
 
 Two shapes are supported, and the line between them is whether other samples can compose the directory.
 
-- **Self-contained workload bundle.** The directory carries a `_partial.yaml` defining its own steps, so other samples can compose it. It may also carry a Bicep template, chaining inputs, and declaration files. Examples: `opc-ua-solution` (with its own template), `secretsync-sample`.
-- **Composition.** The directory carries no `_partial.yaml`, so it is an endpoint rather than a building block. Its manifest `include:`s leaf partials from `manifests/` and other samples into one deploy, adds any glue step those partials need such as a `wait` gate, and may attach declaration files supplying what they deploy. Examples: `aio-with-opc-ua`, `aio-with-aksee-bootstrap`, `dataflow-sample` (a declaration over the shared `templates/aio/dataflows/`), `asset-sample` (committed device and asset sets over the shared `templates/aio/assets/`), and the resource-set samples that include the catalog partial and take their declarations from site selections.
+- **Reusable workload.** The directory carries a `_partial.yaml` defining its own steps, so other samples can compose it. It may also carry a Bicep template, chaining inputs, and declaration files. Examples: `opc-ua-solution` (with its own template), `secretsync-sample`.
+- **Composition.** The directory carries no `_partial.yaml`, so it is an endpoint rather than a building block. Its manifest `include:`s leaf partials from `manifests/` and other samples into one deploy, adds any glue step those partials need such as a `wait` gate, and may attach declaration files supplying what they deploy. Examples: `aio-with-opc-ua`, `aio-with-aksee-bootstrap`, `dataflow-sample` (a declaration over the shared `templates/aio/dataflows/`), `asset-sample` (committed device and asset sets over the shared `templates/aio/assets/`), and the resource set samples that include the catalog partial and take their declarations from Site selections.
 
 Both shapes use the same command progression. Replace `<name>` and `<site>`
-after preparing the target described by that sample:
+after preparing the Site described by that sample:
 
 ```bash
 siteops -w workspaces/iot-operations validate samples/<name>/manifest.yaml -l name=<site>
@@ -27,16 +29,16 @@ siteops -w workspaces/iot-operations plan samples/<name>/manifest.yaml -l name=<
 siteops -w workspaces/iot-operations deploy samples/<name>/manifest.yaml -l name=<site>
 ```
 
-## Bundle layout (self-contained shape)
+## Workload layout
 
 ```
 samples/<name>/
-├── manifest.yaml     User entry point. Standalone deployable.
+├── manifest.yaml     The manifest users deploy. Standalone deployable.
 ├── README.md         What it deploys, prerequisites, and how to configure it.
 ├── _partial.yaml     Internal partial. Composed by the manifest above and by other samples.
 ├── template.bicep    Optional. The sample's own Bicep. Omit it when the steps run shared templates.
-├── inputs.yaml       Optional. Step output to step input wiring (consumer fan-in). Attaches at step level.
-├── <declaration>.yaml Optional. Operator-authored values. Attaches at manifest level.
+├── inputs.yaml       Optional. Step output to step input wiring (consumer inputs). Attaches at step level.
+├── <declaration>.yaml Optional. Values that operators author. Attaches at manifest level.
 └── outputs.yaml      Optional. Sample step outputs forwarded to downstream consumers.
 ```
 
@@ -46,28 +48,28 @@ Only `manifest.yaml`, `README.md`, and `_partial.yaml` are always present. `secr
 
 ```
 samples/<name>/
-├── manifest.yaml     User entry point. include: steps, any glue step they need, plus any declaration it attaches.
+├── manifest.yaml     The manifest users deploy. include: steps, any glue step they need, plus any declaration it attaches.
 ├── README.md         What the composition deploys and in what order.
-└── <declaration>.yaml Optional. Operator-authored values. Attaches at manifest level.
+└── <declaration>.yaml Optional. Values that operators author. Attaches at manifest level.
 ```
 
 ## File conventions
 
-- **`manifest.yaml`** is the user-facing entry point. Composes `_partial.yaml` plus any prerequisite steps the standalone deployment needs (e.g., `_resolve-aio.yaml` reads names from an existing AIO instance).
-- **`_partial.yaml`** holds only the steps that ARE the sample. The leading `_` marks it as an internal partial not intended for direct deployment. Composed by `manifest.yaml` and by compositional samples.
-- **`template.bicep`** is the sample's deployment template. Pinned to the oldest supported AIO and ADR API versions per `docs/aio-releases.md` (Sample template API-version policy).
-- **`inputs.yaml`** wires upstream step outputs into the sample's step parameters. Co-located with the sample (not in the workspace-root `parameters/inputs/` dir). Attaches at step level, since chaining belongs to one consumer.
-- **Declaration files** hold operator-authored values such as a `secrets` array or resource definitions. Attach them at manifest level so several steps can read one source. Ordinary values remain overridable through `site.parameters`. Composed resource definitions change through `properties.resourceSets`. Keep declarations separate from `inputs.yaml` even when the same step consumes both. See `docs/parameter-resolution.md` (Choosing an attachment tier).
-- **`outputs.yaml`** (optional) is the producer-side fan-out file when the sample's step outputs are consumed elsewhere. Same shape as `parameters/outputs/`.
+- **`manifest.yaml`** is the manifest users deploy. Composes `_partial.yaml` plus any prerequisite steps the standalone deployment needs (e.g., `_resolve-aio.yaml` reads names from an existing AIO instance).
+- **`_partial.yaml`** holds only the steps that make up the sample. The leading `_` marks it as an internal partial not intended for direct deployment. Composed by `manifest.yaml` and by compositional samples.
+- **`template.bicep`** is the sample's deployment template. Pinned to the oldest supported AIO and ADR API versions per `docs/aio-releases.md` (Sample template API version policy).
+- **`inputs.yaml`** wires upstream step outputs into the sample's step parameters. Kept with the sample (not in `parameters/inputs/` at the workspace root). Attaches at step level, since chaining belongs to one consumer.
+- **Declaration files** hold values that operators author, such as a `secrets` array or resource definitions. Attach them at manifest level so several steps can read one source. Ordinary values remain overridable through `site.parameters`. Composed resource definitions change through `properties.resourceSets`. Keep declarations separate from `inputs.yaml` even when the same step consumes both. See `docs/parameter-resolution.md` (Choosing an attachment tier).
+- **`outputs.yaml`** (optional) is the producer's output file when the sample's step outputs are consumed elsewhere. Same shape as `parameters/outputs/`.
 
-## Adding a new self-contained sample
+## Adding a new reusable workload sample
 
 1. Create `samples/<name>/`.
 2. Add `template.bicep` with your sample's resources. Pin Microsoft.IoTOperations and Microsoft.DeviceRegistry references to the oldest supported API version (the workspace test `test_samples_pin_to_oldest_api_version` enforces this).
 3. Add `inputs.yaml` with `{{ steps.X.outputs.Y }}` references for any values the template needs from upstream steps.
-4. Add a declaration file for any operator-authored values the sample ships defaults for, and attach it at manifest level in step 6.
+4. Add a declaration file for any values that operators author and the sample ships defaults for, and attach it at manifest level in step 6.
 5. Add `_partial.yaml` containing the sample steps (no `resolve-aio`, no other prerequisites).
-6. Add `manifest.yaml`. For a sample that needs `resolve-aio`, include `_resolve-aio.yaml` from `manifests/` and then include `_partial.yaml`.
+6. Add `manifest.yaml`. For a sample that needs `resolve-aio`, include `_resolve-aio.yaml` from `manifests/_partials/` and then include `_partial.yaml`.
 7. Optionally add an integration test under `tests/integration/test_<name>_manifest.py`.
 8. Optionally compose into `samples/<combo>/manifest.yaml` to demonstrate the sample alongside other deployments. See the next section.
 
@@ -75,9 +77,9 @@ samples/<name>/
 
 Real samples may exceed the shape above. Conventions:
 
-- **Multiple Bicep files**: `template.bicep` is the entry template called by `_partial.yaml`. Helper templates go under `samples/<name>/modules/`, mirroring `templates/<area>/modules/`.
-- **Multiple input files**: prefer one shared `inputs.yaml` for the whole sample. Auto-filtering routes the right keys to each step. If steps need genuinely disjoint inputs, name them `samples/<name>/<step>.yaml` to mirror `parameters/inputs/`.
-- **Sample-local outputs**: `outputs.yaml` next to `inputs.yaml`, consumed by other samples via `{{ steps.<sample-step>.outputs.<key> }}`.
+- **Multiple Bicep files**: `template.bicep` is the main template called by `_partial.yaml`. Helper templates go under `samples/<name>/modules/`, mirroring `templates/<area>/modules/`.
+- **Multiple input files**: prefer one shared `inputs.yaml` for the whole sample. Automatic filtering routes the right keys to each step. If steps need genuinely disjoint inputs, name them `samples/<name>/<step>.yaml` to mirror `parameters/inputs/`.
+- **Outputs local to a sample**: `outputs.yaml` next to `inputs.yaml`, consumed by other samples via `{{ steps.<sample-step>.outputs.<key> }}`.
 
 ## Composing samples
 
@@ -98,32 +100,32 @@ steps:
   - include: ../opc-ua-solution/_partial.yaml
 ```
 
-Omit `_resolve-aio.yaml` when the composition has no downstream consumer of the resolved instance and custom-location names. The OPC UA sample needs them, so it stays in.
+Omit `_resolve-aio.yaml` when the composition has no downstream consumer of the resolved instance and custom location names. The OPC UA sample needs them, so it stays in.
 
 ### Composition rules
 
-1. **Compose partials, not standalone manifests.** `manifests/aio-install/manifest.yaml` and `samples/<name>/manifest.yaml` are standalone entry points that re-include `_resolve-aio.yaml` so they can be deployed on their own. Composing two of them in one parent will collide on the `resolve-aio` step name. Compose the underlying `_partial.yaml` files instead.
-2. **Step names must be unique** across the post-include flat step list. Collision is a parse-time error.
+1. **Compose partials, not standalone manifests.** `manifests/aio-install/manifest.yaml` and `samples/<name>/manifest.yaml` are standalone manifests that include `_resolve-aio.yaml` again so they can be deployed on their own. Composing two of them in one parent will collide on the `resolve-aio` step name. Compose the underlying `_partial.yaml` files instead.
+2. **Step names must be unique** across the flat step list after includes. A collision is an error when the manifest is parsed.
 3. **Site selectors and parallel settings** declared on the composing manifest apply at the composition level. The same fields on included partials are silently ignored.
 
 ## Samples in this workspace
 
 | Sample | Shape | What it teaches | Composes |
 |---|---|---|---|
-| `secretsync-sample/` | Bundle | Synchronizing Key Vault secrets to the cluster | inputs + declaration + partial, over `templates/secretsync/` |
-| `opc-ua-solution/` | Bundle | A full solution in Bicep: device, asset, dataflow, and cloud egress | template + inputs + partial |
-| `dataflow-sample/` | Composition | Declaring dataflows in YAML | declaration + `_resolve-aio` + `manifests/_dataflows`, over `templates/aio/dataflows/` |
-| `asset-sample/` | Composition | Declaring Device Registry devices and assets in YAML | `resource-sets/devices/site-devices.yaml` + `resource-sets/assets/site-assets.yaml` + `_resolve-aio` + `manifests/_assets`, over `templates/aio/assets/` |
-| `resource-set-basic/` | Composition | Selecting one reusable set from a site | `sites/catalog-basic.yaml` + `manifests/_partials/_aio-resources.yaml` |
-| `resource-set-composition/` | Composition | Inheritance, shared and external providers, independent assets, and cross-set dataflow references | `sites/shared/catalog-composition.yaml` + `sites/catalog-composition.yaml` + `manifests/_partials/_aio-resources.yaml` |
+| `secretsync-sample/` | Workload | Synchronizing Key Vault secrets to the cluster | inputs + declaration + partial, over `templates/secretsync/` |
+| `opc-ua-solution/` | Workload | A full solution in Bicep: device, asset, dataflow, and cloud egress | template + inputs + partial |
+| `dataflow-sample/` | Composition | Declaring dataflows in YAML | declaration + `_resolve-aio` + `manifests/_partials/_dataflows`, over `templates/aio/dataflows/` |
+| `asset-sample/` | Composition | Declaring Device Registry devices and assets in YAML | `resource-sets/devices/site-devices.yaml` + `resource-sets/assets/site-assets.yaml` + `_resolve-aio` + `manifests/_partials/_assets`, over `templates/aio/assets/` |
+| `resource-set-basic/` | Composition | Selecting one reusable set from a Site | `sites/catalog-basic.yaml` + `manifests/_partials/_aio-resources.yaml` |
+| `resource-set-composition/` | Composition | Inheritance, shared and external providers, independent assets, and dataflow references across sets | `sites/shared/catalog-composition.yaml` + `sites/catalog-composition.yaml` + `_external-provider` + `manifests/_partials/_aio-resources.yaml` |
 | `aio-with-opc-ua/` | Composition | Installing the platform and a full solution in one deploy | `_aio-fundamentals` + `_resolve-aio` + `_secretsync` (gated) + `opc-ua-solution/_partial` |
 | `aio-with-aksee-bootstrap/` | Composition | Bringing up a host before installing AIO | `host-bootstrap/aksee/_partial` + a wait on the bootstrap tag + `_aio-fundamentals` |
 
 See each sample's own `README.md` for what it deploys, prerequisites, and how to configure before deploying.
 
 `dataflow-sample` and `asset-sample` attach fixed definitions to their own
-manifests, which suits a one-off deployment. The resource-set samples use the
-fleet route: committed sites compose ordered sets under
+manifests, which suits a deployment you run once. The resource set samples use
+the fleet route: committed Sites compose ordered sets under
 `properties.resourceSets`, and each sample includes the same catalog partial
 as `manifests/aio-resources/manifest.yaml`. See
 [resource-catalog.md](../../../docs/resource-catalog.md).

@@ -105,6 +105,8 @@ jobs:
         persistCredentials: false
 
       - template: templates/setup-siteops.yaml
+        parameters:
+          installDev: true
 
       - pwsh: ./scripts/validate-bicep.ps1
         displayName: Validate Bicep templates

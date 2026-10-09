@@ -17,6 +17,7 @@ from siteops_release_assets import (  # noqa: E402
     ReferencedEngine,
     ReleaseAsset,
     ReleaseAssetsError,
+    engine_reference,
     publication_assets,
 )
 
@@ -54,6 +55,7 @@ def inputs(tmp_path):
     (workspace_dir / "release-assets.json").write_bytes(workspace.serialized())
     plan = {
         "source": source, "siteops": {"bundle": True, "releaseTag": None},
+        "release": {"tag": "v1.2.3"}, "dryRun": False,
         "workspaces": [{"workspace": "workspace", "package": "workspace.zip", "id": "fixture"}],
     }
     selected = {
@@ -62,9 +64,14 @@ def inputs(tmp_path):
     }
     path = tmp_path / "engine-selection.json"
     path.write_text(json.dumps(selected))
+    reference_dir = tmp_path / "reference"
+    reference_dir.mkdir()
+    (reference_dir / "siteops-engine.json").write_bytes(engine_reference(plan, selected).serialized())
+    (reference_dir / "siteops-engine.json.attestation.jsonl").write_bytes(b"synthetic reference proof")
     return {
         "plan": plan, "native": native, "native_dir": native_dir, "workspace": workspace,
         "workspace_dir": workspace_dir, "selected": path, "output": tmp_path / "payload",
+        "reference_dir": reference_dir,
     }
 
 
@@ -75,6 +82,8 @@ def invoke(stage, inputs):
         workspace_sha=hashlib.sha256(inputs["workspace"].serialized()).hexdigest(),
         selected_engine=inputs["selected"],
         selected_engine_sha=hashlib.sha256(inputs["selected"].read_bytes()).hexdigest(),
+        reference_directory=inputs["reference_dir"],
+        reference_sha=hashlib.sha256((inputs["reference_dir"] / "siteops-engine.json").read_bytes()).hexdigest(),
     )
 
 
@@ -87,10 +96,12 @@ def test_complete_payload_preserves_roles_and_exact_bytes(stage, inputs, built):
         inputs["plan"]["siteops"] = {"bundle": False, "releaseTag": reference.tag}
         selected = json.loads(inputs["selected"].read_bytes())
         selected["reference"] = reference.document()
+        selected["native"]["source"]["commit"] = "d" * 40
         inputs["selected"].write_text(json.dumps(selected))
+        (inputs["reference_dir"] / "siteops-engine.json").write_bytes(engine_reference(inputs["plan"], selected).serialized())
     result = invoke(stage, inputs)
     native, workspace = publication_assets(inputs["plan"], result)
-    assert len(native) == (8 if built else 0) and len(workspace) == 3
+    assert len(native) == (8 if built else 0) and len(workspace) == 5
     assert {path.name for path in inputs["output"].iterdir()} == {asset.name for asset in result.assets}
     for asset in result.assets:
         assert hashlib.sha256((inputs["output"] / asset.name).read_bytes()).hexdigest() == asset.sha256
@@ -128,6 +139,34 @@ def test_engine_only_and_reference_only_keep_existing_publication_behavior(stage
     reference = ReferencedEngine("71", "siteops/v1.2.3", "b" * 40, result.assets)
     plan["siteops"] = {"bundle": False, "releaseTag": reference.tag}
     referenced = replace(result, assets=(), engine=reference)
-    empty = tmp_path / "reference"
+    empty = tmp_path / "empty-reference"
     assert stage(plan, "c" * 64, referenced, empty, engine_directory=None) == referenced
     assert list(empty.iterdir()) == []
+
+
+@pytest.mark.parametrize("fault", [
+    "release", "revision", "engine-release", "engine-revision", "version", "bundle", "proof",
+    "preview", "missing-proof", "extra-file", "empty-proof",
+])
+def test_public_reference_must_match_frozen_selection(stage, inputs, fault):
+    directory = inputs["reference_dir"]
+    path = directory / "siteops-engine.json"
+    document = json.loads(path.read_bytes())
+    if fault in {"release", "revision"}:
+        document[fault] = "other"
+    elif fault in {"engine-release", "engine-revision", "version"}:
+        document["engine"][fault.removeprefix("engine-")] = "other"
+    elif fault in {"bundle", "proof"}:
+        document["engine"][fault]["sha256"] = "a" * 64
+    elif fault == "preview":
+        document["preview"] = True
+    elif fault == "missing-proof":
+        (directory / "siteops-engine.json.attestation.jsonl").unlink()
+    elif fault == "extra-file":
+        (directory / "unapproved.json").write_text("{}")
+    elif fault == "empty-proof":
+        (directory / "siteops-engine.json.attestation.jsonl").write_bytes(b"")
+    path.write_text(json.dumps(document))
+    with pytest.raises(ReleaseAssetsError):
+        invoke(stage, inputs)
+    assert not inputs["output"].exists()

@@ -7,22 +7,22 @@ description: |
   existing AIO instance, carrying no Bicep of its own. `dataflows.yaml` declares
   two MQTT endpoints, two execution pools, and two dataflows, each reading a
   topic under the AIO data prefix and republishing it through its own endpoint
-  and pool. Destination topics carry the site's country, city, and name, so
-  every site publishes under its own.
+  and pool. Destination topics carry the Site's country, city, and name, so
+  every Site publishes under its own.
 
   Creates no supporting cloud service outside the existing AIO instance and
   uses the normal Site Ops deployment identity. Deployment configures the
-  routes but does not verify their health or data movement. Use an authenticated
-  in-cluster MQTT client to publish and subscribe when verifying the data path.
+  routes. To confirm that data moves, publish and subscribe with an
+  authenticated MQTT client in the cluster.
 
-  `dataflows.yaml` attaches directly for this one-off sample. A fleet can place
+  `dataflows.yaml` attaches directly for this sample. A fleet can place
   the same definition under `resource-sets/dataflows/`, select it through
   `properties.resourceSets.dataflows`, and deploy
   `manifests/aio-resources/manifest.yaml`. Both routes run the same templates.
 
   Prerequisites:
     - AIO instance must be deployed and running (run aio-install first)
-    - The site's aioRelease must point to a parameters/aio-releases/<release>.yaml file
+    - The Site's aioRelease must point to a parameters/aio-releases/<release>.yaml file
 
 parallel: 3
 

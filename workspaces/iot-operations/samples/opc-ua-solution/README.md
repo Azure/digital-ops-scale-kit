@@ -1,6 +1,6 @@
 # opc-ua-solution
 
-Reference sample that adds a simulated OPC UA asset, an Event Hub destination, and a dataflow that routes oven telemetry from the AIO broker to the Event Hub. Demonstrates the full asset-to-cloud data path against an existing AIO instance.
+Reference sample that adds a simulated OPC UA asset, an Event Hub destination, and a dataflow that routes oven telemetry from the AIO broker to the Event Hub. Demonstrates the full data path from asset to cloud against an existing AIO instance.
 
 This sample expresses its dataflow as ARM resources in `template.bicep`, alongside the Event Hub and role assignment it also needs. For dataflows whose values are known ahead of the deployment, `../dataflow-sample/` declares the same kind of resource in YAML. [docs/resource-catalog.md](../../../../docs/resource-catalog.md) covers when each route fits.
 
@@ -14,24 +14,24 @@ Once running, the OPC UA connector polls the simulator over `opc.tcp://opcplc-00
 
 ## Releases this data path reaches
 
-The sample creates its device, asset, Event Hub, and dataflow on every release.
+The sample creates its device, asset, Event Hub, and dataflow on every AIO release.
 
-Release `2608`, which sites inherit by default, deploys the connector template
+AIO release `2608`, which Sites inherit by default, deploys the connector template
 during both install and upgrade. The supervisor
 then creates the connector pod on demand, and the complete telemetry path
 described above is available.
 
-Releases before 2607 deploy the OPC UA connector statically. Release `2607` is
+AIO releases before 2607 deploy the OPC UA connector statically. AIO release `2607` is
 affected by [Microsoft known issue 1330](https://learn.microsoft.com/azure/iot-operations/troubleshoot/known-issues#opc-connector-template-missing),
 where the OPC UA connector template is absent. The sample resources deploy, but
-that release does not create the connector pod that publishes their telemetry.
+that AIO release does not create the connector pod that publishes their telemetry.
 
 ## Prerequisites
 
-- AIO must be installed on the target cluster. Run `aio-install` first, or use the composed `samples/aio-with-opc-ua/manifest.yaml` for a single-command install + sample.
-- The site's `aioRelease` must point to a release config under `parameters/aio-releases/`.
-- Your principal needs role-assignment permissions (Owner, or `User Access Administrator` plus `Contributor`) on the deployment resource group so the Event Hubs Data Sender role can be granted to the AIO extension principal. Skip this requirement by setting `createRoleAssignment: false` if the role is already granted at a higher scope.
-- Your principal also needs Kubernetes RBAC inside the cluster, because the `opc-plc-simulator` step applies the simulator through Arc cluster-connect. Azure roles on the cluster resource authorize the connection rather than the operations that travel over it, so a principal without a binding sees `is forbidden` from the API server. The simulator manifest creates its own ServiceAccount, Role, and RoleBinding alongside the Deployment and Service, so the grant has to cover those. [docs/ci-cd-setup.md](../../../../docs/ci-cd-setup.md#kubernetes-rbac-for-arc-proxy-operations) covers both the Kubernetes-native and Azure RBAC routes, and [docs/troubleshooting.md](../../../../docs/troubleshooting.md) covers what to weigh when choosing the role.
+- AIO must be installed on the cluster. Run `aio-install` first, or use the composed `samples/aio-with-opc-ua/manifest.yaml` to install AIO and the sample with one command.
+- The Site's `aioRelease` must point to an AIO release config under `parameters/aio-releases/`.
+- Your principal needs permission to create role assignments (Owner, or `User Access Administrator` plus `Contributor`) on the deployment resource group so the Event Hubs Data Sender role can be granted to the AIO extension principal. Skip this requirement by setting `createRoleAssignment: false` if the role is already granted at a higher scope.
+- Your principal also needs Kubernetes RBAC inside the cluster, because the `opc-plc-simulator` step applies the simulator through Arc cluster connect. Azure roles on the cluster resource authorize the connection rather than the operations that travel over it, so a principal without a binding sees `is forbidden` from the API server. The simulator manifest creates its own ServiceAccount, Role, and RoleBinding alongside the Deployment and Service, so the grant has to cover those. [docs/ci-cd-setup.md](../../../../docs/ci-cd-setup.md#kubernetes-rbac-for-arc-proxy-operations) covers both the Kubernetes RBAC and Azure RBAC routes, and [docs/troubleshooting.md](../../../../docs/troubleshooting.md) covers what to weigh when choosing the role.
 
 ## Configure before deploying
 
@@ -49,13 +49,17 @@ See `template.bicep` for the full parameter list.
 ## Deploy
 
 ```bash
-siteops -w workspaces/iot-operations deploy samples/opc-ua-solution/manifest.yaml -l environment=dev
+siteops -w workspaces/iot-operations plan samples/opc-ua-solution/manifest.yaml -l name=<site>
+siteops -w workspaces/iot-operations deploy samples/opc-ua-solution/manifest.yaml -l name=<site>
 ```
 
-For a fresh-cluster combined install + sample, use the composed wrapper:
+Replace `<site>` with the configured Site. The explicit selector replaces the
+manifest's `environment=dev` default.
+
+To install AIO and the sample together on a fresh cluster, use the composed wrapper:
 
 ```bash
-siteops -w workspaces/iot-operations deploy samples/aio-with-opc-ua/manifest.yaml -l environment=dev
+siteops -w workspaces/iot-operations deploy samples/aio-with-opc-ua/manifest.yaml -l name=<site>
 ```
 
 ## Verifying the result
@@ -66,7 +70,7 @@ Check the dataflow CR is projected to the cluster:
 kubectl get dataflows.connectivity.iotoperations.azure.com -n azure-iot-operations
 ```
 
-Subscribe to the topic with an in-cluster MQTT client (see Microsoft's [`mqtt-client.yaml` reference](https://learn.microsoft.com/azure/iot-operations/manage-mqtt-broker/howto-test-connection)) and watch for messages on `azure-iot-operations/data/oven`. End-to-end telemetry flow lags the deploy: after Bicep returns, the OPC UA connector still needs to reconcile the asset, establish the OPC UA session, and warm up polling before the first MQTT publish lands. On release `2607`, read [Releases this data path reaches](#releases-this-data-path-reaches) before waiting on this step.
+Subscribe to the topic with an MQTT client in the cluster (see Microsoft's [`mqtt-client.yaml` reference](https://learn.microsoft.com/azure/iot-operations/manage-mqtt-broker/howto-test-connection)) and watch for messages on `azure-iot-operations/data/oven`. Telemetry flow from end to end lags the deploy: after Bicep returns, the OPC UA connector still needs to reconcile the asset, establish the OPC UA session, and warm up polling before the first MQTT publish lands. On AIO release `2607`, read [Releases this data path reaches](#releases-this-data-path-reaches) before waiting on this step.
 
 For Event Hub egress, inspect incoming messages in the Azure portal under the deployed Event Hub namespace, or query via the Event Hubs SDK.
 
@@ -87,4 +91,4 @@ az eventhubs namespace delete --name <eventHubName> --resource-group <rg>
 
 ## Writing your own sample
 
-See `../README.md` for sample bundle conventions and how to add a new sample to this workspace.
+See `../README.md` for sample conventions and how to add a new sample to this workspace.

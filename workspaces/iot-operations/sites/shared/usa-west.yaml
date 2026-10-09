@@ -1,14 +1,14 @@
-# USA West Regional Template (Subscription-Level)
+# USA West regional template (subscription level)
 #
 # Inheritance: base-site.yaml → usa-west.yaml → <factory>-<env>.yaml
 #
-# This template represents the USA West subscription - shared by West Coast factories.
-# Sites inheriting from this get subscription + location + country pre-configured.
+# This template represents the USA West subscription, shared by West Coast factories.
+# Sites inheriting from this get subscription + location + country preconfigured.
 #
 # Hierarchy:
-#   usa-west.yaml (subscription-level)
-#     ├── seattle-dev.yaml (RG-level)
-#     └── seattle-prod.yaml (RG-level)
+#   usa-west.yaml (subscription level)
+#     ├── seattle-dev.yaml (resource group level)
+#     └── seattle-prod.yaml (resource group level)
 
 apiVersion: siteops/v1
 kind: SiteTemplate

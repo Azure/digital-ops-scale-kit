@@ -6,6 +6,8 @@ from urllib.parse import urlsplit
 
 import yaml
 
+from tests.workspace.test_manifest_validation import _all_manifest_files
+
 
 def _entries(workspace: Path) -> list[Path]:
     core = sorted((workspace / "manifests").glob("*/manifest.yaml"))
@@ -15,12 +17,9 @@ def _entries(workspace: Path) -> list[Path]:
 
 
 def test_public_entries_own_their_guide_and_identity(workspace):
-    names = set()
     for manifest in _entries(workspace):
         data = yaml.safe_load(manifest.read_text(encoding="utf-8"))
         assert data["name"] == manifest.parent.name
-        assert data["name"] not in names
-        names.add(data["name"])
         guide = manifest.with_name("README.md")
         assert guide.is_file(), f"{manifest.relative_to(workspace)} has no operator guide."
         for match in re.finditer(r"\[[^\]]*\]\(([^)]+)\)", guide.read_text(encoding="utf-8")):
@@ -29,6 +28,19 @@ def test_public_entries_own_their_guide_and_identity(workspace):
                 assert (guide.parent / target.path).exists(), (
                     f"{guide.relative_to(workspace)} links to missing {target.path}"
                 )
+
+
+def test_every_manifest_name_is_unique_including_partials(workspace):
+    owners: dict[str, Path] = {}
+    manifests = _all_manifest_files(workspace)
+    assert any(path.name.startswith("_") for path in manifests)
+    for manifest in manifests:
+        name = yaml.safe_load(manifest.read_text(encoding="utf-8"))["name"]
+        assert name not in owners, (
+            f"{manifest.relative_to(workspace)} reuses the name '{name}' "
+            f"of {owners[name].relative_to(workspace)}."
+        )
+        owners[name] = manifest
 
 
 def test_shared_sets_have_one_library_owner(workspace):

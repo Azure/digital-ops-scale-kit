@@ -2,15 +2,15 @@ apiVersion: siteops/v1
 kind: Manifest
 name: aio-with-aksee-bootstrap
 description: |
-  Composes the AKS Edge Essentials host bootstrap with AIO fundamentals as a
-  single deploy.
+  Bootstrap an AKS Edge Essentials host on a Windows VM connected to Azure Arc,
+  then install the Azure IoT Operations platform on it, in one deploy.
 
   The bootstrap launcher registers a Scheduled Task, then the cluster comes up
   asynchronously on the VM. The wait step polls the bootstrap state tag before
-  the AIO fundamentals. The wait is state-only and is not bound to the run ID.
+  the AIO fundamentals. The wait checks only the state, not the run ID.
   One `siteops deploy` runs the whole chain.
 
-  Post-flatten step sequence (preview with `siteops plan <manifest> --describe`):
+  Flattened step sequence (preview with `siteops plan <manifest> --describe`):
     1. aksee-bootstrap          (Windows VM through K3s + Arc + custom locations)
     2. wait-for-bootstrap       (gate on the siteops.bootstrap.state tag)
     3. global-edge-site         (gated by enableGlobalSite)
@@ -24,14 +24,14 @@ description: |
 # Default selector. Override at the CLI with `-l <key>=<value>`.
 selector: "environment=dev"
 
-# Max concurrent sites. 0 = unlimited, 1 = serial.
+# Max concurrent Sites. 0 = unlimited, 1 = serial.
 parallel: 3
 
 steps:
   - include: ../../templates/host-bootstrap/aksee/_partial.yaml
 
   # Gate AIO fundamentals on the bootstrap reaching its terminal state. A
-  # completed bootstrap resumes at Phase 3 and requires its running-tag reset
+  # completed bootstrap resumes at Phase 3 and requires the reset of its running tag
   # to succeed before it revalidates Arc connectivity.
   # The worker writes `succeeded` at Phase 99 or `failed-phase-N` on failure.
   - name: wait-for-bootstrap

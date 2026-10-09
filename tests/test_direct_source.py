@@ -150,7 +150,7 @@ def test_source_alias_selects_only_consumer_enrollment(monkeypatch):
     assert calls == [("approved", True)]
     command_context.resolve_source_request("approved", for_inspection=True)
     assert calls[-1] == ("approved", False)
-    with pytest.raises(ProjectError, match="approval"):
+    with pytest.raises(ProjectError, match="one approved source"):
         command_context.resolve_source_request("approved@release-7", approved_source="other")
 
 

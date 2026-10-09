@@ -4,13 +4,14 @@ role: standalone
 category: sample
 tags: [aio, resource-sets, composition, advanced]
 documentation: [README.md]
-outcome: Demonstrate inherited selections, managed and external providers, and cross-resource composition.
+outcome: Demonstrate inherited selections, managed and external providers, and composition across resources.
 prerequisites:
   - An existing AIO installation and the configured catalog-composition Site.
-  - Review the guide's simulator, resource permissions and external-provider ownership.
+  - Azure CLI with the connectedk8s extension, and kubectl. The simulator step applies a local Kubernetes manifest through the Arc cluster connect proxy.
+  - Review the guide's simulator, resource permissions and ownership of external providers.
 effects:
-  - Applies a local simulator and Bicep-owned provider before the selected catalog resources.
+  - Applies a local simulator and a provider that Bicep owns before the selected catalog resources.
   - External assertions describe expected providers. They are not live existence observations.
 removal:
   - Remove managed resources and the example provider according to their actual ownership. Deselection does not prune.
-coverage: Advanced-composition synopsis. The guide owns the selected sets and functional observation procedure. Detailed operator input and permission coverage is not declared.
+coverage: Synopsis of the advanced composition. The guide owns the selected sets and the functional observation procedure.

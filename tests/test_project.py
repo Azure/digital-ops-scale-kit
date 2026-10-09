@@ -171,8 +171,22 @@ def test_missing_pin_has_no_source_or_local_workspace_fallback(tmp_path, monkeyp
         with context(project=root, discover=discover):
             pytest.fail("Missing pin was accepted.")
     assert caught.value.code == "project.pin-missing"
+    assert "-w to select local content" in str(caught.value)
     discover.assert_not_called()
     command_context.WorkspaceCache.assert_not_called()
+
+
+def test_project_show_without_a_pin_suggests_only_project_pin(tmp_path, monkeypatch, capsys):
+    root = project_root(tmp_path / "project", create=True)
+    monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "0")
+    monkeypatch.setattr(sys, "argv", ["siteops", "project", "show", str(root)])
+    with pytest.raises(SystemExit) as stopped:
+        cli.main()
+    assert stopped.value.code == 1
+    assert capsys.readouterr().err == (
+        "Error: Workspace pin not found. Create one with "
+        "`siteops project pin DIRECTORY --source SOURCE@RELEASE`.\n"
+    )
 
 
 def test_local_override_uses_project_sites_without_reading_or_changing_the_pin(pinned, tmp_path, monkeypatch):
@@ -290,7 +304,7 @@ def test_index_project_rejection_is_a_diagnostic_not_a_traceback(tmp_path, monke
     with pytest.raises(SystemExit) as stopped:
         cli.main()
     assert stopped.value.code == 1
-    assert "index.project:" in capsys.readouterr().err
+    assert capsys.readouterr().err.startswith("Error: ")
 
 
 def test_index_explicit_local_workspace_and_public_approval_controls(tmp_path, monkeypatch, capsys):
@@ -307,14 +321,14 @@ def test_index_explicit_local_workspace_and_public_approval_controls(tmp_path, m
         assert stopped.value.code == expected
         output = capsys.readouterr()
         if expected:
-            assert "index.approval:" in output.err
+            assert output.err == "Error: Add --public to publish the authored descriptions in the index.\n"
     monkeypatch.setattr(sys, "argv", [
         "siteops", "--approved-source", "official", "-w", str(local), "index", "--public",
     ])
     with pytest.raises(SystemExit) as stopped:
         cli.main()
     assert stopped.value.code == 1
-    assert "index.project:" in capsys.readouterr().err
+    assert capsys.readouterr().err.startswith("Error: ")
     assert (local / "siteops-index.json").is_file()
     assert not (project / "siteops-index.json").exists()
 
@@ -337,7 +351,9 @@ def test_pin_rejects_cache_overlap_before_directory_creation(tmp_path, monkeypat
     assert WorkspaceCache(cache.root).root == cache.root
 
 
-def test_pin_reports_progress_before_cold_acquisition(tmp_path, monkeypatch, capsys):
+def test_pin_reports_acquisition_phases(tmp_path, monkeypatch, capsys):
+    from siteops.results import ProgressEvent, ProgressEventKind, ProgressPhase
+
     target = tmp_path / "factory"
     monkeypatch.setenv("SITEOPS_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.setattr(sys, "argv", [
@@ -348,10 +364,9 @@ def test_pin_reports_progress_before_cold_acquisition(tmp_path, monkeypatch, cap
     ])
 
     def stop_acquisition(*args, **kwargs):
-        progress = capsys.readouterr().err
-        assert "Resolving and verifying" in progress
-        assert "may take time" in progress
-        assert str(target) not in progress
+        progress = acquirer.call_args.kwargs["progress"]
+        for phase in (ProgressPhase.RESOLUTION, ProgressPhase.DOWNLOAD, ProgressPhase.VERIFICATION):
+            progress(ProgressEvent(kind=ProgressEventKind.PHASE_STARTED, phase=phase))
         raise ProjectError("Fixture acquisition stopped.")
 
     with (
@@ -363,3 +378,11 @@ def test_pin_reports_progress_before_cold_acquisition(tmp_path, monkeypatch, cap
         with pytest.raises(SystemExit) as stopped:
             cli.main()
     assert stopped.value.code == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err.splitlines()[:3] == [
+        "Resolving the selected release...",
+        "Downloading missing content...",
+        "Checking source approval and content integrity...",
+    ]
+    assert str(target) not in output.err

@@ -39,8 +39,10 @@ def test_remote_preview_uses_the_shared_card_and_pinned_guides(workspace):
         f"https://github.com/example/kit/blob/{REVISION}/{PREFIX}manifests/storage/README.md",
     )
     output = render_browse_plain(result)
-    assert "Remote preview only" in output
-    assert "No targets declared" not in output
+    assert "Published descriptions only" not in output
+    assert "Plan and deploy use a release from an approved source" in " ".join(output.split())
+    assert "No Sites or selector declared" not in output
+    assert "Private inspection of published descriptions. Deployment verifies the package first." in output
     assert "siteops -w" not in output
     document = result.document()
     assert document["source"]["kind"] == "remote"
@@ -57,7 +59,7 @@ def test_remote_inventory_keeps_source_context_in_next_steps(workspace):
     assert "same --source" in output
     assert "Use --ref" in output
     empty = render_browse_plain(inspect_github("github:example/kit", search="absent", client=client))
-    assert "No published entries match" in empty
+    assert "No published manifests match" in empty
     assert "custom layout" not in empty
 
 

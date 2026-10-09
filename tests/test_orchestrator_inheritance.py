@@ -1014,7 +1014,7 @@ class TestSiteProvenance:
         from siteops.orchestrator import Orchestrator
         orch = Orchestrator(tmp_workspace)
         import pytest as _pytest
-        with _pytest.raises(ValueError, match="cannot rename the site"):
+        with _pytest.raises(ValueError, match="cannot rename the Site"):
             orch.load_site("munich")
 
     def test_overlay_restating_same_name_allowed(self, tmp_workspace):
@@ -1072,7 +1072,7 @@ class TestSiteProvenance:
         from siteops.orchestrator import Orchestrator
         orch = Orchestrator(tmp_workspace)
         import pytest as _pytest
-        with _pytest.raises(ValueError, match="cannot rename the site"):
+        with _pytest.raises(ValueError, match="cannot rename the Site"):
             orch.load_site("mysite")
 
     def test_overlay_restating_basename_default_allowed(self, tmp_workspace):

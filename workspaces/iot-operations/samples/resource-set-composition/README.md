@@ -1,7 +1,7 @@
 # resource-set-composition
 
-This sample shows how a fleet composes provider-shaped resources without
-copying them into one declaration file. The `catalog-composition` site inherits
+This sample shows how a fleet composes provider resources without
+copying them into one declaration file. The `catalog-composition` Site inherits
 its device selections from `sites/shared/catalog-composition.yaml`, then adds
 independent asset and dataflow selections:
 
@@ -30,7 +30,7 @@ The composition demonstrates:
   and `_siteops.external` asserts
 - a dataflow resolving its `profileRef` and destination `endpointRef` from two
   separately selected sets
-- site inheritance and source provenance in the local deployment plan
+- Site inheritance and source provenance in the local deployment plan
 - three selected resource areas deployed through two ordered families
 
 The boiler telemetry nodes follow the OPC PLC boiler simulation used by
@@ -38,8 +38,8 @@ The boiler telemetry nodes follow the OPC PLC boiler simulation used by
 
 ## Prerequisites
 
-- AIO is installed on the target cluster. The committed sample site uses
-  release `2608`.
+- AIO is installed on the cluster. The committed sample Site uses
+  AIO release `2608`.
 - cert-manager is enabled because the simulator creates a local certificate.
 - Arc Cluster Connect is enabled.
 - The deployment identity has Kubernetes permission to create Deployments,
@@ -47,7 +47,7 @@ The boiler telemetry nodes follow the OPC PLC boiler simulation used by
   ServiceAccounts, Roles, and RoleBindings in `azure-iot-operations`. See
   [Kubernetes RBAC for Arc proxy operations](../../../../docs/ci-cd-setup.md#kubernetes-rbac-for-arc-proxy-operations).
 
-## Prepare the site
+## Prepare the Site
 
 Create `workspaces/iot-operations/sites.local/catalog-composition.yaml`:
 
@@ -61,14 +61,14 @@ parameters:
   clusterName: "<arc-cluster-name>"
 ```
 
-Deploy AIO on this site first:
+Deploy AIO on this Site first:
 
 ```bash
 siteops -w workspaces/iot-operations \
   deploy manifests/aio-install/manifest.yaml -l name=catalog-composition
 ```
 
-The committed site uses `environment=sample`, which keeps it out of ordinary
+The committed Site uses `environment=sample`, which keeps it out of ordinary
 development fleet deployments. In the GitHub Actions or Azure Pipelines
 deployment UI, select the `dev` environment. The workflow uses that environment
 for credentials and approvals and adds the sample selector automatically.
@@ -76,16 +76,16 @@ for credentials and approvals and adds the sample selector automatically.
 The advanced manifest applies the included OPC PLC simulator and creates
 `external-opc-ua` through its own Bicep step before the catalog steps run. The
 simulator manifest is adapted from a pinned upstream commit and pins every
-container image by multi-architecture digest. The device is external to the
+container image by a digest that covers all architectures. The device is external to the
 catalog even though the sample owns its lifecycle. An external assertion
 validates the declared identity and expected endpoint shape during
 composition. It does not query Azure to prove that the device currently
 exists.
 
 `external-provider.bicep` pins the oldest supported Device Registry API, which
-is the workspace policy for sample-owned Bicep. The catalog-managed assets
-continue to follow the API generation selected by the site's AIO release. This
-is a deliberate cross-lifecycle example: the external assertion binds by
+is the workspace policy for Bicep that a sample owns. The assets that the
+catalog manages continue to follow the API generation selected by the Site's
+AIO release. This example deliberately spans two lifecycles: the external assertion binds by
 provider identity and endpoint shape rather than requiring both owners to use
 one deployment template or API version.
 
@@ -96,7 +96,7 @@ siteops -w workspaces/iot-operations \
   plan samples/resource-set-composition/manifest.yaml --describe
 ```
 
-The local plan identifies which site file selected each source, distinguishes
+The local plan identifies which Site file selected each source, distinguishes
 managed resources from the external device assertion, and shows the resolved
 asset, endpoint, and profile references.
 
@@ -128,10 +128,10 @@ catalog/catalog-composition/azure-iot-operations/data/catalog-composition/resour
 catalog/catalog-composition/azure-iot-operations/data/catalog-composition/resource-set-composition/external-oven
 ```
 
-Use an in-cluster MQTT client to observe those topics. The boiler asset also
+Use an MQTT client in the cluster to observe those topics. The boiler asset also
 demonstrates OPC UA node identifiers from the simulator's boiler model.
 
-The `resource-set-samples` input in the
+The `resource-set-samples` value of the `tests` input in the
 [E2E workflow](../../../../docs/e2e-testing.md) automates this proof on a fresh
 cluster. It waits for the simulator trust job, checks the projected device,
 asset, endpoint, profile, and dataflow resources, waits for dataflow health
@@ -164,7 +164,7 @@ kubectl patch secret aio-opc-ua-broker-trust-list \
   -p '{"data":{"resource-set-opc-plc.crt":null}}'
 ```
 
-Remove `sites.local/catalog-composition.yaml` when the sample site is no
+Remove `sites.local/catalog-composition.yaml` when the sample Site is no
 longer used.
 
 ## Authoritative resource shapes

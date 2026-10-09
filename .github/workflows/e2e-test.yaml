@@ -1473,7 +1473,6 @@ jobs:
             "$RUNNER_TEMP/published-deployment.json" \
             "$RELEASE" "$SOURCE_SHA" "$SITEOPS_E2E_ENGINE_VERSION" <<'PY'
           import json
-          import os
           import sys
           from pathlib import Path
 
@@ -1498,12 +1497,6 @@ jobs:
               or operations["total"] < 1
               or type(operation_counts.get("succeeded")) is not int
               or operation_counts["succeeded"] < 1
-              or (
-                  os.environ.get("E2E_JOURNEY") == "guided"
-                  and result.get("assessments") != {
-                      "readiness": "not-assessed", "functionality": "not-assessed"
-                  }
-              )
           ):
               raise SystemExit("The published deployment result is incomplete.")
           receipt = {

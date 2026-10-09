@@ -1,0 +1,54 @@
+parameters:
+  - name: workspace
+    type: string
+  - name: manifest
+    type: string
+  - name: selector
+    type: string
+    default: ''
+  - name: siteFile
+    type: string
+    default: ''
+
+steps:
+  - script: |
+      set -euo pipefail
+      # Paths stay relative to the checkout: no parent segments and no absolute or drive paths.
+      for value in "$WORKSPACE" "$MANIFEST" "$SITE_FILE"; do
+        if [[ "$value" == *".."* || "$value" == /* || "$value" == \\* || "$value" =~ ^[A-Za-z]: ]]; then
+          echo "##vso[task.logissue type=error]Workspace, manifest and Site file paths must be relative to the checkout."
+          exit 1
+        fi
+      done
+      if [[ -n "$SELECTOR" && ! "$SELECTOR" =~ ^[a-zA-Z0-9_=,./:-]+$ ]]; then
+        echo "##vso[task.logissue type=error]Invalid selector format"
+        exit 1
+      fi
+      if [[ ! -d "$WORKSPACE" || ( -n "$SITE_FILE" && ! -f "$SITE_FILE" ) ]]; then
+        echo "##vso[task.logissue type=error]The selected workspace or Site file is unavailable."
+        exit 1
+      fi
+      echo "Inputs validated."
+    displayName: Validate inputs
+    workingDirectory: $(SITEOPS_WORKSPACE_ROOT)
+    env:
+      WORKSPACE: ${{ parameters.workspace }}
+      MANIFEST: ${{ parameters.manifest }}
+      SELECTOR: ${{ parameters.selector }}
+      SITE_FILE: ${{ parameters.siteFile }}
+
+  - script: |
+      set -euo pipefail
+      if [[ -z "$SITE_OVERRIDES" ]]; then
+        echo "No site overrides configured, using committed sites"
+        exit 0
+      fi
+      python3 -I -S -B "$TEMPLATE_ROOT/scripts/mask-site-overrides.py" azure-pipelines
+      printf '%s' "$SITE_OVERRIDES" |
+        python3 -I -S -B "$TEMPLATE_ROOT/scripts/generate-site-overrides.py" "$WORKSPACE"
+    displayName: Setup site overrides
+    workingDirectory: $(SITEOPS_WORKSPACE_ROOT)
+    env:
+      WORKSPACE: ${{ parameters.workspace }}
+      SITE_OVERRIDES: $(SITE_OVERRIDES)
+      TEMPLATE_ROOT: $(SITEOPS_TEMPLATE_ROOT)

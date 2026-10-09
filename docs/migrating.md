@@ -15,157 +15,246 @@ references describe the current configuration rules.
 
 ## Before you migrate
 
-Run the listing against your workspace before changing anything:
+With the release you run now, list your Sites and validate each manifest you
+deploy before changing anything:
 
 ```bash
 siteops -w <workspace> sites
+siteops -w <workspace> validate <manifest>
 ```
 
-Resolve any reported site-loading errors, then plan each manifest you deploy:
+Resolve any reported Site loading or validation errors. Then install the new
+release, apply the sections below, and plan each manifest you deploy:
 
 ```bash
 siteops -w <workspace> plan <manifest> -l <selector>
 ```
 
-## Current preview
+`plan` arrives with v1.0.0b7, so run it with the new engine.
+
+## To v1.0.0b7
+
+These changes affect workspaces, scripts and pipelines that worked with
+v1.0.0b6. Features that need no change to existing use, such as typed Site
+inputs, operator projects, verified published content and the device and asset
+resource areas, are described in the
+[release notes](https://github.com/Azure/digital-ops-scale-kit/releases) and
+the [documentation index](README.md).
 
 Start with the changes that affect your workflow:
 
 | If you... | What to change |
 |---|---|
-| Install or maintain Site Ops | Use [native uv installation](#site-ops-installation) and the matching maintenance route. |
-| Deploy one AIO target from a release | Use the [direct reviewed deployment](#direct-deployment-and-source-selection). A project pin, answer file and separate plan are optional. |
-| Use typed AIO installation answers | Review [optional naming and labels](#typed-aio-targets) before omitting an existing name. |
-| Reference shipped workspace paths | Update [entry and resource-set paths](#workspace-content-paths). |
-| Select a manifest by a bare filename | Review [name and path selection](#manifest-names-and-paths). |
-| Browse a published source | Use [reference refresh and offline controls](#remote-source-observations) when choosing source freshness. |
-| Separate operator configuration from deployment content | Use an [operator project](projects.md) with a workspace pin or explicit local workspace. |
-| Use Windows batch-based tools | Review [literal tool arguments](#windows-tool-arguments). |
-| Produce workspace packages | Use canonical `bicepconfig.json` filenames and committed source bytes as described in [workspace packages](workspace-packages.md). |
-| Use `sites --render` | Replace it with [`--output yaml`](#inspect-sites). |
-| Preview a deployment | Use [`siteops plan`](#plan-and-validate). |
-| Author manifests or parameters | Review the [preparation checks](#preparation-checks). |
-| Capture output in scripts or CI | Use [structured results and explicit projections](#results-and-ci-output). |
-| Reference the ADO deployment template | Review [consumer pipeline checks and checkout paths](#consumer-pipelines). |
-| Manage temporary files | Review the [new location and cleanup behavior](#temporary-files). |
-| Call the engine from Python | Update the [internal result consumers](#internal-python-callers). |
+| Installed Site Ops with `pip install -e .` | [Reinstall, or install an identified release](#site-ops-installation). |
+| Check the installed release with `siteops --version` | Expect the [engine version](#reported-version), `1.0.0b1` with a build suffix. |
+| Deploy with Azure CLI older than 2.70.0 | Run `az upgrade`. See [Azure CLI version](#azure-cli-version). |
+| Run `plan` or `deploy` for Bicep or kubectl steps | Install the [local tools](#local-tool-checks) those steps use. |
+| Run `deploy` from a script or pipeline | Add [`--yes`](#deployment-confirmation). |
+| Preview with `deploy --dry-run` or `validate --plan` | Use [`siteops plan`](#plan-replaces-preview-options). |
+| Use `sites --render`, read plain `sites` output or run `sites` in CI | Review [site inspection](#inspect-sites). |
+| Match text in plain output or error messages | Review [plain output](#plain-output) and [error messages](#error-messages). |
+| Repeat an option such as `-w`, or shorten option names | Review [option spelling](#option-spelling). |
+| Reference shipped manifests, partials or dataflow sets by path | Update [workspace content paths](#workspace-content-paths). |
+| Pass a manifest filename without a directory | Review [manifest names and paths](#manifest-names-and-paths). |
+| Rely on the workspace default AIO release | Review the [2608 default](#default-aio-release). |
+| Select dataflow sets or read catalog step outputs | Update [resource sets](#resource-sets) and [catalog step outputs](#catalog-step-outputs). |
+| Author sites, manifests or parameter files | Review [preparation checks](#preparation-checks), [empty site mappings](#empty-site-mappings) and [parameter file selection](#parameter-file-selection). |
+| Write `when: ""` on a step or include | Omit `when:` or set it to `null`. See [empty conditions](#empty-conditions). |
+| Use the Azure Pipelines templates | Choose an [engine selection](#azure-pipelines-templates). |
+| Queue `.pipelines/deploy.yaml` with `siteopsSource` | Set `release` and `sourceCommit` instead. See [Azure Pipelines templates](#azure-pipelines-templates). |
+| Set `serviceConnections` or `secretGroups` in the Azure Pipelines deploy or integration pipeline | Move the names into the [Environment settings block](#azure-pipelines-environment-settings). |
+| Call the reusable GitHub Actions workflow | Pass the selector [as a secret](#github-actions-workflows). |
+| Run Windows batch launchers such as `az.cmd` | Review [literal tool arguments](#windows-tool-arguments). |
+| Clean up `.siteops/tmp` | Review [temporary files](#temporary-files). |
+| Call the engine from Python | Update [internal callers](#internal-python-callers). |
 
 ### Site Ops installation
 
-Use the complete command from the selected engine release: native
-`uv tool install` for an online wheel installation, or the platform bootstrap
-for independent archive provenance and complete payload verification.
-The bootstrap can provision uv and managed Python without a system Python
-installation. Both routes use normal uv tool storage.
+The v1.0.0b6 guide installed Site Ops with `pip install -e .` in a clone. The
+engine now also depends on `packaging`, so run `pip install -e .` again after
+updating a clone.
 
-For a local installation owned by pipx, inspect it and remove only Site Ops
-with `pipx uninstall siteops` before selecting the new route. Preserve other
-pipx tools and shared state. An unrelated exposed command is reported as
-`The exposed command belongs to another installation. Remove it with its
-original manager.` The bootstrap does not take over another manager's command.
+The editable installation is now a contributor workflow. To run an identified
+engine instead, use the command from the selected release:
+[native `uv tool install`](install-siteops.md#install-the-release-wheel) of the
+release wheel, or the [verified bootstrap](install-siteops.md#bootstrap-from-https).
+Deactivate or uninstall the editable installation first, then confirm the
+version with `siteops --version`.
 
-Verified replacement and repair use the selected bootstrap with `--replace`
-or `-Replace`. Online replacement uses the exact wheel command with
-`--reinstall`. Ordinary removal is `uv tool uninstall siteops`.
-A raw uv upgrade does not perform the bootstrap's provenance and payload
-checks. Use the [installation guide](install-siteops.md) for storage,
-source enrollment and the distinction between these routes.
+### Reported version
 
-### Direct deployment and source selection
-
-The supported preview path for one existing Arc-connected cluster is:
+`siteops --version` reports the Site Ops engine version, which is separate
+from the Scale Kit release. The v1.0.0b7 release keeps the engine at
+`1.0.0b1`, and an engine installed from that release adds a build suffix,
+for example:
 
 ```text
-siteops deploy aio-install --source "official@<release>" --input "cluster=<Arc-cluster-resource-ID>"
+siteops 1.0.0b1+build.12345.1.gabcdef123456
 ```
 
-Use the exact published release selected by its release instructions.
-`official` must already be independently enrolled with reviewed policy
-and roots. Acquired bytes cannot approve their own source. Deploy builds
-one executable plan, displays its private scope and asks for confirmation
-before executing that same plan. A prior `plan` is optional and never
-authorizes a later deploy. To install with Secret Sync, add
-`--input enableSecretSync=true` after verifying prerequisites. On an
-existing AIO 2607/2608 instance, use the
-[standalone Secret Sync route](guided-inputs.md#enable-secret-sync-on-an-existing-instance)
-with its `instance` resource ID. It does not reinstall AIO.
+An editable installation from a clone at the v1.0.0b7 tag reports
+`siteops 1.0.0b1`. See [Use the installed CLI](install-siteops.md#use-the-installed-cli).
 
-For noninteractive, CI or JSON deployment, add `--yes`. Without it,
-`deploy` exits with argparse usage error 2 (`Noninteractive deployment
-requires --yes`) before reading content or contacting Azure. `--yes`
-does not bypass validation, approval or target prerequisites and does
-not print a private plan to stderr. Capture JSON stdout as one document
-and keep stderr separate and private.
+### Azure CLI version
 
-Direct `--source SOURCE@RELEASE` selects a release online each time,
-even when previously verified bytes can be reused. An unversioned direct
-source reports `Direct source use requires an explicit published release:
---source SOURCE@RELEASE.` Direct `plan`, `deploy` and `validate` without a
-project require `--input`, `--input-file` or `--site-file`. Otherwise they
-fail with `Direct content requires explicit Site inputs or --project for
-configured targets.` Global `-w` with `--source` selects a relative
-workspace path inside that release. `--project` adds operator
-configuration without changing its pin. Local `-w` and saved project
-Sites remain supported.
+v1.0.0b6 accepted any Azure CLI version. `plan` and `deploy` now require Azure
+CLI 2.70.0 or newer for steps that use Azure CLI, the same minimum that the
+connectedk8s and azure-iot-ops extensions require. An older version blocks
+those steps before anything is submitted:
 
-If an approved alias expires, the error is `source.profile-expired`.
-Inspect it privately with `siteops source show NAME`, then remove and
-re-enroll that name with reviewed policy and trusted-root files. There
-is no automatic renewal. Passive metadata `browse --source NAME` may
-still resolve the repository, but cannot restore execution trust.
+```text
+Error: Azure CLI 2.69.0 was found. Azure CLI 2.70.0 or newer is required. Run `az upgrade`, then retry.
+```
 
-`--offline-content` replaces the Site Ops CLI's `--offline`. The old
-spelling is an unrecognized argument (usage error 2). This option
-limits content acquisition, not target reads or deployment writes.
-It works with cached metadata or a project pin, not direct executable
-`--source`, which must resolve its release online. Scripts or other tools
-with their own offline switches are unaffected.
+`validate` and `browse` do not check Azure CLI. Deployments now run with
+`--no-prompt`, so a template parameter without a value fails at once instead
+of waiting for console input.
 
-### Typed AIO targets
+### Local tool checks
 
-The resource route accepts a cluster ID without a Site name, environment
-or country. An omitted Site name now generates an identity from the full
-cluster ID. Keep your previous explicit `siteName` when targeting resources
-created under that name. Existing configured or saved Sites keep their names.
+v1.0.0b6 found a missing tool when the step that needed it ran. `plan` and
+`deploy` now check the tools that the selected steps use before anything is
+submitted:
 
-Typed AIO names must be lowercase DNS labels of at most 59 characters.
-Invalid values report `must be a lowercase DNS label` or
-`exceeds its 59-character limit`. The manual route still requires an
-explicit Site name and target fields.
+| Steps | Local tools |
+|---|---|
+| Deployment and wait steps | Azure CLI 2.70.0 or newer |
+| Bicep template steps | Azure CLI with Bicep, installed with `az bicep install` |
+| kubectl steps | kubectl, and the Azure CLI connectedk8s extension, installed with `az extension add --name connectedk8s` |
 
-Omit optional labels rather than leaving them null or empty. Supplied labels
-still feed the corresponding resource tags. Without an environment label,
-a saved Site does not match `environment=dev`. Select its explicit name or
-assign intentional labels before including it in a fleet.
+A missing tool blocks the steps that use it, which report
+`A required local tool is unavailable`. The diagnostic names the step and the
+fix, for example:
 
-Use an engine release supporting `nameFromResource`, string constraints and
-optional label mapping values with this workspace. Workspace producers must
-declare and qualify that compatible engine selection.
-Input sidecars are recognized by `kind: SiteInputContract` or an
-`apiVersion` in the `siteops.inputs/` namespace. Unrelated sample wiring
-is not a typed contract, but a malformed declared contract still fails.
+```text
+Error: The Azure CLI connectedk8s extension is not installed. Step 'apply' needs Azure CLI and its connectedk8s extension to reach the cluster through `az connectedk8s proxy`. Run `az extension add --name connectedk8s`, then rerun the command.
+```
 
-### Guided Secret Sync resource reads
+`validate` and `plan --describe` run without these tools. See
+[Azure CLI errors](troubleshooting.md#azure-cli-errors) for the Azure CLI
+messages.
 
-The standalone `secretsync` typed route accepts an AIO instance ID for the
-API used by releases 2607 and 2608. It resolves the actual instance name and
-associated cluster instead of assuming a Site naming convention. Existing
-configured-Site commands and their release selections remain available.
+### Deployment confirmation
 
-For `plan` and `deploy`, supplied resource-ID inputs authorize bounded
-reads of the declared ID and its `fromResource` relationships without
-`--read-resources`. That option now belongs only to `inputs`, for
-optional Site preview or save. `validate` stays read-free. Related
-targets stay in the source subscription and resource group. The operator
-cannot override a derived resource input. Use a compatible engine release
-and workspace.
+`deploy` now prints the prepared plan and asks `Deploy this plan? [y/N]` before
+it submits anything. An answer other than `y` or `yes` reports
+`Deployment cancelled. No operations were submitted.` and exits with code 130.
+
+Without `--yes`, `deploy` stops with usage error 2 before reading content when
+it has no interactive terminal, when `--output json` is selected, when output
+redaction is enabled, or when `CI`, `GITHUB_ACTIONS` or `TF_BUILD` is set:
+
+```text
+siteops: error: Noninteractive deployment requires --yes. Use `plan` to inspect without deploying.
+```
+
+Add `--yes` to unattended deployments. It does not bypass validation or target
+prerequisites. The shipped GitHub Actions workflow and Azure Pipelines template
+already pass it.
+
+During execution, Ctrl-C stops new operations and waits for calls already
+running to return or reach their own timeout. Work Azure already accepted is
+not cancelled. An interrupted run exits with code 130.
+
+### Plan replaces preview options
+
+The preview options were removed, not aliased:
+
+| Removed invocation | Replacement |
+|---|---|
+| `deploy <manifest> --dry-run` | `plan <manifest>` |
+| `validate <manifest> --plan` | `plan <manifest> --describe` |
+
+Each removed option reports `unrecognized arguments` (argparse usage error 2).
+`plan` validates, compiles templates, checks the local tools the selected
+operations need and prepares every value known before execution, without
+deployment writes. `plan --describe` shows the plan without compiling. Both
+need targets. Bare `validate` remains the structural check for a library
+manifest without targets.
+
+### Inspect sites
+
+`sites --render` was removed and reports `unrecognized arguments: --render`.
+Use one of these instead:
+
+```bash
+siteops -w <workspace> sites <name> --output yaml
+siteops -w <workspace> sites --output json
+```
+
+YAML writes one document per site. JSON always writes an array.
+
+Plain `sites` output lists several Sites one per line with name, location,
+resource group and labels. Use `sites NAME`, `--show-sources` or
+`--output yaml` for full resolved values. Plain values use YAML spelling,
+such as `false` and `[basic-routing]`.
+
+When `GITHUB_ACTIONS` or `TF_BUILD` is set, or `SITEOPS_REDACT_OUTPUT` enables
+redaction, `sites` no longer prints a masked listing. It reports
+`Site inspection output is private` and exits with code 1. Set
+`SITEOPS_REDACT_OUTPUT=0` only for an authorized private destination. See
+[inspection output details](site-configuration.md#inspection-output-details).
+
+### Plain output
+
+Plain output uses ASCII markers: `+` succeeded or runs, `x` failed or blocked,
+`-` skipped or not run and `?` unconfirmed. `validate` reports
+`+ Manifest is valid: NAME` with the manifest name rather than its file name,
+and writes validation errors to stderr. Scripts should test the exit code
+rather than this text.
+
+`deploy` progress and summary lines use new text:
+
+| v1.0.0b6 | v1.0.0b7 |
+|---|---|
+| `[Phase 1] Subscription-scoped steps: N subscription(s)` | `[Phase 1] Steps at subscription scope: N Sites` |
+| `[Phase 2] Resource group-scoped steps: N site(s)` | `[Phase 2] Steps in resource groups: N Sites` |
+| `[Parallel] Deploying to N sites (N concurrent)` | `[Parallel] Deploying to N Sites (N concurrent)` |
+| `Deployment Summary` | `Deployment summary` |
+| `Total: N succeeded, N failed (N sites)` and `Duration: Ns` | `Result: all deployment operations succeeded in Ns`, then `Sites:` and `Operations:` counts |
+
+A run without steps at subscription scope starts with
+`[Execution] Prepared Sites: N Sites`. With `--yes`, `deploy` reports
+`Prepared N Sites for deployment.` before it runs. `plan --describe` notes
+`Plan shape only.` above its Sites. See [run output](run-output.md) and
+[plan output](plan-output.md).
+
+### Error messages
+
+Plain errors start with `Error:`. `cache` and `index` errors no longer start
+with a code such as `cache.entry-missing:` or `index.approval:`, and
+`validate` reports `Error: Validation failed with N error(s):`. Plan and run
+diagnostics are labeled `Error:` and `Warning:`. JSON output keeps the codes.
+Messages capitalize Site, for example `No Sites matched the specified criteria`.
+
+A global option after the command still fails with usage error 2. Instead of
+`unrecognized arguments`, it names the option and where it goes:
+
+```text
+siteops: error: -w is a global option. Put it before the command: siteops -w PATH plan ...
+```
+
+### Option spelling
+
+v1.0.0b6 kept the last value of a repeated option and accepted a unique
+prefix of an option name, such as `--sel` for `--selector`. Both now stop
+with usage error 2:
+
+```text
+siteops: error: argument -w/--workspace: may be supplied only once
+siteops: error: unrecognized arguments: --sel
+```
+
+Give options that take one value, such as `-w`, `--project`, `--source`,
+`--input-file` and `--parallel`, only once, and spell option names in full.
+Options documented as repeatable, such as `-l`, accept several values.
 
 ### Workspace content paths
 
-Core entries now have the same directory shape as samples: a named directory
-with `manifest.yaml` and its operator guide.
+Core entries now use a named directory with `manifest.yaml` and an operator
+guide, and dataflow sets moved to `resource-sets/`:
 
-| Previous path | Current path |
+| v1.0.0b6 path | Current path |
 |---|---|
 | `manifests/aio-install.yaml` | `manifests/aio-install/manifest.yaml` |
 | `manifests/aio-upgrade.yaml` | `manifests/aio-upgrade/manifest.yaml` |
@@ -174,256 +263,39 @@ with `manifest.yaml` and its operator guide.
 | `manifests/aksee-bootstrap.yaml` | `manifests/aksee-bootstrap/manifest.yaml` |
 | `manifests/aksee-upgrade.yaml` | `manifests/aksee-upgrade/manifest.yaml` |
 | `manifests/_<name>.yaml` | `manifests/_partials/_<name>.yaml` |
-| `parameters/devices/<set>.yaml` | `resource-sets/devices/<set>.yaml` |
-| `parameters/assets/<set>.yaml` | `resource-sets/assets/<set>.yaml` |
 | `parameters/dataflows/<set>.yaml` | `resource-sets/dataflows/<set>.yaml` |
 
-Update custom commands, workflow selections and fixed parameter-source paths.
-Recompute relative `include` paths from each including file's directory.
-Source paths and provenance change, while manifest names, Site selection
-keys, set names, parameter precedence and resource intent remain unchanged.
-Sample entry paths and sample-local declarations retain their locations.
+Update custom commands, workflow and pipeline manifest selections, and fixed
+parameter source paths. Recompute relative `include` paths from each including
+file's directory. Sample directories keep their paths.
 
-There are no forwarding manifests at the old paths. An old command reports
-`Manifest not found`. Select the corresponding current path and review the
-plan before deploying. A file move does not delete or recreate Azure resources.
+There are no forwarding manifests at the old paths. An old path reports
+`Manifest not found.` and suggests the nearest current manifest, for example
+`Did you mean 'aio-install' (manifests/aio-install/manifest.yaml)?`. A file
+move does not delete or recreate Azure resources.
 
 ### Manifest names and paths
 
-Use an exact name with `browse`, `validate`, `plan` or `deploy`, such as
-`siteops -w workspaces/iot-operations plan aio-install`.
-Names refer to the selected workspace's discoverable manifests.
-
-Bare filenames now participate in name lookup too, including `.yaml` and
-extensionless filenames. If a name and filename identify different files,
-the command reports `Manifest selection is ambiguous`. Select one of its
-explicit paths. With an incomplete inventory, it reports
+In v1.0.0b6, a manifest argument without a directory, such as `install.yaml`,
+was joined to the workspace path. It is now looked up among the workspace's
+manifest names and root filenames, so `plan aio-install` also works. If a name
+and a filename identify different files, the command reports
+`Manifest selection is ambiguous`. With an incomplete inventory, it reports
 `Name lookup requires a complete inventory`.
 
-Prefix a filename with `./` to retain direct file selection, for example
-`plan ./install.yaml` or `plan ./install`. Relative paths containing a
-directory and absolute local execution paths retain their existing meaning.
-Browsing remains confined to inspectable paths inside its selected workspace.
+Prefix a filename with `./`, for example `plan ./install.yaml`, to select the
+file directly. A path that contains a directory, such as
+`manifests/aio-install/manifest.yaml`, is still resolved against the
+workspace.
 
-### Remote source observations
+### Default AIO release
 
-`browse --source` reuses branch, tag and default branch observations for up to
-five minutes. Use `--refresh` to resolve the reference again immediately, or
-`--offline-content` to select retained metadata explicitly. Offline output identifies
-an overdue observation rather than presenting it as the current branch head.
-
-Remote browsing now uses the protected Site Ops cache. Its default location
-and the `SITEOPS_CACHE_DIR` override are described in
-[workspace packages](workspace-packages.md#internal-workspace-cache).
-Anonymous and CLI access have separate cache scopes. Cached reads retain
-previously obtained data and do not confirm current remote permissions.
-
-References of exactly 40 hexadecimal characters must resolve to the requested
-commit. A mismatch reports
-`GitHub resolved a different commit than the requested identity.`
-Qualify a named Git reference explicitly if its name has that shape, for
-example `--ref refs/heads/<branch>`.
-
-JSON source context adds an `observation` object with origin, observation and
-refresh times, and the offline and stale states. Metadata refresh does not
-change a workspace pin. The index, source and package trust distinctions
-remain separate. See
-[remote browsing](remote-content.md#use-cached-metadata-with-browse) for examples.
-
-### Windows tool arguments
-
-Site Ops passes arguments to Windows `.cmd` and `.bat` launchers as literal
-quoted values, with AutoRun and delayed expansion disabled. Paths containing
-ampersands or parentheses remain one argument.
-
-Batch launchers report
-`Windows batch launchers require arguments without percent signs, double quotes or control characters`
-when an argument cannot be passed literally. An oversized invocation reports
-`The Windows batch command exceeds its supported length.` Both failures occur
-before process creation. Use a native executable where available, shorten the
-invocation, or change the selected path or input. These constraints apply to
-command arguments, including content, cache and temporary paths passed to
-tools. Values inside parameter JSON files are unaffected.
-
-For an immutable package with an unsupported path, select a corrected package
-rather than editing cached content. Native `.exe` and Linux process argument
-vectors retain their existing behavior.
-
-### Inspect sites
-
-Replace `--render`, which now reports `unrecognized arguments: --render`:
-
-```bash
-siteops -w <workspace> sites <name> --output yaml
-siteops -w <workspace> sites --output json
-```
-
-YAML keeps one document per site. JSON always uses an array. The default
-plain display and `--show-sources` retain their local behavior. Source
-annotations require plain output.
-
-Site inspection is private and has no publishable projection. If you see
-`Site inspection output is private`, use `SITEOPS_REDACT_OUTPUT=0` only for
-an authorized private destination. Sensitive-key masking is not a publication
-guarantee. See [inspection output details](site-configuration.md#inspection-output-details).
-
-### Plan and validate
-
-`siteops plan <manifest>` validates, compiles, preflights, and previews a
-deployment without executing it. For a faster compile-free description, use
-`plan --describe`.
-
-The preview spellings were removed, not aliased:
-
-| Removed invocation | Replacement |
-|---|---|
-| `validate <manifest> --plan` | `plan <manifest> --describe` (requires a target) |
-| `deploy <manifest> --dry-run` | `plan <manifest>` (executable preparation, no deployment) |
-| `validate <manifest> --output json [--projection ...]` | `plan <manifest> --describe --output json [--projection ...]` |
-| `plan` or `deploy` with `--read-resources` | Supply the declared resource-ID input without this option |
-
-Each removed option produces `unrecognized arguments` (argparse usage
-error 2). Bare `validate` prints a structural result in plain text and
-has no plan-only `--output` or `--projection`. `inputs --read-resources`
-remains the opt-in for inspection or save. `plan` and `plan --describe`
-are read-only with respect to deployment writes, but resource-ID inputs
-still perform their bounded setup reads.
-
-`-v` controls logging only. To inspect operation and dependency metadata
-locally, use `plan --output json --projection local-private` with redaction
-disabled. This projection omits parameter values and full value-bearing
-command lines. Local plain plans display authored multiline descriptions
-as separate lines, not as a source of execution authority.
-
-### Preparation checks
-
-`plan` and `deploy` share validation before compilation or resource writes.
-Structurally invalid inputs produce an invalid plan, not a partial target plan.
-Check these areas when existing content is rejected:
-
-- **Targets:** every plan form requires targets, including describe mode
-  (but not bare `validate`). Use bare `validate` for a reusable manifest without
-  targets. A selector matching no sites exits nonzero.
-- **Parameter files:** use a mapping. Empty documents remain empty mappings.
-  Scalars and arrays report `must contain a mapping`.
-- **Template inputs:** non-nullable parameters without defaults are required.
-  Nullable parameters, including ARM type references, and parameters with
-  explicit defaults (including `null`) may be omitted.
-- **Kubectl inputs:** resolved local files and directories must exist inside
-  the workspace and URLs must use HTTPS. Site-specific inputs are required
-  only for applicable operations, not conditionally skipped steps.
-- **Deferred inputs:** output-dependent top-level parameter names are checked
-  against the template schema after resolution. Paths and values derived
-  from outputs retain runtime validation. Known kubectl scalar inputs and
-  wait conditions are checked during preparation.
-
-### Results and CI output
-
-`siteops deploy` prints a plain summary by default. `deploy --yes --output json`
-writes one `DeploymentRun` document to stdout. Progress and logs use stderr.
-The final result accounts for every prepared operation, including skipped,
-unstarted, and unconfirmed work.
-
-| Exit | Deployment result |
-|---|---|
-| `0` | Succeeded, or every operation was skipped. A skipped run explicitly reports no work. |
-| `1` | Failed, invalid, incomplete, or unconfirmed. |
-| `130` | Interrupted, with `summary.interrupted` set, regardless of observed successes. |
-
-For CI artifacts, use `--output json --projection publishable` with
-`plan`, or with `deploy --yes`. Capture stdout separately and keep diagnostic
-stderr private. Direct source progress names fixed resolution, download,
-verification and preparation phases. Waiting operations report elapsed
-time roughly once per minute, not a percentage or workload readiness.
-Redacted plain plans use the same allowlisted fields: aggregate
-activity and generic diagnostics, not private identities or prepared values.
-
-See [plan output](plan-output.md), [run output](run-output.md), and the
-[CI capture contract](ci-cd-setup.md).
-
-### Stopping a run
-
-- **During execution:** Ctrl-C stops new work and wakes waiting loops.
-  Active child processes return or reach their own timeout before the
-  final result is printed.
-- **During preparation or review:** Ctrl-C cancels before deployment
-  submission and exits `130`. Local tool cleanup may delay the return.
-  An interrupted review does not produce a completed deployment result.
-
-Stopping locally does not cancel work Azure already accepted.
-
-### Consumer pipelines
-
-Put the global verbosity flag before the command:
-
-```bash
-siteops -v -w workspaces/example-workspace validate manifests/custom-resources.yaml
-```
-
-The former trailing form, `validate <manifest> -v`, reports
-`unrecognized arguments: -v`. Structural `validate` remains suitable for
-consumer CI without Azure authentication. It does not produce an executable
-deployment plan. Use `plan` for executable preparation. Updated templates
-implement their `dryRun` input with `plan`, rather than the removed
-`deploy --dry-run`, and pass `--yes` for unattended deployment.
-
-ADO setup, cache lookup and override generation preserve command failures.
-Reporting and private-file cleanup also fail the task when unsuccessful,
-without replacing an earlier Site Ops failure or interruption. Fix the
-reported step rather than relying on a later successful command.
-Manifest validation requires a complete, nonempty inventory. The error
-`The workspace has no standalone manifests to validate.` means the
-expected entry directories contain no manifests.
-
-For templates referenced from another repository, the optional
-`templateRepository` parameter selects your pinned repository resource
-alias. Your workspace remains in the caller's checkout and helpers come
-from the separate tooling checkout. Existing `self` and `siteopsSource`
-defaults are unchanged. See the [consumer template example](ci-cd-setup.md#reference-the-deployment-template-from-another-repository)
-before selecting a template revision that contains this parameter.
-
-If you maintain copied templates, update their scripts and helper files
-together with the selected engine. The copy has no external repository
-resource from which to infer a release. Keep its engine selection explicit.
-Include pipeline and version-pin files in CI path filters so an installation
-change is validated even when workspace files are unchanged.
-
-CI override logs retain counts and fixed diagnostics rather than Site names.
-Keep detailed validation output in a private local session. These ADO
-consumer changes do not introduce package production or release publication.
-
-For ADO Workload Identity Federation service connections, opt into the
-Azure CLI task's experimental session refresh with `keepAzSessionActive: true`
-on the deploy template, deployment pipeline or integration pipeline. The
-default is `false`, preserving other authentication schemes. Review
-[the WIF setup and qualification requirements](ci-cd-setup.md#1-create-service-connection-workload-identity-federation)
-before enabling it. It does not extend job timeouts or grant permissions.
-
-### Temporary files
-
-Resolved parameter files now use the operating system temporary directory.
-Set `SITEOPS_TEMP_DIR` to an absolute path to choose another parent.
-POSIX files have owner only permissions. Windows files inherit the parent's
-ACLs. Cleanup is best effort: a removal failure warns and may leave files.
-
-**Existing files:** Site Ops no longer writes to `<workspace>/.siteops/tmp`
-and does not automatically clean it. Inspect remaining content before
-deleting it, since it may contain sensitive resolved inputs or files you
-want to retain.
-
-### Internal Python callers
-
-These are internal interfaces, not a separately supported Python SDK.
-
-| Call or usage | Update |
-|---|---|
-| `Orchestrator.deploy` / `execute_plan` | Consume `RunResult` instead of a dictionary summary. |
-| `Orchestrator.build_plan` | Use `intent=PlanIntent.EXECUTABLE` for deployment preparation. |
-| Executing invalid preparation | Handle `PlanNotExecutableError`. |
-| `get_template_parameters` / `filter_parameters` | These executor helpers are removed. Use shared plan preparation. |
-| Cooperative stopping | Pass `stop_requested`. Signal handling belongs to the CLI. |
-
-## To v1.0.0b7
+`sites/base-site.yaml` now sets `aioRelease: "2608"`, where v1.0.0b6 set
+`"2607"`. A site that inherits it without its own `aioRelease` selects 2608 on
+its next deployment, and 2608 adds the OPC UA connector template. Pin
+`properties.aioRelease: "2607"` on a site that must stay on 2607, or move it
+with the [upgrade operation](../workspaces/iot-operations/manifests/aio-upgrade/README.md).
+See [AIO releases](aio-releases.md).
 
 ### Resource sets
 
@@ -444,42 +316,44 @@ properties:
 ```
 
 Remove `none`. Omit an area for no selection, or use `[]` when a child site
-must clear a list inherited from its parent. The old scalar and `none` forms
-report `to the legacy scalar`, naming the site and the ordered list to write
-instead.
+must clear a list inherited from its parent. `parameters/dataflows/none.yaml`
+has no replacement. The old scalar and `none` forms report
+`to the legacy scalar`, naming the site and the ordered list to write instead.
 
-A plain manifest parameter path that carries a governed collection must become
-the typed object form even when it loads one fixed file:
+**A directly attached declaration names its collections.** A plain manifest
+parameter path that carries dataflow resources must become the typed object
+form, even when it loads one fixed file. Otherwise planning reports that the
+source contributes a governed collection without listing it in `collections`.
 
 ```yaml
 # Before
 parameters:
-  - samples/my-sample/resources.yaml
+  - samples/my-sample/dataflows.yaml
 
 # After
 parameters:
-  - path: samples/my-sample/resources.yaml
-    collections: [devices, assets]
+  - path: samples/my-sample/dataflows.yaml
+    collections: [dataflowEndpoints, dataflowProfiles, dataflows]
 ```
 
 Update a custom catalog manifest from scalar path interpolation and the
 `none` comparison:
 
 ```yaml
-# Before
+# Before: manifests/custom.yaml
 parameters:
-  - "resource-sets/dataflows/{{ site.properties.resourceSets.dataflows }}.yaml"
+  - "parameters/dataflows/{{ site.properties.resourceSets.dataflows }}.yaml"
 steps:
   - include: _dataflows.yaml
     when: "{{ site.properties.resourceSets.dataflows != 'none' }}"
 
-# After
+# After: manifests/custom/manifest.yaml
 parameters:
   - path: "resource-sets/dataflows/{{ item }}.yaml"
     forEach: "{{ site.properties.resourceSets.dataflows }}"
     collections: [dataflowEndpoints, dataflowProfiles, dataflows]
 steps:
-  - include: _dataflows.yaml
+  - include: ../_partials/_dataflows.yaml
     when: "{{ site.properties.resourceSets.dataflows }}"
 ```
 
@@ -487,26 +361,19 @@ The included family partial contributes its `parameterCompositions` contract.
 See [Manifest reference](manifest-reference.md) when a custom partial needs to
 declare one directly.
 
-Device and asset sets are selected independently:
-
-```yaml
-properties:
-  resourceSets:
-    devices:
-      - site-devices
-    assets:
-      - site-assets
-```
-
-Selecting a set applies its definitions. Deselecting it stops applying them and
-does not delete resources from an earlier deployment.
+**Dataflow references are checked before deployment.** Every `endpointRef` and
+`profileRef` must name an endpoint or profile from a selected source, the
+`default` endpoint and profile that AIO creates, or an `_siteops.external`
+assertion. Otherwise validation and planning report `does not resolve to`.
+Declaring an endpoint or profile named `default` reports
+`is provider-owned and cannot be written by a resource set`. See
+[Resource catalog](resource-catalog.md#compose-sets-by-resource-identity).
 
 ### Catalog step outputs
 
-**Catalog deployment steps now keep a parameter-only interface.** If a custom
-manifest reads catalog step outputs, remove references to `endpointNames`,
-`profileNames`, `dataflowNames`, `dataflowProfileRefs`, `deviceNames`,
-`assetNames`, `assetDeviceRefs`, or `apiVersion`.
+**The `dataflow-resources` step keeps a parameter-only interface.** If a custom
+manifest reads its outputs, remove references to `endpointNames`,
+`profileNames`, `dataflowNames`, `dataflowProfileRefs`, or `apiVersion`.
 
 Use `siteops plan <manifest> --describe` to inspect the effective composition
 before deployment. Read the deployed resources from Azure or their projected
@@ -519,12 +386,132 @@ custom resources when verifying provider state.
 before inheritance merge. Use an explicit field value, such as
 `resourceSets.dataflows: []`, when a child needs to clear supported state.
 
+### Empty conditions
+
+v1.0.0b6 treated `when: ""` as no condition and ran the step. `validate`,
+`plan` and `deploy` now report `Invalid 'when' condition syntax on step 'NAME'`,
+or `on include of 'FILE'` for an include. For a step that always runs, omit
+`when:` or set it to `null`.
+
 ### Parameter file selection
 
 **A site-selected parameter path stays within the workspace.** A parameter path containing a
 template must resolve to a relative path with no `..` segments, and the resulting file must remain
 inside the workspace. Keep the selectable value to a file or subdirectory name under the manifest's
 intended parameter directory.
+
+### Preparation checks
+
+In v1.0.0b6, `deploy` did not run `validate`. `plan` and `deploy` now share its
+checks before compiling templates or writing resources, and stop on problems
+that v1.0.0b6 `deploy` warned about or left to Azure:
+
+- **Parameter files:** every attached file must exist. A missing fixed file
+  reports `Manifest parameter file not found` or `Parameter file not found`,
+  where v1.0.0b6 `deploy` logged a warning and continued. A file that holds a
+  scalar or an array reports `must contain a mapping`.
+- **Targets:** a manifest selector that matches no Site reports
+  `No Sites matched the specified criteria` and exits with code 1. A manifest
+  without steps reports `Manifest has no steps defined`. In both cases
+  v1.0.0b6 printed `Nothing to deploy` and exited with code 0.
+- **Template inputs:** a template parameter that is not nullable and has no
+  default must receive a value. Otherwise preparation reports
+  `missing required template parameter` before anything is submitted.
+- **Kubectl inputs:** local files must exist inside the workspace, and URLs
+  must use HTTPS. A path outside the workspace reports
+  `Kubectl file must stay within the workspace`.
+
+### Azure Pipelines templates
+
+With an empty `siteopsSource`, the v1.0.0b6 templates installed the checkout
+with `pip install -e .`. They now install a released engine through the
+verified bootstrap, which needs an engine selection. Without one, setup
+reports:
+
+```text
+Site Ops setup: Select a tagged GitHub template repository, an explicit release and sourceCommit, or siteopsSource. An unpinned checkout is not an engine selection.
+```
+
+Choose one route:
+
+- Run the templates from a GitHub repository checkout at a release tag, either
+  the pipeline's own repository or the repository resource named by
+  `templateRepository`.
+- Set `release` and `sourceCommit`, adding `repository` for a fork.
+- Set `siteopsSource` to an explicit pip source in reviewed YAML.
+- Set `installDev: true` on `setup-siteops.yaml` for a contributor checkout.
+
+These routes are mutually exclusive. The release route requires a Linux agent.
+If you maintain copied templates, update their scripts and helper files
+together. See the
+[consumer example](ci-cd-setup.md#reference-the-deployment-template-from-another-repository).
+
+`.pipelines/deploy.yaml` no longer offers `siteopsSource` when you queue a
+run, and Azure Pipelines rejects a run request that still sets it. Select the
+engine with the `release` and `sourceCommit` run parameters, or queue the
+pipeline from a release tag. A custom engine source belongs in reviewed YAML,
+as the `siteopsSource` parameter of `templates/siteops-deploy.yaml`.
+
+`dryRun` now prepares an executable plan with `plan` rather than running
+`deploy --dry-run`, and deployment passes `--yes`.
+
+### Azure Pipelines environment settings
+
+In v1.0.0b6, `.pipelines/deploy.yaml` and `.pipelines/integration-test.yaml`
+read each environment's service connection and variable group from the
+`serviceConnections` and `secretGroups` parameter defaults. Both pipelines
+now read them from an Environment settings block under `variables`, and a
+queued run chooses only the environment. Move your names from the old
+defaults into the block in each file, as shown in
+[Environment settings](ci-cd-setup.md#environment-settings). Azure Pipelines
+rejects a run request that still sets `serviceConnections` or
+`secretGroups`. The integration pipeline's `environment` parameter now
+accepts only `dev`, `staging` and `prod`, the environments the block maps.
+
+### GitHub Actions workflows
+
+The reusable `.github/workflows/_siteops-deploy.yaml` workflow no longer
+accepts a `selector` input. Pass the selector as the `SITE_SELECTOR` secret, as
+`deploy.yaml` does. Its `dry-run` input now prepares an executable plan with
+`plan`, and deployment passes `--yes`. An empty `siteops-source` still installs
+the checkout.
+
+### Windows tool arguments
+
+Site Ops now passes arguments to Windows `.cmd` and `.bat` launchers, such as
+`az.cmd`, as literal quoted values, with AutoRun and delayed expansion
+disabled. Paths containing ampersands or parentheses remain one argument.
+
+An argument that cannot be passed literally reports
+`Windows batch launchers require arguments without percent signs, double quotes or control characters`.
+An oversized invocation reports
+`The Windows batch command exceeds its supported length.` Both failures occur
+before the tool starts. Rename a workspace or temporary path that contains
+these characters, shorten the invocation, or use a native executable where
+available. Values inside parameter JSON files are unaffected. Native `.exe`
+launchers and Linux argument vectors behave as before.
+
+### Temporary files
+
+Resolved parameter files now use the operating system temporary directory.
+Set `SITEOPS_TEMP_DIR` to an absolute path to choose another parent.
+POSIX files have owner only permissions. Windows files inherit the parent's
+ACLs. Cleanup is best effort: a removal failure warns and may leave files.
+
+**Existing files:** Site Ops no longer writes to `<workspace>/.siteops/tmp`
+and does not automatically clean it. Inspect remaining content before
+deleting it, since it may contain sensitive resolved inputs or files you
+want to retain.
+
+### Internal Python callers
+
+These are internal interfaces, not a separately supported Python SDK.
+
+| Call or usage | Update |
+|---|---|
+| `Orchestrator.deploy` | Consume the returned `RunResult` instead of a dictionary summary. |
+| Deploying invalid preparation | Handle `PlanNotExecutableError`. |
+| `get_template_parameters` / `filter_parameters` | These executor helpers are removed. Use shared plan preparation through `Orchestrator.build_plan` with `intent=PlanIntent.EXECUTABLE`. |
 
 ## To v1.0.0b6
 
@@ -587,7 +574,7 @@ name: "2607"
 using the `metadata`/`spec` envelope can inherit as long as `inherits:` sits alongside `apiVersion`
 and `kind` rather than inside `spec`. A site that wrote `inherits:` inside `spec:` has been
 deploying without its parent's `properties` and `parameters`. Move the one line to the top level,
-then confirm what the site resolves to with `siteops -w <workspace> sites <name> --output yaml`. Expect
+then confirm what the site resolves to with `siteops -w <workspace> sites <name> --render`. Expect
 values the site did not have before, and review them before you deploy.
 
 **Keep one shape across an `inherits` chain.** A flat site inheriting a `metadata`/`spec` template,
@@ -628,20 +615,19 @@ resolve. Rename one, since keeping either would drop the other.
 **A mistyped template delimiter fails the step.** `{ site.x }}` and `{{ site.x }` reached ARM as
 literal text. Both now fail.
 
-**Executable planning fails on what deployment preparation would fail on.**
-`siteops plan` resolves everything available before execution. A
-`{{ steps.X.outputs.Y }}` reference to an earlier operation remains a typed
-deferred value because the deployment has not produced it yet. An unresolved
-`{{ site.X }}` path, a mistyped delimiter, and a reference to an unknown or
-later step fail planning.
+**`deploy --dry-run` fails on what the real deployment would fail on.** A dry run resolves
+everything a real run resolves, apart from `{{ steps.X.outputs.Y }}` naming a step that runs earlier
+in the same manifest, which depends on outputs no dry run produces. Those still warn. An unresolved
+`{{ site.X }}` path, a mistyped delimiter, and a reference to a step that does not exist or that runs
+later all fail the dry run, so a pipeline that gates on `--dry-run` sees the same answer the
+deployment would give it.
 
 **A parameter path that selects a file by site value must resolve to a real file.** A path such as
 `parameters/aio-releases/{{ site.properties.aioRelease }}.yaml` lets the site choose which file to
 load. When the site does not carry the property, or carries a value naming a file that is not
 there, the step deployed without those parameters and reported success. Both cases now fail the
-step. A path with no template in it is unchanged and still warns, so an optional fixed file keeps
-working when the template can use defaults. Executable preparation still
-reports a required parameter that the missing file would have supplied.
+step. In `deploy`, a path with no template in it is unchanged and still warns, so an optional fixed
+file keeps working.
 
 ### Deployment and targeting
 
@@ -662,8 +648,8 @@ first and fix everything it names.
 
 **One subscription holds one subscription-level site.** `deploy` reports a second one rather than
 choosing between them. Subscription-scoped steps run once per subscription and their outputs feed
-every resource group site under it, so two candidates have no correct resolution.
-Shared preparation reports the ambiguity for both planning and deployment.
+every resource group site under it, so two candidates have no correct resolution. `validate`
+already reported this, and `deploy` does not run `validate`, so the check now covers both paths.
 
 ### Secret Sync
 
@@ -681,8 +667,8 @@ manifest that referenced the old path reports `Parameter file not found` and doe
 
 | Previously | Now |
 |---|---|
-| `siteops validate m.yaml -v` | `siteops plan m.yaml --describe` |
+| `siteops validate m.yaml -v` | `siteops validate m.yaml --plan` |
 | `siteops sites -v` | `siteops sites --show-sources` |
 
-Use `siteops plan` for executable preflight. Running `-v` where one of these
-commands is meant prints a note naming the command.
+`siteops deploy --dry-run` prints the plan on its own. Running `-v` where one of these flags is
+meant prints a note naming the flag.

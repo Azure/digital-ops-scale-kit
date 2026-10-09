@@ -155,8 +155,8 @@ class TestCmdValidate:
 
         assert exit_code == 0
         captured = capsys.readouterr()
-        assert "✓" in captured.out
-        assert "valid" in captured.out.lower()
+        assert "+ Manifest is valid: test-manifest" in captured.out
+        assert captured.out.isascii()
 
     def test_validate_manifest_not_found(self, complete_workspace, capsys):
         """Test validate with missing manifest returns exit code 1."""
@@ -220,8 +220,8 @@ class TestCmdValidate:
 
         assert exit_code == 0
         captured = capsys.readouterr()
-        assert "Preflight: not performed" in captured.out
-        assert "DEPLOYMENT PLAN" in captured.out
+        assert "Plan shape only. Run `siteops plan` without --describe" in captured.out
+        assert "Deployment plan: test-manifest" in captured.out
         assert "Sites" in captured.out
         assert "Steps" in captured.out
 
@@ -556,7 +556,7 @@ class TestCmdValidate:
         assert exit_code == 1
         captured = capsys.readouterr()
         assert "Template not found" in captured.out
-        assert "DEPLOYMENT PLAN" not in captured.out
+        assert "Deployment plan:" not in captured.out
 
     def test_validate_with_selector(self, complete_workspace):
         """Test validate passes selector to orchestrator."""
@@ -598,7 +598,7 @@ class TestCmdSites:
         assert exit_code == 0
         captured = capsys.readouterr()
         assert "test-site" in captured.out
-        assert "Available Sites" in captured.out
+        assert "Sites (1)" in captured.out
 
     def test_sites_with_selector(self, multi_site_workspace, capsys):
         """Test filtering sites by selector."""
@@ -636,7 +636,7 @@ class TestCmdSites:
 
         assert exit_code == 1
         captured = capsys.readouterr()
-        assert "No sites matched" in captured.err
+        assert "No Sites matched" in captured.err
 
     def test_sites_redacted_no_match_omits_selector(
         self,
@@ -656,7 +656,7 @@ class TestCmdSites:
         assert cmd_sites(args, Orchestrator(complete_workspace)) == 1
 
         error = capsys.readouterr().err
-        assert "No sites matched selector" in error
+        assert "Error: No Sites matched the selector." in error
         assert "private-label" not in error
         assert "private-value" not in error
 
@@ -715,7 +715,7 @@ class TestCmdSites:
 
         assert exit_code == 0
         captured = capsys.readouterr()
-        assert "No sites found" in captured.out
+        assert "No Sites found" in captured.out
 
     def test_sites_shows_labels(self, complete_workspace, capsys):
         """Test sites output includes labels."""
@@ -886,7 +886,7 @@ class TestCmdDeploy:
 
         assert exit_code == 1
         captured = capsys.readouterr()
-        assert "No sites matched" in captured.err
+        assert "No Sites matched" in captured.err
 
     def test_deploy_generic_manifest_no_selector_errors(self, complete_workspace, capsys):
         """Generic manifest (no targeting) without `-l` is a hard error."""
@@ -1026,7 +1026,7 @@ class TestCmdDeploy:
 
         assert exit_code == 1
         captured = capsys.readouterr()
-        assert "matched no sites" in captured.err
+        assert "matched no Sites" in captured.err
         # Diagnostic should mention the missing label so the operator
         # sees the typo.
         assert "nonexistent" in captured.err
@@ -1060,7 +1060,7 @@ class TestCmdDeploy:
         assert cmd_deploy(args, Orchestrator(complete_workspace)) == 1
 
         error = capsys.readouterr().err
-        assert "No sites matched the selected criteria" in error
+        assert "No Sites matched the selected criteria" in error
         assert "private-label" not in error
         assert "private-value" not in error
 
@@ -1331,8 +1331,8 @@ class TestMainArgumentParsing:
             "browse", "inputs", "sites", "validate", "plan", "deploy",
             "project", "source", "index", "cache",
         ]
-        assert "Global options such as --project and --approved-source precede the command." in help_text
-        assert "siteops --approved-source NAME project pin ./factory --release RELEASE" in help_text
+        assert "Global options such as -w, --project and --approved-source go before the command." in help_text
+        assert "siteops --approved-source official project pin ./factory --release <release>" in help_text
 
     @pytest.mark.parametrize("command", ["validate", "plan", "deploy"])
     def test_misplaced_project_is_not_interpreted_as_projection(
@@ -1350,7 +1350,98 @@ class TestMainArgumentParsing:
                 main()
         assert stopped.value.code == 2
         error = capsys.readouterr().err
-        assert "unrecognized arguments: --project publishable" in error
+        assert error == (
+            "siteops: error: --project is a global option. Put it before the command: "
+            f"siteops --project DIRECTORY {command} ...\n"
+        )
+
+    @pytest.mark.parametrize(("arguments", "expected"), [
+        (["plan", "aio-install", "-w", "workspace"], "-w is a global option"),
+        (["inputs", "aio-install", "--workspace=workspace"], "--workspace is a global option"),
+        (["sites", "-v"], "-v is a global option"),
+        (["deploy", "aio-install", "--trust-policy", "p", "--trusted-root", "r"],
+         "--trust-policy and --trusted-root are global options. Put them before the command: "
+         "siteops --trust-policy FILE --trusted-root FILE deploy ..."),
+        (["project", "pin", "--approved-source", "official"],
+         "Put it before the command: siteops --approved-source NAME project pin ..."),
+        (["source", "list", "--extra-sites-dir", "d"], "--extra-sites-dir is a global option"),
+    ])
+    def test_global_option_after_the_command_names_the_option_and_its_place(
+        self, capsys, arguments, expected,
+    ):
+        with (
+            patch.object(sys, "argv", ["siteops", *arguments]),
+            patch("siteops.cli.open_command_context", side_effect=AssertionError("No content read")),
+            patch("siteops.cli.cmd_project", side_effect=AssertionError("No project write")),
+            patch("siteops.cli.cmd_source", side_effect=AssertionError("No source read")),
+        ):
+            with pytest.raises(SystemExit) as stopped:
+                main()
+        assert stopped.value.code == 2
+        error = capsys.readouterr().err
+        assert expected in error
+        assert "usage:" not in error and "unrecognized arguments" not in error
+
+    def test_other_unknown_arguments_keep_the_usage_error(self, capsys):
+        with patch.object(sys, "argv", ["siteops", "plan", "aio-install", "--bogus"]):
+            with pytest.raises(SystemExit) as stopped:
+                main()
+        assert stopped.value.code == 2
+        assert "unrecognized arguments: --bogus" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("arguments", [[], ["project"], ["source"], ["cache"]])
+    def test_bare_group_prints_its_help(self, capsys, arguments):
+        with patch.object(sys, "argv", ["siteops", *arguments]):
+            with pytest.raises(SystemExit) as stopped:
+                main()
+        assert stopped.value.code == 2
+        error = capsys.readouterr().err
+        assert error.startswith(f"usage: siteops {' '.join(arguments)}".rstrip() + " [-h]")
+        assert "the following arguments are required" not in error
+
+    @pytest.mark.parametrize(("arguments", "expected"), [
+        (["--help"], "Environment:\n  SITEOPS_REDACT_OUTPUT"),
+        (["--help"], "SITEOPS_CACHE_DIR"),
+        (["--help"], "SITEOPS_EXTRA_SITES_DIRS"),
+        (["--help"], "  GH_TOKEN                  Optional GitHub token for source metadata requests."),
+        (["--help"], "Redaction is on by default when GITHUB_ACTIONS or"),
+        (["project", "--help"], "Pin a verified published release"),
+        (["project", "show", "--help"], "Output format (default: plain)"),
+        (["cache", "--help"], "SITEOPS_CACHE_DIR selects the cache directory"),
+        (["cache", "remove", "--help"], "Cache entry kind, as shown by cache list"),
+        (["index", "--help"], "For content authors:"),
+        (["browse", "--help"], "Resolve the remote reference again before browsing"),
+        (["browse", "--help"], "Include partials"),
+        (["plan", "--help"], "0, max or auto for no limit"),
+    ])
+    def test_help_documents_groups_outputs_and_environment(self, capsys, arguments, expected):
+        with patch.object(sys, "argv", ["siteops", *arguments]):
+            with pytest.raises(SystemExit) as stopped:
+                main()
+        assert stopped.value.code == 0
+        output = capsys.readouterr().out
+        assert expected in output or expected in " ".join(output.split())
+
+    def test_root_help_follows_the_published_journey_without_migration_text(self, capsys):
+        with patch.object(sys, "argv", ["siteops", "--help"]):
+            with pytest.raises(SystemExit) as stopped:
+                main()
+        assert stopped.value.code == 0
+        help_text = capsys.readouterr().out
+        journey = [
+            "siteops source enroll official",
+            'siteops deploy aio-install --source "official@<release>" '
+            '--input "cluster=<Arc-cluster-resource-ID>"',
+            'siteops inputs aio-install --source "official@<release>"',
+            "siteops -w workspaces/iot-operations plan aio-install",
+        ]
+        positions = [help_text.index(line) for line in journey]
+        assert positions == sorted(positions)
+        flat = " ".join(help_text.split())
+        assert "an alternative to an approved source" in flat
+        assert "required to create or use a workspace pin" not in flat
+        assert "docs/" not in help_text
+        assert "To see a deployment plan" not in flat
 
     def test_source_enrollment_rejects_abbreviated_authority_option(self, capsys):
         with (
@@ -1363,10 +1454,10 @@ class TestMainArgumentParsing:
             with pytest.raises(SystemExit) as stopped:
                 main()
         assert stopped.value.code == 2
-        assert "--source" in capsys.readouterr().err
+        assert "unrecognized arguments: --sour" in capsys.readouterr().err
 
     @pytest.mark.parametrize(("arguments", "expected"), [
-        (["source", "--help"], "Enroll a consumer-approved source"),
+        (["source", "--help"], "Enroll or renew an approved source"),
         (["source", "enroll", "--help"], "--trust-policy FILE"),
         (["source", "show", "--help"], "private"),
         (["source", "list", "--help"], "private"),
@@ -1406,7 +1497,6 @@ class TestMainArgumentParsing:
     @pytest.mark.parametrize("arguments", [
         ["browse", "--source", "github:example/one", "--source", "github:example/two"],
         ["browse", "--ref", "first", "--ref", "second"],
-        ["browse", "--auth", "anonymous", "--auth", "cli"],
         ["project", "pin", "--source", "github:example/one", "--source", "github:example/two"],
         ["project", "pin", "--release", "v1", "--release", "v2"],
         ["project", "pin", "--release-workspace", "one", "--release-workspace", "two"],
@@ -1426,6 +1516,16 @@ class TestMainArgumentParsing:
                 main()
         assert stopped.value.code == 2
         assert "only once" in capsys.readouterr().err
+
+    def test_browse_auth_option_is_rejected_before_any_read(self, capsys):
+        with (
+            patch.object(sys, "argv", ["siteops", "browse", "--source", "github:example/one", "--auth", "cli"]),
+            patch("siteops.cli.cmd_browse", side_effect=AssertionError("No remote read")),
+        ):
+            with pytest.raises(SystemExit) as stopped:
+                main()
+        assert stopped.value.code == 2
+        assert "unrecognized arguments: --auth" in capsys.readouterr().err
 
     @pytest.mark.parametrize("command", ["plan", "deploy"])
     def test_repeated_parallel_cap_does_not_silently_change_fleet_concurrency(
@@ -1869,13 +1969,31 @@ class TestPrintValue:
         assert "deepValue: found" in captured.out
 
     def test_print_simple_list(self, capsys):
-        """Test printing a simple list (inline)."""
+        """Simple lists use inline YAML spelling rather than Python reprs."""
         from siteops.cli import _print_value
 
         _print_value({"items": ["a", "b", "c"]}, indent=0)
 
         captured = capsys.readouterr()
-        assert "items: ['a', 'b', 'c']" in captured.out
+        assert "items: [a, b, c]" in captured.out
+
+    def test_print_uses_yaml_scalars(self, capsys):
+        from siteops.cli import _print_value
+
+        _print_value(
+            {"enabled": False, "on": True, "unset": None, "empty": "", "text": "2608", "nested": {}},
+            indent=0,
+        )
+
+        output = capsys.readouterr().out.splitlines()
+        assert output == [
+            "enabled: false",
+            "on: true",
+            "unset: null",
+            "empty: ''",
+            "text: '2608'",
+            "nested: {}",
+        ]
 
     def test_print_complex_list(self, capsys):
         """Test printing a list of dictionaries."""
@@ -2621,7 +2739,7 @@ class TestAWorkspaceWhoseSitesAllFailIsDiagnosedAsSuch:
         captured = capsys.readouterr()
         assert exit_code == 1
         assert "plant-east" in captured.err
-        assert "No sites found in workspace" not in captured.out
+        assert "No Sites found in the workspace" not in captured.out
 
     def test_an_empty_workspace_still_reports_an_empty_workspace(
         self, tmp_workspace, capsys
@@ -2634,7 +2752,7 @@ class TestAWorkspaceWhoseSitesAllFailIsDiagnosedAsSuch:
 
         captured = capsys.readouterr()
         assert exit_code == 0
-        assert "No sites found in workspace" in captured.out
+        assert "No Sites found in the workspace" in captured.out
 
     def test_the_selector_explanation_names_the_rejected_files(self, broken_workspace):
         from siteops.orchestrator import Orchestrator
@@ -2930,6 +3048,50 @@ class TestDeployResultOutput:
         ]
         assert "private-site" not in captured.out
         assert "private/path" not in captured.out
+        execute.assert_not_called()
+
+    @pytest.mark.parametrize("redacted", [False, True])
+    def test_plain_preparation_failure_lists_every_blocking_diagnostic(
+        self, complete_workspace, capsys, monkeypatch, redacted
+    ):
+        from siteops.orchestrator import Orchestrator
+
+        monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1" if redacted else "0")
+        orchestrator = Orchestrator(complete_workspace)
+        manifest = complete_workspace / "manifests" / "test-manifest.yaml"
+        failure = PlanBuildResult(
+            status=PlanStatus.INVALID,
+            executable=False,
+            plan=None,
+            diagnostics=tuple(
+                PlanDiagnostic(
+                    code=code,
+                    severity=DiagnosticSeverity.ERROR,
+                    summary="Missing.",
+                    detail=detail,
+                )
+                for code, detail in (
+                    ("capability.arm-control-plane.missing", "Azure CLI was not found on PATH."),
+                    ("capability.arc-proxy.missing", "Run `az extension add --name connectedk8s`."),
+                )
+            ),
+            intent=PlanIntent.EXECUTABLE,
+        )
+
+        with (
+            patch.object(orchestrator, "build_plan", return_value=failure),
+            patch.object(orchestrator, "execute_plan") as execute,
+        ):
+            exit_code = cmd_deploy(
+                self._args(complete_workspace, manifest, output="plain"), orchestrator,
+            )
+
+        error = capsys.readouterr().err
+        assert exit_code == 1
+        assert "Error: The deployment plan has 2 blocking problems:\n  - " in error
+        assert "`az extension add --name connectedk8s`" in error
+        assert ("https://aka.ms/installazurecli" in error) is redacted
+        assert ("Azure CLI was not found on PATH." in error) is not redacted
         execute.assert_not_called()
 
     def test_real_preparation_failure_emits_invalid_json_before_compilation(
@@ -3272,3 +3434,36 @@ class TestDocumentedInterruptBounds:
             f"{DEFAULT_KUBECTL_TIMEOUT_SECONDS // 60} minutes for a kubectl "
             "operation"
         ) in document
+
+@pytest.mark.parametrize(("options", "expected"), [
+    (["--approved-source", "official"],
+     "Error: --approved-source, --trust-policy and --trusted-root apply only to a workspace pin "
+     "or --source content, not to a local workspace.\n"),
+    (["--trust-policy", "policy.json", "--trusted-root", "root.jsonl"],
+     "Error: --approved-source, --trust-policy and --trusted-root apply only to a workspace pin "
+     "or --source content, not to a local workspace.\n"),
+])
+def test_trust_options_with_local_content_name_where_they_apply(
+    complete_workspace, monkeypatch, capsys, options, expected,
+):
+    monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "0")
+    with patch.object(sys, "argv", [
+        "siteops", "-w", str(complete_workspace), *options, "validate", "test-manifest",
+    ]):
+        with pytest.raises(SystemExit) as stopped:
+            main()
+    assert stopped.value.code == 1
+    assert capsys.readouterr().err == expected
+
+
+def test_offline_content_with_local_content_names_where_it_applies(complete_workspace, monkeypatch, capsys):
+    monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "0")
+    with patch.object(sys, "argv", [
+        "siteops", "-w", str(complete_workspace), "validate", "test-manifest", "--offline-content",
+    ]):
+        with pytest.raises(SystemExit) as stopped:
+            main()
+    assert stopped.value.code == 1
+    assert capsys.readouterr().err == (
+        "Error: --offline-content applies only to a workspace pin, not to a local workspace.\n"
+    )

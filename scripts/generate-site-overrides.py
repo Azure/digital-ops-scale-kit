@@ -27,11 +27,17 @@ import re
 import sys
 from pathlib import Path
 
-import yaml
-
-from siteops.sanitize import is_redaction_enabled
-
 SITE_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def is_redaction_enabled() -> bool:
+    """Apply the CLI's output-context contract without requiring an installed engine."""
+    explicit = os.environ.get("SITEOPS_REDACT_OUTPUT", "").strip().lower()
+    if explicit in {"1", "true", "yes", "on"}:
+        return True
+    if explicit in {"0", "false", "no", "off"}:
+        return False
+    return any(os.environ.get(name) for name in ("GITHUB_ACTIONS", "TF_BUILD"))
 
 
 def expand_dot_notation(flat: dict) -> dict:
@@ -42,11 +48,21 @@ def expand_dot_notation(flat: dict) -> dict:
       → {"parameters": {"broker": {"memoryProfile": "Low"}}, "subscription": "abc"}
     """
     nested: dict = {}
+    for key in flat:
+        if not isinstance(key, str) or not key or any(not part for part in key.split(".")):
+            raise ValueError("Override keys must be nonempty field paths.")
+    for key in flat:
+        parts = key.split(".")
+        # A parent and its own child cannot both be set, whatever the key order.
+        if any(".".join(parts[:index]) in flat for index in range(1, len(parts))):
+            raise ValueError("Override field paths conflict.")
     for key, value in flat.items():
         parts = key.split(".")
         current = nested
         for part in parts[:-1]:
             current = current.setdefault(part, {})
+            if not isinstance(current, dict):
+                raise ValueError("Override field paths conflict.")
         current[parts[-1]] = value
     return nested
 
@@ -70,12 +86,14 @@ def generate_overlays(overrides: dict, sites_local: Path) -> tuple[list[Path], l
     Raises:
         ValueError: If a site name contains invalid characters.
     """
+    if not isinstance(overrides, dict) or any(not isinstance(value, dict) for value in overrides.values()):
+        raise ValueError("Overrides must map Site names to field mappings.")
     sites_local.mkdir(parents=True, exist_ok=True)
     generated: list[Path] = []
     skipped: list[str] = []
 
     for site_name, values in overrides.items():
-        if not SITE_NAME_PATTERN.match(site_name):
+        if not isinstance(site_name, str) or not SITE_NAME_PATTERN.fullmatch(site_name):
             raise ValueError(
                 f"Invalid site name: '{site_name}' (must match {SITE_NAME_PATTERN.pattern})"
             )
@@ -86,7 +104,13 @@ def generate_overlays(overrides: dict, sites_local: Path) -> tuple[list[Path], l
             continue
 
         expanded = expand_dot_notation(values)
-        output_path.write_text(yaml.safe_dump(expanded, default_flow_style=False))
+        content = json.dumps(expanded, indent=2, allow_nan=False) + "\n"
+        try:
+            with output_path.open("x", encoding="utf-8") as stream:
+                stream.write(content)
+        except FileExistsError:
+            skipped.append(site_name)
+            continue
         generated.append(output_path)
 
     return generated, skipped

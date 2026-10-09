@@ -22,6 +22,7 @@ from siteops.cache_filesystem import (
     check_private_node,
     make_private_directory,
 )
+from siteops.cache_layout import CacheLayout
 from siteops.compilation import TemplateCompilationSession
 from siteops.executor import DeploymentResult
 from siteops.orchestrator import Orchestrator
@@ -113,6 +114,80 @@ def test_cache_initialization_preserves_unmarked_operator_directory(tmp_path):
         WorkspaceCache(root)
     assert list(root.iterdir()) == [sentinel]
     assert sentinel.read_text(encoding="utf-8") == "operator-owned"
+
+
+def test_private_operator_directory_with_other_files_names_the_remedy(tmp_path):
+    root = tmp_path / "operator"
+    root.mkdir(mode=0o700)
+    make_private_directory(root / "objects")
+    make_private_directory(root / "objects" / "other")
+    with pytest.raises(CacheError, match="contains other files. Select a new or empty directory"):
+        WorkspaceCache(root)
+    assert sorted(path.name for path in root.rglob("*")) == ["objects", "other"]
+
+
+def _empty_operator_directory(root: Path) -> Path:
+    root.mkdir(mode=0o700)
+    return root
+
+
+def test_existing_empty_cache_override_is_initialized_in_place(tmp_path, package_archive, monkeypatch):
+    root = _empty_operator_directory(tmp_path / "selected")
+    identity = root.stat().st_ino
+    monkeypatch.setenv("SITEOPS_CACHE_DIR", str(root))
+    cache = WorkspaceCache()
+    assert cache.root == root and root.stat().st_ino == identity
+    for path in (root, root / "objects", root / "objects" / "sha256", root / "staging", root / "locks"):
+        check_private_node(path, directory=True)
+    check_private_node(root / "cache.json", directory=False)
+    assert not list((root / "staging").iterdir())
+    archive, digest = package_archive
+    cache.publish(archive, digest, source_revision=REVISION, verify=Verifier())
+    with WorkspaceCache(root).lease(digest, source_revision=REVISION, verify=Verifier()):
+        pass
+
+
+def test_inspection_leaves_an_existing_empty_directory_uninitialized(tmp_path):
+    root = _empty_operator_directory(tmp_path / "selected")
+    with pytest.raises(CacheError) as caught:
+        CacheLayout(root, create=False)
+    assert caught.value.code == "cache.uninitialized"
+    assert not list(root.iterdir())
+
+
+def test_interrupted_in_place_initialization_is_completed(tmp_path):
+    root = _empty_operator_directory(tmp_path / "selected")
+    make_private_directory(root / "objects")
+    make_private_directory(root / "staging")
+    (root / "staging" / f"cache-{'a' * 32}.json").write_bytes(b"")
+    WorkspaceCache(root)
+    check_private_node(root / "cache.json", directory=False)
+    check_private_node(root / "objects" / "sha256", directory=True)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions contract")
+def test_posix_shared_empty_directory_is_refused_without_repair(tmp_path):
+    root = tmp_path / "selected"
+    root.mkdir(mode=0o700)
+    root.chmod(0o755)
+    with pytest.raises(CacheError) as failure:
+        WorkspaceCache(root)
+    assert failure.value.code == "cache.permissions"
+    assert root.stat().st_mode & 0o777 == 0o755 and not list(root.iterdir())
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows access-control contract")
+def test_windows_shared_empty_directory_is_refused_without_repair(tmp_path):
+    root = _empty_operator_directory(tmp_path / "selected")
+    subprocess.run(
+        [str(Path(os.environ["SystemRoot"]) / "System32" / "icacls.exe"),
+         str(root), "/grant", "*S-1-1-0:R"],
+        check=True, capture_output=True, timeout=15,
+    )
+    with pytest.raises(CacheError) as failure:
+        WorkspaceCache(root)
+    assert failure.value.code == "cache.permissions"
+    assert not list(root.iterdir())
 
 
 def test_new_nested_cache_is_private_and_reopens(tmp_path):
@@ -433,9 +508,12 @@ print("published", flush=True)
 """
 
 
-def test_concurrent_native_initialization_and_publication_converge(tmp_path, package_archive):
+@pytest.mark.parametrize("existing", [False, True], ids=["new-root", "empty-root"])
+def test_concurrent_native_initialization_and_publication_converge(tmp_path, package_archive, existing):
     archive, digest = package_archive
     root = tmp_path / "cache"
+    if existing:
+        _empty_operator_directory(root)
     processes = []
     try:
         for _ in range(2):
@@ -521,7 +599,7 @@ def test_cached_non_aio_package_uses_existing_planner_and_executor(populated, tm
 
     def command_runner(argv, timeout):
         assert argv[1:] == ("version", "--output", "json")
-        return subprocess.CompletedProcess(argv, 0, stdout='{"azure-cli":"test"}', stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout='{"azure-cli":"2.87.0"}', stderr="")
 
     session = TemplateCompilationSession(
         command_runner=command_runner,

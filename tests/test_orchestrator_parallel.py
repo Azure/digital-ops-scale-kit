@@ -582,8 +582,7 @@ class TestSubscriptionFailureBlastRadius:
                         skip_reason=PlanSkipReason(
                             code=SkipReasonCode.SCOPE_MISMATCH,
                             detail=(
-                                "resourceGroup-scoped step, site has no "
-                                "resource group"
+                                "Runs in a resource group. This Site has none."
                             ),
                         ),
                     ),
@@ -614,8 +613,7 @@ class TestSubscriptionFailureBlastRadius:
                         skip_reason=PlanSkipReason(
                             code=SkipReasonCode.SCOPE_MISMATCH,
                             detail=(
-                                "subscription-scoped step, site has resource "
-                                "group"
+                                "Runs at subscription scope. This Site has a resource group."
                             ),
                         ),
                     ),

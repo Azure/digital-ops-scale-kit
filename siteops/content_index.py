@@ -184,7 +184,7 @@ def build_content_index(
     if not approve_public:
         raise BrowseError(
             "index.approval",
-            "Use --public to approve the selected authored descriptions for a public index.",
+            "Use --public to publish the selected authored descriptions in a public index.",
         )
     reader = ContentReader(workspace)
     entries = reader.inventory()

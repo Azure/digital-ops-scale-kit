@@ -1,7 +1,7 @@
 # The dataflow resources this sample declares.
 #
-# Attached at manifest level, which puts it below site parameters in the merge order,
-# so a `sites.local/` overlay or a site definition overrides it. The same three keys
+# Attached at manifest level, which puts it below Site parameters in the merge order,
+# so a `sites.local/` overlay or a Site definition overrides it. The same three keys
 # are what a committed set under `resource-sets/dataflows/` supplies, so a declaration
 # moves between the two routes unchanged.
 # See docs/dataflows.md for the authoring contract.
@@ -14,16 +14,16 @@
 #
 # Where the values come from
 # --------------------------
-# Every `{{ ... }}` resolves per site, so this one file deploys across a fleet and each
-# site receives its own values. Tiers in this workspace:
+# Every `{{ ... }}` resolves for each Site, so this one file deploys across a fleet and
+# each Site receives its own values. Tiers in this workspace:
 #
-#   sites/base-site.yaml       fleet-wide defaults, inherited by every site
-#   sites/shared/germany.yaml  one region, shared by every German site under it
-#   sites/munich-dev.yaml      one site, carrying only what differs
+#   sites/base-site.yaml       defaults for the whole fleet, inherited by every Site
+#   sites/shared/germany.yaml  one region, shared by every German Site under it
+#   sites/munich-dev.yaml      one Site, carrying only what differs
 #
 # Comments below name the tier each value comes from. A declaration names a value, not
 # a tier, so moving a value up a tier changes only where it is maintained. Interpolate
-# into string-valued properties, and state numbers directly. Preview a site's resolved
+# into properties with string values, and state numbers directly. Preview a Site's resolved
 # values with:
 #   siteops -w workspaces/iot-operations sites munich-dev --output yaml
 
@@ -31,7 +31,7 @@
 # endpoint alongside the instance, so declare an endpoint here only when a solution
 # needs one the instance did not supply.
 #
-# The host and trust bundle below name the in-cluster broker service for an install
+# The host and trust bundle below name the broker service in the cluster for an install
 # in the default `azure-iot-operations` namespace. Adjust both when the install uses
 # a different namespace.
 dataflowEndpoints:
@@ -40,8 +40,8 @@ dataflowEndpoints:
       endpointType: Mqtt
       mqttSettings:
         host: "aio-broker.azure-iot-operations:18883"
-        # Site tier. Each site connects under its own prefix, so a broker-side view can
-        # tell them apart. A site value resolves at any depth.
+        # Site tier. Each Site connects under its own prefix, so a view from the broker
+        # can tell them apart. A Site value resolves at any depth.
         clientIdPrefix: "dataflow-sample-{{ site.name }}"
         authentication:
           method: ServiceAccountToken
@@ -70,7 +70,7 @@ dataflowEndpoints:
 # pool. Do not name a profile or an endpoint `default`, since the instance template
 # owns both names.
 #
-# Two pools here keep a low-volume alert path off the pool carrying bulk telemetry,
+# Two pools here keep an alert path with low volume off the pool carrying bulk telemetry,
 # which is the usual reason to declare one at all.
 dataflowProfiles:
   - name: dataflow-sample-profile
@@ -87,7 +87,7 @@ dataflowProfiles:
 # `profileRef` names which pool the dataflow runs in.
 #
 # The first subscribes to every asset topic under the AIO data prefix, so one
-# declaration moves telemetry from whatever assets a site has without naming them.
+# declaration moves telemetry from whatever assets a Site has without naming them.
 # Deploy `samples/opc-ua-solution/manifest.yaml` first to have it carry real oven
 # telemetry, or publish to the prefix yourself to exercise it standalone. On
 # release `2607`, publishing yourself is the quickest route, for the
@@ -117,8 +117,8 @@ dataflows:
         - operationType: Destination
           destinationSettings:
             endpointRef: dataflow-sample-mqtt-out
-            # Region tier for `country`, site tier for `name`. One template, a distinct
-            # topic per site.
+            # Region tier for `country`, Site tier for `name`. One template, a distinct
+            # topic for each Site.
             dataDestination: "dataflow-sample/{{ site.labels.country }}/{{ site.name }}/output"
 
   - name: dataflow-sample-alerts

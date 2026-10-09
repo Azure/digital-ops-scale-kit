@@ -1,6 +1,8 @@
 # Integration tests: deploy manifests against real Azure and assert outputs
 # On-demand only via manual trigger
 # Azure Pipelines counterpart to .github/workflows/integration-test.yaml
+# Set each environment's service connection and variable group in the
+# Environment settings block under variables.
 
 trigger: none
 
@@ -34,32 +36,35 @@ parameters:
     displayName: Target environment
     type: string
     default: dev
+    values: [dev, staging, prod]
 
   - name: selector
     displayName: "Site selector override (default: manifest selector)"
     type: string
     default: ""
 
-  - name: serviceConnections
-    displayName: Service connection per environment
-    type: object
-    default:
-      dev: azure-siteops
-      staging: azure-siteops
-      prod: azure-siteops
-
-  - name: secretGroups
-    displayName: Variable group per environment
-    type: object
-    default:
-      dev: siteops-secrets
-      staging: siteops-secrets
-      prod: siteops-secrets
-
 variables:
   - name: SITE_OVERRIDES
     value: ''
-  - group: ${{ parameters.secretGroups[parameters.environment] }}
+
+  # Environment settings: one service connection and variable group per
+  # environment. Edit the names here. A queued run chooses only the
+  # environment, so it cannot pair one environment's approvals with another
+  # environment's identity or secrets. Add a block for each value you add to
+  # the environment parameter.
+  - ${{ if eq(parameters.environment, 'dev') }}:
+    - group: siteops-secrets
+    - name: siteopsServiceConnection
+      value: azure-siteops
+  - ${{ if eq(parameters.environment, 'staging') }}:
+    - group: siteops-secrets
+    - name: siteopsServiceConnection
+      value: azure-siteops
+  - ${{ if eq(parameters.environment, 'prod') }}:
+    - group: siteops-secrets
+    - name: siteopsServiceConnection
+      value: azure-siteops
+
   - name: PYTHONUNBUFFERED
     value: '1'
   # Engine output reaches this pipeline's logs and artifacts, which are public.
@@ -97,7 +102,7 @@ jobs:
             - task: AzureCLI@2
               displayName: Run integration tests
               inputs:
-                azureSubscription: ${{ parameters.serviceConnections[parameters.environment] }}
+                azureSubscription: ${{ variables.siteopsServiceConnection }}
                 keepAzSessionActive: ${{ parameters.keepAzSessionActive }}
                 scriptType: bash
                 scriptLocation: inlineScript

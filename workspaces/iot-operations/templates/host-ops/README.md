@@ -1,6 +1,6 @@
 # Host operations
 
-Day-2 operations against a host that is already bootstrapped and Arc-enabled.
+Ongoing operations against a host that is already bootstrapped and enabled for Azure Arc.
 Where `host-bootstrap/` takes a bare host to a ready cluster, an operation here
 changes a host that is already running a workload, so each one has to survive
 the AIO installation already on the cluster.
@@ -12,10 +12,10 @@ implementation.
 
 | Path | Role |
 |---|---|
-| `<operation>/template.bicep` | The entry template invoked by the operation's `_partial.yaml`. |
+| `<operation>/template.bicep` | The main template invoked by the operation's `_partial.yaml`. |
 | `<operation>/_partial.yaml` | Partial that wires the template into a deployable step. Composed by `manifests/<operation>/manifest.yaml`. |
-| `<operation>/scripts/` | Host-runtime artifacts the template delivers, inlined with `loadTextContent`. |
-| `<operation>/README.md` | Implementation ownership and a link to the public entry's operator guide. |
+| `<operation>/scripts/` | Artifacts for the host runtime that the template delivers, inlined with `loadTextContent`. |
+| `<operation>/README.md` | Implementation ownership and a link to the public manifest's operator guide. |
 | `<operation>/scripts/README.md` | Dev workflow for the scripts, including launcher regeneration. |
 
 ## Operations
@@ -28,9 +28,9 @@ implementation.
 
 - **Run Command success is not workload completion.** It proves the launcher
   returned. Gate later steps on the asynchronous worker's own completion signal.
-- **Reset terminal state before starting**, and record a per-deploy run
-  identifier. If reset is best-effort, document that the state-only wait is
-  not bound to the current run identifier.
+- **Reset terminal state before starting**, and record a run identifier for
+  each deploy. If reset is best effort, document that the wait checks only the
+  state, not the current run identifier.
 - **Generated launchers are built, not edited.** `Build-Launcher.ps1` embeds
   `worker.ps1` into the installer and a minified variant. Edit the source and
   rebuild. CI rebuilds and fails on a difference.
@@ -41,10 +41,11 @@ implementation.
 ## Adding an operation
 
 1. Create `<operation>/` with `template.bicep` and `_partial.yaml`.
-2. Add `scripts/` with the host-runtime artifacts and a `scripts/README.md`.
+2. Add `scripts/` with the artifacts for the host runtime and a `scripts/README.md`.
 3. Keep implementation guidance with the source and put the operator procedure
-   beside the public entry.
-4. Add a standalone entry point at `manifests/<operation>/manifest.yaml` that includes
+   beside the public manifest.
+4. Add a standalone manifest at `manifests/<operation>/manifest.yaml` that includes
    the partial and then waits on the completion tag the worker writes.
-5. Register the manifest in the deploy dropdowns on both CI platforms.
+5. Add the manifest to the `manifest` choices in `.github/workflows/deploy.yaml`
+   and `.pipelines/deploy.yaml`.
 6. Add a row to the operations table above.

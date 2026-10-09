@@ -22,8 +22,10 @@ from packaging.version import Version
 from siteops.artifact_verification import ArtifactVerification, utc_text
 from siteops.artifacts import ArtifactError, hash_file, open_regular_file, relative_artifact_path
 from siteops.browse import BrowseError
+from siteops.cache_filesystem import check_trusted_executable
 from siteops.compilation import resolve_tool_from_path
 from siteops.content_metadata import require_mapping, validate_envelope
+from siteops.github_source import UNTRUSTED_GH as _UNTRUSTED_VERIFIER
 from siteops.github_source import _run_gh
 
 MAX_POLICY_BYTES = 256 * 1024
@@ -192,6 +194,10 @@ def _resolve_verifier() -> str:
         raise VerificationError("The GitHub CLI executable could not be resolved.") from None
     if not path.is_absolute() or not path.is_file() or (os.name == "nt" and path.suffix.lower() != ".exe"):
         raise VerificationError("Use an installed GitHub CLI executable, not a shell wrapper.")
+    try:
+        check_trusted_executable(path)
+    except (ArtifactError, OSError, RuntimeError):
+        raise VerificationError(_UNTRUSTED_VERIFIER) from None
     return str(path)
 
 
@@ -201,6 +207,18 @@ def _run(argv: list[str]) -> tuple[int, bytes]:
     except BrowseError:
         raise VerificationError("The verification tool could not complete within its output/time limits.") from None
     return code, stdout
+
+
+def fetch_trusted_root() -> bytes:
+    """Obtain the current Sigstore trusted root through the admitted GitHub CLI, without signing in."""
+    executable = _resolve_verifier()
+    try:
+        code, stdout, _ = _run_gh([executable, "attestation", "trusted-root"], timeout=120.0)
+    except BrowseError:
+        raise VerificationError("The trusted-root snapshot could not be obtained within its limits.") from None
+    if code != 0 or not stdout.strip() or len(stdout) > MAX_EVIDENCE_BYTES:
+        raise VerificationError("The GitHub trusted-root snapshot could not be obtained.")
+    return stdout
 
 
 def _observations(

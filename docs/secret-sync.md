@@ -2,7 +2,7 @@
 
 Enable [secret synchronization](https://learn.microsoft.com/azure/iot-operations/secure-iot-ops/howto-manage-secrets) for Azure IoT Operations instances through declarative Site Ops manifests. No imperative `az iot ops secretsync` commands are required.
 
-Secret sync bridges Azure Key Vault and your Arc-enabled Kubernetes cluster. Once enabled, you can synchronize Key Vault secrets to Kubernetes secrets that AIO workloads consume directly.
+Secret Sync bridges Azure Key Vault and your Kubernetes cluster connected to Azure Arc. Once enabled, you can synchronize Key Vault secrets to Kubernetes secrets that AIO workloads consume directly.
 
 ## What gets deployed
 
@@ -13,22 +13,22 @@ The enablement template (`enable-secretsync.bicep`) creates:
 | User-Assigned Managed Identity | Authenticates the cluster to Key Vault |
 | Key Vault (optional) | Stores secrets, skipped if you bring your own |
 | Key Vault role assignments | Grants the MI `Key Vault Secrets User` + `Key Vault Reader` |
-| Federated Identity Credential | Binds the MI to the cluster's secret sync service account via OIDC |
-| SecretProviderClass (SPC) | Cluster-side resource linking the MI, Key Vault, and tenant, carrying the secrets the site declares |
+| Federated Identity Credential | Binds the MI to the cluster's Secret Sync service account via OIDC |
+| SecretProviderClass (SPC) | Resource on the cluster linking the MI, Key Vault, and tenant, carrying the secrets the Site declares |
 | Instance update | Sets the SPC as the instance's default secret provider |
 
 ## Prerequisites
 
 - Existing Azure IoT Operations instance
 - Connected cluster with **OIDC issuer** and **workload identity** enabled
-- Contributor on the deployment resource group, plus permission to create role assignments at the Key Vault scope (for example, Owner, User Access Administrator, or Role Based Access Control Administrator at an applicable scope). Set `skipRoleAssignments: true` only when the secret sync managed identity already has the required Key Vault roles.
+- Contributor on the deployment resource group, plus permission to create role assignments at the Key Vault scope (for example, Owner, User Access Administrator, or Role Based Access Control Administrator at an applicable scope). Set `skipRoleAssignments: true` only when the Secret Sync managed identity already has the required Key Vault roles.
 
 ## How it works
 
-Secret sync enablement uses a two-step pipeline:
+Secret Sync enablement uses a pipeline of two steps, named `resolve-aio` and `secretsync`:
 
 ```
-resolve-aio                          enable-secretsync
+resolve-aio                          secretsync
 ┌──────────────────────────┐         ┌──────────────────────────────────┐
 │ Read-only instance lookup │────────▶│ Create MI, KV, FIC, SPC,        │
 │                           │ output  │ role assignments, instance update│
@@ -39,7 +39,7 @@ resolve-aio                          enable-secretsync
 └──────────────────────────┘         └──────────────────────────────────┘
 ```
 
-`resolve-aio.bicep` is read-only and outputs everything downstream needs. `enable-secretsync.bicep` receives those values via [output chaining](parameter-resolution.md#output-chaining) and provisions the secret sync resources. The split keeps `enable-secretsync.bicep` portable across naming conventions.
+`resolve-aio.bicep` only reads resources and outputs everything downstream needs. The `secretsync` step deploys `enable-secretsync.bicep`, which receives those values via [output chaining](parameter-resolution.md#output-chaining) and provisions the Secret Sync resources. Later steps read its outputs as `{{ steps.secretsync.outputs.<name> }}`. The split keeps `enable-secretsync.bicep` portable across naming conventions.
 
 ### Output chaining
 
@@ -61,11 +61,11 @@ schemaRegistryResourceId: "{{ steps.resolve-aio.outputs.schemaRegistryResourceId
 
 ### Declaring the secrets to sync
 
-The set of Key Vault secrets a site synchronizes is declared once, as a `secrets` array, and read by both templates that write the SPC.
+The set of Key Vault secrets a Site synchronizes is declared once, as a `secrets` array, and read by both templates that write the SPC.
 
-`enable-secretsync.bicep` and `sync-secrets.bicep` both PUT the default Secret Provider Class, and a full PUT replaces `properties.objects`. Both therefore derive that field from the same declaration through the shared `templates/secretsync/spc-objects.bicep` library, so the two writers always agree on what the cluster-side controller materializes.
+`enable-secretsync.bicep` and `sync-secrets.bicep` both PUT the default Secret Provider Class, and a full PUT replaces `properties.objects`. Both therefore derive that field from the same declaration through the shared `templates/secretsync/spc-objects.bicep` library, so the two writers always agree on what the controller on the cluster materializes.
 
-Declare the array at **manifest level**, or in a site's `parameters` section:
+Declare the array at **manifest level**, or in a Site's `parameters` section:
 
 ```yaml
 # sites/my-site.yaml, or a sites.local/ overlay
@@ -77,17 +77,17 @@ parameters:
       kubernetesSecretKey: key
 ```
 
-Manifest-level attachment sits below site parameters in the [merge order](parameter-resolution.md#merge-order), so a site overrides the declared default. It also applies to every step in the pipeline, and each step receives only the parameters its own template declares. `secretValues` is `@secure()` and declared only by `sync-secrets.bicep`, so values reach the template that writes them to Key Vault and no other deployment.
+Attachment at manifest level sits below Site parameters in the [merge order](parameter-resolution.md#merge-order), so a Site overrides the declared default. It also applies to every step in the pipeline, and each step receives only the parameters its own template declares. `secretValues` is `@secure()` and declared only by `sync-secrets.bicep`, so values reach the template that writes them to Key Vault and no other deployment.
 
-A site that declares no secrets keeps whatever object list the cluster already carries. Enablement reads the current value from the class the instance is bound to and writes it back, so running the platform install on a cluster whose secrets came from elsewhere leaves them in place. On a first install there is nothing to read, and the class is written with `objects` set to an empty string.
+A Site that declares no secrets keeps whatever object list the cluster already carries. Enablement reads the current value from the class the instance is bound to and writes it back, so running the platform install on a cluster whose secrets came from elsewhere leaves them in place. On a first install there is nothing to read, and the class is written with `objects` set to an empty string.
 
-The read requires the bound class to exist. When an instance points at a class that was deleted out of band, the read fails and the deployment stops rather than writing over the reference. Set `preserveExistingSpcObjects: false` in the site's `parameters` to skip the read and let enablement create the class fresh. It belongs on the site rather than in a parameter file, because the chaining file that supplies the class reference attaches at step level and outranks a site value.
+The read requires the bound class to exist. When an instance points at a class that was deleted out of band, the read fails and the deployment stops rather than writing over the reference. Set `preserveExistingSpcObjects: false` in the Site's `parameters` to skip the read and let enablement create the class fresh. It belongs on the Site rather than in a parameter file, because the chaining file that supplies the class reference attaches at step level and outranks a Site value.
 
-## Enabling secret sync
+## Enabling Secret Sync
 
 ### Option 1: Integrated deployment (new instances)
 
-Set `enableSecretSync: true` in your site configuration:
+Set `enableSecretSync: true` in your Site configuration:
 
 ```yaml
 # sites/my-site.yaml (or base-site.yaml for all sites)
@@ -99,29 +99,29 @@ properties:
 Then deploy with `aio-install` as usual. The resolve-aio and secretsync steps run automatically after the AIO instance is configured:
 
 ```bash
-siteops -w workspaces/iot-operations deploy manifests/aio-install/manifest.yaml -l "name=my-site"
+siteops -w workspaces/iot-operations deploy aio-install -l "name=my-site"
 ```
 
-Both steps are gated by a `when` condition and only run for sites that have `enableSecretSync: true`.
+Both steps are gated by a `when` condition on their includes in `aio-install` and only run for Sites that have `enableSecretSync: true`.
 
-### Option 2: Standalone day-2 enablement (existing instances)
+### Option 2: Standalone enablement on existing instances
 
-For AIO 2607 or 2608, the [guided instance-ID route](guided-inputs.md#enable-secret-sync-on-an-existing-instance)
+For AIO 2607 or 2608, the [guided route with an instance ID](guided-inputs.md#enable-secret-sync-on-an-existing-instance)
 needs only the existing instance resource ID and explicit read permission.
 It resolves the related cluster and checks identity prerequisites before
 deployment. Optional answers select an existing vault or override Site labels.
 
-Use the standalone manifest to enable secret sync on instances that are already deployed:
+Use the standalone manifest to enable Secret Sync on instances that are already deployed:
 
 ```bash
 siteops -w workspaces/iot-operations deploy manifests/secretsync/manifest.yaml -l "name=my-site"
 ```
 
-The standalone `secretsync` entry runs the same two steps (resolve-aio → enable-secretsync) without the full AIO installation pipeline.
+The standalone `secretsync` manifest runs the same `resolve-aio` and `secretsync` steps without the full AIO installation pipeline. It has no `enableSecretSync` gate.
 
 ### CI/CD
 
-In CI, enable secret sync per-site via the `SITE_OVERRIDES` secret:
+In CI, enable Secret Sync for each Site via the `SITE_OVERRIDES` secret:
 
 ```json
 {
@@ -145,12 +145,12 @@ parameters:
 
 When an existing Key Vault is provided:
 - No new Key Vault is created
-- Role assignments are deployed from the Key Vault's resource group and scoped to the Key Vault itself (cross-RG supported)
+- Role assignments are deployed from the Key Vault's resource group and scoped to the Key Vault itself (another resource group is supported)
 - The Key Vault must have RBAC authorization enabled (`enableRbacAuthorization: true`)
 
 ## Syncing secrets to the cluster
 
-After enablement, use the `sync-secrets.bicep` step to configure one or more Key Vault secrets for synchronization to Kubernetes Secrets. The workspace sample composes that step and accepts secret values from a same-name local overlay:
+After enablement, use the `sync-secrets.bicep` step to configure one or more Key Vault secrets for synchronization to Kubernetes Secrets. The workspace sample composes that step and accepts secret values from a local overlay with the same name:
 
 ```yaml
 # workspaces/iot-operations/sites.local/my-site.yaml
@@ -167,7 +167,7 @@ parameters:
 siteops -w workspaces/iot-operations deploy samples/secretsync-sample/manifest.yaml -l "name=my-site"
 ```
 
-The template treats the `secrets` array as the desired state. Each deploy PUTs the SPC with the union of all entries' object names and creates one SecretSync per distinct `kubernetesSecretName` (defaulting to `secretName`). Entries that share a `kubernetesSecretName` are grouped into one multi-key Kubernetes Secret. See [Multi-key Secrets](#multi-key-secrets) below.
+The template treats the `secrets` array as the desired state. Each deploy PUTs the SPC with the union of all entries' object names and creates one SecretSync per distinct `kubernetesSecretName` (defaulting to `secretName`). Entries that share a `kubernetesSecretName` are grouped into one Kubernetes Secret with multiple keys. See [Secrets with multiple keys](#secrets-with-multiple-keys) below.
 
 ### Parameters
 
@@ -176,24 +176,24 @@ The template treats the `secrets` array as the desired state. Each deploy PUTs t
 | `keyVaultName` | Yes | Key Vault name (from enablement outputs) |
 | `customLocationName` | Yes | Custom location name (from `resolve-aio` outputs) |
 | `spcName` | Yes | Default SPC name (from enablement outputs) |
-| `managedIdentityClientId` | Yes | Secretsync MI client ID (from enablement outputs) |
+| `managedIdentityClientId` | Yes | Secret Sync MI client ID (from enablement outputs) |
 | `instanceLocation` | Yes | AIO instance location (from `resolve-aio` outputs) |
-| `secrets` | Yes | Array of per-secret metadata, see below |
+| `secrets` | Yes | Array of metadata for each secret, see below |
 | `secretValues` | No | **`@secure()`** object keyed by `secretName`, required for entries with `createInKv` true |
 | `tags` | No | Tags applied to the SPC, KV secrets, and SecretSync resources |
 
-Per-entry fields in `secrets`:
+Fields of each item in `secrets`:
 
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `secretName` | Yes | | Key Vault secret name. Must be unique within the array. |
-| `kubernetesSecretName` | No | `secretName` | Kubernetes Secret name. Multiple entries that set the same value are grouped into one multi-key Secret. |
+| `kubernetesSecretName` | No | `secretName` | Kubernetes Secret name. Multiple entries that set the same value are grouped into one Secret with multiple keys. |
 | `kubernetesSecretKey` | No | `secretName` | Key inside the Kubernetes Secret. Must be unique within a group of entries that share a `kubernetesSecretName`. |
 | `createInKv` | No | `true` | Set `false` to sync a secret already present in the Key Vault |
 
-### Multi-key Secrets
+### Secrets with multiple keys
 
-Workloads often consume related credentials as a single multi-key Kubernetes Secret (e.g., a `database-credentials` Secret with `host`, `username`, and `password` keys). Express this by setting the same `kubernetesSecretName` on each entry and a distinct `kubernetesSecretKey`:
+Workloads often consume related credentials as a single Kubernetes Secret with multiple keys (for example, a `database-credentials` Secret with `host`, `username`, and `password` keys). Express this by setting the same `kubernetesSecretName` on each entry and a distinct `kubernetesSecretKey`:
 
 ```yaml
 secrets:
@@ -217,17 +217,17 @@ This produces:
 Constraints:
 
 - Each `secretName` must be unique across the array. Each entry corresponds to one Key Vault secret.
-- Within a group of entries sharing a `kubernetesSecretName`, each `kubernetesSecretKey` must also be unique. Like any duplicate-key situation in YAML, two entries claiming the same `(kubernetesSecretName, kubernetesSecretKey)` pair both write to the same Kubernetes Secret slot and the cluster-side reconcile order decides which value wins.
+- Within a group of entries sharing a `kubernetesSecretName`, each `kubernetesSecretKey` must also be unique. Like any duplicate key in YAML, two entries claiming the same `(kubernetesSecretName, kubernetesSecretKey)` pair both write to the same Kubernetes Secret slot, and the reconcile order on the cluster decides which value wins.
 
 Workspace tests enforce these constraints for committed declarations. A
-`sites.local/` overlay or another caller-provided array must preserve the same
+`sites.local/` overlay or another array that a caller provides must preserve the same
 uniqueness because the template does not reject duplicates at deployment time.
 
 ### Security model
 
 The `secretValues` parameter is decorated with `@secure()` so ARM does not record values in deployment history or outputs. This protection does not make shell arguments safe. Provide values via:
 
-- **`sites.local/`** parameter overrides (gitignored), the standard siteops pattern for local development
+- **`sites.local/`** parameter overrides (gitignored), the standard Site Ops pattern for local development
 - **The `SITE_OVERRIDES` secret** populated from GitHub Actions secrets or Azure DevOps variable groups
 
 ### Adding as a manifest step
@@ -253,20 +253,20 @@ instanceLocation: "{{ steps.resolve-aio.outputs.instanceLocation }}"
     - samples/secretsync-sample/inputs.yaml
 ```
 
-Gate the step when the composition makes secret sync optional. `aio-install` puts the `when:` on the `_secretsync.yaml` include rather than on individual steps, so every spliced step inherits one condition.
+Gate the step when the composition makes Secret Sync optional. `aio-install` puts the `when:` on the `_secretsync.yaml` include rather than on individual steps, so every spliced step inherits one condition.
 
-The declaration file holds `secrets` and `secretValues` and attaches at manifest level, which puts it below site parameters in the [merge order](parameter-resolution.md#merge-order) so a site or a `sites.local/` overlay overrides it:
+The declaration file holds `secrets` and `secretValues` and attaches at manifest level, which puts it below Site parameters in the [merge order](parameter-resolution.md#merge-order) so a Site or a `sites.local/` overlay overrides it:
 
 ```yaml
 parameters:
   - samples/secretsync-sample/secrets.yaml
 ```
 
-Manifest-level attachment also reaches every step, so the enablement step and the sync step PUT the SPC from the same array. See [Declaring the secrets to sync](#declaring-the-secrets-to-sync).
+Attachment at manifest level also reaches every step, so the enablement step and the sync step PUT the SPC from the same array. See [Declaring the secrets to sync](#declaring-the-secrets-to-sync).
 
 ### Removing a secret
 
-See [secretsync-sample/README.md](../workspaces/iot-operations/samples/secretsync-sample/README.md#removing-a-secret) for the operational steps. The SPC PUT semantics and SecretSync ARM-resource cleanup are documented there alongside the sample they apply to.
+See [secretsync-sample/README.md](../workspaces/iot-operations/samples/secretsync-sample/README.md#removing-a-secret) for the operational steps. The SPC PUT semantics and SecretSync ARM resource cleanup are documented there alongside the sample they apply to.
 
 ## Template reference
 
@@ -290,11 +290,11 @@ templates/
         └── read-spc-objects.bicep           # Reads `objects` off an existing SPC so enablement preserves it
 ```
 
-The per-API-version modules track the supported releases, so read the directory rather than this tree for the current set.
+The modules for each API version track the supported AIO releases, so read the directory rather than this tree for the current set.
 
 ### Resolve modules
 
-`resolve-aio.bicep` is the entry point. It is a dispatcher on `aioApiVersion` (sourced from `parameters/aio-releases/<release>.yaml`) that dispatches the instance read to a per-API-version inner module, then chains the (version-stable) custom-location and connected-cluster lookups:
+Callers deploy `resolve-aio.bicep`. It is a dispatcher on `aioApiVersion` (sourced from `parameters/aio-releases/<release>.yaml`) that sends the instance read to an inner module for that API version, then chains the custom location and connected cluster lookups, which do not vary by version:
 
 | Module | Input | Outputs |
 |--------|-------|---------|
@@ -303,20 +303,20 @@ The per-API-version modules track the supported releases, so read the directory 
 | `common/modules/resolve-custom-location.bicep` | CL resource ID | `name`, `namespace`, `hostResourceId` |
 | `common/modules/resolve-cluster.bicep` | Cluster resource ID | `name`, `oidcIssuerUrl`, `selfHostedIssuerUrl` |
 
-These modules use Bicep's **module boundary** pattern: runtime resource IDs passed as module parameters become compile-time values inside the module, enabling chained `existing` resource lookups.
+These modules use Bicep's **module boundary** pattern: runtime resource IDs passed as module parameters become values known at compile time inside the module, enabling chained `existing` resource lookups.
 
 ### Enablement modules
 
 | Module | Purpose |
 |--------|---------|
 | `aio/modules/update-instance.bicep` | Safe instance PUT that forwards all writable properties for the pinned API version, with conditional identity handling |
-| `secretsync/modules/keyvault-roles.bicep` | Key Vault role assignments via module scope, supporting cross-resource-group Key Vaults |
+| `secretsync/modules/keyvault-roles.bicep` | Key Vault role assignments via module scope, supporting Key Vaults in other resource groups |
 
 ## Troubleshooting
 
-### "condition not met" (steps skipped)
+### "Condition not met" (steps skipped)
 
-The resolve-aio and secretsync steps have `when: "{{ site.properties.deployOptions.enableSecretSync }}"`. Ensure your site (or its base template) sets this to `true`:
+In `aio-install`, the includes that add the resolve-aio and secretsync steps carry `when: "{{ site.properties.deployOptions.enableSecretSync }}"`. The standalone `secretsync` manifest has no such gate. Ensure your Site (or its base template) sets this to `true`:
 
 ```yaml
 properties:
@@ -336,7 +336,7 @@ If `resolve-aio` fails with an error about a property not existing on the instan
 
 ### Role assignment conflicts
 
-Role assignments use deterministic names via `guid(keyVault.id, principalId, roleId)`, so re-running assignments created by this template is idempotent. Assignments created elsewhere are not necessarily reused. Set `skipRoleAssignments: true` when the required grants are already configured.
+Role assignments use deterministic names via `guid(keyVault.id, principalId, roleId)`, so rerunning assignments created by this template is idempotent. Assignments created elsewhere are not necessarily reused. Set `skipRoleAssignments: true` when the required grants are already configured.
 
 ### Key Vault RBAC not enabled
 

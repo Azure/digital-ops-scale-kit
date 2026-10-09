@@ -54,6 +54,31 @@ def inputs(tmp_path, monkeypatch):
     return storage, policy_file, root_file, policy
 
 
+def test_trust_guidance_names_the_enrolled_source_for_the_selected_publisher(inputs, tmp_path):
+    _, policy_file, root_file, _ = inputs
+    cache = tmp_path / "different-cache"
+    with pytest.raises(ProjectError) as missing:
+        require_trust_inputs(cache, None, None, source_reference="github:example/content")
+    assert missing.value.code == "project.trust-required"
+    assert "Run `siteops source enroll NAME --source github:example/content`, then put " \
+           "--approved-source NAME before the command." in missing.value.private_message
+    enroll_source("factory", "github:example/content", policy_file, root_file)
+    with pytest.raises(ProjectError) as pinned:
+        require_trust_inputs(cache, None, None, source_reference="github:example/content")
+    assert str(pinned.value) == (
+        "Verified content requires an approved source or independent --trust-policy and --trusted-root."
+    )
+    assert pinned.value.private_message == (
+        "Verified content from github:example/content requires an approved source. Approved source "
+        "'factory' is enrolled for github:example/content: put --approved-source factory before the command."
+    )
+    with pytest.raises(ProjectError) as direct:
+        require_trust_inputs(
+            cache, None, None, source_reference="github:example/content", direct=True, release="v1",
+        )
+    assert direct.value.private_message.endswith("use --source factory@v1.")
+
+
 def test_enrollment_requires_explicit_files_and_never_changes_existing_source(inputs, tmp_path):
     storage, policy_file, root_file, _ = inputs
     enrolled = enroll_source("approved", "github:example/content", policy_file, root_file)
@@ -203,8 +228,12 @@ def test_expired_enrollment_can_be_inspected_and_removed(inputs):
     with pytest.raises(SourceProfileError, match="expired") as error:
         read_source("approved")
     assert error.value.code == "source.profile-expired"
-    assert "source show NAME" in str(error.value)
-    assert "remove" in str(error.value) and "enroll" in str(error.value)
+    assert error.value.private_message == (
+        "The approved source policy has expired. Inspect it with `siteops source show approved`. "
+        "Renew a standard enrollment with `siteops source enroll approved`. For a custom policy, "
+        "remove the name and enroll it again with reviewed trust files."
+    )
+    assert str(error.value) == error.value.private_message.replace("approved`", "NAME`")
     assert selected.policy.read_bytes() == updated
     assert read_source("approved", require_valid=False).name == "approved"
     assert list_sources() == ("approved",)
@@ -324,7 +353,7 @@ def test_cli_enrolls_inspects_and_refuses_a_different_project_source(tmp_path):
     assert "does not match" in mismatch.stderr
     assert not (tmp_path / "factory").exists()
     assert invoke("source", "remove", "approved").returncode == 0
-    assert invoke("source", "list").stdout.strip() == ""
+    assert invoke("source", "list").stdout.strip() == "No approved sources. Run `siteops source enroll NAME` to add one."
 
 
 def test_project_pin_uses_the_explicit_approved_source_without_network(
@@ -431,3 +460,193 @@ def test_redacted_source_inspection_and_invalid_enrollment_are_safe(
     assert "private-name" not in output.out + output.err
     assert "private-rejected" not in output.out + output.err
     assert not storage.exists()
+
+def _standard_root(monkeypatch, *roots: bytes) -> None:
+    import siteops.source_profiles as profiles
+
+    supplied = iter(roots)
+    monkeypatch.setattr(profiles, "fetch_trusted_root", lambda: next(supplied))
+
+
+def test_standard_enrollment_approves_main_branch_releases_and_renews(inputs, monkeypatch):
+    from siteops.source_profiles import OFFICIAL_SOURCE, enroll_standard_source
+
+    _standard_root(monkeypatch, b'{"root":1}\n', b'{"root":2}\n')
+    first = enroll_standard_source("core")
+    assert first.reference == OFFICIAL_SOURCE == "github:Azure/digital-ops-scale-kit"
+    policy = json.loads(first.policy.read_text(encoding="utf-8"))
+    assert policy["provider"] == {
+        "kind": "github-attestation/v1", "repository": "Azure/digital-ops-scale-kit",
+        "sourceRef": "refs/heads/main",
+        "signerWorkflow": ".github/workflows/_workspace-distribution.yaml",
+        "builderWorkflow": ".github/workflows/release.yaml", "runnerEnvironment": "self-hosted",
+    }
+    remaining = datetime.fromisoformat(policy["validUntil"]) - datetime.now(timezone.utc)
+    assert timedelta(days=29) < remaining <= timedelta(days=30)
+    assert first.trusted_root.read_bytes() == b'{"root":1}\n'
+
+    renewed = enroll_standard_source("core")
+    assert renewed.trusted_root.read_bytes() == b'{"root":2}\n'
+    assert renewed.root_sha256 != first.root_sha256
+    assert list_sources() == ("core",)
+
+
+def test_source_enroll_renews_an_existing_name_with_its_enrolled_publisher(inputs, monkeypatch, capsys):
+    _standard_root(monkeypatch, b'{"root":1}\n', b'{"root":2}\n', b'{"root":2}\n')
+    for argv, expected in (
+        (["siteops", "source", "enroll", "fork", "--source", "github:example/content"],
+         "Approved source fork: github:example/content.\nValid until:"),
+        (["siteops", "source", "enroll", "fork"],
+         "Renewed approved source fork: github:example/content.\nTrusted root: updated.\n"),
+        (["siteops", "source", "enroll", "fork"],
+         "Renewed approved source fork: github:example/content.\nTrusted root: unchanged.\n"),
+    ):
+        monkeypatch.setattr(sys, "argv", argv)
+        with pytest.raises(SystemExit) as stopped:
+            cli.main()
+        output = capsys.readouterr()
+        assert stopped.value.code == 0, output.err
+        assert expected in output.out
+    assert read_source("fork").trusted_root.read_bytes() == b'{"root":2}\n'
+
+
+@pytest.mark.parametrize("redacted", [False, True])
+def test_reenrolling_a_custom_policy_says_the_existing_approval_is_kept(
+    inputs, tmp_path, monkeypatch, capsys, redacted,
+):
+    _, policy_file, root_file, _ = inputs
+    enroll_source("custom", "github:example/content", policy_file, root_file)
+    newer = tmp_path / "newer-policy.json"
+    document = json.loads(policy_file.read_text(encoding="utf-8"))
+    document["validUntil"] = (datetime.now(timezone.utc) + timedelta(days=60)).isoformat()
+    newer.write_text(json.dumps(document), encoding="utf-8")
+    monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1" if redacted else "0")
+    for supplied, note in ((policy_file, False), (newer, True)):
+        monkeypatch.setattr(sys, "argv", [
+            "siteops", "--trust-policy", str(supplied), "--trusted-root", str(root_file),
+            "source", "enroll", "custom", "--source", "github:example/content",
+        ])
+        with pytest.raises(SystemExit) as stopped:
+            cli.main()
+        output = capsys.readouterr()
+        assert stopped.value.code == 0, output.err
+        if redacted:
+            assert output.out.startswith("Approved source unchanged.\n")
+            assert "custom" not in output.out
+        else:
+            assert "Approved source custom is already enrolled for github:example/content. " \
+                   "The existing approval is unchanged." in output.out
+        assert ("The supplied policy was not applied." in output.out) is note
+    assert read_source("custom").policy.read_bytes() == policy_file.read_bytes()
+
+
+def test_source_list_names_the_enroll_command_when_empty(inputs, monkeypatch, capsys):
+    monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "0")
+    monkeypatch.setattr(sys, "argv", ["siteops", "source", "list"])
+    with pytest.raises(SystemExit) as stopped:
+        cli.main()
+    assert stopped.value.code == 0
+    assert capsys.readouterr().out == "No approved sources. Run `siteops source enroll NAME` to add one.\n"
+
+
+@pytest.mark.parametrize("redacted", [False, True])
+def test_missing_approved_source_names_the_source_and_the_fix(inputs, monkeypatch, capsys, redacted):
+    monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1" if redacted else "0")
+    for arguments, private in (
+        (["plan", "aio-install", "--source", "official@v1", "--input", "cluster=x"],
+         "Approved source 'official' is not enrolled. Run `siteops source enroll official`."),
+        (["source", "remove", "official"],
+         "Approved source 'official' is not enrolled. Run `siteops source list`"),
+    ):
+        monkeypatch.setattr(sys, "argv", ["siteops", *arguments])
+        with pytest.raises(SystemExit) as stopped:
+            cli.main()
+        error = capsys.readouterr().err
+        assert stopped.value.code == 1
+        assert error.startswith("Error: ")
+        assert (private in error) is not redacted
+        assert ("official" in error) is not redacted
+
+
+@pytest.mark.parametrize("failure", ["write", "swap"])
+def test_failed_standard_renewal_keeps_the_previous_approval(inputs, monkeypatch, failure):
+    import siteops.source_profiles as profiles
+    from siteops.source_profiles import enroll_standard_source
+
+    storage, _, _, _ = inputs
+    _standard_root(monkeypatch, b'{"root":1}\n', b'{"root":2}\n')
+    first = enroll_standard_source("core")
+    before = (first.policy.read_bytes(), first.trusted_root.read_bytes())
+    if failure == "write":
+        original, calls = profiles.write_new, 0
+
+        def fail_in_record(path, data):
+            nonlocal calls
+            calls += 1
+            if calls == 4:
+                raise OSError("controlled write failure")
+            original(path, data)
+
+        monkeypatch.setattr(profiles, "write_new", fail_in_record)
+        restore = (profiles, "write_new", original)
+    else:
+        rename = os.rename
+
+        def fail_swap(source, target):
+            if Path(source).name == "new":
+                raise OSError("controlled swap failure")
+            rename(source, target)
+
+        monkeypatch.setattr(profiles.os, "rename", fail_swap)
+        restore = (profiles.os, "rename", rename)
+    with pytest.raises(SourceProfileError, match="could not be"):
+        enroll_standard_source("core")
+    monkeypatch.setattr(*restore)
+    kept = read_source("core")
+    assert (kept.policy.read_bytes(), kept.trusted_root.read_bytes()) == before
+    assert list_sources() == ("core",)
+    assert not list(storage.parent.glob(".renew-*"))
+
+
+def test_successful_standard_renewal_leaves_no_holding_directory(inputs, monkeypatch):
+    from siteops.source_profiles import enroll_standard_source
+
+    storage, _, _, _ = inputs
+    _standard_root(monkeypatch, b'{"root":1}\n', b'{"root":2}\n')
+    enroll_standard_source("core")
+    assert read_source(enroll_standard_source("core").name).trusted_root.read_bytes() == b'{"root":2}\n'
+    assert sorted(path.name for path in storage.parent.iterdir()) == ["sources"]
+
+
+def test_standard_enrollment_never_replaces_different_trust(inputs, monkeypatch):
+    from siteops.source_profiles import enroll_standard_source
+
+    _, policy_file, root_file, _ = inputs
+    enroll_source("approved", "github:example/content", policy_file, root_file)
+    _standard_root(monkeypatch, b'{"root":1}\n', b'{"root":1}\n')
+    for source in ("github:example/content", "github:other/content"):
+        with pytest.raises(SourceProfileError, match="differs"):
+            enroll_standard_source("approved", source)
+    assert read_source("approved").policy.read_bytes() == policy_file.read_bytes()
+
+
+def test_source_enroll_defaults_to_the_official_publisher_under_any_name(inputs, monkeypatch, capsys):
+    storage, policy_file, _, _ = inputs
+    _standard_root(monkeypatch, b'{"root":1}\n')
+    monkeypatch.setattr(sys, "argv", ["siteops", "source", "enroll", "core"])
+    with pytest.raises(SystemExit) as stopped:
+        cli.main()
+    output = capsys.readouterr()
+    assert stopped.value.code == 0, output.err
+    assert "Approved source core: github:Azure/digital-ops-scale-kit." in output.out
+    assert "Valid until:" in output.out
+    assert (storage / "core").is_dir()
+
+    monkeypatch.setattr(sys, "argv", [
+        "siteops", "--trust-policy", str(policy_file), "source", "enroll", "other",
+    ])
+    with pytest.raises(SystemExit) as stopped:
+        cli.main()
+    assert stopped.value.code == 1
+    assert "Supply both --trust-policy and --trusted-root" in capsys.readouterr().err
+    assert not (storage / "other").exists()

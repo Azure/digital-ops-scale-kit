@@ -19,16 +19,37 @@ SCRIPTS = ROOT / "scripts" / "bootstrap"
 SOURCE_SHA = "c" * 40
 
 
-def test_managed_azure_linux_uses_existing_os_tools_without_sudo():
+def test_ubuntu_fixture_uses_a_pinned_acr_base_and_nonroot_python():
+    source = (ROOT / "tests" / "fixtures" / "Dockerfile.bootstrap-ubuntu").read_text(encoding="utf-8")
+    assert re.fullmatch(
+        r"FROM ubuntu\.azurecr\.io/ubuntu:noble@sha256:[0-9a-f]{64}",
+        source.splitlines()[0],
+    )
+    assert "apt-get install -y --no-install-recommends python3 python3-venv" in source
+    assert "USER 65534:65534" in source
+    assert "ENV PYTHONDONTWRITEBYTECODE=1" in source
+
+
+def test_bash_bootstrap_gates_on_capability_without_elevation():
     bash = (SCRIPTS / "siteops-bootstrap.sh").read_text(encoding="utf-8")
-    assert "azurelinux:3.0" in bash
-    assert 'if [[ "$platform" == azurelinux ]]; then' in bash
-    assert "Managed Azure Linux" in bash
+    assert "getconf GNU_LIBC_VERSION" in bash
+    for removed in ("/etc/os-release", "VERSION_ID", "sudo", "apt-get", "--with-azure-cli"):
+        assert removed not in bash
+
+
+def test_bootstraps_run_github_cli_without_telemetry():
+    bash = (SCRIPTS / "siteops-bootstrap.sh").read_text(encoding="utf-8")
+    assert bash.index("\nexport GH_TELEMETRY=false\n") < bash.index('gh_version="$(timeout')
+    powershell = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
+    assert powershell.index("\n$env:GH_TELEMETRY = 'false'\n") < powershell.index("\n$gh = Select-GitHubCli\n")
 
 
 def test_bash_bootstrap_admits_private_data_root_before_retained_tool_use():
     bash = (SCRIPTS / "siteops-bootstrap.sh").read_text(encoding="utf-8")
-    assert bash.index('admit_directory "$data" private') < bash.index("\nselect_uv\n")
+    for invocation in ("\n  prepare_runtime\n", "\nprepare_runtime\n"):
+        assert bash.index('admit_directory "$data" private') < bash.index(invocation)
+    runtime = re.search(r"(?ms)^prepare_runtime\(\) \{.*?^\}", bash).group()
+    assert "\n  select_uv\n" in runtime
 
 
 def test_windows_bootstrap_admits_private_data_root_before_retained_tool_use():
@@ -51,6 +72,26 @@ def test_windows_bootstrap_owns_new_data_root_before_private_acl_and_admission()
     assert "if (-not $owned) {" in create
     assert "Reject 'ROOT_DATA_OWNER'" in create
 
+
+def test_bootstrap_failures_are_distinguishable_from_progress():
+    bash = {line.strip() for line in (SCRIPTS / "siteops-bootstrap.sh").read_text(encoding="utf-8").splitlines()}
+    assert "fail() { printf 'Site Ops installation failed: %s\\n' \"$1\" >&2; exit 1; }" in bash
+    assert "stage() { printf 'Site Ops installation: %s\\n' \"$1\"; }" in bash
+    powershell = {
+        line.strip() for line in (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8").splitlines()
+    }
+    assert 'function Fail([string]$Message) { throw "Site Ops installation failed: $Message" }' in powershell
+    assert 'function Stage([string]$Message) { Write-Host "Site Ops installation: $Message" }' in powershell
+
+
+def test_windows_bootstrap_creates_retained_bundle_as_user_before_helper_extraction():
+    powershell = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
+    lines = [line.strip() for line in powershell.splitlines()]
+    declared = lines.index("$bundle = Join-Path $root $bundleId")
+    helper = next(index for index, line in enumerate(lines) if line.startswith("$installed = Check-Payload @("))
+    # The helper would otherwise create the bundle with the elevated token's default owner.
+    assert "Require-PrivateDataRoot $bundle" in lines[declared + 1:helper]
+    assert not any("Test-Path -LiteralPath $bundle" in line for line in lines)
 
 def test_windows_bootstrap_checks_managed_executables_before_running_them():
     powershell = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
@@ -75,16 +116,23 @@ def test_windows_bootstrap_checks_managed_executables_before_running_them():
     )
 
 
-def _windows_private_root_wrapper(tmp_path: Path, setup: str = "") -> Path:
+def _windows_functions(*names: str) -> str:
     source = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
-    helper = re.search(r"(?ms)^function Require-PrivateDataRoot\([^\n]*\) \{.*?^\}", source)
-    assert helper, "The Windows private data-root helper is missing."
+    bodies = []
+    for name in ("Read-NodeAcl", *names):
+        body = re.search(rf"(?ms)^function {name}\([^\n]*\) \{{.*?^\}}", source)
+        assert body, f"The Windows {name} helper is missing."
+        bodies.append(body.group(0))
+    return "\n".join(bodies) + "\n"
+
+
+def _windows_private_root_wrapper(tmp_path: Path, setup: str = "") -> Path:
     wrapper = tmp_path / "check-data-root.ps1"
     wrapper.write_text(
         'function Fail([string]$message) { throw "Site Ops installation: $message" }\n'
         + setup
-        + helper.group(0) + "\n"
-        "$ErrorActionPreference = 'Stop'\n"
+        + _windows_functions("Require-PrivateDataRoot")
+        + "$ErrorActionPreference = 'Stop'\n"
         "Require-PrivateDataRoot $env:TEST_DATA_ROOT\n"
         "'PRIVATE_ROOT_ACCEPTED'\n",
         encoding="utf-8",
@@ -113,14 +161,10 @@ def _windows_tool_probe(
 
 
 def _windows_tool_path_wrapper(tmp_path: Path) -> Path:
-    source = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
-    root = re.search(r"(?ms)^function Require-PrivateDataRoot\([^\n]*\) \{.*?^\}", source)
-    tool = re.search(r"(?ms)^function Require-PrivateExecutablePath\([^\n]*\) \{.*?^\}", source)
-    assert root and tool
     wrapper = tmp_path / "check-tool.ps1"
     wrapper.write_text(
         'function Fail([string]$message) { throw "Site Ops installation: $message" }\n'
-        + root.group(0) + "\n" + tool.group(0) + "\n"
+        + _windows_functions("Require-PrivateDataRoot", "Require-PrivateExecutablePath")
         + "$ErrorActionPreference='Stop'\n"
         "Require-PrivateDataRoot $env:TEST_DATA_ROOT\n"
         "Require-PrivateExecutablePath $env:TEST_TOOL $env:TEST_PRIVATE_ROOT\n"
@@ -572,13 +616,23 @@ def test_windows_native_verification_parses_json_without_powershell_51_jq_quotin
     assert "ConvertFrom-Json" in windows
 
 
-def test_windows_azure_cli_is_selected_independently_of_gh_and_policy_time_is_portable():
+def test_windows_prerequisites_are_checked_not_installed_and_enrollment_is_delegated():
     powershell = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
-    gh_branch = powershell.split("if ($ghVersion -cnotmatch", 1)[1].split("\n}\n", 1)[0]
-    assert "if ($WithAzureCli" not in gh_branch
-    assert "if ($WithAzureCli -and -not (AzureCli))" in powershell
-    assert ".ToString('o')" not in powershell
-    assert "yyyy-MM-ddTHH:mm:ss.ffffffzzz" in powershell
+    for removed in ("WithAzureCli", "WinGet", "winget", "GetEnvironmentVariable('PATH'",
+                    "Ensure-UvStorage $env:TEMP", "Join-Path $env:TEMP", "attestation trusted-root",
+                    "ArtifactVerificationPolicy"):
+        assert removed not in powershell
+    lines = [line.strip() for line in powershell.splitlines()]
+    resolved = lines.index("$gh = Select-GitHubCli")
+    assert lines.count("$gh = Select-GitHubCli") == 1
+    assert resolved < lines.index("if ($DryRun) {") < lines.index("if (-not $Yes) {")
+    selection = powershell.split("function Select-GitHubCli() {", 1)[1].split("\n}\n", 1)[0]
+    assert selection.index("Require-PrivateExecutablePath $path $path -Optional") < selection.index(
+        "& $path version",
+    )
+    assert "& $gh attestation verify" in powershell
+    assert '& $siteops source enroll $EnrollSource --source "github:$Repository"' in lines
+    assert "Stage 'Azure CLI was not found. Install it before deploying: https://aka.ms/installazurecli'" in lines
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="This checks native PowerShell 5.1 argument handling.")
@@ -587,8 +641,8 @@ def test_windows_bootstrap_checks_native_verifier_certificate_before_bundle_use(
     tmp_path, accepted,
 ):
     script = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
-    block = script.split('    $signer = "', 1)[1].split("    $bundleId =", 1)[0]
-    block = '    $signer = "' + block
+    block = re.search(r"(?ms)^function Verify-ReleaseAsset\([^\n]*\) \{.*?^\}", script).group()
+    assert "Verify-ReleaseAsset $archive $engineCommit $engineRef $engineCaller '_siteops-distribution.yaml'" in script
     observation = verified_observation(
         "Azure/digital-ops-scale-kit", SOURCE_SHA, "refs/heads/main",
         ".github/workflows/_siteops-distribution.yaml", ".github/workflows/release.yaml",
@@ -608,7 +662,8 @@ $archive = 'unopened.zip'
 $Repository = 'Azure/digital-ops-scale-kit'
 $SourceRef = 'refs/heads/main'
 $Caller = 'release.yaml'
-$SourceCommit = '""" + SOURCE_SHA + "'\n" + block + "\n'CERTIFICATE_ACCEPTED'\n",
+$SourceCommit = '""" + SOURCE_SHA + "'\n" + block
+        + "\nVerify-ReleaseAsset $archive $SourceCommit $SourceRef $Caller '_siteops-distribution.yaml'\n'CERTIFICATE_ACCEPTED'\n",
         encoding="utf-8",
     )
     result = subprocess.run(
@@ -624,13 +679,12 @@ $SourceCommit = '""" + SOURCE_SHA + "'\n" + block + "\n'CERTIFICATE_ACCEPTED'\n"
 @pytest.mark.skipif(sys.platform != "win32", reason="PowerShell 5.1 is available on Windows.")
 def test_windows_retained_release_key_binds_exact_selection(tmp_path):
     script = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
-    block = script.split('    $identity = (', 1)[1].split('    $cache = Join-Path', 1)[0]
-    block = '    $identity = (' + block
+    block = re.search(r"(?ms)^function Get-SelectionKey\([^\n]*\) \{.*?^\}", script).group()
     statement = (
         "$Repository='Azure/digital-ops-scale-kit';$Release='siteops/v1.0.0b1';"
         "$SourceCommit='" + SOURCE_SHA + "';$SourceRef='refs/heads/main';"
         "$Caller='release.yaml';$data='unused';"
-        + block + "\n$cacheId\n"
+        + block + "\nGet-SelectionKey $Release $SourceCommit $SourceRef $Caller\n"
     )
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-Command", statement],
@@ -696,14 +750,59 @@ def test_bootstrap_preview_keeps_source_names_private_in_redacted_output():
     assert "private-name" not in result.stdout + result.stderr
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="Ubuntu preview runs on the Linux runner.")
+def test_bootstrap_messages_use_enrollment_and_product_terms():
+    expected = (
+        "will enroll {repository} with an expiring policy after installation.",
+        "Enroll this publisher as an approved source? [y/N]",
+        "Installed Site Ops $version with approved source {name}. Authenticate to Azure separately.",
+        "Installed Site Ops $version. Next, authenticate to Azure and enroll a content source, "
+        "for example siteops source enroll official.",
+    )
+    for path, repository, name in (
+        (SCRIPTS / "siteops-bootstrap.sh", "$repository", "$enroll_name"),
+        (SCRIPTS / "siteops-bootstrap.ps1", "$Repository", "$EnrollSource"),
+    ):
+        script = path.read_text(encoding="utf-8")
+        for line in expected:
+            assert line.format(repository=repository, name=name) in script, (path.name, line)
+        for retired in ("will approve", "approved consumer source", "approve a workspace source",
+                        "Installed siteops"):
+            assert retired not in script, (path.name, retired)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="PowerShell preview runs on Windows.")
+def test_powershell_preview_names_the_enrollment(tmp_path):
+    if shutil.which("gh") is None:
+        pytest.skip("GitHub CLI is unavailable.")
+    result = subprocess.run(
+        [
+            "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+            str(SCRIPTS / "siteops-bootstrap.ps1"),
+            "-Release", "siteops/v1.0.0b1", "-SourceCommit", SOURCE_SHA,
+            "-EnrollSource", "demo", "-DryRun",
+        ],
+        env={**os.environ, "SITEOPS_REDACT_OUTPUT": "0", "LOCALAPPDATA": str(tmp_path / "state")},
+        capture_output=True, text=True, timeout=20,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Source demo will enroll Azure/digital-ops-scale-kit with an expiring policy" in result.stdout
+    assert "approve" not in result.stdout
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="The Linux preview runs on the Linux runner.")
 def test_bash_preview_and_unattended_refusal_do_not_acquire_tools(tmp_path):
-    os_release = Path("/etc/os-release").read_text(encoding="utf-8")
-    if "ID=ubuntu" not in os_release or 'VERSION_ID="24.04"' not in os_release:
-        pytest.skip("Requires Ubuntu 24.04.")
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    gh = tools / "gh"
+    gh.write_text("#!/usr/bin/env bash\necho 'gh version 2.95.0 (fixture)'\n", encoding="utf-8")
+    for path, mode in ((tmp_path, 0o700), (tools, 0o755), (gh, 0o755)):
+        path.chmod(mode)
     script = SCRIPTS / "siteops-bootstrap.sh"
     arguments = ["bash", str(script), "--release", "siteops/v1.0.0b1", "--source-commit", SOURCE_SHA]
-    env = {**os.environ, "HOME": str(tmp_path), "XDG_DATA_HOME": str(tmp_path / "state")}
+    env = {
+        **os.environ, "HOME": str(tmp_path), "XDG_DATA_HOME": str(tmp_path / "state"),
+        "PATH": f"{tools}{os.pathsep}{os.environ['PATH']}",
+    }
     preview = subprocess.run(
         [*arguments, "--dry-run"], input="", text=True, capture_output=True, env=env, timeout=20,
     )
@@ -732,6 +831,7 @@ def test_powershell_preview_and_invalid_identity_do_not_acquire_tools(tmp_path):
         [*arguments, "-DryRun"], input="", text=True, capture_output=True, env=env, timeout=20,
     )
     assert preview.returncode == 0, preview.stdout + preview.stderr
+    assert "Uses the installed GitHub CLI" in preview.stdout
     assert "No tools or content were downloaded" in preview.stdout
     denied = subprocess.run(
         [*arguments[:-1], "bad", "-Yes"], input="", text=True,
@@ -739,4 +839,25 @@ def test_powershell_preview_and_invalid_identity_do_not_acquire_tools(tmp_path):
     )
     assert denied.returncode != 0
     assert "Select an exact release" in denied.stderr
+    # The admitted GitHub CLI may keep its own state; the preview creates no Site Ops state.
+    assert not (tmp_path / "state" / "siteops").exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="PowerShell preview runs on Windows.")
+def test_powershell_preview_requires_github_cli_without_installing_it(tmp_path):
+    system = Path(os.environ["SystemRoot"]) / "System32"
+    result = subprocess.run(
+        [
+            str(system / "WindowsPowerShell" / "v1.0" / "powershell.exe"), "-NoProfile",
+            "-ExecutionPolicy", "Bypass", "-File", str(SCRIPTS / "siteops-bootstrap.ps1"),
+            "-Release", "siteops/v1.0.0b1", "-SourceCommit", SOURCE_SHA, "-DryRun",
+        ],
+        env={**os.environ, "PATH": str(system), "LOCALAPPDATA": str(tmp_path / "state")},
+        input="", text=True, capture_output=True, timeout=20,
+    )
+    assert result.returncode != 0
+    # Windows PowerShell wraps long errors at its console width.
+    message = "GitHub CLI 2.95 or newer is required. Install it from https://cli.github.com, then retry."
+    assert "".join(message.split()) in "".join(result.stderr.split())
+    assert "Preview only" not in result.stdout
     assert not (tmp_path / "state").exists()

@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import ContextManager, Protocol
 
-from siteops.artifacts import hash_file
+from siteops.artifacts import ArtifactError, hash_file
 from siteops.cache_filesystem import CacheError
 from siteops.github_workspace_acquisition import GitHubWorkspaceAcquirer
 from siteops.project import (
@@ -32,7 +32,7 @@ from siteops.runtime import (
     create_private_directory,
     describe_os_error,
 )
-from siteops.source_profiles import read_source
+from siteops.source_profiles import read_source, sources_for
 from siteops.workspace_cache import CachedWorkspace, WorkspaceCache, default_cache_root
 from siteops.workspace_source import ResolvedWorkspaceSource
 
@@ -67,7 +67,9 @@ def resolve_source_request(
             raise ProjectError("Source selection must include a nonempty source and release.")
     if not value.startswith(("github:", "https://")):
         if approved_source is not None:
-            raise ProjectError("Choose one source approval, not both an alias and --approved-source.")
+            raise ProjectError(
+                "Choose one approved source: --source NAME@RELEASE or --approved-source NAME, not both."
+            )
         approved_source = value
         value = read_source(value, require_valid=not for_inspection).reference
     reference = GitHubReference.parse(value, ref=release)
@@ -95,22 +97,56 @@ class ProjectAcquirer(Protocol):
     def restore(self, source: ResolvedWorkspaceSource) -> None: ...
 
 
+def _approval_guidance(reference: str, *, direct: bool, release: str | None) -> str:
+    """Name the enrolled source for a publisher, or how to enroll one."""
+    try:
+        names = sources_for(reference)
+    except (ArtifactError, OSError):
+        names = ()
+
+    def selection(name: str) -> str:
+        return (
+            f"use --source {name}@{release or 'RELEASE'}" if direct
+            else f"put --approved-source {name} before the command"
+        )
+
+    if names:
+        return f"Approved source '{names[0]}' is enrolled for {reference}: {selection(names[0])}."
+    return (
+        f"Run `siteops source enroll NAME --source {reference}`, then {selection('NAME')}. "
+        "Alternatively, supply --trust-policy and --trusted-root."
+    )
+
+
 def require_trust_inputs(
     cache_root: Path, policy: Path | None, trusted_root: Path | None,
     *, approved_source: str | None = None, source_reference: str | None = None,
+    direct: bool = False, release: str | None = None,
 ) -> tuple[Path, Path]:
     if approved_source is not None:
         if policy is not None or trusted_root is not None:
             raise ProjectError("Choose --approved-source or explicit trust files, not both.")
         profile = read_source(approved_source)
         if source_reference is not None and profile.reference.casefold() != source_reference.casefold():
-            raise ProjectError("The approved source does not match the selected workspace source.")
+            error = ProjectError("The approved source does not match the selected workspace source.")
+            error.private_message = (
+                f"Approved source '{approved_source}' does not match the selected workspace source: "
+                f"it is enrolled for {profile.reference}, not {source_reference}. "
+                + _approval_guidance(source_reference, direct=direct, release=release)
+            )
+            raise error
         policy, trusted_root = profile.policy, profile.trusted_root
     if policy is None or trusted_root is None:
-        raise ProjectError(
+        error = ProjectError(
             "Verified content requires an approved source or independent --trust-policy and --trusted-root.",
             code="project.trust-required",
         )
+        if source_reference is not None:
+            error.private_message = (
+                f"Verified content from {source_reference} requires an approved source. "
+                + _approval_guidance(source_reference, direct=direct, release=release)
+            )
+        raise error
     for path in (policy, trusted_root):
         if path.resolve().is_relative_to(cache_root.resolve()):
             raise ProjectError("Consumer policy and trusted roots must be outside the content cache.")
@@ -170,8 +206,13 @@ def open_command_context(
         yield CommandContext(root, root, project=root)
         return
     if source is None and (workspace is not None or root is None):
-        if policy is not None or trusted_root is not None or approved_source is not None or offline:
-            raise ValueError("Trust and offline options apply only when using a workspace pin.")
+        if policy is not None or trusted_root is not None or approved_source is not None:
+            raise ValueError(
+                "--approved-source, --trust-policy and --trusted-root apply only to a workspace pin "
+                "or --source content, not to a local workspace."
+            )
+        if offline:
+            raise ValueError("--offline-content applies only to a workspace pin, not to a local workspace.")
         selected = workspace if workspace is not None else (discover(current) or current)
         selected = Path(selected).resolve()
         if not selected.is_dir():
@@ -194,6 +235,7 @@ def open_command_context(
     policy_file, root_file = require_trust_inputs(
         cache_root, policy, trusted_root,
         approved_source=approval, source_reference=reference,
+        direct=request is not None, release=request.release if request is not None else None,
     )
     with ExitStack() as stack:
         configuration = root
@@ -238,7 +280,7 @@ def open_command_context(
             )
             receipt = package.verification
             if datetime.now(timezone.utc) >= receipt.valid_until:
-                raise ProjectError("Source verification expired during preparation. Renew approval and review again.")
+                raise ProjectError("Source verification expired during preparation. Renew the approved source and review again.")
             if (
                 hash_file(current_policy, limit=8 * 1024 * 1024)[1] != receipt.policy_sha256
                 or hash_file(current_root, limit=8 * 1024 * 1024)[1] != receipt.root_sha256

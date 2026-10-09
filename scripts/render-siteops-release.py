@@ -29,18 +29,47 @@ class RenderingError(ValueError):
     """Candidate presentation metadata is incomplete or invalid."""
 
 
+OFFICIAL_REPOSITORY = "Azure/digital-ops-scale-kit"
+AIO_WORKSPACE_ID = "azure.iot-operations"
+
+
+def source_enrollment(repository: str, source_ref: str, builder_identity: str, runner_environment: str) -> str | None:
+    """Return the standard enrollment command when this build matches the standard release policy."""
+    standard_builder = f"https://github.com/{repository}/.github/workflows/release.yaml@refs/heads/main"
+    if runner_environment != "self-hosted" or source_ref != "refs/heads/main" or builder_identity != standard_builder:
+        return None
+    if repository.casefold() == OFFICIAL_REPOSITORY.casefold():
+        return "siteops source enroll official"
+    name = re.sub(r"[^a-z0-9-]+", "-", repository.split("/", 1)[0].lower()).strip("-")[:40]
+    if re.fullmatch(r"[a-z][a-z0-9-]{0,39}", name) is None:
+        name = "publisher"
+    return f"siteops source enroll {name} --source github:{repository}"
+
+
+def workspace_deploy_command(plan: dict[str, Any], enrollment: str | None) -> str:
+    """Render the direct deployment command for this release, using the enrollment name shown."""
+    source = enrollment.split()[3] if enrollment else "<approved-source>"
+    selection = f'--source "{source}@{plan["release"]["tag"]}"'
+    requests = plan.get("workspaces") or []
+    aio = next((request for request in requests if request["id"] == AIO_WORKSPACE_ID), None)
+    if aio is None:
+        return f"siteops deploy <manifest> {selection} --input-file <answers.yaml>"
+    workspace = f"-w {aio['workspace']} " if len(requests) > 1 else ""
+    return f'siteops {workspace}deploy aio-install {selection} --input "cluster=<Arc-cluster-resource-ID>"'
+
+
 def bootstrap_commands(
     tag: str, source: dict[str, str], scripts: dict[str, ReleaseAsset], downloads: str, caller: str,
-) -> list[str]:
-    """Render complete downloads bound to the reviewed script bytes and source."""
+) -> tuple[list[str], list[str]]:
+    """Render complete downloads bound to the reviewed script bytes and source, and their caveats."""
     if re.fullmatch(r"(?:siteops/)?v[0-9][0-9A-Za-z._-]{0,100}", tag) is None:
         raise RenderingError("The bootstrap requires a supported exact release tag.")
     if not source["ref"].startswith("refs/heads/"):
         raise RenderingError("The bootstrap requires an exact source branch.")
     repository, commit, source_ref = source["repository"], source["commit"], source["ref"]
     bash, powershell = scripts["siteops-bootstrap.sh"], scripts["siteops-bootstrap.ps1"]
-    return [
-        "Ubuntu 24.04 or managed Azure Linux 3, x64:",
+    commands = [
+        "Linux x64 with glibc, including Ubuntu and Azure Cloud Shell:",
         f"""```bash
 (
   set -euo pipefail
@@ -88,20 +117,20 @@ def bootstrap_commands(
   }}
 }}
 ```""",
-        "These commands download the complete script into a fresh private directory and "
+    ]
+    details = [
+        "The bootstrap commands download the complete script into a fresh private directory and "
         "check its size and digest before execution. The digest binds the script to these "
         "reviewed instructions. It is not independent publisher authentication. "
         "The initial script trusts this release's HTTPS delivery. "
         "The script separately authenticates the engine ZIP before extracting its installer helper.",
-        "Review the proposed tool changes when prompted. These commands install the engine only. "
-        "To include Azure CLI, add `--with-azure-cli` to the final Bash invocation or "
-        "`-WithAzureCli` to the PowerShell invocation. Source enrollment is a separate choice: "
+        "Source enrollment is a separate choice: "
         "add `--enroll-source NAME` or `-EnrollSource NAME` only for an approved source. "
-        "For the official Azure/digital-ops-scale-kit publisher, the guided examples use `official`. "
-        "Azure authentication and deployment remain separate.",
+        "For the official Azure/digital-ops-scale-kit publisher, the guided examples use `official`.",
         "The PowerShell execution policy setting applies only to the child process. "
         "An organization policy may require an approved managed installation instead.",
     ]
+    return commands, details
 
 
 def render_notes(
@@ -125,25 +154,38 @@ def render_notes(
     repository = source["repository"]
     home = "https://github.com/" + repository
     notes = authored.rstrip() + "\n\n## Install Site Ops\n\n"
+    enrollment = source_enrollment(repository, source["ref"], builder_identity, runner_environment)
     workspace_notes = ""
     if workspace:
         downloads = home + "/releases/download/" + urllib.parse.quote(plan["release"]["tag"], safe="") + "/"
         project_guide = (
             home + "/blob/" + source["commit"] + "/docs/projects.md#run-project-pin"
         )
+        aio = any(request["id"] == AIO_WORKSPACE_ID for request in plan.get("workspaces") or [])
+        target = (
+            "deploy Azure IoT Operations to an existing cluster connected to Azure Arc"
+            if aio else "deploy a manifest"
+        )
+        commands = [workspace_deploy_command(plan, enrollment)]
+        if enrollment is None:
+            lead = f"After you enroll this publisher with reviewed trust files, {target} directly from this release:"
+        elif engine["bundle"]:
+            lead = f"After you enroll the content source, {target} directly from this release:"
+        else:
+            lead = f"Enroll the content source once, then {target} directly from this release:"
+            commands.insert(0, enrollment)
         workspace_notes = (
             "\n\n## Workspace content\n\n"
             "This release contains complete workspace packages. Each package has a detached "
-            "attestation proof containing signed provenance evidence. "
-            f"Follow the [workspace pin guidance]({project_guide}) to run "
-            "`siteops project pin` with `--release` for this release. Supply the trust "
-            "policy and trusted roots independently. The routing descriptor cannot select "
-            "them.\n\n"
+            "attestation proof containing signed provenance evidence.\n\n"
+            f"{lead}\n\n```console\n" + "\n".join(commands) + "\n```\n\n"
+            f"For a repeatable fleet, follow the [workspace pin guidance]({project_guide}) to run "
+            "`siteops project pin` with `--release` for this release. Use an approved source, or "
+            "supply the trust policy and trusted roots independently. The routing descriptor "
+            "cannot select either.\n\n"
             + "\n".join(f"- [{asset.name}]({downloads}{asset.name})" for asset in workspace)
             + "\n\nWorkspace qualification used the selected installed engine to check package "
-            "compatibility, protected cache use, and guarded catalog loading. It did not compare "
-            "executable deployment plans, authorize targets, deploy resources, or evaluate "
-            "workload health.\n"
+            "compatibility, protected cache use, and guarded catalog loading.\n"
         )
     if not engine["bundle"]:
         tag = engine["releaseTag"]
@@ -179,7 +221,12 @@ def render_notes(
         f'uv tool install "{downloads}{wheel}" '
         '--python 3.11.16 --managed-python --no-build --system-certs'
     )
-    bootstrap = []
+    bootstrap: list[str] = []
+    bootstrap_details: list[str] = []
+    identity = (
+        f"Expected publisher: `{repository}`. Source commit: `{source['commit']}`. "
+        f"Source ref: `{source['ref']}`."
+    )
     if all(name in native_names for name in scripts):
         callers = [
             name for name in ("release.yaml", "ci.yaml")
@@ -187,32 +234,56 @@ def render_notes(
         ]
         if len(callers) != 1:
             raise RenderingError("The release calling workflow does not match the selected source.")
-        bootstrap = [
-            "### Bootstrap without uv",
-            f"Expected calling workflow: `{callers[0]}`.",
-        ]
+        identity += f" Expected calling workflow: `{callers[0]}`."
+        bootstrap = ["### Bootstrap without uv"]
         if runner_environment == "self-hosted":
-            bootstrap.extend(bootstrap_commands(
+            commands, bootstrap_details = bootstrap_commands(
                 plan["release"]["tag"], source,
                 {asset.name: asset for asset in native if asset.name in scripts},
                 downloads, callers[0],
-            ))
+            )
+            bootstrap.append(
+                "Use this route when uv is not installed, or when you want the verified installation "
+                "archive. It needs `curl` and GitHub CLI 2.95 or newer, never uses administrator "
+                "rights, and asks before changing tools.",
+            )
+            bootstrap.extend(commands)
         else:
             bootstrap.append(
                 "The bootstrap requires the approved `self-hosted` provenance policy. "
                 "Use the release wheel with approved tooling for this runner class.",
             )
+    enroll = [
+        "### Enroll the content source",
+        "After installing with either route, enroll this publisher's content source once. "
+        "Run the same command again to renew the 30 day enrollment. "
+        "Enrollment works without signing in to GitHub or Azure.",
+        f"```console\n{enrollment}\n```",
+    ] if enrollment else []
     paragraphs = [
-        f"Package version: `{engine_version}`.",
+        f"Package version: `{engine_version}`. "
+        "Installing the CLI does not authenticate to Azure or deploy resources.",
         "### Already have uv",
-        "**Prerequisite:** uv 0.12.20 from an approved channel. "
-        "The command uses uv-managed CPython and can provision it when needed. "
-        "Use a supported Windows x64 or Linux x64 host. "
-        "Configure an approved package index that serves the runtime dependencies as wheels.",
-        "Install the versioned wheel from this release. Runtime dependencies come from your configured package index as wheels. "
-        "To name it explicitly, add `--default-index <your approved index>`. "
-        "uv does not read pip configuration.",
+        "Use this route on a supported Windows x64 or Linux x64 host with uv 0.12.20 from an "
+        "approved channel and a package index that serves the runtime dependencies as wheels. "
+        "The command uses uv-managed CPython and can provision it when needed.",
         f"```console\n{command}\n```",
+        *bootstrap,
+        *enroll,
+        "<details><summary>Provenance, verification and maintenance</summary>",
+        identity + f" Expected provenance runner class: `{runner_environment}`. "
+        "The runner class does not identify a particular pool. "
+        "Use these values with the guide verification policy.",
+        "For publisher provenance before any installer code runs, review this release tag, "
+        "publisher, source commit and source ref against your approved selection. "
+        f"[Verify the versioned script and its detached proof]({script_guide}) "
+        "with those identities before running it. HTTPS download alone does not authenticate "
+        "the publisher. If the guide's example publisher, source ref, workflows or runner "
+        "differ from this release, use this release's reviewed provenance values instead.",
+        *bootstrap_details,
+        "Runtime dependencies come from your configured package index as wheels when you use "
+        "the wheel command. To name it explicitly, add `--default-index <your approved index>`. "
+        "uv does not read pip configuration. "
         "To replace or repair an existing online installation, review the selection and rerun with `--reinstall`. "
         "Confirm the result with `siteops --version` and `siteops --help`.",
         "The installation ZIP and standalone wheel each have a detached attestation proof "
@@ -222,27 +293,14 @@ def render_notes(
         "from stable private storage, "
         f"follow the [verified installation guide]({guide}). "
         "The engine path downloads the ZIP and its detached proof, authenticates the ZIP before extraction, "
-        "then invokes native uv only after independent payload admission.",
-        f"Expected publisher: `{repository}`. Source commit: `{source['commit']}`. "
-        f"Source ref: `{source['ref']}`. Use these values with the guide verification policy. "
+        "then invokes native uv only after independent payload admission. "
         "The guide also describes switching between online and verified installations.",
-        f"Expected provenance runner class: `{runner_environment}`. "
-        "The runner class does not identify a particular pool.",
-        *bootstrap,
-        "For publisher provenance before any installer code runs, review this release tag, "
-        "publisher, source commit and source ref against your approved selection. "
-        f"[Verify the versioned script and its detached proof]({script_guide}) "
-        "with those identities before running it. HTTPS download alone does not authenticate "
-        "the publisher. If the guide's example publisher, source ref, workflows or runner "
-        "differ from this release, use this release's reviewed provenance values instead.",
-        "The bootstrap owns provenance and complete payload validation. "
-        "Native uv owns the tool environment and ordinary installation lifecycle.",
         f"Release assets: [{wheel}]({downloads}{wheel}), "
         f"[{wheel}{attestation_suffix}]({downloads}{wheel}{attestation_suffix}), "
         f"[{archive_name}]({downloads}{archive_name}), and "
         f"[{archive_name}{attestation_suffix}]({downloads}{archive_name}{attestation_suffix})."
         + bootstrap_links + " Use these assets instead of the generated source archives.",
-        "Installing the CLI does not authenticate to Azure or deploy resources.",
+        "</details>",
         "Existing local `-w` workspaces and configured-Site fleet selectors remain supported. "
         "`siteops inputs` and explicit typed answers are optional for manifests with a typed "
         "input contract. A project pin selects content, not operator Site configuration.",
@@ -337,8 +395,7 @@ def render_summary(plan: dict[str, Any], notes: str, values: Mapping[str, str]) 
             "It does not select trust policy or trusted roots.\n",
             "The selected installed engine consumed the frozen workspace packages on every "
             "declared target. Qualification checked package compatibility, protected cache use, "
-            "and guarded catalog loading. It did not compare executable deployment plans, "
-            "authorize targets, deploy resources, or evaluate workload health.\n",
+            "and guarded catalog loading.\n",
             f"[Download the complete release payload]({values['ARTIFACT_URL']})\n",
             f"Frozen publication inventory SHA-256: `{values['ASSET_LIST_SHA']}`",
         ])

@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import re
 import shlex
 import shutil
 import subprocess
@@ -11,6 +12,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.ado_helpers import TEMPLATES
+from tests.ado_helpers import step as _step
 from tests.native_uv_consumers import _required, _unavailable
 from tests.shell_helpers import bash_path, run_script, write_executable
 
@@ -20,22 +23,6 @@ DEPLOY = ROOT / ".pipelines" / "templates" / "siteops-deploy.yaml"
 INTEGRATION = ROOT / ".pipelines" / "integration-test.yaml"
 CI = ROOT / ".pipelines" / "ci.yaml"
 NATIVE_FIXTURES = ROOT / "tests" / "fixtures" / "prepare-native-uv.sh"
-
-
-def _step(path: Path, name: str) -> dict:
-    def walk(node):
-        if isinstance(node, dict):
-            if node.get("displayName", node.get("name")) == name:
-                yield node
-            for value in node.values():
-                yield from walk(value)
-        elif isinstance(node, list):
-            for value in node:
-                yield from walk(value)
-
-    matches = list(walk(yaml.safe_load(path.read_text(encoding="utf-8"))))
-    assert len(matches) == 1
-    return matches[0]
 
 
 @pytest.mark.parametrize("path", [ROOT / ".pipelines" / "deploy.yaml", DEPLOY, INTEGRATION])
@@ -72,6 +59,157 @@ def test_wif_consumer_examples_explicitly_select_task_session_refresh():
     assert "WIF" in ado_refresh
 
 
+def _expression(condition, values):
+    match = re.fullmatch(r"not\(in\(parameters\.(\w+), '', ' '\)\)", condition)
+    if match:
+        return values[match[1]] not in ("", " ")
+    match = re.fullmatch(r"eq\(parameters\.(\w+), '([^']*)'\)", condition)
+    if match:
+        return values[match[1]] == match[2]
+    raise AssertionError(f"Unsupported template condition: {condition}")
+
+
+def _expand(node, values, variables=None):
+    """Expand the conditional mapping forms the entry pipelines use, without an Azure service call."""
+    if isinstance(node, str):
+        context = {"parameters": values, "variables": variables or {}}
+        return re.sub(
+            r"\$\{\{ (parameters|variables)\.(\w+) \}\}",
+            lambda match: str(context[match[1]][match[2]]) if match[1] == "parameters"
+            else str(context["variables"].get(match[2], "")),
+            node,
+        )
+    if not isinstance(node, dict):
+        return node
+    result, taken = {}, None
+    for key, value in node.items():
+        branch = re.fullmatch(r"\$\{\{ (if|elseif) (.+) \}\}", key)
+        if branch or key == "${{ else }}":
+            if branch is None or branch[1] == "elseif":
+                assert taken is not None, key
+            else:
+                taken = False
+            if not taken and (branch is None or _expression(branch[2], values)):
+                result.update(_expand(value, values, variables))
+                taken = True
+            if branch is None:
+                taken = None
+            continue
+        taken = None
+        result[key] = _expand(value, values, variables)
+    return result
+
+
+def _variables(document, values):
+    """Flatten list-level `${{ if }}` insertion in a pipeline's root variables."""
+    rows = []
+    for item in document["variables"]:
+        key = next(iter(item)) if len(item) == 1 else None
+        branch = re.fullmatch(r"\$\{\{ if (.+) \}\}", key) if isinstance(key, str) else None
+        if branch is None:
+            rows.append(item)
+        elif _expression(branch[1], values):
+            rows.extend(item[key])
+    return rows
+
+
+def _deploy_stage(text=None, **selected):
+    document = yaml.safe_load(text or (ROOT / ".pipelines" / "deploy.yaml").read_text(encoding="utf-8"))
+    values = {row["name"]: row.get("default") for row in document["parameters"]} | selected
+    names = {row["name"]: row["value"] for row in _variables(document, values) if "name" in row}
+    stage = next(row for row in document["stages"] if row.get("template") == "templates/siteops-deploy.yaml")
+    return _expand(stage["parameters"], values, names)
+
+
+_ENVIRONMENTS = ["dev", "staging", "prod"]
+_SETTINGS_BLOCK = """  - ${{{{ if eq(parameters.environment, '{0}') }}}}:
+    - group: siteops-secrets
+    - name: siteopsServiceConnection
+      value: azure-siteops
+"""
+
+
+@pytest.mark.parametrize("path", [ROOT / ".pipelines" / "deploy.yaml", INTEGRATION])
+def test_environment_settings_pair_each_environment_with_its_own_resources(path):
+    text = path.read_text(encoding="utf-8")
+    document = yaml.safe_load(text)
+    assert not [row["name"] for row in document["parameters"] if row.get("type") == "object"]
+    environment = next(row for row in document["parameters"] if row["name"] == "environment")
+    assert environment["values"] == _ENVIRONMENTS
+    distinct = text
+    for name in _ENVIRONMENTS:
+        block = _SETTINGS_BLOCK.format(name)
+        assert text.count(block) == 1, name
+        distinct = distinct.replace(block, block.replace("siteops-secrets", f"{name}-secrets").replace(
+            "azure-siteops", f"{name}-connection"))
+    edited = yaml.safe_load(distinct)
+    for name in _ENVIRONMENTS:
+        rows = _variables(edited, {"environment": name})
+        assert rows[0] == {"name": "SITE_OVERRIDES", "value": ""}
+        assert [row for row in rows if "group" in row] == [{"group": f"{name}-secrets"}]
+        assert [row["value"] for row in rows if row.get("name") == "siteopsServiceConnection"] == [
+            f"{name}-connection"
+        ]
+        if path == INTEGRATION:
+            task = _step(path, "Run integration tests")
+            assert task["inputs"]["azureSubscription"] == "${{ variables.siteopsServiceConnection }}"
+        else:
+            stage = _deploy_stage(distinct, environment=name)
+            assert stage["serviceConnection"] == f"{name}-connection"
+            assert stage["environment"] == name
+
+
+def test_deploy_stage_takes_its_service_connection_from_the_environment_settings():
+    document = yaml.safe_load((ROOT / ".pipelines" / "deploy.yaml").read_text(encoding="utf-8"))
+    stage = next(row for row in document["stages"] if row.get("template") == "templates/siteops-deploy.yaml")
+    assert stage["parameters"]["serviceConnection"] == "${{ variables.siteopsServiceConnection }}"
+    assert stage["parameters"]["environment"] == "${{ parameters.environment }}"
+
+
+@pytest.mark.parametrize("environment", ["dev", "staging", "prod"])
+@pytest.mark.parametrize("additional", [" ", "country=US"])
+@pytest.mark.parametrize("site_file", [" ", "operator/site.yaml"])
+def test_deploy_site_file_keeps_the_environment_label_requirement(environment, additional, site_file):
+    stage = _deploy_stage(environment=environment, selector=additional, siteFile=site_file)
+    assert stage["environment"] == environment
+    assert stage["selector"] == f"environment={environment}" + (
+        f",{additional}" if additional.strip() else ""
+    )
+    assert stage.get("siteFile") == (site_file if site_file.strip() else None)
+
+
+@pytest.mark.parametrize("sample", ["resource-set-basic", "resource-set-composition"])
+def test_resource_set_sample_site_file_keeps_the_sample_label_requirement(sample):
+    stage = _deploy_stage(manifest=f"samples/{sample}/manifest.yaml", siteFile="operator/site.yaml")
+    assert stage["siteFile"] == "operator/site.yaml"
+    assert stage["selector"] == f"environment=sample,sample={sample}"
+
+
+def test_deploy_template_passes_the_label_requirement_with_the_site_file_through_env():
+    task = _step(DEPLOY, "Prepare executable plan and deploy")
+    assert task["env"]["SELECTOR"] == "${{ parameters.selector }}"
+    assert task["env"]["SITE_FILE"] == "${{ parameters.siteFile }}"
+    script = task["inputs"]["inlineScript"]
+    assert "${{" not in script
+    for arguments in ("PLAN_ARGS", "CMD_ARGS"):
+        assert f'[[ -n "$SELECTOR" ]] && {arguments}+=(-l "$SELECTOR")' in script
+        assert f'[[ -n "$SITE_FILE" ]] && {arguments}+=(--site-file "$SITE_FILE")' in script
+
+
+def test_queue_time_parameters_cannot_select_an_engine_source():
+    for path in (ROOT / ".pipelines").glob("*.yaml"):
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        names = {row["name"] for row in document.get("parameters", [])}
+        assert "siteopsSource" not in names, path.name
+    assert "siteopsSource" not in _deploy_stage()
+    assert {"release", "sourceCommit"} <= {
+        row["name"] for row in yaml.safe_load((ROOT / ".pipelines" / "deploy.yaml").read_text())["parameters"]
+    }
+    for path in (DEPLOY, SETUP):
+        names = {row["name"] for row in yaml.safe_load(path.read_text(encoding="utf-8"))["parameters"]}
+        assert "siteopsSource" in names, path.name
+
+
 @pytest.mark.parametrize(("upgrade", "install"), [(0, 0), (31, 0), (0, 32), (31, 32)])
 def test_setup_stops_on_the_first_failed_installation(tmp_path, upgrade, install):
     binary = tmp_path / "bin"
@@ -79,13 +217,14 @@ def test_setup_stops_on_the_first_failed_installation(tmp_path, upgrade, install
     write_executable(binary / "pip", """#!/usr/bin/env bash
 case "$*" in
   'install --upgrade pip') echo upgrade >> calls; exit "$UPGRADE_EXIT" ;;
-  'install -e .') echo install >> calls; exit "$INSTALL_EXIT" ;;
+  'install -e .[dev]') echo install >> calls; exit "$INSTALL_EXIT" ;;
   *) exit 98 ;;
 esac
 """)
     result = run_script(
         _step(SETUP, "Install Site Ops")["script"], tmp_path,
-        {"SITEOPS_SOURCE": "", "INSTALL_DEV": "False",
+        {"SITEOPS_SOURCE": "", "INSTALL_DEV": "True",
+         "SITEOPS_RELEASE": "", "SITEOPS_SOURCE_COMMIT": "", "SITEOPS_REPOSITORY": "",
          "UPGRADE_EXIT": str(upgrade), "INSTALL_EXIT": str(install)},
         shell_options=(),
     )
@@ -125,8 +264,8 @@ def test_override_preparation_preserves_failures_and_empty_values(
     binary.mkdir()
     write_executable(binary / "python3", """#!/usr/bin/env bash
 case "$*" in
-  './scripts/generate-site-overrides.py workspace') echo generator >> calls; exit "$GENERATOR_EXIT" ;;
-  './scripts/mask-site-overrides.py azure-pipelines') echo masker >> calls; exit "$MASK_EXIT" ;;
+  '-I -S -B ./scripts/generate-site-overrides.py workspace') echo generator >> calls; exit "$GENERATOR_EXIT" ;;
+  '-I -S -B ./scripts/mask-site-overrides.py azure-pipelines') echo masker >> calls; exit "$MASK_EXIT" ;;
   *) exit 98 ;;
 esac
 """)
@@ -343,8 +482,13 @@ def test_masking_rejects_invalid_input_without_emitting_it(masking, monkeypatch,
 def test_optional_overrides_default_precedes_the_selected_secret_group(path):
     variables = yaml.safe_load(path.read_text())["variables"]
     index = next(i for i, value in enumerate(variables) if value.get("name") == "SITE_OVERRIDES")
-    group = next(i for i, value in enumerate(variables) if "group" in value)
-    assert index < group
+
+    def selects_group(value):
+        rows = next(iter(value.values())) if len(value) == 1 else None
+        return "group" in value or isinstance(rows, list) and any("group" in row for row in rows)
+
+    groups = [i for i, value in enumerate(variables) if selects_group(value)]
+    assert groups and all(index < group for group in groups)
     assert variables[index]["value"] == ""
 
 
@@ -353,19 +497,22 @@ def test_reusable_template_separates_the_callers_workspace_from_pinned_tooling(t
     defaults = {parameter["name"]: parameter.get("default") for parameter in data["parameters"]}
     assert defaults["templateRepository"] == "self"
     stage = data["stages"][0]
-    variables = stage["variables"]
+    assert stage["variables"] == [{
+        "template": "siteops-context.yaml", "parameters": {"templateRepository": "${{ parameters.templateRepository }}"},
+    }]
+    variables = yaml.safe_load((TEMPLATES / "siteops-context.yaml").read_text())["variables"]
     assert variables["${{ if eq(parameters.templateRepository, 'self') }}"] == {
         "SITEOPS_TEMPLATE_ROOT": "$(Build.SourcesDirectory)",
         "SITEOPS_WORKSPACE_ROOT": "$(Build.SourcesDirectory)",
     }
-    assert variables["${{ else }}"] == {
-        "SITEOPS_TEMPLATE_ROOT": "$(Pipeline.Workspace)/s/siteops-automation",
-        "SITEOPS_WORKSPACE_ROOT": "$(Pipeline.Workspace)/s/siteops-inputs",
-    }
+    assert variables["${{ else }}"]["SITEOPS_TEMPLATE_ROOT"] == "$(Pipeline.Workspace)/s/siteops-automation"
+    assert variables["${{ else }}"]["SITEOPS_WORKSPACE_ROOT"] == "$(Pipeline.Workspace)/s/siteops-inputs"
     steps = stage["jobs"][0]["strategy"]["runOnce"]["deploy"]["steps"]
-    assert steps[0]["checkout"] == "self"
-    assert steps[0]["${{ if ne(parameters.templateRepository, 'self') }}"]["path"] == "s/siteops-inputs"
-    checkout = steps[1]["${{ if ne(parameters.templateRepository, 'self') }}"][0]
+    assert steps[0]["template"] == "siteops-checkout.yaml"
+    checkouts = yaml.safe_load((TEMPLATES / "siteops-checkout.yaml").read_text())["steps"]
+    assert checkouts[0]["checkout"] == "self"
+    assert checkouts[0]["${{ if ne(parameters.templateRepository, 'self') }}"]["path"] == "s/siteops-inputs"
+    checkout = checkouts[1]["${{ if ne(parameters.templateRepository, 'self') }}"][0]
     assert checkout["checkout"] == "${{ parameters.templateRepository }}"
     assert checkout["path"] == "s/siteops-automation"
     assert checkout["persistCredentials"] is False
@@ -415,7 +562,7 @@ def test_setup_retains_local_and_external_consumer_installation_routes(tmp_path,
 if [[ "$#" == 3 && "$1" == install && "$2" == --upgrade && "$3" == pip ]]; then
   exit 0
 fi
-if [[ "$#" == 3 && "$1" == install && "$2" == -e && "$3" == . ]] ||
+if [[ "$#" == 3 && "$1" == install && "$2" == -e && "$3" == '.[dev]' ]] ||
    [[ "$#" == 2 && "$1" == install && "$2" == "$EXPECTED_SOURCE" && -n "$2" ]]; then
   printf '%s\\n' "$@" > installed
 else
@@ -424,12 +571,13 @@ fi
 """)
     result = run_script(
         step["script"], tmp_path,
-        {"SITEOPS_SOURCE": spec, "INSTALL_DEV": "False", "EXPECTED_SOURCE": spec},
+        {"SITEOPS_SOURCE": spec, "INSTALL_DEV": "False" if spec else "True", "EXPECTED_SOURCE": spec,
+         "SITEOPS_RELEASE": "", "SITEOPS_SOURCE_COMMIT": "", "SITEOPS_REPOSITORY": ""},
         shell_options=(),
     )
     assert result.returncode == 0
     assert (tmp_path / "installed").read_text().splitlines() == (
-        ["install", spec] if spec else ["install", "-e", "."]
+        ["install", spec] if spec else ["install", "-e", ".[dev]"]
     )
 
 

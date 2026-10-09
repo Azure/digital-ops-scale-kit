@@ -26,7 +26,7 @@ from siteops.workspace_source import (
 )
 
 _ASSET_ORIGINS = (
-    "https://api.github.com",
+    "https://github.com",
     "https://release-assets.githubusercontent.com",
     "https://objects.githubusercontent.com",
 )
@@ -112,23 +112,36 @@ def bind_workspace_release(
     )
 
 
+def release_asset_url(release: GitHubReleaseSnapshot, asset: GitHubReleaseAsset) -> str:
+    """Return the github.com download URL for an asset name under the observed release tag.
+
+    Each segment is percent encoded, so a tag such as `release/v1` stays one segment.
+    """
+    reference = release.reference
+    if reference.ref is None:
+        raise SourceResolutionError("A resolved workspace source requires an explicit release.")
+    if asset.name in {".", ".."}:
+        raise SourceResolutionError("The selected asset must belong to the observed release.")
+    segments = (reference.owner, reference.repository, "releases", "download", reference.ref, asset.name)
+    return "https://github.com/" + "/".join(quote(segment, safe="") for segment in segments)
+
+
 @contextmanager
 def download_release_asset(
     release: GitHubReleaseSnapshot, asset: GitHubReleaseAsset, *, staging_parent: Path,
 ) -> Iterator[Path]:
-    """Download an observed asset by ID using anonymous HTTPS and fixed provider origins."""
+    """Download an observed asset from its github.com release URL using anonymous HTTPS.
+
+    The tag and name select the asset, and the bytes must match the size and
+    SHA-256 observed in the release asset listing. No source credential is sent.
+    """
     if (
         asset not in release.assets or type(asset.identifier) is not int
         or not 0 < asset.identifier <= 2**63 - 1
     ):
         raise SourceResolutionError("The selected asset must belong to the observed release.")
     identity = _artifact_identity(asset, limit=MAX_SOURCE_ARTIFACT_BYTES)
-    reference = release.reference
-    url = (
-        "https://api.github.com/repos/"
-        f"{quote(reference.owner, safe='')}/{quote(reference.repository, safe='')}"
-        f"/releases/assets/{asset.identifier}"
-    )
+    url = release_asset_url(release, asset)
     with download_https_asset(
         url, identity, origins=_ASSET_ORIGINS, staging_parent=staging_parent,
     ) as path:
@@ -148,11 +161,6 @@ def resolve_workspace_release(
     client: GitHubClient, *, staging_parent: Path, workspace: str | None = None,
 ) -> GitHubWorkspaceSource:
     """Bind one workspace through its descriptor before downloading a package or proof."""
-    if client.auth != "anonymous":
-        raise SourceResolutionError(
-            "Workspace asset acquisition currently uses anonymous HTTPS.",
-            code="source.auth-unsupported",
-        )
     release = client.resolve_release()
     descriptor = workspace_descriptor_asset(release)
     with download_release_asset(release, descriptor, staging_parent=staging_parent) as path:

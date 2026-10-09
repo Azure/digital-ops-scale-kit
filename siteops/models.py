@@ -144,7 +144,7 @@ _SITE_UNREAD_ADVICE = {
         "selectors match on, or in `properties`, which templates read"
     ),
     "namespace": (
-        "not read by siteops. A site targets a subscription and a resource "
+        "not read by siteops. A Site targets a subscription and a resource "
         "group, which `subscription` and `resourceGroup` name"
     ),
 }
@@ -180,11 +180,11 @@ def validate_site_required(spec: dict, source: Path | str) -> None:
     """
     for key in _SITE_REQUIRED_SPEC_KEYS:
         if key not in spec:
-            raise ValueError(f"Missing required field '{key}' in site: {source}")
+            raise ValueError(f"Missing required field '{key}' in Site: {source}")
         value = spec[key]
         if value is None or (isinstance(value, str) and not value.strip()):
             raise ValueError(
-                f"Required field '{key}' in site '{source}' has no value. "
+                f"Required field '{key}' in Site '{source}' has no value. "
                 f"Give it one, inherit it from a parent template, or remove "
                 f"the key entirely, since a key written with no value "
                 f"overrides the inherited one."
@@ -218,7 +218,7 @@ def validate_site_keys(data: dict, source: Path | str) -> None:
         if misplaced:
             named = ", ".join(f"`{key}`" for key in misplaced)
             raise ValueError(
-                f"Site '{source}' mixes the two site shapes. It declares `spec`, "
+                f"Site '{source}' mixes the two Site shapes. It declares `spec`, "
                 f"which is the envelope shape, and also carries {named} at the "
                 f"top level, where only the flat shape reads them. Move them "
                 f"under `metadata` or `spec`, or remove `spec` and put every "
@@ -245,7 +245,7 @@ def validate_site_keys(data: dict, source: Path | str) -> None:
             raise ValueError(
                 f"Site '{source}' declares `inherits` inside `spec`, which is "
                 f"never read. Move it to the top level of the file, alongside "
-                f"`apiVersion` and `kind`. Both site shapes inherit that way."
+                f"`apiVersion` and `kind`. Both Site shapes inherit that way."
             )
         _validate_known_keys(
             spec, _SITE_NESTED_SPEC_KEYS, path, "spec", "Site", _SITE_SPEC_ADVICE
@@ -265,14 +265,14 @@ def validate_site_keys(data: dict, source: Path | str) -> None:
             if key in container and container[key] is not None:
                 if not isinstance(container[key], dict):
                     raise ValueError(
-                        f"'{key}' in site '{source}' must be a mapping, got "
+                        f"'{key}' in Site '{source}' must be a mapping, got "
                         f"{type(container[key]).__name__}."
                     )
         for key in _SITE_STRING_KEYS:
             if key in container and container[key] is not None:
                 if not isinstance(container[key], str):
                     raise ValueError(
-                        f"'{key}' in site '{source}' must be text, got "
+                        f"'{key}' in Site '{source}' must be text, got "
                         f"{type(container[key]).__name__}. Quote the value if "
                         f"it is meant to be text."
                     )
@@ -286,7 +286,7 @@ def validate_site_keys(data: dict, source: Path | str) -> None:
             for label, value in labels.items():
                 if not isinstance(value, str):
                     raise ValueError(
-                        f"Label '{label}' in site '{source}' must be text, got "
+                        f"Label '{label}' in Site '{source}' must be text, got "
                         f"{type(value).__name__}. Selectors compare text, so "
                         f"this label matches nothing. Quote the value."
                     )
@@ -379,8 +379,9 @@ def _require_envelope_mapping(
     if value is None:
         return {}
     if not isinstance(value, dict):
+        label = kind if kind.startswith("Site") else kind.lower()
         raise ValueError(
-            f"'{key}' in {kind.lower()} '{source}' must be a mapping, got "
+            f"'{key}' in {label} '{source}' must be a mapping, got "
             f"{type(value).__name__}."
         )
     return value
@@ -666,7 +667,7 @@ def parse_selector(selector: str | None) -> dict[str, list[str]]:
                 raise SelectorParseError(
                     f"Selector key `{key}` may only appear once. Selectors "
                     f"AND across keys, so duplicating a key would always "
-                    f"match zero sites. Only `name=` supports multiple "
+                    f"match zero Sites. Only `name=` supports multiple "
                     f"values (OR-combined)."
                 )
             if value not in labels[key]:
@@ -1417,7 +1418,7 @@ class Manifest:
                 sites.append(_normalize_site_identifier(item))
             except ValueError as e:
                 raise ValueError(
-                    f"Invalid site identifier in `{path}` `sites:` list: {e}"
+                    f"Invalid Site identifier in `{path}` `sites:` list: {e}"
                 ) from e
 
         # `selector:` is the preferred manifest field. `siteSelector:` is
@@ -2037,7 +2038,7 @@ def _resolve_steps_and_params(
                 f"Include '{raw_target}' in '{manifest_path}' has a `when:` "
                 f"but its include subtree contributes manifest-level "
                 f"`parameters:`. Drop the `when:` or move the parameters onto "
-                f"individual fragment steps."
+                f"the individual steps of the included partial."
             )
 
         if not sub_steps:
@@ -2066,6 +2067,6 @@ def _validate_no_step_name_collisions(steps: list["ManifestStep"]) -> None:
             raise ValueError(
                 f"Duplicate step name '{step.name}' after include flattening. "
                 f"Step names must be unique across the entire flattened "
-                f"pipeline (parent steps and all included fragments)."
+                f"pipeline (parent steps and all included partials)."
             )
         seen.add(step.name)

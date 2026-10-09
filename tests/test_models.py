@@ -937,7 +937,7 @@ class TestManifest:
         with open(manifest_path, "w", encoding="utf-8") as f:
             yaml.dump(manifest_data, f)
 
-        with pytest.raises(ValueError, match="Invalid site identifier"):
+        with pytest.raises(ValueError, match="Invalid Site identifier"):
             Manifest.from_file(manifest_path, workspace_root=manifest_path.parent)
 
     def test_from_file_parallel_mode(self, tmp_path):
@@ -2008,11 +2008,11 @@ class TestKeyWrittenWithNoValue:
         [
             (
                 "metadata: just-a-string\nspec:\n  subscription: s\n  location: eastus\n",
-                r"'metadata' in site .* must be a mapping, got str",
+                r"'metadata' in Site .* must be a mapping, got str",
             ),
             (
                 "metadata:\n  name: n\nspec: just-a-string\n",
-                r"'spec' in site .* must be a mapping, got str",
+                r"'spec' in Site .* must be a mapping, got str",
             ),
         ],
         ids=["metadata", "spec"],
@@ -2185,14 +2185,14 @@ class TestSiteEnvelopeIsClosed:
             body = self.FLAT + f"{key}: {value}\n"
         path = self._write(tmp_path, body)
 
-        with pytest.raises(ValueError, match=rf"'{key}' in site .* must be a mapping"):
+        with pytest.raises(ValueError, match=rf"'{key}' in Site .* must be a mapping"):
             Site.from_file(path)
 
     @pytest.mark.parametrize("key", ["properties", "parameters"])
     def test_open_container_must_be_a_mapping_nested(self, tmp_path, key):
         path = self._write(tmp_path, self.NESTED + f"  {key}: not-a-map\n")
 
-        with pytest.raises(ValueError, match=rf"'{key}' in site .* must be a mapping"):
+        with pytest.raises(ValueError, match=rf"'{key}' in Site .* must be a mapping"):
             Site.from_file(path)
 
     @pytest.mark.parametrize(
@@ -2221,7 +2221,7 @@ class TestSiteEnvelopeIsClosed:
             body = body + f"{key}:{value}\n"
         path = self._write(tmp_path, body)
 
-        with pytest.raises(ValueError, match=rf"'{key}' in site .* must be text"):
+        with pytest.raises(ValueError, match=rf"'{key}' in Site .* must be text"):
             Site.from_file(path)
 
     def test_a_quoted_numeric_name_is_accepted(self, tmp_path):
@@ -2265,7 +2265,7 @@ class TestSiteEnvelopeIsClosed:
             tmp_path, self.NESTED.replace("  name: munich-dev\n", "  name:\n  - one\n  - two\n")
         )
 
-        with pytest.raises(ValueError, match=r"'name' in site .* must be text"):
+        with pytest.raises(ValueError, match=r"'name' in Site .* must be text"):
             Site.from_file(path)
 
     def test_description_is_accepted_and_not_read(self, tmp_path):
@@ -2522,7 +2522,7 @@ class TestTheIndexPathDefersToValidation:
 
         from siteops.orchestrator import Orchestrator
 
-        with pytest.raises(ValueError, match=r"'metadata' in site .* must be a mapping"):
+        with pytest.raises(ValueError, match=r"'metadata' in Site .* must be a mapping"):
             Orchestrator(workspace).load_site("n")
 
     @pytest.mark.parametrize(
@@ -2544,7 +2544,7 @@ class TestTheIndexPathDefersToValidation:
 
         from siteops.orchestrator import Orchestrator
 
-        with pytest.raises(ValueError, match=r"'name' in site .* must be text"):
+        with pytest.raises(ValueError, match=r"'name' in Site .* must be text"):
             Orchestrator(workspace).load_site("n")
 
 
@@ -2744,7 +2744,7 @@ class TestARejectedKeyIsExplainedNotJustNamed:
             Site.from_file(self._write(tmp_path, body))
 
         message = str(exc.value)
-        assert "mixes the two site shapes" in message
+        assert "mixes the two Site shapes" in message
         for field in ("`name`", "`subscription`", "`location`"):
             assert field in message
         assert "unknown" not in message

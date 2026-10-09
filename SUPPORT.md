@@ -8,10 +8,11 @@ opening a new one.
 
 ## Documentation
 
-- [README.md](README.md) - Product overview and starting points
-- [First-site quickstart](docs/getting-started.md) - Install, configure, plan, and deploy
-- [docs/](docs/) - Extended documentation
-- [docs/ci-cd-setup.md](docs/ci-cd-setup.md) - CI/CD setup guide
+- [Quick start](README.md#quick-start): install Site Ops and deploy AIO to one cluster
+- [Install Site Ops](docs/install-siteops.md): installation routes and problems
+- [Guided inputs](docs/guided-inputs.md): deploy AIO to one existing cluster
+- [Documentation by task](docs/README.md): extended documentation
+- [CI/CD setup](docs/ci-cd-setup.md): run deployments in automation
 
 ## Microsoft Support Policy
 

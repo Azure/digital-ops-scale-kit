@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from release_fleet import SLOTS, FleetScope, check_admission, expected_document
-from siteops_release_assets import FrozenReleaseAssets, publication_assets
+from siteops_release_assets import ENGINE_REFERENCE_FILES, FrozenReleaseAssets, publication_assets
 from workspace_engine import EngineSelection
 
 from siteops.artifacts import hash_file, load_artifact_json, open_regular_file
@@ -186,7 +186,7 @@ def check_inputs(candidate: FleetCandidate, root: Path) -> dict:
         or selection.plan_sha256 != artifacts["plan"]["sha256"]
         or workspaces.source != candidate.source
         or identities(engine_assets) != identities(selection.native.assets)
-        or identities(workspace_assets) != identities(workspaces.assets)
+        or identities(asset for asset in workspace_assets if asset.name not in ENGINE_REFERENCE_FILES) != identities(workspaces.assets)
         or (plan["siteops"]["bundle"] and (
             selection.native.source != candidate.source or selection.reference is not None
         ))

@@ -2,10 +2,10 @@
 # Consumed by `templates/host-ops/aksee-upgrade/template.bicep`.
 #
 # Only machineName is required. The Bicep derives the subscription and resource
-# group from the site context, defaults runId to the deploy time, and keeps
+# group from the Site context, defaults runId to the deploy time, and keeps
 # allowKubernetesMinorUpgrade false (patch updates only) unless overridden.
 #
-# Override per-site in `sites/<site>.yaml`. See
+# Override for each Site in `sites/<site>.yaml`. See
 # `templates/host-ops/aksee-upgrade/README.md`.
 
 machineName: "{{ site.parameters.aksee.machineName }}"

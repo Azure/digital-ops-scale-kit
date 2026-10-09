@@ -1,4 +1,4 @@
-# Shared provider selections for the advanced resource-set sample
+# Shared provider selections for the advanced resource set sample
 
 apiVersion: siteops/v1
 kind: SiteTemplate
@@ -7,10 +7,6 @@ inherits: ../base-site.yaml
 
 subscription: "00000000-0000-0000-0000-000000000000"
 location: westus2
-
-labels:
-  country: US
-  region: americas
 
 properties:
   resourceSets:

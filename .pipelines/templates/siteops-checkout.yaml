@@ -1,0 +1,16 @@
+parameters:
+  - name: templateRepository
+    type: string
+    default: self
+
+steps:
+  - checkout: self
+    ${{ if ne(parameters.templateRepository, 'self') }}:
+      path: s/siteops-inputs
+    fetchDepth: 1
+    persistCredentials: false
+  - ${{ if ne(parameters.templateRepository, 'self') }}:
+      - checkout: ${{ parameters.templateRepository }}
+        path: s/siteops-automation
+        fetchDepth: 1
+        persistCredentials: false

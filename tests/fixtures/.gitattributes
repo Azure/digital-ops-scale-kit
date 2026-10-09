@@ -1,3 +1,2 @@
 bootstrap-harness.sh text eol=lf
 bootstrap-ubuntu24-os-release text eol=lf
-bootstrap-azurelinux3-os-release text eol=lf

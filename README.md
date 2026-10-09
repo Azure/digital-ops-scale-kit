@@ -1,86 +1,102 @@
 # Digital Operations Scale Kit
 
-**Fleet-scale Azure infrastructure deployment.**
+**Azure infrastructure deployment at fleet scale.**
 
 > [!NOTE]
-> This project is under active development. If you're an Azure IoT Operations customer or interested in fleet-scale deployment, reach out at <aioteam@microsoft.com>.
+> This project is under active development. If you're an Azure IoT Operations customer or interested in deployment at fleet scale, reach out at <aioteam@microsoft.com>.
 
-Deploy Azure IoT Operations, or any Azure infrastructure, across dozens of sites with a single command. Per-site customization, parallel execution, and failure isolation built in.
+Deploy Azure IoT Operations, or any Azure infrastructure, across dozens of Sites with a single command. Customization for each Site, parallel execution, and failure isolation are built in.
 
 ---
 
 ## Why Scale Kit?
 
 Keep one deployment workflow for your fleet and change only what varies by
-site. Scale Kit combines reusable deployment content with Site Ops, the CLI
-that runs it across your selected targets.
+Site. Scale Kit combines reusable manifests, templates and parameters with
+Site Ops, the CLI that runs them across your selected Sites.
 
-- **Reuse the same deployment across sites.** Compose templates and ordered
-  steps once, then supply each site's subscription, resource group, and settings.
-- **Target the right part of your fleet.** Select one site, an environment,
+- **Reuse the same manifest across Sites.** Compose templates and ordered
+  steps once, then supply each Site's subscription, resource group, and settings.
+- **Target the right part of your fleet.** Select one Site, an environment,
   or a labeled group with the same command.
 - **Review before making changes.** Validate configuration and inspect a plan
   before submitting deployments.
-- **See what happened at each site.** Run sites concurrently with failure
+- **See what happened at each Site.** Run Sites concurrently with failure
   isolation, and distinguish completed, failed, and skipped operations.
 
-The same workspace and commands work locally and in CI/CD. Site Ops runs on
-demand, with no persistent orchestration service to operate.
+The same `plan` and `deploy` commands run locally and in CI/CD, where the
+shipped pipelines select a workspace in your repository with `-w`. Site Ops
+runs on demand, with no persistent orchestration service to operate.
 
 ## Scale Kit and Site Ops
 
-**Scale Kit** provides the deployment content and examples. Its included
+**Scale Kit** provides the content: manifests, templates, parameters and
+samples. Its included
 IoT Operations workspace covers AIO installation, upgrades, workload resources,
 and host lifecycle operations.
 
 **Site Ops** is the reusable engine. It orchestrates your Bicep, ARM, kubectl,
 and wait steps, so you can also use it with infrastructure beyond AIO.
 
-A **site** describes a target and its settings. A **manifest** describes the
-steps to run. A **workspace** groups those files with their templates and
-parameters. Reusing a manifest across sites keeps deployment logic separate
-from environment-specific configuration.
+A **Site** describes one deployment target and its settings. A **manifest**
+describes the steps to run. A **workspace** groups those files with their
+templates and parameters. Reusing a manifest across Sites keeps deployment
+logic separate from the configuration of each environment.
 
 ## Quick start
 
-Start with one existing Arc-connected cluster. You do not need a repository
+Start with one existing cluster connected to Azure Arc. You do not need a repository
 clone, saved Site or project pin.
 
 ### Install Site Ops
 
-Follow the selected release's generated installation instructions, using a
-compatible engine and complete IoT Operations workspace.
+Use the selected release's generated installation instructions. They install
+the Site Ops engine only.
 
 | Your environment | Installation route |
 |---|---|
-| uv is already available | Use the exact [release-wheel command](docs/install-siteops.md#install-the-release-wheel). Dependencies come from your approved uv package feed. |
+| uv is already available | Use the exact [release wheel command](docs/install-siteops.md#install-the-release-wheel). Dependencies come from your approved uv package feed. |
 | You need installation tooling | Use the generated [Windows or Linux bootstrap](docs/install-siteops.md#bootstrap-from-https). It proposes tool changes and verifies the installation archive. |
 
 For independent script provenance before any installer code runs, use the
-[verified bootstrap entry](docs/install-siteops.md#verify-the-bootstrap-script).
-When choosing the bootstrap, add `--enroll-source official` or
-`-EnrollSource official` to approve the official content source explicitly.
-It can also provision Azure CLI with `--with-azure-cli` or `-WithAzureCli`.
-Other installation routes use [independent source enrollment](docs/projects.md#use-an-approved-source).
-Installing the CLI alone does not acquire or approve workspace content.
+[verified bootstrap route](docs/install-siteops.md#verify-the-bootstrap-script).
+Site Ops uses GitHub CLI 2.95 or newer, without a login, to verify published
+content. The bootstrap also needs it, along with `curl`, and reports when
+Azure CLI is missing.
+Installing the CLI alone does not acquire workspace content or enroll a
+source.
+
+### Enroll the official content source
+
+Enroll the official publisher once, under a name you choose. This example
+uses `official`:
+
+```text
+siteops source enroll official
+```
+
+The enrollment accepts releases that the official publisher builds from
+its main branch, for 30 days. Run the same command again to renew. The bootstrap
+does the same when you add `--enroll-source official` or
+`-EnrollSource official`. See [approved sources](docs/projects.md#use-an-approved-source)
+for other publishers and custom policies.
 
 ### Deploy AIO
 
-Use an authorized Azure CLI identity and the source/version identified by
-your release instructions. `official` is an independently approved consumer
-alias, not authority supplied by downloaded content. Replace the cluster
+Use an authorized Azure CLI identity and the release named by your release
+instructions. `official` is the approved source you enrolled independently
+above, not authority supplied by downloaded content. Replace the cluster
 placeholder with its full ARM resource ID:
 
 ```text
 siteops deploy aio-install --source "official@<release>" --input "cluster=<Arc-cluster-resource-ID>"
 ```
 
-Deploy prepares an executable plan once, displays its target and operation
-scope in a private terminal, asks for confirmation, then executes that same
-plan. Declared resource-ID answers authorize bounded Azure reads. Publisher
-trust, read access and permission to deploy remain separate. For CI, JSON
-output or any unattended invocation, pass `--yes` to approve execution
-explicitly. It does not bypass validation or source approval. The command
+The command reads the cluster to fill in its subscription, resource group
+and region. In a private terminal, it shows the Sites and operations of
+one prepared plan and asks for confirmation before executing that plan. For
+CI, JSON output or any other unattended run, pass `--yes` to confirm
+execution. Validation and approved source checks still apply. The command
 does not sign you in, and deployment can incur charges. Follow the
 [outcome check](docs/guided-inputs.md#check-the-result) after deployment.
 
@@ -90,36 +106,36 @@ To enable Secret Sync on an existing AIO 2607 or 2608 instance without
 reinstalling, use the instance ID with the
 [standalone Secret Sync route](docs/guided-inputs.md#enable-secret-sync-on-an-existing-instance).
 [Guided inputs](docs/guided-inputs.md) covers optional names and labels,
-answer files, manual targets and all three routes. `plan` is available
+answer files, manually described Sites and all three routes. `plan` is available
 when you want a separate preview. It is not a prerequisite for deployment.
 
 ### Scale out on the same model
 
-Save Sites for repeatable fleet selection
-and optionally pin a release in an operator project. Review only the new
-targets before deploying them:
+[Save Sites](docs/guided-inputs.md#keep-a-site-for-later) for repeatable
+fleet selection and optionally pin a release in an operator project. Review
+only the new Sites before deploying them:
 
 ```text
-siteops --approved-source official project pin factory --release <release>
-siteops --approved-source official --project factory plan aio-install -l name=plant-two,name=plant-three
+siteops --approved-source official project pin ./factory --release <release>
+siteops --approved-source official --project ./factory plan aio-install -l name=plant-two,name=plant-three
 ```
 
 Deploy the same selector only after confirming it excludes already installed
 clusters. Reapplying `aio-install` can overwrite their settings. A project
-pin is an optional repeatability and `--offline-content` route, not a
-prerequisite for the single-cluster command. Local workspaces and non-AIO
-content also use the same planner and executor.
+pin is an optional route for repeatability and `--offline-content`, not a
+prerequisite for the command that deploys one cluster. Local workspaces and
+content beyond AIO also use the same planner and executor.
 See [project Sites](docs/projects.md),
 [fleet targeting](docs/targeting.md) and the
 [local checkout guide](docs/getting-started.md) for experienced workflows.
 
 ## Browse deployment choices
 
-With a pinned approved workspace, browse its packaged content without a
-checkout:
+With a workspace pinned from an approved source, browse its packaged content
+without a checkout:
 
 ```bash
-siteops --approved-source official --project factory browse aio-install
+siteops --approved-source official --project ./factory browse aio-install
 ```
 
 The following `-w` commands require a local checkout. Inspect local
@@ -133,8 +149,8 @@ siteops -w workspaces/iot-operations browse --tag mqtt
 
 Browsing reads descriptions and authored guidance without loading Site values
 or invoking deployment tools. Use the same name with `plan` and `deploy`,
-or select the explicit path shown on the card. See [browse deployment content](docs/browse-content.md)
-for filters, private JSON and the installation-to-workload journey.
+or select the explicit path shown on the card. See [browse manifests](docs/browse-content.md)
+for filters, private JSON and the journey from installation to workload.
 
 Use `browse --source` to inspect a source's published index without cloning.
 [Remote browsing](docs/remote-content.md) identifies the exact source revision

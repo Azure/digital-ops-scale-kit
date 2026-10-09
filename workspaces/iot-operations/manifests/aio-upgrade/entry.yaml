@@ -4,14 +4,14 @@ role: standalone
 category: core
 tags: [aio, upgrade]
 documentation: [README.md]
-outcome: Upgrade AIO-related extensions and resources explicitly required by the selected release.
+outcome: Upgrade the AIO extensions and the resources that the selected AIO release explicitly requires.
 prerequisites:
   - An existing AIO installation and a supported upgrade transition.
-  - A configured Site with the intended target release and permission for the selected updates.
+  - A configured Site with the intended AIO release and permission for the selected updates.
 effects:
-  - Updates extensions and release-required resources while preserving supported existing configuration.
+  - Updates extensions and the resources the AIO release requires while preserving supported existing configuration.
   - Does not perform general migrations of instance child resources.
-  - Avoid workload resource-set deployments between changing the release pin and completing the upgrade.
+  - Avoid resource set deployments between changing the AIO release pin and completing the upgrade.
 removal:
   - There is no general rollback. Review partial outcomes and recovery guidance before retrying.
-coverage: Operational synopsis. Follow the guide for release selection, supported paths and post-upgrade workload observations. Detailed input and effective permission coverage is not declared.
+coverage: Operational synopsis. Follow the guide for AIO release selection, supported paths and workload observations after the upgrade.

@@ -19,6 +19,24 @@ def default_non_integration_output_to_local(monkeypatch, request):
         monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "0")
 
 
+@pytest.fixture(autouse=True)
+def default_arc_proxy_extension_probe_to_unknown(monkeypatch, request):
+    """Keep executable planning independent of the host's Azure CLI extensions.
+
+    Planning a kubectl step runs `az extension show` to check the connectedk8s
+    extension. Unit tests record that check as inconclusive unless they set a
+    result themselves. Integration tests run the real check.
+    """
+    if request.node.get_closest_marker("integration") is not None:
+        return
+    from siteops.executor import AzureCliExtensionProbe, AzureCliExtensionStatus
+
+    monkeypatch.setattr(
+        "siteops.orchestrator.probe_azure_cli_extension",
+        lambda *_args, **_kwargs: AzureCliExtensionProbe(AzureCliExtensionStatus.UNKNOWN),
+    )
+
+
 @pytest.fixture
 def tmp_workspace(tmp_path):
     """Create a minimal workspace structure."""

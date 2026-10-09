@@ -4,7 +4,7 @@ Select one complete workspace package from a published release either
 directly with `siteops deploy <manifest> --source SOURCE@RELEASE` and
 explicit Site inputs, or with `siteops project pin --release` for
 repeatable configured Sites. Both routes require independently supplied
-consumer trust policy and trusted roots (or a separately enrolled approval).
+consumer trust policy and trusted roots (or a separately enrolled approved source).
 The release descriptor cannot select them. See
 [guided inputs](guided-inputs.md) and
 [workspace pins and configured Site execution](projects.md#run-project-pin)
@@ -69,7 +69,7 @@ lowercase SHA-256 digests. They cannot name the descriptor itself. Workspace
 paths and referenced filenames cannot collide by case. Unrelated release
 assets are allowed.
 
-An entry may also contain `index: {"sha256": "<public-index-sha256>"}`.
+A workspace record may also contain `index: {"sha256": "<public-index-sha256>"}`.
 This is optional correlation data, not an acquisition dependency. The
 descriptor does not list itself or contain its own final digest.
 
@@ -80,14 +80,15 @@ unsupported fields and numbers outside JSON syntax are rejected.
 
 ## Source identity and trust
 
-The descriptor is unsigned routing metadata. An approved source adapter
+The descriptor is unsigned routing metadata. A trusted source adapter
 establishes its expected digest and revision independently. Before parsing,
 the caller compares the descriptor bytes with that observed identity.
 
 `ResolvedReleaseSource` and `ResolvedWorkspaceSource` retain common source
 expectations without transport URLs, GitHub asset IDs, publisher policy or
 trusted roots. `check_package` compares the inspected archive identity,
-source revision, workspace root, kit ID and kit version with the selection.
+source revision, workspace root, package identifier and version (`kit`) with
+the selection.
 That comparison does not authenticate the publisher.
 
 The GitHub binding compares every declared package and proof with the
@@ -111,7 +112,7 @@ supplies the URL, permitted HTTPS origins and expected artifact identity.
 Artifact names remain descriptive and never become local output paths.
 
 The transfer uses normal TLS verification and configured proxies. It permits
-up to three redirects within the approved origins, rebuilding anonymous
+up to three redirects within the permitted origins, rebuilding anonymous
 request headers at each hop. Redirect and error bodies are closed without
 being consumed. Responses must have supported HTTP framing and identity
 content encoding. Size and SHA-256 must match before the caller receives the
@@ -131,28 +132,31 @@ GitHub metadata authentication.
 
 The internal `download_workspace_release` context resolves a GitHub release,
 downloads its descriptor and binds the selected workspace before requesting
-the package and proof. Each request addresses the observed asset ID through
-the GitHub API. Download locations are constructed by the adapter rather than
-read from the descriptor, with redirects restricted to the API and supported
-GitHub asset origins.
+the package and proof. Each download uses the release download URL on
+`https://github.com` for the observed tag and asset name, and the asset must
+belong to the observed release snapshot. Its bytes must match the size and
+SHA-256 from the observed asset listing. Download locations are constructed
+by the adapter rather than read from the descriptor, with redirects
+restricted to `https://github.com` and supported GitHub asset origins.
+Release metadata requests to `https://api.github.com` carry `GH_TOKEN` when
+it is set. `GITHUB_TOKEN` is not read, and downloads send no credentials.
 
 Package and proof files remain opaque and available only within that context.
-A failed proof download also cleans up the temporary package. Configured CLI
-authentication is rejected explicitly for this acquisition path rather than
-silently changed to anonymous access. Retained proofs and cache orchestration
-use the internal acquisition boundary below.
+A failed proof download also cleans up the temporary package. Retained proofs
+and cache orchestration use the internal acquisition boundary below.
 
 ## Acquisition and workspace pin reuse
 
 `GitHubWorkspaceAcquirer` connects release selection, retained proofs and the
 existing workspace cache. Its caller supplies a local consumer policy and
-an independently provisioned trusted root. Repository approval, policy expiry
-and root identity are checked before source resolution.
+an independently provisioned trusted root. The approved repository, policy
+expiry and root identity are checked before source resolution.
 
 `acquire` resolves the explicit release and its descriptor, then reuses valid
-cached bytes or downloads the missing proof and package by observed asset ID.
+cached bytes or downloads the missing proof and package from the observed
+release.
 The package must pass the existing detached provenance verifier before
-extraction. Source revision, workspace, kit identity and version must agree
+extraction. Source revision, workspace, package identity and version must agree
 with the selection before cache publication.
 Direct `--source SOURCE@RELEASE` performs this source resolution online on
 every invocation, including when valid package bytes are cached. It does
@@ -184,7 +188,7 @@ Stored receipts are records of evaluation, never permission to bypass it.
 
 Ordinary commands for a selected project restore missing objects identified
 by the workspace pin unless `--offline-content` was requested. That option
-restricts content acquisition, not declared Azure target reads or execution.
+restricts content acquisition, not declared Azure resource reads or execution.
 Direct `--source` requires online resolution and rejects `--offline-content`.
 Restoration requires
 the fresh release selection to equal the workspace pin before package and
@@ -193,7 +197,7 @@ that restoration.
 
 The common `WorkspaceAcquisition` layer accepts a trusted verifier supplied by
 application code. Its source expectations, proof storage and cache contracts
-contain no GitHub transport fields. Other approved providers can use the same
+contain no GitHub transport fields. Other source providers can use the same
 boundary without adding an executor or changing operator configuration.
 
 These internal APIs support

@@ -24,13 +24,29 @@ _ERROR_TEXT = MappingProxyType(
         "UNSUPPORTED_FACT": "The requested ARM resource fact is not supported.",
         "UNSUPPORTED_REFERENCE": "The requested ARM resource relationship is not supported.",
         "UNSUPPORTED_PROVIDER": "The selected ARM resource reader is not available.",
-        "TOOL_MISSING": "The selected Azure CLI could not be started.",
-        "TIMEOUT": "The ARM resource read exceeded its deadline.",
+        "TOOL_MISSING": (
+            "The selected Azure CLI could not be started. Install Azure CLI from "
+            "https://aka.ms/installazurecli and make sure `az` is on PATH."
+        ),
+        "TIMEOUT": (
+            "The ARM resource read exceeded its deadline. Check network access "
+            "to Azure, then retry."
+        ),
         "RESPONSE_LIMIT": "The ARM resource read exceeded its output limit.",
-        "NOT_FOUND": "The ARM resource was not found.",
-        "FORBIDDEN": "The selected session cannot read the ARM resource.",
-        "NOT_LOGGED_IN": "The selected Azure CLI session is not signed in.",
-        "SUBSCRIPTION_MISSING": "The subscription is not available to the selected session.",
+        "NOT_FOUND": "The ARM resource was not found. Check the resource ID.",
+        "FORBIDDEN": (
+            "The account signed in to Azure CLI cannot read the ARM resource. "
+            "Ask for a role that grants read access to it, such as Reader."
+        ),
+        "NOT_LOGGED_IN": (
+            "The selected Azure CLI session is not signed in. Run `az login`, "
+            "then retry."
+        ),
+        "SUBSCRIPTION_MISSING": (
+            "The subscription is not visible to the account signed in to Azure "
+            "CLI. Run `az account list` to see the subscriptions it can use, or "
+            "run `az login` with an account that can access the subscription."
+        ),
         "CANCELLED": "The ARM resource read was cancelled.",
         "FAILED": "The ARM resource read failed.",
     }

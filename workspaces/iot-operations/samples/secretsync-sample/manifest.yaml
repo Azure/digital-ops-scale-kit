@@ -3,25 +3,28 @@ kind: Manifest
 name: secretsync-sample
 
 description: |
-  Reference sample that synchronizes a set of Key Vault secrets to
-  Kubernetes Secrets on the target AIO cluster. Demonstrates the full
-  secret-sync data path: scalekit provisions the secretsync infrastructure
-  (managed identity, Key Vault, role assignments, federated identity
-  credential, default Secret Provider Class wired into the AIO instance),
-  writes the configured Key Vault secrets, and creates one SecretSync ARM
-  resource per distinct `kubernetesSecretName`. Entries that share a
-  `kubernetesSecretName` are grouped into one multi-key Kubernetes Secret.
-  The cluster-side SecretSync controller then materializes each group as a
-  Kubernetes Secret in the AIO namespace.
+  Synchronize sample Key Vault secrets to Kubernetes Secrets on an existing
+  AIO cluster. Enables Secret Sync, writes the configured secrets to Key
+  Vault, and creates the SecretSync resources that the cluster turns into
+  Kubernetes Secrets.
+
+  Demonstrates the full Secret Sync data path: the sample provisions the
+  Secret Sync infrastructure (managed identity, Key Vault, role assignments,
+  federated identity credential, default Secret Provider Class wired into the
+  AIO instance), writes the configured Key Vault secrets, and creates one
+  SecretSync ARM resource per distinct `kubernetesSecretName`. Entries that
+  share a `kubernetesSecretName` are grouped into one Kubernetes Secret with
+  multiple keys. The SecretSync controller on the cluster then materializes
+  each group as a Kubernetes Secret in the AIO namespace.
 
   The defaults in `secrets.yaml` are obvious sample values. It attaches at
-  manifest level, so a site or a `sites.local/` overlay overrides `secrets`
+  manifest level, so a Site or a `sites.local/` overlay overrides `secrets`
   and `secretValues`. Supply `secretValues` via a CI secret or an overlay.
   Do not commit real values.
 
   Prerequisites:
     - AIO instance must be deployed and running (run aio-install first)
-    - The site's aioRelease must point to a parameters/aio-releases/<release>.yaml file
+    - The Site's aioRelease must point to a parameters/aio-releases/<release>.yaml file
 
 parallel: 3
 

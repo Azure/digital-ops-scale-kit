@@ -1,12 +1,12 @@
 # Build a workspace package
 
 Content authors can build one `WorkspacePackage` ZIP containing a complete
-authored workspace, approved companion documentation and licensing files, and
+authored workspace, selected companion documentation and licensing files, and
 ARM JSON compiled by the producer for executable Bicep roots. Authored files
 keep their paths relative to the source. Generated templates use a separate
 namespace owned by the producer.
 
-This content artifact is separate from the Site Ops installation wheel or ZIP
+This package is separate from the Site Ops installation wheel or ZIP
 bundle. Building it performs no upload, signing, release operation or
 deployment. The producer reports `provenance: not-established`. A checksum
 and a valid package structure do not authenticate the publisher.
@@ -16,12 +16,12 @@ not deployment safety or a live AIO outcome.
 ## Produce from a reviewed commit
 
 Use a clean source checkout and the repository's development environment.
-Git, Azure CLI, an existing Azure CLI-managed Bicep installation, and the
+Git, Azure CLI, an existing Bicep installation managed by Azure CLI, and the
 declared Python dependencies must be installed. Choose an existing output
 directory outside the source checkout, or a gitignored directory. The output
 filename must be new.
 
-From the repository root, substitute your kit version and output directory:
+From the repository root, substitute your package version and output directory:
 
 ```powershell
 $commit = git rev-parse HEAD
@@ -34,6 +34,7 @@ python scripts\build-workspace-package.py `
   --requires-siteops '>=1.0.0b1,<2' `
   --require-feature manifest/v1 `
   --require-feature composition/v1 `
+  --require-feature manifest-selection/v1 `
   --include docs `
   --include README.md `
   --license LICENSE `
@@ -41,11 +42,11 @@ python scripts\build-workspace-package.py `
   --output '<absolute-output-directory>\iot-operations.zip'
 ```
 
-Use `--bicep <absolute-path>` when the provisioned Azure CLI-managed Bicep
-binary is outside the current Azure CLI configuration directory.
+Use `--bicep <absolute-path>` when the provisioned Bicep binary managed by
+Azure CLI is outside the current Azure CLI configuration directory.
 
-Use forward slashes for source-relative `--workspace`, `--include` and
-`--license` values on every platform. `--root` and `--output` are native
+Use forward slashes for `--workspace`, `--include` and `--license` values,
+which are relative to the source, on every platform. `--root` and `--output` are native
 filesystem paths. The script also runs on Linux using its ordinary Python
 invocation and shell continuation syntax.
 
@@ -57,13 +58,13 @@ An export that omits selected tracked files, such as through `export-ignore`,
 is rejected. Submodules, symbolic links and Git LFS pointers require explicit
 source preparation rather than automatic downloads.
 Source contents come from raw committed Git blobs. Archive substitutions and
-checkout line-ending settings do not rewrite the authored package files.
+checkout line ending settings do not rewrite the authored package files.
 
-The producer starts with the conventional entries and declared partials in the
+The producer starts with the conventional manifests and declared partials in the
 browse inventory. It then uses the engine parser to recognize additional
 parseable manifests throughout the workspace, including manifests available
 only by explicit path, extensionless manifests and valid manifests without a
-`kind`. Name-based browse discovery keeps its existing inventory rules.
+`kind`. Browse discovery by name keeps its existing inventory rules.
 
 The producer expands includes and compiles distinct deployment template paths,
 not every Bicep module. It does not construct Sites, apply overlays or resolve
@@ -77,8 +78,8 @@ path. Bicep roots are compiled to
 `.siteops/compiled/v1/<source-path>.json`. Authored content cannot use the
 `.siteops/compiled` namespace.
 
-Package compilation uses an absolute Azure CLI path and a copied,
-already-provisioned Bicep executable. The invocation runs with isolated Azure
+Package compilation uses an absolute Azure CLI path and a copied Bicep
+executable that is already provisioned. The invocation runs with isolated Azure
 CLI configuration, user cache, and temporary directories. Azure CLI telemetry
 and automatic Bicep upgrade checks are disabled. `--no-restore` prevents
 implicit module restoration, and Azure CLI is configured to use only the
@@ -91,12 +92,12 @@ recorded by path and digest. When the workspace supplies none, the producer
 uses an explicit empty configuration outside the package source as the
 nearest boundary and records `producer-default` with its digest. Every tracked
 Bicep file in the workspace must resolve to a configuration inside the
-workspace or to that producer default. This accounts for module-level
-configuration discovery without claiming a complete module graph and keeps
-ancestor checks consistent across case-sensitive and case-insensitive
-filesystems.
+workspace or to that producer default. This accounts for configuration discovery
+at module level without claiming a complete module graph and keeps
+ancestor checks consistent across filesystems, whether or not they are case
+sensitive.
 
-The output is a JSON summary with the ZIP's SHA-256, size, kit identity and
+The output is a JSON summary with the ZIP's SHA-256, size, package identity (`kit`) and
 workspace path, plus the number of mapped deployment templates. Keep those
 exact bytes for later signing and qualification. Signing creates a detached
 attestation proof, a separate file containing signed provenance evidence.
@@ -105,7 +106,7 @@ Reconstructing another ZIP is a different artifact.
 ## Build workspaces declared by a release
 
 A content release file can declare complete workspace builds alongside its
-engine choice. The content tag supplies the kit version. Each workspace names
+engine choice. The content tag supplies the package version. Each workspace names
 its own package, compatibility range and licensing files:
 
 ```json
@@ -120,7 +121,7 @@ its own package, compatibility range and licensing files:
       "package": "iot-operations.zip",
       "compatibility": {
         "siteops": ">=1.0.0b1,<2",
-        "requiredFeatures": ["manifest/v1", "composition/v1"]
+        "requiredFeatures": ["manifest/v1", "composition/v1", "manifest-selection/v1"]
       },
       "include": ["docs", "README.md"],
       "licenses": ["LICENSE", "ThirdPartyNotices.txt"]
@@ -192,7 +193,7 @@ The producer checks declared compatibility against the selected engine
 version. This does not establish that the released engine supports the
 workspace. Consumer inspection and extraction still enforce the actual
 installed engine's version and supported features. For an individual package,
-`--target-engine-version` sets the compatibility target explicitly. It does
+`--target-engine-version` sets the target engine version explicitly. It does
 not acquire an engine or authorize consumer use.
 
 The candidate workflow uses one reusable build and signing path per workspace,
@@ -225,10 +226,10 @@ are retained with the qualification inputs.
 
 The qualification transfer path is anonymous and bounded to 128 MiB per
 native engine asset and 2 MiB per proof. It uses the existing HTTPS transfer
-boundary, restricted to approved origins. This limit applies to workspace
+boundary, restricted to permitted origins. This limit applies to workspace
 qualification, not to ordinary direct wheel installation.
 
-For each declared Windows or Linux target and Python version, a new application
+For each declared Windows or Linux platform and Python version, a new application
 environment consumes the engine's authenticated `pylock.toml` through stock
 pip. The probe runs with isolated Python imports, confirms the exact installed
 version and module location, then checks package compatibility, protected
@@ -238,7 +239,7 @@ checkout imports cannot satisfy this gate.
 The matrix also creates an operator project for the first declared workspace
 through the installed engine's normal pin API. Its release identity comes
 from the independently hashed release plan. Project publication follows
-successful checks of the complete declared package set. Every runtime target
+successful checks of the complete declared package set. Every runtime platform
 must produce the same pin digest. The receipt explicitly records that public
 release observation was not performed, since the candidate is not yet published.
 
@@ -248,15 +249,21 @@ and `--plan FILE` together to `qualify-workspace-engine.py`. The plan must match
 under the selected private state at `probe-state/operator`, with its cache
 at `probe-state/cache`. Use that cache and the generated workspace policy/root
 files when running the installed CLI with `--project` and `--offline-content`.
-This seeds prepublication test state, not a new public archive-pinning route.
+This seeds prepublication test state, not a new public route for pinning archives.
 Its temporary qualification policy does not enroll an operator source or
 authorize Azure deployment.
 
 The result reports package and catalog counts separately. It loads no operator
-Site values. It does not authorize targets, compare executable deployment
+Site values. It does not authorize deployment, compare executable deployment
 plans, deploy resources, or evaluate workload health. The final matrix gate
-requires every declared target's result to name the same frozen engine,
+requires every declared platform's result to name the same frozen engine,
 workspace inventory, release plan and candidate project pin.
+
+The release workflow projects that frozen selection into the signed
+`siteops-engine.json` reference described in [release preparation](releasing.md#preview-a-release-without-publishing).
+It records the selected engine's own source revision and bundle identities.
+The internal `workspace-engine.json` remains qualification state, not a
+public consumer contract.
 
 Native `uv tool install <wheel-url>` and the verified bootstrap are
 described in the [installation guide](install-siteops.md). The isolated
@@ -273,13 +280,13 @@ The first member, `siteops-package.json`, uses `siteops/v1alpha1` and kind
 
 | Field | Meaning |
 |---|---|
-| `kit` | Author-supplied identifier and version, independent of the engine version |
+| `kit` | Package identifier and version that the author supplies, independent of the engine version |
 | `source.revision` | Opaque source revision, without a required repository or hosting provider |
-| `workspace.root` | Package-relative workspace directory, or `.` for a root workspace |
-| `workspace.tree` | SHA-256 over the sorted workspace-relative file inventory |
+| `workspace.root` | Workspace directory relative to the package, or `.` for a root workspace |
+| `workspace.tree` | SHA-256 over the sorted file inventory, with paths relative to the workspace |
 | `compatibility` | Bounded PEP 440 Site Ops version range and required engine features |
-| `files` | Exact package-relative payload paths, raw-byte SHA-256 digests and sizes |
-| `templates` | Exact source-to-ARM-artifact mappings and producer compilation identities |
+| `files` | Exact payload paths relative to the package, SHA-256 digests of the raw bytes, and sizes |
+| `templates` | Exact mappings from source to ARM artifact, and producer compilation identities |
 
 File hashes preserve raw bytes, including line endings. The workspace tree
 uses the domain prefix `siteops.workspace-tree/v1` followed by a NUL byte and
@@ -296,8 +303,8 @@ contract, not deployment or workload qualification.
 
 ## Template mapping
 
-`templates.artifactRoot` is `.siteops/compiled/v1`. Each entry uses
-workspace-relative paths, so `source.path` is the same canonical path stored in
+`templates.artifactRoot` is `.siteops/compiled/v1`. Each mapping uses
+paths relative to the workspace, so `source.path` is the same canonical path stored in
 the manifest.
 
 ```json
@@ -344,8 +351,8 @@ the manifest.
 }
 ```
 
-A workspace-authored configuration uses `nearest-found` and adds its
-workspace-relative `path`. Native ARM JSON uses the same entry shape with
+A configuration authored in the workspace uses `nearest-found` and adds its
+`path` relative to the workspace. Native ARM JSON uses the same mapping shape with
 identical source and artifact paths and identities. It uses
 `mode: "native-arm-json"`, `invocation: ["read-arm-json"]`, and null tool
 and configuration fields.
@@ -356,16 +363,16 @@ mapping, and every mapped artifact must be valid ARM deployment JSON. Missing
 fields, unsupported toolchain modes, changed identities, malformed output,
 or generated files without mappings invalidate the package.
 
-Compiler-emitted nested template hashes are retained with
+Nested template hashes emitted by the compiler are retained with
 `compiled-output-only` coverage. They do not claim a complete source module,
-file-read, or configuration graph. Native ARM JSON records
+file read, or configuration graph. Native ARM JSON records
 `not-applicable`, or `unknown` when it contains a linked template.
 
 ## Bounded materialization
 
 Package inspection compares the expected archive SHA-256 before parsing the
-ZIP. It checks the metadata, every payload digest and current-engine
-compatibility. Materialization writes only into a newly created staging
+ZIP. It checks the metadata, every payload digest and compatibility with the
+current engine. Materialization writes only into a newly created staging
 directory. Existing files and directories are preserved.
 
 | Limit | Maximum |
@@ -381,13 +388,13 @@ directory. Existing files and directories are preserved.
 | Expansion ratio | 200 times compressed member size |
 
 The ZIP32 format supports stored and deflated regular files. It excludes
-directory entries, links, special files, duplicate or case-colliding paths,
+directory entries, links, special files, duplicate paths or paths that differ only by case,
 file/directory conflicts, encrypted members, extra fields, comments,
-multi-volume archives and ZIP64. Directories are inferred from file paths.
+archives split across volumes, and ZIP64. Directories are inferred from file paths.
 The producer stores highly compressible files when compression would exceed
 the consumer's expansion limit.
 
-Files use owner-only POSIX permissions. On Windows, staging inherits its
+Files use POSIX permissions restricted to the owner. On Windows, staging inherits its
 parent's access controls, so the caller must provide a protected parent.
 Failure removes only paths created by that materialization attempt.
 
@@ -399,23 +406,23 @@ inventory.
 ## Trust and execution boundary
 
 The package format, file identities and compatibility model contain no
-GitHub-specific requirements. The current producer reads exact Git commits.
-Other approved producers can create the same package format.
+requirements specific to GitHub. The current producer reads exact Git commits.
+Other producers can create the same package format.
 
 These integrity and materialization primitives are not a trusted acquisition
-command. Remote use requires consumer-owned provenance policy before
+command. Remote use requires provenance policy owned by the consumer before
 materialization, a protected cache with atomic publication, and separate
-operator-owned Site configuration. Packaged example Sites must not silently
-become deployment targets. A direct `--source SOURCE@RELEASE` command
+Site configuration owned by the operator. Packaged example Sites must not
+silently become operator Sites. A direct `--source SOURCE@RELEASE` command
 selects one verified package online but still requires explicit Site
 inputs unless `--project` supplies the operator's configured Sites.
-It does not change a project pin. A pin is the repeatable fleet and
-`--offline-content` route.
+It does not change a project pin. A pin is the route for repeatable fleets
+and `--offline-content`.
 
 Producer compilation is limited to the selected source snapshot, but Bicep
-does not expose an allowed-root switch or a complete file-read graph. The
-mapping therefore does not claim complete dependency coverage. Engine-owned
-manifest and parameter path confinement remains part of the acquired
+does not expose a switch for allowed roots or a complete file read graph. The
+mapping therefore does not claim complete dependency coverage. The engine's
+confinement of manifest and parameter paths remains part of the acquired
 execution boundary.
 
 `MaterializedPackageBinding.bind(inspection, package_root, manifest)` provides
@@ -430,14 +437,14 @@ Pass that binding to
 `Orchestrator(..., site_config_root=<project>, materialized_package=binding)`.
 The Site configuration root is required and must stay outside package content.
 For direct source use without a project, the CLI uses temporary private
-operator configuration for one explicit target, not packaged example Sites.
-Packaged example Sites therefore remain content rather than deployment
-targets. Runtime Site values, overlays, selection, and prior-operation outputs
+operator configuration for one explicit Site, not packaged example Sites.
+Packaged example Sites therefore remain examples rather than operator
+Sites. Runtime Site values, overlays, selection, and outputs of prior operations
 continue through the ordinary planner and executor.
 
-The caller owns source-provenance verification and an immutable cache lease for
+The caller owns verification of source provenance and an immutable cache lease for
 the binding's full lifetime. A parsed receipt, package metadata, or a
-cache-shaped path does not establish that authority. The engine detects
+path shaped like the cache does not establish that authority. The engine detects
 unexpected paths, links, path aliases, and inventory drift at its validation
 points. It does not provide an OS sandbox against another process running as
 the same user.
@@ -461,13 +468,13 @@ protected storage layout through a separate cache without acquiring executable
 packages.
 
 `publish` copies an opaque local archive into private staging, verifies its
-expected SHA-256 and consumer-owned provenance, then extracts and validates
+expected SHA-256 and the provenance that consumer policy requires, then extracts and validates
 the complete package before publishing it atomically. Existing valid objects
 are reused. Changed or incomplete objects fail rather than being repaired
 in place.
 
 `lease` checks the retained archive, materialized inventory, source revision,
-current-engine compatibility and consumer verification policy before returning
+compatibility with the current engine and consumer verification policy before returning
 a `CachedWorkspace`. Keep that shared lease open through browsing, planning
 and execution. Its `bind` method uses the same manifest resolver and
 `MaterializedPackageBinding` as other acquired execution callers.
@@ -477,7 +484,7 @@ and execution. Its `bind` method uses the same manifest resolver and
 | Windows | `%LOCALAPPDATA%\siteops\cache` |
 | Linux | `$XDG_CACHE_HOME/siteops`, or `~/.cache/siteops` |
 
-`SITEOPS_CACHE_DIR` is the single cache-root override. It must select an
+`SITEOPS_CACHE_DIR` is the single override for the cache root. It must select an
 absolute directory. Cache root resolution is lazy until the storage API is
 used. Cache directory selection does not select a workspace, source or trust
 policy.
@@ -486,7 +493,7 @@ The cache retains the ZIP and its extracted package beneath
 `objects/sha256/<digest>/`, with verification receipts outside those immutable
 objects. Every use invokes the caller's trusted verifier. A stored receipt
 never authorizes execution by itself. A verifier with retained local proof
-and trusted-root inputs can support offline reuse without a source request.
+and trusted root inputs can support offline reuse without a source request.
 The storage layer performs no downloads and does not refresh workspace pins.
 
 `retain_proof` stores exact opaque verification inputs at
@@ -503,8 +510,8 @@ without repair. Older builds that do not support this namespace may reject
 the cache. Use a separate cache directory when running such a build.
 
 Source acquisition supplies an additional source check to `publish` and
-`lease`. It compares the verified package with the selected workspace and kit
-before publication or use. See [workspace sources](workspace-sources.md) for
+`lease`. It compares the verified package with the selected workspace and package
+identity before publication or use. See [workspace sources](workspace-sources.md) for
 the download, policy and pinned reuse flow.
 
 New directories use private POSIX modes or an explicit Windows DACL for the
@@ -513,9 +520,9 @@ controls are checked rather than changed. Choose a local filesystem location
 whose ancestors prevent replacement by other users. An existing unmarked
 directory, a filesystem alias or a shared cache path is rejected.
 Windows native declarations and the current process SID may be cached.
-Per-node access-control checks are not cached.
+Access control checks for each node are not cached.
 
-Shared process-held leases allow concurrent readers. Publication requires an
+Shared leases held by processes allow concurrent readers. Publication requires an
 exclusive lease for the package digest, and the operating system releases
 leases when a process exits. Lease coordination protects cooperating Site Ops
 operations, not against another process running as the same user. Corrupt
@@ -530,4 +537,4 @@ See [remote browsing](remote-content.md#use-cached-metadata-with-browse).
 
 Operator Sites, overlays, pins and run state remain outside the cache.
 Use [cache maintenance](cache.md) to inspect storage or remove a selected
-entry. Automatic pruning is not implemented.
+entry. Site Ops removes cached content only when you ask it to.

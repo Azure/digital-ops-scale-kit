@@ -32,21 +32,28 @@ from siteops.executor import (
     ARC_PROXY_MAX_SLOTS,
     ARC_PROXY_PORT_BASE,
     ARC_PROXY_PORT_SPACING,
+    AZURE_CLI_EXTENSION_PROBE_TIMEOUT_SECONDS,
     DEFAULT_AZ_TIMEOUT_SECONDS,
     DEFAULT_DEPLOYMENT_SUBMIT_TIMEOUT_SECONDS,
     DEFAULT_KUBECTL_TIMEOUT_SECONDS,
     ENGINE_TIMEOUT_SENTINEL,
     HTTPS_URL_PATTERN,
     AzCliExecutor,
+    AzureCliExtensionProbe,
+    AzureCliExtensionStatus,
     DeploymentResult,
     KubectlResult,
+    UnconfirmedCompletion,
     _allocate_arc_port_slot,
     _allocated_arc_port_slots,
     _arc_port_lock,
+    _arc_proxy_port_open,
+    _arc_proxy_timeout_message,
     _compute_probe_phase_budget,
     _probe_arc_proxy_ready,
     _ProxyOutputDrainer,
     _release_arc_port_slot,
+    probe_azure_cli_extension,
 )
 from siteops.runtime import TEMP_DIR_ENV, RuntimePathError, RuntimePaths
 
@@ -687,10 +694,10 @@ class TestDeployResourceGroup:
             )
 
         assert result.success is True
-        assert "--no-wait" in calls[0]
+        assert "--no-wait" in calls[0] and "--no-prompt" in calls[0]
         assert calls[0][:3] == ["deployment", "group", "create"]
         assert calls[1][:3] == ["deployment", "group", "show"]
-        assert "--no-wait" not in calls[1]
+        assert "--no-wait" not in calls[1] and "--no-prompt" not in calls[1]
 
     def test_deploy_resource_group_failure(self, tmp_workspace, sample_bicep_template, monkeypatch):
         executor = AzCliExecutor(workspace=tmp_workspace)
@@ -1126,7 +1133,8 @@ class TestDeployResourceGroup:
             )
 
         assert result.success is False
-        assert "Azure CLI (az) not found" in result.error
+        assert "Azure CLI (`az`) was not found on PATH" in result.error
+        assert "https://aka.ms/installazurecli" in result.error
 
 
 class TestDeploySubscription:
@@ -3105,3 +3113,440 @@ class TestTheArcProxyKubeconfigIsEngineOwned:
             assert list(executor.tmp_dir.iterdir()) == []
         finally:
             executor.close()
+
+
+# Azure CLI stderr captured for a subscription that the account signed in to
+# Azure CLI cannot see. Azure CLI rejects it locally, before any request
+# reaches Azure.
+_SUBSCRIPTION_NOT_FOUND_STDERR = (
+    "ERROR: Subscription '00000000-0000-0000-0000-000000000001' not found. "
+    "Check the spelling and casing and try again.\n"
+)
+_TENANT_LEVEL_ACCOUNT_STDERR = (
+    "ERROR: Subscription '00000000-0000-0000-0000-000000000001' not found. "
+    "Profile has tenant-level account only.\n"
+)
+# What `az connectedk8s proxy` prints when the extension is missing and stdin
+# cannot answer its install prompt.
+_EXTENSION_PROMPT_REFUSED_STDERR = (
+    "ERROR: The command requires the extension connectedk8s. Unable to prompt "
+    "for extension install confirmation as no tty available. Run 'az config "
+    "set extension.use_dynamic_install=yes_without_prompt' to allow installing "
+    "extensions without prompt.\n"
+)
+_EXTENSION_NOT_INSTALLED_STDERR = (
+    "ERROR: The extension connectedk8s is not installed. Please install the "
+    "extension via `az extension add -n connectedk8s`.\n"
+)
+# Captured on Windows, where the null device counts as a terminal: Azure CLI
+# writes its install question to stdout and then fails reading the answer.
+_EXTENSION_PROMPT_WINDOWS_STDOUT = (
+    "The command requires the extension connectedk8s. Do you want to install it "
+    "now? The command will continue to run after the extension is installed. "
+    "(Y/n): "
+)
+_END_OF_INPUT_STDERR = (
+    "ERROR: The command failed with an unexpected error. Here is the traceback:\n"
+    "ERROR: EOF when reading a line\n"
+    "Traceback (most recent call last):\n"
+    '  File "knack/prompting.py", line 22, in _input\n'
+    "EOFError: EOF when reading a line\n"
+)
+# Captured with `extension.use_dynamic_install` set to `no`.
+_EXTENSION_NOT_RECOGNIZED_STDERR = (
+    "ERROR: 'connectedk8s' is misspelled or not recognized by the system.\n"
+    "If the command is from an extension, please make sure the corresponding "
+    "extension is installed.\n"
+)
+# Azure CLI's question for a template parameter without a value, and its error
+# where stdin is not a terminal.
+_PARAMETER_PROMPT_STDOUT = "Please provide string value for 'location' (? for help): "
+_MISSING_PARAMETERS_STDERR = "ERROR: Missing input parameters: location\n"
+
+
+class TestAzureCliNeverWaitsForInput:
+    """Every `az` process gets empty stdin, so a prompt fails instead of blocking."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated_slots(self):
+        with _arc_port_lock:
+            _allocated_arc_port_slots.clear()
+        with patch("siteops.executor.os.killpg", create=True), \
+             patch("siteops.executor.os.getpgid", create=True):
+            yield
+        with _arc_port_lock:
+            _allocated_arc_port_slots.clear()
+
+    def test_run_az_gives_az_empty_stdin(self, tmp_workspace):
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        executor._az_path = "/usr/bin/az"
+        captured: dict[str, object] = {}
+
+        def fake_run(cmd, **kwargs):
+            captured.update(kwargs)
+            return MagicMock(returncode=0, stdout="{}", stderr="")
+
+        with patch("siteops.executor.subprocess.run", side_effect=fake_run):
+            executor._run_az(["deployment", "group", "create"])
+
+        assert captured["stdin"] is subprocess.DEVNULL
+
+    def test_arc_proxy_gives_az_empty_stdin(self, tmp_workspace):
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        executor._az_path = "/usr/bin/az"
+        process = MagicMock()
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        process.stdout = io.StringIO("")
+        process.stderr = io.StringIO("")
+        popen = MagicMock(return_value=process)
+
+        try:
+            with patch("siteops.executor.subprocess.Popen", popen), \
+                 patch("siteops.executor._probe_arc_proxy_ready", return_value=True):
+                with executor._arc_proxy("cluster", "rg", "sub") as kubeconfig:
+                    assert kubeconfig is not None
+        finally:
+            executor.close()
+
+        assert popen.call_args.kwargs["stdin"] is subprocess.DEVNULL
+
+
+class TestSubscriptionNotVisible:
+    """Azure CLI's local subscription refusal is a definite failure, not an unknown one."""
+
+    @pytest.mark.parametrize(
+        "stderr", [_SUBSCRIPTION_NOT_FOUND_STDERR, _TENANT_LEVEL_ACCOUNT_STDERR]
+    )
+    def test_submit_fails_without_an_unconfirmed_effect(
+        self, tmp_workspace, sample_bicep_template, stderr
+    ):
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        executor._az_path = "/usr/bin/az"
+
+        def submit(args, timeout=None, **kwargs):
+            if "show" in args:
+                raise AssertionError("A rejected submission must not be polled.")
+            return False, "", stderr
+
+        with patch.object(executor, "_run_az", side_effect=submit) as run_az:
+            result = executor.deploy_resource_group(
+                subscription="00000000-0000-0000-0000-000000000001",
+                resource_group="rg-test",
+                template_path=sample_bicep_template,
+                parameters={},
+                deployment_name="test-deploy",
+                step_name="step-1",
+                site_name="site-1",
+            )
+
+        assert run_az.call_count == 1
+        assert result.success is False
+        assert result.unconfirmed is None
+        assert result.error.startswith(
+            "The target subscription is not visible to the account signed in to "
+            "Azure CLI. No deployment was started."
+        )
+        assert "`az account list`" in result.error
+        assert stderr.strip() in result.error
+
+    def test_wait_poll_fails_fast_with_the_same_cause(self, tmp_workspace):
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        condition = SimpleNamespace(
+            type="arm-tag",
+            resource_id="/subscriptions/x/resourceGroups/rg/providers/A.B/c/d",
+            tag_key="state",
+            expected_value="ready",
+            failure_pattern=None,
+        )
+        with patch.object(
+            executor, "_run_az", return_value=(False, "", _TENANT_LEVEL_ACCOUNT_STDERR)
+        ):
+            state, observed, error = executor._evaluate_arm_tag(condition, "sub")
+
+        assert state.value == "failed"
+        assert observed is None
+        assert "not visible to the account signed in to Azure CLI" in error
+        assert "No deployment was started" not in error
+
+
+class TestMissingParameterPrompt:
+    """A parameter question Azure CLI cannot ask stops the submission definitely."""
+
+    @pytest.mark.parametrize(("stdout", "stderr"), [
+        ("", _MISSING_PARAMETERS_STDERR),
+        (_PARAMETER_PROMPT_STDOUT, _END_OF_INPUT_STDERR),
+    ])
+    def test_submit_fails_without_an_unconfirmed_effect(
+        self, tmp_workspace, sample_bicep_template, stdout, stderr,
+    ):
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        executor._az_path = "/usr/bin/az"
+
+        def submit(args, timeout=None, **kwargs):
+            if "show" in args:
+                raise AssertionError("A rejected submission must not be polled.")
+            return False, stdout, stderr
+
+        with patch.object(executor, "_run_az", side_effect=submit) as run_az:
+            result = executor.deploy_resource_group(
+                subscription="sub",
+                resource_group="rg-test",
+                template_path=sample_bicep_template,
+                parameters={},
+                deployment_name="test-deploy",
+                step_name="step-1",
+                site_name="site-1",
+            )
+
+        assert run_az.call_count == 1
+        assert result.success is False
+        assert result.unconfirmed is None
+        assert result.error.startswith(
+            "Template parameters have no value, so the deployment was rejected "
+            "before any resource changed."
+        )
+        assert "location" in result.error
+
+    def test_end_of_input_without_a_parameter_question_stays_unconfirmed(
+        self, tmp_workspace, sample_bicep_template,
+    ):
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        executor._az_path = "/usr/bin/az"
+
+        with patch.object(
+            executor, "_run_az", return_value=(False, "", _END_OF_INPUT_STDERR)
+        ):
+            result = executor.deploy_resource_group(
+                subscription="sub",
+                resource_group="rg-test",
+                template_path=sample_bicep_template,
+                parameters={},
+                deployment_name="test-deploy",
+                step_name="step-1",
+                site_name="site-1",
+            )
+
+        assert result.success is False
+        assert result.unconfirmed is UnconfirmedCompletion.SUBMIT_UNCLASSIFIED
+
+
+class TestArcProxyStartupDiagnostics:
+    """The startup failure names what was observed, and only that."""
+
+    @pytest.fixture(autouse=True)
+    def _isolated_slots(self):
+        with _arc_port_lock:
+            _allocated_arc_port_slots.clear()
+        with patch("siteops.executor.os.killpg", create=True), \
+             patch("siteops.executor.os.getpgid", create=True):
+            yield
+        with _arc_port_lock:
+            _allocated_arc_port_slots.clear()
+
+    def test_message_says_bound_only_when_the_port_opened(self):
+        opened = _arc_proxy_timeout_message(47021, bound=True)
+        unopened = _arc_proxy_timeout_message(47021, bound=False)
+
+        assert "opened local port 47021 but did not become responsive" in opened
+        assert "did not open local port 47021" in unopened
+        assert "bound" not in unopened
+        assert "opened" not in unopened
+
+    def test_port_check_reflects_a_listener(self):
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        try:
+            assert _arc_proxy_port_open(port) is True
+        finally:
+            listener.close()
+        assert _arc_proxy_port_open(port) is False
+
+    @pytest.mark.parametrize(("bound", "expected"), [
+        (False, "did not open local port"),
+        (True, "opened local port"),
+    ])
+    def test_timeout_reports_whether_the_port_opened(
+        self, tmp_workspace, caplog, bound, expected
+    ):
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        executor._az_path = "/usr/bin/az"
+        alive = MagicMock()
+        alive.poll.return_value = None
+        alive.wait.return_value = 0
+        alive.stdout = io.StringIO("")
+        alive.stderr = io.StringIO("")
+
+        try:
+            with patch("siteops.executor.subprocess.Popen", MagicMock(return_value=alive)), \
+                 patch("siteops.executor._probe_arc_proxy_ready", return_value=False), \
+                 patch("siteops.executor._arc_proxy_port_open", return_value=bound), \
+                 caplog.at_level(logging.ERROR, logger="siteops.executor"):
+                with executor._arc_proxy("cluster", "rg", "sub") as kubeconfig:
+                    assert kubeconfig is None
+        finally:
+            executor.close()
+
+        messages = " ".join(record.getMessage() for record in caplog.records)
+        assert expected in messages
+        if not bound:
+            assert "bound" not in messages
+
+    @pytest.mark.parametrize(("stdout", "stderr"), [
+        ("", _EXTENSION_PROMPT_REFUSED_STDERR),
+        (_EXTENSION_PROMPT_WINDOWS_STDOUT, _END_OF_INPUT_STDERR),
+        ("", _EXTENSION_NOT_RECOGNIZED_STDERR),
+        ("", _EXTENSION_NOT_INSTALLED_STDERR),
+    ])
+    def test_missing_extension_names_the_install_command(
+        self, tmp_workspace, caplog, stdout, stderr,
+    ):
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        executor._az_path = "/usr/bin/az"
+        exited = MagicMock()
+        exited.poll.return_value = 1
+        exited.stdout = io.StringIO(stdout)
+        exited.stderr = io.StringIO(stderr)
+
+        try:
+            with patch("siteops.executor.subprocess.Popen", MagicMock(return_value=exited)), \
+                 patch("siteops.executor._probe_arc_proxy_ready", return_value=False), \
+                 caplog.at_level(logging.ERROR, logger="siteops.executor"):
+                with executor._arc_proxy("cluster", "rg", "sub") as kubeconfig:
+                    assert kubeconfig is None
+        finally:
+            executor.close()
+
+        messages = " ".join(record.getMessage() for record in caplog.records)
+        assert "Arc proxy needs the Azure CLI connectedk8s extension" in messages
+        assert "`az extension add --name connectedk8s`" in messages
+
+    def test_an_extension_installed_on_first_use_is_not_reported_missing(
+        self, tmp_workspace, caplog,
+    ):
+        executor = AzCliExecutor(workspace=tmp_workspace)
+        executor._az_path = "/usr/bin/az"
+        exited = MagicMock()
+        exited.poll.return_value = 1
+        exited.stdout = io.StringIO("")
+        exited.stderr = io.StringIO(
+            "WARNING: The command requires the extension connectedk8s. It will be "
+            "installed first.\nERROR: Authentication failed.\n"
+        )
+
+        try:
+            with patch("siteops.executor.subprocess.Popen", MagicMock(return_value=exited)), \
+                 patch("siteops.executor._probe_arc_proxy_ready", return_value=False), \
+                 caplog.at_level(logging.ERROR, logger="siteops.executor"):
+                with executor._arc_proxy("cluster", "rg", "sub") as kubeconfig:
+                    assert kubeconfig is None
+        finally:
+            executor.close()
+
+        messages = " ".join(record.getMessage() for record in caplog.records)
+        assert "Arc proxy exited unexpectedly" in messages
+        assert "needs the Azure CLI connectedk8s extension" not in messages
+
+
+class TestProbeAzureCliExtension:
+    """`az extension show` decides availability locally and never blocks a plan alone."""
+
+    def _run(self, *, returncode=0, stdout="", stderr="", captured=None):
+        def fake_run(cmd, **kwargs):
+            if captured is not None:
+                captured["cmd"] = cmd
+                captured.update(kwargs)
+            return subprocess.CompletedProcess(cmd, returncode, stdout=stdout, stderr=stderr)
+
+        return fake_run
+
+    def test_installed_extension_reports_its_version(self):
+        captured: dict[str, object] = {}
+        document = {"name": "connectedk8s", "version": "1.11.1", "path": "C:/private"}
+        with patch(
+            "siteops.executor.subprocess.run",
+            side_effect=self._run(stdout=json.dumps(document), captured=captured),
+        ):
+            probe = probe_azure_cli_extension("/usr/bin/az")
+
+        assert probe == AzureCliExtensionProbe(AzureCliExtensionStatus.INSTALLED, "1.11.1")
+        assert captured["cmd"][1:5] == ["extension", "show", "--name", "connectedk8s"]
+        assert captured["stdin"] is subprocess.DEVNULL
+        assert captured["timeout"] == AZURE_CLI_EXTENSION_PROBE_TIMEOUT_SECONDS
+
+    def test_installed_extension_without_a_version_is_still_installed(self):
+        with patch("siteops.executor.subprocess.run", side_effect=self._run(stdout="not json")):
+            probe = probe_azure_cli_extension("/usr/bin/az")
+
+        assert probe == AzureCliExtensionProbe(AzureCliExtensionStatus.INSTALLED, None)
+
+    def test_not_installed_is_missing(self):
+        responses = {
+            "extension": (1, "", _EXTENSION_NOT_INSTALLED_STDERR),
+            "config": (
+                1,
+                "",
+                "ERROR: Configuration 'extension.use_dynamic_install' is not set.\n",
+            ),
+        }
+        calls: list[list[str]] = []
+        with patch(
+            "siteops.executor.subprocess.run",
+            side_effect=self._dispatch(responses, calls),
+        ):
+            probe = probe_azure_cli_extension("/usr/bin/az")
+
+        assert probe.status is AzureCliExtensionStatus.MISSING
+        assert calls[1][1:4] == ["config", "get", "extension.use_dynamic_install"]
+
+    @pytest.mark.parametrize("config", [
+        (0, json.dumps({"name": "use_dynamic_install", "value": "yes_without_prompt"}), ""),
+        (1, "", "ERROR: 'config' is misspelled or not recognized by the system.\n"),
+        subprocess.TimeoutExpired(cmd="az", timeout=20),
+    ])
+    def test_install_on_first_use_or_unreadable_setting_is_unknown(self, config):
+        """Azure CLI set to install extensions without a prompt adds a missing one itself."""
+        responses = {
+            "extension": (1, "", _EXTENSION_NOT_INSTALLED_STDERR),
+            "config": config,
+        }
+        with patch(
+            "siteops.executor.subprocess.run",
+            side_effect=self._dispatch(responses, []),
+        ):
+            probe = probe_azure_cli_extension("/usr/bin/az")
+
+        assert probe.status is AzureCliExtensionStatus.UNKNOWN
+
+    def _dispatch(self, responses, calls):
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            assert kwargs["stdin"] is subprocess.DEVNULL
+            response = responses[cmd[1]]
+            if isinstance(response, BaseException):
+                raise response
+            returncode, stdout, stderr = response
+            return subprocess.CompletedProcess(cmd, returncode, stdout=stdout, stderr=stderr)
+
+        return fake_run
+
+    @pytest.mark.parametrize("failure", [
+        subprocess.TimeoutExpired(cmd="az", timeout=20),
+        OSError("cannot start"),
+    ])
+    def test_an_inconclusive_probe_is_unknown(self, failure):
+        with patch("siteops.executor.subprocess.run", side_effect=failure):
+            probe = probe_azure_cli_extension("/usr/bin/az")
+
+        assert probe.status is AzureCliExtensionStatus.UNKNOWN
+
+    def test_an_unrecognized_error_is_unknown(self):
+        with patch(
+            "siteops.executor.subprocess.run",
+            side_effect=self._run(returncode=1, stderr="ERROR: unexpected failure"),
+        ):
+            probe = probe_azure_cli_extension("/usr/bin/az")
+
+        assert probe.status is AzureCliExtensionStatus.UNKNOWN

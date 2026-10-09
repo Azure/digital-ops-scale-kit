@@ -1,4 +1,4 @@
-# Fan-in inputs into the aio-instance step, pulled from multiple upstream producers.
+# Inputs to the aio-instance step, pulled from multiple upstream producers.
 # See docs/parameter-resolution.md for the inputs/outputs convention.
 # Consumed by: aio-instance
 

@@ -75,6 +75,58 @@ def test_names_are_exact_without_fuzzy_fallback(selection):
     assert failed.value.code == "lookup.missing"
 
 
+@pytest.mark.parametrize(("selection", "suggested"), [("instal", "install"), ("zzz", None)])
+def test_missing_names_suggest_the_nearest_manifest_privately(selection, suggested):
+    with pytest.raises(ManifestSelectionError) as failed:
+        select_manifest_path(
+            selection, [("install", "manifests/install.yaml"), ("upgrade", "manifests/upgrade.yaml")],
+            names_complete=True,
+        )
+    assert str(failed.value) == (
+        "Manifest not found. Run `siteops browse` to list manifests, or use an explicit path."
+    )
+    if suggested is None:
+        assert failed.value.private_message is None
+    else:
+        assert failed.value.private_message.startswith(f"Manifest not found. Did you mean '{suggested}'?")
+
+
+@pytest.mark.parametrize("redacted", [False, True])
+def test_cli_suggests_the_nearest_manifest_name_unless_redacted(
+    complete_workspace, monkeypatch, capsys, redacted,
+):
+    from argparse import Namespace
+
+    monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1" if redacted else "0")
+    args = Namespace(manifest="test-manifes", workspace=complete_workspace)
+    assert cli.cmd_plan(args, Mock()) == 1
+    error = capsys.readouterr().err
+    assert error.startswith("Error: Manifest not found.")
+    assert ("Did you mean 'test-manifest'?" in error) is not redacted
+
+
+@pytest.mark.parametrize("redacted", [False, True])
+@pytest.mark.parametrize("selection", ["manifests/test-manifes.yaml", "manifests/test-manifest/manifest.yaml"])
+def test_missing_explicit_path_suggests_the_current_manifest_not_itself(
+    complete_workspace, monkeypatch, capsys, redacted, selection,
+):
+    from argparse import Namespace
+
+    monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1" if redacted else "0")
+    orchestrator = Mock()
+    assert cli.cmd_plan(Namespace(manifest=selection, workspace=complete_workspace), orchestrator) == 1
+    orchestrator.build_plan.assert_not_called()
+    error = capsys.readouterr().err
+    assert selection not in error and "Explicit paths:" not in error
+    if redacted:
+        assert error == "Error: Manifest not found. Run `siteops browse` to list manifests.\n"
+    else:
+        assert error == (
+            "Error: Manifest not found. Did you mean 'test-manifest' (manifests/test-manifest.yaml)? "
+            "Run `siteops browse` to list manifests.\n"
+        )
+
+
 def test_local_name_lookup_reads_no_site_or_parameter_values(complete_workspace, monkeypatch):
     original = Path.open
     opened = []

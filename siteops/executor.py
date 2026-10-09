@@ -132,6 +132,36 @@ _ARC_PROXY_PORT_IN_USE_PATTERN = re.compile(
     r"port\s+\d+\s+is\s+already\s+in\s+use", re.IGNORECASE
 )
 
+# Install guidance shared by capability preflight and runtime messages.
+AZURE_CLI_INSTALL_URL = "https://aka.ms/installazurecli"
+_AZURE_CLI_NOT_FOUND = (
+    f"Azure CLI (`az`) was not found on PATH. Install it from {AZURE_CLI_INSTALL_URL}."
+)
+CONNECTEDK8S_EXTENSION = "connectedk8s"
+CONNECTEDK8S_INSTALL_COMMAND = "az extension add --name connectedk8s"
+
+# `az extension show` reads local files only, so a short bound is enough.
+AZURE_CLI_EXTENSION_PROBE_TIMEOUT_SECONDS = 20
+
+# Azure CLI's own error for an extension that is not installed.
+_AZ_EXTENSION_NOT_INSTALLED_PATTERN = re.compile(
+    r"The extension \S+ is not installed", re.IGNORECASE
+)
+
+# What `az connectedk8s proxy` prints when the extension is missing. Stdin is
+# empty, so the install question always fails: "Unable to prompt" where stdin
+# is not a terminal, and on Windows, where the null device counts as one, the
+# question itself on stdout followed by an end of input error. Dynamic install
+# turned off reports the command as not recognized. A successful install on
+# first use prints "requires the extension" too, so the refusal is matched.
+_ARC_PROXY_EXTENSION_MISSING_PATTERN = re.compile(
+    r"requires the extension connectedk8s\. "
+    r"(?:Unable to prompt|Do you want to install it now)|"
+    r"extension connectedk8s is not installed|"
+    r"'connectedk8s' is misspelled or not recognized",
+    re.IGNORECASE,
+)
+
 # Default deployment observation deadline (60 minutes).
 DEFAULT_AZ_TIMEOUT_SECONDS = 3600
 
@@ -216,14 +246,82 @@ class WaitState(Enum):
     PENDING = "pending"
 
 
+# Azure CLI refuses locally when `--subscription` names a subscription the
+# account signed in to Azure CLI cannot see, including an account with tenant
+# access only. ARM reports the same condition as `SubscriptionNotFound`. In
+# both cases the request is rejected before any deployment starts.
+_SUBSCRIPTION_NOT_VISIBLE_PATTERN = re.compile(
+    r"Subscription '[^'\r\n]*' not found|tenant-level account only|SubscriptionNotFound",
+    re.IGNORECASE,
+)
+
+
+def _is_subscription_not_visible(stderr: str) -> bool:
+    return bool(_SUBSCRIPTION_NOT_VISIBLE_PATTERN.search(stderr or ""))
+
+
+# Azure CLI asks for any template parameter without a value before it sends the
+# deployment. Stdin is empty, so the question fails at once: "Missing input
+# parameters" where stdin is not a terminal, or, on Windows, where the null
+# device counts as one, the question on stdout followed by an end of input
+# error.
+_AZ_MISSING_PARAMETERS_PATTERN = re.compile(r"Missing input parameters", re.IGNORECASE)
+_AZ_PARAMETER_PROMPT_PATTERN = re.compile(r"Please provide \S+ value for '[^'\r\n]+'")
+_AZ_END_OF_INPUT_PATTERN = re.compile(r"EOF when reading a line")
+
+
+def _is_missing_parameter_prompt(stdout: str, stderr: str) -> bool:
+    return bool(
+        _AZ_MISSING_PARAMETERS_PATTERN.search(stderr or "")
+        or (
+            _AZ_END_OF_INPUT_PATTERN.search(stderr or "")
+            and _AZ_PARAMETER_PROMPT_PATTERN.search(stdout or "")
+        )
+    )
+
+
+def _missing_parameter_message(stdout: str, stderr: str) -> str:
+    """Explain a deployment that failed because template parameters have no value."""
+    parts = [
+        "Template parameters have no value, so the deployment was rejected "
+        "before any resource changed. Add values for them to the step's "
+        "parameter files or the Site's parameters, then retry."
+    ]
+    asked = [match.group(0) for match in _AZ_PARAMETER_PROMPT_PATTERN.finditer(stdout or "")]
+    if asked:
+        parts.append(f"Azure CLI asked: {asked[0]}")
+    reported = (stderr or "").strip()
+    if reported:
+        parts.append(f"Azure CLI reported: {reported}")
+    return " ".join(parts)
+
+
+def _subscription_not_visible_message(stderr: str, *, submission: bool) -> str:
+    """Explain a subscription that Azure CLI's account cannot see."""
+    parts = ["The target subscription is not visible to the account signed in to Azure CLI."]
+    if submission:
+        parts.append("No deployment was started.")
+    parts.append(
+        "Run `az account list` to see the subscriptions this account can use, "
+        "or run `az login` with an account that can access the subscription."
+    )
+    reported = (stderr or "").strip()
+    if reported:
+        parts.append(f"Azure CLI reported: {reported}")
+    return " ".join(parts)
+
+
 def _classify_az_error(stderr: str) -> str:
     """Classify an `az` failure stderr for wait-step polling.
 
     Returns one of `resource_not_found`, `permanent`, `transient`, or `unknown`.
     Codes are tested before the not-found prose, which appears in messages of
-    every class.
+    every class. A subscription the account cannot see is permanent, since
+    Azure CLI rejects it before sending anything.
     """
     text = stderr or ""
+    if _is_subscription_not_visible(text):
+        return "permanent"
     if _WAIT_NOT_FOUND_CODE_PATTERN.search(text):
         return "resource_not_found"
     if _WAIT_PERMANENT_ERROR_PATTERN.search(text):
@@ -352,7 +450,7 @@ def _allocate_arc_port_slot() -> int:
         raise RuntimeError(
             f"No Arc proxy slot is free. At most {ARC_PROXY_MAX_SLOTS} proxies run "
             f"at once, so a manifest with a kubectl or wait step cannot deploy to "
-            f"more than {ARC_PROXY_MAX_SLOTS} sites concurrently. Lower `parallel:` "
+            f"more than {ARC_PROXY_MAX_SLOTS} Sites at once. Lower `parallel:` "
             f"in the manifest, or pass `--parallel {ARC_PROXY_MAX_SLOTS}`."
         )
 
@@ -406,6 +504,9 @@ class _ProxyOutputDrainer:
         # evicts the line the retry depends on, and a retryable collision
         # would become a hard failure.
         self._port_in_use = False
+        # Set from either stream, since on Windows the extension question that
+        # identifies a missing connectedk8s extension is written to stdout.
+        self._extension_missing = False
 
         for name in ("stdout", "stderr"):
             stream = getattr(process, name, None)
@@ -435,6 +536,8 @@ class _ProxyOutputDrainer:
                 buffer.append(line)
                 if watch_for_port and _ARC_PROXY_PORT_IN_USE_PATTERN.search(line):
                     self._port_in_use = True
+                if _ARC_PROXY_EXTENSION_MISSING_PATTERN.search(line):
+                    self._extension_missing = True
         except UnicodeDecodeError:
             # Ordered above `ValueError`, which it subclasses, so this handler
             # is reachable at all. The Arc proxy's streams are opened with
@@ -484,6 +587,13 @@ class _ProxyOutputDrainer:
         """
         return self._port_in_use or bool(
             _ARC_PROXY_PORT_IN_USE_PATTERN.search(self.stderr)
+        )
+
+    @property
+    def extension_missing(self) -> bool:
+        """Whether Azure CLI reported the connectedk8s extension as missing."""
+        return self._extension_missing or bool(
+            _ARC_PROXY_EXTENSION_MISSING_PATTERN.search(self.stderr)
         )
 
     @property
@@ -633,6 +743,32 @@ def _probe_arc_proxy_ready(
     return False
 
 
+def _arc_proxy_port_open(port: int) -> bool:
+    """Whether something accepts connections on the proxy's local port now."""
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def _arc_proxy_timeout_message(port: int, *, bound: bool) -> str:
+    """Describe an Arc proxy that is still running but never became usable."""
+    if bound:
+        return (
+            f"Arc proxy opened local port {port} but did not become responsive "
+            f"within {ARC_PROXY_STARTUP_WAIT}s. Check that the cluster is "
+            "reachable and that the account signed in to Azure CLI can use "
+            "cluster connect."
+        )
+    return (
+        f"Arc proxy did not open local port {port} within "
+        f"{ARC_PROXY_STARTUP_WAIT}s. Check network access to Azure, that the "
+        "cluster has cluster connect enabled, and that the account signed in "
+        "to Azure CLI can reach it."
+    )
+
+
 class UnconfirmedCompletion(str, Enum):
     """Why a provider's final outcome could not be established."""
 
@@ -731,6 +867,110 @@ class WaitResult:
 
     def __post_init__(self) -> None:
         _validate_completion(self.success, self.unconfirmed, self.stopped_before_start)
+
+
+class AzureCliExtensionStatus(str, Enum):
+    """Local presence of one Azure CLI extension."""
+
+    INSTALLED = "installed"
+    MISSING = "missing"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class AzureCliExtensionProbe:
+    """Result of a local Azure CLI extension check."""
+
+    status: AzureCliExtensionStatus
+    version: str | None = None
+
+
+def _run_local_az(
+    az_path: str | Path, args: list[str], timeout: float
+) -> subprocess.CompletedProcess[str] | None:
+    """Run one local `az` query with empty stdin, or return None if it cannot finish."""
+    try:
+        return subprocess.run(
+            prepare_process_args([str(az_path), *args]),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=timeout,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _json_field(stdout: str | None, name: str) -> str | None:
+    try:
+        document = json.loads(stdout or "")
+    except json.JSONDecodeError:
+        return None
+    value = document.get(name) if isinstance(document, dict) else None
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _azure_cli_installs_extensions_without_prompt(
+    az_path: str | Path, timeout: float
+) -> bool | None:
+    """Read `extension.use_dynamic_install`, which the environment can also set.
+
+    With `yes_without_prompt`, set in Azure CLI's configuration or through
+    `AZURE_EXTENSION_USE_DYNAMIC_INSTALL`, az installs a missing extension on
+    first use. None means the setting could not be read.
+    """
+    result = _run_local_az(
+        az_path,
+        [
+            "config",
+            "get",
+            "extension.use_dynamic_install",
+            "--output",
+            "json",
+            "--only-show-errors",
+        ],
+        timeout,
+    )
+    if result is None:
+        return None
+    if result.returncode != 0:
+        return False if "is not set" in (result.stderr or "") else None
+    value = _json_field(result.stdout, "value")
+    return value is not None and value.lower() == "yes_without_prompt"
+
+
+def probe_azure_cli_extension(
+    az_path: str | Path,
+    name: str = CONNECTEDK8S_EXTENSION,
+    *,
+    timeout: float = AZURE_CLI_EXTENSION_PROBE_TIMEOUT_SECONDS,
+) -> AzureCliExtensionProbe:
+    """Report whether an Azure CLI extension is available, without contacting Azure.
+
+    `MISSING` means Azure CLI said the extension is not installed and is not
+    configured to install it without a prompt. A timeout, a launch failure or
+    any other error is `UNKNOWN`, so an inconclusive probe never blocks a plan
+    by itself. Stdin is empty, so az cannot wait on a prompt.
+    """
+    result = _run_local_az(
+        az_path,
+        ["extension", "show", "--name", name, "--output", "json", "--only-show-errors"],
+        timeout,
+    )
+    if result is None:
+        return AzureCliExtensionProbe(AzureCliExtensionStatus.UNKNOWN)
+    if result.returncode == 0:
+        return AzureCliExtensionProbe(
+            AzureCliExtensionStatus.INSTALLED, _json_field(result.stdout, "version")
+        )
+    if not _AZ_EXTENSION_NOT_INSTALLED_PATTERN.search(result.stderr or ""):
+        return AzureCliExtensionProbe(AzureCliExtensionStatus.UNKNOWN)
+    if _azure_cli_installs_extensions_without_prompt(az_path, timeout) is False:
+        return AzureCliExtensionProbe(AzureCliExtensionStatus.MISSING)
+    return AzureCliExtensionProbe(AzureCliExtensionStatus.UNKNOWN)
 
 
 class AzCliExecutor:
@@ -900,7 +1140,7 @@ class AzCliExecutor:
             Tuple of (success, stdout, stderr)
         """
         if not self.az_path:
-            return False, "", "Azure CLI (az) not found in PATH. Install from https://aka.ms/installazurecli"
+            return False, "", _AZURE_CLI_NOT_FOUND
 
         cmd = [self.az_path] + args
         # Rendered from the vector rather than scrubbed after joining, so a
@@ -921,9 +1161,12 @@ class AzCliExecutor:
             # Decode as UTF-8 rather than the locale encoding. `az` emits UTF-8,
             # and a byte the locale cannot represent otherwise raises inside
             # subprocess's reader thread, which surfaces as `stdout=None` rather
-            # than as an error.
+            # than as an error. Empty stdin makes an `az` question fail at once
+            # rather than wait for an answer nobody can see. A Windows password
+            # prompt reads the console directly and is the exception.
             result = subprocess.run(
                 prepare_process_args(cmd),
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -1035,7 +1278,7 @@ class AzCliExecutor:
             return
 
         if not self.az_path:
-            logger.error("Azure CLI not found - cannot start Arc proxy")
+            logger.error(f"{_AZURE_CLI_NOT_FOUND} The Arc proxy cannot start without it.")
             yield None
             return
 
@@ -1094,11 +1337,15 @@ class AzCliExecutor:
 
                 logger.debug(f"Starting Arc proxy: {scrub_command_for_output(cmd)}")
 
+                # Empty stdin: without it, a missing connectedk8s extension
+                # makes az ask to install it and wait for an answer that never
+                # comes, until the readiness deadline expires.
                 # Start process with its own process group for clean termination
                 if os.name == "nt":
                     # Windows: use CREATE_NEW_PROCESS_GROUP for signal handling
                     proxy_process = subprocess.Popen(
                         prepare_process_args(cmd),
+                        stdin=subprocess.DEVNULL,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                         text=True,
@@ -1110,6 +1357,7 @@ class AzCliExecutor:
                     # Unix: use setsid to create new process group
                     proxy_process = subprocess.Popen(
                         prepare_process_args(cmd),
+                        stdin=subprocess.DEVNULL,
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                         text=True,
@@ -1143,13 +1391,14 @@ class AzCliExecutor:
 
                 # Probe did not become ready. Determine cause.
                 if proxy_process.poll() is None:
-                    # Port bound but tunnel never responded within deadline.
-                    # Not a port-in-use case (proxy is still running), so no
-                    # retry. Terminate and surface a clear diagnostic.
+                    # The proxy is still running, so its port was not taken
+                    # and it is not retried. Whether the port opened tells
+                    # the operator which half of the startup stalled.
                     logger.error(
-                        f"Arc proxy on port {allocated_port} bound but did not "
-                        f"become responsive within {ARC_PROXY_STARTUP_WAIT}s. "
-                        f"Check upstream cluster reachability and az identity."
+                        _arc_proxy_timeout_message(
+                            allocated_port,
+                            bound=_arc_proxy_port_open(allocated_port),
+                        )
                     )
                     try:
                         if os.name == "nt":
@@ -1185,6 +1434,13 @@ class AzCliExecutor:
                     continue
 
                 # Not retryable: surface stderr and bail.
+                if drainer.extension_missing:
+                    logger.error(
+                        "Arc proxy needs the Azure CLI connectedk8s extension. "
+                        f"Run `{CONNECTEDK8S_INSTALL_COMMAND}`, then retry. "
+                        f"Azure CLI reported: {scrub_for_output(stderr)}"
+                    )
+                    break
                 logger.error(f"Arc proxy exited unexpectedly: {scrub_for_output(stderr)}")
                 break
 
@@ -1369,7 +1625,7 @@ class AzCliExecutor:
                 step_name=step_name,
                 site_name=site_name,
                 deployment_name=deployment_name,
-                error="Azure CLI (az) not found in PATH. Install from https://aka.ms/installazurecli",
+                error=_AZURE_CLI_NOT_FOUND,
             )
 
         if parameters:
@@ -1396,7 +1652,8 @@ class AzCliExecutor:
             # stale in-memory OIDC assertion across the token-refresh boundary. Do NOT
             # replace the show poll below with `az deployment ... wait`: that is itself a
             # single long-lived process and reintroduces the same failure.
-            submit_args = create_args + ["--no-wait"]
+            # --no-prompt makes a missing parameter an error instead of a console prompt.
+            submit_args = create_args + ["--no-wait", "--no-prompt"]
 
             if self.dry_run:
                 # Log the intended submit. Never submit or poll in dry-run.
@@ -1475,13 +1732,23 @@ class AzCliExecutor:
                     ),
                     stopped_before_start=attempt == 1,
                 )
-            ok, _stdout, stderr = self._run_az(
+            ok, stdout, stderr = self._run_az(
                 submit_args,
                 timeout=DEFAULT_DEPLOYMENT_SUBMIT_TIMEOUT_SECONDS,
                 site_name=site_name,
             )
             if ok:
                 return True, None
+            if _is_missing_parameter_prompt(stdout, stderr):
+                # Azure CLI names missing parameters before Azure Resource Manager
+                # validates the template, so no resource changed and this is definite.
+                return False, DeploymentResult(
+                    success=False,
+                    step_name=step_name,
+                    site_name=site_name,
+                    deployment_name=deployment_name,
+                    error=_missing_parameter_message(stdout, stderr),
+                )
             last_error = stderr
             category = _classify_az_error(stderr)
             # Stopping must preserve a definitive response already received.
@@ -1525,7 +1792,11 @@ class AzCliExecutor:
                 step_name=step_name,
                 site_name=site_name,
                 deployment_name=deployment_name,
-                error=last_error,
+                error=(
+                    _subscription_not_visible_message(last_error, submission=True)
+                    if _is_subscription_not_visible(last_error)
+                    else last_error
+                ),
                 unconfirmed=(
                     UnconfirmedCompletion.SUBMIT_UNCLASSIFIED
                     if category == "unknown" else None
@@ -2121,6 +2392,10 @@ class AzCliExecutor:
                 f"group, name). az error: {message}"
             )
         if classification == "permanent":
+            if _is_subscription_not_visible(stderr):
+                return WaitState.FAILED, None, _subscription_not_visible_message(
+                    stderr, submission=False
+                )
             return WaitState.FAILED, None, f"permanent error polling tags: {message}"
         # transient or unknown: keep polling, surface for the diagnostic.
         return WaitState.PENDING, None, message or "transient error polling tags"

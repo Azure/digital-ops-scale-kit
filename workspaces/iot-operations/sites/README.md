@@ -1,24 +1,25 @@
 # sites/
 
-Per-deployment-target YAML files (`kind: Site` and `kind: SiteTemplate`).
+Site files (`kind: Site` and `kind: SiteTemplate`), one for each deployment target or shared template.
 
 ## Files
 
-- **`base-site.yaml`**: `kind: SiteTemplate`. The shared base holds release selection, labels, common parameters and deployment options. Concrete Sites supply target subscription and location.
-- **`<site>.yaml`**: `kind: Site`. A deployable target. Names match `<region>-<env>` for RG-scoped sites or `<tenant>-global` for subscription-scoped.
-- **`shared/`**: additional `kind: SiteTemplate` files for partial reuse (e.g. `germany.yaml`, `usa-east.yaml`).
+- **`base-site.yaml`**: `kind: SiteTemplate`. The shared base holds AIO release selection, labels, common parameters and deployment options. Concrete Sites supply their subscription and location.
+- **`<site>.yaml`**: `kind: Site`. A deployable Site. Names match `<city>-<env>` for Sites at resource group level or `<tenant>-global` for Sites at subscription level.
+- **`shared/`**: additional `kind: SiteTemplate` files for shared settings (for example `germany.yaml`, `usa-east.yaml`).
 - **`catalog-basic.yaml` and `catalog-composition.yaml`**: deployable sample
-  sites for the beginner and advanced resource-set walkthroughs under
-  `samples/`.
+  Sites for the beginner and advanced resource set walkthroughs under
+  `samples/`. They carry only sample labels, so fleet selectors such as
+  `country=US` skip them.
 
 ## Conventions
 
-- **Inheritance**: a site declares `inherits: base-site.yaml` (or any `SiteTemplate`). Single parent. Child wins on conflict. Nested objects merge recursively. See `docs/site-configuration.md`.
-- **Overlays**: a same-name file under `sites.local/` (or any extras dir passed via `--extra-sites-dir`) merges into the base site at load time. Overlays cannot introduce `inherits:`.
-- **Scope**: sites with no `resourceGroup:` are subscription-scoped and must carry `labels.scope: subscription` so manifests can target them with `selector: scope=subscription`. The `test_subscription_scoped_sites_carry_scope_label` workspace test enforces this.
-- **Resource sets**: each ordered list under `properties.resourceSets` names reusable resource definitions from the matching `resource-sets/<area>/` directory. An omitted area in the effective site means no selection. A child site must use `[]` to clear a list inherited from its parent. Deselecting a set stops applying it and does not delete resources. See `docs/resource-catalog.md`.
+- **Inheritance**: a Site declares `inherits: base-site.yaml` (or any `SiteTemplate`). Single parent. Child wins on conflict. Nested objects merge recursively. See `docs/site-configuration.md`.
+- **Overlays**: a file with the same name under `sites.local/` (or any extras directory passed via `--extra-sites-dir`) merges into the base Site at load time. Overlays cannot introduce `inherits:`.
+- **Scope**: Sites with no `resourceGroup:` are scoped to the subscription and must carry `labels.scope: subscription` so manifests can select them with `selector: scope=subscription`. The `test_subscription_scoped_sites_carry_scope_label` workspace test enforces this.
+- **Resource sets**: each ordered list under `properties.resourceSets` names reusable resource definitions from the matching `resource-sets/<area>/` directory. An omitted area in the effective Site means no selection. A child Site must use `[]` to clear a list inherited from its parent. Deselecting a set stops applying it and does not delete resources. See `docs/resource-catalog.md`.
 
 ## Authoring tips
 
-- Preview the fully-resolved site (after inheritance + overlays) with `siteops -w workspaces/iot-operations sites <name> --output yaml`.
-- Keep environment- or region-specific values in intermediate `SiteTemplate` files under `shared/` to avoid duplicating env config across `<region>-dev.yaml` and `<region>-prod.yaml` pairs.
+- Preview the fully resolved Site (after inheritance + overlays) with `siteops -w workspaces/iot-operations sites <name> --output yaml`.
+- Keep values specific to an environment or region in intermediate `SiteTemplate` files under `shared/` to avoid duplicating env config across `<city>-dev.yaml` and `<city>-prod.yaml` pairs.

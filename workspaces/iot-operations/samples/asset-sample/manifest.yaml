@@ -7,8 +7,8 @@ description: |
   and deploys them onto an existing AIO instance, carrying no Bicep of its own.
   It attaches the committed device and asset sets, which declare one OPC UA
   device and one oven asset bound to that device's inbound endpoint. The
-  asset's display name, attributes, and MQTT topic carry the site's own name,
-  so every site publishes under its own topic.
+  asset's display name, attributes, and MQTT topic carry the Site's own name,
+  so every Site publishes under its own topic.
 
   The device's inbound endpoint addresses the OPC PLC simulator that
   `samples/opc-ua-solution/` brings up. The resources deploy without it, and
@@ -16,7 +16,7 @@ description: |
 
   Prerequisites:
     - AIO instance must be deployed and running (run aio-install first)
-    - The site's aioRelease must point to a parameters/aio-releases/<release>.yaml file
+    - The Site's aioRelease must point to a parameters/aio-releases/<release>.yaml file
 
 parallel: 3
 

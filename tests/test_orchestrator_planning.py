@@ -17,8 +17,15 @@ from siteops.compilation import (
     CompilationFailure,
     CompilationFailureCode,
     TemplateCompilationSession,
+    VersionProvenance,
 )
-from siteops.executor import DeploymentResult, KubectlResult, WaitResult
+from siteops.executor import (
+    AzureCliExtensionProbe,
+    AzureCliExtensionStatus,
+    DeploymentResult,
+    KubectlResult,
+    WaitResult,
+)
 from siteops.models import Manifest
 from siteops.orchestrator import Orchestrator
 from siteops.planning import (
@@ -36,10 +43,13 @@ from siteops.planning import (
     PlanDisposition,
     PlanIntent,
     PlanNotExecutableError,
+    PlanProjection,
     PlanStatus,
     SkipReasonCode,
     SubmissionMode,
+    render_plain_plan,
     resolve_plan_value,
+    serialize_plan,
 )
 from siteops.results import OperationStatus, RunStatus, SiteStatus
 
@@ -167,7 +177,7 @@ class _VersionOnlyToolRunner:
             return subprocess.CompletedProcess(
                 argv,
                 0,
-                stdout=json.dumps({"azure-cli": "test"}),
+                stdout=json.dumps({"azure-cli": "2.87.0"}),
                 stderr="",
             )
         if argv[1:] == ("bicep", "version"):
@@ -470,7 +480,7 @@ def test_engine_validates_loaded_inputs_before_tool_preflight(
         pytest.param(
             None,
             None,
-            "did not resolve for site",
+            "did not resolve for Site",
             id="unresolved",
         ),
         pytest.param(
@@ -2688,7 +2698,7 @@ def test_executable_plan_requires_subscription_target(tmp_path):
 
     assert result.status is PlanStatus.INVALID
     assert result.diagnostics[0].code == "validation.failed"
-    assert "no subscription-level site" in result.diagnostics[0].detail
+    assert "no subscription-level Site" in result.diagnostics[0].detail
     assert not result.executable
 
 
@@ -2875,3 +2885,310 @@ def test_redacted_wait_validation_omits_resolved_output_values(
     assert "private-secret-state" not in target.operations[1].reason.summary
     assert "private-secret-state" not in output
     assert "private-secret-state" not in repr(target.operations[1])
+
+
+def _arc_manifest(workspace: Path, *, sites: list[str] | None = None) -> Path:
+    return _write_manifest(
+        workspace,
+        [
+            {"name": "first", "template": "templates/first.json"},
+            {
+                "name": "apply",
+                "type": "kubectl",
+                "operation": "apply",
+                "arc": {"name": "cluster", "resourceGroup": "rg-cluster"},
+                "files": ["config.yaml"],
+            },
+            {
+                "name": "apply-again",
+                "type": "kubectl",
+                "operation": "apply",
+                "arc": {"name": "cluster", "resourceGroup": "rg-cluster"},
+                "files": ["config.yaml"],
+            },
+        ],
+        sites=sites,
+    )
+
+
+def _tool_session(tmp_path: Path, *, az: bool = True) -> TemplateCompilationSession:
+    tools = {"kubectl": str(tmp_path / "tools" / "kubectl.exe")}
+    if az:
+        tools["az"] = str(tmp_path / "tools" / "az.exe")
+    return TemplateCompilationSession(
+        command_runner=_RecordingToolRunner(),
+        tool_resolver=tools.get,
+    )
+
+
+def test_missing_connectedk8s_extension_blocks_kubectl_steps(tmp_path, monkeypatch):
+    workspace = _workspace(tmp_path)
+    manifest_path = _arc_manifest(workspace)
+    probe = MagicMock(
+        return_value=AzureCliExtensionProbe(AzureCliExtensionStatus.MISSING)
+    )
+    monkeypatch.setattr("siteops.orchestrator.probe_azure_cli_extension", probe)
+
+    with patch(
+        "siteops.orchestrator.TemplateCompilationSession",
+        return_value=_tool_session(tmp_path),
+    ):
+        result = Orchestrator(workspace).build_plan(
+            manifest_path, intent=PlanIntent.EXECUTABLE,
+        )
+
+    probe.assert_called_once_with((tmp_path / "tools" / "az.exe").resolve())
+    assert result.status is PlanStatus.INVALID
+    assert not result.executable
+    [diagnostic] = result.diagnostics
+    assert diagnostic.code == "capability.arc-proxy.missing"
+    assert diagnostic.detail == (
+        "The Azure CLI connectedk8s extension is not installed. Steps 'apply' "
+        "and 'apply-again' need Azure CLI and its connectedk8s extension to "
+        "reach the cluster through `az connectedk8s proxy`. Run "
+        "`az extension add --name connectedk8s`, then rerun the command."
+    )
+    assert result.plan is not None
+    first, apply, again = result.plan.targets[0].operations
+    assert first.disposition is PlanDisposition.EXECUTE
+    for blocked in (apply, again):
+        assert blocked.disposition is PlanDisposition.BLOCKED
+        assert blocked.skip_reason is not None
+        assert blocked.skip_reason.code is SkipReasonCode.CAPABILITY_UNAVAILABLE
+        assert blocked.skip_reason.detail == (
+            "A required local tool is unavailable: Azure CLI with the "
+            "connectedk8s extension."
+        )
+    statuses = {
+        capability.kind: capability.status
+        for capability in result.plan.capabilities
+    }
+    assert statuses[CapabilityKind.ARC_PROXY] is CapabilityStatus.MISSING
+
+
+def test_installed_connectedk8s_extension_is_checked_once_and_recorded(
+    tmp_path, monkeypatch,
+):
+    workspace = _workspace(tmp_path)
+    (workspace / "sites" / "second-site.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "apiVersion": "siteops/v1",
+                "kind": "Site",
+                "name": "second-site",
+                "subscription": "sub",
+                "resourceGroup": "rg-second",
+                "location": "eastus",
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    manifest_path = _arc_manifest(workspace, sites=["test-site", "second-site"])
+    probe = MagicMock(
+        return_value=AzureCliExtensionProbe(
+            AzureCliExtensionStatus.INSTALLED, "1.11.1"
+        )
+    )
+    monkeypatch.setattr("siteops.orchestrator.probe_azure_cli_extension", probe)
+    orchestrator = Orchestrator(workspace)
+
+    with patch(
+        "siteops.orchestrator.TemplateCompilationSession",
+        return_value=_tool_session(tmp_path),
+    ):
+        result = orchestrator.build_plan(
+            manifest_path, intent=PlanIntent.EXECUTABLE,
+        )
+
+    assert probe.call_count == 1
+    assert result.executable
+    assert result.plan is not None
+    arc = next(
+        capability
+        for capability in result.plan.capabilities
+        if capability.kind is CapabilityKind.ARC_PROXY
+    )
+    assert arc.status is CapabilityStatus.AVAILABLE
+    assert arc.provider is not None
+    assert arc.provider.name == "azure-cli-connectedk8s"
+    assert arc.provider.version == "1.11.1"
+    assert arc.provider.version_provenance is VersionProvenance.KNOWN
+    assert arc.provider.executable_path == (tmp_path / "tools" / "az.exe").resolve()
+    document = serialize_plan(
+        result, PlanProjection.LOCAL_PRIVATE, engine_version="test",
+    )
+    arc_document = next(
+        capability
+        for capability in document["plan"]["capabilities"]
+        if capability["kind"] == "arc-proxy"
+    )
+    assert arc_document["status"] == "available"
+    assert arc_document["provider"]["version"] == "1.11.1"
+
+    with (
+        patch.object(
+            orchestrator.executor,
+            "deploy_resource_group",
+            side_effect=lambda **kwargs: DeploymentResult(
+                success=True,
+                step_name=kwargs["step_name"],
+                site_name=kwargs["site_name"],
+                deployment_name=kwargs["deployment_name"],
+            ),
+        ),
+        patch.object(
+            orchestrator.executor,
+            "kubectl_apply",
+            side_effect=lambda **kwargs: KubectlResult(
+                success=True,
+                step_name=kwargs["step_name"],
+                site_name=kwargs["site_name"],
+            ),
+        ),
+    ):
+        execution = orchestrator.execute_plan(result)
+
+    assert execution.status is RunStatus.SUCCEEDED
+    assert orchestrator.executor.az_path == str(
+        (tmp_path / "tools" / "az.exe").resolve()
+    )
+    assert probe.call_count == 1
+
+
+def test_missing_azure_cli_names_the_tool_and_the_steps_that_need_it(
+    tmp_path, monkeypatch,
+):
+    workspace = _workspace(tmp_path)
+    manifest_path = _arc_manifest(workspace)
+    monkeypatch.setattr(
+        "siteops.orchestrator.probe_azure_cli_extension",
+        MagicMock(side_effect=AssertionError("No Azure CLI to probe")),
+    )
+
+    with patch(
+        "siteops.orchestrator.TemplateCompilationSession",
+        return_value=_tool_session(tmp_path, az=False),
+    ):
+        result = Orchestrator(workspace).build_plan(
+            manifest_path, intent=PlanIntent.EXECUTABLE,
+        )
+
+    assert not result.executable
+    capability_diagnostics = [
+        diagnostic
+        for diagnostic in result.diagnostics
+        if diagnostic.code.startswith("capability.")
+    ]
+    assert [diagnostic.code for diagnostic in capability_diagnostics] == [
+        "capability.arm-control-plane.missing",
+        "capability.arc-proxy.missing",
+    ]
+    arm, arc = capability_diagnostics
+    assert (
+        "Step 'first' needs Azure CLI to submit ARM deployments or read "
+        "resource tags." in arm.detail
+    )
+    assert "https://aka.ms/installazurecli" in arm.detail
+    assert (
+        "Steps 'apply' and 'apply-again' need Azure CLI and its connectedk8s "
+        "extension" in arc.detail
+    )
+    assert "https://aka.ms/installazurecli" in arc.detail
+    assert "`az extension add --name connectedk8s`" in arc.detail
+
+    local = serialize_plan(
+        result, PlanProjection.LOCAL_PRIVATE, engine_version="test",
+    )
+    local_arc = next(
+        diagnostic
+        for diagnostic in local["diagnostics"]
+        if diagnostic["code"] == "capability.arc-proxy.missing"
+    )
+    assert local_arc["summary"] == (
+        "Azure CLI (`az`) and its connectedk8s extension are required for "
+        "kubectl steps."
+    )
+    assert "https://aka.ms/installazurecli" in local_arc["detail"]
+    assert "`az extension add --name connectedk8s`" in local_arc["detail"]
+
+    public = serialize_plan(
+        result, PlanProjection.PUBLISHABLE, engine_version="test",
+    )
+    public_summaries = " ".join(
+        diagnostic["summary"] for diagnostic in public["diagnostics"]
+    )
+    assert "Azure CLI (`az`) is required for deployment and wait steps" in (
+        public_summaries
+    )
+    assert "`az extension add --name connectedk8s`" in public_summaries
+    assert "apply-again" not in public_summaries
+
+    for redacted in (False, True):
+        rendered = render_plain_plan(result, redacted=redacted)
+        assert "az extension add --name connectedk8s" in rendered
+        assert "https://aka.ms/installazurecli" in rendered
+
+
+def test_describe_and_validate_do_not_probe_the_extension(tmp_path, monkeypatch):
+    workspace = _workspace(tmp_path)
+    manifest_path = _arc_manifest(workspace)
+    monkeypatch.setattr(
+        "siteops.orchestrator.probe_azure_cli_extension",
+        MagicMock(side_effect=AssertionError("Describe and validate stay tool-free")),
+    )
+    orchestrator = Orchestrator(workspace)
+
+    assert orchestrator.validate(manifest_path) == []
+    result = orchestrator.build_plan(manifest_path, intent=PlanIntent.DESCRIBE)
+
+    assert result.status is PlanStatus.PLANNED
+    assert result.plan is not None
+    assert result.plan.capabilities == ()
+
+
+@pytest.mark.parametrize("output", ["plain", "json"])
+def test_deploy_stops_in_preparation_when_the_extension_is_missing(
+    tmp_path, monkeypatch, capsys, output,
+):
+    from siteops.cli import main
+
+    workspace = _workspace(tmp_path)
+    manifest_path = _arc_manifest(workspace)
+    monkeypatch.setattr(
+        "siteops.orchestrator.probe_azure_cli_extension",
+        MagicMock(return_value=AzureCliExtensionProbe(AzureCliExtensionStatus.MISSING)),
+    )
+    argv = ["siteops", "-w", str(workspace), "deploy", str(manifest_path), "--yes"]
+    if output == "json":
+        argv.extend(["--output", "json"])
+
+    with (
+        patch(
+            "siteops.orchestrator.TemplateCompilationSession",
+            return_value=_tool_session(tmp_path),
+        ),
+        patch.object(
+            Orchestrator, "execute_plan", side_effect=AssertionError("No execution"),
+        ),
+        patch("sys.argv", argv),
+        pytest.raises(SystemExit) as stopped,
+    ):
+        main()
+
+    assert stopped.value.code == 1
+    captured = capsys.readouterr()
+    if output == "plain":
+        assert (
+            "The Azure CLI connectedk8s extension is not installed. Steps 'apply' "
+            "and 'apply-again' need Azure CLI and its connectedk8s extension"
+        ) in captured.err
+        assert "Run `az extension add --name connectedk8s`" in captured.err
+    else:
+        document = json.loads(captured.out)
+        [diagnostic] = [
+            diagnostic
+            for diagnostic in document["diagnostics"]
+            if diagnostic["code"] == "capability.arc-proxy.missing"
+        ]
+        assert "`az extension add --name connectedk8s`" in json.dumps(diagnostic)

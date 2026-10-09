@@ -27,6 +27,20 @@ def required_bash() -> Path:
     return Path(resolved)
 
 
+def required_openssl() -> Path:
+    """Use native OpenSSL for temporary TLS fixtures without another package dependency."""
+    if sys.platform == "win32":
+        git = required_bash().parent.parent
+        for directory in ("mingw64", "usr"):
+            candidate = git / directory / "bin" / "openssl.exe"
+            if candidate.is_file():
+                return candidate
+        raise AssertionError("Git for Windows must include OpenSSL for the HTTPS tests.")
+    resolved = shutil.which("openssl")
+    assert resolved, "OpenSSL is required to generate temporary certificates for the HTTPS tests."
+    return Path(resolved)
+
+
 def bash_path(path: Path) -> str:
     """Return a native or Git Bash path for an absolute local path."""
     resolved = path.resolve()

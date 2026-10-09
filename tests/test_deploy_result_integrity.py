@@ -38,7 +38,7 @@ SUBSCRIPTION = "00000000-0000-0000-0000-000000000000"
 def deterministic_tools(tmp_path, monkeypatch):
     def run(argv, timeout):
         assert argv[1:] == ("version", "--output", "json")
-        return subprocess.CompletedProcess(argv, 0, '{"azure-cli":"test"}', "")
+        return subprocess.CompletedProcess(argv, 0, '{"azure-cli":"2.87.0"}', "")
 
     monkeypatch.setattr(
         "siteops.orchestrator.TemplateCompilationSession",

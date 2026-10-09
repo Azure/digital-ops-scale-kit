@@ -11,6 +11,7 @@ import yaml
 
 from siteops.arm_resources import ArmResourceObservation
 from siteops.guided_inputs import (
+    GuidedInputError,
     load_contract,
     load_direct_site,
     write_yaml_exclusive,
@@ -256,6 +257,40 @@ def test_resource_name_default_retains_overrides_and_manual_route(tmp_path):
     assert contract.build_site(bound, {"cluster": observation}).name == "my-site"
     assert contract.example()["values"] == {"cluster": None}
     assert contract.describe()["inputs"][0]["defaultFromResource"] == "cluster"
+
+
+def test_known_identity_holds_back_values_that_a_read_supplies(tmp_path):
+    resource = (
+        "/subscriptions/00000000-0000-0000-0000-000000000001/"
+        "resourceGroups/rg-first/providers/Microsoft.Kubernetes/connectedClusters/arc-first"
+    )
+    named = _named_resource_contract(tmp_path / "named")
+    assert named.known_identity(named.bind(inline=[f"cluster={resource}"])) == (None, {}, frozenset())
+    assert named.known_identity(
+        named.bind(inline=["siteName=my-site", f"cluster={resource}"]),
+    ) == ("my-site", {}, frozenset())
+
+    manifest, _ = _manifest_and_contract(
+        tmp_path / "labeled",
+        fields=[
+            _field("siteName", "name"), *_manual_resource_fields(), _field("region", "labels.region"),
+            _resource_role(derive={
+                "subscription": "subscription", "resourceGroup": "resourceGroup",
+                "location": "region", "name": "clusterName",
+            }),
+        ],
+        defaults={"labels": {"environment": "dev"}},
+    )
+    labeled = load_contract(manifest)
+    bound = labeled.bind(inline=["siteName=one", "location=eastus", f"cluster={resource}"])
+    assert labeled.known_identity(bound) == ("one", {"environment": "dev"}, frozenset({"region"}))
+    manual = labeled.bind(inline=[
+        "siteName=one", "subscription=00000000-0000-0000-0000-000000000001",
+        "resourceGroup=rg-first", "location=eastus", "clusterName=arc-first", "region=eu",
+    ])
+    site = labeled.build_site(manual)
+    assert labeled.known_identity(manual) == (site.name, site.labels, frozenset())
+    assert site.labels == {"environment": "dev", "region": "eu"}
 
 
 @pytest.mark.parametrize("name", ["", "UPPER", "has space", "-start", "end-", "x" * 60])
@@ -537,12 +572,16 @@ def test_related_resource_prerequisites_are_checked_before_site_construction(tmp
 def test_manual_answers_cannot_bypass_active_related_resource_prerequisite(tmp_path):
     manifest, _ = _linked_contract(tmp_path)
     contract = load_contract(manifest)
-    with pytest.raises(ValueError, match="requirement-unverified.*'instance'"):
+    with pytest.raises(ValueError) as rejected:
         contract.resolve(inline=[
             "siteName=manual", "subscription=00000000-0000-0000-0000-000000000001",
             "resourceGroup=rg-first", "location=eastus", "clusterName=cluster-one",
             "instanceName=machine-one",
         ])
+    assert str(rejected.value) == (
+        "inputs.resource.requirement-unverified: Supply `--input instance=<instance-resource-ID>` "
+        "so Site Ops can read the cluster's workload identity settings."
+    )
 
 
 def test_inactive_related_prerequisite_preserves_manual_route(tmp_path):
@@ -691,8 +730,20 @@ def test_enabled_resource_requirement_needs_cluster_read_before_site_constructio
         "resourceGroup=rg-first", "location=eastus", "clusterName=arc-first",
     ]
     assert contract.resolve(inline=manual).properties["deployOptions"]["enableSecretSync"] is False
-    with pytest.raises(ValueError, match="requirement-unverified"):
+    with pytest.raises(ValueError, match="requirement-unverified") as rejected:
         contract.bind(inline=[*manual, "enableSecretSync=true"])
+    assert str(rejected.value).endswith(
+        "With `enableSecretSync=true`, supply `--input cluster=<Arc-cluster-resource-ID>` "
+        "so Site Ops can read the cluster's OIDC issuer and workload identity settings."
+    )
+
+
+def test_every_supported_resource_fact_has_plain_text():
+    from siteops import guided_inputs
+
+    supported = set().union(*guided_inputs._RESOURCE_FACTS.values())
+    assert set(guided_inputs._FACT_TEXT) == supported
+    assert {kind.casefold() for kind in guided_inputs._RESOURCE_FACTS} <= set(guided_inputs._RESOURCE_TEXT)
 
 
 def test_inactive_resource_does_not_enforce_its_unconditional_requirement(tmp_path):
@@ -1181,6 +1232,21 @@ def test_multiple_dependents_can_share_an_unconditional_controller(tmp_path):
     }
 
 
+def test_missing_controller_is_reported_in_separate_sentences(tmp_path):
+    manifest, _ = _manifest_and_contract(
+        tmp_path,
+        fields=[
+            _field("subscription", "subscription", default="sub"),
+            _field("location", "location", default="eastus"),
+            _field("enable", "properties.enable", type="boolean"),
+            _field("first", "properties.first", when={"input": "enable", "equals": True}),
+        ],
+    )
+    with pytest.raises(ValueError) as rejected:
+        load_contract(manifest).resolve()
+    assert str(rejected.value) == "Input 'enable' is missing. It controls conditional input 'first'."
+
+
 def test_missing_required_name_is_safe_guided_error(tmp_path):
     from siteops.guided_inputs import GuidedInputError
 
@@ -1370,6 +1436,19 @@ def test_inline_answers_are_typed_and_unique(tmp_path, inline, error):
         load_contract(manifest).resolve(inline=inline)
 
 
+@pytest.mark.parametrize(("answer", "private"), [
+    ("locaton=eastus", "Inline inputs contain an unknown input 'locaton'. Did you mean 'location'?"),
+    ("zzz=1", "Inline inputs contain an unknown input 'zzz'. Run `siteops inputs MANIFEST` "
+              "to list the declared inputs."),
+])
+def test_unknown_input_is_named_only_in_its_private_detail(tmp_path, answer, private):
+    manifest, _ = _manifest_and_contract(tmp_path)
+    with pytest.raises(GuidedInputError) as rejected:
+        load_contract(manifest).resolve(inline=[answer])
+    assert str(rejected.value) == "Inline inputs contain an unknown input name."
+    assert rejected.value.private_message == private
+
+
 @pytest.mark.parametrize(
     ("contents", "error"),
     [
@@ -1516,7 +1595,7 @@ def test_direct_site_file_rejects_inheritance_without_loading_a_parent(tmp_path,
             "name: child\nsubscription: sub\nlocation: eastus\n",
             encoding="utf-8",
         )
-    with pytest.raises(ValueError, match="inherits"):
+    with pytest.raises(ValueError, match=r"^A direct Site file cannot use inherits\. Provide a complete Site\.$"):
         load_direct_site(child)
     child.write_text(
         "apiVersion: siteops/v1\nkind: Site\nname: child\n"
@@ -1553,10 +1632,12 @@ def test_exclusive_yaml_writer_does_not_overwrite_or_create_parents(tmp_path):
     assert yaml.safe_load(destination.read_text(encoding="utf-8")) == data
     if os.name == "posix":
         assert stat.S_IMODE(destination.stat().st_mode) == 0o600
-    with pytest.raises(FileExistsError):
+    with pytest.raises(GuidedInputError, match="already exists") as existing:
         write_yaml_exclusive(destination, {"subscription": "different"})
+    assert str(destination) not in str(existing.value)
+    assert existing.value.private_message == f"{destination} already exists. Choose a new file name."
     assert yaml.safe_load(destination.read_text(encoding="utf-8")) == data
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises(GuidedInputError, match="directory does not exist"):
         write_yaml_exclusive(tmp_path / "missing" / "site.yaml", data)
     assert not (tmp_path / "missing").exists()
     with pytest.raises(ValueError, match="mapping"):

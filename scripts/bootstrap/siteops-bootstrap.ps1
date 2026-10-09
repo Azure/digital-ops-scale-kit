@@ -1,11 +1,11 @@
 param(
-    [Parameter(Mandatory = $true)][string]$Release,
+    [string]$Release,
+    [string]$ContentRelease,
     [Parameter(Mandatory = $true)][string]$SourceCommit,
     [string]$Repository = 'Azure/digital-ops-scale-kit',
     [string]$SourceRef = 'refs/heads/main',
     [ValidateSet('release.yaml', 'ci.yaml')][string]$Caller = 'release.yaml',
     [string]$EnrollSource,
-    [switch]$WithAzureCli,
     [switch]$Replace,
     [switch]$Yes,
     [switch]$DryRun
@@ -13,13 +13,165 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop
-function Fail([string]$Message) { throw "Site Ops installation: $Message" }
+function Fail([string]$Message) { throw "Site Ops installation failed: $Message" }
 function Stage([string]$Message) { Write-Host "Site Ops installation: $Message" }
+# Windows PowerShell reads ACLs through FileSystemInfo; PowerShell 7 uses the .NET extension class.
+function Read-NodeAcl([string]$Path, [switch]$Directory) {
+    $node = if ($Directory) { [IO.DirectoryInfo]::new($Path) } else { [IO.FileInfo]::new($Path) }
+    if ($PSVersionTable.PSEdition -eq 'Core') { return [IO.FileSystemAclExtensions]::GetAccessControl($node) }
+    return $node.GetAccessControl()
+}
 
-function Get-InstallerHelper([string]$Archive, [string]$Directory) {
+function Get-SelectionKey([string]$SelectedRelease, [string]$Commit, [string]$Ref, [string]$Workflow) {
+    $identity = (@($Repository, $SelectedRelease, $Commit, $Ref, $Workflow) -join [char]0) + [char]0
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    try {
+        return [BitConverter]::ToString(
+            $hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($identity))
+        ).Replace('-', '').ToLowerInvariant()
+    } finally { $hasher.Dispose() }
+}
+function Verify-ReleaseAsset([string]$Subject, [string]$Commit, [string]$Ref, [string]$Workflow, [string]$SignerWorkflow) {
+    $signer = "https://github.com/$Repository/.github/workflows/$SignerWorkflow@$Ref"
+    $builder = "https://github.com/$Repository/.github/workflows/$Workflow@$Ref"
+    $lines = [Collections.Generic.List[string]]::new()
+    $bytes = 0
+    $previousPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $gh attestation verify $Subject --bundle "$Subject.attestation.jsonl" `
+            --repo $Repository --cert-identity $signer --source-ref $Ref `
+            --source-digest $Commit --signer-digest $Commit `
+            --cert-oidc-issuer https://token.actions.githubusercontent.com `
+            --predicate-type https://slsa.dev/provenance/v1 --hostname github.com `
+            --digest-alg sha256 --format json 2>$null | ForEach-Object {
+                $bytes += [Text.Encoding]::UTF8.GetByteCount($_) + 1
+                if ($bytes -gt 8388608) { Fail 'Verification evidence exceeds its byte limit.' }
+                $lines.Add($_)
+            }
+        $verifyExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousPreference
+    }
+    if ($verifyExit -ne 0 -or $lines.Count -eq 0) {
+        Fail 'The selected asset provenance could not be verified.'
+    }
+    $results = @((($lines -join "`n") | ConvertFrom-Json))
+    if ($results.Count -lt 1 -or $results.Count -gt 128) {
+        Fail 'Verification evidence has an unsupported result count.'
+    }
+    $expected = @{
+        subjectAlternativeName = $signer
+        issuer = 'https://token.actions.githubusercontent.com'
+        sourceRepositoryURI = "https://github.com/$Repository"
+        sourceRepositoryDigest = $Commit
+        sourceRepositoryRef = $Ref
+        buildSignerDigest = $Commit
+        buildConfigURI = $builder
+        buildConfigDigest = $Commit
+        runnerEnvironment = 'self-hosted'
+    }
+    foreach ($result in $results) {
+        $verification = $result.verificationResult
+        $certificate = $verification.signature.certificate
+        if ($verification -isnot [pscustomobject] -or
+            $certificate -isnot [pscustomobject] -or
+            $verification.mediaType -isnot [string] -or
+            $verification.mediaType -cne
+            'application/vnd.dev.sigstore.verificationresult+json;version=0.1') {
+            Fail 'The verified observation format is unsupported.'
+        }
+        foreach ($key in $expected.Keys) {
+            $value = $certificate.PSObject.Properties[$key].Value
+            if ($value -isnot [string] -or $value -cne $expected[$key]) {
+                Fail 'The verified certificate does not match the selected release.'
+            }
+        }
+    }
+}
+function Read-EngineReference([string]$Path, [string]$SelectedRelease, [string]$Commit, [string]$Ref, [string]$Workflow) {
+    $info = Get-Item -LiteralPath $Path -Force
+    if ($info.Length -lt 1 -or $info.Length -gt 16384 -or $info.PSIsContainer -or
+        ($info.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        Fail 'The engine reference is unavailable or oversized.'
+    }
+    try {
+        $raw = [Text.UTF8Encoding]::new($false, $true).GetString([IO.File]::ReadAllBytes($Path))
+        $record = $raw | ConvertFrom-Json
+    } catch [ArgumentException] {
+        Fail 'The signed engine reference is invalid.'
+    }
+    $engine = $record.engine
+    if ($record -isnot [pscustomobject] -or $engine -isnot [pscustomobject] -or
+        $record.apiVersion -cne 'siteops.release.engine/v1' -or $record.kind -cne 'EngineReference' -or
+        $record.release -cne $SelectedRelease -or $record.revision -cne $Commit -or
+        $record.preview -isnot [bool] -or $record.preview -ne ($Workflow -ceq 'ci.yaml') -or
+        $engine.release -isnot [string] -or $engine.release -cnotmatch '^(siteops/)?v[0-9][0-9A-Za-z._-]{0,100}$' -or
+        $engine.revision -isnot [string] -or $engine.revision -cnotmatch '^[0-9a-f]{40}$' -or
+        $engine.version -isnot [string] -or $engine.version -cnotmatch '^[A-Za-z0-9][A-Za-z0-9.!+_-]{0,127}$') {
+        Fail 'The signed engine reference differs from the selected content release.'
+    }
+    if ($engine.release -ceq $SelectedRelease) {
+        if ($engine.revision -cne $Commit) { Fail 'The combined engine has a different source revision.' }
+        $engineRef = $Ref
+        $engineCaller = $Workflow
+    } else {
+        if ($engine.release -cne ('siteops/v' + $engine.version)) {
+            Fail 'The engine reference does not select an exact engine release.'
+        }
+        $engineRef = 'refs/heads/main'
+        $engineCaller = 'release.yaml'
+    }
+    foreach ($key in @('bundle', 'proof')) {
+        $asset = $engine.$key
+        $name = if ($key -eq 'bundle') { 'siteops-install.zip' } else { 'siteops-install.zip.attestation.jsonl' }
+        $limit = if ($key -eq 'bundle') { 134217728 } else { 2097152 }
+        if ($asset -isnot [pscustomobject] -or $asset.name -cne $name -or
+            ($asset.size -isnot [int] -and $asset.size -isnot [long]) -or
+            $asset.size -lt 1 -or $asset.size -gt $limit -or
+            $asset.sha256 -isnot [string] -or $asset.sha256 -cnotmatch '^[0-9a-f]{64}$') {
+            Fail 'The engine reference contains invalid asset identities.'
+        }
+    }
+    $canonical = [ordered]@{
+        apiVersion = 'siteops.release.engine/v1'
+        engine = [ordered]@{
+            bundle = [ordered]@{ name = $engine.bundle.name; sha256 = $engine.bundle.sha256; size = $engine.bundle.size }
+            proof = [ordered]@{ name = $engine.proof.name; sha256 = $engine.proof.sha256; size = $engine.proof.size }
+            release = $engine.release
+            revision = $engine.revision
+            version = $engine.version
+        }
+        kind = 'EngineReference'
+        preview = $record.preview
+        release = $SelectedRelease
+        revision = $Commit
+    } | ConvertTo-Json -Compress -Depth 5
+    if ($raw -cne ($canonical + "`n")) { Fail 'The engine reference has unsupported or ambiguous fields.' }
+    return [pscustomobject]@{
+        Release = $engine.release; Commit = $engine.revision; SourceRef = $engineRef
+        Caller = $engineCaller; Version = $engine.version
+        BundleSize = $engine.bundle.size; BundleSha = $engine.bundle.sha256
+        ProofSize = $engine.proof.size; ProofSha = $engine.proof.sha256
+    }
+}
+
+function Get-InstallerHelper([string]$Archive, [string]$Directory, [string]$ExpectedVersion = '') {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip = [IO.Compression.ZipFile]::OpenRead($Archive)
     try {
+        if ($ExpectedVersion) {
+            $metadata = @($zip.Entries | Where-Object { $_.FullName -ieq 'bundle.json' })
+            if ($metadata.Count -ne 1 -or $metadata[0].FullName -cne 'bundle.json' -or
+                $metadata[0].Length -lt 1 -or $metadata[0].Length -gt 1048576) {
+                Fail 'The bundle has no valid version metadata.'
+            }
+            $reader = [IO.StreamReader]::new($metadata[0].Open())
+            try { $manifest = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
+            if ($manifest.package.version -isnot [string] -or $manifest.package.version -cne $ExpectedVersion) {
+                Fail 'The bundle version differs from the signed content selection.'
+            }
+        }
         $entries = @($zip.Entries | Where-Object { $_.FullName -ieq 'siteops-install.py' })
         if ($entries.Count -ne 1 -or $entries[0].FullName -cne 'siteops-install.py' -or
             $entries[0].Length -lt 1 -or $entries[0].Length -gt 1048576 -or
@@ -68,85 +220,11 @@ function Check-Payload([string[]]$Arguments) {
     return $result
 }
 
-if ($Release -cnotmatch '^(siteops/)?v[0-9][0-9A-Za-z._-]{0,100}$' -or
-    $SourceCommit -cnotmatch '^[0-9a-f]{40}$' -or
-    $Repository -cnotmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' -or
-    $SourceRef -cnotmatch '^refs/heads/[A-Za-z0-9._/-]+$' -or
-    $SourceRef.Contains('..')) {
-    Fail 'Select an exact release, full source commit, and approved publisher.'
-}
-if ($EnrollSource -and $EnrollSource -cnotmatch '^[a-z][a-z0-9-]{0,39}$') {
-    Fail 'Choose a lowercase approved source name.'
-}
-if (-not [Environment]::Is64BitOperatingSystem -or
-    [Environment]::OSVersion.Version.Major -lt 10) {
-    Fail 'A supported Windows x64 machine is required.'
-}
-Stage "Release: $Release ($SourceCommit) from $Repository."
-Stage 'GitHub CLI 2.95+, checksum-pinned uv 0.12.20, and uv-managed Python are needed.'
-Stage 'Existing uv and Python installations are not upgraded. No account is signed in.'
-if (Get-Command 'uv.exe' -CommandType Application -ErrorAction SilentlyContinue) {
-    Stage 'Check: the existing uv executable. Preserve it if another version is installed.'
-} else {
-    Stage 'Add: pinned native uv in protected tooling storage and expose it for maintenance.'
-}
-$existingGh = Get-Command 'gh.exe' -CommandType Application -ErrorAction SilentlyContinue |
-    Select-Object -First 1
-$ghCheck = if ($existingGh) {
-    (Get-Item -LiteralPath $existingGh.Source).VersionInfo.ProductVersion
-} else { '' }
-if ($ghCheck -match '^2\.([0-9]+)\.' -and [int]$Matches[1] -ge 95) {
-    Stage 'Keep: compatible GitHub CLI.'
-} else {
-    Stage 'Add: GitHub CLI through WinGet or a managed channel.'
-}
-if (Get-Command 'curl.exe' -CommandType Application -ErrorAction SilentlyContinue) {
-    Stage 'Keep: Windows HTTPS downloader.'
-} else { Stage 'Requires Windows curl.exe for anonymous HTTPS downloads.' }
-Stage 'Check: ordinary uv tool, command, and managed Python storage.'
-if ($Replace) { Stage 'The selected build will explicitly replace or repair an existing Site Ops installation.' }
-if ($WithAzureCli) {
-    if (Get-Command 'az.cmd', 'az.exe' -CommandType Application -ErrorAction SilentlyContinue) {
-        Stage 'Keep: available Azure CLI.'
-    } else { Stage 'Add: Azure CLI through WinGet or a managed channel.' }
-}
-if ($EnrollSource) {
-    if ($env:SITEOPS_REDACT_OUTPUT -eq '1') {
-        Stage 'An explicitly selected source will be enrolled after installation.'
-    } else {
-        Stage "Source $EnrollSource will approve $Repository with a time-limited policy after installation."
-    }
-}
-if ($DryRun) {
-    Stage 'Preview only. No tools or content were downloaded.'
-    return
-}
-if (-not $Yes) {
-    if ([Console]::IsInputRedirected) {
-        Fail 'In automation, pass -Yes after reviewing the changes.'
-    }
-    if ($EnrollSource -and -not $Yes) {
-        if ((Read-Host 'Enroll this publisher as an approved consumer source? [y/N]') -cnotin @('y', 'Y')) {
-            Fail 'Source enrollment was not approved.'
-        }
-    }
-    $answer = Read-Host 'Install missing tools and the selected Site Ops build? [y/N]'
-    if ($answer -cnotin @('y', 'Y')) { Fail 'Installation was not approved.' }
-}
-
 function Native([string]$Name) {
     $tool = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue |
         Select-Object -First 1
     if ($null -eq $tool -or $tool.Source -notlike '*.exe') { return $null }
     return $tool.Source
-}
-function AzureCli {
-    $executable = Native 'az.exe'
-    if ($executable) { return $executable }
-    $launcher = Get-Command 'az.cmd' -CommandType Application -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    if ($launcher -and $launcher.Source -like '*.cmd') { return $launcher.Source }
-    return $null
 }
 function Require-PrivateDataRoot([string]$Path, [switch]$Managed) {
     function Reject([string]$Code) {
@@ -154,7 +232,7 @@ function Require-PrivateDataRoot([string]$Path, [switch]$Managed) {
     }
     function Read-DirectoryAcl([string]$Directory, [string]$Code) {
         try {
-            $acl = [IO.Directory]::GetAccessControl($Directory)
+            $acl = Read-NodeAcl $Directory -Directory
             return [pscustomobject]@{
                 Owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
                 Rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
@@ -355,12 +433,14 @@ function Require-PrivateExecutablePath([string]$Path, [string]$PrivateRoot, [swi
         Reject 'TOOL_PATH'
     }
     $root = $PrivateRoot.TrimEnd('\')
-    if (-not $Path.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) {
+    # A root equal to the file applies the ancestor rules to every directory, as for an installed tool.
+    if ($Path -ine $root -and -not $Path.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) {
         Reject 'TOOL_PATH'
     }
     $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    $trusted = @($sid, 'S-1-5-18', 'S-1-5-32-544', 'S-1-3-4')
-    $trustedOwners = $trusted + 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+    # Windows Modules Installer owns and writes the protected program directories.
+    $trusted = @($sid, 'S-1-5-18', 'S-1-5-32-544', 'S-1-3-4',
+                 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
     $nodes = [Collections.Generic.List[string]]::new()
     $parent = Split-Path -Parent $Path
     while ($parent) {
@@ -386,17 +466,13 @@ function Require-PrivateExecutablePath([string]$Path, [string]$PrivateRoot, [swi
             Reject 'TOOL_TYPE'
         }
         try {
-            $acl = if ($isFile) {
-                [IO.File]::GetAccessControl($nodePath)
-            } else {
-                [IO.Directory]::GetAccessControl($nodePath)
-            }
+            $acl = Read-NodeAcl $nodePath -Directory:(-not $isFile)
             $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
             $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
         } catch {
             Reject 'TOOL_ACL'
         }
-        if ($owner -notin $trustedOwners) {
+        if ($owner -notin $trusted) {
             Reject 'TOOL_OWNER'
         }
         $privateNode = $isFile -or $nodePath -ieq $root -or
@@ -437,11 +513,7 @@ function Require-PrivateRuntimeTree([string]$Root, [string]$Storage, [string]$In
                         Fail 'RUNTIME_TYPE: A selected Python runtime contains a redirected entry.'
                     }
                     $isDirectory = ($attributes -band [IO.FileAttributes]::Directory) -ne 0
-                    $acl = if ($isDirectory) {
-                        [IO.Directory]::GetAccessControl($path)
-                    } else {
-                        [IO.File]::GetAccessControl($path)
-                    }
+                    $acl = Read-NodeAcl $path -Directory:$isDirectory
                     $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
                     $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
                 } catch [UnauthorizedAccessException] {
@@ -471,21 +543,6 @@ function Require-PrivateRuntimeTree([string]$Root, [string]$Storage, [string]$In
             Fail 'RUNTIME_TYPE: A selected Python runtime cannot be enumerated.'
         }
     }
-}
-function WinGetPackage([string]$Id, [bool]$UserScope = $true) {
-    $winget = Native 'winget.exe'
-    if (-not $winget) { Fail "Use an approved software channel to install $Id. WinGet is unavailable." }
-    if ($Yes -and -not $UserScope) {
-        Fail "Unattended installation of $Id needs a separately approved managed channel."
-    }
-    $options = @('install', '--id', $Id, '--exact', '--source', 'winget',
-                 '--accept-source-agreements', '--accept-package-agreements')
-    if ($UserScope) { $options += @('--scope', 'user') }
-    if ($Yes) { $options += @('--silent', '--disable-interactivity') }
-    & $winget @options
-    if ($LASTEXITCODE -ne 0) { Fail "WinGet could not install $Id." }
-    $env:PATH = [Environment]::GetEnvironmentVariable('PATH', 'Machine') + ';' +
-        [Environment]::GetEnvironmentVariable('PATH', 'User') + ';' + $env:PATH
 }
 function Assert-UvArchive([string]$Archive, [string]$Executable = '') {
     if ((Get-Item -LiteralPath $Archive -Force).Length -ne 18039150 -or
@@ -591,8 +648,8 @@ function Select-Uv([string]$Data, [string]$Downloads, [string]$Curl) {
         Assert-UvArchive $incoming (Join-Path $Downloads 'uv.exe')
         Assert-PinnedUv (Join-Path $Downloads 'uv.exe') $Downloads
         Require-PrivateDataRoot $cache
-        Copy-Item -LiteralPath $incoming -Destination $archive -ErrorAction Stop
-        Copy-Item -LiteralPath (Join-Path $Downloads 'uv.exe') -Destination $uv -ErrorAction Stop
+        Move-Item -LiteralPath $incoming -Destination $archive -ErrorAction Stop
+        Move-Item -LiteralPath (Join-Path $Downloads 'uv.exe') -Destination $uv -ErrorAction Stop
         Require-PrivateExecutablePath $archive $cache
         Assert-UvArchive $archive
         Assert-PinnedUv $uv $cache
@@ -700,41 +757,163 @@ function Select-ManagedPython([string]$Uv, [string]$Directory, [string]$Tools) {
     }
     return $python
 }
-$data = Join-Path $env:LOCALAPPDATA 'siteops'
-Require-PrivateDataRoot $data
-$curl = Native 'curl.exe'
-if (-not $curl) { Fail 'Windows curl.exe is required for anonymous HTTPS downloads.' }
-$gh = Native 'gh.exe'
-$ghVersion = if ($gh) { & $gh version 2>$null | Select-Object -First 1 } else { '' }
-if ($ghVersion -cnotmatch '^gh version 2\.([0-9]+)\.([0-9]+)' -or [int]$Matches[1] -lt 95) {
-    WinGetPackage 'GitHub.cli'
-    $gh = Native 'gh.exe'
-    if (-not $gh) { Fail 'GitHub CLI was installed but is not on PATH. Open a new shell and retry.' }
-    $ghVersion = & $gh version 2>$null | Select-Object -First 1
-    if ($ghVersion -cnotmatch '^gh version 2\.([0-9]+)\.([0-9]+)' -or [int]$Matches[1] -lt 95) {
-        Fail 'GitHub CLI 2.95 or newer in the 2.x line is required.'
+function Select-GitHubCli() {
+    $path = Native 'gh.exe'
+    $version = ''
+    if ($path) {
+        try {
+            # The verifier runs only after its file and every parent pass admission.
+            Require-PrivateExecutablePath $path $path -Optional
+        } catch [Security.SecurityException] {
+            Fail 'The GitHub CLI executable must be owned by an administrator or the current user and protected from other users.'
+        }
+        $version = & $path version 2>$null | Select-Object -First 1
     }
-}
-if ($WithAzureCli -and -not (AzureCli)) {
-    WinGetPackage 'Microsoft.AzureCLI' $false
-    if (-not (AzureCli)) {
-        Fail 'Azure CLI was installed but is not on PATH. Open a new shell and retry.'
+    if ($version -cnotmatch '^gh version 2\.([0-9]+)\.[0-9]+' -or [int]$Matches[1] -lt 95) {
+        Fail 'GitHub CLI 2.95 or newer is required. Install it from https://cli.github.com, then retry.'
     }
+    return $path
 }
 
-Ensure-UvStorage $env:TEMP
-$download = Join-Path $env:TEMP ('siteops-download-' + [guid]::NewGuid().ToString('N'))
+if ($ContentRelease) {
+    if ($Release -or $ContentRelease -cnotmatch '^v[0-9][0-9A-Za-z._-]{0,100}$') {
+        Fail 'Choose either -Release for an engine or -ContentRelease for its signed engine selection.'
+    }
+    $Release = $ContentRelease
+}
+if ($Release -cnotmatch '^(siteops/)?v[0-9][0-9A-Za-z._-]{0,100}$' -or
+    $SourceCommit -cnotmatch '^[0-9a-f]{40}$' -or
+    $Repository -cnotmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' -or
+    $SourceRef -cnotmatch '^refs/heads/[A-Za-z0-9._/-]+$' -or
+    $SourceRef.Contains('..')) {
+    Fail 'Select an exact release, full source commit, and approved publisher.'
+}
+if ($EnrollSource -and $EnrollSource -cnotmatch '^[a-z][a-z0-9-]{0,39}$') {
+    Fail 'Choose a lowercase approved source name.'
+}
+if ($EnrollSource -and ($Caller -cne 'release.yaml' -or $SourceRef -cne 'refs/heads/main')) {
+    Fail 'Source enrollment applies to releases built by release.yaml from refs/heads/main. Enroll other builds with explicit trust files.'
+}
+if (-not [Environment]::Is64BitOperatingSystem -or
+    [Environment]::OSVersion.Version.Major -lt 10) {
+    Fail 'A supported Windows x64 machine is required.'
+}
+$curl = Native 'curl.exe'
+if (-not $curl) { Fail 'Windows curl.exe is required for anonymous HTTPS downloads.' }
+# Site Ops runs gh as an internal verifier, so gh records no telemetry or device identifier.
+$env:GH_TELEMETRY = 'false'
+$gh = Select-GitHubCli
+Stage "Release: $Release ($SourceCommit) from $Repository."
+Stage 'Uses the installed GitHub CLI, checksum-pinned uv 0.12.20, and uv-managed Python.'
+Stage 'Existing uv and Python installations are not upgraded. No account is signed in.'
+if (Get-Command 'uv.exe' -CommandType Application -ErrorAction SilentlyContinue) {
+    Stage 'Check: the existing uv executable. Preserve it if another version is installed.'
+} else {
+    Stage 'Add: pinned native uv in protected tooling storage and expose it for maintenance.'
+}
+Stage 'Check: ordinary uv tool, command, and managed Python storage.'
+if ($Replace) { Stage 'The selected build will explicitly replace or repair an existing Site Ops installation.' }
+if (-not (Get-Command 'az.cmd', 'az.exe' -CommandType Application -ErrorAction SilentlyContinue)) {
+    Stage 'Azure CLI was not found. Install it before deploying: https://aka.ms/installazurecli'
+}
+if ($EnrollSource) {
+    if ($env:SITEOPS_REDACT_OUTPUT -eq '1') {
+        Stage 'An explicitly selected source will be enrolled after installation.'
+    } else {
+        Stage "Source $EnrollSource will enroll $Repository with an expiring policy after installation."
+    }
+}
+if ($DryRun) {
+    Stage 'Preview only. No tools or content were downloaded.'
+    return
+}
+if (-not $Yes) {
+    if ([Console]::IsInputRedirected) {
+        Fail 'In automation, pass -Yes after reviewing the changes.'
+    }
+    if ($EnrollSource -and -not $Yes) {
+        if ((Read-Host 'Enroll this publisher as an approved source? [y/N]') -cnotin @('y', 'Y')) {
+            Fail 'Source enrollment was not approved.'
+        }
+    }
+    $answer = Read-Host 'Install missing tools and the selected Site Ops build? [y/N]'
+    if ($answer -cnotin @('y', 'Y')) { Fail 'Installation was not approved.' }
+}
+
+$data = Join-Path $env:LOCALAPPDATA 'siteops'
+Require-PrivateDataRoot $data
+$staging = Join-Path $data 'install-staging'
+Require-PrivateDataRoot $staging
+foreach ($entry in Get-ChildItem -LiteralPath $staging -Force) {
+    if ($entry.LastWriteTimeUtc -lt [DateTime]::UtcNow.AddHours(-24)) {
+        # .NET deletes a link itself and never recurses through it.
+        try {
+            if ($entry.PSIsContainer) { [IO.Directory]::Delete($entry.FullName, $true) } else { [IO.File]::Delete($entry.FullName) }
+        } catch [IO.IOException], [UnauthorizedAccessException] { }
+    }
+}
+# Staging shares the cache volume, so retained downloads move into place without copying.
+$download = Join-Path $staging ([guid]::NewGuid().ToString('N'))
 Require-PrivateDataRoot $download
+$callerTemp = @($env:TEMP, $env:TMP, $env:TMPDIR)
 try {
+    $temporary = Join-Path $download 'temp'
+    Require-PrivateDataRoot $temporary
+    $env:TEMP = $env:TMP = $env:TMPDIR = $temporary
+    $engineRelease = $Release
+    $engineCommit = $SourceCommit
+    $engineRef = $SourceRef
+    $engineCaller = $Caller
+    $engineVersion = ''
+    $referenceDownload = $null
+    if ($ContentRelease) {
+        $referenceId = Get-SelectionKey $Release $SourceCommit $SourceRef $Caller
+        $referenceRoot = Join-Path $data 'engine-references'
+        Require-PrivateDataRoot $referenceRoot
+        $referenceCache = Join-Path $referenceRoot $referenceId
+        $referenceAssets = $referenceCache
+        if (Test-Path -LiteralPath $referenceCache) {
+            Require-PrivateDataRoot $referenceCache
+            if (@(Get-ChildItem -LiteralPath $referenceCache -Force).Count -ne 2) {
+                Fail 'Retained engine reference bytes are incomplete. Inspect them before retrying.'
+            }
+            Stage "Rechecking the retained content release's engine selection."
+        } else {
+            $referenceDownload = Join-Path $download 'reference'
+            Require-PrivateDataRoot $referenceDownload
+            $referenceAssets = $referenceDownload
+            foreach ($asset in @('siteops-engine.json', 'siteops-engine.json.attestation.jsonl')) {
+                $limit = if ($asset.EndsWith('.attestation.jsonl')) { 2097152 } else { 16384 }
+                & $curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' `
+                    --tlsv1.2 --max-redirs 3 --max-time 180 --max-filesize $limit `
+                    --output (Join-Path $referenceAssets $asset) `
+                    ("https://github.com/$Repository/releases/download/$Release/$asset")
+                if ($LASTEXITCODE -ne 0) {
+                    Fail "The content release's signed engine reference is unavailable. Use that release's explicit engine installation instructions."
+                }
+            }
+        }
+        foreach ($asset in @('siteops-engine.json', 'siteops-engine.json.attestation.jsonl')) {
+            $path = Join-Path $referenceAssets $asset
+            Require-PrivateExecutablePath $path $referenceAssets
+            $length = (Get-Item -LiteralPath $path).Length
+            $limit = if ($asset.EndsWith('.attestation.jsonl')) { 2097152 } else { 16384 }
+            if ($length -lt 1 -or $length -gt $limit) { Fail 'The engine reference or proof is empty or oversized.' }
+        }
+        Stage "Checking the content release's engine reference."
+        $referencePath = Join-Path $referenceAssets 'siteops-engine.json'
+        Verify-ReleaseAsset $referencePath $SourceCommit $SourceRef $Caller '_release-candidate.yaml'
+        $selectedEngine = Read-EngineReference $referencePath $Release $SourceCommit $SourceRef $Caller
+        $engineRelease = $selectedEngine.Release
+        $engineCommit = $selectedEngine.Commit
+        $engineRef = $selectedEngine.SourceRef
+        $engineCaller = $selectedEngine.Caller
+        $engineVersion = $selectedEngine.Version
+        Stage "Selected engine: $engineVersion from $engineRelease ($engineCommit)."
+    }
     $base = 'https://github.com/' + $Repository + '/releases/download/' +
-        [uri]::EscapeDataString($Release) + '/'
-    $identity = (@($Repository, $Release, $SourceCommit, $SourceRef, $Caller) -join [char]0) + [char]0
-    $hasher = [Security.Cryptography.SHA256]::Create()
-    try {
-        $cacheId = [BitConverter]::ToString(
-            $hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($identity))
-        ).Replace('-', '').ToLowerInvariant()
-    } finally { $hasher.Dispose() }
+        [uri]::EscapeDataString($engineRelease) + '/'
+    $cacheId = Get-SelectionKey $engineRelease $engineCommit $engineRef $engineCaller
     $cache = Join-Path $data ("install-downloads\" + $cacheId)
     $cacheRoot = Join-Path $data 'install-downloads'
     Require-PrivateDataRoot $cacheRoot
@@ -773,70 +952,23 @@ try {
         }
         Require-PrivateExecutablePath $asset $assets
     }
-    $signer = "https://github.com/$Repository/.github/workflows/_siteops-distribution.yaml@$SourceRef"
-    $builder = "https://github.com/$Repository/.github/workflows/$Caller@$SourceRef"
+    if ($ContentRelease -and (
+        (Get-Item -LiteralPath $archive).Length -ne $selectedEngine.BundleSize -or
+        (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -cne $selectedEngine.BundleSha -or
+        (Get-Item -LiteralPath "$archive.attestation.jsonl").Length -ne $selectedEngine.ProofSize -or
+        (Get-FileHash -LiteralPath "$archive.attestation.jsonl" -Algorithm SHA256).Hash.ToLowerInvariant() -cne $selectedEngine.ProofSha)) {
+        Fail 'The engine bundle or proof differs from the signed content selection.'
+    }
     Stage "Checking the bundle's source, signer, caller, and runner."
-    $lines = [Collections.Generic.List[string]]::new()
-    $bytes = 0
-    $previousPreference = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = 'Continue'
-        & $gh attestation verify $archive --bundle "$archive.attestation.jsonl" `
-            --repo $Repository --cert-identity $signer --source-ref $SourceRef `
-            --source-digest $SourceCommit --signer-digest $SourceCommit `
-            --cert-oidc-issuer https://token.actions.githubusercontent.com `
-            --predicate-type https://slsa.dev/provenance/v1 --hostname github.com `
-            --digest-alg sha256 --format json 2>$null | ForEach-Object {
-                $bytes += [Text.Encoding]::UTF8.GetByteCount($_) + 1
-                if ($bytes -gt 8388608) { Fail 'Verification evidence exceeds its byte limit.' }
-                $lines.Add($_)
-            }
-        $verifyExit = $LASTEXITCODE
-    } finally {
-        $ErrorActionPreference = $previousPreference
-    }
-    if ($verifyExit -ne 0 -or $lines.Count -eq 0) {
-        Fail 'The bundle provenance could not be verified.'
-    }
-    $results = @((($lines -join "`n") | ConvertFrom-Json))
-    if ($results.Count -lt 1 -or $results.Count -gt 128) {
-        Fail 'Verification evidence has an unsupported result count.'
-    }
-    $expected = @{
-        subjectAlternativeName = $signer
-        issuer = 'https://token.actions.githubusercontent.com'
-        sourceRepositoryURI = "https://github.com/$Repository"
-        sourceRepositoryDigest = $SourceCommit
-        sourceRepositoryRef = $SourceRef
-        buildSignerDigest = $SourceCommit
-        buildConfigURI = $builder
-        buildConfigDigest = $SourceCommit
-        runnerEnvironment = 'self-hosted'
-    }
-    foreach ($result in $results) {
-        $verification = $result.verificationResult
-        $certificate = $verification.signature.certificate
-        if ($verification -isnot [pscustomobject] -or
-            $certificate -isnot [pscustomobject] -or
-            $verification.mediaType -isnot [string] -or
-            $verification.mediaType -cne
-            'application/vnd.dev.sigstore.verificationresult+json;version=0.1') {
-            Fail 'The verified observation format is unsupported.'
-        }
-        foreach ($key in $expected.Keys) {
-            $value = $certificate.PSObject.Properties[$key].Value
-            if ($value -isnot [string] -or $value -cne $expected[$key]) {
-                Fail 'The verified certificate does not match the selected release.'
-            }
-        }
-    }
+    Verify-ReleaseAsset $archive $engineCommit $engineRef $engineCaller '_siteops-distribution.yaml'
     $bundleId = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-    $installerHelper = Get-InstallerHelper $archive $download
+    $installerHelper = Get-InstallerHelper $archive $download $engineVersion
     Require-PrivateExecutablePath $installerHelper $download
     $root = Join-Path $data 'bundles'
     Require-PrivateDataRoot $root
     $bundle = Join-Path $root $bundleId
-    if (Test-Path -LiteralPath $bundle) { Require-PrivateDataRoot $bundle }
+    # Create the retained bundle as the user. An elevated helper would otherwise assign it to Administrators.
+    Require-PrivateDataRoot $bundle
     $script:UvCacheDir = Join-Path $download 'uv-cache'
     Ensure-UvStorage $script:UvCacheDir
     foreach ($name in @('UV_TOOL_DIR', 'UV_TOOL_BIN_DIR', 'UV_PYTHON_INSTALL_DIR')) {
@@ -863,9 +995,12 @@ try {
         Require-PrivateRuntimeTree $toolHome $toolDirectory (Join-Path $toolHome 'Scripts\python.exe')
     }
     $mode = if ($Replace) { 'replace' } else { 'install' }
-    $installed = Check-Payload @($mode, $archive, $bundle, $Repository, $SourceCommit,
-        $SourceRef, $uv, $toolDirectory, $commandDirectory)
+    $installed = Check-Payload @($mode, $archive, $bundle, $Repository, $engineCommit,
+        $engineRef, $uv, $toolDirectory, $commandDirectory)
     $version = $installed.version
+    if ($engineVersion -and $version -cne $engineVersion) {
+        Fail 'The installed version differs from the signed content selection.'
+    }
     Require-PrivateDataRoot $bundle
     $expectedTarget = Join-Path $toolHome 'Scripts\siteops.exe'
     Require-PrivateExecutablePath $expectedTarget $toolDirectory
@@ -887,49 +1022,7 @@ try {
     Stage "Command directory: $commandDirectory. Add it to your current PATH or open a new shell."
     Stage 'For native removal, run uv tool uninstall siteops.'
     if ($EnrollSource) {
-        $lines = [Collections.Generic.List[string]]::new()
-        $bytes = 0
-        $previousPreference = $ErrorActionPreference
-        try {
-            $ErrorActionPreference = 'Continue'
-            & $gh attestation trusted-root 2>$null | ForEach-Object {
-                $bytes += [Text.Encoding]::UTF8.GetByteCount($_) + 1
-                if ($bytes -gt 2097152) { Fail 'The trusted-root snapshot exceeds its byte limit.' }
-                $lines.Add($_)
-            }
-            $rootExit = $LASTEXITCODE
-        } finally {
-            $ErrorActionPreference = $previousPreference
-        }
-        if ($rootExit -ne 0 -or $lines.Count -eq 0) {
-            Fail 'The GitHub trusted-root snapshot could not be obtained.'
-        }
-        $rootFile = Join-Path $download 'trusted-root.jsonl'
-        $utf8 = [Text.UTF8Encoding]::new($false)
-        [IO.File]::WriteAllText($rootFile, ($lines -join "`n") + "`n", $utf8)
-        $rootDigest = (Get-FileHash -LiteralPath $rootFile -Algorithm SHA256).Hash.ToLowerInvariant()
-        $policyFile = Join-Path $download 'source-policy.json'
-        $policy = @{
-            apiVersion = 'siteops/v1alpha1'
-            kind = 'ArtifactVerificationPolicy'
-            id = 'approved-source'
-            version = 1
-            validUntil = [DateTimeOffset]::UtcNow.AddDays(30).ToString(
-                'yyyy-MM-ddTHH:mm:ss.ffffffzzz', [Globalization.CultureInfo]::InvariantCulture
-            )
-            trustedRootSha256 = $rootDigest
-            provider = @{
-                kind = 'github-attestation/v1'
-                repository = $Repository
-                sourceRef = $SourceRef
-                signerWorkflow = '.github/workflows/_workspace-distribution.yaml'
-                builderWorkflow = ".github/workflows/$Caller"
-                runnerEnvironment = 'self-hosted'
-            }
-        }
-        [IO.File]::WriteAllText($policyFile, ($policy | ConvertTo-Json -Depth 5) + "`n", $utf8)
-        & $siteops --trust-policy $policyFile --trusted-root $rootFile `
-            source enroll $EnrollSource --source "github:$Repository"
+        & $siteops source enroll $EnrollSource --source "github:$Repository"
         if ($LASTEXITCODE -ne 0) { Fail 'The approved source could not be enrolled.' }
     }
     if ($assets -eq $download) {
@@ -938,30 +1031,38 @@ try {
         }
         Require-PrivateDataRoot $cache
         foreach ($name in @('siteops-install.zip', 'siteops-install.zip.attestation.jsonl')) {
-            $source = Join-Path $download $name
-            $target = Join-Path $cache $name
             try {
-                [IO.File]::Copy($source, $target, $false)
+                [IO.File]::Move((Join-Path $download $name), (Join-Path $cache $name))
             } catch [IO.IOException] {
-                Fail 'The retained release bytes could not be copied without replacing existing files.'
+                Fail 'The retained release bytes could not be moved without replacing existing files.'
             }
-            if ((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -cne
-                (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash) {
-                Fail 'The retained release bytes differ from the authenticated download.'
+        }
+    }
+    if ($referenceDownload) {
+        if (Test-Path -LiteralPath $referenceCache) {
+            Fail 'The engine reference cache changed during installation. Inspect it before retrying.'
+        }
+        Require-PrivateDataRoot $referenceCache
+        foreach ($name in @('siteops-engine.json', 'siteops-engine.json.attestation.jsonl')) {
+            try {
+                [IO.File]::Move((Join-Path $referenceDownload $name), (Join-Path $referenceCache $name))
+            } catch [IO.IOException] {
+                Fail 'The verified engine reference could not be retained without replacing existing files.'
             }
         }
     }
     if ($EnrollSource) {
         if ($env:SITEOPS_REDACT_OUTPUT -eq '1') {
-            Stage "Installed siteops $version with an approved source. Authenticate to Azure separately."
+            Stage "Installed Site Ops $version with an approved source. Authenticate to Azure separately."
         } else {
-            Stage "Installed siteops $version with approved source $EnrollSource. Authenticate to Azure separately."
+            Stage "Installed Site Ops $version with approved source $EnrollSource. Authenticate to Azure separately."
         }
     } else {
-        Stage "Installed siteops $version. Authenticate to Azure and approve a workspace source separately."
+        Stage "Installed Site Ops $version. Next, authenticate to Azure and enroll a content source, for example siteops source enroll official."
     }
 }
 finally {
+    $env:TEMP, $env:TMP, $env:TMPDIR = $callerTemp
     if (Test-Path -LiteralPath $download) {
         Remove-Item -LiteralPath $download -Recurse -Force
     }

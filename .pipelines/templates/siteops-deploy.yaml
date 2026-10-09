@@ -21,7 +21,11 @@ parameters:
     type: string
     default: ''
   - name: selector
-    displayName: Site selector
+    displayName: Site selector, or the labels a Site file must carry
+    type: string
+    default: ''
+  - name: siteFile
+    displayName: Complete Site file relative to the caller checkout, used instead of configured Sites
     type: string
     default: ''
   - name: dryRun
@@ -29,7 +33,16 @@ parameters:
     type: boolean
     default: false
   - name: siteopsSource
-    displayName: siteops install source (empty = local editable install)
+    displayName: Explicit pip source, set only in reviewed YAML (empty selects the released engine)
+    type: string
+    default: ''
+  - name: release
+    type: string
+    default: ''
+  - name: sourceCommit
+    type: string
+    default: ''
+  - name: repository
     type: string
     default: ''
   - name: stageName
@@ -44,15 +57,9 @@ parameters:
 stages:
   - stage: ${{ parameters.stageName }}
     variables:
-      PYTHONUNBUFFERED: '1'
-      SITEOPS_REDACT_OUTPUT: '1'
-      AZURE_CORE_OUTPUT: none
-      ${{ if eq(parameters.templateRepository, 'self') }}:
-        SITEOPS_TEMPLATE_ROOT: $(Build.SourcesDirectory)
-        SITEOPS_WORKSPACE_ROOT: $(Build.SourcesDirectory)
-      ${{ else }}:
-        SITEOPS_TEMPLATE_ROOT: $(Pipeline.Workspace)/s/siteops-automation
-        SITEOPS_WORKSPACE_ROOT: $(Pipeline.Workspace)/s/siteops-inputs
+      - template: siteops-context.yaml
+        parameters:
+          templateRepository: ${{ parameters.templateRepository }}
     jobs:
       - deployment: siteops_deploy
         displayName: Deploy
@@ -61,66 +68,26 @@ stages:
           runOnce:
             deploy:
               steps:
-                - checkout: self
-                  ${{ if ne(parameters.templateRepository, 'self') }}:
-                    path: s/siteops-inputs
-                  fetchDepth: 1
-                  persistCredentials: false
-
-                - ${{ if ne(parameters.templateRepository, 'self') }}:
-                    - checkout: ${{ parameters.templateRepository }}
-                      path: s/siteops-automation
-                      fetchDepth: 1
-                      persistCredentials: false
+                - template: siteops-checkout.yaml
+                  parameters:
+                    templateRepository: ${{ parameters.templateRepository }}
 
                 - template: setup-siteops.yaml
                   parameters:
                     siteopsSource: ${{ parameters.siteopsSource }}
                     enableCache: false
                     sourceDirectory: $(SITEOPS_TEMPLATE_ROOT)
+                    templateRepository: ${{ parameters.templateRepository }}
+                    release: ${{ parameters.release }}
+                    sourceCommit: ${{ parameters.sourceCommit }}
+                    repository: ${{ parameters.repository }}
 
-                - script: |
-                    set -euo pipefail
-                    # Prevent path traversal attacks
-                    if [[ "$WORKSPACE" == *".."* ]] || [[ "$MANIFEST" == *".."* ]]; then
-                      echo "##vso[task.logissue type=error]Path traversal not allowed"
-                      exit 1
-                    fi
-
-                    if [[ -n "$SELECTOR" && ! "$SELECTOR" =~ ^[a-zA-Z0-9_=,./:-]+$ ]]; then
-                      echo "##vso[task.logissue type=error]Invalid selector format"
-                      exit 1
-                    fi
-
-                    if [[ ! -d "$WORKSPACE" ]]; then
-                      echo "##vso[task.logissue type=error]Workspace directory not found: $WORKSPACE"
-                      exit 1
-                    fi
-
-                    echo "✓ Inputs validated"
-                  displayName: Validate inputs
-                  workingDirectory: $(SITEOPS_WORKSPACE_ROOT)
-                  env:
-                    WORKSPACE: ${{ parameters.workspace }}
-                    MANIFEST: ${{ parameters.manifest }}
-                    SELECTOR: ${{ parameters.selector }}
-
-                - script: |
-                    set -euo pipefail
-                    if [[ -z "$SITE_OVERRIDES" ]]; then
-                      echo "No site overrides configured, using committed sites"
-                      exit 0
-                    fi
-
-                    python3 "$TEMPLATE_ROOT/scripts/mask-site-overrides.py" azure-pipelines
-                    printf '%s' "$SITE_OVERRIDES" |
-                      python3 "$TEMPLATE_ROOT/scripts/generate-site-overrides.py" "$WORKSPACE"
-                  displayName: Setup site overrides
-                  workingDirectory: $(SITEOPS_WORKSPACE_ROOT)
-                  env:
-                    WORKSPACE: ${{ parameters.workspace }}
-                    SITE_OVERRIDES: $(SITE_OVERRIDES)
-                    TEMPLATE_ROOT: $(SITEOPS_TEMPLATE_ROOT)
+                - template: siteops-inputs.yaml
+                  parameters:
+                    workspace: ${{ parameters.workspace }}
+                    manifest: ${{ parameters.manifest }}
+                    selector: ${{ parameters.selector }}
+                    siteFile: ${{ parameters.siteFile }}
 
                 - task: AzureCLI@2
                   displayName: Prepare executable plan and deploy
@@ -143,6 +110,7 @@ stages:
                         --projection publishable
                       )
                       [[ -n "$SELECTOR" ]] && PLAN_ARGS+=(-l "$SELECTOR")
+                      [[ -n "$SITE_FILE" ]] && PLAN_ARGS+=(--site-file "$SITE_FILE")
 
                       PLAN_STDOUT="$PLAN_TEMP_DIRECTORY/siteops-plan.json"
                       PLAN_STDERR="$PLAN_TEMP_DIRECTORY/siteops-plan.stderr"
@@ -231,6 +199,7 @@ stages:
                         --projection publishable
                       )
                       [[ -n "$SELECTOR" ]] && CMD_ARGS+=(-l "$SELECTOR")
+                      [[ -n "$SITE_FILE" ]] && CMD_ARGS+=(--site-file "$SITE_FILE")
 
                       RUN_STDOUT="$PLAN_TEMP_DIRECTORY/siteops-run.json"
                       RUN_STDERR="$PLAN_TEMP_DIRECTORY/siteops-run.stderr"
@@ -317,6 +286,7 @@ stages:
                     WORKSPACE: ${{ parameters.workspace }}
                     MANIFEST: ${{ parameters.manifest }}
                     SELECTOR: ${{ parameters.selector }}
+                    SITE_FILE: ${{ parameters.siteFile }}
                     DRY_RUN: ${{ parameters.dryRun }}
                     PLAN_TEMP_DIRECTORY: $(Agent.TempDirectory)
                     PLAN_SUMMARY_DIRECTORY: $(Build.ArtifactStagingDirectory)

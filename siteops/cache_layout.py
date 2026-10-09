@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import uuid
 from collections.abc import Iterator, Mapping
@@ -26,6 +27,7 @@ CACHE_DIR_ENV = "SITEOPS_CACHE_DIR"
 _MARKER = b'{"apiVersion":"siteops/v1alpha1","kind":"WorkspaceCache"}\n'
 _DIRECTORIES = ("objects", "receipts", "staging", "locks")
 _NAMESPACES = {"proofs": "sha256", "metadata": "records"}
+_STAGED_MARKER = re.compile(r"cache-[0-9a-f]{32}\.json\Z")
 
 
 def default_cache_root(environment: Mapping[str, str] | None = None) -> Path:
@@ -106,6 +108,10 @@ class CacheLayout:
         check_cache_ancestors(self.root)
         check_private_node(self.root, directory=True)
         marker = self.root / "cache.json"
+        if not marker.exists() and not marker.is_symlink():
+            raise CacheError(
+                "The selected cache directory contains other files. Select a new or empty directory.",
+            )
         check_private_node(marker, directory=False)
         with open_regular_file(marker) as stream:
             if stream.read(len(_MARKER) + 1) != _MARKER:
@@ -124,12 +130,64 @@ class CacheLayout:
                     raise CacheError("The cache namespace contains an unexpected path.")
                 check_private_node(directory / child, directory=True)
 
+    def _unmarked_layout(self) -> bool:
+        """Recognize an empty selected directory or one that another initializer is completing."""
+        check_cache_ancestors(self.root)
+        check_private_node(self.root, directory=True)
+        names = {entry.name for entry in self.root.iterdir()}
+        if not names <= set(_DIRECTORIES):
+            return False
+        for name in names:
+            directory = self.root / name
+            check_private_node(directory, directory=True)
+            children = list(directory.iterdir())
+            if name == "objects":
+                if any(child.name != "sha256" for child in children):
+                    return False
+                if children:
+                    check_private_node(children[0], directory=True)
+                    if any(children[0].iterdir()):
+                        return False
+            elif name == "staging":
+                if any(not _STAGED_MARKER.fullmatch(child.name) for child in children):
+                    return False
+            elif children:
+                return False
+        return True
+
+    def _initialize_in_place(self) -> None:
+        """Lay out a selected empty directory, converging with concurrent initializers."""
+        for name in (*_DIRECTORIES, "objects/sha256"):
+            directory = self.root.joinpath(*name.split("/"))
+            try:
+                make_private_directory(directory)
+            except FileExistsError:
+                pass
+            check_private_node(directory, directory=True)
+        staged = self.root / "staging" / f"cache-{uuid.uuid4().hex}.json"
+        marker = self.root / "cache.json"
+        write_new(staged, _MARKER)
+        try:
+            # POSIX replaces an identical marker. Windows refuses when another initializer placed one.
+            os.rename(staged, marker)
+        except OSError:
+            try:
+                staged.unlink()
+            except OSError:
+                logger.warning("Cache file staging cleanup could not be completed.")
+            if not marker.exists():
+                raise
+
     def _initialize(self, *, create: bool = True) -> None:
         try:
             self.root.lstat()
         except FileNotFoundError:
             pass
         else:
+            if self._unmarked_layout():
+                if not create:
+                    raise CacheError("The Site Ops cache has not been initialized.", code="cache.uninitialized")
+                self._initialize_in_place()
             self._check_root()
             return
         if not create:

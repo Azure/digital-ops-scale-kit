@@ -2,20 +2,23 @@ apiVersion: siteops/v1
 kind: Manifest
 name: aio-upgrade
 description: |
-  Upgrade existing Azure IoT Operations installations to the release selected
-  by each site. Bumps the cert-manager, azure-secret-store, and AIO Arc
-  extensions while preserving each extension's existing configurationSettings,
-  releaseTrain, and identity.
+  Upgrade an existing Azure IoT Operations installation to the AIO release
+  that each Site selects with `aioRelease`. Updates the AIO Arc extensions
+  while keeping their existing configuration, then deploys any resources the
+  new AIO release requires.
 
-  Reads target versions from parameters/aio-releases/<release>.yaml, the same
-  source aio-install.yaml uses for the initial deployment. Operators select the
-  target version per site via site.properties.aioRelease (re-pin the site to
-  the new release, then run this manifest). A separate ordered step deploys
-  release-required resources after the Arc extension updates complete.
-  The AIO instance ARM resource has no writable version property and is not
-  mutated.
+  Bumps the cert-manager, azure-secret-store, and AIO Arc extensions while
+  preserving each extension's existing configurationSettings, releaseTrain,
+  and identity. Reads target versions from
+  parameters/aio-releases/<release>.yaml, the same source the aio-install
+  manifest uses for the initial deployment. Operators select the target
+  version for each Site via site.properties.aioRelease (pin the Site to the
+  new AIO release, then run this manifest). A separate ordered step deploys
+  the resources the new AIO release requires after the Arc extension updates
+  complete. The AIO instance ARM resource has no writable
+  version property and is not mutated.
 
-  cert-manager is upgraded only when the site declares
+  cert-manager is upgraded only when the Site declares
   `deployOptions.enableCertManager: true`. Sites that delegate cert-manager
   to a customer-managed install set the flag false to leave the existing
   extension untouched. Custom or partial overrides can be applied via
@@ -23,13 +26,13 @@ description: |
 
   Prerequisites:
     - AIO instance must be deployed and running
-    - The site's aioRelease must point to a parameters/aio-releases/<release>.yaml file
+    - The Site's aioRelease must point to a parameters/aio-releases/<release>.yaml file
 
   Out of scope:
     - AIO instance property migrations
-    - Child resource types without an API-versioned release-resources module
+    - Child resource types without a release resources module for their API version
 
-# Max concurrent sites. 0 = unlimited, 1 = serial.
+# Max concurrent Sites. 0 = unlimited, 1 = serial.
 parallel: 3
 
 # Default selector. Override at the CLI with `-l <key>=<value>`.

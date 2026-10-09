@@ -12,7 +12,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping, TypeAlias
 
-from siteops import __version__
+from siteops import __version__, terminal
 from siteops.compilation import (
     CompilationKey,
     PreparedTemplateUnit,
@@ -170,13 +170,44 @@ class PlanNotExecutableError(ValueError):
         super().__init__(self.message(redacted=False))
 
     def message(self, *, redacted: bool) -> str:
-        """Return the diagnostic text permitted for the output destination."""
-        if self.result.diagnostics:
-            diagnostic = self.result.diagnostics[0]
-            if redacted:
-                return _publishable_diagnostic(diagnostic)["summary"]
-            return diagnostic.detail or diagnostic.summary
-        return "The deployment plan is not executable."
+        """Return the blocking diagnostics permitted for the output destination.
+
+        A single problem is returned as its own text. Several are listed, up
+        to `_BLOCKING_MESSAGE_LIMIT`, followed by the number not shown.
+        """
+        diagnostics = [
+            diagnostic
+            for diagnostic in self.result.diagnostics
+            if diagnostic.severity is DiagnosticSeverity.ERROR
+        ] or list(self.result.diagnostics)
+        texts = list(dict.fromkeys(
+            _publishable_diagnostic(diagnostic)["summary"]
+            if redacted
+            else diagnostic.detail or diagnostic.summary
+            for diagnostic in diagnostics
+        ))
+        if not texts:
+            return "The deployment plan is not executable."
+        if len(texts) == 1:
+            return texts[0]
+        lines = [f"The deployment plan has {len(texts)} blocking problems:"]
+        for text in texts[:_BLOCKING_MESSAGE_LIMIT]:
+            first, *rest = text.split("\n")
+            lines.append(f"  - {first}")
+            lines.extend(f"    {line}" for line in rest)
+        hidden = len(texts) - _BLOCKING_MESSAGE_LIMIT
+        if hidden > 0:
+            lines.append(
+                f"  {hidden} more not shown. `siteops plan` lists every diagnostic."
+            )
+        return "\n".join(lines)
+
+
+_BLOCKING_MESSAGE_LIMIT = 5
+_DESCRIBE_NOTE = (
+    "Plan shape only. Run `siteops plan` without --describe to compile templates "
+    "and check local tools."
+)
 
 
 class PlanValueResolutionError(ValueError):
@@ -597,7 +628,7 @@ def _resolve_data_reference(
             return _render_data_reference(reference)
         raise PlanValueResolutionError(
             detail=(
-                f"Step '{reference.source.step}' on site "
+                f"Step '{reference.source.step}' on Site "
                 f"'{reference.source.target}' has no available outputs."
             ),
             public_message=(
@@ -613,7 +644,7 @@ def _resolve_data_reference(
                 return _render_data_reference(reference)
             raise PlanValueResolutionError(
                 detail=(
-                    f"Step '{reference.source.step}' on site "
+                    f"Step '{reference.source.step}' on Site "
                     f"'{reference.source.target}' has no output at "
                     f"{'.'.join(reference.output_path)!r}."
                 ),
@@ -1348,8 +1379,13 @@ def render_plain_plan(
     result: PlanBuildResult,
     *,
     redacted: bool,
+    width: int | None = None,
 ) -> str:
-    """Render the plain deployment plan deterministically."""
+    """Render the plain deployment plan deterministically.
+
+    Authored and Site text is shown with control characters escaped. `width`
+    sets the prose wrap width, defaulting to the width resolved for stdout.
+    """
     if redacted:
         return _render_publishable_plan(
             _publishable_plan_document(result, __version__)
@@ -1359,35 +1395,38 @@ def render_plain_plan(
     if plan is None:
         lines = ["Deployment plan is unavailable."]
         for diagnostic in result.diagnostics:
-            message = diagnostic.detail or diagnostic.summary
-            lines.append(f"  {diagnostic.severity.value}: {message}")
+            lines.extend(_diagnostic_lines(diagnostic, indent="  "))
         lines.append("")
-        return "\n".join(lines) + "\n"
+        return _plain_text(lines)
 
     if not plan.targets:
-        lines = [f"⚠ No sites matched for manifest '{plan.manifest_name}'"]
+        lines = [
+            f"{terminal.WARNING} No Sites matched for manifest "
+            f"'{terminal.sanitize(plan.manifest_name)}'"
+        ]
         if plan.cli_selector:
             lines.append(f"  Selector: {plan.cli_selector}")
         elif plan.manifest_selector:
             lines.append(f"  Manifest selector: {plan.manifest_selector}")
         lines.append("")
-        return "\n".join(lines) + "\n"
+        return _plain_text(lines)
 
-    border = "═" * 60
-    lines = [
-        border,
-        f"  DEPLOYMENT PLAN: {plan.manifest_name}",
-    ]
+    width = terminal.line_width() if width is None else width
+    lines = terminal.heading(
+        f"Deployment plan: {terminal.sanitize(plan.manifest_name)}",
+        blank_after=False,
+    )
     if plan.cli_selector:
-        lines.append(f"  (filtered by: {plan.cli_selector})")
-    lines.append(border)
+        lines.append(f"  Selector: {plan.cli_selector}")
 
-    if plan.description:
-        lines.extend(("", *(f"  {line}" for line in plan.description.splitlines())))
+    summary = _first_paragraph(plan.description or "")
+    if summary:
+        lines.append("")
+        lines.extend(terminal.wrap(terminal.sanitize(summary), width=width))
 
     if plan.intent is PlanIntent.EXECUTABLE:
         binding_description = {
-            CompilationBinding.OBSERVED_NOT_ENFORCED: "compilation observed, not enforced",
+            CompilationBinding.OBSERVED_NOT_ENFORCED: "local compilation recorded",
             CompilationBinding.PACKAGE_ARTIFACT: "package artifact",
         }[plan.compilation_binding]
         lines.extend(
@@ -1407,94 +1446,103 @@ def render_plain_plan(
                 "  No operations will be submitted from this plan."
             )
     else:
-        lines.extend(
-            (
-                "",
-                "  Preflight: not performed",
-                "  Templates and deployment capabilities were not checked.",
-            )
-        )
+        lines.append("")
+        lines.extend(terminal.wrap(_DESCRIBE_NOTE, width=width))
 
     if plan.target_selection == "explicit-site":
-        lines.extend(("", "  Target selection: explicit Site (replaces manifest targeting)"))
+        lines.extend(("", "  Site selection: explicit Site (replaces manifest targeting)"))
     lines.extend(("", f"  Sites ({len(plan.targets)}):"))
     for target in plan.targets:
         lines.extend((
-            f"    • {target.name} ({target.location})",
+            f"    {target.name} ({target.location})",
             f"      Subscription: {target.subscription}",
             f"      Resource group: {target.resource_group}"
             if target.kind is TargetKind.RESOURCE_GROUP else "      Scope: subscription",
         ))
 
-    lines.extend(
-        (
-            "",
-            f"  Parallel: {_format_parallel(plan.max_parallel_sites)}",
-        )
-    )
-
     if plan.composition_enabled:
         lines.extend(("", "  Resource composition:"))
         _render_local_composition(lines, plan.targets)
 
+    operations_by_step: dict[str, list[PreparedOperation]] = {}
+    for target in plan.targets:
+        for operation in target.operations:
+            operations_by_step.setdefault(operation.step.name, []).append(
+                operation
+            )
     lines.extend(("", f"  Steps ({len(plan.steps)}):"))
     for step in plan.steps:
-        _render_plan_step(lines, step)
+        _render_plan_step(
+            lines,
+            step,
+            operations_by_step.get(step.name, []),
+            len(plan.targets),
+        )
 
     if result.diagnostics:
         lines.extend(("", "  Diagnostics:"))
         for diagnostic in result.diagnostics:
-            message = diagnostic.detail or diagnostic.summary
-            lines.append(
-                f"    {diagnostic.severity.value}: {message}"
-            )
+            lines.extend(_diagnostic_lines(diagnostic, indent="    "))
 
-    lines.extend(("", border))
     disposition_counts = {
-        disposition: sum(
+        disposition.value: sum(
             operation.disposition is disposition
             for target in plan.targets
             for operation in target.operations
         )
         for disposition in PlanDisposition
     }
-    if plan.intent is PlanIntent.EXECUTABLE:
-        lines.extend(
-            (
-                "  Proposed: "
-                f"{disposition_counts[PlanDisposition.EXECUTE]} execute",
-                "  Blocked: "
-                f"{disposition_counts[PlanDisposition.BLOCKED]}",
-                "  Skipped: "
-                f"{disposition_counts[PlanDisposition.SKIP]}",
-            )
-        )
-    else:
-        lines.append(
-            "  Total: "
-            f"{disposition_counts[PlanDisposition.EXECUTE]} operation(s)"
-        )
+    lines.extend(("", _operation_counts(disposition_counts)))
 
     if len(plan.targets) > 1:
         if plan.max_parallel_sites == 1:
-            lines.append("  Execution: Sequential (one site at a time)")
+            lines.append("  Execution: one Site at a time")
         elif plan.max_parallel_sites == 0:
-            lines.append("  Execution: Parallel (all sites concurrently)")
+            lines.append("  Execution: all Sites at once")
         else:
             lines.append(
-                "  Execution: Parallel "
-                f"(max {plan.max_parallel_sites} concurrent)"
+                f"  Execution: up to {plan.max_parallel_sites} Sites at once"
             )
-    lines.extend((border, ""))
-    return "\n".join(lines) + "\n"
+    lines.append("")
+    return _plain_text(lines)
 
 
-def _format_parallel(max_parallel_sites: int) -> str:
-    if max_parallel_sites == 0:
-        return "unlimited"
-    if max_parallel_sites == 1:
-        return "sequential"
-    return f"max {max_parallel_sites}"
+def _plain_text(lines: list[str]) -> str:
+    """Join rendered lines, escaping control characters a field carried in."""
+    return "\n".join(terminal.sanitize(line) for line in lines) + "\n"
+
+
+def _first_paragraph(text: str) -> str:
+    """Return the text before the first blank line as one line of prose."""
+    paragraph: list[str] = []
+    for line in text.strip().split("\n"):
+        if not line.strip():
+            break
+        paragraph.append(line.strip())
+    return " ".join(paragraph)
+
+
+def _diagnostic_lines(diagnostic: PlanDiagnostic, *, indent: str) -> list[str]:
+    first, *rest = terminal.sanitize_lines(
+        diagnostic.detail or diagnostic.summary
+    )
+    return [
+        f"{indent}{diagnostic.severity.value.capitalize()}: {first}",
+        *(f"{indent}  {line}" for line in rest),
+    ]
+
+
+def _operation_counts(dispositions: Mapping[str, int]) -> str:
+    """Summarize operation dispositions the same way for every plain plan."""
+    execute = dispositions[PlanDisposition.EXECUTE.value]
+    skip = dispositions[PlanDisposition.SKIP.value]
+    blocked = dispositions[PlanDisposition.BLOCKED.value]
+    parts = [f"{execute + skip + blocked} total", f"{execute} to run"]
+    if skip:
+        parts.append(f"{skip} skipped")
+    if blocked:
+        parts.append(f"{blocked} blocked")
+    return "  Operations: " + ", ".join(parts)
 
 
 def _render_publishable_plan(document: Mapping[str, Any]) -> str:
@@ -1502,32 +1550,21 @@ def _render_publishable_plan(document: Mapping[str, Any]) -> str:
     summary = document["summary"]
     dispositions = summary["dispositions"]
     composition = summary["composition"]
-    border = "═" * 60
     lines = [
-        border,
-        "  DEPLOYMENT PLAN",
-        border,
-        "",
+        *terminal.heading("Deployment plan"),
         f"  Status: {document['status']}",
         f"  Intent: {document['intent'] or 'unspecified'}",
         "  Executable: yes" if document["executable"] else "  Executable: no",
     ]
     if document["intent"] == PlanIntent.DESCRIBE.value:
-        lines.extend(
-            (
-                "  Preflight: not performed",
-                "  Templates and deployment capabilities were not checked.",
-            )
-        )
+        lines.append(f"  {_DESCRIBE_NOTE}")
     elif not document["executable"]:
         lines.append("  No operations will be submitted from this plan.")
     lines.extend(
         (
             "",
             f"  Sites: {summary['targetCount']} selected",
-            f"  Proposed: {dispositions['execute']} execute",
-            f"  Blocked: {dispositions['blocked']}",
-            f"  Skipped: {dispositions['skip']}",
+            _operation_counts(dispositions),
         )
     )
     if any(composition.values()):
@@ -1535,7 +1572,7 @@ def _render_publishable_plan(document: Mapping[str, Any]) -> str:
             (
                 "",
                 "  Resource composition:",
-                f"    Across {summary['targetCount']} site(s): "
+                f"    Across {summary['targetCount']} Site(s): "
                 f"{composition['selectedSourceCount']} selected source(s), "
                 f"{composition['appliedResourceCount']} applied resource(s), "
                 f"{composition['externalAssertionCount']} external assertion(s)",
@@ -1549,11 +1586,11 @@ def _render_publishable_plan(document: Mapping[str, Any]) -> str:
     if document["diagnostics"]:
         lines.extend(("", "  Diagnostics:"))
         lines.extend(
-            f"    {diagnostic['severity']}: {diagnostic['summary']}"
+            f"    {diagnostic['severity'].capitalize()}: {diagnostic['summary']}"
             for diagnostic in document["diagnostics"]
         )
-    lines.extend(("", border, ""))
-    return "\n".join(lines) + "\n"
+    lines.append("")
+    return _plain_text(lines)
 
 
 def _render_local_composition(
@@ -1564,9 +1601,11 @@ def _render_local_composition(
         lines.append(f"    {target.name}:")
         if target.diagnostics:
             for diagnostic in target.diagnostics:
-                lines.append(
-                    f"      error: {diagnostic.detail or diagnostic.summary}"
+                first, *rest = terminal.sanitize_lines(
+                    diagnostic.detail or diagnostic.summary
                 )
+                lines.append(f"      error: {first}")
+                lines.extend(f"        {line}" for line in rest)
             continue
 
         composition = target.composition
@@ -1647,47 +1686,73 @@ def _render_local_composition(
         )
 
 
-def _render_plan_step(lines: list[str], step: PlanStep) -> None:
-    condition = f" [when: {step.condition}]" if step.condition else ""
+def _render_plan_step(
+    lines: list[str],
+    step: PlanStep,
+    operations: list[PreparedOperation],
+    target_count: int,
+) -> None:
+    """Mark whether a step runs for the selected Sites, then show its details."""
+    counts = {disposition: 0 for disposition in PlanDisposition}
+    for operation in operations:
+        counts[operation.disposition] += 1
+    if counts[PlanDisposition.BLOCKED]:
+        marker = terminal.FAILED
+    elif counts[PlanDisposition.EXECUTE]:
+        marker = terminal.SUCCEEDED
+    else:
+        marker = terminal.NOT_RUN
+    states = []
+    for disposition, word in (
+        (PlanDisposition.SKIP, "skipped"),
+        (PlanDisposition.BLOCKED, "blocked"),
+    ):
+        if not counts[disposition]:
+            continue
+        if target_count == 1:
+            states.append(word)
+        elif counts[disposition] == target_count:
+            states.append(f"{word} for all {target_count} Sites")
+        else:
+            states.append(
+                f"{word} for {counts[disposition]} of {target_count} Sites"
+            )
+    status = f": {', '.join(states)}" if states else ""
+    reasons = list(dict.fromkeys(
+        operation.skip_reason.detail
+        for operation in operations
+        if operation.skip_reason is not None
+    ))
+
     details = step.details
+    detail_indent = "         "
     if isinstance(details, KubectlOperation):
-        lines.append(
-            f"    {step.sequence}. {step.name} "
-            f"(kubectl:{details.operation}){condition}"
-        )
-        lines.append(
-            f"       ├─ cluster: {_render_plan_value(details.cluster_name)}"
-        )
-        for index, file_value in enumerate(details.files):
-            prefix = "└─" if index == len(details.files) - 1 else "├─"
-            lines.append(
-                f"       {prefix} {_render_plan_value(file_value)}"
-            )
+        kind = f"kubectl:{details.operation}"
+        detail_lines = [
+            f"cluster: {_render_plan_value(details.cluster_name)}",
+            *(_render_plan_value(file_value) for file_value in details.files),
+        ]
     elif isinstance(details, ArmTagWaitOperation):
-        lines.append(f"    {step.sequence}. {step.name} (wait){condition}")
-        lines.append(
-            "       ├─ resource: "
-            f"{_render_plan_value(details.resource_id)}"
-        )
-        lines.append(
-            f"       ├─ tag: {_render_plan_value(details.tag_key)} == "
-            f"{_render_plan_value(details.expected_value)}"
-        )
+        kind = "wait"
+        detail_lines = [
+            f"resource: {_render_plan_value(details.resource_id)}",
+            f"tag: {_render_plan_value(details.tag_key)} == "
+            f"{_render_plan_value(details.expected_value)}",
+        ]
         if details.failure_pattern is not None:
-            lines.append(
-                "       ├─ failurePattern: "
-                f"{_render_plan_value(details.failure_pattern)}"
+            detail_lines.append(
+                f"failurePattern: {_render_plan_value(details.failure_pattern)}"
             )
-        lines.append(
-            f"       └─ timeout {details.timeout_minutes}m, "
+        detail_lines.append(
+            f"timeout {details.timeout_minutes}m, "
             f"poll {details.poll_interval_seconds}s"
         )
     else:
-        lines.append(
-            f"    {step.sequence}. {step.name} "
-            f"({step.scope.value}){condition}"
-        )
-        lines.append(f"       └─ {details.template.as_posix()}")
+        kind = step.scope.value
+        detail_lines = [details.template.as_posix()]
+    lines.append(f"    {marker} {step.sequence}. {step.name} ({kind}){status}")
+    lines.extend(f"{detail_indent}{line}" for line in detail_lines)
+    lines.extend(f"{detail_indent}Reason: {reason}" for reason in reasons)
 
 
 def _format_resource_identity(identity: ResourceIdentity) -> str:
@@ -1732,28 +1797,41 @@ def _render_data_reference(reference: DataReference) -> str:
     )
 
 
+# Fixed tool names and remedies that plan and run projections both publish.
+# Bicep templates compile through Azure CLI, so template compiler failures
+# share one remedy.
+BICEP_COMPILER_SUMMARY = (
+    "Azure CLI (`az`) with Bicep is required for Bicep template steps. Install "
+    "Azure CLI from https://aka.ms/installazurecli, run `az bicep install`, "
+    "then rerun the command."
+)
+PUBLISHABLE_CAPABILITY_SUMMARIES = {
+    "capability.arm-control-plane.missing": (
+        "Azure CLI (`az`) is required for deployment and wait steps. Install "
+        "it from https://aka.ms/installazurecli, then rerun the command."
+    ),
+    "capability.bicep-compiler.missing": BICEP_COMPILER_SUMMARY,
+    "capability.kubectl.missing": (
+        "kubectl is required for kubectl steps. Install it from "
+        "https://kubernetes.io/docs/tasks/tools/, then rerun the command."
+    ),
+    "capability.arc-proxy.missing": (
+        "Azure CLI (`az`) and its connectedk8s extension are required for "
+        "kubectl steps. Install Azure CLI from https://aka.ms/installazurecli, "
+        "run `az extension add --name connectedk8s`, then rerun the command."
+    ),
+}
+
 _PUBLISHABLE_DIAGNOSTICS = {
     "composition.invalid": (
         "plan.composition-invalid",
         "Resource composition failed. Set SITEOPS_REDACT_OUTPUT=0, then rerun "
         "the command locally for source and identity details.",
     ),
-    "capability.arm-control-plane.missing": (
-        "plan.capability-unavailable",
-        "A required local deployment capability is unavailable.",
-    ),
-    "capability.bicep-compiler.missing": (
-        "plan.capability-unavailable",
-        "A required local deployment capability is unavailable.",
-    ),
-    "capability.kubectl.missing": (
-        "plan.capability-unavailable",
-        "A required local deployment capability is unavailable.",
-    ),
-    "capability.arc-proxy.missing": (
-        "plan.capability-unavailable",
-        "A required local deployment capability is unavailable.",
-    ),
+    **{
+        code: ("plan.capability-unavailable", summary)
+        for code, summary in PUBLISHABLE_CAPABILITY_SUMMARIES.items()
+    },
     "compilation.failed": (
         "plan.compilation-failed",
         "Template compilation failed.",
@@ -1780,11 +1858,11 @@ _PUBLISHABLE_DIAGNOSTICS = {
     ),
     "compilation.tool-missing": (
         "plan.capability-unavailable",
-        "A required local deployment capability is unavailable.",
+        BICEP_COMPILER_SUMMARY,
     ),
     "compilation.tool-unavailable": (
         "plan.capability-unavailable",
-        "A required local deployment capability is unavailable.",
+        BICEP_COMPILER_SUMMARY,
     ),
     "operation-preparation.invalid": (
         "plan.operation-preparation-failed",
@@ -1797,7 +1875,7 @@ _PUBLISHABLE_DIAGNOSTICS = {
     "parameter-selection.invalid": (
         "plan.parameter-selection-invalid",
         "Parameter file selection failed. Set SITEOPS_REDACT_OUTPUT=0, then "
-        "rerun the command locally for site and path details.",
+        "rerun the command locally for Site and path details.",
     ),
     "plan.targeting.required": (
         "plan.targeting-required",
@@ -1806,7 +1884,7 @@ _PUBLISHABLE_DIAGNOSTICS = {
     ),
     "plan.targeting.empty": (
         "plan.targeting-empty",
-        "No sites matched the selected criteria.",
+        "No Sites matched the selected criteria.",
     ),
     "plan.target-set-incomplete": (
         "plan.target-set-incomplete",

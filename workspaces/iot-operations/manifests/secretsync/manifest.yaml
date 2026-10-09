@@ -2,10 +2,13 @@ apiVersion: siteops/v1
 kind: Manifest
 name: secretsync
 description: |
-  Enable secret sync on existing Azure IoT Operations instances.
+  Enable Secret Sync on an existing Azure IoT Operations instance. Creates a
+  managed identity, a Key Vault, role assignments and the default Secret
+  Provider Class, or uses an existing Key Vault that you supply.
 
-  This is a standalone manifest for day-2 enablement. For new deployments,
-  use the aio-install entry with deployOptions.enableSecretSync = true.
+  This standalone manifest enables Secret Sync on instances that already run.
+  For new deployments, use the aio-install manifest with
+  deployOptions.enableSecretSync = true.
 
   Prerequisites:
     - AIO instance must be deployed and running

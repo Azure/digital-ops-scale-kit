@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from release_verification import ReleaseVerifier  # noqa: E402
 from siteops_release import bind_prepared_plan, load_release_intent  # noqa: E402
+from siteops_release_assets import ENGINE_REFERENCE_NAME, engine_reference  # noqa: E402
 from workspace_engine import prepare_engine  # noqa: E402
 
 from siteops.cache_filesystem import make_private_directory  # noqa: E402
@@ -43,11 +44,14 @@ def main() -> int:
     parser.add_argument("--build-number", required=True, type=int, help="Candidate workflow run number.")
     parser.add_argument("--build-attempt", required=True, type=int, help="Candidate workflow run attempt.")
     parser.add_argument("--dry-run", action="store_true", help="Require preview identities and permit a committed release example.")
+    parser.add_argument("--engine-reference-output", type=Path, metavar="FILE",
+                        help="New siteops-engine.json path for the unsigned consumer reference.")
     parser.add_argument(
         "--expected-runner-environment", required=True, choices=("github-hosted", "self-hosted"),
         help="Trusted expected signing runner class, supplied independently of the engine assets.",
     )
     args = parser.parse_args()
+    reference_sha = None
     try:
         intent = load_release_intent(
             args.root,
@@ -92,6 +96,14 @@ def main() -> int:
             archive_sha=args.archive_sha,
             wheel_sha=args.wheel_sha,
         )
+        if args.engine_reference_output is not None:
+            if args.engine_reference_output.name != ENGINE_REFERENCE_NAME:
+                raise ValueError("Select the standard engine reference filename.")
+            document = engine_reference(intent.to_dict(), selection.document()).serialized()
+            args.engine_reference_output.parent.mkdir(mode=0o700)
+            with args.engine_reference_output.open("xb") as stream:
+                stream.write(document)
+            reference_sha = hashlib.sha256(document).hexdigest()
     except (ValueError, OSError) as error:
         message = (
             str(error)
@@ -106,6 +118,8 @@ def main() -> int:
                 "selectionSha256": hashlib.sha256(selection.serialized()).hexdigest(),
                 "matrix": selection.matrix(),
                 "engineVersion": selection.version,
+                "engineRevision": selection.native.commit,
+                "engineReferenceSha256": reference_sha,
             },
             sort_keys=True,
         )

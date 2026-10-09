@@ -4,7 +4,7 @@ name: asset-steps
 description: |
   Deploys the effective Device Registry device and asset composition for an
   existing AIO instance. Expects an upstream `resolve-aio` step. One
-  API-versioned deployment creates devices before the assets that bind to them.
+  deployment, versioned by API, creates devices before the assets that bind to them.
 
   Internal partial. `aio-resources` and direct samples include it. See
   docs/assets.md for the resource shapes and docs/resource-catalog.md for set
