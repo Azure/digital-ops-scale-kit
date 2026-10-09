@@ -162,7 +162,7 @@ jobs:
           path: ${{ runner.temp }}/fleet/admission
           merge-multiple: true
           digest-mismatch: error
-      - uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         timeout-minutes: 5
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -275,7 +275,7 @@ jobs:
         timeout-minutes: 12
         with:
           private-diagnostics: "true"
-      - uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         timeout-minutes: 5
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -455,7 +455,7 @@ jobs:
         run: |
           set -euo pipefail
           "$PYTHON" -B scripts/coordinate-release-fleet.py wait-ready --root "$RUNNER_TEMP/fleet" --timeout 2700
-      - uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         timeout-minutes: 5
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -575,7 +575,7 @@ jobs:
           path: ${{ runner.temp }}/fleet/ownership
           merge-multiple: true
           digest-mismatch: error
-      - uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         timeout-minutes: 5
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
