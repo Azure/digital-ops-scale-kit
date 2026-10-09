@@ -215,8 +215,6 @@ def test_contributor_pipelines_request_development_installation_explicitly():
     ("", "environment=dev", 0), ("target.yaml", "", 0), ("target.yaml", "environment=dev", 0),
     ("missing.yaml", "", 1), ("operator/../target.yaml", "environment=dev", 1),
     ("target.yaml", "environment=dev;id", 1),
-    ("/etc/hostname", "environment=dev", 1), ("\\\\server\\share\\site.yaml", "environment=dev", 1),
-    ("C:/agent/site.yaml", "environment=dev", 1), ("c:\\agent\\site.yaml", "environment=dev", 1),
 ])
 def test_site_file_and_selector_validation_is_explicit(tmp_path, site_file, selector, expected):
     (tmp_path / "workspace").mkdir()
@@ -253,6 +251,23 @@ def test_workspace_and_manifest_paths_must_be_relative(tmp_path, platform, field
     result = run_script(script, tmp_path, environment, shell_options=())
     assert result.returncode == expected
     assert ("must be relative to the checkout" in result.stdout) is bool(expected)
+
+
+@pytest.mark.parametrize("site_file", [
+    "existing absolute file", "\\\\server\\share\\site.yaml", "C:/agent/site.yaml", "c:\\agent\\site.yaml",
+])
+def test_site_file_path_must_be_relative(tmp_path, site_file):
+    (tmp_path / "workspace").mkdir()
+    target = tmp_path / "target.yaml"
+    target.write_text("{}")
+    if site_file == "existing absolute file":
+        site_file = bash_path(target)
+    result = run_script(step(TEMPLATES / "siteops-inputs.yaml", "Validate inputs")["script"], tmp_path, {
+        "WORKSPACE": "workspace", "MANIFEST": "manifests/install.yaml",
+        "SITE_FILE": site_file, "SELECTOR": "environment=dev",
+    }, shell_options=())
+    assert result.returncode == 1
+    assert "must be relative to the checkout" in result.stdout
 
 
 @pytest.mark.parametrize("site_file,selector", [
