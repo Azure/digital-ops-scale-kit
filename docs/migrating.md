@@ -2,7 +2,11 @@
 
 Use this guide when upgrading the Scale Kit you run. Sections are newest
 first. Apply the sections between your current and target releases,
-starting with the oldest applicable release.
+starting with the oldest applicable release. The sections start at
+v1.0.0b6. From an earlier release, first apply the migration notes in the
+[v1.0.0b4 release notes](https://github.com/Azure/digital-ops-scale-kit/releases/tag/v1.0.0b4)
+and review the
+[v1.0.0b5 release notes](https://github.com/Azure/digital-ops-scale-kit/releases/tag/v1.0.0b5).
 
 To upgrade deployed Azure IoT Operations or Kubernetes instead, see
 [aio-releases.md](aio-releases.md) and the `aio-upgrade` and
