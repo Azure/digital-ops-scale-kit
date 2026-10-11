@@ -2146,14 +2146,22 @@ def test_verified_powershell_bootstrap_runs_the_script_only_after_a_matching_pro
 def test_installation_guides_name_the_rendered_release_note_labels(verified_notes):
     readme = " ".join((ROOT / "README.md").read_text(encoding="utf-8").split())
     guide = " ".join((ROOT / "docs" / "install-siteops.md").read_text(encoding="utf-8").split())
-    # The README names the release note sections a reader copies from.
+    # The short README route leaves script checks and uv instructions in the rendered notes.
     for label, rendered in (
         ("Install Site Ops", "\n## Install Site Ops\n"),
         ("Already have uv", "\n### Already have uv\n"),
         ("Bootstrap without uv", "\n### Bootstrap without uv\n"),
     ):
         assert rendered in verified_notes
-        assert f"**{label}**" in readme
+        if label == "Already have uv":
+            assert f"**{label}** section" in readme
+        elif label == "Install Site Ops":
+            assert "### 1. Install Site Ops and approve the official source" in readme
+        else:
+            assert "### Bootstrap from HTTPS" in (ROOT / "docs" / "install-siteops.md").read_text(encoding="utf-8")
+    assert "bash siteops-bootstrap.sh --release <release> --enroll-source official" in readme
+    assert r"-File .\siteops-bootstrap.ps1" in readme
+    assert '-Release "<release>" -EnrollSource official' in readme
     assert VERIFIED in verified_notes
     for label in ("Install Site Ops", "Verify the script before it runs"):
         assert f"`{label}`" in guide

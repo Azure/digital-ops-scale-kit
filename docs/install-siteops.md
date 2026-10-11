@@ -32,7 +32,7 @@ exact approved release. Its release notes provide complete commands with the
 tag, source commit, publisher and script digest already filled in.
 Do not use a floating branch or `latest` as installation
 authority. Both scripts disclose required tool changes and ask for consent.
-To print those changes and stop without downloading anything, add
+With an explicit source commit, print those changes and stop without downloading anything by adding
 `--dry-run` on Linux or `-DryRun` on Windows to the script invocation.
 Use `--yes` on Linux or `-Yes` on Windows only for an explicitly approved
 unattended installation. Use these routes with releases that contain the
@@ -64,11 +64,85 @@ The script enrolls a source only when you ask it to.
 
 ### Bootstrap from HTTPS
 
-Copy the complete Bash or PowerShell command from your approved release's
+Run the commands from your home directory or another directory that only you can change.
+Replace `<release>` with an approved release that includes an engine:
+
+```bash
+curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+  --tlsv1.2 --output siteops-bootstrap.sh \
+  https://github.com/Azure/digital-ops-scale-kit/releases/download/<release>/siteops-bootstrap.sh &&
+bash siteops-bootstrap.sh --release <release>
+```
+
+```powershell
+curl.exe --fail --silent --show-error --location --proto '=https' --proto-redir '=https' `
+  --tlsv1.2 --output siteops-bootstrap.ps1 `
+  "https://github.com/Azure/digital-ops-scale-kit/releases/download/<release>/siteops-bootstrap.ps1"
+if ($LASTEXITCODE -eq 0) {
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\siteops-bootstrap.ps1 -Release "<release>"
+}
+```
+
+If the tag contains `/`, use `%2F` in the download URL and keep the original
+tag in the script's release argument.
+
+If a release's bootstrap requires a source commit, use its explicit release
+notes command instead.
+
+The short command downloads the script over HTTPS and runs it before anything
+is authenticated. It trusts the official HTTPS endpoint and the complete
+script bytes it serves. It does not check the script's digest or publisher
+independently. Download fully before running. Never pipe a remote
+response into a shell. Both forms stop before execution if the download fails.
+The PowerShell form runs the file at its explicit local path. It creates no private download directory
+or ACL grants. Use a protected directory, not shared writable storage.
+Normal installation without a commit always downloads the evidence from the
+release location into private staging. Only the preview reads evidence beside
+the script. It admits the script's location and both files, and refuses rather
+than downloading if any admission check fails.
+
+Without `--source-commit` or `-SourceCommit`, the bootstrap verifies the
+engine archive's detached attestation under the selected repository, source
+branch, caller, signing workflow identity, OIDC issuer and runner policy.
+The defaults authenticate the official publisher's main branch and release
+workflow on the required runner class.
+It requires one unambiguous source commit of 40 lowercase hexadecimal
+characters from the verified certificate, then runs the existing verification
+again with that commit pinned as both source and signer digest.
+It uses the same admitted GitHub CLI and disables its telemetry.
+A failed discovery or pinned check stops installation.
+Supplying a source commit keeps the explicit pinned route and skips discovery.
+
+Direct engine selection binds the requested tag through that release's
+download location, which is locked because official releases are immutable.
+This is a publication requirement, not a bootstrap check. The archive has
+no signed tag field.
+The existing payload checks compare the engine version with its authenticated
+bundle metadata and wheel bytes. They do not prove that the archive names
+the requested tag. With content selection below, the authenticated reference
+names the requested content release. Without a commit, the release download
+location selects which signed reference is used, as for the engine route.
+Neither route takes a commit from a tag API, release JSON or filename.
+
+For `--dry-run` or `-DryRun` without a commit, first stage the release's
+`siteops-install.zip` and its detached proof beside the script in that protected
+directory. For content selection, stage `siteops-engine.json` and its proof
+instead. The preview verifies discovery and the pinned proof, prints the
+discovered commit and creates no Site Ops files. It refuses if the evidence
+is absent. It reports source provenance, not resolution of a content reference
+or validation of the engine payload. GitHub CLI may refresh its signing roots,
+so this is not a claim of offline verification.
+
+For a size and digest check before execution, copy the complete Bash or
+PowerShell command from your approved release's
 `Install Site Ops` section. It downloads the script fully, checks the exact
 size and SHA-256 from the reviewed release instructions, then runs it from
 a fresh private directory. A failed download or mismatch stops execution.
 The command removes its temporary script when it finishes.
+It also pins the reviewed source commit. If you authenticate the script
+independently, use this pinned invocation or pass `--source-commit` or
+`-SourceCommit` with a commit from a trusted channel. Keep that commit rather
+than enabling discovery.
 
 Run it from a trusted user shell with the normal protected temporary
 directory. The generated command installs the engine only. It asks before
@@ -79,10 +153,13 @@ execution policy only for the child process. An organization policy may
 still prohibit unsigned scripts. Use your approved managed installation
 path in that case.
 
-Repeating the same selected installation checks the retained bundle before
+With an explicit source commit, repeating the same
+selected installation checks the retained bundle before
 skipping native tool changes. The script retains the authenticated ZIP and proof
 in private user storage for that exact release selection. It rechecks
-their proof on repeat without downloading the same assets again. This
+their proof on repeat without downloading the same assets again. Without
+a commit, discovery downloads the archive and proof again before choosing
+that cache. This
 uses additional disk space beside the extracted bundle. A different
 build or an explicit repair requires
 `--replace` on Linux or `-Replace` on Windows. This opts into native
@@ -110,6 +187,13 @@ bash ./siteops-bootstrap.sh --content-release "<content-release-tag>" \
 ```
 
 Obtain and approve the bootstrap itself through one of the routes above.
+If you authenticated the script independently, keep the source commit from
+your trusted instructions. For the HTTPS route, you may omit the source commit.
+Discovery verifies the content release's
+engine reference under `_release-candidate.yaml`, reads its certified source
+commit, then rechecks the reference with that commit pinned. The existing
+reference parser requires its signed release tag and revision to match the
+requested content selection before selecting an engine.
 Content selection does not authenticate a script you already executed.
 The selected content release must publish `siteops-engine.json` and its
 detached proof. The bootstrap verifies that reference, displays the selected
@@ -123,8 +207,10 @@ does not fall back to another engine or a source checkout. For a release
 without that metadata, use its explicit engine installation instructions.
 Do not combine the two release inputs.
 
-Repeat installation rechecks both retained proofs without downloading the
-same assets again. Changing engines still requires explicit replacement.
+With an explicit commit, repeat installation
+rechecks both retained proofs without downloading the same assets again.
+Otherwise, discovery downloads the reference and proof again before choosing
+those caches. Changing engines still requires explicit replacement.
 Source enrollment remains a separate choice and applies to the selected
 content source, not a policy supplied by the engine reference. Installation
 does not acquire workspace content, sign in or authorize Azure deployment.
@@ -231,12 +317,14 @@ Windows PowerShell:
     $certificate = $verified.signature.certificate
     if ($verified -isnot [pscustomobject] -or $certificate -isnot [pscustomobject] -or
         $verified.mediaType -isnot [string] -or
-        $verified.mediaType -cne "application/vnd.dev.sigstore.verificationresult+json;version=0.1") {
+        -not [string]::Equals($verified.mediaType,
+          "application/vnd.dev.sigstore.verificationresult+json;version=0.1", [StringComparison]::Ordinal)) {
       throw "Unsupported verified script observation."
     }
     foreach ($key in $expected.Keys) {
       $value = $certificate.PSObject.Properties[$key].Value
-      if ($value -isnot [string] -or $value -cne $expected[$key]) {
+      if ($value -isnot [string] -or
+          -not [string]::Equals($value, $expected[$key], [StringComparison]::Ordinal)) {
         throw "The verified script certificate differs from the selected release."
       }
     }

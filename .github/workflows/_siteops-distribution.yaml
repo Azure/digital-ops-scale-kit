@@ -985,6 +985,25 @@ jobs:
           [[ "$caller" == ci.yaml || "$caller" == release.yaml ]] ||
             { echo "::error::The attested caller is not supported by the bootstrap."; exit 1; }
           release=siteops/v0.0.0-ci
+          script="$download/$BOOTSTRAP_SH"
+          if [[ "$MATRIX_PYTHON" == 3.11 ]]; then
+            source_directory="$owned/bootstrap-source"
+            mkdir -m 0700 -- "$source_directory"
+            cp "$download/$BOOTSTRAP_SH" "$download/$ARCHIVE_NAME" \
+              "$download/${ARCHIVE_NAME}${ATTESTATION_SUFFIX}" "$source_directory/"
+            preview_log="$owned/logs/bootstrap-sh-preview.log"
+            if ! bash "$source_directory/$BOOTSTRAP_SH" --release "$release" \
+              --repository "$SOURCE_REPOSITORY" --source-ref "$SOURCE_REF" --caller "$caller" \
+              --dry-run > "$preview_log" 2>&1; then
+              echo "::error::The signed Bash bootstrap did not verify the preview."
+              exit 1
+            fi
+            if [[ "$(grep -Fxc "Site Ops installation: Discovered source commit: $SOURCE_SHA." "$preview_log")" != 1 ]] ||
+               [[ -e "$XDG_DATA_HOME/siteops" || -L "$XDG_DATA_HOME/siteops" ]]; then
+              echo "::error::The signed Bash bootstrap preview did not preserve the selected source and data."
+              exit 1
+            fi
+          fi
           selection="$(printf '%s\0' "$SOURCE_REPOSITORY" "$release" "$SOURCE_SHA" "$SOURCE_REF" "$caller" |
             sha256sum | cut -d ' ' -f 1)"
           cache="$XDG_DATA_HOME/siteops/install-downloads/$selection"
@@ -992,7 +1011,7 @@ jobs:
           cp "$download/$ARCHIVE_NAME" "$cache/$ARCHIVE_NAME"
           cp "$download/${ARCHIVE_NAME}${ATTESTATION_SUFFIX}" \
             "$cache/${ARCHIVE_NAME}${ATTESTATION_SUFFIX}"
-          if ! bash "$download/$BOOTSTRAP_SH" --release "$release" \
+          if ! bash "$script" --release "$release" \
             --source-commit "$SOURCE_SHA" --repository "$SOURCE_REPOSITORY" \
             --source-ref "$SOURCE_REF" --caller "$caller" --yes \
             > "$owned/logs/bootstrap-sh.log" 2>&1; then
@@ -1077,6 +1096,34 @@ jobs:
           }
           $caller = $Matches[1] + '.yaml'
           $release = 'siteops/v0.0.0-ci'
+          if ($env:MATRIX_PYTHON -ceq '3.11') {
+              $sourceDirectory = Join-Path $owned 'bootstrap-source'
+              New-Item -ItemType Directory -Path $sourceDirectory | Out-Null
+              foreach ($name in @($env:BOOTSTRAP_PS1, $env:ARCHIVE_NAME,
+                                 ($env:ARCHIVE_NAME + $env:ATTESTATION_SUFFIX))) {
+                  Copy-Item -LiteralPath (Join-Path $download $name) -Destination $sourceDirectory
+              }
+              $previewScript = Join-Path $sourceDirectory $env:BOOTSTRAP_PS1
+              $previewLog = Join-Path $owned 'logs\bootstrap-ps1-preview.log'
+              $previousPreference = $ErrorActionPreference
+              try {
+                  $ErrorActionPreference = 'Continue'
+                  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $previewScript `
+                      -Release $release -Repository $env:SOURCE_REPOSITORY `
+                      -SourceRef $env:SOURCE_REF -Caller $caller -DryRun *> $previewLog
+                  $previewStatus = $LASTEXITCODE
+              } finally { $ErrorActionPreference = $previousPreference }
+              if ($previewStatus -ne 0) {
+                  throw 'The signed PowerShell bootstrap did not verify the preview.'
+              }
+              $expectedLine = "Site Ops installation: Discovered source commit: $env:SOURCE_SHA."
+              $commitLines = @(Get-Content -LiteralPath $previewLog | Where-Object {
+                  [string]::Equals($_, $expectedLine, [StringComparison]::Ordinal)
+              })
+              if ($commitLines.Count -ne 1 -or @(Get-ChildItem -LiteralPath $bootstrapData -Force).Count) {
+                  throw 'The signed PowerShell bootstrap preview did not preserve the selected source and data.'
+              }
+          }
           $selection = (@($env:SOURCE_REPOSITORY, $release, $env:SOURCE_SHA,
                           $env:SOURCE_REF, $caller) -join [char]0) + [char]0
           $hasher = [Security.Cryptography.SHA256]::Create()

@@ -59,37 +59,53 @@ Before you start, have:
   without a login to verify published content.
 - `curl`, on Linux.
 
-### 1. Install Site Ops
+### 1. Install Site Ops and approve the official source
 
-Open the release you want on the
+Pick a release from the
 [releases page](https://github.com/Azure/digital-ops-scale-kit/releases) and
-copy one command from its **Install Site Ops** section. Each command is
-generated for that exact release, so there is nothing to fill in.
+replace `<release>` with its tag. A release that contains only content links
+to the engine release to use instead.
+Run the commands from your home directory or another directory that only you can change.
 
-| Your machine | Command in the release notes |
-|---|---|
-| Linux x64, including Ubuntu, Azure Cloud Shell and GitHub Codespaces | **Bootstrap without uv**, Linux. It checks the script against the notes, installs uv and Python for your user when needed, and authenticates the engine bundle before installing it. |
-| Windows x64 | **Bootstrap without uv**, PowerShell. The same steps, without administrator rights. |
-| uv already installed | **Already have uv**. uv installs the release wheel over HTTPS and its dependencies from your configured package index. |
+Linux x64, including Azure Cloud Shell and GitHub Codespaces:
 
-A release that contains only content links to the engine release it uses.
-The [installation guide](docs/install-siteops.md#choose-an-installation-route)
-covers verifying the script before it runs, offline installation and
-troubleshooting.
-
-### 2. Approve the official content source
-
-```text
-siteops source enroll official
+```bash
+curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+  --tlsv1.2 --output siteops-bootstrap.sh \
+  https://github.com/Azure/digital-ops-scale-kit/releases/download/<release>/siteops-bootstrap.sh &&
+bash siteops-bootstrap.sh --release <release> --enroll-source official
 ```
 
-This approves releases that the official publisher builds from its main
-branch, for 30 days. Site Ops deploys published content only from a source
-you approve this way. Run it again to renew. See
-[approved sources](docs/projects.md#use-an-approved-source) for other
-publishers and custom policies.
+Windows x64, Windows PowerShell:
 
-### 3. Deploy AIO
+```powershell
+curl.exe --fail --silent --show-error --location --proto '=https' --proto-redir '=https' `
+  --tlsv1.2 --output siteops-bootstrap.ps1 `
+  "https://github.com/Azure/digital-ops-scale-kit/releases/download/<release>/siteops-bootstrap.ps1"
+if ($LASTEXITCODE -eq 0) {
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\siteops-bootstrap.ps1 `
+    -Release "<release>" -EnrollSource official
+}
+```
+
+The installer checks prerequisites, verifies that the engine was built and
+signed by the publisher's release workflow from its main branch, installs
+with your consent and approves the `official` content source for 30 days.
+Site Ops deploys published content only from a source you approve, which you
+can renew with `siteops source enroll official`.
+
+The short command downloads the script over HTTPS and runs it before anything
+is authenticated. It binds the requested tag through that release's download
+location, which is locked because official releases are immutable, then pins
+the commit discovered from the verified engine provenance.
+
+Already have uv? Use the release notes' **Already have uv** section, then run
+`siteops source enroll official`.
+To verify the script before it runs, or to pin a reviewed source commit, use
+the release notes command described in the
+[installation guide](docs/install-siteops.md#choose-an-installation-route).
+
+### 2. Deploy AIO
 
 Copy the deploy command from the release notes' **Workspace content**
 section, which names the exact release, and replace the cluster placeholder:
@@ -110,7 +126,7 @@ it to an instance that already runs AIO, use the
 [Guided inputs](docs/guided-inputs.md) covers optional names, answer files
 and separate plans.
 
-### 4. Scale out on the same model
+### 3. Scale out on the same model
 
 [Save Sites](docs/guided-inputs.md#keep-a-site-for-later) and pin a release
 in an operator project, then plan and deploy to a selected group of Sites:

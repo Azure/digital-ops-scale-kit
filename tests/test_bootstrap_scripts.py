@@ -11,12 +11,523 @@ from pathlib import Path
 
 import pytest
 
+from tests.bootstrap_discovery_helpers import (
+    COMMIT,
+    ENGINE_COMMIT,
+    expected_arguments,
+    observation,
+    reference,
+    run_bootstrap,
+)
 from tests.shell_helpers import bash_path, required_bash
 from tests.verification_helpers import verified_observation
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts" / "bootstrap"
 SOURCE_SHA = "c" * 40
+
+
+@pytest.fixture(params=["bash", "powershell"])
+def discovery_shell(request):
+    if request.param == "powershell" and sys.platform != "win32":
+        pytest.skip("The Windows lane runs native PowerShell 5.1.")
+    return request.param
+
+
+@pytest.mark.parametrize("content", [False, True])
+@pytest.mark.parametrize("local", [False, True])
+def test_optional_commit_discovers_then_pins_the_production_flow(tmp_path, discovery_shell, content, local):
+    replies = [{"observations": [observation(content=content)], "exit": 0}] * 2
+    if content:
+        replies += [{"observations": [observation(engine=True)], "exit": 0}]
+    result, calls, _ = run_bootstrap(tmp_path, discovery_shell, replies, content=content, local=local)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PINNED_FLOW_REACHED" in result.stdout
+    assert f"Discovered source commit: {COMMIT}." in result.stdout
+    assert len(calls) == (3 if content else 2)
+    assert calls[0] == expected_arguments(calls[0], discovery_shell, pinned=False, content=content)
+    assert calls[1] == expected_arguments(calls[1], discovery_shell, pinned=True, content=content)
+    if content:
+        assert calls[2] == expected_arguments(calls[2], discovery_shell, pinned=True, engine=True)
+        assert f"({ENGINE_COMMIT})" in result.stdout
+
+
+@pytest.mark.parametrize("content", [False, True])
+def test_explicit_commit_skips_discovery_and_preserves_pinned_arguments(tmp_path, discovery_shell, content):
+    replies = [{"observations": [observation(content=content)], "exit": 0}]
+    if content:
+        replies += [{"observations": [observation(engine=True)], "exit": 0}]
+    result, calls, _ = run_bootstrap(tmp_path, discovery_shell, replies, explicit=True, content=content, local=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PINNED_FLOW_REACHED" in result.stdout
+    assert "Discovered source commit:" not in result.stdout
+    assert len(calls) == (2 if content else 1)
+    assert calls[0] == expected_arguments(calls[0], discovery_shell, pinned=True, content=content)
+    if content:
+        assert calls[1] == expected_arguments(calls[1], discovery_shell, pinned=True, engine=True)
+
+
+@pytest.mark.parametrize("fault", [
+    "sourceRepositoryRef", "buildConfigURI", "subjectAlternativeName", "sourceRepositoryURI",
+    "issuer", "runnerEnvironment", "buildSignerDigest", "buildConfigDigest",
+    "missing-digest", "null-digest", "number-digest", "short-digest", "newline-digest",
+    "extra-result", "empty-results", "too-many-results", "wrong-media", "gh-failure", "malformed-output", "object-output",
+])
+def test_discovery_refuses_untrusted_or_ambiguous_verified_evidence(tmp_path, discovery_shell, fault):
+    item = observation()
+    certificate = item["verificationResult"]["signature"]["certificate"]
+    replies = [{"observations": [item], "exit": 0}]
+    if fault in certificate:
+        certificate[fault] = "PRIVATE_WRONG"
+    elif fault == "missing-digest":
+        del certificate["sourceRepositoryDigest"]
+    elif fault == "null-digest":
+        certificate["sourceRepositoryDigest"] = None
+    elif fault == "number-digest":
+        certificate["sourceRepositoryDigest"] = 123
+    elif fault == "short-digest":
+        for key in ("sourceRepositoryDigest", "buildSignerDigest", "buildConfigDigest"):
+            certificate[key] = "c" * 39
+    elif fault == "newline-digest":
+        certificate["sourceRepositoryDigest"] = COMMIT + "\nPRIVATE_WRONG"
+    elif fault == "extra-result":
+        other = observation(engine=True)
+        replies[0]["observations"].append(other)
+    elif fault == "empty-results":
+        replies[0]["observations"] = []
+    elif fault == "too-many-results":
+        replies[0]["observations"] *= 129
+    elif fault == "wrong-media":
+        item["verificationResult"]["mediaType"] = "PRIVATE_WRONG"
+    elif fault == "gh-failure":
+        replies[0]["exit"] = 1
+    elif fault == "malformed-output":
+        replies[0]["raw"] = '{"PRIVATE_WRONG":broken'
+    elif fault == "object-output":
+        # An object must not supply its own result count.
+        item["Count"] = 1
+        replies[0]["raw"] = json.dumps(item)
+    else:
+        pytest.fail("The discovery fault is not implemented.")
+    result, calls, _ = run_bootstrap(tmp_path, discovery_shell, replies, dry_run=True)
+    assert result.returncode != 0
+    assert len(calls) == 1
+    message = "The source discovery provenance could not be verified." if fault == "gh-failure" else (
+        "The source commit could not be discovered from verified evidence."
+    )
+    assert message in " ".join((result.stdout + result.stderr).split())
+    assert "PRIVATE_WRONG" not in result.stdout + result.stderr
+    assert "Discovered source commit:" not in result.stdout
+    assert "PINNED_FLOW_REACHED" not in result.stdout
+
+
+@pytest.mark.parametrize("content", [False, True])
+def test_discovered_commit_must_survive_the_second_pinned_verification(tmp_path, discovery_shell, content):
+    item = observation(content=content)
+    disagreement = observation(content=content)
+    disagreement["verificationResult"]["signature"]["certificate"]["sourceRepositoryDigest"] = "d" * 40
+    result, calls, _ = run_bootstrap(
+        tmp_path, discovery_shell,
+        [{"observations": [item], "exit": 0}, {"observations": [disagreement], "exit": 0}],
+        content=content,
+    )
+    assert result.returncode != 0
+    assert len(calls) == 2
+    assert calls[1] == expected_arguments(calls[1], discovery_shell, pinned=True, content=content)
+    assert "PINNED_FLOW_REACHED" not in result.stdout
+
+
+@pytest.mark.parametrize("content", [False, True])
+def test_normal_discovery_ignores_staged_evidence_and_downloads_the_selected_release(tmp_path, discovery_shell, content):
+    replies = [{"observations": [observation(content=content)], "exit": 0}] * 2
+    if content:
+        replies += [{"observations": [observation(engine=True)], "exit": 0}]
+    result, calls, writes = run_bootstrap(
+        tmp_path, discovery_shell, replies, content=content,
+        real_admission=discovery_shell == "powershell" or sys.platform == "linux",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PINNED_FLOW_REACHED" in result.stdout
+    subject = "siteops-engine.json" if content else "siteops-install.zip"
+    local_directory = tmp_path / "source" if discovery_shell == "powershell" or sys.platform == "linux" else tmp_path
+    local_subject = str(local_directory / subject) if discovery_shell == "powershell" else bash_path(local_directory / subject)
+    assert all(call[2] != local_subject for call in calls)
+    assert {
+        (local_directory / subject).relative_to(tmp_path),
+        (local_directory / (subject + ".attestation.jsonl")).relative_to(tmp_path),
+    }.isdisjoint(writes)
+    assert len(calls) == (3 if content else 2)
+    base = "https://github.com/example/publisher/releases/download/v1.0.0b7/"
+    downloads = (tmp_path / "curl.log").read_text(encoding="utf-8").splitlines()
+    expected = [base + subject, base + subject + ".attestation.jsonl"]
+    if content:
+        engine_base = "https://github.com/example/publisher/releases/download/siteops%2Fv1.0.0b1/"
+        expected += [engine_base + "siteops-install.zip", engine_base + "siteops-install.zip.attestation.jsonl"]
+    assert downloads == expected
+
+
+def test_normal_content_discovery_ignores_a_superseded_signed_reference(tmp_path, discovery_shell):
+    stale = reference()
+    stale["engine"].update(release="siteops/v0.9.0", revision="b" * 40, version="0.9.0")
+    result, calls, _ = run_bootstrap(
+        tmp_path, discovery_shell, [{"observations": [observation(content=True)], "exit": 0}] * 2 +
+        [{"observations": [observation(engine=True)], "exit": 0}], content=True, local_record=stale,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Selected engine: 1.0.0b1 from siteops/v1.0.0b1" in result.stdout
+    assert "0.9.0" not in result.stdout
+    assert len(calls) == 3
+    assert calls[2][calls[2].index("--source-digest") + 1] == ENGINE_COMMIT
+    downloads = (tmp_path / "curl.log").read_text(encoding="utf-8").splitlines()
+    assert downloads[0].endswith("/v1.0.0b7/siteops-engine.json")
+    assert downloads[2].endswith("/siteops%2Fv1.0.0b1/siteops-install.zip")
+    assert json.loads((tmp_path / "siteops-engine.json").read_bytes()) == stale
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_signed_content_release_binding_must_match_the_requested_tag(tmp_path, discovery_shell, explicit):
+    record = reference()
+    record["release"] = "v9.9.9"
+    replies = [{"observations": [observation(content=True)], "exit": 0}] * (1 if explicit else 2)
+    result, calls, _ = run_bootstrap(
+        tmp_path, discovery_shell, replies, content=True, explicit=explicit, record=record,
+    )
+    assert result.returncode != 0
+    assert len(calls) == (1 if explicit else 2)
+    assert "PINNED_FLOW_REACHED" not in result.stdout
+    assert "Selected engine:" not in result.stdout
+
+
+@pytest.mark.parametrize("content", [False, True])
+def test_discovery_preview_reports_pinned_commit_without_writes(tmp_path, discovery_shell, content):
+    replies = [{"observations": [observation(content=content)], "exit": 0}] * 2
+    result, calls, writes = run_bootstrap(
+        tmp_path, discovery_shell, replies, dry_run=True, content=content,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"Discovered source commit: {COMMIT}." in result.stdout
+    assert "Preview only." in result.stdout
+    assert len(calls) == 2
+    assert not writes
+
+
+def test_discovery_preview_refuses_missing_local_evidence_without_writes(tmp_path, discovery_shell):
+    result, calls, writes = run_bootstrap(tmp_path, discovery_shell, [], dry_run=True, local=False)
+    assert result.returncode != 0
+    assert not calls and not writes
+    assert "Source discovery in preview requires the release asset and proof beside the bootstrap script." in (
+        " ".join((result.stdout + result.stderr).split())
+    )
+
+
+def test_bash_discovery_template_reads_only_verified_certificate_fields():
+    source = (SCRIPTS / "siteops-bootstrap.sh").read_text(encoding="utf-8")
+    template = re.search(r"^  template='(.*)'$", source, re.MULTILINE).group(1)
+    assert "{{range .}}" in template
+    assert "{{with .verificationResult.signature.certificate}}" in template
+    assert re.findall(r" \.([A-Za-z]+)", template) == [
+        "verificationResult", "verificationResult", "subjectAlternativeName", "issuer",
+        "sourceRepositoryURI", "sourceRepositoryDigest", "sourceRepositoryRef", "buildSignerDigest",
+        "buildConfigURI", "buildConfigDigest", "runnerEnvironment",
+    ]
+    assert '"%q"' in template and '"%q\\t%q' in template
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Ordinal comparisons use native Windows PowerShell 5.1.")
+@pytest.mark.parametrize("mode", ["discovery", "pinned"])
+@pytest.mark.parametrize("suffix", ["", "\u0000", "\u00ad", "\u200b"], ids=["exact", "nul", "soft-hyphen", "zero-width"])
+@pytest.mark.parametrize("field", [
+    "subjectAlternativeName", "issuer", "sourceRepositoryURI", "sourceRepositoryDigest",
+    "sourceRepositoryRef", "buildSignerDigest", "buildConfigURI", "buildConfigDigest", "runnerEnvironment", "mediaType",
+])
+def test_windows_verified_fields_require_ordinal_equality(tmp_path, mode, suffix, field):
+    item = observation()
+    target = item["verificationResult"] if field == "mediaType" else item["verificationResult"]["signature"]["certificate"]
+    target[field] += suffix
+    # Preserve JSON escapes until the production ConvertFrom-Json decodes them.
+    reply = {"raw": json.dumps([item]), "exit": 0}
+    replies = [reply, {"observations": [observation()], "exit": 0}] if mode == "discovery" else [reply]
+    result, calls, _ = run_bootstrap(
+        tmp_path, "powershell", replies, explicit=mode == "pinned", dry_run=mode == "discovery",
+    )
+    assert (result.returncode == 0) is (suffix == ""), result.stdout + result.stderr
+    assert len(calls) == (2 if mode == "discovery" and suffix == "" else 1)
+    if suffix:
+        message = "The source commit could not be discovered from verified evidence." if mode == "discovery" else (
+            "The verified observation format is unsupported." if field == "mediaType" else
+            "The verified certificate does not match the selected release."
+        )
+        assert message in " ".join((result.stdout + result.stderr).split())
+        assert "Discovered source commit:" not in result.stdout
+        assert "PINNED_FLOW_REACHED" not in result.stdout
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Engine reference comparisons use native Windows PowerShell 5.1.")
+@pytest.mark.parametrize("suffix", ["", "\u0000", "\u00ad", "\u200b"], ids=["exact", "nul", "soft-hyphen", "zero-width"])
+@pytest.mark.parametrize("field", ["apiVersion", "kind", "release", "revision", "bundle-name"])
+def test_windows_engine_reference_fields_require_ordinal_equality(tmp_path, suffix, field):
+    record = reference()
+    if field == "bundle-name":
+        record["engine"]["bundle"]["name"] += suffix
+    else:
+        record[field] += suffix
+    replies = [{"observations": [observation(content=True)], "exit": 0},
+               {"observations": [observation(engine=True)], "exit": 0}]
+    result, _, _ = run_bootstrap(tmp_path, "powershell", replies, content=True, explicit=True, record=record)
+    assert (result.returncode == 0) is (suffix == ""), result.stdout + result.stderr
+    assert ("PINNED_FLOW_REACHED" in result.stdout) is (suffix == "")
+
+
+def test_windows_provenance_and_reference_checks_do_not_use_cultural_equality():
+    source = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
+    for name in ("Verify-ReleaseAsset", "Find-SourceCommit", "Read-EngineReference"):
+        body = re.search(rf"(?ms)^function {name}\([^\n]*\) \{{.*?^\}}", source).group()
+        assert not re.search(r"\s-c(?:eq|ne)\s", body)
+        assert "[StringComparison]::Ordinal" in body
+
+
+@pytest.mark.parametrize("edition", ["windows-51", "core-7"])
+@pytest.mark.parametrize("count", [1, 2])
+def test_native_powershell_discovery_accepts_one_and_two_verified_results(tmp_path, edition, count):
+    if sys.platform != "win32":
+        pytest.skip("Native Windows PowerShell compatibility requires Windows.")
+    program = shutil.which("powershell.exe" if edition == "windows-51" else "pwsh.exe")
+    if program is None:
+        pytest.skip("The requested native PowerShell edition is unavailable.")
+    raw = json.dumps([observation()] * count)
+    replies = [{"raw": raw, "exit": 0}] * 2
+    result, calls, writes = run_bootstrap(
+        tmp_path, "powershell", replies, dry_run=True, real_admission=True, powershell=program,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"Discovered source commit: {COMMIT}." in result.stdout
+    assert len(calls) == 2 and not writes
+    assert calls[0] == expected_arguments(calls[0], "powershell", pinned=False)
+    assert calls[1] == expected_arguments(calls[1], "powershell", pinned=True)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Real POSIX ownership and modes require the Linux lane.")
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize(("case", "staged"), [
+    (case, staged) for case in ("private", "group-writable", "other-writable", "shared-sticky", "piped")
+    for staged in (False, True)
+] + [(case, True) for case in ("foreign-owner", "symlink", "dangling-asset", "dangling-proof", "subject-only", "proof-only")])
+def test_linux_local_discovery_uses_real_file_and_directory_admission(tmp_path, case, staged, dry_run):
+    owned_asset = None
+    original_owner = None
+
+    def setup(directory, script, asset):
+        nonlocal owned_asset, original_owner
+        if case == "group-writable":
+            # Choose a group other than the admitted user private group.
+            groups = [group for group in os.getgroups() if group != os.getgid()]
+            group = groups[0] if groups else os.getgid() + 1
+            try:
+                os.chown(directory, -1, group)
+            except PermissionError:
+                pytest.skip("This account cannot assign a distinct fixture group.")
+            directory.chmod(0o770)
+        elif case == "other-writable":
+            directory.chmod(0o707)
+        elif case == "shared-sticky":
+            # A shared sticky directory within the fixture models the system temporary root.
+            directory.chmod(0o1777)
+        elif case == "foreign-owner":
+            original_owner = asset.stat().st_uid, asset.stat().st_gid
+            try:
+                os.chown(asset, os.getuid() + 1, -1)
+            except PermissionError:
+                pytest.skip("This account cannot assign another fixture owner.")
+            owned_asset = asset
+        elif case == "symlink":
+            target = directory / "foreign.zip"
+            asset.rename(target)
+            asset.symlink_to(target)
+        elif case in {"dangling-asset", "dangling-proof"}:
+            asset.unlink()
+            proof = directory / (asset.name + ".attestation.jsonl")
+            proof.unlink()
+            (asset if case == "dangling-asset" else proof).symlink_to(directory / "absent")
+        elif case == "subject-only":
+            (directory / (asset.name + ".attestation.jsonl")).unlink()
+        elif case == "proof-only":
+            asset.unlink()
+
+    try:
+        result, calls, writes = run_bootstrap(
+            tmp_path, "bash", [{"observations": [observation()], "exit": 0}] * 2,
+            dry_run=dry_run, local=staged, real_admission=True, local_setup=setup, piped=case == "piped",
+        )
+    finally:
+        if owned_asset:
+            os.chown(owned_asset, *original_owner)
+    no_local = not staged or case == "piped"
+    message = "The source discovery asset or proof is unavailable or oversized." if case in (
+        "foreign-owner", "symlink", "dangling-asset", "dangling-proof", "subject-only", "proof-only",
+    ) else "The bootstrap script must use a trusted file location for source discovery."
+    _assert_real_discovery_result(tmp_path, result, calls, writes, dry_run=dry_run,
+                                  no_local=no_local, safe=case == "private", message=message)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Real Windows ACL and reparse admission requires Windows.")
+@pytest.mark.parametrize("dry_run", [False, True])
+@pytest.mark.parametrize(("case", "staged"), [
+    (case, staged) for case in ("private", "directory-users", "directory-everyone", "script-users", "junction", "piped")
+    for staged in (False, True)
+] + [(case, True) for case in ("asset-users", "asset-everyone", "symlink", "foreign-owner",
+                             "dangling-asset", "dangling-proof", "subject-only", "proof-only")])
+def test_windows_local_discovery_uses_real_acl_and_reparse_admission(tmp_path, case, staged, dry_run):
+    granted = None
+    principal = None
+    linked = None
+    owned_asset = None
+    original_owner = None
+
+    def setup(directory, script, asset):
+        nonlocal granted, principal, linked, owned_asset, original_owner
+        if case == "foreign-owner":
+            sid = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-Command",
+                 "[Security.Principal.WindowsIdentity]::GetCurrent().User.Value"],
+                capture_output=True, text=True, check=True, timeout=20,
+            ).stdout.strip()
+            changed = subprocess.run(
+                ["icacls.exe", str(asset), "/setowner", "*S-1-5-32-545"],
+                capture_output=True, text=True, timeout=20,
+            )
+            if changed.returncode:
+                pytest.skip("This account cannot assign an untrusted fixture owner.")
+            owned_asset, original_owner = asset, sid
+        elif case in {"dangling-asset", "dangling-proof"}:
+            asset.unlink()
+            proof = directory / (asset.name + ".attestation.jsonl")
+            proof.unlink()
+            path = asset if case == "dangling-asset" else proof
+            created = subprocess.run(
+                [os.environ["ComSpec"], "/d", "/c", "mklink", "/J", str(path), str(directory / "absent")],
+                capture_output=True, text=True, timeout=20,
+            )
+            if created.returncode:
+                pytest.skip("This account cannot create the dangling fixture junction.")
+            linked = path, True
+        elif case == "subject-only":
+            (directory / (asset.name + ".attestation.jsonl")).unlink()
+        elif case == "proof-only":
+            asset.unlink()
+        elif "-" in case:
+            target, identity = case.split("-")
+            principal = "*S-1-5-32-545" if identity == "users" else "*S-1-1-0"
+            granted = directory if target == "directory" else script if target == "script" else asset
+            rights = "(OI)(CI)M" if target == "directory" else "M"
+            changed = subprocess.run(
+                ["icacls.exe", str(granted), "/grant", principal + ":" + rights],
+                capture_output=True, text=True, timeout=20,
+            )
+            if changed.returncode:
+                granted = None
+                pytest.skip("This account cannot grant access to the fixture.")
+        elif case == "symlink":
+            target = directory / "foreign.zip"
+            asset.rename(target)
+            _windows_file_link(asset, target)
+            linked = asset, False
+        elif case == "junction":
+            target = directory.with_name("redirected-source")
+            directory.rename(target)
+            created = subprocess.run(
+                [os.environ["ComSpec"], "/d", "/c", "mklink", "/J", str(directory), str(target)],
+                capture_output=True, text=True, timeout=20,
+            )
+            if created.returncode:
+                pytest.skip("This account cannot create the fixture junction.")
+            linked = directory, True
+
+    try:
+        result, calls, writes = run_bootstrap(
+            tmp_path, "powershell", [{"observations": [observation()], "exit": 0}] * 2,
+            dry_run=dry_run, local=staged, real_admission=True, local_setup=setup, piped=case == "piped",
+        )
+    finally:
+        if owned_asset:
+            subprocess.run(
+                ["icacls.exe", str(owned_asset), "/setowner", "*" + original_owner],
+                capture_output=True, text=True, check=True, timeout=20,
+            )
+        if granted:
+            subprocess.run(
+                ["icacls.exe", str(granted), "/remove:g", principal],
+                capture_output=True, text=True, check=True, timeout=20,
+            )
+        if linked:
+            path, directory = linked
+            if directory:
+                os.rmdir(path)
+            else:
+                path.unlink()
+    message = "The source discovery asset or proof is unavailable or oversized." if case.startswith("asset-") or (
+        case in {"symlink", "foreign-owner", "dangling-asset", "dangling-proof", "subject-only", "proof-only"}
+    ) else "The bootstrap script must use a trusted file location for source discovery."
+    _assert_real_discovery_result(tmp_path, result, calls, writes, dry_run=dry_run,
+                                  no_local=not staged or case == "piped", safe=case == "private", message=message)
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_bash_unknown_script_location_uses_the_download_path(tmp_path, dry_run):
+    result, calls, writes = run_bootstrap(
+        tmp_path, "bash", [{"observations": [observation()], "exit": 0}] * 2,
+        dry_run=dry_run, piped=True, real_admission=sys.platform == "linux",
+    )
+    _assert_real_discovery_result(tmp_path, result, calls, writes, dry_run=dry_run,
+                                  no_local=True, safe=False, message="")
+
+
+def _assert_real_discovery_result(tmp_path, result, calls, writes, *, dry_run, no_local, safe, message):
+    accepted = not dry_run or (not no_local and safe)
+    assert (result.returncode == 0) is accepted, result.stdout + result.stderr
+    log = tmp_path / "curl.log"
+    downloads = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+    if accepted:
+        assert len(calls) == 2 and f"Discovered source commit: {COMMIT}." in result.stdout
+        if dry_run:
+            assert not writes and not downloads
+        else:
+            base = "https://github.com/example/publisher/releases/download/v1.0.0b7/"
+            assert downloads == [base + "siteops-install.zip", base + "siteops-install.zip.attestation.jsonl"]
+            assert "PINNED_FLOW_REACHED" in result.stdout
+    else:
+        assert not calls and not downloads
+        if dry_run:
+            assert not writes
+        if no_local:
+            message = "Source discovery in preview requires the release asset and proof beside the bootstrap script."
+        assert message in " ".join((result.stdout + result.stderr).split())
+        assert "Discovered source commit:" not in result.stdout
+
+
+def test_local_evidence_admission_is_called_only_at_the_preview_discovery_boundary():
+    bash = (SCRIPTS / "siteops-bootstrap.sh").read_text(encoding="utf-8")
+    windows = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
+    block = bash.split("if ! $commit_supplied && $dry_run; then", 1)[1].split('commit="$(discover_source_commit', 1)[0]
+    assert "\n  select_local_discovery_assets\n" in block
+    assert bash.count("\n  select_local_discovery_assets\n") == 1
+    block = windows.split("if (-not $commitSupplied -and $DryRun) {", 1)[1].split("$SourceCommit = Find-SourceCommit", 1)[0]
+    assert "$discoveryAssets = Select-LocalDiscoveryEvidence $discoverySubject" in block
+    assert windows.count("$discoveryAssets = Select-LocalDiscoveryEvidence $discoverySubject") == 1
+
+
+def test_local_script_admission_follows_evidence_presence_in_both_platforms():
+    bash = (SCRIPTS / "siteops-bootstrap.sh").read_text(encoding="utf-8")
+    body = re.search(r"(?ms)^select_local_discovery_assets\(\) \{.*?^\}", bash).group()
+    assert body.index('[[ -n "$self" ]] || return 0') < body.index('admit_file "$self"')
+    assert body.index('-L "$directory/$discovery_subject.attestation.jsonl"') < body.index('admit_file "$self"')
+    windows = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
+    body = re.search(r"(?ms)^function Select-LocalDiscoveryEvidence\([^\n]*\) \{.*?^\}", windows).group()
+    assert body.index("if (-not $PSCommandPath) { return $null }") < body.index(
+        "Require-PrivateExecutablePath $PSCommandPath",
+    )
+    assert body.index("if ($present.Count -eq 0) { return $null }") < body.index(
+        "Require-PrivateExecutablePath $PSCommandPath",
+    )
 
 
 def test_ubuntu_fixture_uses_a_pinned_acr_base_and_nonroot_python():

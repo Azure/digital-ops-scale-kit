@@ -666,9 +666,174 @@ def test_qualification_runs_both_signed_scripts_with_private_preseeded_assets():
         assert "GH_TOKEN" in script and "GITHUB_TOKEN" in script
         assert "az login" not in script and "--with-azure-cli" not in script
     bash_step = _script(qualify, "Install with the signed Bash bootstrap")
-    assert 'bash "$download/$BOOTSTRAP_SH"' in bash_step
+    assert 'script="$download/$BOOTSTRAP_SH"' in bash_step
+    assert 'bash "$script"' in bash_step
     windows_step = _script(qualify, "Install with the signed PowerShell bootstrap")
     assert "powershell.exe -NoProfile -ExecutionPolicy Bypass -File" in windows_step
+
+
+def _run_linux_bootstrap_cell(tmp_path, python, fault="none"):
+    source = _script(REUSABLE["jobs"]["qualify"], "Install with the signed Bash bootstrap")
+    block = 'script="$download/$BOOTSTRAP_SH"\n' + source.split(
+        'script="$download/$BOOTSTRAP_SH"\n', 1,
+    )[1].split("if ! grep", 1)[0]
+    download = tmp_path / "download"
+    download.mkdir()
+    (tmp_path / "logs").mkdir()
+    log = tmp_path / "arguments.txt"
+    _write_executable(download / BOOTSTRAP_SH, r'''#!/usr/bin/env bash
+{
+  printf '=== gh ===\n'
+  printf '%s\n' "$@"
+} >> "$TEST_ARGUMENTS"
+if [[ " $* " == *" --dry-run "* ]]; then
+  case "$TEST_PREVIEW_FAULT" in
+    fail) exit 9 ;;
+    missing) exit 0 ;;
+    wrong) echo 'Site Ops installation: Discovered source commit: wrong.'; exit 0 ;;
+    write) mkdir -p "$XDG_DATA_HOME/siteops" ;;
+    duplicate) printf 'Site Ops installation: Discovered source commit: %s.\n' "$SOURCE_SHA" ;;
+  esac
+  printf 'Site Ops installation: Discovered source commit: %s.\n' "$SOURCE_SHA"
+fi
+''')
+    for name in (ARCHIVE_NAME, ARCHIVE_NAME + ATTESTATION_SUFFIX):
+        (download / name).write_bytes(b"staged signed asset")
+    adapter = (
+        'mkdir() { if [[ "$1" == -m && "$2" == 0700 && "$3" == -- ]]; then command mkdir -- "$4"; '
+        'elif [[ "$1" == -p && $# == 2 ]]; then command mkdir -p -- "$2"; else return 99; fi; }\n'
+        if sys.platform == "win32" else ""
+    )
+    result = _run_script(
+        'set -euo pipefail\n' + adapter + 'download="$TEST_DOWNLOAD";owned="$TEST_ROOT"\n'
+        "release=siteops/v0.0.0-ci\ncaller=ci.yaml\n" + block,
+        tmp_path,
+        {
+            "TEST_DOWNLOAD": _bash_path(download), "TEST_ROOT": _bash_path(tmp_path),
+            "TEST_ARGUMENTS": _bash_path(log), "BOOTSTRAP_SH": BOOTSTRAP_SH,
+            "XDG_DATA_HOME": _bash_path(tmp_path / "data"),
+            "TEST_PREVIEW_FAULT": fault,
+            "ARCHIVE_NAME": ARCHIVE_NAME, "ATTESTATION_SUFFIX": ATTESTATION_SUFFIX,
+            "MATRIX_PYTHON": python, "SOURCE_SHA": "c" * 40, "SOURCE_REPOSITORY": "example/publisher",
+            "SOURCE_REF": "refs/heads/feature",
+        },
+    )
+    return result, log, download
+
+
+@pytest.mark.parametrize("python", QUALIFIED_PYTHONS)
+def test_linux_runner_cells_select_discovery_only_for_python_311(tmp_path, python):
+    result, log, download = _run_linux_bootstrap_cell(tmp_path, python)
+    assert result.returncode == 0, result.stdout + result.stderr
+    pinned = ["--release", "siteops/v0.0.0-ci", "--source-commit", "c" * 40,
+        "--repository", "example/publisher", "--source-ref", "refs/heads/feature",
+        "--caller", "ci.yaml", "--yes"]
+    preview = [
+        "--release", "siteops/v0.0.0-ci", "--repository", "example/publisher",
+        "--source-ref", "refs/heads/feature", "--caller", "ci.yaml", "--dry-run",
+    ]
+    assert _invocations(log) == ([preview, pinned] if python == "3.11" else [pinned])
+    assert (tmp_path / "bootstrap-source" / BOOTSTRAP_SH).exists() is (python == "3.11")
+    if python == "3.11":
+        for name in (BOOTSTRAP_SH, ARCHIVE_NAME, ARCHIVE_NAME + ATTESTATION_SUFFIX):
+            assert (tmp_path / "bootstrap-source" / name).read_bytes() == (download / name).read_bytes()
+
+
+@pytest.mark.parametrize("fault", ["fail", "missing", "wrong", "write", "duplicate"])
+def test_linux_preview_must_pin_the_source_without_creating_data(tmp_path, fault):
+    result, log, _ = _run_linux_bootstrap_cell(tmp_path, "3.11", fault)
+    assert result.returncode != 0
+    assert len(_invocations(log)) == 1
+    expected = "did not verify the preview" if fault == "fail" else (
+        "preview did not preserve the selected source and data"
+    )
+    assert expected in result.stdout + result.stderr
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Runner invocation uses native PowerShell 5.1.")
+@pytest.mark.parametrize("python", QUALIFIED_PYTHONS)
+def test_windows_runner_cells_select_discovery_only_for_python_311(tmp_path, python):
+    child = (
+        '[IO.File]::AppendAllText($env:TEST_ARGUMENTS, '
+        '((ConvertTo-Json -InputObject $PSBoundParameters -Compress) + "`n"))\n'
+        'if ($DryRun) { Write-Host "Site Ops installation: Discovered source commit: $env:SOURCE_SHA." }\nexit 0\n'
+    )
+    log = tmp_path / "arguments.json"
+    for name in (ARCHIVE_NAME, ARCHIVE_NAME + ATTESTATION_SUFFIX):
+        (tmp_path / name).write_bytes(b"staged signed asset")
+    result = _run_windows_bootstrap_qualifier(
+        tmp_path, child,
+        {"MATRIX_PYTHON": python, "TEST_ARGUMENTS": str(log),
+         "ARCHIVE_NAME": ARCHIVE_NAME, "ATTESTATION_SUFFIX": ATTESTATION_SUFFIX},
+        success_marker=True, stage_source=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert len(calls) == (2 if python == "3.11" else 1)
+    arguments = calls[-1]
+    assert arguments["SourceCommit"] == "c" * 40
+    assert arguments["Release"] == "siteops/v0.0.0-ci"
+    assert arguments["Repository"] == "example/publisher"
+    assert arguments["SourceRef"] == "refs/heads/feat/siteops-guided-inputs"
+    assert arguments["Caller"] == "ci.yaml"
+    assert arguments["Yes"]["IsPresent"]
+    assert "DryRun" not in arguments
+    if python == "3.11":
+        preview = calls[0]
+        assert preview["DryRun"]["IsPresent"]
+        assert "SourceCommit" not in preview and "Yes" not in preview
+        assert {key: value for key, value in preview.items() if key != "DryRun"} == {
+            key: value for key, value in arguments.items() if key not in {"SourceCommit", "Yes"}
+        }
+    assert (tmp_path / "bootstrap-source").exists() is (python == "3.11")
+    if python == "3.11":
+        assert (tmp_path / "bootstrap-source" / "bootstrap.ps1").read_bytes() == (tmp_path / "bootstrap.ps1").read_bytes()
+        for name in (ARCHIVE_NAME, ARCHIVE_NAME + ATTESTATION_SUFFIX):
+            assert (tmp_path / "bootstrap-source" / name).read_bytes() == (tmp_path / name).read_bytes()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Preview qualification runs native PowerShell 5.1.")
+@pytest.mark.parametrize("fault", ["fail", "missing", "wrong", "write", "duplicate"])
+def test_windows_preview_must_pin_the_source_without_creating_data(tmp_path, fault):
+    log = tmp_path / "arguments.jsonl"
+    for name in (ARCHIVE_NAME, ARCHIVE_NAME + ATTESTATION_SUFFIX):
+        (tmp_path / name).write_bytes(b"staged signed asset")
+    child = r'''
+[IO.File]::AppendAllText($env:TEST_ARGUMENTS, ((ConvertTo-Json -InputObject $PSBoundParameters -Compress) + "`n"))
+if (-not $DryRun) { throw 'The preview boundary allowed installation.' }
+switch ($env:TEST_PREVIEW_FAULT) {
+    'fail' { exit 9 }
+    'missing' { exit 0 }
+    'wrong' { Write-Host 'Site Ops installation: Discovered source commit: wrong.'; exit 0 }
+    'write' { New-Item -ItemType Directory -Path (Join-Path $env:TEST_ROOT 'profile\siteops\unexpected')|Out-Null }
+    'duplicate' { Write-Host "Site Ops installation: Discovered source commit: $env:SOURCE_SHA." }
+}
+Write-Host "Site Ops installation: Discovered source commit: $env:SOURCE_SHA."
+exit 0
+'''
+    result = _run_windows_bootstrap_qualifier(
+        tmp_path, child,
+        {"MATRIX_PYTHON": "3.11", "TEST_ARGUMENTS": str(log), "TEST_PREVIEW_FAULT": fault,
+         "ARCHIVE_NAME": ARCHIVE_NAME, "ATTESTATION_SUFFIX": ATTESTATION_SUFFIX},
+        stage_source=True,
+    )
+    assert result.returncode != 0
+    assert len(log.read_text(encoding="utf-8").splitlines()) == 1
+    expected = "did not verify the preview" if fault == "fail" else (
+        "preview did not preserve the selected source and data"
+    )
+    assert expected in " ".join((result.stdout + result.stderr).split())
+
+
+def test_standard_user_cell_keeps_the_explicit_commit_route():
+    source = _script(REUSABLE["jobs"]["qualify"], STANDARD_USER_STEP)
+    assert "-SourceCommit $SourceCommit -Repository $Repository -SourceRef $SourceRef" in source
+    assert "'-SourceCommit', $env:SOURCE_SHA" in source
+    assert "sourceArguments" not in source and "MATRIX_PYTHON" not in source
+    matrix = REUSABLE["jobs"]["qualify"]["strategy"]["matrix"]
+    assert matrix["python"] == list(QUALIFIED_PYTHONS)
+    assert {"os": "ubuntu-26.04", "python": "3.11"} in matrix["include"]
+    assert {"os": "windows-2025", "python": "3.11", "account": "standard"} in matrix["include"]
 
 
 def test_every_qualification_consumer_checks_the_matrix_app_runtime():
@@ -713,7 +878,7 @@ def test_signed_bash_qualification_resolves_caller_before_branch_path(
 
 def test_windows_bootstrap_qualification_captures_native_stderr_then_checks_exit():
     script = _script(REUSABLE["jobs"]["qualify"], "Install with the signed PowerShell bootstrap")
-    invocation = script.index("& powershell.exe -NoProfile -ExecutionPolicy Bypass -File")
+    invocation = script.index("& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script")
     assert "$ErrorActionPreference = 'Continue'" in script[invocation - 170:invocation]
     assert "$bootstrapStatus = $LASTEXITCODE" in script[invocation:invocation + 310]
     assert "$ErrorActionPreference = $previousPreference" in script[invocation:invocation + 420]
@@ -749,7 +914,7 @@ def test_windows_bootstrap_qualification_owns_every_preloaded_cache_directory():
     assert "foreach ($directory in @($cacheRoot, $cache))" in preload
     assert '& icacls.exe $directory /setowner "*$sid"' in preload
     assert "-Force" not in preload
-    assert script.index(preload) < script.index("& powershell.exe -NoProfile -ExecutionPolicy Bypass")
+    assert script.index(preload) < script.index("& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script")
     bootstrap = (REPO_ROOT / "scripts" / "bootstrap" / "siteops-bootstrap.ps1").read_text(
         encoding="utf-8",
     )
@@ -889,6 +1054,7 @@ def _run_windows_bootstrap_qualifier(
     extra_env: dict[str, str],
     *,
     success_marker: bool = False,
+    stage_source: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     script = _script(REUSABLE["jobs"]["qualify"], "Install with the signed PowerShell bootstrap")
     block = script.split("$log = Join-Path $owned 'logs\\bootstrap-ps1.log'\n", 1)[1].split(
@@ -898,16 +1064,23 @@ def _run_windows_bootstrap_qualifier(
     fake = tmp_path / "bootstrap.ps1"
     fake.write_text(
         "param([string]$Release,[string]$SourceCommit,[string]$Repository,"
-        "[string]$SourceRef,[string]$Caller,[switch]$Yes)\n" + child,
+        "[string]$SourceRef,[string]$Caller,[switch]$Yes,[switch]$DryRun)\n" + child,
         encoding="utf-8",
+    )
+    staging = (
+        script.split("$release = 'siteops/v0.0.0-ci'\n", 1)[1].split("$selection = ", 1)[0]
+        if stage_source else ""
     )
     wrapper = tmp_path / "qualify.ps1"
     wrapper.write_text(
         "$ErrorActionPreference='Stop'\n"
         "$owned=$env:TEST_ROOT;$download=$owned\n"
+        "$bootstrapData=Join-Path $owned 'profile\\siteops'\n"
+        "New-Item -ItemType Directory -Path $bootstrapData -Force|Out-Null\n"
         "$script=Join-Path $download $env:BOOTSTRAP_PS1\n"
-        "$log=Join-Path $owned 'logs\\bootstrap-ps1.log'\n"
         "$release='siteops/v0.0.0-ci';$caller='ci.yaml'\n"
+        + staging
+        + "$log=Join-Path $owned 'logs\\bootstrap-ps1.log'\n"
         + block + ("\n'CAPTURE_ACCEPTED'\n" if success_marker else "\n"),
         encoding="utf-8",
     )

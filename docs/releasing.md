@@ -834,6 +834,18 @@ Titles and release notes remain editable through GitHub's normal controls.
 The workflow cannot enable immutability itself, and the publish job fails when
 the published release is not immutable.
 
+### Check the published install commands
+
+Candidate qualification stages its assets, because a candidate has no release
+download location. After publication, run the README's short install command
+for the new tag on Linux, in Azure Cloud Shell or a Codespace, and on Windows.
+Each run must download the script and the engine from the release, report the
+discovered source commit, install and approve the `official` source. Record the
+tag, the discovered commit and the installed version in private notes. If a
+command fails, do not announce the release. Add a line to the editable
+release notes that directs operators to its pinned commands, then fix the
+README or bootstrap through the normal review process.
+
 ## Retry or prepare a new candidate
 
 A failed check stops publication. Missing artifacts, changed release files,
