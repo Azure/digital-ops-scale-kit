@@ -64,7 +64,8 @@ Before you start, have:
 Pick a release from the
 [releases page](https://github.com/Azure/digital-ops-scale-kit/releases) and
 replace `<release>` with its tag. A release that contains only content links
-to the engine release to use instead.
+to the engine release to use instead. For an engine tag of the form
+`siteops/v<version>`, write the slash as `%2F` in the download URL only.
 Run the commands from your home directory or another directory that only you can change.
 
 Linux x64, including Azure Cloud Shell and GitHub Codespaces:

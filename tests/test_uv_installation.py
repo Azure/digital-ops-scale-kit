@@ -69,7 +69,7 @@ def test_platform_helper_extraction_follows_provenance_admission():
     bash = (SCRIPTS / "bootstrap" / "siteops-bootstrap.sh").read_text(encoding="utf-8")
     windows = (SCRIPTS / "bootstrap" / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
     assert bash.index('[[ "$verified" == true ]]') < bash.index('installer_helper="$(extract_installer_helper)"')
-    assert windows.index("$value -isnot [string] -or $value -cne $expected[$key]") < windows.index(
+    assert windows.index("Fail 'The verified certificate does not match the selected release.'") < windows.index(
         "$installerHelper = Get-InstallerHelper $archive $download",
     )
     for script in (bash, windows):
