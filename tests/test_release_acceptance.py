@@ -324,7 +324,7 @@ def test_site_outcome_records_only_assertions_from_successful_steps(selection, s
     expected = context(selection, 1)
     qualification = {"kind": "WorkspaceEngineQualification", "engineVersion": "1.0.0b7",
                      "project": {"workspace": "workspaces/iot-operations", "sourceReleaseObservation": "not-performed"}}
-    readiness = {"kind": "PublishedPackageReadiness", "aioInstances": 1, "readyOperatorPods": 3,
+    readiness = {"kind": "PublishedPackageReadiness", "aioInstances": 1, "activePods": 3, "readyActivePods": 3,
                  "instanceCustomResources": 1, "secretSyncEnabled": slot != "disabled"}
     if slot != "disabled":
         readiness.update(spcBoundToInstance=True, vaultBinding="existing" if slot == "existing" else "created")
@@ -350,6 +350,15 @@ def test_site_outcome_records_only_assertions_from_successful_steps(selection, s
     assert record(outcomes={**outcomes, "deploy": "failure"})["status"] == "failed"
     assert "deploy-succeeded" not in record(outcomes={**outcomes, "deploy": "failure"})["assertions"]
     assert record(readiness=None)["status"] == "failed"
+    for key in ("aioInstances", "activePods", "readyActivePods", "instanceCustomResources"):
+        for value in (None, True, "3", 0, -1):
+            assert "aio-readiness" not in record(readiness={**readiness, key: value})["assertions"]
+    for count in (1, 2, 4):
+        # A Ready neighbor cannot stand in for another active pod.
+        unready = record(readiness={**readiness, "readyActivePods": count})
+        assert unready["status"] == "failed" and "aio-readiness" not in unready["assertions"]
+    missing_count = {key: value for key, value in readiness.items() if key != "readyActivePods"}
+    assert "aio-readiness" not in record(readiness=missing_count)["assertions"]
     assert record(cleanup=None)["cleanup"] == "unknown"
     residual = copy.deepcopy(cleanup)
     residual.update(status="incomplete", slots={slot: {"state": "residual", "reason": "deletion-pending"}})
@@ -362,6 +371,21 @@ def test_site_outcome_records_only_assertions_from_successful_steps(selection, s
         assert record(readiness={**readiness, "vaultBinding": "other"})["status"] == "failed"
     assert site_outcome(expected, "d" * 64, slot, {}, qualification=None, readiness=None, cleanup=None,
                         preflight="failure", groups=groups)["cleanup"] == "not-attempted"
+
+
+@pytest.mark.parametrize(("active", "ready", "expected"), [
+    pytest.param(2, 2, True, id="all-active-ready"),
+    pytest.param(2, 1, False, id="crash-loop-with-ready-neighbor"),
+    pytest.param(2, 3, False, id="excess-ready-count"),
+    pytest.param(0, 0, False, id="no-active-pods"),
+])
+def test_site_readiness_requires_matching_active_counts(active, ready, expected):
+    readiness = {"kind": "PublishedPackageReadiness", "aioInstances": 1,
+                 "activePods": active, "readyActivePods": ready, "instanceCustomResources": 1}
+    result = site_outcome({}, "d" * 64, "disabled", {"readiness": "success"},
+                          qualification=None, readiness=readiness, cleanup=None,
+                          preflight="failure", groups="persistent")
+    assert ("aio-readiness" in result["assertions"]) is expected
 
 
 def _cli(tmp_path, selection, *, downloads="success", evidence=None, jobs=None, artifacts=None):

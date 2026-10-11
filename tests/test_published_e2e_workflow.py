@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import runpy
 import shlex
 import shutil
 import stat
@@ -1710,10 +1711,10 @@ def test_published_readiness_is_bounded_and_existing_teardown_is_retained():
         "microsoft.iotoperations/instances",
         "microsoft.deviceregistry/schemaregistries",
         "microsoft.deviceregistry/namespaces",
-        "for _ in {1..60}",
-        'status.get("phase") == "Running"',
-        'condition.get("type") == "Ready"',
-        "AIO instance projection and operator readiness did not converge within five minutes.",
+        "python scripts/observe-site-readiness.py",
+        "published-kubernetes-readiness.json",
+        '"activePods": kubernetes["activePods"]',
+        '"readyActivePods": kubernetes["readyActivePods"]',
         "PublishedPackageReadiness",
         "Snapshot RG resources (persistent mode)",
         "Teardown (persistent mode, delta cleanup, keep RG)",
@@ -2094,12 +2095,16 @@ def _run_readiness_receipt(tmp_path, mode, *, provider_vault=None, owned_vault="
         "status": {"phase": "Running", "conditions": [
             {"type": "Ready", "status": "True"},
         ]},
-    }]}
-    instances = {"items": [{}]}
+    }, {"status": {"phase": "Succeeded"}}]}
+    instances = {"items": [{"metadata": {"name": "private-instance"}}]}
+    observer = runpy.run_path(str(ROOT / "scripts" / "observe-site-readiness.py"))
+    counts = observer["observe"](
+        query=lambda kind, timeout: pods if kind == "pods" else instances,
+        sleep=lambda _: pytest.fail("Ready observations must not sleep."),
+    )
     for filename, document in (
         ("resources.json", resources),
-        ("pods.json", pods),
-        ("instances.json", instances),
+        ("kubernetes.json", counts),
     ):
         (tmp_path / filename).write_text(json.dumps(document), encoding="utf-8")
     output = tmp_path / "readiness.json"
@@ -2120,8 +2125,7 @@ def _run_readiness_receipt(tmp_path, mode, *, provider_vault=None, owned_vault="
         [
             sys.executable, "-c", script,
             str(tmp_path / "resources.json"),
-            str(tmp_path / "pods.json"),
-            str(tmp_path / "instances.json"),
+            str(tmp_path / "kubernetes.json"),
             str(output),
         ],
         env=environment, capture_output=True, text=True, timeout=15, check=False,
@@ -2141,6 +2145,8 @@ def test_guided_readiness_receipt_asserts_enabled_state_without_private_ids(
     result, output, spc_id, site = _run_readiness_receipt(tmp_path, mode, owned_vault=owned_vault)
     assert result.returncode == 0, result.stderr
     receipt = json.loads(output.read_text(encoding="utf-8"))
+    assert (receipt["namespacePods"], receipt["activePods"], receipt["readyActivePods"]) == (2, 1, 1)
+    assert receipt["instanceCustomResources"] == 1
     assert receipt["secretSyncEnabled"] is (mode != "disabled")
     assert spc_id not in json.dumps(receipt)
     assert site not in json.dumps(receipt)

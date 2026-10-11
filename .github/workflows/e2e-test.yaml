@@ -2042,7 +2042,7 @@ jobs:
       - name: Observe bounded AIO readiness
         id: readiness
         if: needs.prep.outputs.published-mode == 'true'
-        timeout-minutes: 15
+        timeout-minutes: 20
         shell: bash
         env:
           RG: ${{ steps.names.outputs.rg }}
@@ -2097,48 +2097,8 @@ jobs:
               raise SystemExit("Published guided resource observation could not be stored.") from None
           PY
           fi
-          ready=false
-          for _ in {1..60}; do
-            kubectl get pods --namespace azure-iot-operations --output json \
-              > "$RUNNER_TEMP/published-pods.json"
-            if ! kubectl get instance.iotoperations.azure.com \
-              --namespace azure-iot-operations --output json \
-              > "$RUNNER_TEMP/published-instances.json" 2> /dev/null; then
-              printf '{"items":[]}\n' > "$RUNNER_TEMP/published-instances.json"
-            fi
-            if python - \
-              "$RUNNER_TEMP/published-pods.json" \
-              "$RUNNER_TEMP/published-instances.json" <<'PY'
-          import json
-          import sys
-          from pathlib import Path
-
-          pods = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-          instances = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
-          if not instances.get("items"):
-              raise SystemExit(1)
-          for pod in pods.get("items", []):
-              status = pod.get("status", {})
-              conditions = status.get("conditions", [])
-              if status.get("phase") == "Running" and any(
-                  condition.get("type") == "Ready"
-                  and condition.get("status") == "True"
-                  for condition in conditions
-                  if isinstance(condition, dict)
-              ):
-                  raise SystemExit(0)
-          raise SystemExit(1)
-          PY
-            then
-              ready=true
-              break
-            fi
-            sleep 5
-          done
-          if [[ "$ready" != "true" ]]; then
-            echo "::error::AIO instance projection and operator readiness did not converge within five minutes."
-            exit 1
-          fi
+          python scripts/observe-site-readiness.py \
+            --output "$RUNNER_TEMP/published-kubernetes-readiness.json"
           if [[ "$E2E_JOURNEY" == "guided" && "$E2E_ENABLE_SECRET_SYNC" == "true" ]]; then
             mapfile -t secret_resources < <(python3 - "$RUNNER_TEMP/published-owned-resources.json" <<'PY'
           import json
@@ -2181,8 +2141,7 @@ jobs:
           fi
           python - \
             "$RUNNER_TEMP/published-resources.json" \
-            "$RUNNER_TEMP/published-pods.json" \
-            "$RUNNER_TEMP/published-instances.json" \
+            "$RUNNER_TEMP/published-kubernetes-readiness.json" \
             "$RUNNER_TEMP/published-readiness.json" <<'PY'
           import json
           import os
@@ -2190,8 +2149,7 @@ jobs:
           from pathlib import Path
 
           resources = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-          pods = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
-          instances = json.loads(Path(sys.argv[3]).read_text(encoding="utf-8"))
+          kubernetes = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
           if not isinstance(resources, list):
               raise SystemExit("Azure resource observation is invalid.")
           types = [
@@ -2202,27 +2160,15 @@ jobs:
           instance_count = types.count("microsoft.iotoperations/instances")
           schema_count = types.count("microsoft.deviceregistry/schemaregistries")
           namespace_count = types.count("microsoft.deviceregistry/namespaces")
-          pod_count = len(pods.get("items", []))
-          ready_pod_count = sum(
-              pod.get("status", {}).get("phase") == "Running"
-              and any(
-                  condition.get("type") == "Ready"
-                  and condition.get("status") == "True"
-                  for condition in pod.get("status", {}).get("conditions", [])
-                  if isinstance(condition, dict)
-              )
-              for pod in pods.get("items", [])
-              if isinstance(pod, dict)
-          )
-          custom_resource_count = len(instances.get("items", []))
-          if min(
-              instance_count,
-              schema_count,
-              namespace_count,
-              pod_count,
-              ready_pod_count,
-              custom_resource_count,
-          ) < 1:
+          if (
+              min(instance_count, schema_count, namespace_count) < 1
+              or not isinstance(kubernetes, dict)
+              or not all(type(kubernetes.get(key)) is int and kubernetes[key] >= 1 for key in (
+                  "namespacePods", "activePods", "readyActivePods", "instanceCustomResources"
+              ))
+              or kubernetes["readyActivePods"] != kubernetes["activePods"]
+              or kubernetes["namespacePods"] < kubernetes["activePods"]
+          ):
               raise SystemExit("The bounded AIO readiness observations are incomplete.")
           receipt = {
               "apiVersion": "siteops.e2e/v1",
@@ -2230,9 +2176,10 @@ jobs:
               "aioInstances": instance_count,
               "schemaRegistries": schema_count,
               "deviceRegistryNamespaces": namespace_count,
-              "namespacePods": pod_count,
-              "readyOperatorPods": ready_pod_count,
-              "instanceCustomResources": custom_resource_count,
+              "namespacePods": kubernetes["namespacePods"],
+              "activePods": kubernetes["activePods"],
+              "readyActivePods": kubernetes["readyActivePods"],
+              "instanceCustomResources": kubernetes["instanceCustomResources"],
           }
           if os.environ["E2E_JOURNEY"] == "guided":
               owned = json.loads(
@@ -2302,7 +2249,7 @@ jobs:
                   if spcs or identities or vaults:
                       raise SystemExit("Guided disabled path created Secret Sync resources.")
                   receipt["secretSyncEnabled"] = False
-          Path(sys.argv[4]).write_text(
+          Path(sys.argv[3]).write_text(
               json.dumps(receipt, indent=2, sort_keys=True) + "\n",
               encoding="utf-8",
           )

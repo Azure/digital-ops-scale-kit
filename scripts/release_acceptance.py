@@ -420,7 +420,9 @@ def site_outcome(context: dict, scope_key: str, slot: str, outcomes: dict, *, qu
     ready = (
         isinstance(readiness, dict) and readiness.get("kind") == "PublishedPackageReadiness"
         and all(type(readiness.get(key)) is int and readiness[key] >= 1 for key in (
-            "aioInstances", "readyOperatorPods", "instanceCustomResources"))
+            "aioInstances", "activePods", "instanceCustomResources"))
+        and type(readiness.get("readyActivePods")) is int
+        and readiness["readyActivePods"] == readiness["activePods"]
     )
     if not ready or outcomes.get("readiness") != "success":
         assertions.discard("aio-readiness")

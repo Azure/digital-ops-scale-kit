@@ -410,8 +410,10 @@ The workflow:
    offline `aio-install` plan without compiling.
 7. Runs `aio-install` through the same project with package acquisition
    offline, then checks the redacted deployment summary, expected Azure
-   resource types, AIO instance custom resource and at least one running,
-   Ready operator pod. Completed AIO job pods are not required to become Ready.
+   resource types and at least one AIO instance custom resource. Every active pod in
+   `azure-iot-operations` must be Running and Ready within fifteen minutes.
+   Completed job pods with phase `Succeeded` are excluded.
+   This does not check workload data flow.
 8. Uploads only bounded count and status receipts and runs the existing
    persistent teardown of the snapshot delta, preserving the RG that the
    operator supplied.

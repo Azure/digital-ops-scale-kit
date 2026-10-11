@@ -17,7 +17,8 @@ INVOKED = sorted({
 
 
 def test_workflows_invoke_the_acceptance_helpers():
-    assert {"manage-release-fleet.py", "aggregate-release-acceptance.py", "coordinate-release-fleet.py"} <= set(INVOKED)
+    assert {"manage-release-fleet.py", "aggregate-release-acceptance.py", "coordinate-release-fleet.py",
+            "observe-site-readiness.py"} <= set(INVOKED)
 
 
 @pytest.mark.parametrize("name", INVOKED)
