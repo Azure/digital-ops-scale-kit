@@ -42,8 +42,10 @@ var generatedStorageAccountName = !empty(storageAccountName)
 var schemaRegistryResourceId = resourceId('Microsoft.DeviceRegistry/schemaRegistries', schemaRegistryName)
 
 // The service limits the namespace to 32 characters and requires it to be unique in the tenant.
-// A registry name that fits is used unchanged. A longer name keeps its first 26 characters and
-// gains a hash of the resource group and the full name.
+// A registry name that fits is used unchanged, so registries created earlier keep their
+// namespace. A longer name keeps its first 26 characters and gains a hash of the resource group
+// and the full name. Sites that share a name in one tenant set schemaRegistryName to keep their
+// namespaces distinct.
 var schemaRegistryNamespace = length(schemaRegistryName) <= 32
   ? schemaRegistryName
   : '${toLower(take(schemaRegistryName, 26))}${take(uniqueString(resourceGroup().id, schemaRegistryName), 6)}'
