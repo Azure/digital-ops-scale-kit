@@ -750,8 +750,9 @@ created, as described in [Read the result and retry](e2e-testing.md#read-the-res
 After approval, the publish job finds the newest **Release acceptance** run of
 `.github/workflows/e2e-test.yaml` on `main` at the candidate commit that
 carries a receipt for this candidate. A newer run that is still in progress
-stops publication. The governing run must have completed successfully, and
-its latest attempt must have exactly one unexpired receipt. That receipt must
+or completed without recording a result stops publication. Runs bound to
+another candidate are skipped. The governing run must have completed successfully,
+and its latest attempt must have exactly one unexpired receipt. That receipt must
 name this candidate's source, release run and attempt, admission, plan and
 inventory digests, the `dev` environment, and every required scenario as
 passed with resources confirmed absent. Previews, other branches, other
@@ -776,8 +777,9 @@ publish rerun keeps the candidate from the original attempt.
    deployment, readiness and cleanup in private notes. These runs use staged
    candidate assets, not a public download.
 4. For content releases, the applicable content and AIO evidence is confirmed.
-5. Immutable releases are enabled in the repository settings. The publish job
-   fails when the published release is not immutable.
+5. Immutable releases are enabled in the repository settings. The workflow
+   token cannot read that setting, so this confirmation is the only check
+   before publication.
 
 ## Approve publication
 
@@ -831,8 +833,11 @@ Enable immutable releases in the repository settings before publishing.
 GitHub then locks the uploaded assets and tag when publication completes, so
 the short install command can rely on a release tag's download location.
 Titles and release notes remain editable through GitHub's normal controls.
-The workflow cannot enable immutability itself, and the publish job fails when
-the published release is not immutable.
+The workflow cannot enable immutability or read the setting, because the
+workflow token has no administration permission. When the published release
+is not immutable, the publish job deletes that release, keeps its tag at the
+approved commit and fails. Enable immutable releases, then re-run the publish
+job. It reuses the tag and creates the release again.
 
 ### Check the published install commands
 

@@ -266,7 +266,10 @@ jobs:
               pattern = re.compile("release-acceptance-" + str(run["id"]) + "-[0-9]+-" + admission)
               bound = [item for item in listed if isinstance(item.get("name"), str) and pattern.fullmatch(item["name"])]
               if not bound:
-                  continue
+                  other = re.compile("release-acceptance-" + str(run["id"]) + "-[0-9]+-[0-9a-f]{64}")
+                  if any(isinstance(item.get("name"), str) and other.fullmatch(item["name"]) for item in listed):
+                      continue
+                  raise SystemExit("::error::The newest acceptance run for this commit recorded no result. Re-run it, or start acceptance for this candidate, then re-run publish.")
               # Once any attempt bound this run, only its latest attempt may decide.
               latest = [item for item in bound
                         if item["name"] == "release-acceptance-%d-%s-%s" % (run["id"], attempt, admission)]
@@ -1011,8 +1014,24 @@ jobs:
             echo "- Source: \`$SOURCE_SHA\`"
             echo "- Immutable: \`$immutable\`"
           } >> "$GITHUB_STEP_SUMMARY"
-          # The short install command binds a release tag through its locked assets.
+          # The short install command binds a release tag through its locked assets. The
+          # workflow token cannot read the repository setting before publication, so a
+          # mutable release is removed again and its tag is kept for the retry.
           if [[ "$immutable" != "true" ]]; then
-            echo "::error::The published release is not immutable. Enable immutable releases for this repository, then replace this release."
+            release_id="$(python3 -c '
+          import json, sys
+          value = json.load(open(sys.argv[1])).get("id")
+          if type(value) is not int or value <= 0:
+              raise SystemExit(1)
+          print(value)
+          ' "$RUNNER_TEMP/published-release.json")" || release_id=""
+            if [[ -n "$release_id" ]] &&
+               gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$release_id" > /dev/null; then
+              echo "- Mutable release deleted, tag kept: \`true\`" >> "$GITHUB_STEP_SUMMARY"
+              echo "::error::The published release is not immutable, so it was deleted and its tag kept. Enable immutable releases for this repository, then re-run this job."
+            else
+              echo "- Mutable release deleted, tag kept: \`false\`" >> "$GITHUB_STEP_SUMMARY"
+              echo "::error::The published release is not immutable and could not be deleted. Delete it, enable immutable releases for this repository, then re-run this job."
+            fi
             exit 1
           fi

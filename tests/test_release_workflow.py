@@ -2255,8 +2255,8 @@ def test_publication_uploads_only_declared_assets(candidate, runner, bundle):
     assert len(asset_arguments) == (8 if bundle else 0)
 
 
-@pytest.mark.parametrize("immutable", [False, True])
-def test_published_asset_digests_and_immutable_release_are_checked(candidate, runner, immutable):
+@pytest.mark.parametrize("immutable, deleted", [(False, True), (False, False), (True, None)])
+def test_published_asset_digests_and_immutable_release_are_checked(candidate, runner, immutable, deleted):
     tag = candidate["plan"]["release"]["tag"]
     assets = [
         {"name": name, "size": (candidate["root"] / "release-bundle" / name).stat().st_size,
@@ -2266,19 +2266,30 @@ def test_published_asset_digests_and_immutable_release_are_checked(candidate, ru
     endpoint = f"repos/{REPO}/releases/tags/{tag}"
     candidate["responses"][endpoint] = {
         "status": 200,
-        "body": {"tag_name": tag, "draft": False, "prerelease": True, "immutable": immutable, "assets": assets},
+        "body": {"id": 42, "tag_name": tag, "draft": False, "prerelease": True, "immutable": immutable,
+                 "assets": assets},
     }
+    candidate["responses"][f"repos/{REPO}/releases/42"] = {"status": 204 if deleted else 500, "method": "DELETE"}
     result, _, calls = runner(
         "publish", "Confirm published assets and immutability",
         extra={"PRERELEASE": "true", "BUNDLE": "true"},
     )
+    output = result.stdout + result.stderr
     # A published release must be immutable, so its assets cannot change after approval.
-    assert (result.returncode == 0) is immutable, result.stdout + result.stderr
-    assert ("::error::The published release is not immutable." in result.stdout + result.stderr) is not immutable
+    assert (result.returncode == 0) is immutable, output
     summary = (candidate["root"].parent / "summary.md").read_text(encoding="utf-8")
     assert f"- Immutable: `{str(immutable).lower()}`" in summary
     assert any(call[:2] == ["release", "verify"] for call in calls) is immutable
     assert len([call for call in calls if call[:2] == ["release", "verify-asset"]]) == (8 if immutable else 0)
+    # The workflow cannot read the repository setting first, so it removes a mutable release.
+    delete = ["api", "--method", "DELETE", f"repos/{REPO}/releases/42"]
+    assert (delete in calls) is not immutable
+    assert ("::error::The published release is not immutable, so it was deleted and its tag kept."
+            in output) is (deleted is True)
+    assert ("::error::The published release is not immutable and could not be deleted." in output) is (deleted is False)
+    if not immutable:
+        assert f"- Mutable release deleted, tag kept: `{str(deleted).lower()}`" in summary
+        assert not any(call[:2] == ["api", "--method"] and "git/refs" in " ".join(call) for call in calls)
     candidate["responses"][endpoint]["body"]["immutable"] = True
     assets[0]["digest"] = "sha256:" + "a" * 64
     result, _, _ = runner(
@@ -2735,7 +2746,7 @@ def test_publish_binds_acceptance_before_any_other_input_or_write():
     assert "${{" not in located["run"] and "${{" not in step("publish", "Verify the bound acceptance")["run"]
 
 
-@pytest.mark.parametrize("case", ["single", "rerun-attempt", "newer-unbound", "publish-rerun"])
+@pytest.mark.parametrize("case", ["single", "rerun-attempt", "newer-other-admission", "newer-bound-pass", "publish-rerun"])
 def test_publish_locates_the_newest_bound_acceptance(candidate, runner, case):
     runs = [_acceptance_run()]
     artifacts = {ACCEPTANCE_RUN: [_receipt_artifact(), {"id": 1, "name": "site-outcome-7000-1-disabled"}]}
@@ -2746,10 +2757,14 @@ def test_publish_locates_the_newest_bound_acceptance(candidate, runner, case):
         runs = [_acceptance_run(attempt=2)]
         artifacts[ACCEPTANCE_RUN] = [_receipt_artifact(attempt=1), _receipt_artifact(attempt=2)]
         expected = (ACCEPTANCE_RUN, ACCEPTANCE_RUN * 10 + 2)
-    elif case == "newer-unbound":
+    elif case == "newer-other-admission":
         # A newer run for another candidate at this commit does not govern this one.
         runs.insert(0, _acceptance_run(run_id=7100, conclusion="failure"))
         artifacts[7100] = [_receipt_artifact(run_id=7100, admission="b" * 64)]
+    elif case == "newer-bound-pass":
+        runs.insert(0, _acceptance_run(run_id=7100, attempt=2))
+        artifacts[7100] = [_receipt_artifact(run_id=7100, attempt=1), _receipt_artifact(run_id=7100, attempt=2)]
+        expected = (7100, 71002)
     elif case == "publish-rerun":
         run_attempt = "2"
     _serve_acceptance(candidate, runs, artifacts)
@@ -2757,7 +2772,8 @@ def test_publish_locates_the_newest_bound_acceptance(candidate, runner, case):
     assert result.returncode == 0, result.stdout + result.stderr
     assert (int(outputs["run-id"]), int(outputs["artifact-id"])) == expected
     binding = json.loads((candidate["root"] / "acceptance-binding.json").read_text(encoding="utf-8"))
-    assert binding["acceptance"] == {"run": ACCEPTANCE_RUN, "attempt": runs[-1]["run_attempt"]}
+    governing = next(run for run in runs if run["id"] == expected[0])
+    assert binding["acceptance"] == {"run": governing["id"], "attempt": governing["run_attempt"]}
     assert binding["candidate"]["producerAttempt"] == 1
     assert all(call[:3] == ["api", "--paginate", "--slurp"] for call in calls)
 
@@ -2768,6 +2784,7 @@ def test_publish_locates_the_newest_bound_acceptance(candidate, runner, case):
     "other-path", "other-event", "other-branch", "other-commit", "other-repository", "other-title",
     "other-candidate", "preview", "other-producer", "later-producer-attempt", "other-admission-id",
     "other-plan", "listing-failure",
+    "newer-no-result", "newer-unrelated-artifact", "newer-malformed-receipt", "newer-wrong-run-receipt",
 ])
 def test_publish_rejects_unbound_or_unsettled_acceptance(candidate, runner, fault):
     runs = [_acceptance_run()]
@@ -2788,6 +2805,14 @@ def test_publish_rejects_unbound_or_unsettled_acceptance(candidate, runner, faul
     elif fault == "newer-bound-failure":
         runs.insert(0, _acceptance_run(run_id=7100, conclusion="failure"))
         artifacts[7100] = [_receipt_artifact(run_id=7100)]
+    elif fault in {"newer-no-result", "newer-unrelated-artifact", "newer-malformed-receipt", "newer-wrong-run-receipt"}:
+        runs.insert(0, _acceptance_run(run_id=7100))
+        artifacts[7100] = {
+            "newer-no-result": [],
+            "newer-unrelated-artifact": [{"name": "site-outcome-7100-1-disabled"}],
+            "newer-malformed-receipt": [{"name": "release-acceptance-7100-1-not-an-admission"}],
+            "newer-wrong-run-receipt": [_receipt_artifact(run_id=7200, admission="b" * 64)],
+        }[fault]
     elif fault == "duplicate":
         artifacts[ACCEPTANCE_RUN].append(_receipt_artifact(id=99))
     elif fault == "expired":
@@ -2828,6 +2853,11 @@ def test_publish_rejects_unbound_or_unsettled_acceptance(candidate, runner, faul
         "newer-bound-failure": "did not pass", "no-runs": "No acceptance evidence",
         "other-candidate": "No acceptance evidence", "latest-receipt-missing": "no single valid receipt",
         "listing-failure": "could not list",
+        **dict.fromkeys(("newer-no-result", "newer-unrelated-artifact", "newer-malformed-receipt",
+                         "newer-wrong-run-receipt"), (
+            "::error::The newest acceptance run for this commit recorded no result. "
+            "Re-run it, or start acceptance for this candidate, then re-run publish."
+        )),
     }.get(fault)
     if message:
         assert message in output
