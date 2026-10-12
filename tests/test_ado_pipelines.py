@@ -414,6 +414,9 @@ def test_manifest_discovery_requires_a_complete_nonempty_inventory(tmp_path, pla
 def test_override_masks_encode_values_as_single_logging_commands(tmp_path, platform, integration):
     binary = tmp_path / "bin"
     binary.mkdir()
+    sites = tmp_path / "workspace" / "sites"
+    sites.mkdir(parents=True)
+    (sites / "test-site.yaml").write_text("kind: Site\n", encoding="utf-8")
     scripts = tmp_path / "scripts"
     scripts.mkdir()
     for name in ("generate-site-overrides.py", "mask-site-overrides.py"):

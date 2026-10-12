@@ -116,6 +116,39 @@ def generate_overlays(overrides: dict, sites_local: Path) -> tuple[list[Path], l
     return generated, skipped
 
 
+def warn_unmatched_overlays(overrides: dict, workspace: Path) -> None:
+    """Report overlay keys against the trusted directories available to this process."""
+    extra_dirs = os.environ.get("SITEOPS_EXTRA_SITES_DIRS", "")
+    site_dirs = [
+        workspace / "sites",
+        *(Path(path) for path in extra_dirs.split(os.pathsep) if path),
+    ]
+    unmatched = sorted(
+        key for key in overrides
+        if not any(
+            (directory / f"{key}{extension}").is_file()
+            for directory in site_dirs
+            for extension in (".yaml", ".yml")
+        )
+    )
+    if not unmatched:
+        return
+
+    names = "" if is_redaction_enabled() else f" ({', '.join(unmatched)})"
+    message = (
+        f"{len(unmatched)} Site override key(s) match no Site file{names}. "
+        "Each key must name a Site file at the top of sites/ or a "
+        "SITEOPS_EXTRA_SITES_DIRS directory, without its extension. "
+        "The overlays were still written."
+    )
+    if os.environ.get("GITHUB_ACTIONS"):
+        print(f"::warning::{message}")
+    elif os.environ.get("TF_BUILD"):
+        print(f"##vso[task.logissue type=warning]{message}")
+    else:
+        print(f"Warning: {message}", file=sys.stderr)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate sites.local/ overlays from SITE_OVERRIDES JSON"
@@ -167,6 +200,7 @@ def main() -> None:
             f"Skipped {len(skipped)} site(s) with existing overlays in "
             f"sites.local/{names} (existing overlays are preserved)"
         )
+    warn_unmatched_overlays(overrides, Path(args.workspace))
 
 
 if __name__ == "__main__":

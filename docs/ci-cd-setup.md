@@ -195,6 +195,15 @@ The JSON format is identical on both platforms.
 
 ### Format
 
+Each key names a Site file directly under `sites/` or an extra trusted Site
+directory, without its `.yaml` or `.yml` extension. For `sites/selected.yaml`,
+use `selected`, even when the Site's `name:` is `inventory-site`. Overlays are
+written at the top of `sites.local/`, so a nested Site such as
+`sites/regions/selected.yaml` needs its overlay supplied as
+`sites.local/regions/selected.yaml`. The pipeline warns about any key that
+matches no Site file in `sites/` or `SITEOPS_EXTRA_SITES_DIRS`, and reports
+only the number of such keys when output redaction is enabled.
+
 Override subscription, resource group, and parameters for each Site. Supports nested paths using dot notation (e.g., `parameters.clusterName`):
 
 ```json
@@ -699,6 +708,12 @@ signed engine reference. Configure a GitHub
 repository service connection named `scalekit-github`, an Azure WIF service
 connection named `azure-siteops`, and the `dev` approval environment.
 The validation stage itself needs no Azure service connection.
+
+Azure Pipelines requires a GitHub service connection even for a public
+repository. A classic personal access token with no scopes can read a public
+template repository. OAuth authorization and the Azure Pipelines GitHub App
+both request write access, and the App is limited to the repositories you
+select.
 
 ```yaml
 trigger: none
