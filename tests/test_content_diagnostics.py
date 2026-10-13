@@ -106,6 +106,30 @@ def test_content_cause_survives_commands(tmp_path, monkeypatch, case, code, comm
             assert "schemaField" not in diagnostic
 
 
+@pytest.mark.parametrize("output", ["plain", "json"])
+@pytest.mark.parametrize("matches", [False, True])
+def test_validate_explicit_site_label_requirement_keeps_targeting_code(tmp_path, monkeypatch, capsys, output, matches):
+    root = workspace(tmp_path, "valid")
+    args = arguments(root, output)
+    args.site_file = root / "sites" / "selected.yaml"
+    args.selector = "environment=smoke" if matches else "environment=customerA"
+    monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1")
+    assert cmd_validate(args, Orchestrator(root)) == (0 if matches else 1)
+    captured = capsys.readouterr()
+    assert all(value not in captured.out + captured.err for value in SENTINELS)
+    if not matches:
+        if output == "json":
+            document = json.loads(captured.out)
+            assert document["status"] == "invalid" and document["exitCode"] == 1
+            assert document["diagnostics"][0]["code"] == "plan.targeting.conflict"
+        else:
+            assert captured.out == ""
+            assert "plan.targeting.conflict" in captured.err
+        text = captured.out + captured.err
+        assert "The supplied Site conflicts with the selected target requirements." in " ".join(text.split())
+        assert "content.other" not in text
+
+
 def test_provenance_wrapper_keeps_cause(tmp_path):
     root = workspace(tmp_path, "unknown")
     with pytest.raises(ContentError) as caught:
@@ -404,6 +428,19 @@ def test_real_validation_task_bodies(tmp_path, platform, case, code):
         if code:
             assert code in text
     assert not list((tmp_path / "state").iterdir())
+
+
+@pytest.mark.parametrize("platform", ["ado-template", "ado-sweep", "github-sweep"])
+def test_validation_python_isolation_is_only_on_the_adapter(platform):
+    if platform == "ado-template":
+        task = step(ROOT / ".pipelines" / "templates" / "siteops-validate.yaml", "Validate caller content")
+    elif platform == "ado-sweep":
+        task = step(ROOT / ".pipelines" / "ci.yaml", "Validate manifest structure")
+    else:
+        flow = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yaml").read_text(encoding="utf-8"))
+        task = next(s for s in flow["jobs"]["validate"]["steps"] if s.get("name") == "Validate manifest structure")
+    assert "PYTHONSAFEPATH" not in task.get("env", {})
+    assert "python3 -I -S -B" in task.get("run", task.get("script", ""))
 
 
 @pytest.mark.parametrize("loader", ["load_site", "load_site_with_provenance"])

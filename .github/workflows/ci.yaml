@@ -478,7 +478,6 @@ jobs:
         env:
           MANIFESTS: ${{ steps.find.outputs.manifests }}
           WORKSPACE_DIR: workspaces/iot-operations
-          PYTHONSAFEPATH: '1'
         run: |
           umask 077
           private="$(mktemp -d "$RUNNER_TEMP/siteops-validate.XXXXXX")"

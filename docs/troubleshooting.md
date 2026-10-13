@@ -440,9 +440,11 @@ Error: The Site does not match the -l label requirement. Check its name and labe
 `name=` must match the Site's `name:` field. The Azure Pipelines deploy
 pipeline always passes its environment selector with `siteFile`, for
 example `-l environment=prod`. In that pipeline, this error means the Site
-file is labeled for another environment. Redacted output, including
-pipeline plan summaries, reports the second form with the code
-`plan.targeting.conflict`. No plan is prepared and nothing is deployed.
+file is labeled for another environment. Redacted plain `plan` and `deploy`
+errors use the second form. Publishable JSON and pipeline plan summaries
+instead report
+`plan.targeting.conflict: The supplied Site conflicts with the selected target requirements.`
+No plan is prepared and nothing is deployed.
 
 **Solution**: Select the environment the Site is labeled for, or use a Site
 labeled for the selected environment. To see which term differs, run the

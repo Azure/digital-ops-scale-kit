@@ -107,4 +107,3 @@ stages:
               SITE_FILE: ${{ parameters.siteFile }}
               STATE_PARENT: $(Agent.TempDirectory)
               TOOL_ROOT: $(SITEOPS_TEMPLATE_ROOT)
-              PYTHONSAFEPATH: '1'

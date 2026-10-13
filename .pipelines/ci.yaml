@@ -202,4 +202,3 @@ jobs:
         displayName: Validate manifest structure
         env:
           STATE_PARENT: $(Agent.TempDirectory)
-          PYTHONSAFEPATH: '1'

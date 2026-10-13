@@ -399,6 +399,31 @@ def test_adapter_rejects_present_empty_azure_code_without_losing_outcome():
     assert "unknown: timeout" not in "\n".join(logs)
 
 
+@pytest.mark.parametrize("kind", ["ValidationResult", "DeploymentPlan", "DeploymentRun"])
+@pytest.mark.parametrize("platform", ["ado", "github"])
+def test_malformed_optional_details_preserve_a_zero_exit_result(kind, platform):
+    from siteops.diagnostics import ValidationResult
+    from siteops.planning import PlanBuildResult, PlanIntent, PlanStatus, serialize_plan
+
+    if kind == "ValidationResult":
+        document = ValidationResult(()).document("publishable", "future")
+    elif kind == "DeploymentPlan":
+        document = serialize_plan(PlanBuildResult(PlanStatus.INVALID, False, None, intent=PlanIntent.EXECUTABLE),
+                                  PlanProjection.PUBLISHABLE, engine_version="future")
+        document.update(status="planned", executable=True)
+    else:
+        document = json.loads(serialize_run_json(RunResult.from_sites((), elapsed=0),
+                                               PlanProjection.PUBLISHABLE, engine_version="future"))
+    document["diagnostics"] = [{"code": "future.code", "severity": "warning",
+                                "summary": "FactoryBlue\x1b"}]
+    if "diagnosticCount" in document["summary"]:
+        document["summary"]["diagnosticCount"] = 1
+    core = _adapter()._core(document, kind, 0)
+    logs, summary, valid = _adapter().render(document, kind, 0, platform)
+    assert valid and summary == [core, _adapter().UNAVAILABLE]
+    assert "FactoryBlue" not in "\n".join(logs + summary)
+
+
 @pytest.mark.parametrize("redacted", [False, True])
 def test_proxy_exception_keeps_local_scrubbing_and_public_registry_text(tmp_workspace, monkeypatch, caplog, redacted):
     executor = AzCliExecutor(tmp_workspace)

@@ -1515,6 +1515,8 @@ def cmd_validate(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         )
         if isinstance(error, (ResourceReadError, ResourceInputError)):
             issue = replace(issue, code=error.code)
+        elif isinstance(error, ExplicitSiteConflict):
+            issue = replace(issue, code="plan.targeting.conflict")
         result = ValidationResult(
             (issue,),
             "incomplete", manifest_name=manifest.name if manifest is not None else None,

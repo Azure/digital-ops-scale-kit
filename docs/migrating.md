@@ -57,6 +57,7 @@ Start with the changes that affect your workflow:
 | Preview with `deploy --dry-run` or `validate --plan` | Use [`siteops plan`](#plan-replaces-preview-options). |
 | Use `sites --render`, read plain `sites` output or run `sites` in CI | Review [site inspection](#inspect-sites). |
 | Match text in plain output or error messages | Review [plain output](#plain-output) and [error messages](#error-messages). |
+| Capture validation JSON or publish pipeline diagnostics | Review [diagnostic output](#diagnostic-output) and copy the matching renderer with your templates. |
 | Repeat an option such as `-w`, or shorten option names | Review [option spelling](#option-spelling). |
 | Reference shipped manifests, partials or dataflow sets by path | Update [workspace content paths](#workspace-content-paths). |
 | Pass a manifest filename without a directory | Review [manifest names and paths](#manifest-names-and-paths). |
@@ -202,10 +203,11 @@ redaction, `sites` no longer prints a masked listing. It reports
 ### Plain output
 
 Plain output uses ASCII markers: `+` succeeded or runs, `x` failed or blocked,
-`-` skipped or not run and `?` unconfirmed. `validate` reports
-`+ Manifest is valid: NAME` with the manifest name rather than its file name,
-and writes validation errors to stderr. Scripts should test the exit code
-rather than this text.
+`-` skipped or not run and `?` unconfirmed. Private local `validate` reports
+`+ Manifest is valid: NAME` with the Manifest name rather than its file name.
+Redacted success reports `+ Manifest structure and static references are valid.`
+Validation errors use stderr. Scripts should test the exit code rather than
+this text.
 
 `deploy` progress and summary lines use new text:
 
@@ -237,6 +239,35 @@ A global option after the command still fails with usage error 2. Instead of
 ```text
 siteops: error: -w is a global option. Put it before the command: siteops -w PATH plan ...
 ```
+
+### Diagnostic output
+
+Redacted output preserves content causes such as `content.duplicate-key` and
+`content.unknown-field`, with fixed guidance and documentation links. Existing
+published plan and run codes remain available. The
+[diagnostic index](diagnostics.md) explains each code without publishing values,
+paths or provider messages.
+
+Use `validate --output json --projection publishable` to capture a
+`ValidationResult`. A reusable Manifest without Sites remains valid.
+JSON keeps one diagnostic record per occurrence. Human output can group
+identical public records as `N occurrences`, without changing record counts
+or private context.
+
+Run JSON adds `summary.operations.failureDiagnostics` beside the existing
+`counts` and `total`. Groups count logical operations, not provider attempts or
+nested ARM resources. Failed and unknown remain separate. Neither JSON
+projection includes raw provider messages.
+
+`local-private` plan diagnostics omit producer `detail` and run diagnostics
+omit `serializedDetail`, and both use registry text for their summaries.
+
+Update copied templates with `scripts/render-siteops-output.py` from the same
+release. Supported older plan and run documents can omit the added fields.
+An unsupported engine invocation that exits `2` without a result prints
+`Site Ops engine and template releases do not match. Use matching engine, setup, templates and helpers.`
+and keeps exit `2`, without probing or retrying. See
+[CI diagnostic output](ci-cd-setup.md#ci-diagnostic-output).
 
 ### Option spelling
 
@@ -514,6 +545,8 @@ These are internal interfaces, not a separately supported Python SDK.
 | Call or usage | Update |
 |---|---|
 | `Orchestrator.deploy` | Consume the returned `RunResult` instead of a dictionary summary. |
+| `Orchestrator.validate` | Consume the immutable `ValidationResult` and its diagnostics instead of a list of error strings. |
+| Executor `_run_az` / `_run_kubectl` | Consume `ToolCallResult.success`, `.stdout`, `.stderr` and optional typed diagnostic instead of unpacking a tuple. |
 | Deploying invalid preparation | Handle `PlanNotExecutableError`. |
 | `get_template_parameters` / `filter_parameters` | These executor helpers are removed. Use shared plan preparation through `Orchestrator.build_plan` with `intent=PlanIntent.EXECUTABLE`. |
 

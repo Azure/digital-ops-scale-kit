@@ -392,7 +392,7 @@ gh workflow run deploy.yaml -f workspace="iot-operations" -f manifest="samples/a
 Executable planning runs after login because Bicep compiler acquisition and
 module restore may use the network and may need the workflow identity. Planning
 does not submit Azure deployments or contact Kubernetes clusters. The workflow
-sets private file permissions, publishes only a supported executable
+sets private file permissions, renders only a supported executable
 `publishable` JSON plan, and removes stdout and stderr files on the runner when
 the step finishes. The workflow's **Dry run** input stops here and publishes
 no deployment result. It does not call the removed CLI `deploy --dry-run`.
@@ -406,14 +406,14 @@ consumer enrolls in Site Ops. `--yes` confirms execution without bypassing
 source trust or Site prerequisites, and does not print the private plan to stderr.
 The deploy command prepares its own fresh executable plan rather than
 executing the separately published preview as a saved plan.
-The step captures stdout separately from stderr. It validates the `DeploymentRun` envelope before
-publishing anything, including that the reported exit code matches the process
-exit code and that exit code `130` appears only with `summary.interrupted`. An
-unsupported document is reported as unavailable rather than published, and the
-process exit code is always preserved. The published summary carries a short
-status line and the allowlisted JSON document. Run stdout and stderr files are
-removed when the step finishes. See [run-output.md](run-output.md) for the
-result contract.
+The step captures stdout separately from stderr. The shared
+`scripts/render-siteops-output.py` helper checks the `DeploymentRun` envelope,
+reported exit, complete counts and interruption flag. It renders status and
+counts, preparation diagnostic codes, and failure groups with status, category,
+optional Azure code, operation count and guidance. Plan failures also show their
+root content causes. The GitHub step summary contains this human report, not a
+raw JSON code block. Run capture files are removed when the step finishes.
+See [run-output.md](run-output.md) for the result contract.
 
 Reporting and file cleanup preserve a failed or interrupted Site Ops exit
 code. If the operation succeeded but its summary or private file cleanup
@@ -421,6 +421,42 @@ fails, the task fails too. A warning on stderr alone does not determine the
 deployment result.
 
 See [ADO architecture](#ado-architecture) for the Azure DevOps equivalent.
+
+### CI diagnostic output
+
+The ADO validation template runs
+`validate --output json --projection publishable`. It prints validation status,
+diagnostic record counts and annotations from a `ValidationResult`, without
+compilation or Azure authentication. Both CI validation sweeps also capture
+stdout JSON separately from stderr and render the publishable result.
+
+Diagnostic summaries, guidance and documentation links come from the engine
+registry. The helper reads only stdout JSON and imports no engine module.
+It checks field bounds, encodes logging and Markdown delimiters, and groups
+identical content records as `N occurrences`. Provider groups count logical
+operations instead. See [diagnostic codes](diagnostics.md).
+
+Copied templates must include `scripts/render-siteops-output.py` from the same
+release, in the automation checkout. Use matching engine, setup, templates and
+helpers. The helper needs only standard Python. Its isolated interpreter does
+not change Python path policy for other tools.
+
+Older supported plan and run documents can omit added guidance, documentation,
+subject, schema fields and failure groups. The helper renders available valid
+fields without inventing a cause. Malformed optional details print
+`Diagnostic details are unavailable.` while keeping validated status, counts
+and the actual operation exit. They alone do not fail a successful operation.
+A missing or unsupported core result with exit `0` fails the task instead.
+Nonzero operation exits survive reporting and cleanup failures.
+
+An exit `2` without a supported result prints:
+
+```text
+Site Ops engine and template releases do not match. Use matching engine, setup, templates and helpers.
+```
+
+The invocation keeps exit `2`. Templates do not probe, retry without flags, or
+publish captured stderr. Update the engine and copied automation together.
 
 ## Security
 
@@ -441,9 +477,9 @@ See [ADO architecture](#ado-architecture) for the Azure DevOps equivalent.
 
 ### Output redaction
 
-Plan and run summaries publish only the supported `publishable` JSON
-projection. Deployment diagnostics in that document use fixed categories
-and summaries. The workflows capture progress and diagnostic stderr
+Validation, plan and run reports render only the supported `publishable` JSON
+projection. Diagnostics use fixed registry text and documentation links.
+The workflows capture progress and diagnostic stderr
 separately, then remove it without publishing it. Integration result
 assertions likewise use fixed outcome reasons when redaction is enabled.
 
@@ -792,6 +828,10 @@ another environment cannot run with this environment's identity. A manifest
 remains required. For a fleet, keep the existing inventory and selector
 semantics.
 
+The validation stage prints typed content causes, not file names or raw errors.
+Deployment uploads separate plan and run reports with registry guidance and
+provider operation groups. Both use the [shared renderer](#ci-diagnostic-output).
+
 With `templateRepository: self`, a tagged checkout can select its release.
 A branch checkout or copied template must instead provide `release` and
 `sourceCommit`, or explicitly select `siteopsSource`. The release pair
@@ -806,7 +846,7 @@ Older releases without the signed reference require their explicit engine
 selection. There is no lookup of the newest compatible engine and no
 silent fallback to editable installation. Referenced templates are the
 recommended route. If you copy templates, retain their matching shared
-templates and helper scripts from the same revision.
+templates and `scripts/render-siteops-output.py` from the same release.
 
 ### ADO project setup
 
@@ -902,8 +942,9 @@ Same as GitHub Actions, see [Assign Azure roles](#3-assign-azure-roles). The ser
 5. Click **"Run"**
 
 A Site file labeled for another environment stops before any plan is
-prepared. The plan summary reports
-`The Site does not match the -l label requirement.` See
+prepared. Its publishable plan reports `plan.targeting.conflict` with
+`The supplied Site conflicts with the selected target requirements.`
+Local output retains the `-l` mismatch detail. See
 [troubleshooting](troubleshooting.md#does-not-match--l).
 
 #### Deploy via Azure CLI
@@ -955,8 +996,8 @@ Dry run stops after the publishable plan. Otherwise, `AzureCLI@2` handles
 authentication, compiler or module access during planning, deployment and session
 cleanup in one task. WIF session refresh is the explicit `keepAzSessionActive`
 choice described above, not a guarantee from the initial login. The deployment
-result is validated and uploaded as a second summary using the same envelope
-rules as the GitHub workflow.
+result is validated and uploaded as a second human report using the same
+diagnostic rendering and envelope rules as the GitHub workflow.
 
 Setup and override steps stop on the first failed command. Empty optional
 override values remain valid. Unit and integration result publication

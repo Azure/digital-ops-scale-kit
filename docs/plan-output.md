@@ -67,9 +67,10 @@ siteops -w <workspace> plan <manifest> --describe
 
 Use `plan --describe` for the shape without compiling, or `plan` for
 executable preparation without deployment. Bare `validate` remains a
-structural check for library manifests that select no Sites. It does not
-accept the `--output` and `--projection` options of `plan`. The [migration guide](migrating.md) lists replaced preview
-options.
+structural check for library manifests that select no Sites. It also supports
+`--output json --projection publishable`, with its own
+[ValidationResult](run-output.md#validate-a-manifest).
+The [migration guide](migrating.md) lists replaced preview options.
 
 A library manifest that selects no Sites can be checked with `validate`.
 Pass a selector to plan that library against specific Sites.
@@ -177,7 +178,7 @@ Two projections are available:
 | Projection | Intended destination | Detail |
 |---|---|---|
 | `local-private` | An authorized local terminal or private file | Site, operation, path, condition, composition, and deferred reference detail |
-| `publishable` | CI logs, summaries, artifacts, and reports | Aggregate counts and generic typed diagnostics |
+| `publishable` | CI logs, summaries, artifacts, and reports | Aggregate counts and typed diagnostics with fixed guidance |
 
 Choose one explicitly when needed:
 
@@ -197,7 +198,7 @@ The publishable projection omits:
 - tenant, subscription, resource group, and location
 - labels and resource identities
 - parameter names and values
-- paths and URLs
+- content paths and resource URLs
 - conditions and deferred expressions
 - provenance and template identity
 - raw provider, compiler, and tool errors
@@ -207,7 +208,7 @@ It is constructed from an allowlist rather than by redacting the
 
 When redaction is enabled, plain plans render the same allowlisted fields as
 the publishable JSON projection. They show status, intent, aggregate activity,
-and generic diagnostics rather than manifest names, descriptions, individual
+and typed diagnostics rather than manifest names, descriptions, individual
 steps, paths, conditions, or Site details. Authorized local plain output
 retains its detailed view when redaction is disabled.
 
@@ -229,8 +230,15 @@ executable plan held in memory.
 An expected validation, targeting, capability, compilation, or composition
 failure can produce a typed JSON envelope with `status: invalid` and a nonzero
 exit code. The `intent` field distinguishes executable preparation from a
-describe request. Publishable diagnostics contain generic categories.
-`local-private` diagnostics include detail only when the producer supplies a
-separate message that contains no values.
+describe request. Content diagnostics identify causes such as
+`content.duplicate-key` and `content.unknown-field`, alongside existing broad
+preparation codes. Their summary, guidance and documentation come from the
+engine registry. The [diagnostic index](diagnostics.md) explains each code.
+
+Both JSON projections omit raw error messages and source excerpts.
+`local-private` can add recorded source, Site and step context.
+Plain output groups identical public records as `N occurrences`.
+JSON retains each record and its private context, and `summary.diagnosticCount`
+is unchanged by presentation grouping. An occurrence is not an operation.
 
 An unexpected internal failure writes no plan document to stdout.
