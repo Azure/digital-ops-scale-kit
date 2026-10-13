@@ -30,6 +30,29 @@ those defaults. Keep an existing explicit Site name when reusing configuration.
 IDs produced by earlier operations are supplied to their
 consuming steps, rather than entered by the operator.
 
+To set Arc extension configuration, add override maps under the Site's
+`parameters`. `aioConfigurationOverrides` applies to AIO,
+`certManagerConfigurationOverrides` to cert-manager, and
+`secretStoreConfigurationOverrides` to the secret store. Site values take
+precedence over release configuration and template defaults. Use strings for
+setting values. These settings are visible in Azure and are not for secrets:
+
+```yaml
+parameters:
+  aioConfigurationOverrides:
+    "<setting.key>": "<value>"
+  certManagerConfigurationOverrides:
+    "<setting.key>": "<value>"
+  secretStoreConfigurationOverrides:
+    "<setting.key>": "<value>"
+```
+
+Replace the placeholders with settings supported by each extension.
+Typed inputs do not accept these maps. For the guided route,
+[save a Site](../../../../docs/guided-inputs.md#keep-a-site-for-later)
+with `siteops inputs ... --save-site` into the configured inventory, add the
+override maps to that file, then deploy with `-l name=<site>`.
+
 Optional `properties.deployOptions` settings include `enableEdgeSite`,
 `enableSecretSync` and `enableCertManager`. Secret Sync requires OIDC and
 workload identity on the existing cluster. Host bootstrap flags do not enable
