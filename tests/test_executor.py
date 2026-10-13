@@ -43,6 +43,7 @@ from siteops.executor import (
     AzureCliExtensionStatus,
     DeploymentResult,
     KubectlResult,
+    ToolCallResult,
     UnconfirmedCompletion,
     _allocate_arc_port_slot,
     _allocated_arc_port_slots,
@@ -269,7 +270,8 @@ class TestAzCliExecutorRunAz:
         )
 
         with patch("subprocess.run", return_value=mock_result) as mock_run:
-            success, stdout, stderr = executor._run_az(["version"])
+            call = executor._run_az(["version"])
+            success, stdout, _stderr = call.success, call.stdout, call.stderr
 
             assert success is True
             assert "azure-cli" in stdout
@@ -287,7 +289,8 @@ class TestAzCliExecutorRunAz:
         )
 
         with patch("subprocess.run", return_value=mock_result):
-            success, stdout, stderr = executor._run_az(["bad-command"])
+            call = executor._run_az(["bad-command"])
+            success, _stdout, stderr = call.success, call.stdout, call.stderr
 
             assert success is False
             assert "not a valid command" in stderr
@@ -297,7 +300,8 @@ class TestAzCliExecutorRunAz:
         # Set cached path to empty string - bypasses shutil.which and is falsy
         executor._az_path = ""
 
-        success, stdout, stderr = executor._run_az(["version"])
+        call = executor._run_az(["version"])
+        success, _stdout, stderr = call.success, call.stdout, call.stderr
 
         assert success is False
         assert "not found" in stderr
@@ -308,7 +312,8 @@ class TestAzCliExecutorRunAz:
         executor._az_path = "/usr/bin/az"
 
         with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="az", timeout=10)):
-            success, stdout, stderr = executor._run_az(["long-command"], timeout=10)
+            call = executor._run_az(["long-command"], timeout=10)
+            success, _stdout, stderr = call.success, call.stdout, call.stderr
 
         assert success is False
         assert "timed out" in stderr
@@ -319,7 +324,8 @@ class TestAzCliExecutorRunAz:
         executor._az_path = "/usr/bin/az"
 
         with patch("subprocess.run", side_effect=OSError("Permission denied")):
-            success, stdout, stderr = executor._run_az(["version"])
+            call = executor._run_az(["version"])
+            success, _stdout, stderr = call.success, call.stdout, call.stderr
 
         assert success is False
         assert "Permission denied" in stderr
@@ -329,7 +335,8 @@ class TestAzCliExecutorRunAz:
         monkeypatch.setattr(executor, "_az_path", "/usr/bin/az")
 
         with patch("subprocess.run") as mock_run:
-            success, stdout, stderr = executor._run_az(["deployment", "create"])
+            call = executor._run_az(["deployment", "create"])
+            success, stdout, _stderr = call.success, call.stdout, call.stderr
 
             assert success is True
             assert stdout == "{}"
@@ -351,7 +358,8 @@ class TestAzCliExecutorRunKubectl:
         )
 
         with patch("subprocess.run", return_value=mock_result):
-            success, stdout, stderr = executor._run_kubectl(["version"])
+            call = executor._run_kubectl(["version"])
+            success, stdout, _stderr = call.success, call.stdout, call.stderr
 
             assert success is True
             assert "v1.28.0" in stdout
@@ -361,7 +369,8 @@ class TestAzCliExecutorRunKubectl:
         # Set cached path to empty string - bypasses shutil.which and is falsy
         executor._kubectl_path = ""
 
-        success, stdout, stderr = executor._run_kubectl(["version"])
+        call = executor._run_kubectl(["version"])
+        success, _stdout, stderr = call.success, call.stdout, call.stderr
 
         assert success is False
         assert "kubectl not found" in stderr
@@ -371,7 +380,8 @@ class TestAzCliExecutorRunKubectl:
         monkeypatch.setattr(executor, "_kubectl_path", "/usr/bin/kubectl")
 
         with patch("subprocess.run") as mock_run:
-            success, stdout, stderr = executor._run_kubectl(["apply", "-f", "config.yaml"])
+            call = executor._run_kubectl(["apply", "-f", "config.yaml"])
+            success, _stdout, _stderr = call.success, call.stdout, call.stderr
 
             assert success is True
             mock_run.assert_not_called()
@@ -382,7 +392,8 @@ class TestAzCliExecutorRunKubectl:
         executor._kubectl_path = "/usr/bin/kubectl"
 
         with patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="kubectl", timeout=10)):
-            success, stdout, stderr = executor._run_kubectl(["apply", "-f", "config.yaml"], timeout=10)
+            call = executor._run_kubectl(["apply", "-f", "config.yaml"], timeout=10)
+            success, _stdout, stderr = call.success, call.stdout, call.stderr
 
         assert success is False
         assert "timed out" in stderr
@@ -393,7 +404,8 @@ class TestAzCliExecutorRunKubectl:
         executor._kubectl_path = "/usr/bin/kubectl"
 
         with patch("subprocess.run", side_effect=OSError("Permission denied")):
-            success, stdout, stderr = executor._run_kubectl(["version"])
+            call = executor._run_kubectl(["version"])
+            success, _stdout, stderr = call.success, call.stdout, call.stderr
 
         assert success is False
         assert "Permission denied" in stderr
@@ -503,11 +515,11 @@ def _show_result(state, outputs=None, error=None):
         props["outputs"] = outputs
     if error is not None:
         props["error"] = error
-    return (True, json.dumps({"properties": props}), "")
+    return ToolCallResult(True, json.dumps({"properties": props}), "")
 
 
 # A `--no-wait` submit returns empty stdout with returncode 0.
-_SUBMIT_OK = (True, "", "")
+_SUBMIT_OK = ToolCallResult(True, "", "")
 
 
 class TestDeployResourceGroup:
@@ -529,7 +541,7 @@ class TestDeployResourceGroup:
             "ERROR: Deployment template validation failed: The value for "
             "'idleTimeoutInMinutes' is not valid."
         )
-        with patch.object(executor, "_run_az", side_effect=[(False, "", arm_error)]) as mock_az:
+        with patch.object(executor, "_run_az", side_effect=[ToolCallResult(False, "", arm_error)]) as mock_az:
             result = executor.deploy_resource_group(
                 subscription="sub-123",
                 resource_group="rg-test",
@@ -563,7 +575,7 @@ class TestDeployResourceGroup:
             timeout=DEFAULT_DEPLOYMENT_SUBMIT_TIMEOUT_SECONDS
         )
         responses = [
-            (False, "", sentinel),
+            ToolCallResult(False, "", sentinel),
             _show_result("Succeeded", outputs={}),
         ]
         with patch.object(executor, "_run_az", side_effect=responses):
@@ -598,7 +610,8 @@ class TestDeployResourceGroup:
             return MagicMock(returncode=0, stdout='{"tag": "OK"}', stderr="")
 
         with patch("siteops.executor.subprocess.run", side_effect=_fake_run):
-            ok, stdout, stderr = executor._run_az(["group", "show"])
+            call = executor._run_az(["group", "show"])
+            ok, _stdout, _stderr = call.success, call.stdout, call.stderr
 
         assert ok is True
         assert captured.get("encoding") == "utf-8", (
@@ -615,7 +628,8 @@ class TestDeployResourceGroup:
             "siteops.executor.subprocess.run",
             return_value=MagicMock(returncode=0, stdout=None, stderr=None),
         ):
-            ok, stdout, stderr = executor._run_az(["group", "show"])
+            call = executor._run_az(["group", "show"])
+            _ok, stdout, stderr = call.success, call.stdout, call.stderr
 
         assert stdout == ""
         assert stderr == ""
@@ -732,7 +746,7 @@ class TestDeployResourceGroup:
         def guard(args, timeout=None, **kwargs):
             if "show" in args:
                 raise AssertionError("must not poll after a fail-fast submit error")
-            return (False, "", "InvalidTemplate: the template resource is not valid")
+            return ToolCallResult(False, "", "InvalidTemplate: the template resource is not valid")
 
         with patch.object(executor, "_run_az", side_effect=guard):
             result = executor.deploy_resource_group(
@@ -753,8 +767,8 @@ class TestDeployResourceGroup:
         monkeypatch.setattr(executor, "_az_path", "/usr/bin/az")
 
         responses = [
-            (False, "", "status code: 503 ServiceUnavailable"),
-            (False, "", "status code: 503 ServiceUnavailable"),
+            ToolCallResult(False, "", "status code: 503 ServiceUnavailable"),
+            ToolCallResult(False, "", "status code: 503 ServiceUnavailable"),
             _SUBMIT_OK,
             _show_result("Succeeded", outputs={}),
         ]
@@ -777,7 +791,7 @@ class TestDeployResourceGroup:
         monkeypatch.setattr(executor, "_az_path", "/usr/bin/az")
 
         responses = [
-            (False, "", "Command timed out after 300s"),
+            ToolCallResult(False, "", "Command timed out after 300s"),
             _show_result("Succeeded", outputs={}),
         ]
         with patch.object(executor, "_run_az", side_effect=responses):
@@ -837,7 +851,7 @@ class TestDeployResourceGroup:
                     "message": "At least one resource deployment operation failed.",
                 },
             ),
-            (True, json.dumps(ops), ""),
+            ToolCallResult(True, json.dumps(ops), ""),
         ]
         with patch.object(executor, "_run_az", side_effect=responses):
             result = executor.deploy_resource_group(
@@ -892,7 +906,7 @@ class TestDeployResourceGroup:
                     "message": "At least one resource deployment operation failed.",
                 },
             ),
-            (True, json.dumps(ops), ""),
+            ToolCallResult(True, json.dumps(ops), ""),
         ]
         with patch.object(executor, "_run_az", side_effect=responses):
             result = executor.deploy_resource_group(
@@ -951,7 +965,7 @@ class TestDeployResourceGroup:
         responses = [
             _SUBMIT_OK,
             _show_result("Failed", error={"code": "PolicyViolation", "message": "Denied by policy"}),
-            (True, json.dumps([]), ""),  # no failed operations available
+            ToolCallResult(True, json.dumps([]), ""),  # no failed operations available
         ]
         with patch.object(executor, "_run_az", side_effect=responses):
             result = executor.deploy_resource_group(
@@ -975,7 +989,7 @@ class TestDeployResourceGroup:
 
         responses = [
             _SUBMIT_OK,
-            (False, "", "AADSTS700024: Client assertion is not within its valid time range"),
+            ToolCallResult(False, "", "AADSTS700024: Client assertion is not within its valid time range"),
             _show_result("Succeeded", outputs={}),
         ]
         with patch.object(executor, "_run_az", side_effect=responses):
@@ -998,8 +1012,8 @@ class TestDeployResourceGroup:
 
         responses = [
             _SUBMIT_OK,
-            (True, "not json at all", ""),
-            (True, '{"properties": {"outputs":', ""),
+            ToolCallResult(True, "not json at all", ""),
+            ToolCallResult(True, '{"properties": {"outputs":', ""),
             _show_result("Succeeded", outputs={}),
         ]
         with patch.object(executor, "_run_az", side_effect=responses):
@@ -1022,8 +1036,8 @@ class TestDeployResourceGroup:
 
         responses = [
             _SUBMIT_OK,
-            (False, "", "ResourceNotFound: deployment not found"),
-            (False, "", "ResourceNotFound: deployment not found"),
+            ToolCallResult(False, "", "ResourceNotFound: deployment not found"),
+            ToolCallResult(False, "", "ResourceNotFound: deployment not found"),
         ]
         clock = iter([0.0, 10.0, 10.0, 200.0])
 
@@ -1056,8 +1070,8 @@ class TestDeployResourceGroup:
 
         responses = [
             _SUBMIT_OK,
-            (False, "", "AADSTS700024: assertion expired"),
-            (False, "", "AADSTS700024: assertion expired"),
+            ToolCallResult(False, "", "AADSTS700024: assertion expired"),
+            ToolCallResult(False, "", "AADSTS700024: assertion expired"),
         ]
         clock = iter([0.0, 10.0, 10.0, 700.0])
 
@@ -1186,7 +1200,7 @@ class TestDeploySubscription:
                         }
                     }
                 ]
-                return (True, json.dumps(ops), "")
+                return ToolCallResult(True, json.dumps(ops), "")
             return _show_result("Failed", error={"code": "DeploymentFailed", "message": "see operations"})
 
         with patch.object(executor, "_run_az", side_effect=record):
@@ -1426,7 +1440,8 @@ class TestArcProxyPortInUseRetry:
              patch("siteops.executor.time.sleep"), \
              patch("siteops.executor.ARC_PROXY_STARTUP_WAIT", 0), \
              patch("siteops.executor._probe_arc_proxy_ready", side_effect=[False, True]):
-            with executor._arc_proxy("cluster", "rg", "sub") as kubeconfig:
+            with executor._arc_proxy("cluster", "rg", "sub") as session:
+                kubeconfig = session.kubeconfig
                 assert isinstance(kubeconfig, str)
                 assert kubeconfig != ""
         # Two Popen calls (one per attempt)
@@ -1443,7 +1458,8 @@ class TestArcProxyPortInUseRetry:
              patch("siteops.executor.time.sleep"), \
              patch("siteops.executor.ARC_PROXY_STARTUP_WAIT", 0), \
              patch("siteops.executor._probe_arc_proxy_ready", return_value=False):
-            with executor._arc_proxy("cluster", "rg", "sub") as kubeconfig:
+            with executor._arc_proxy("cluster", "rg", "sub") as session:
+                kubeconfig = session.kubeconfig
                 assert kubeconfig is None
         assert popen.call_count == 1
 
@@ -1457,7 +1473,8 @@ class TestArcProxyPortInUseRetry:
              patch("siteops.executor.time.sleep"), \
              patch("siteops.executor.ARC_PROXY_STARTUP_WAIT", 0), \
              patch("siteops.executor._probe_arc_proxy_ready", return_value=False):
-            with executor._arc_proxy("cluster", "rg", "sub") as kubeconfig:
+            with executor._arc_proxy("cluster", "rg", "sub") as session:
+                kubeconfig = session.kubeconfig
                 assert kubeconfig is None
         assert popen.call_count == ARC_PROXY_MAX_PORT_RETRIES
 
@@ -1474,7 +1491,8 @@ class TestArcProxyPortInUseRetry:
              patch("siteops.executor.time.sleep"), \
              patch("siteops.executor.ARC_PROXY_STARTUP_WAIT", 0), \
              patch("siteops.executor._probe_arc_proxy_ready", side_effect=[False, False, True]):
-            with executor._arc_proxy("cluster", "rg", "sub") as kubeconfig:
+            with executor._arc_proxy("cluster", "rg", "sub") as session:
+                kubeconfig = session.kubeconfig
                 assert isinstance(kubeconfig, str)
         # After exit, the successful slot is released too. No slots held.
         assert len(_allocated_arc_port_slots) == 0
@@ -1498,7 +1516,8 @@ class TestArcProxyPortInUseRetry:
              patch("siteops.executor._probe_arc_proxy_ready", return_value=False), \
              patch("siteops.executor.os.killpg", create=True) as mock_killpg, \
              patch("siteops.executor.os.getpgid", create=True, return_value=12345):
-            with executor._arc_proxy("cluster", "rg", "sub") as kubeconfig:
+            with executor._arc_proxy("cluster", "rg", "sub") as session:
+                kubeconfig = session.kubeconfig
                 assert kubeconfig is None
         # No retry: only one Popen call.
         assert popen.call_count == 1
@@ -1541,7 +1560,8 @@ class TestArcProxyPortInUseRetry:
              patch("siteops.executor.ARC_PROXY_STARTUP_WAIT", 0), \
              patch("siteops.executor._probe_arc_proxy_ready", return_value=True), \
              patch("siteops.executor.os.unlink", side_effect=record_then_remove):
-            with executor._arc_proxy("cluster", "rg", "sub") as kubeconfig:
+            with executor._arc_proxy("cluster", "rg", "sub") as session:
+                kubeconfig = session.kubeconfig
                 assert isinstance(kubeconfig, str)
                 yielded_path = kubeconfig
 
@@ -1569,7 +1589,8 @@ class TestArcProxyPortInUseRetry:
              patch("siteops.executor.time.sleep"), \
              patch("siteops.executor.ARC_PROXY_STARTUP_WAIT", 0), \
              patch("siteops.executor._probe_arc_proxy_ready", side_effect=recording_probe):
-            with executor._arc_proxy("cluster", "rg", "sub") as kubeconfig:
+            with executor._arc_proxy("cluster", "rg", "sub") as session:
+                kubeconfig = session.kubeconfig
                 yielded_path = kubeconfig
 
         assert isinstance(yielded_path, str) and yielded_path != ""
@@ -1888,7 +1909,8 @@ class TestArcProxyErrorAttribution:
         with patch.object(ex.subprocess, "Popen", side_effect=OSError("cannot spawn")), patch.object(
             ex, "_allocate_arc_port_slot", return_value=18080
         ), patch.object(ex, "_release_arc_port_slot"):
-            with executor._arc_proxy("cluster", "rg", "sub") as kubeconfig:
+            with executor._arc_proxy("cluster", "rg", "sub") as session:
+                kubeconfig = session.kubeconfig
                 assert kubeconfig is None
 
 
@@ -2035,7 +2057,8 @@ class TestArcProxyDrainsFromStart:
         with patch("siteops.executor.subprocess.Popen", return_value=proxy), \
              patch.object(_ProxyOutputDrainer, "__init__", recording_init), \
              patch("siteops.executor._probe_arc_proxy_ready", side_effect=recording_probe):
-            with executor._arc_proxy("cluster", "rg", "sub") as kubeconfig:
+            with executor._arc_proxy("cluster", "rg", "sub") as session:
+                kubeconfig = session.kubeconfig
                 assert kubeconfig is not None
 
         assert events == ["drain", "probe"], (
@@ -2165,7 +2188,8 @@ class TestPortRetrySurvivesABoundedTail:
                  ), \
                  patch("siteops.executor.os.killpg", create=True), \
                  patch("siteops.executor.os.getpgid", create=True):
-                with executor._arc_proxy("cluster", "rg", "sub") as kubeconfig:
+                with executor._arc_proxy("cluster", "rg", "sub") as session:
+                    kubeconfig = session.kubeconfig
                     assert kubeconfig is None, "a port collision every time cannot succeed"
 
             assert len(attempts) == expected_attempts, (
@@ -2215,7 +2239,8 @@ class TestPortRetrySurvivesABoundedTail:
                  ), \
                  patch("siteops.executor.os.killpg", create=True), \
                  patch("siteops.executor.os.getpgid", create=True):
-                with executor._arc_proxy("cluster", "rg", "sub") as kubeconfig:
+                with executor._arc_proxy("cluster", "rg", "sub") as session:
+                    kubeconfig = session.kubeconfig
                     assert kubeconfig is None
 
             assert len(attempts) == 1, (
@@ -2312,7 +2337,8 @@ class TestPortRetrySurvivesABoundedTail:
                  patch("siteops.executor.os.killpg", create=True), \
                  patch("siteops.executor.os.getpgid", create=True):
                 with pytest.raises(ValueError, match=r"the caller's own failure"):
-                    with executor._arc_proxy("cluster", "rg", "sub") as kubeconfig:
+                    with executor._arc_proxy("cluster", "rg", "sub") as session:
+                        kubeconfig = session.kubeconfig
                         assert kubeconfig is None
                         raise ValueError("the caller's own failure")
         finally:
@@ -2506,10 +2532,32 @@ class TestTheReadinessProbeReportsSafely:
 
         assert ready is False
         assert "secretuser" not in caplog.text
-        assert "<kubeconfig>" in caplog.text
+        assert "Last observation: kubectl exited with code 1" in caplog.text
         assert "jane.operator" not in caplog.text
         assert "3f2504e0-4f89-11d3-9a0c-0305e82c3301" not in caplog.text
-        assert "forbidden" in caplog.text, "the diagnostic itself has to survive"
+        assert "forbidden" not in caplog.text
+
+    def test_an_actual_readiness_call_timeout_keeps_the_timeout_observation(
+        self, tmp_path, monkeypatch, caplog,
+    ):
+        monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1")
+        proxy = MagicMock()
+        proxy.poll.return_value = None
+        with self._bound_port() as port, \
+             patch("siteops.executor.time.monotonic", side_effect=[0, 0, 0, 0, 2]), \
+             patch("siteops.executor._wait_or_stop", return_value=False), \
+             patch("siteops.executor.subprocess.run", side_effect=subprocess.TimeoutExpired(
+                 "kubectl", 2, stderr="FactoryBlue PRIVATE_PROVIDER_STDERR",
+             )), \
+             caplog.at_level(logging.ERROR, logger="siteops.executor"):
+            ready = _probe_arc_proxy_ready(
+                proxy, port, timeout_s=2, kubectl_path="/usr/bin/kubectl",
+                kubeconfig_path=tmp_path / "FactoryBlue",
+            )
+        assert ready is False
+        assert "Last observation: kubectl invocation timed out at 2.0s" in caplog.text
+        assert "kubectl exited with code" not in caplog.text
+        assert "FactoryBlue" not in caplog.text and "PRIVATE_PROVIDER_STDERR" not in caplog.text
 
 
 class TestTheWorkspaceStaysReadOnly:
@@ -2891,7 +2939,7 @@ class TestTransientDeploymentFilesAreReleased:
     ):
         executor = self._executor(tmp_workspace, monkeypatch)
         try:
-            failure = (False, "", "ERROR: Deployment template validation failed.")
+            failure = ToolCallResult(False, "", "ERROR: Deployment template validation failed.")
             with patch.object(executor, "_run_az", side_effect=[failure]):
                 result = executor.deploy_resource_group(
                     subscription="sub-123",
@@ -2916,7 +2964,7 @@ class TestTransientDeploymentFilesAreReleased:
             timeout=DEFAULT_DEPLOYMENT_SUBMIT_TIMEOUT_SECONDS
         )
         try:
-            responses = [(False, "", sentinel), _show_result("Succeeded", outputs={})]
+            responses = [ToolCallResult(False, "", sentinel), _show_result("Succeeded", outputs={})]
             with patch.object(executor, "_run_az", side_effect=responses):
                 result = executor.deploy_resource_group(
                     subscription="sub-123",
@@ -3038,7 +3086,8 @@ class TestAnUnusableTempRootFailsClearly:
         monkeypatch.setattr(executor, "_az_path", "/usr/bin/az")
 
         with patch("siteops.executor.subprocess.Popen") as popen:
-            with executor._arc_proxy("cluster", "rg", "sub") as kubeconfig:
+            with executor._arc_proxy("cluster", "rg", "sub") as session:
+                kubeconfig = session.kubeconfig
                 assert kubeconfig is None
 
         popen.assert_not_called()
@@ -3074,7 +3123,8 @@ class TestTheArcProxyKubeconfigIsEngineOwned:
                  patch("siteops.executor.time.sleep"), \
                  patch("siteops.executor.ARC_PROXY_STARTUP_WAIT", 0), \
                  patch("siteops.executor._probe_arc_proxy_ready", return_value=True):
-                with executor._arc_proxy("cluster", "rg", "sub") as kubeconfig:
+                with executor._arc_proxy("cluster", "rg", "sub") as session:
+                    kubeconfig = session.kubeconfig
                     assert kubeconfig is not None
                     kubeconfig_path = Path(kubeconfig)
 
@@ -3107,7 +3157,8 @@ class TestTheArcProxyKubeconfigIsEngineOwned:
             ), patch("siteops.executor.time.sleep"), \
                  patch("siteops.executor.ARC_PROXY_STARTUP_WAIT", 0), \
                  patch("siteops.executor._probe_arc_proxy_ready", return_value=False):
-                with executor._arc_proxy("cluster", "rg", "sub") as kubeconfig:
+                with executor._arc_proxy("cluster", "rg", "sub") as session:
+                    kubeconfig = session.kubeconfig
                     assert kubeconfig is None
 
             assert list(executor.tmp_dir.iterdir()) == []
@@ -3204,7 +3255,8 @@ class TestAzureCliNeverWaitsForInput:
         try:
             with patch("siteops.executor.subprocess.Popen", popen), \
                  patch("siteops.executor._probe_arc_proxy_ready", return_value=True):
-                with executor._arc_proxy("cluster", "rg", "sub") as kubeconfig:
+                with executor._arc_proxy("cluster", "rg", "sub") as session:
+                    kubeconfig = session.kubeconfig
                     assert kubeconfig is not None
         finally:
             executor.close()
@@ -3227,7 +3279,7 @@ class TestSubscriptionNotVisible:
         def submit(args, timeout=None, **kwargs):
             if "show" in args:
                 raise AssertionError("A rejected submission must not be polled.")
-            return False, "", stderr
+            return ToolCallResult(False, "", stderr)
 
         with patch.object(executor, "_run_az", side_effect=submit) as run_az:
             result = executor.deploy_resource_group(
@@ -3260,9 +3312,10 @@ class TestSubscriptionNotVisible:
             failure_pattern=None,
         )
         with patch.object(
-            executor, "_run_az", return_value=(False, "", _TENANT_LEVEL_ACCOUNT_STDERR)
+            executor, "_run_az", return_value=ToolCallResult(False, "", _TENANT_LEVEL_ACCOUNT_STDERR)
         ):
-            state, observed, error = executor._evaluate_arm_tag(condition, "sub")
+            call = executor._evaluate_arm_tag(condition, "sub")
+            state, observed, error = call.state, call.observed, call.error
 
         assert state.value == "failed"
         assert observed is None
@@ -3286,7 +3339,7 @@ class TestMissingParameterPrompt:
         def submit(args, timeout=None, **kwargs):
             if "show" in args:
                 raise AssertionError("A rejected submission must not be polled.")
-            return False, stdout, stderr
+            return ToolCallResult(False, stdout, stderr)
 
         with patch.object(executor, "_run_az", side_effect=submit) as run_az:
             result = executor.deploy_resource_group(
@@ -3315,7 +3368,7 @@ class TestMissingParameterPrompt:
         executor._az_path = "/usr/bin/az"
 
         with patch.object(
-            executor, "_run_az", return_value=(False, "", _END_OF_INPUT_STDERR)
+            executor, "_run_az", return_value=ToolCallResult(False, "", _END_OF_INPUT_STDERR)
         ):
             result = executor.deploy_resource_group(
                 subscription="sub",
@@ -3368,29 +3421,39 @@ class TestArcProxyStartupDiagnostics:
         (False, "did not open local port"),
         (True, "opened local port"),
     ])
+    @pytest.mark.parametrize("redacted", [False, True])
     def test_timeout_reports_whether_the_port_opened(
-        self, tmp_workspace, caplog, bound, expected
+        self, tmp_workspace, monkeypatch, caplog, bound, expected, redacted,
     ):
+        monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", str(int(redacted)))
         executor = AzCliExecutor(workspace=tmp_workspace)
         executor._az_path = "/usr/bin/az"
         alive = MagicMock()
         alive.poll.return_value = None
         alive.wait.return_value = 0
         alive.stdout = io.StringIO("")
-        alive.stderr = io.StringIO("")
+        alive.stderr = io.StringIO("FactoryBlue PRIVATE_PROVIDER_STDERR")
+        popen = MagicMock(return_value=alive)
 
         try:
-            with patch("siteops.executor.subprocess.Popen", MagicMock(return_value=alive)), \
+            with patch("siteops.executor.subprocess.Popen", popen), \
                  patch("siteops.executor._probe_arc_proxy_ready", return_value=False), \
                  patch("siteops.executor._arc_proxy_port_open", return_value=bound), \
                  caplog.at_level(logging.ERROR, logger="siteops.executor"):
-                with executor._arc_proxy("cluster", "rg", "sub") as kubeconfig:
+                with executor._arc_proxy("FactoryBlue", "customerA", "InvalidTemplateCustomer") as session:
+                    kubeconfig = session.kubeconfig
                     assert kubeconfig is None
         finally:
             executor.close()
 
         messages = " ".join(record.getMessage() for record in caplog.records)
         assert expected in messages
+        argv = popen.call_args.args[0]
+        port = int(argv[argv.index("--port") + 1])
+        assert _arc_proxy_timeout_message(port, bound=bound) in messages
+        assert all(value not in messages for value in (
+            "FactoryBlue", "customerA", "InvalidTemplateCustomer", "PRIVATE_PROVIDER_STDERR",
+        ))
         if not bound:
             assert "bound" not in messages
 
@@ -3400,21 +3463,24 @@ class TestArcProxyStartupDiagnostics:
         ("", _EXTENSION_NOT_RECOGNIZED_STDERR),
         ("", _EXTENSION_NOT_INSTALLED_STDERR),
     ])
+    @pytest.mark.parametrize("redacted", [False, True])
     def test_missing_extension_names_the_install_command(
-        self, tmp_workspace, caplog, stdout, stderr,
+        self, tmp_workspace, monkeypatch, caplog, stdout, stderr, redacted,
     ):
+        monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", str(int(redacted)))
         executor = AzCliExecutor(workspace=tmp_workspace)
         executor._az_path = "/usr/bin/az"
         exited = MagicMock()
         exited.poll.return_value = 1
         exited.stdout = io.StringIO(stdout)
-        exited.stderr = io.StringIO(stderr)
+        exited.stderr = io.StringIO(stderr + "\nFactoryBlue PRIVATE_PROVIDER_STDERR")
 
         try:
             with patch("siteops.executor.subprocess.Popen", MagicMock(return_value=exited)), \
                  patch("siteops.executor._probe_arc_proxy_ready", return_value=False), \
                  caplog.at_level(logging.ERROR, logger="siteops.executor"):
-                with executor._arc_proxy("cluster", "rg", "sub") as kubeconfig:
+                with executor._arc_proxy("cluster", "rg", "sub") as session:
+                    kubeconfig = session.kubeconfig
                     assert kubeconfig is None
         finally:
             executor.close()
@@ -3422,6 +3488,9 @@ class TestArcProxyStartupDiagnostics:
         messages = " ".join(record.getMessage() for record in caplog.records)
         assert "Arc proxy needs the Azure CLI connectedk8s extension" in messages
         assert "`az extension add --name connectedk8s`" in messages
+        if redacted:
+            assert "Azure CLI reported:" not in messages
+            assert "FactoryBlue" not in messages and "PRIVATE_PROVIDER_STDERR" not in messages
 
     def test_an_extension_installed_on_first_use_is_not_reported_missing(
         self, tmp_workspace, caplog,
@@ -3440,7 +3509,8 @@ class TestArcProxyStartupDiagnostics:
             with patch("siteops.executor.subprocess.Popen", MagicMock(return_value=exited)), \
                  patch("siteops.executor._probe_arc_proxy_ready", return_value=False), \
                  caplog.at_level(logging.ERROR, logger="siteops.executor"):
-                with executor._arc_proxy("cluster", "rg", "sub") as kubeconfig:
+                with executor._arc_proxy("cluster", "rg", "sub") as session:
+                    kubeconfig = session.kubeconfig
                     assert kubeconfig is None
         finally:
             executor.close()

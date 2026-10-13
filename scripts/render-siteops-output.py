@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-"""Validate and render a publishable Site Ops validation result without engine imports."""
+"""Validate and render publishable Site Ops results without engine imports."""
 
 import argparse
 import json
@@ -19,6 +19,11 @@ MISMATCH = (
 )
 _CODE = re.compile(r"[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*\Z", re.ASCII)
 _FIELDS = {"code", "severity", "summary", "guidance", "documentation", "subject", "schemaField"}
+_STATUSES = {"succeeded", "failed", "skipped", "not-run", "cancelled", "unknown"}
+_COMPOSITION_COUNTS = {
+    "selectedSourceCount", "appliedResourceCount", "externalAssertionCount",
+    "verifiedReferenceCount", "recordedReferenceCount", "requirementCount",
+}
 
 
 def _pairs(pairs):
@@ -61,7 +66,7 @@ def _text(value, limit, *, multiline=False):
 
 
 def _core(document, kind, code):
-    if kind != "ValidationResult" or not isinstance(document, dict) or (
+    if type(code) is not int or not 0 <= code <= 255 or not isinstance(document, dict) or (
         document.get("apiVersion") != "siteops/v1alpha1"
         or document.get("kind") != kind or document.get("projection") != "publishable"
     ):
@@ -83,6 +88,63 @@ def _core(document, kind, code):
         ):
             return None
         return f"Validation result: {status}. Diagnostic records: {count}."
+    if kind == "DeploymentPlan":
+        targets, operations = summary.get("targetCount"), summary.get("operationCount")
+        dispositions = summary.get("dispositions")
+        if (
+            status not in ("planned", "invalid") or not _count(targets) or not _count(operations)
+            or type(dispositions) is not dict or set(dispositions) != {"execute", "skip", "blocked"}
+            or not all(_count(value) for value in dispositions.values()) or sum(dispositions.values()) != operations
+            or document.get("intent") not in ("describe", "executable")
+            or type(document.get("executable")) is not bool
+            or document["executable"] != (status == "planned" and document["intent"] == "executable")
+            or (code == 0) != (status == "planned")
+            or not _count(summary.get("diagnosticCount"))
+        ):
+            return None
+        if "composition" in summary:
+            composition = summary["composition"]
+            if type(composition) is not dict or set(composition) != _COMPOSITION_COUNTS or (
+                not all(_count(value) for value in composition.values())
+            ):
+                return None
+        return f"Plan result: {status}. Sites: {targets}. Operations: {operations}."
+    if kind == "DeploymentRun":
+        interrupted = summary.get("interrupted")
+        if (
+            type(status) is not str or status not in _STATUSES | {"invalid"}
+            or type(document.get("exitCode")) is not int or document["exitCode"] != code
+            or type(interrupted) is not bool or (code == 130) != interrupted
+            or (not interrupted and (code == 0) != (status in {"succeeded", "skipped"}))
+        ):
+            return None
+        totals = []
+        for name in ("sites", "operations"):
+            section = summary.get(name)
+            if type(section) is not dict or not _count(section.get("total")):
+                return None
+            counts = section.get("counts")
+            if type(counts) is not dict or set(counts) != _STATUSES or (
+                not all(_count(value) for value in counts.values()) or sum(counts.values()) != section["total"]
+            ):
+                return None
+            totals.append(section["total"])
+        site_counts = summary["sites"]["counts"]
+        if status == "invalid":
+            if any(summary[name]["counts"][outcome] for name in ("sites", "operations")
+                   for outcome in _STATUSES - {"not-run", "skipped"}):
+                return None
+        else:
+            expected = next(
+                (outcome for outcome in ("failed", "unknown", "cancelled", "not-run") if site_counts[outcome]),
+                "skipped" if not totals[0] or site_counts["skipped"] == totals[0] else "succeeded",
+            )
+            if interrupted and (expected == "not-run" or not totals[0]):
+                expected = "cancelled"
+            if status != expected:
+                return None
+        flag = "yes" if interrupted else "no"
+        return f"Status {status}. Sites {totals[0]}. Operations {totals[1]}. Interrupted {flag}."
     return None
 
 
@@ -123,6 +185,43 @@ def _markdown(value):
     return re.sub(r"([\\`*_{}\[\]()#!|])", r"\\\1", value)
 
 
+def _failure_groups(document, kind):
+    if kind != "DeploymentRun":
+        return []
+    section = document["summary"]["operations"]
+    groups = section.get("failureDiagnostics", [])
+    if type(groups) is not list:
+        return None
+    result, seen = [], set()
+    sums = {"failed": 0, "unknown": 0}
+    for group in groups:
+        if type(group) is not dict or group.get("status") not in ("failed", "unknown"):
+            return None
+        category, count = group.get("category"), group.get("count")
+        code = group.get("azureCode", "")
+        if not _text(category, 128) or not _CODE.fullmatch(category) or not _count(count) or count == 0:
+            return None
+        if type(code) is not str or (
+            "azureCode" in group and not re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,63}", code, re.ASCII)
+        ):
+            return None
+        if not all(field in group for field in ("summary", "guidance", "documentation")):
+            return None
+        public = {key: group[key] for key in ("summary", "guidance", "documentation")}
+        if _diagnostics({"diagnostics": [{"code": "provider", "severity": "error", **public}]}) is None:
+            return None
+        key = (group["status"], category, code)
+        if key in seen:
+            return None
+        seen.add(key)
+        sums[group["status"]] += count
+        result.append({"status": group["status"], "category": category, "count": count, **public,
+                       **({"azureCode": code} if code else {})})
+    if "failureDiagnostics" in section and any(sums[status] != section["counts"][status] for status in sums):
+        return None
+    return result
+
+
 def _annotation(value, platform, severity):
     value = value.replace("%", "%AZP25" if platform == "ado" else "%25").replace("\r", "%0D").replace("\n", "%0A")
     if platform == "ado":
@@ -141,7 +240,8 @@ def render(document, kind, code, platform):
         return [_annotation(message, platform, "error")], [message], False
     logs, summary = [core], [core]
     diagnostics = _diagnostics(document)
-    if diagnostics is None:
+    groups = _failure_groups(document, kind)
+    if diagnostics is None or groups is None:
         logs.append(_annotation(UNAVAILABLE, platform, "warning"))
         summary.append(UNAVAILABLE)
         return logs, summary, True
@@ -161,16 +261,24 @@ def render(document, kind, code, platform):
             text += "\n" + item["documentation"]
         logs.append(_annotation(text, platform, item["severity"]))
         summary.extend("- " + _markdown(line) for line in text.splitlines())
+    for group in groups:
+        code = f" ({group['azureCode']})" if "azureCode" in group else ""
+        noun = "operation" if group["count"] == 1 else "operations"
+        text = f"{group['status']}: {group['category']}{code}, {group['count']} {noun}\n{group['summary']}"
+        text += "\n" + group["guidance"] + "\n" + group["documentation"]
+        logs.append(_annotation(text, platform, "error" if group["status"] == "failed" else "warning"))
+        summary.extend("- " + _markdown(line) for line in text.splitlines())
     return logs, summary, True
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("result", type=Path)
-    parser.add_argument("--kind", choices=("ValidationResult",), required=True)
+    parser.add_argument("--kind", choices=("ValidationResult", "DeploymentPlan", "DeploymentRun"), required=True)
     parser.add_argument("--exit-code", type=int, required=True)
     parser.add_argument("--platform", choices=("ado", "github"), required=True)
     parser.add_argument("--summary", type=Path)
+    parser.add_argument("--require-executable", action="store_true")
     args = parser.parse_args()
     try:
         with args.result.open("rb") as stream:
@@ -182,6 +290,10 @@ def main():
             parse_constant=_reject_constant,
         )
     except (OSError, ValueError, UnicodeError, RecursionError):
+        document = None
+    if args.require_executable and (
+        type(document) is not dict or document.get("intent") != "executable"
+    ):
         document = None
     try:
         logs, summary, valid = render(document, args.kind, args.exit_code, args.platform)

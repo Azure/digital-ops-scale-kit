@@ -54,8 +54,10 @@ def _invoke(boundary, launcher, arguments):
     executor.bind_tool_paths(azure_cli=launcher, kubectl=launcher)
     try:
         if boundary == "azure":
-            return executor._run_az(arguments, timeout=10)
-        return executor._run_kubectl(arguments, timeout=10)
+            result = executor._run_az(arguments, timeout=10)
+        else:
+            result = executor._run_kubectl(arguments, timeout=10)
+        return result.success, result.stdout, result.stderr
     finally:
         executor.close()
 
@@ -123,8 +125,9 @@ def test_arc_proxy_batch_arguments_remain_literal(batch_tool, tmp_path):
             patch("siteops.executor._allocate_arc_port_slot", return_value=31001),
             patch("siteops.executor._release_arc_port_slot"),
             patch("siteops.executor._probe_arc_proxy_ready", side_effect=observed),
-            executor._arc_proxy(cluster, "group", "subscription") as kubeconfig,
+            executor._arc_proxy(cluster, "group", "subscription") as session,
         ):
+            kubeconfig = session.kubeconfig
             assert kubeconfig is None
         arguments = json.loads(result_path.read_text(encoding="utf-8"))
         assert arguments[arguments.index("-n") + 1] == cluster

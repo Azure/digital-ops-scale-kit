@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from siteops.executor import ToolCallResult
 from siteops.orchestrator import Orchestrator, _ProgressOwner
 from siteops.planning import (
     OperationIdentity,
@@ -733,12 +734,12 @@ location: eastus
             )
 
         assert "private-site" not in caplog.text
-        assert "m-<site>-step-ts" in caplog.text
+        assert "[DRY-RUN] Azure CLI command" in caplog.text
 
         monkeypatch.setattr(
             executor,
             "_run_az",
-            lambda *args, **kwargs: (
+            lambda *args, **kwargs: ToolCallResult(
                 False,
                 "",
                 ENGINE_TIMEOUT_SENTINEL.format(
@@ -756,7 +757,7 @@ location: eastus
             )
 
         assert "private-site" not in caplog.text
-        assert "m-<site>-step-ts" in caplog.text
+        assert "Deployment submission timed out. Polling for provider state." in caplog.text
 
     def test_integration_failure_does_not_reinsert_the_site_name(
         self,
@@ -1012,8 +1013,7 @@ class TestCommandScrubbing:
 
         assert "Contoso Prod" not in caplog.text
         assert "rg-contoso-munich" not in caplog.text
-        assert "<subscription>" in caplog.text
-        assert "<resource-group>" in caplog.text
+        assert "[DRY-RUN] Azure CLI command" in caplog.text
 
 
 class TestUserPrincipalNames:

@@ -229,13 +229,57 @@ local codes retain their spelling and fixed recovery guidance.
 Check the declared input and required read access. Resource input admission is
 not a deployment outcome. Validation does not read Azure resources.
 
+## provider.subscription-not-visible
+
+The target subscription is not visible to the current Azure account.
+Check the subscriptions visible to the current account and use an identity with
+access to the target subscription. `SubscriptionNotFound` is published only
+when it comes from a supported structured Azure error.
+
+## provider.authorization-failed
+
+The current identity is not authorized for the requested operation.
+Check the identity and its access at the required Azure scope. For unknown
+work, confirm the provider state before another deployment.
+The admitted structured Azure code is `AuthorizationFailed`.
+
+## provider.template-invalid
+
+The deployment template or its parameters were rejected.
+Correct the template or required parameter inputs, then review a new plan.
+Inspect the full provider detail locally or in the Azure activity log.
+The admitted structured Azure code is `InvalidTemplate`.
+
+## provider.tool-unavailable
+
+A required local tool is unavailable. Install or repair the tools required by
+the selected steps, then plan again.
+
+## provider.timeout
+
+The local execution or observation deadline was reached.
+Confirm the provider state before another deployment. A local deadline does
+not establish whether cloud work completed.
+
+## provider.other
+
+The operation failed or its completion could not be established.
+Inspect the detailed error locally or in the Azure activity log. Confirm
+unknown work before another deployment. Unrecognized or conflicting causes
+use this category without an Azure code, including `QuotaExceeded`.
+
+Provider groups count logical Site Ops operations, not provider attempts,
+Sites or nested ARM operations. Failed and unknown groups stay distinct.
+Their counts reconcile with the existing operation counters.
+
 ## CI result rendering
 
 Copy `scripts/render-siteops-output.py` with updated automation templates.
 It uses standard Python, validates the publishable envelope and field bounds,
 and encodes logging and Markdown delimiters. It does not import the engine.
-It renders `ValidationResult` documents, including records without optional
-diagnostic fields. Deployment templates keep their existing rendering.
+It renders `ValidationResult`, `DeploymentPlan` and `DeploymentRun` documents.
+Older supported documents can omit optional diagnostic fields and provider
+groups. The adapter validates counts and preserves the actual operation exit.
 
 Malformed details print `Diagnostic details are unavailable.` without replacing
 a validated status, counts or operation exit. An engine that rejects the new

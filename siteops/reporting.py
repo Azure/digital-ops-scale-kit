@@ -13,6 +13,7 @@ from typing import Any, TextIO
 from siteops import __version__, terminal
 from siteops.diagnostics import (
     ValidationResult,
+    provider_document,
     public_document,
     render_diagnostics,
     resolve_member,
@@ -120,6 +121,7 @@ def _summary_document(result: RunResult) -> dict[str, Any]:
                 OperationStatus,
             ),
             "total": len(operations),
+            "failureDiagnostics": _failure_groups(operations),
         },
         "sites": {
             "counts": _enum_counts(
@@ -129,6 +131,19 @@ def _summary_document(result: RunResult) -> dict[str, Any]:
             "total": len(result.sites),
         },
     }
+
+
+def _failure_groups(operations: list[OperationResult]) -> list[dict[str, Any]]:
+    groups = Counter(
+        (operation.status.value, operation.failure.category, operation.failure.azure_code or "")
+        for operation in operations if operation.failure is not None
+    )
+    from siteops.diagnostics import ProviderFailure
+
+    return [
+        {"status": status, "count": count, **provider_document(ProviderFailure(category, code or None))}
+        for (status, category, code), count in sorted(groups.items())
+    ]
 
 
 def _base_document(
@@ -164,6 +179,8 @@ def _operation_document(operation: OperationResult) -> dict[str, Any]:
         document["reason"] = _reason_document(operation.reason)
     if operation.deployment_name is not None:
         document["deploymentName"] = operation.deployment_name
+    if operation.failure is not None:
+        document["failure"] = provider_document(operation.failure)
     return document
 
 
@@ -412,6 +429,7 @@ def _render_publishable_plain(result: RunResult) -> str:
     if no_work is not None:
         lines.append(no_work)
     lines.extend(_interrupted_lines(result, redacted=True))
+    lines.extend(_failure_lines(document["summary"]["operations"]["failureDiagnostics"]))
     if document["diagnostics"]:
         lines.extend(_heading("Diagnostics", blank_after=False))
         lines.extend(render_diagnostics(document["diagnostics"], indent="    "))
@@ -420,6 +438,21 @@ def _render_publishable_plain(result: RunResult) -> str:
         lines.extend(["", *_wrap(next_action)])
     lines.append("")
     return "\n".join(sanitize(line) for line in lines) + "\n"
+
+
+def _failure_lines(groups: list[dict[str, Any]]) -> list[str]:
+    if not groups:
+        return []
+    lines = _heading("Failure diagnostics", blank_after=False)
+    for group in groups:
+        code = f" ({group['azureCode']})" if "azureCode" in group else ""
+        marker = terminal.FAILED if group["status"] == "failed" else terminal.UNKNOWN
+        lines.extend(_wrap(
+            f"{marker} {group['status']}: {group['category']}{code}, {_plural(group['count'], 'operation')}",
+            indent="  ",
+        ))
+        lines.extend(_wrap(group["guidance"], indent="    "))
+    return lines
 
 
 def _operation_progress(site: SiteResult) -> str:
@@ -521,6 +554,7 @@ def render_plain_run(result: RunResult, *, redacted: bool) -> str:
         lines.append(no_work)
     lines.extend(_interrupted_lines(result, redacted=False))
     lines.extend(_incomplete_lines(result))
+    lines.extend(_failure_lines(_summary_document(result)["operations"]["failureDiagnostics"]))
     if result.diagnostics:
         lines.extend(_heading("Diagnostics", blank_after=False))
         for diagnostic in result.diagnostics:

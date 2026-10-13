@@ -6025,6 +6025,7 @@ class Orchestrator:
                 ),
                 elapsed=operation_elapsed,
                 reason=reason,
+                failure=result.failure,
                 _deployment_name=(
                     result.deployment_name
                     if isinstance(result, DeploymentResult)

@@ -226,6 +226,12 @@ def test_publishable_json_is_an_allowlist_with_complete_counts():
         "summary": {
             "interrupted": False,
             "operations": {
+                "failureDiagnostics": [
+                    {"status": "failed", "count": 1, "category": "other",
+                     "summary": "The operation failed or its completion could not be established.",
+                     "guidance": "Inspect the detailed error locally or in the Azure activity log. Confirm unknown work before another deployment.",
+                     "documentation": "https://github.com/Azure/digital-ops-scale-kit/blob/main/docs/diagnostics.md#providerother"},
+                ],
                 "counts": {
                     "cancelled": 0,
                     "failed": 1,

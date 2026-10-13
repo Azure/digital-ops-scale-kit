@@ -134,6 +134,27 @@ _definitions = [
     _definition(f"content.{code}", summary, guidance, content=True, addenda=_ADDENDA.get(code, ()))
     for code, summary, guidance in _CONTENT
 ]
+_PROVIDERS = (
+    ("subscription-not-visible", "The target subscription is not visible to the current Azure account.",
+     "Check the subscriptions visible to the current account and use an identity with access to the target subscription."),
+    ("authorization-failed", "The current identity is not authorized for the requested operation.",
+     "Check the identity and its access at the required Azure scope. For unknown work, confirm the provider state before another deployment."),
+    ("template-invalid", "The deployment template or its parameters were rejected.",
+     "Correct the template or required parameter inputs, then review a new plan. Inspect the full provider detail locally or in the Azure activity log."),
+    ("tool-unavailable", "A required local tool is unavailable.",
+     "Install or repair the tools required by the selected steps, then plan again."),
+    ("timeout", "The local execution or observation deadline was reached.",
+     "Confirm the provider state before another deployment. A local deadline does not establish whether cloud work completed."),
+    ("other", "The operation failed or its completion could not be established.",
+     "Inspect the detailed error locally or in the Azure activity log. Confirm unknown work before another deployment."),
+)
+_definitions.extend(_definition("provider." + code, summary, guidance) for code, summary, guidance in _PROVIDERS)
+_PROVIDER_CATEGORIES = frozenset(code for code, _, _ in _PROVIDERS)
+_AZURE_CODES = {
+    "SubscriptionNotFound": "subscription-not-visible",
+    "AuthorizationFailed": "authorization-failed",
+    "InvalidTemplate": "template-invalid",
+}
 _LEGACY = {
     "plan.diagnostic": "Plan processing reported a diagnostic.",
     "run.diagnostic": "The deployment run reported a diagnostic.",
@@ -340,6 +361,73 @@ def public_document(
     if member.value in field_codes and schema_field in fields:
         document["schemaField"] = schema_field
     return document
+
+
+@dataclass(frozen=True)
+class ProviderFailure:
+    category: str = "other"
+    azure_code: str | None = None
+
+
+OTHER_FAILURE = ProviderFailure()
+
+
+def normalize_provider_failure(value: Any) -> ProviderFailure:
+    if type(value) is not ProviderFailure or type(value.category) is not str or value.category not in _PROVIDER_CATEGORIES:
+        return OTHER_FAILURE
+    if value.azure_code is None:
+        return value
+    if type(value.azure_code) is str and _AZURE_CODES.get(value.azure_code) == value.category:
+        return value
+    return OTHER_FAILURE
+
+
+def provider_document(value: Any) -> dict[str, str]:
+    failure = normalize_provider_failure(value)
+    entry = public_entry(resolve_member("provider." + failure.category), None)
+    document = {"category": failure.category, "summary": entry.summary,
+                "guidance": entry.guidance, "documentation": entry.documentation}
+    if failure.azure_code is not None:
+        document["azureCode"] = failure.azure_code
+    return document
+
+
+def arm_failure(nodes: Any) -> ProviderFailure:
+    """Reduce only documented error nodes, with bounded structural admission."""
+    if type(nodes) not in (list, tuple) or not nodes or len(nodes) > 64:
+        return OTHER_FAILURE
+    pending = [(node, 0) for node in nodes]
+    seen = set()
+    causes = []
+    try:
+        while pending:
+            node, depth = pending.pop()
+            if type(node) is not dict or depth > 8 or id(node) in seen or len(seen) >= 64:
+                return OTHER_FAILURE
+            seen.add(id(node))
+            code = node.get("code")
+            if type(code) is not str or not code or len(code) > 64:
+                return OTHER_FAILURE
+            children = []
+            if "details" in node:
+                if type(node["details"]) is not list or len(node["details"]) > 64:
+                    return OTHER_FAILURE
+                children.extend(node["details"])
+            if "innererror" in node:
+                if type(node["innererror"]) is not dict:
+                    return OTHER_FAILURE
+                children.append(node["innererror"])
+            if len(seen) + len(pending) + len(children) > 64:
+                return OTHER_FAILURE
+            if code != "DeploymentFailed" or not children:
+                category = _AZURE_CODES.get(code)
+                if category is None:
+                    return OTHER_FAILURE
+                causes.append((category, code))
+            pending.extend((child, depth + 1) for child in children)
+        return ProviderFailure(*causes[0]) if causes and len(set(causes)) == 1 else OTHER_FAILURE
+    except Exception:
+        return OTHER_FAILURE
 
 
 @dataclass(frozen=True)

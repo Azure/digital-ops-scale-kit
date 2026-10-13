@@ -957,6 +957,8 @@ def _resolve_typed_site(
         resource = contract.resource_request(field, bound, observations)
         name = field.name
         print(
+            f"Reading declared resource {index}/{len(resource_fields)}."
+            if is_redaction_enabled() else
             f"Reading declared resource {_content_text(name)} "
             f"{index}/{len(resource_fields)} using {_content_text(reader.identity.name)}.",
             file=sys.stderr,

@@ -907,17 +907,17 @@ def test_review_local_private_artifact_keeps_real_code(tmp_path, monkeypatch, ca
 
 
 @pytest.mark.parametrize("kind", ["DeploymentPlan", "DeploymentRun"])
-def test_review_adapter_does_not_accept_unimplemented_document_kinds(kind):
+def test_review_adapter_accepts_supported_deployment_document_kinds(kind):
     result = PlanBuildResult(PlanStatus.INVALID, False, None, intent=PlanIntent.EXECUTABLE)
     document = (serialize_plan(result, PlanProjection.PUBLISHABLE, engine_version=__version__)
                 if kind == "DeploymentPlan" else
                 json.loads(serialize_run_json(preparation_failure_result(result), PlanProjection.PUBLISHABLE,
                                               engine_version=__version__)))
     logs, summary, valid = _adapter().render(document, kind, 1, "ado")
-    assert not valid and summary == [_adapter().UNAVAILABLE]
+    assert valid and _adapter().UNAVAILABLE not in summary
 
 
-def test_review_resource_progress_retains_existing_surface(tmp_path, monkeypatch, capsys):
+def test_review_resource_progress_omits_input_identity_under_redaction(tmp_path, monkeypatch, capsys):
     from siteops.arm_resources import ArmResourceError
 
     root = workspace(tmp_path, "valid")
@@ -933,7 +933,9 @@ def test_review_resource_progress_retains_existing_surface(tmp_path, monkeypatch
         with pytest.raises(cli.ResourceReadError):
             cli._resolve_typed_site(contract, args, manifest_path=root / "manifests" / "smoke.yaml",
                                     orchestrator=Orchestrator(root))
-    assert "Reading declared resource cluster 1/1 using azure-cli." in capsys.readouterr().err
+    text = capsys.readouterr().err
+    assert "Reading declared resource 1/1." in text
+    assert "cluster" not in text and "azure-cli" not in text
 
 
 @pytest.mark.parametrize("failure", ["yaml", "os"])
