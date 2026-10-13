@@ -12,20 +12,23 @@ from pathlib import Path
 from typing import Any
 
 from siteops import yamlio
+from siteops.diagnostics import ContentError, diagnostic_from_error, public_entry, resolve_member
 from siteops.sanitize import is_redaction_enabled
 
 
-class CompositionError(ValueError):
+class CompositionError(ContentError):
     """Raised when parameter sources cannot form one valid composition."""
+
+    diagnostic_subject = "composition"
 
 
 def report_composition_error(error: Exception) -> str:
     """Keep resource identities and source paths out of published diagnostics."""
     if is_redaction_enabled():
-        return (
-            "Resource composition failed. Re-run locally with output "
-            "redaction disabled for source and identity details."
-        )
+        diagnostic = diagnostic_from_error(error, subject="composition")
+        code = "composition.invalid" if diagnostic.code == "content.other" else diagnostic.code
+        entry = public_entry(resolve_member(code, "DeploymentPlan"), diagnostic.subject)
+        return f"{entry.code}: {entry.summary} {entry.guidance}"
     return str(error)
 
 
@@ -157,13 +160,13 @@ class CompositionResult:
 
 def _require_mapping(value: Any, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
-        raise CompositionError(f"{label} must be a mapping.")
+        raise CompositionError(f"{label} must be a mapping.", code="content.invalid-type", subject="composition")
     return value
 
 
 def _require_list(value: Any, label: str) -> list[Any]:
     if not isinstance(value, list):
-        raise CompositionError(f"{label} must be a list.")
+        raise CompositionError(f"{label} must be a list.", code="content.invalid-type", subject="composition")
     return value
 
 
@@ -172,7 +175,8 @@ def _known_keys(value: dict[str, Any], allowed: set[str], label: str) -> None:
     if unknown:
         raise CompositionError(
             f"{label} has unknown key(s): {unknown}. "
-            f"Allowed: {sorted(allowed)}."
+            f"Allowed: {sorted(allowed)}.",
+            code="content.unknown-field", subject="composition",
         )
 
 

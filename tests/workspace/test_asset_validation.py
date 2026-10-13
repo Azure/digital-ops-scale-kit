@@ -98,7 +98,7 @@ class TestAssetSemantics:
     ):
         errors = orchestrator.validate(
             workspace / "samples" / "asset-sample" / "manifest.yaml"
-        )
+        ).local_messages()
         assert not errors, "\n".join(errors)
 
     def test_contract_resolves_the_endpoint_on_the_selected_device(self, workspace):

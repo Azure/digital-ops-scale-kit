@@ -547,7 +547,7 @@ def test_executable_plan_preflights_known_kubectl_inputs_before_tools(
         assert result.status is PlanStatus.INVALID
         assert not result.executable
         assert result.plan is None
-        assert len(result.diagnostics) == 1
+        assert result.diagnostics[0].code == "validation.failed"
         assert expected_error in result.diagnostics[0].detail
         return
 
@@ -725,7 +725,7 @@ def test_mixed_fleet_validates_only_applicable_kubectl_site_inputs(
     assert result.status is PlanStatus.INVALID
     assert not result.executable
     assert result.plan is None
-    assert len(result.diagnostics) == 1
+    assert result.diagnostics[0].code == "validation.failed"
     assert "missing-enabled.yaml" in result.diagnostics[0].detail
     assert "enabled-site" in result.diagnostics[0].detail
     assert "test-site" not in result.diagnostics[0].detail
@@ -898,7 +898,7 @@ def test_executable_plan_enforces_known_required_parameters(
             is SkipReasonCode.TARGET_PREPARATION_FAILED
         )
         assert [diagnostic.code for diagnostic in result.diagnostics] == [
-            "operation-preparation.invalid"
+            "operation-preparation.invalid", "content.other",
         ]
         assert "requiredName" in result.diagnostics[0].detail
     else:
@@ -1058,7 +1058,8 @@ def test_explicit_sites_do_not_inherit_failed_inventory_scope(tmp_path):
         manifest_path, "environment=dev", intent=PlanIntent.EXECUTABLE
     )
     assert inventory_plan.status is PlanStatus.INVALID
-    assert inventory_plan.diagnostics[0].code == "plan.target-set-incomplete"
+    assert any(item.code == "plan.target-set-incomplete" for item in inventory_plan.diagnostics)
+    assert any(item.code == "content.syntax-invalid" for item in inventory_plan.diagnostics)
     session = TemplateCompilationSession(
         command_runner=_RecordingToolRunner(),
         tool_resolver=lambda name: str(tmp_path / "tools" / "az.exe"),
@@ -1884,7 +1885,7 @@ def test_executable_plan_preflights_known_kubectl_scalar_inputs(
         assert not result.executable
         assert operation.disposition is PlanDisposition.BLOCKED
         assert [diagnostic.code for diagnostic in result.diagnostics] == [
-            "operation-preparation.invalid"
+            "operation-preparation.invalid", "content.other",
         ]
         assert error in result.diagnostics[0].detail
 
@@ -1975,7 +1976,7 @@ def test_executable_plan_validates_fully_known_wait_values(
         assert not result.executable
         assert wait.disposition is PlanDisposition.BLOCKED
         assert [diagnostic.code for diagnostic in result.diagnostics] == [
-            "operation-preparation.invalid"
+            "operation-preparation.invalid", "content.other",
         ]
         assert error in result.diagnostics[0].detail
 
@@ -3064,25 +3065,24 @@ def test_missing_azure_cli_names_the_tool_and_the_steps_that_need_it(
     )
     assert local_arc["summary"] == (
         "Azure CLI (`az`) and its connectedk8s extension are required for "
-        "kubectl steps."
+        "kubectl steps. Install Azure CLI from https://aka.ms/installazurecli, "
+        "run `az extension add --name connectedk8s`, then rerun the command."
     )
-    assert "https://aka.ms/installazurecli" in local_arc["detail"]
-    assert "`az extension add --name connectedk8s`" in local_arc["detail"]
+    assert "https://aka.ms/installazurecli" in local_arc["guidance"]
+    assert "`az extension add --name connectedk8s`" in local_arc["guidance"]
 
     public = serialize_plan(
         result, PlanProjection.PUBLISHABLE, engine_version="test",
     )
     public_summaries = " ".join(
-        diagnostic["summary"] for diagnostic in public["diagnostics"]
+        diagnostic["guidance"] for diagnostic in public["diagnostics"]
     )
-    assert "Azure CLI (`az`) is required for deployment and wait steps" in (
-        public_summaries
-    )
+    assert "https://aka.ms/installazurecli" in public_summaries
     assert "`az extension add --name connectedk8s`" in public_summaries
     assert "apply-again" not in public_summaries
 
     for redacted in (False, True):
-        rendered = render_plain_plan(result, redacted=redacted)
+        rendered = " ".join(render_plain_plan(result, redacted=redacted).split())
         assert "az extension add --name connectedk8s" in rendered
         assert "https://aka.ms/installazurecli" in rendered
 
@@ -3096,7 +3096,7 @@ def test_describe_and_validate_do_not_probe_the_extension(tmp_path, monkeypatch)
     )
     orchestrator = Orchestrator(workspace)
 
-    assert orchestrator.validate(manifest_path) == []
+    assert orchestrator.validate(manifest_path).local_messages() == []
     result = orchestrator.build_plan(manifest_path, intent=PlanIntent.DESCRIBE)
 
     assert result.status is PlanStatus.PLANNED

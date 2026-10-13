@@ -25,7 +25,7 @@ from typing import Any, Callable, Iterable, Iterator
 
 import yaml
 
-from siteops import terminal, yamlio
+from siteops import yamlio
 from siteops.artifacts import ArtifactError
 from siteops.compilation import (
     CompilationFailure,
@@ -47,6 +47,14 @@ from siteops.composition import (
     load_contract,
     merge_contracts,
     report_composition_error,
+)
+from siteops.diagnostics import (
+    ContentDiagnostic,
+    ContentError,
+    DiagnosticCollector,
+    SiteLoadFailure,
+    ValidationResult,
+    diagnostic_from_error,
 )
 from siteops.executor import (
     AZURE_CLI_INSTALL_URL,
@@ -126,6 +134,7 @@ from siteops.planning import (
     UnavailableDataReferenceError,
     classify_plan_value,
     collect_data_references,
+    content_plan_diagnostic,
     render_plain_plan,
     required_capability_kinds,
     resolve_plan_value,
@@ -149,7 +158,6 @@ from siteops.results import (
 from siteops.sanitize import (
     is_redaction_enabled,
     report_parameter_selection_error,
-    report_site_load_error,
     scrub_for_output,
     scrub_site_for_output,
     site_name_for_output,
@@ -382,10 +390,11 @@ def _resolve_parameter_mapping(
         if isinstance(key, str) and "{{" in key:
             new_key = resolve(key)
             if not isinstance(new_key, str):
-                raise ValueError(
+                raise ContentError(
                     f"Parameter name '{key}' resolved to "
                     f"{type(new_key).__name__}, which cannot be a name. A name "
-                    f"template must resolve to a single value."
+                    f"template must resolve to a single value.",
+                    code="content.invalid-type", subject="parameters",
                 )
 
         if new_key in resolved:
@@ -393,7 +402,7 @@ def _resolve_parameter_mapping(
             # resource group, or anything else the operator put in the site.
             # The two templates that produced it say the same thing to the
             # person fixing it, without publishing the value.
-            raise ValueError(
+            raise ContentError(
                 f"Parameter names '{origins[new_key]}' and '{key}' both "
                 f"resolve to the same name. Rename one, since keeping either "
                 f"would drop the other."
@@ -446,9 +455,10 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     seen: dict[str, Any] = {}
     for key, value in pairs:
         if key in seen:
-            raise ValueError(
+            raise ContentError(
                 f"Duplicate key '{key}' in a JSON parameter file. JSON keeps the "
-                f"last one, so the first is discarded. Merge them or rename one."
+                f"last one, so the first is discarded. Merge them or rename one.",
+                code="content.duplicate-key", subject="parameters",
             )
         seen[key] = value
     return seen
@@ -919,7 +929,7 @@ class Orchestrator:
         self._all_sites_cache: list[Site] | None = None
         # Sites that failed to load on the last `load_all_sites`, as
         # `(name, reportable_error)`. Empty until that runs.
-        self.skipped_sites: list[tuple[str, str]] = []
+        self.skipped_sites: list[SiteLoadFailure] = []
         # Memo of `_load_inherited_data(path)` keyed by resolved path,
         # used only when no provenance dict is being recorded. With N
         # sites sharing one template, the template would otherwise be
@@ -1483,6 +1493,7 @@ class Orchestrator:
                 tried.append(workspace_candidate)
                 if workspace_candidate.exists():
                     logger.debug(
+                        "Resolved Site inheritance from the workspace." if is_redaction_enabled() else
                         f"`inherits: {inherits_value}` in {child_path} resolved "
                         f"via workspace fallback to {workspace_candidate}"
                     )
@@ -1595,7 +1606,7 @@ class Orchestrator:
         if prov is None and sources is None:
             self._inherited_data_cache[normalized] = copy.deepcopy(data)
 
-        logger.debug(f"Loaded inherited data from: {path}")
+        logger.debug("Loaded inherited Site data." if is_redaction_enabled() else f"Loaded inherited data from: {path}")
         return data
 
     def _load_site_data(
@@ -1727,10 +1738,10 @@ class Orchestrator:
                         merged_data = self._deep_merge(merged_data, data)
                     found = True
                     if is_base_file:
-                        logger.debug(f"Loaded site data from: {path}")
+                        logger.debug("Loaded Site data." if is_redaction_enabled() else f"Loaded site data from: {path}")
                     else:
                         # DEBUG: avoids per-overlay noise across large fleets.
-                        logger.debug(f"Site '{name}': applied overlay {path}")
+                        logger.debug("Applied a Site overlay." if is_redaction_enabled() else f"Site '{name}': applied overlay {path}")
                     is_base_file = False  # Subsequent files are overlays
                     break  # Only load one file per directory (prefer .yaml)
 
@@ -1827,7 +1838,10 @@ class Orchestrator:
         try:
             site = Site.from_data(merged_data, source=name, default_name=default_name)
         except ValueError as e:
-            raise ValueError(self._name_the_files_behind(canonical_id, str(e))) from e
+            raise ContentError(
+                self._name_the_files_behind(canonical_id, str(e)),
+                diagnostic=diagnostic_from_error(e, subject="site", source=site_path),
+            ) from e
         # Normalize prov to the flat-shape view that matches `Site` so
         # display-time lookups like `prov["subscription"]` succeed
         # regardless of whether the on-disk file used the K8s envelope.
@@ -1949,7 +1963,10 @@ class Orchestrator:
         try:
             site = Site.from_data(merged_data, source=name, default_name=default_name)
         except ValueError as e:
-            raise ValueError(self._name_the_files_behind(canonical_id, str(e))) from e
+            raise ContentError(
+                self._name_the_files_behind(canonical_id, str(e)),
+                diagnostic=diagnostic_from_error(e, subject="site", source=site_path),
+            ) from e
 
         # Cache under every form the caller might use later. Always
         # under the canonical id (basename or relative path) and the
@@ -2049,28 +2066,9 @@ class Orchestrator:
                 site = self.load_site(name)
                 sites.append(site)
             except (ValueError, yaml.YAMLError, OSError) as e:
-                # Site errors can carry trusted directory paths and internal
-                # names, so published output uses one generic diagnostic.
-                reportable = report_site_load_error(e)
-                logger.warning(
-                    f"Failed to load Site '{site_name_for_output(name)}': "
-                    f"{reportable}"
-                )
-                skipped.append((name, reportable))
-
-        if skipped:
-            import sys
-
-            print(
-                f"\n{terminal.WARNING} Skipped {len(skipped)} Site(s) due to errors:",
-                file=sys.stderr,
-            )
-            for name, error in skipped:
-                print(
-                    f"  {terminal.BULLET} {site_name_for_output(name)}: {error}",
-                    file=sys.stderr,
-                )
-            print(file=sys.stderr)
+                skipped.append(SiteLoadFailure(
+                    name, diagnostic_from_error(e, subject="site"),
+                ))
 
         # Recorded so a caller can fail on it. A site that does not load is one
         # the operator expected to deploy to, so a run that silently continues
@@ -2100,7 +2098,7 @@ class Orchestrator:
                 return copy.deepcopy(self._params_cache[path])
 
         if not path.exists():
-            logger.warning(f"Parameter file not found: {path}")
+            logger.warning("Parameter file not found." if is_redaction_enabled() else f"Parameter file not found: {path}")
             return {}
 
         with open(path, "r", encoding="utf-8") as f:
@@ -2111,7 +2109,10 @@ class Orchestrator:
         if result is None:
             result = {}
         if not isinstance(result, dict):
-            raise ValueError(f"Parameter file '{path}' must contain a mapping.")
+            raise ContentError(
+                f"Parameter file '{path}' must contain a mapping.",
+                code="content.invalid-type", subject="parameters", source=path,
+            )
 
         with self._params_cache_lock:
             self._params_cache[path] = result
@@ -2341,14 +2342,16 @@ class Orchestrator:
             raise ParameterSelectionError(
                 f"{tier} parameter path '{declared}' resolved to "
                 f"'{resolved}' for Site '{site.name}', but site-selected "
-                "parameter paths must be relative to the workspace."
+                "parameter paths must be relative to the workspace.",
+                code="content.path-invalid", subject="parameters",
             )
 
         if ".." in resolved_path.parts:
             raise ParameterSelectionError(
                 f"{tier} parameter path '{declared}' resolved to "
                 f"'{resolved}' for Site '{site.name}', but site-selected "
-                "parameter paths must not contain '..' path segments."
+                "parameter paths must not contain '..' path segments.",
+                code="content.path-invalid", subject="parameters",
             )
 
         workspace_root = workspace.resolve()
@@ -2359,21 +2362,23 @@ class Orchestrator:
             raise ParameterSelectionError(
                 f"{tier} parameter path '{declared}' resolved to "
                 f"'{resolved}' for Site '{site.name}', which resolves outside "
-                "the workspace."
+                "the workspace.",
+                code="content.path-invalid", subject="parameters",
             ) from exc
 
         if not full_path.is_file():
             raise ParameterSelectionError(
                 f"{tier} parameter path '{declared}' resolved to "
                 f"'{resolved}' for Site '{site.name}', which does not exist. "
-                f"Check the value the Site selects for a typo, or add the file."
+                f"Check the value the Site selects for a typo, or add the file.",
+                code="content.file-missing", subject="parameters",
             )
 
     def _kubectl_file_validation_error(
         self,
         file_path: str,
         workspace: Path,
-    ) -> str | None:
+    ) -> ContentDiagnostic | None:
         """Validate one known kubectl file path without contacting a cluster."""
         security_error = self._kubectl_file_security_error(
             file_path,
@@ -2390,30 +2395,30 @@ class Orchestrator:
                     label="Kubectl file",
                 )
             except ArtifactError as error:
-                return str(error)
+                return diagnostic_from_error(error, subject="manifest")
             return None
 
         workspace_root = workspace.resolve()
         resolved = (workspace_root / file_path).resolve()
         if not resolved.exists():
-            return f"Kubectl file not found: {file_path}"
+            return ContentDiagnostic("content.file-missing", f"Kubectl file not found: {file_path}", "manifest")
         return None
 
     def _kubectl_file_security_error(
         self,
         file_path: str,
         workspace: Path,
-    ) -> str | None:
+    ) -> ContentDiagnostic | None:
         """Validate kubectl URL scheme and workspace confinement."""
         if HTTPS_URL_PATTERN.match(file_path):
             if self._materialized_package is not None:
-                return (
+                return ContentDiagnostic("content.other",
                     "Acquired package kubectl inputs must be local verified "
-                    "workspace paths, not remote URLs."
+                    "workspace paths, not remote URLs.", "manifest",
                 )
             return None
         if file_path.lower().startswith("http://"):
-            return f"HTTP URLs not allowed (use HTTPS): {file_path}"
+            return ContentDiagnostic("content.path-invalid", f"HTTP URLs not allowed (use HTTPS): {file_path}", "manifest")
         if self._materialized_package is not None:
             try:
                 self._materialized_package.authored_path(
@@ -2421,7 +2426,7 @@ class Orchestrator:
                     label="Kubectl file",
                 )
             except ArtifactError as error:
-                return str(error)
+                return diagnostic_from_error(error, subject="manifest")
             return None
 
         workspace_root = workspace.resolve()
@@ -2429,9 +2434,9 @@ class Orchestrator:
         try:
             resolved.relative_to(workspace_root)
         except ValueError:
-            return (
+            return ContentDiagnostic("content.path-invalid",
                 "Kubectl file must stay within the workspace: "
-                f"{file_path}"
+                f"{file_path}", "manifest",
             )
         return None
 
@@ -2541,13 +2546,15 @@ class Orchestrator:
             raise ParameterSelectionError(
                 f"Site '{site.name}' sets properties.{property_path} to the "
                 f"legacy scalar {values!r}. Replace it with the ordered list "
-                f"{replacement}."
+                f"{replacement}.",
+                code="content.legacy-resource-selection", subject="site",
             )
         if not isinstance(values, list):
             raise ParameterSelectionError(
                 f"Site '{site.name}' properties.{property_path} must be an "
                 f"ordered list of resource set names, got "
-                f"{type(values).__name__}."
+                f"{type(values).__name__}.",
+                code="content.invalid-type", subject="site",
             )
 
         items: list[str] = []
@@ -2874,7 +2881,7 @@ class Orchestrator:
                 file_params = self.load_parameters(full_path)
                 params = self._deep_merge(params, file_params)
             else:
-                logger.warning(f"Step parameter file not found: {full_path}")
+                logger.warning("Step parameter file not found." if is_redaction_enabled() else f"Step parameter file not found: {full_path}")
 
         # 4. Resolve template variables ({{ site.X }})
         return self._resolve_template_strings(params, site)
@@ -3406,8 +3413,8 @@ class Orchestrator:
         *,
         manifest: Manifest | None = None,
         sites: list[Site] | None = None,
-    ) -> list[str]:
-        """Validate manifest and return list of errors.
+    ) -> ValidationResult:
+        """Validate structure and collect independent typed content issues.
 
         Checks:
         - Manifest parses correctly
@@ -3431,9 +3438,9 @@ class Orchestrator:
             sites: Already resolved targets to validate without reselection.
 
         Returns:
-            List of error messages (empty if valid)
+            A typed result, including every independent content issue.
         """
-        errors: list[str] = []
+        errors = DiagnosticCollector()
 
         try:
             self._validate_materialized_package()
@@ -3446,7 +3453,10 @@ class Orchestrator:
                     manifest_path,
                 )
         except (ValueError, OSError, yaml.YAMLError) as e:
-            return [f"Failed to parse manifest: {e}"]
+            return ValidationResult(
+                errors.error(e, subject="manifest", source=manifest_path).diagnostics,
+                target_resolution="incomplete", source_path=manifest_path,
+            )
 
         resolve_targets = sites is None
         try:
@@ -3464,23 +3474,19 @@ class Orchestrator:
             # (operator sees it alongside other manifest issues in one
             # diagnostic pass) but suppress the no-match diagnostic
             # below since the parse error is the higher-signal cause.
-            errors.append(
-                "Invalid Site selector."
-                if is_redaction_enabled()
-                else str(e)
-            )
+            errors = errors.error(e, subject="targeting")
             sites = []
             selector_parse_failed = True
         except ValueError as e:
             # Site-resolution failure (cycle, overlay-rename, missing
             # field, etc.). Append and continue so other manifest
             # issues still surface in this pass.
-            errors.append(report_site_load_error(e))
+            errors = errors.error(e, subject="site")
             sites = []
             selector_parse_failed = False
         except OSError as e:
             # A selected site could not be read.
-            errors.append(report_site_load_error(e))
+            errors = errors.error(e, subject="site")
             sites = []
             selector_parse_failed = False
         if (
@@ -3488,22 +3494,27 @@ class Orchestrator:
             and (selector or (not manifest.sites and manifest.site_selector))
             and self.skipped_sites
         ):
-            errors.append(
+            errors = errors.extend(failure.diagnostic for failure in self.skipped_sites)
+            errors = errors.add(
                 "The selected target set is incomplete. "
-                "Fix Sites that could not be loaded or narrow the selector."
+                "Fix Sites that could not be loaded or narrow the selector.",
+                code="plan.target-set-incomplete", subject="targeting",
             )
         assert sites is not None
-        if not sites and (manifest.sites or manifest.site_selector or selector):
+        if not sites and (manifest.sites or manifest.site_selector or selector) and not self.skipped_sites:
             if selector and not selector_parse_failed:
                 # Rich diagnostic when CLI selector knocked everything
                 # out and the selector itself parsed cleanly.
-                errors.append(
+                errors = errors.add(
                     "CLI selector matched no Sites."
                     if is_redaction_enabled()
-                    else self.explain_no_match(selector)
+                    else self.explain_no_match(selector),
+                    code="plan.targeting.empty", subject="targeting",
                 )
             elif not selector:
-                errors.append("No Sites matched the specified criteria")
+                errors = errors.add(
+                    "No Sites matched the specified criteria", code="plan.targeting.empty", subject="targeting",
+                )
 
         # Validate manifest-level parameter files
         if sites:
@@ -3517,7 +3528,7 @@ class Orchestrator:
                             site,
                         )
                     except ParameterSelectionError as e:
-                        errors.append(report_parameter_selection_error(e))
+                        errors = errors.error(e, subject="parameters", fallback_code="parameter-selection.invalid")
                         source_error = True
                         continue
                     for resolved, _ in expanded:
@@ -3527,22 +3538,24 @@ class Orchestrator:
                                 label="Manifest parameter file",
                             )
                         except ArtifactError as e:
-                            errors.append(str(e))
+                            errors = errors.error(e, subject="parameters")
                             source_error = True
                             continue
                         if not full_path.is_file():
-                            errors.append(
+                            errors = errors.add(
                                 "Manifest parameter file not found: "
-                                f"{resolved}"
+                                f"{resolved}", code="content.file-missing", subject="parameters",
                             )
                             source_error = True
                             continue
                         try:
                             self.load_parameters(full_path)
                         except (ValueError, OSError, yaml.YAMLError) as e:
-                            errors.append(
+                            errors = errors.error(
+                                e, source=full_path, subject="parameters", detail=(
                                 f"Invalid manifest parameter file "
                                 f"{resolved}: {e}"
+                                ),
                             )
                             source_error = True
                 if source_error:
@@ -3550,15 +3563,15 @@ class Orchestrator:
                 try:
                     self._resolve_manifest_parameters(manifest, site)
                 except CompositionError as e:
-                    errors.append(report_composition_error(e))
+                    errors = errors.error(e, subject="composition", fallback_code="composition.invalid")
                 except ParameterSelectionError as e:
-                    errors.append(report_parameter_selection_error(e))
+                    errors = errors.error(e, subject="parameters", fallback_code="parameter-selection.invalid")
                 except (
                     ValueError,
                     yaml.YAMLError,
                     OSError,
                 ) as e:
-                    errors.append(str(e))
+                    errors = errors.error(e, subject="parameters")
         else:
             for source in manifest.parameters:
                 raw_path = source if isinstance(source, str) else source.path
@@ -3573,18 +3586,20 @@ class Orchestrator:
                         label="Manifest parameter file",
                     )
                 except ArtifactError as e:
-                    errors.append(str(e))
+                    errors = errors.error(e, subject="parameters")
                     continue
                 if not full_path.exists():
-                    errors.append(
-                        f"Manifest parameter file not found: {raw_path}"
+                    errors = errors.add(
+                        f"Manifest parameter file not found: {raw_path}",
+                        code="content.file-missing", subject="parameters",
                     )
                 else:
                     try:
                         self.load_parameters(full_path)
                     except (ValueError, OSError, yaml.YAMLError) as e:
-                        errors.append(
-                            f"Invalid manifest parameter file {raw_path}: {e}"
+                        errors = errors.error(
+                            e, source=full_path, subject="parameters",
+                            detail=f"Invalid manifest parameter file {raw_path}: {e}",
                         )
 
         # Build step name lookup for output reference validation
@@ -3594,7 +3609,7 @@ class Orchestrator:
         seen_names: set[str] = set()
         for step in manifest.steps:
             if step.name in seen_names:
-                errors.append(f"Duplicate step name: '{step.name}'")
+                errors = errors.add(f"Duplicate step name: '{step.name}'")
             seen_names.add(step.name)
 
         for step_index, step in enumerate(manifest.steps):
@@ -3608,9 +3623,9 @@ class Orchestrator:
                         self.workspace,
                     )
                     if authored_error is not None:
-                        errors.append(
-                            f"{authored_error} (step: {step.name})"
-                        )
+                        errors = errors.extend((replace(
+                            authored_error, private_detail=f"{authored_error.private_detail} (step: {step.name})",
+                        ),))
                         continue
                     if "{{" not in declared_path:
                         error = self._kubectl_file_validation_error(
@@ -3618,9 +3633,9 @@ class Orchestrator:
                             self.workspace,
                         )
                         if error is not None:
-                            errors.append(
-                                f"{error} (step: {step.name})"
-                            )
+                            errors = errors.extend((replace(
+                                error, private_detail=f"{error.private_detail} (step: {step.name})",
+                            ),))
                         continue
 
                     for site in sites:
@@ -3634,16 +3649,17 @@ class Orchestrator:
                             site,
                         )
                         if not isinstance(resolved_path, str):
-                            errors.append(
+                            errors = errors.add(
                                 f"Kubectl file path '{declared_path}' "
                                 "resolved to a non-string value for Site "
-                                f"'{site.name}' (step: {step.name})"
+                                f"'{site.name}' (step: {step.name})",
+                                code="content.invalid-type", subject="manifest",
                             )
                             continue
                         if UNRESOLVED_SITE_TEMPLATE_PATTERN.search(
                             resolved_path
                         ):
-                            errors.append(
+                            errors = errors.add(
                                 f"Kubectl file path '{declared_path}' did "
                                 f"not resolve for Site '{site.name}' "
                                 f"(step: {step.name})"
@@ -3656,10 +3672,9 @@ class Orchestrator:
                             self.workspace,
                         )
                         if error is not None:
-                            errors.append(
-                                f"{error} (step: {step.name}, "
-                                f"site: {site.name})"
-                            )
+                            errors = errors.extend((replace(
+                                error, private_detail=f"{error.private_detail} (step: {step.name}, site: {site.name})",
+                            ),))
             elif isinstance(step, WaitStep):
                 # Validate that step-output references in the condition point
                 # only to prior steps. A wait produces no outputs, so a self or
@@ -3676,11 +3691,11 @@ class Orchestrator:
                     for match in STEP_OUTPUT_PATTERN.finditer(condition_string):
                         ref_step = match.group(1)
                         if ref_step not in all_step_names:
-                            errors.append(
+                            errors = errors.add(
                                 f"Step '{step.name}' wait condition references unknown step '{ref_step}'"
                             )
                         elif ref_step not in prior_step_names:
-                            errors.append(
+                            errors = errors.add(
                                 f"Step '{step.name}' wait condition references step '{ref_step}' "
                                 f"which does not execute before it"
                             )
@@ -3690,11 +3705,13 @@ class Orchestrator:
                         step.template
                     )
                 except ArtifactError as e:
-                    errors.append(f"{e} (step: {step.name})")
+                    errors = errors.error(e, detail=f"{e} (step: {step.name})", subject="template")
                     continue
 
                 if not template_path.exists():
-                    errors.append(f"Template not found: {step.template}")
+                    errors = errors.add(
+                        f"Template not found: {step.template}", code="content.file-missing", subject="template",
+                    )
                     continue
 
                 for param_path in step.parameters:
@@ -3707,9 +3724,9 @@ class Orchestrator:
                                     param_path, resolved, site, self.workspace, "Step"
                                 )
                             except ParameterSelectionError as e:
-                                errors.append(
-                                    f"{report_parameter_selection_error(e)} "
-                                    f"(step: {step.name})"
+                                errors = errors.error(
+                                    e, detail=f"{e} (step: {step.name})", subject="parameters",
+                                    fallback_code="parameter-selection.invalid",
                                 )
                                 continue
                             try:
@@ -3719,7 +3736,7 @@ class Orchestrator:
                                         label="Step parameter file",
                                     )
                                 )
-                                errors.extend(
+                                errors = errors.extend(
                                     self._validate_output_references(
                                         params,
                                         step.name,
@@ -3730,7 +3747,10 @@ class Orchestrator:
                                     )
                                 )
                             except (ValueError, OSError, yaml.YAMLError) as e:
-                                errors.append(f"Invalid parameter file {resolved}: {e}")
+                                errors = errors.error(
+                                    e, subject="parameters",
+                                    detail=f"Invalid parameter file {resolved}: {e}",
+                                )
                         continue
 
                     try:
@@ -3739,16 +3759,19 @@ class Orchestrator:
                             label="Step parameter file",
                         )
                     except ArtifactError as e:
-                        errors.append(f"{e} (step: {step.name})")
+                        errors = errors.error(e, detail=f"{e} (step: {step.name})", subject="parameters")
                         continue
                     if not full_path.exists():
-                        errors.append(f"Parameter file not found: {param_path} (step: {step.name})")
+                        errors = errors.add(
+                            f"Parameter file not found: {param_path} (step: {step.name})",
+                            code="content.file-missing", subject="parameters",
+                        )
                     else:
                         try:
                             params = self.load_parameters(full_path)
 
                             # Validate step output references with auto-filter awareness
-                            errors.extend(
+                            errors = errors.extend(
                                 self._validate_output_references(
                                     params,
                                     step.name,
@@ -3759,17 +3782,22 @@ class Orchestrator:
                                 )
                             )
                         except (ValueError, OSError, yaml.YAMLError) as e:
-                            errors.append(f"Invalid parameter file {param_path}: {e}")
+                            errors = errors.error(
+                                e, source=full_path, subject="parameters",
+                                detail=f"Invalid parameter file {param_path}: {e}",
+                            )
 
         if not manifest.steps:
-            errors.append("Manifest has no steps defined")
+            errors = errors.add(
+                "Manifest has no steps defined", code="content.required-value-empty", subject="manifest",
+            )
 
         for step in manifest.steps:
             if step.when and isinstance(step.when, str):
                 if not CONDITION_PATTERN.fullmatch(step.when.strip()):
-                    errors.append(
+                    errors = errors.add(
                         f"Invalid 'when' condition in step '{step.name}': "
-                        f"{step.when}"
+                        f"{step.when}", code="content.condition-invalid", subject="manifest",
                     )
 
         for step in manifest.steps:
@@ -3779,7 +3807,10 @@ class Orchestrator:
                     if site.is_subscription_level:
                         continue
                     if not site.resource_group:
-                        errors.append(f"Site '{site.name}' missing 'resourceGroup' required by step '{step.name}'")
+                        errors = errors.add(
+                            f"Site '{site.name}' missing 'resourceGroup' required by step '{step.name}'",
+                            code="content.required-field-missing", subject="site",
+                        )
 
         # Validate subscription-scoped steps
         subscription_steps = [
@@ -3804,31 +3835,27 @@ class Orchestrator:
                         site_names = ", ".join(s.name for s in rg_level_sites[:3])
                         if len(rg_level_sites) > 3:
                             site_names += f"... and {len(rg_level_sites) - 3} more"
-                        errors.append(
+                        errors = errors.add(
                             f"Subscription '{_reportable_subscription(sub_id)}' has RG-level Sites ({site_names}) "
                             f"but no subscription-level Site for subscription-scoped steps"
                         )
                 elif len(sub_level_sites) > 1:
                     # Multiple subscription-level sites for same subscription
                     site_names = ", ".join(s.name for s in sub_level_sites)
-                    errors.append(
+                    errors = errors.add(
                         f"Subscription '{_reportable_subscription(sub_id)}' has multiple subscription-level Sites: {site_names}. "
                         f"Only one subscription-level Site per subscription is allowed."
                     )
 
-        if is_redaction_enabled():
-            site_names = {
-                site.name for site in sites
-            } | {
-                name for name, _ in self.skipped_sites
-            }
-            for site_name in sorted(site_names, key=len, reverse=True):
-                errors = [
-                    scrub_site_for_output(error, site_name) or ""
-                    for error in errors
-                ]
-
-        return errors
+        requested = bool(manifest.sites or manifest.site_selector or selector or not resolve_targets)
+        incomplete = resolve_targets and bool(self.skipped_sites) and bool(
+            selector or (not manifest.sites and manifest.site_selector)
+        )
+        resolution = "complete" if sites and not incomplete else "incomplete"
+        return ValidationResult(
+            errors.diagnostics, resolution if requested else "not-requested",
+            manifest.name, manifest_path,
+        )
 
     def _composition_source_origins(
         self,
@@ -3895,7 +3922,7 @@ class Orchestrator:
         source_file: Path,
         template_params: frozenset | None = None,
         _current_key: str | None = None,
-    ) -> list[str]:
+    ) -> tuple[ContentDiagnostic, ...]:
         """Validate step output references in parameter values.
 
         Finds all {{ steps.<name>.outputs.<path> }} patterns and validates that:
@@ -3917,13 +3944,13 @@ class Orchestrator:
         Returns:
             List of validation error messages
         """
-        errors: list[str] = []
+        errors = DiagnosticCollector()
 
         if isinstance(value, dict):
             for key, val in value.items():
                 # Track top-level key for self-reference validation
                 top_level_key = _current_key if _current_key is not None else key
-                errors.extend(
+                errors = errors.extend(
                     self._validate_output_references(
                         val,
                         current_step,
@@ -3936,7 +3963,7 @@ class Orchestrator:
                 )
         elif isinstance(value, list):
             for item in value:
-                errors.extend(
+                errors = errors.extend(
                     self._validate_output_references(
                         item,
                         current_step,
@@ -3952,7 +3979,7 @@ class Orchestrator:
                 ref_step = match.group(1)
 
                 if ref_step not in all_steps:
-                    errors.append(f"Step '{current_step}' references unknown step '{ref_step}' in {source_file}")
+                    errors = errors.add(f"Step '{current_step}' references unknown step '{ref_step}' in {source_file}")
                 elif ref_step == current_step:
                     # Structural validation has no template schema.
                     # Executable planning checks self-references after
@@ -3963,17 +3990,17 @@ class Orchestrator:
                         and _current_key in template_params
                     ):
                         # Template accepts this parameter - genuine circular dependency
-                        errors.append(
+                        errors = errors.add(
                             f"Step '{current_step}' cannot reference its own outputs "
                             f"for parameter '{_current_key}' in {source_file}"
                         )
                     # else: auto-filtering will remove this parameter, so no error
                 elif ref_step not in prior_steps:
-                    errors.append(
+                    errors = errors.add(
                         f"Step '{current_step}' references step '{ref_step}' which runs later in {source_file}"
                     )
 
-        return errors
+        return errors.diagnostics
 
     @staticmethod
     def _plan_resource_identity(
@@ -4411,9 +4438,10 @@ class Orchestrator:
                     failure_pattern=known_failure_pattern,
                 )
             except ValueError as error:
-                raise ValueError(
+                raise ContentError(
                     f"Wait step '{step.name}' condition is invalid after "
-                    f"Site resolution: {error}"
+                    f"Site resolution: {error}",
+                    diagnostic=diagnostic_from_error(error, subject="manifest"),
                 ) from error
         details = ArmTagWaitOperation(
             input_status=InputStatus.PREPARED,
@@ -4787,13 +4815,15 @@ class Orchestrator:
                     ),
                     detail=str(error),
                 )
-                diagnostics.append(diagnostic)
+                root_diagnostic = content_plan_diagnostic(diagnostic_from_error(error, subject="composition"))
+                diagnostics.extend((diagnostic, root_diagnostic))
                 validated.append(
                     replace(
                         target,
                         diagnostics=(
                             *target.diagnostics,
                             diagnostic,
+                            root_diagnostic,
                         ),
                     )
                 )
@@ -5041,6 +5071,10 @@ class Orchestrator:
                     target_diagnostics.append(diagnostic)
                     diagnostics.append(diagnostic)
                     blocked_details = operation.details
+                    if isinstance(error, (ValueError, OSError, yaml.YAMLError)):
+                        root_diagnostic = content_plan_diagnostic(diagnostic_from_error(error, subject="manifest"))
+                        target_diagnostics.append(root_diagnostic)
+                        diagnostics.append(root_diagnostic)
                     if (
                         isinstance(blocked_details, DeploymentOperation)
                         and template_unit is not None
@@ -5073,26 +5107,30 @@ class Orchestrator:
         )
 
     @staticmethod
+    def _content_plan_diagnostic(issue: ContentDiagnostic) -> PlanDiagnostic:
+        return content_plan_diagnostic(issue)
+
+    @staticmethod
     def _invalid_preparation(
-        errors: list[str],
+        errors: Iterable[ContentDiagnostic],
         intent: PlanIntent,
         *,
         code: str = "validation.failed",
         summary: str = "Manifest validation failed.",
     ) -> PlanBuildResult:
+        diagnostics = []
+        for issue in errors:
+            if issue.code != code and code == "validation.failed":
+                diagnostics.append(PlanDiagnostic(
+                    code=code, severity=DiagnosticSeverity.ERROR, summary=summary,
+                    detail=issue.private_detail or summary,
+                ))
+            diagnostics.append(Orchestrator._content_plan_diagnostic(issue))
         return PlanBuildResult(
             status=PlanStatus.INVALID,
             executable=False,
             plan=None,
-            diagnostics=tuple(
-                PlanDiagnostic(
-                    code=code,
-                    severity=DiagnosticSeverity.ERROR,
-                    summary=summary,
-                    detail=error,
-                )
-                for error in errors
-            ),
+            diagnostics=tuple(diagnostics),
             intent=intent,
         )
 
@@ -5124,25 +5162,9 @@ class Orchestrator:
                 )
             if sites is None:
                 sites = self.resolve_sites(manifest, selector)
-                if (
-                    (selector or (not manifest.sites and manifest.site_selector))
-                    and self.skipped_sites
-                ):
-                    return self._invalid_preparation(
-                        [
-                            f"The selected target set is incomplete. "
-                            f"{len(self.skipped_sites)} Site(s) could not "
-                            "be loaded: "
-                            + ", ".join(name for name, _ in self.skipped_sites)
-                            + ". Fix those files or select explicit Sites."
-                        ],
-                        intent,
-                        code="plan.target-set-incomplete",
-                        summary="The selected target set is incomplete.",
-                    )
         except NoTargetingError as error:
             return self._invalid_preparation(
-                [str(error)],
+                (ContentDiagnostic("plan.targeting.required", str(error), "targeting"),),
                 intent,
                 code="plan.targeting.required",
                 summary=(
@@ -5151,11 +5173,28 @@ class Orchestrator:
                 ),
             )
         except (ValueError, OSError, yaml.YAMLError) as error:
-            return self._invalid_preparation([str(error)], intent)
+            return self._invalid_preparation(
+                (diagnostic_from_error(error, source=manifest_path),), intent,
+            )
 
+        incomplete = not explicit_target and bool(self.skipped_sites) and bool(
+            selector or (not manifest.sites and manifest.site_selector)
+        )
+        if incomplete:
+            validation = self.validate(manifest_path, selector, manifest=manifest, sites=sites)
+            return self._invalid_preparation(
+                (
+                    *(failure.diagnostic for failure in self.skipped_sites),
+                    ContentDiagnostic("plan.target-set-incomplete", "The selected target set is incomplete.", "targeting"),
+                    *validation.diagnostics,
+                ),
+                intent, code="plan.target-set-incomplete",
+                summary="The selected target set is incomplete.",
+            )
         if not sites:
             return self._invalid_preparation(
-                [
+                (ContentDiagnostic(
+                    "plan.targeting.empty",
                     self.explain_no_match(selector)
                     if selector
                     else (
@@ -5163,8 +5202,9 @@ class Orchestrator:
                         f"Manifest selector: {manifest.site_selector}"
                     )
                     if manifest.site_selector
-                    else "No Sites matched the specified criteria."
-                ],
+                    else "No Sites matched the specified criteria.",
+                    "targeting",
+                ),),
                 intent,
                 code="plan.targeting.empty",
                 summary="No Sites matched the selected criteria.",
@@ -5175,8 +5215,8 @@ class Orchestrator:
             manifest=manifest,
             sites=sites,
         )
-        if errors:
-            return self._invalid_preparation(errors, intent)
+        if errors.diagnostics:
+            return self._invalid_preparation(errors.diagnostics, intent)
         plan_steps = tuple(
             self._build_plan_step(step, sequence)
             for sequence, step in enumerate(manifest.steps, 1)
@@ -5211,6 +5251,9 @@ class Orchestrator:
                             contract,
                         )
                 except CompositionError as error:
+                    target_diagnostics.append(content_plan_diagnostic(
+                        diagnostic_from_error(error, subject="composition"),
+                    ))
                     target_diagnostics.append(
                         PlanDiagnostic(
                             code="composition.invalid",
@@ -5225,6 +5268,9 @@ class Orchestrator:
                         )
                     )
                 except ParameterSelectionError as error:
+                    target_diagnostics.append(content_plan_diagnostic(
+                        diagnostic_from_error(error, subject="parameters"),
+                    ))
                     target_diagnostics.append(
                         PlanDiagnostic(
                             code="parameter-selection.invalid",
@@ -5668,11 +5714,12 @@ class Orchestrator:
                     )
                     if error is not None:
                         raise PlanValueResolutionError(
-                            detail=error,
+                            detail=error.private_detail,
                             public_message=(
                                 "A resolved kubectl input is not part of the "
                                 "acquired package."
                             ),
+                            diagnostic=error,
                         )
             if details.operation == "apply":
                 return self.executor.kubectl_apply(
@@ -5764,6 +5811,7 @@ class Orchestrator:
                 public_message=(
                     "The resolved wait condition is invalid."
                 ),
+                diagnostic=diagnostic_from_error(error, subject="manifest"),
             ) from error
         return self.executor.wait_for_condition(
             condition=condition,

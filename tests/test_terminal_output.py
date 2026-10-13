@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from siteops import cli, terminal
+from siteops.diagnostics import ContentDiagnostic, ValidationResult
 from siteops.orchestrator import Orchestrator
 from siteops.planning import PlanStatus
 
@@ -65,7 +66,8 @@ def test_validation_errors_escape_authored_text(complete_workspace, capsys):
         manifest=complete_workspace / "manifests" / "test-manifest.yaml",
         workspace=complete_workspace, selector=None,
     )
-    with patch.object(orchestrator, "validate", return_value=[f"Step 'a{_HOSTILE}' failed.\nDetail"]):
+    result = ValidationResult((ContentDiagnostic("content.other", f"Step 'a{_HOSTILE}' failed.\nDetail"),))
+    with patch.object(orchestrator, "validate", return_value=result):
         assert cli.cmd_validate(args, orchestrator) == 1
 
     captured = capsys.readouterr()

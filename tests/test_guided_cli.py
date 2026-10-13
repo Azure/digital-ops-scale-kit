@@ -31,6 +31,7 @@ from siteops.planning import (
     resolve_plan_value,
 )
 from siteops.results import RunResult
+from tests.diagnostic_helpers import published
 
 
 @pytest.fixture
@@ -102,7 +103,9 @@ def test_unknown_input_is_named_with_the_nearest_input_unless_redacted(
         "-w", str(guided_workspace), "inputs", _manifest(guided_workspace), "--input", "locaton=eastus",
     ]) == 1
     error = capsys.readouterr().err
-    assert error.startswith("Error: Inline inputs contain an unknown input")
+    assert error.startswith(
+        "Error: content.unknown-field:" if redacted else "Error: Inline inputs contain an unknown input",
+    )
     assert ("'locaton'. Did you mean 'location'?" in error) is not redacted
 
 
@@ -844,7 +847,7 @@ def test_label_requirement_rejects_a_mismatch_before_preparation(
             *[argument for selector in selectors for argument in ("-l", selector)],
         ]) == 1
     output = capsys.readouterr()
-    assert message in output.out + output.err
+    assert message in " ".join((output.out + output.err).split())
     if command == "deploy":
         assert output.err == f"Error: {message}\n"
 
@@ -886,14 +889,7 @@ def test_redacted_label_requirement_mismatch_names_no_site_values(
             "-l", "environment=PRIVATE_SELECTOR_VALUE", "--output", "json",
         ]) == 1
     output = capsys.readouterr()
-    assert json.loads(output.out)["diagnostics"] == [{
-        "code": "plan.targeting.conflict",
-        "severity": "error",
-        "summary": (
-            "The Site does not match the -l label requirement. "
-            "Check its name and labels against each -l term."
-        ),
-    }]
+    assert json.loads(output.out)["diagnostics"] == [published("plan.targeting.conflict")]
     assert "PRIVATE" not in output.out + output.err
 
 
@@ -968,7 +964,7 @@ def test_label_supplied_by_a_read_is_required_before_preparation(
     if expected:
         assert (
             "Site 'one' does not match -l region=westus (its region label is eastus)."
-            in capsys.readouterr().out
+            in " ".join(capsys.readouterr().out.split())
         )
 
 
@@ -981,7 +977,7 @@ def test_missing_inputs_have_actionable_machine_diagnostic(
     ]) == 1
     output = json.loads(capsys.readouterr().out)
     assert output["diagnostics"][0]["code"] == "inputs.invalid"
-    assert "siteops inputs" in output["diagnostics"][0]["summary"]
+    assert "siteops inputs" in output["diagnostics"][0]["guidance"]
 
 
 def test_ci_missing_input_reports_safe_field_name(
@@ -995,7 +991,7 @@ def test_ci_missing_input_reports_safe_field_name(
     ]) == 1
     output = json.loads(capsys.readouterr().out)
     assert output["diagnostics"][0]["code"] == "inputs.invalid"
-    assert "subscription" in output["diagnostics"][0]["summary"]
+    assert "Run `siteops" in output["diagnostics"][0]["guidance"]
 
 
 def test_ci_deploy_missing_input_reports_safe_field_name(
@@ -1008,7 +1004,7 @@ def test_ci_deploy_missing_input_reports_safe_field_name(
     ]) == 1
     output = json.loads(capsys.readouterr().out)
     assert output["diagnostics"][0]["code"] == "inputs.invalid"
-    assert "subscription" in output["diagnostics"][0]["summary"]
+    assert "Run `siteops" in output["diagnostics"][0]["guidance"]
 
 
 @pytest.mark.parametrize("redacted", [False, True])
@@ -1060,7 +1056,7 @@ def test_saved_site_in_inventory_requires_discoverable_suffix(
     ]) == 1
     assert not invalid.exists()
     output = capsys.readouterr()
-    assert ("Site configuration could not be loaded" if redacted else ".yaml or .yml") in output.err
+    assert ("content.other" if redacted else ".yaml or .yml") in output.err
 
     valid = sites_dir / "one.yml"
     assert _invoke([
@@ -1120,7 +1116,7 @@ def test_save_site_rejects_inventory_identity_collisions_before_writing(
     assert not destination.exists()
     output = capsys.readouterr()
     if redacted:
-        assert "Site configuration could not be loaded" in output.err
+        assert "content.other" in output.err
         assert "taken" not in output.out + output.err
         assert str(existing) not in output.out + output.err
     else:
@@ -1489,10 +1485,9 @@ def test_aio_enabled_without_cluster_observation_fails_before_planning(capsys):
     document = json.loads(capsys.readouterr().out)
     assert document["diagnostics"][0]["code"] == "inputs.resource.requirement-unverified"
     assert document["diagnostics"][0]["summary"] == (
-        "inputs.resource.requirement-unverified: With `enableSecretSync=true`, supply "
-        "`--input cluster=<Arc-cluster-resource-ID>` so Site Ops can read the cluster's "
-        "OIDC issuer and workload identity settings."
+        "A required resource fact has not been verified."
     )
+    assert "siteops inputs" in document["diagnostics"][0]["guidance"]
 
 
 def test_secretsync_names_its_missing_resource_input_before_prerequisites(capsys):
@@ -1513,11 +1508,12 @@ def test_secretsync_names_its_missing_resource_input_before_prerequisites(capsys
         "Missing required input 'instance'. Supply `--input instance=<AIO-instance-resource-ID>` "
         "so Site Ops can read the cluster's OIDC issuer and workload identity settings."
     )
-    assert f"Error: {message}" in output.out
+    assert message in " ".join(output.out.split())
     assert "connectedClusters." not in output.out + output.err
     diagnostic = json.loads(capsys.readouterr().out)["diagnostics"][0]
     assert diagnostic["code"] == "inputs.invalid"
-    assert diagnostic["summary"].startswith(message)
+    assert diagnostic["summary"] == "Typed Site inputs are unavailable or invalid."
+    assert "siteops inputs" in diagnostic["guidance"]
 
 
 def test_missing_manual_answer_names_the_resource_route(capsys):
@@ -1527,9 +1523,9 @@ def test_missing_manual_answer_names_the_resource_route(capsys):
             "-w", str(workspace), "plan", "aio-install", "--describe", "--input", "enableSecretSync=true",
         ]) == 1
     assert (
-        "Error: Missing required input 'siteName'. Supply it, or supply "
+        "Missing required input 'siteName'. Supply it, or supply "
         "`--input cluster=<Arc-cluster-resource-ID>` to derive it."
-    ) in capsys.readouterr().out
+    ) in " ".join(capsys.readouterr().out.split())
 
 
 @pytest.mark.parametrize("workload_ready", [False, True])
@@ -1582,9 +1578,9 @@ def test_aio_enabled_observes_prerequisites_before_one_plan(
     else:
         assert document["diagnostics"][0]["code"] == "inputs.resource.requirement-unmet"
         assert document["diagnostics"][0]["summary"] == (
-            "inputs.resource.requirement-unmet: The cluster read for input 'cluster' "
-            "does not report workload identity enabled."
+            "A required resource fact was not observed."
         )
+        assert "siteops inputs" in document["diagnostics"][0]["guidance"]
 
 
 @pytest.mark.parametrize(

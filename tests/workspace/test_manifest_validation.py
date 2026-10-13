@@ -90,7 +90,7 @@ class TestManifestValidation:
         for manifest in _all_manifest_files(workspace):
             if manifest.name.startswith("_"):
                 continue
-            errors = orchestrator.validate(manifest)
+            errors = orchestrator.validate(manifest).local_messages()
             if errors:
                 failures[str(manifest.relative_to(workspace))] = errors
 

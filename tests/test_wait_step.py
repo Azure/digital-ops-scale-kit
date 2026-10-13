@@ -487,7 +487,7 @@ class TestWaitStepManifestValidation:
         ]
         path = self._write_manifest(tmp_workspace, steps)
         orch = Orchestrator(tmp_workspace)
-        errors = orch.validate(path)
+        errors = orch.validate(path).local_messages()
         assert any("references unknown step 'nonexistent'" in e for e in errors)
 
     def test_reference_to_later_step_errors(self, tmp_workspace):
@@ -507,7 +507,7 @@ class TestWaitStepManifestValidation:
         (tmp_workspace / "templates" / "x.bicep").write_text("// noop", encoding="utf-8")
         path = self._write_manifest(tmp_workspace, steps)
         orch = Orchestrator(tmp_workspace)
-        errors = orch.validate(path)
+        errors = orch.validate(path).local_messages()
         assert any("does not execute before it" in e for e in errors)
 
     def test_valid_prior_reference_passes(self, tmp_workspace):
@@ -527,7 +527,7 @@ class TestWaitStepManifestValidation:
         (tmp_workspace / "templates" / "x.bicep").write_text("// noop", encoding="utf-8")
         path = self._write_manifest(tmp_workspace, steps)
         orch = Orchestrator(tmp_workspace)
-        errors = orch.validate(path)
+        errors = orch.validate(path).local_messages()
         assert not any("wait condition" in e for e in errors)
 
 

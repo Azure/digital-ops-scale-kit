@@ -10,12 +10,14 @@ import threading
 from collections import Counter
 from typing import Any, TextIO
 
-from siteops import terminal
-from siteops.planning import (
-    BICEP_COMPILER_SUMMARY,
-    PUBLISHABLE_CAPABILITY_SUMMARIES,
-    PlanProjection,
+from siteops import __version__, terminal
+from siteops.diagnostics import (
+    ValidationResult,
+    public_document,
+    render_diagnostics,
+    resolve_member,
 )
+from siteops.planning import PlanProjection
 from siteops.results import (
     OperationResult,
     OperationStatus,
@@ -36,97 +38,32 @@ from siteops.terminal import wrap as _wrap
 _API_VERSION = "siteops/v1alpha1"
 _KIND = "DeploymentRun"
 
-# Publication categories for the diagnostic codes a run can carry. A run
-# diagnostic's own code, summary, and serialized detail are producer text, so
-# publishing them directly would export whatever a producer happened to write.
-# Preparation diagnostics enter a run result with their planning codes, so both
-# families are named here. An unlisted code publishes the generic entry below.
-_PUBLISHABLE_RUN_DIAGNOSTICS = {
-    "run-interrupted": (
-        "run.interrupted",
-        "Execution was interrupted before every operation finished.",
-    ),
-    "progress-reporting-failed": (
-        "run.progress-reporting-failed",
-        "Progress reporting stopped before execution completed.",
-    ),
-    **{
-        code: ("run.capability-unavailable", summary)
-        for code, summary in PUBLISHABLE_CAPABILITY_SUMMARIES.items()
-    },
-    "composition.invalid": (
-        "run.preparation-invalid",
-        "Preparation failed before execution started.",
-    ),
-    "compilation.failed": (
-        "run.compilation-failed",
-        "Template compilation failed.",
-    ),
-    "compilation.input-changed": (
-        "run.compilation-failed",
-        "Template compilation failed.",
-    ),
-    "compilation.module-unavailable": (
-        "run.compilation-failed",
-        "Template compilation failed.",
-    ),
-    "compilation.output-invalid": (
-        "run.compilation-failed",
-        "Template compilation failed.",
-    ),
-    "compilation.source-unreadable": (
-        "run.compilation-failed",
-        "Template compilation failed.",
-    ),
-    "compilation.timeout": (
-        "run.compilation-failed",
-        "Template compilation failed.",
-    ),
-    "compilation.tool-missing": (
-        "run.capability-unavailable",
-        BICEP_COMPILER_SUMMARY,
-    ),
-    "compilation.tool-unavailable": (
-        "run.capability-unavailable",
-        BICEP_COMPILER_SUMMARY,
-    ),
-    "operation-preparation.invalid": (
-        "run.preparation-invalid",
-        "Preparation failed before execution started.",
-    ),
-    "operation.dependency-blocked": (
-        "run.dependency-unavailable",
-        "A required prior operation is unavailable.",
-    ),
-    "parameter-selection.invalid": (
-        "run.preparation-invalid",
-        "Preparation failed before execution started.",
-    ),
-    "plan.target-set-incomplete": (
-        "run.targeting-incomplete",
-        "The selected target set is incomplete.",
-    ),
-    "plan.targeting.empty": (
-        "run.targeting-empty",
-        "No Sites matched the selected criteria.",
-    ),
-    "plan.targeting.required": (
-        "run.targeting-required",
-        "The manifest needs a target set or a selector.",
-    ),
-    "subscription-target.missing": (
-        "run.preparation-invalid",
-        "Preparation failed before execution started.",
-    ),
-    "validation.failed": (
-        "run.validation-failed",
-        "Manifest validation failed.",
-    ),
-}
-_GENERIC_RUN_DIAGNOSTIC = (
-    "run.diagnostic",
-    "The deployment run reported a diagnostic.",
-)
+
+def serialize_validation_json(
+    result: ValidationResult, projection: PlanProjection, *, engine_version: str,
+) -> str:
+    """Serialize structural validation without executable preparation."""
+    return json.dumps(result.document(projection.value, engine_version), indent=2, sort_keys=True) + "\n"
+
+
+def render_plain_validation(result: ValidationResult, *, redacted: bool) -> str:
+    """Render a validation result for the selected output boundary."""
+    if not result.diagnostics:
+        if result.manifest_name and not redacted:
+            return f"\n+ Manifest is valid: {sanitize(result.manifest_name)}\n"
+        return "\n+ Manifest structure and static references are valid.\n"
+    error_count = sum(issue.severity == "error" for issue in result.diagnostics)
+    lines = [f"\nError: Validation failed with {error_count} error(s):"] if error_count else []
+    if redacted:
+        lines.extend(render_diagnostics(
+            result.document("publishable", __version__)["diagnostics"],
+        ))
+    else:
+        for issue in result.diagnostics:
+            texts = terminal.sanitize_lines(issue.private_detail)
+            for index, text in enumerate(texts):
+                lines.extend(_wrap(text, indent="  - " if index == 0 else "    ", hanging="    "))
+    return "\n".join(lines) + "\n"
 
 
 def _reason_document(reason: OutcomeReason) -> dict[str, Any]:
@@ -141,35 +78,23 @@ def _reason_document(reason: OutcomeReason) -> dict[str, Any]:
 
 def _publishable_diagnostic_document(
     diagnostic: RunDiagnostic,
+    *, private: bool = False,
 ) -> dict[str, str]:
-    if diagnostic.public_summary is not None and (
-        diagnostic.code in {"inputs.invalid", "site.invalid", "plan.targeting.conflict"}
-        or diagnostic.code.startswith("inputs.resource.")
-    ):
-        return {
-            "code": diagnostic.code,
-            "severity": diagnostic.severity.value,
-            "summary": diagnostic.public_summary,
-        }
-    code, summary = _PUBLISHABLE_RUN_DIAGNOSTICS.get(
-        diagnostic.code,
-        _GENERIC_RUN_DIAGNOSTIC,
+    content = diagnostic.content_diagnostic
+    return public_document(
+        resolve_member(diagnostic.code, _KIND, private=private), diagnostic.severity.value,
+        subject=content.subject if content else None,
+        schema_field=content.schema_field if content else None,
     )
-    return {
-        "code": code,
-        "severity": diagnostic.severity.value,
-        "summary": summary,
-    }
 
 
 def _local_diagnostic_document(diagnostic: RunDiagnostic) -> dict[str, Any]:
-    document: dict[str, Any] = {
-        "code": diagnostic.code,
-        "severity": diagnostic.severity.value,
-        "summary": diagnostic.summary,
-    }
-    if diagnostic.serialized_detail is not None:
-        document["serializedDetail"] = diagnostic.serialized_detail
+    document: dict[str, Any] = _publishable_diagnostic_document(diagnostic, private=True)
+    document["code"] = diagnostic.code
+    if diagnostic.content_diagnostic is not None:
+        context = diagnostic.content_diagnostic.document(private=True).get("context")
+        if context:
+            document["context"] = context
     return document
 
 
@@ -489,14 +414,7 @@ def _render_publishable_plain(result: RunResult) -> str:
     lines.extend(_interrupted_lines(result, redacted=True))
     if document["diagnostics"]:
         lines.extend(_heading("Diagnostics", blank_after=False))
-        for diagnostic in document["diagnostics"]:
-            lines.extend(
-                _wrap(
-                    sanitize(f"{diagnostic['severity'].capitalize()}: {diagnostic['summary']}"),
-                    indent="    ",
-                    hanging="      ",
-                )
-            )
+        lines.extend(render_diagnostics(document["diagnostics"], indent="    "))
     next_action = _next_action(result, redacted=True)
     if next_action is not None:
         lines.extend(["", *_wrap(next_action)])

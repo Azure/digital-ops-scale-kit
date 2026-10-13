@@ -905,8 +905,8 @@ name: bad-site
         assert len(sites) == 1
         assert sites[0].name == "good-site"
 
-    def test_load_all_sites_skips_bad_site_stderr_warning(self, tmp_workspace, capsys):
-        """Skipped sites produce a visible warning on stderr."""
+    def test_load_all_sites_records_bad_site_without_final_output(self, tmp_workspace, capsys):
+        """The command boundary renders failures retained by Site discovery."""
         (tmp_workspace / "sites" / "good-site.yaml").write_text(
             "apiVersion: siteops/v1\nkind: Site\nname: good-site\n"
             'subscription: "00000000-0000-0000-0000-000000000000"\n'
@@ -921,9 +921,9 @@ name: bad-site
 
         assert len(sites) == 1
         err = capsys.readouterr().err
-        assert "! Skipped 1 Site(s) due to errors:" in err
-        assert "  - bad-site: " in err
-        assert all(ord(character) < 128 for character in err)
+        assert err == ""
+        assert orchestrator.skipped_sites[0].name == "bad-site"
+        assert orchestrator.skipped_sites[0].diagnostic.code == "content.required-field-missing"
 
     def test_load_all_sites_no_warning_when_all_valid(self, tmp_workspace, capsys):
         """No stderr warning when all sites load successfully."""

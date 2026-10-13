@@ -13,6 +13,7 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
+from siteops.diagnostics import ContentDiagnostic
 from siteops.planning import (
     DiagnosticSeverity,
     OperationIdentity,
@@ -213,6 +214,7 @@ class RunDiagnostic:
     private_detail: str | None = field(default=None, repr=False, compare=False)
     serialized_detail: str | None = None
     public_summary: str | None = None
+    content_diagnostic: ContentDiagnostic | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.code, "Run diagnostic code")
@@ -533,6 +535,7 @@ def preparation_failure_result(result: PlanBuildResult) -> RunResult:
             private_detail=diagnostic.detail,
             serialized_detail=diagnostic.serialized_detail,
             public_summary=diagnostic.public_summary,
+            content_diagnostic=diagnostic.content_diagnostic,
         )
         for diagnostic in result.diagnostics
     )

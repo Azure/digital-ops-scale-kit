@@ -279,8 +279,13 @@ def test_structural_validation_preserves_target_arguments_and_diagnostics(
     tmp_path, site_file, selector, exit_code,
 ):
     (tmp_path / "bin").mkdir()
+    write_executable(tmp_path / "bin/python3",
+                     f'#!/usr/bin/env bash\nexec "{bash_path(Path(sys.executable))}" "$@"\n')
     write_executable(tmp_path / "bin/siteops", """#!/usr/bin/env bash
 printf '%s\\n' "$@" > arguments
+if [[ "$EXPECTED_EXIT" == 0 ]]; then
+  echo '{"apiVersion":"siteops/v1alpha1","kind":"ValidationResult","engine":{"name":"siteops","version":"1.0.0"},"projection":"publishable","status":"valid","exitCode":0,"summary":{"diagnosticCount":0,"targetResolution":"complete"},"diagnostics":[]}'
+fi
 echo PRIVATE_DIAGNOSTIC >&2
 exit "$EXPECTED_EXIT"
 """)
@@ -288,9 +293,11 @@ exit "$EXPECTED_EXIT"
         "WORKSPACE": "caller workspace", "MANIFEST": "manifests/custom.yaml", "SITE_FILE": site_file,
         "SELECTOR": selector, "EXPECTED_EXIT": str(exit_code),
         "STATE_PARENT": bash_path(tmp_path),
+        "TOOL_ROOT": bash_path(ROOT),
     }, shell_options=())
     assert result.returncode == exit_code
-    expected = ["-w", "caller workspace", "validate", "manifests/custom.yaml"]
+    expected = ["-w", "caller workspace", "validate", "manifests/custom.yaml",
+                "--output", "json", "--projection", "publishable"]
     expected += ["-l", selector] if selector else []
     expected += ["--site-file", site_file] if site_file else []
     assert (tmp_path / "arguments").read_text().splitlines() == expected

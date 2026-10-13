@@ -22,7 +22,7 @@ class TestValidation:
         orchestrator = Orchestrator(complete_workspace)
         manifest_path = complete_workspace / "manifests" / "test-manifest.yaml"
 
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
         assert errors == []
 
     def test_validate_missing_template(self, tmp_workspace, sample_site_file):
@@ -37,7 +37,7 @@ class TestValidation:
         with open(manifest_path, "w", encoding="utf-8") as f:
             yaml.dump(manifest_data, f)
 
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
         assert any("Template not found" in e for e in errors)
 
     def test_validate_missing_step_parameters(self, complete_workspace):
@@ -59,7 +59,7 @@ class TestValidation:
         with open(manifest_path, "w", encoding="utf-8") as f:
             yaml.dump(manifest_data, f)
 
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
         assert any("Parameter file not found" in e for e in errors)
 
     def test_validate_no_sites_matched(self, complete_workspace):
@@ -74,8 +74,10 @@ class TestValidation:
         with open(manifest_path, "w", encoding="utf-8") as f:
             yaml.dump(manifest_data, f)
 
-        errors = orchestrator.validate(manifest_path)
-        assert any("No Sites matched" in e for e in errors)
+        result = orchestrator.validate(manifest_path)
+        assert any("No Sites matched" in e for e in result.local_messages())
+        assert result.diagnostics[0].code == "plan.targeting.empty"
+        assert result.document("publishable", "test")["diagnostics"][0]["code"] == "plan.targeting-empty"
 
     def test_validate_generic_manifest_passes(self, complete_workspace):
         """A manifest with no `sites:` and no `selector:` is a valid library
@@ -91,7 +93,7 @@ class TestValidation:
         with open(manifest_path, "w", encoding="utf-8") as f:
             yaml.dump(manifest_data, f)
 
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
         assert errors == []
 
     def test_validate_duplicate_non_name_selector_key_surfaces_error(self, complete_workspace):
@@ -108,7 +110,7 @@ class TestValidation:
         with open(manifest_path, "w", encoding="utf-8") as f:
             yaml.dump(manifest_data, f)
 
-        errors = orchestrator.validate(manifest_path, selector="env=prod,env=dev")
+        errors = orchestrator.validate(manifest_path, selector="env=prod,env=dev").local_messages()
         assert any("may only appear once" in e for e in errors)
 
     def test_validate_selector_parse_error_does_not_short_circuit(self, complete_workspace):
@@ -128,7 +130,7 @@ class TestValidation:
         with open(manifest_path, "w", encoding="utf-8") as f:
             yaml.dump(manifest_data, f)
 
-        errors = orchestrator.validate(manifest_path, selector="env=prod,env=dev")
+        errors = orchestrator.validate(manifest_path, selector="env=prod,env=dev").local_messages()
         # Both errors must surface so the operator fixes them in one pass.
         assert any("may only appear once" in e for e in errors)
         assert any("Template not found" in e for e in errors)
@@ -149,7 +151,7 @@ class TestValidation:
         with open(manifest_path, "w", encoding="utf-8") as f:
             yaml.dump(manifest_data, f)
 
-        errors = orchestrator.validate(manifest_path, selector="env=prod,env=dev")
+        errors = orchestrator.validate(manifest_path, selector="env=prod,env=dev").local_messages()
         # Parse error must surface.
         assert any("may only appear once" in e for e in errors)
         # The "matched no sites" diagnostic must NOT also surface.
@@ -175,7 +177,7 @@ class TestValidation:
 
         # CLI selector parses cleanly but matches zero sites in the
         # workspace.
-        errors = orchestrator.validate(manifest_path, selector="environment=nope")
+        errors = orchestrator.validate(manifest_path, selector="environment=nope").local_messages()
         # Rich diagnostic surfaces.
         assert any("matched no Sites" in e for e in errors)
 
@@ -197,7 +199,7 @@ class TestValidation:
             yaml.dump(manifest_data, f)
 
         # Must not raise.
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
         assert any("does-not-exist" in e for e in errors)
 
     def test_validate_invalid_condition(self, complete_workspace):
@@ -218,7 +220,7 @@ class TestValidation:
         with open(manifest_path, "w", encoding="utf-8") as f:
             yaml.dump(manifest_data, f)
 
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
 
         assert len(errors) > 0
         assert any("when" in e.lower() or "condition" in e.lower() or "parse" in e.lower() for e in errors)
@@ -271,7 +273,7 @@ steps:
         )
 
         orchestrator = Orchestrator(workspace)
-        errors = orchestrator.validate(manifest_file)
+        errors = orchestrator.validate(manifest_file).local_messages()
 
         param_errors = [e for e in errors if "Manifest parameter file" in e]
         assert param_errors == []
@@ -318,7 +320,7 @@ steps:
         )
 
         orchestrator = Orchestrator(workspace)
-        errors = orchestrator.validate(manifest_file)
+        errors = orchestrator.validate(manifest_file).local_messages()
 
         assert any("Manifest parameter file not found" in e for e in errors)
         assert any("nonexistent.yaml" in e for e in errors)
@@ -375,7 +377,7 @@ steps:
         )
 
         orchestrator = Orchestrator(workspace)
-        errors = orchestrator.validate(manifest_file)
+        errors = orchestrator.validate(manifest_file).local_messages()
 
         assert any("Invalid manifest parameter file" in e for e in errors)
         assert any("invalid.yaml" in e for e in errors)
@@ -427,7 +429,7 @@ steps:
         )
 
         orchestrator = Orchestrator(workspace)
-        errors = orchestrator.validate(manifest_file)
+        errors = orchestrator.validate(manifest_file).local_messages()
 
         assert any("Manifest parameter file not found" in e for e in errors)
         assert any("missing.yaml" in e for e in errors)
@@ -474,7 +476,7 @@ steps:
         )
 
         orchestrator = Orchestrator(workspace)
-        errors = orchestrator.validate(manifest_file)
+        errors = orchestrator.validate(manifest_file).local_messages()
 
         param_errors = [e for e in errors if "Manifest parameter" in e]
         assert param_errors == []
@@ -519,7 +521,7 @@ steps:
         )
 
         orchestrator = Orchestrator(workspace)
-        errors = orchestrator.validate(manifest_file)
+        errors = orchestrator.validate(manifest_file).local_messages()
 
         param_errors = [e for e in errors if "Manifest parameter" in e]
         assert param_errors == []
@@ -543,7 +545,7 @@ steps:
         with open(manifest_path, "w", encoding="utf-8") as f:
             yaml.dump(manifest_data, f)
 
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
         condition_errors = [e for e in errors if "condition" in e.lower() or "when" in e.lower()]
         assert condition_errors == [], f"Unexpected condition errors: {condition_errors}"
 
@@ -566,7 +568,7 @@ steps:
         with open(manifest_path, "w", encoding="utf-8") as f:
             yaml.dump(manifest_data, f)
 
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
         condition_errors = [e for e in errors if "condition" in e.lower() or "when" in e.lower()]
         assert condition_errors == [], f"Unexpected condition errors: {condition_errors}"
 
@@ -584,7 +586,7 @@ steps: []
 """
         )
 
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
         assert any("no steps" in e.lower() for e in errors)
 
     def test_validate_rg_missing_for_rg_scoped_step(self, tmp_workspace):
@@ -622,7 +624,7 @@ steps:
         )
 
         orchestrator = Orchestrator(tmp_workspace)
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
         # Subscription-level sites are skipped for RG-scoped steps.
         # No error is produced because the site is exempt, not invalid.
         # This validates the exemption logic works correctly.
@@ -650,7 +652,7 @@ steps:
         with open(manifest_path, "w", encoding="utf-8") as f:
             yaml.dump(manifest_data, f)
 
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
         dup_errors = [e for e in errors if "duplicate" in e.lower()]
         assert len(dup_errors) == 1
         assert "deploy-infra" in dup_errors[0]
@@ -691,7 +693,7 @@ steps:
         manifest_path = complete_workspace / "manifests" / "dynamic-path.yaml"
         manifest_path.write_text(yaml.dump(manifest_data))
 
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
         param_errors = [e for e in errors if "variants" in e]
         assert param_errors == [], f"Dynamic path should resolve: {param_errors}"
 
@@ -724,7 +726,7 @@ steps:
         manifest_path = complete_workspace / "manifests" / "dynamic-path-missing.yaml"
         manifest_path.write_text(yaml.dump(manifest_data))
 
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
         param_errors = [e for e in errors if "nonexistent" in e]
         assert len(param_errors) == 1
         assert "test-site-missing" in param_errors[0]
@@ -762,7 +764,7 @@ steps:
         manifest_path = complete_workspace / "manifests" / "manifest-dyn.yaml"
         manifest_path.write_text(yaml.dump(manifest_data))
 
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
         param_errors = [e for e in errors if "variants" in e]
         assert param_errors == [], f"Manifest-level dynamic path should resolve: {param_errors}"
 
@@ -799,7 +801,7 @@ steps:
         manifest_path = complete_workspace / "manifests" / "dyn-bad-yaml.yaml"
         manifest_path.write_text(yaml.dump(manifest_data))
 
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
         yaml_errors = [e for e in errors if "Invalid" in e and "broken" in e]
         assert len(yaml_errors) == 1
 
@@ -838,7 +840,7 @@ steps:
         manifest_path = complete_workspace / "manifests" / "dyn-outref.yaml"
         manifest_path.write_text(yaml.dump(manifest_data))
 
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
         ref_errors = [e for e in errors if "nonexistent-step" in e]
         assert len(ref_errors) >= 1
 
@@ -868,7 +870,7 @@ steps:
 """
         )
 
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
         assert any("HTTP URLs not allowed" in e for e in errors)
 
     def test_validate_kubectl_https_url_accepted(self, tmp_workspace, sample_site_file):
@@ -893,7 +895,7 @@ steps:
 """
         )
 
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
         # No kubectl-related errors expected
         assert not any("HTTP URLs not allowed" in e for e in errors)
         assert not any("Kubectl file not found" in e for e in errors)
@@ -920,7 +922,7 @@ steps:
 """
         )
 
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
         assert any("Kubectl file not found" in e for e in errors)
 
     def test_validate_kubectl_existing_local_file(self, tmp_workspace, sample_site_file):
@@ -949,7 +951,7 @@ steps:
 """
         )
 
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
         assert not any("Kubectl file not found" in e for e in errors)
 
     def test_validate_kubectl_unresolved_site_file_path_rejected(
@@ -978,7 +980,7 @@ steps:
 """
         )
 
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
         assert any("did not resolve for Site 'test-site'" in e for e in errors)
 
 
@@ -1033,7 +1035,7 @@ steps:
         )
 
         orchestrator = Orchestrator(tmp_workspace)
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
 
         assert not errors, f"Expected no errors, got: {errors}"
 
@@ -1056,7 +1058,7 @@ steps:
         )
 
         orchestrator = Orchestrator(tmp_workspace)
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
 
         assert len(errors) == 1
         assert "unknown step 'nonexistent'" in errors[0]
@@ -1087,7 +1089,7 @@ steps:
         )
 
         orchestrator = Orchestrator(tmp_workspace)
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
 
         assert len(errors) == 1
         assert "runs later" in errors[0]
@@ -1119,7 +1121,7 @@ config:
         )
 
         orchestrator = Orchestrator(tmp_workspace)
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
 
         assert len(errors) == 1
         assert "unknown step 'unknown'" in errors[0]
@@ -1151,7 +1153,7 @@ items:
         )
 
         orchestrator = Orchestrator(tmp_workspace)
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
 
         assert len(errors) == 2
         assert any("'missing1'" in e for e in errors)
@@ -1185,7 +1187,7 @@ steps:
         )
 
         orchestrator = Orchestrator(tmp_workspace)
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
 
         assert len(errors) == 1
         assert "unknown step 'unknown'" in errors[0]
@@ -1225,7 +1227,7 @@ registryId: "{{ steps.create-registry.outputs.id }}"
         )
 
         orchestrator = Orchestrator(tmp_workspace)
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
 
         assert not errors, f"Expected no errors, got: {errors}"
 
@@ -1256,7 +1258,7 @@ nestedConfig:
         )
 
         orchestrator = Orchestrator(tmp_workspace)
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
 
         assert not errors
 
@@ -1286,7 +1288,7 @@ cluster: "{{ site.labels.clusterName }}"
         )
 
         orchestrator = Orchestrator(tmp_workspace)
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
 
         assert not errors
 
@@ -1332,7 +1334,7 @@ location: eastus
         )
 
         orchestrator = Orchestrator(tmp_workspace)
-        errors = orchestrator.validate(manifest)
+        errors = orchestrator.validate(manifest).local_messages()
 
         self_ref_errors = [e for e in errors if "cannot reference its own outputs" in e]
         assert not self_ref_errors, f"Unexpected self-reference errors: {self_ref_errors}"
@@ -1393,7 +1395,7 @@ location: eastus
         )
 
         orchestrator = Orchestrator(tmp_workspace)
-        errors = orchestrator.validate(manifest)
+        errors = orchestrator.validate(manifest).local_messages()
         result = orchestrator.build_plan(
             manifest,
             intent=PlanIntent.EXECUTABLE,
@@ -1447,7 +1449,7 @@ location: eastus
         )
 
         orchestrator = Orchestrator(tmp_workspace)
-        errors = orchestrator.validate(manifest)
+        errors = orchestrator.validate(manifest).local_messages()
         result = orchestrator.build_plan(
             manifest,
             intent=PlanIntent.EXECUTABLE,
@@ -1529,7 +1531,7 @@ location: eastus
         )
 
         orchestrator = Orchestrator(tmp_workspace)
-        errors = orchestrator.validate(manifest)
+        errors = orchestrator.validate(manifest).local_messages()
 
         # aio-instance step:
         #   - schemaRegistryId refs schema-registry (valid - prior step)
@@ -1571,7 +1573,7 @@ steps:
         )
 
         orchestrator = Orchestrator(tmp_workspace)
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
 
         assert any("subscription-level Site" in e for e in errors)
         assert any("subscription-scoped steps" in e for e in errors)
@@ -1604,7 +1606,7 @@ steps:
         )
 
         orchestrator = Orchestrator(tmp_workspace)
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
 
         # Should not have subscription-level site errors
         assert not any("subscription-level Site" in e for e in errors)
@@ -1650,7 +1652,7 @@ steps:
         )
 
         orchestrator = Orchestrator(tmp_workspace)
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
 
         assert any("multiple subscription-level sites" in e.lower() for e in errors)
 
@@ -1700,7 +1702,7 @@ steps:
         )
 
         orchestrator = Orchestrator(tmp_workspace)
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
 
         # Should not have subscription-level site errors
         assert not any("subscription-level Site" in e for e in errors)
@@ -1737,7 +1739,7 @@ steps:
         )
 
         orchestrator = Orchestrator(tmp_workspace)
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
 
         # Should have no subscription-related errors
         assert not any("subscription" in e.lower() for e in errors)
@@ -1780,7 +1782,7 @@ steps:
         )
 
         orchestrator = Orchestrator(tmp_workspace)
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
 
         # Should NOT error because the subscription step would be skipped anyway
         assert not any("subscription-level Site" in e for e in errors)
@@ -1823,7 +1825,7 @@ steps:
         )
 
         orchestrator = Orchestrator(tmp_workspace)
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
 
         # SHOULD error because the subscription step would execute
         assert any("subscription-level Site" in e for e in errors)
@@ -1880,7 +1882,7 @@ steps:
         )
 
         orchestrator = Orchestrator(tmp_workspace)
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
 
         # SHOULD error because at least one site would execute the subscription step
         assert any("subscription-level Site" in e for e in errors)
@@ -1928,7 +1930,7 @@ steps:
         )
 
         orchestrator = Orchestrator(tmp_workspace)
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
 
         # Should NOT error because all subscription steps would be skipped
         assert not any("subscription-level Site" in e for e in errors)

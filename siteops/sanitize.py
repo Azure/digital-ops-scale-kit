@@ -254,10 +254,7 @@ def is_redaction_enabled() -> bool:
 def report_parameter_selection_error(error: Exception) -> str:
     """Hide selected values, site names, and paths on published surfaces."""
     if is_redaction_enabled():
-        return (
-            "Parameter file selection failed. Re-run locally with output "
-            "redaction disabled for Site and path details."
-        )
+        return _content_error_for_output(error, "parameters", fallback="parameter-selection.invalid")
     return str(error)
 
 
@@ -294,11 +291,17 @@ def scrub_site_for_output(text: str | None, site_name: str) -> str | None:
 def report_site_load_error(error: Exception) -> str:
     """Keep site names and trusted local paths out of published diagnostics."""
     if is_redaction_enabled():
-        return (
-            "Site configuration could not be loaded. Re-run locally with "
-            "output redaction disabled for Site and path details."
-        )
+        return _content_error_for_output(error, "site")
     return str(error)
+
+
+def _content_error_for_output(error: Exception, subject: str, *, fallback: str = "content.other") -> str:
+    from siteops.diagnostics import diagnostic_from_error, public_entry, resolve_member
+
+    diagnostic = diagnostic_from_error(error, subject=subject)
+    code = fallback if diagnostic.code == "content.other" else diagnostic.code
+    entry = public_entry(resolve_member(code, "DeploymentPlan"), diagnostic.subject)
+    return f"{entry.code}: {entry.summary} {entry.guidance}"
 
 
 def scrub_command_for_output(argv: list[str]) -> str:

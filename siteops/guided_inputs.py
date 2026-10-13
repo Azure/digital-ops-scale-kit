@@ -22,6 +22,7 @@ import yaml
 from siteops import yamlio
 from siteops.artifacts import open_regular_file
 from siteops.cache_layout import write_new
+from siteops.diagnostics import ContentError, diagnostic_from_error
 from siteops.models import Site, _validate_resource
 from siteops.workspace_package import MaterializedPackageBinding
 
@@ -58,7 +59,7 @@ _RESOURCE_TEXT = {
 _OBSERVED_FIELDS = frozenset({"id", "subscription", "resourceGroup", "name", "location"})
 
 
-class GuidedInputError(ValueError):
+class GuidedInputError(ContentError):
     """A guided-input validation failure with no supplied values or local paths.
 
     `private_message` may name a supplied input or file for output that is not
@@ -69,7 +70,9 @@ class GuidedInputError(ValueError):
 
 
 def _unknown_input(name: str, declared: list[str], source: str) -> GuidedInputError:
-    error = GuidedInputError(f"{source} contain an unknown input name.")
+    error = GuidedInputError(
+        f"{source} contain an unknown input name.", code="content.unknown-field", subject="inputs",
+    )
     nearest = difflib.get_close_matches(name, declared, n=1)
     hint = (
         f"Did you mean '{nearest[0]}'?" if nearest
@@ -108,32 +111,42 @@ def contract_path(manifest_path: Path) -> Path:
 
 def _read_yaml(path: Path, *, label: str) -> Any:
     if not path.exists() and not path.is_symlink():
-        raise GuidedInputError(f"{label} was not found.") from None
+        raise GuidedInputError(
+            f"{label} was not found.", code="content.file-missing", subject="inputs", source=path,
+        ) from None
     with open_regular_file(path) as stream:
         raw = stream.read(_MAX_YAML_BYTES + 1)
     if len(raw) > _MAX_YAML_BYTES:
         raise GuidedInputError(f"{label} exceeds the 128 KiB YAML limit.")
     try:
         return yamlio.load_bounded(raw.decode("utf-8"))
-    except yamlio.DuplicateKeyError:
-        raise GuidedInputError(f"{label} contains a duplicate YAML key.") from None
-    except (UnicodeError, yaml.YAMLError, RecursionError):
-        raise GuidedInputError(f"{label} must be valid UTF-8 YAML within structural limits.") from None
+    except yamlio.DuplicateKeyError as error:
+        raise GuidedInputError(
+            f"{label} contains a duplicate YAML key.",
+            diagnostic=diagnostic_from_error(error, subject="inputs", source=path),
+        ) from error
+    except (UnicodeError, yaml.YAMLError, RecursionError) as error:
+        raise GuidedInputError(
+            f"{label} must be valid UTF-8 YAML within structural limits.",
+            diagnostic=diagnostic_from_error(error, subject="inputs", source=path),
+        ) from error
 
 
 def _mapping(value: Any, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
-        raise GuidedInputError(f"{label} must be a mapping.")
+        raise GuidedInputError(f"{label} must be a mapping.", code="content.invalid-type", subject="inputs")
     if any(not isinstance(key, str) for key in value):
-        raise GuidedInputError(f"{label} must have string keys.")
+        raise GuidedInputError(f"{label} must have string keys.", code="content.invalid-type", subject="inputs")
     return value
 
 
 def _shape(value: dict[str, Any], *, allowed: set[str], required: set[str], label: str) -> None:
     if value.keys() - allowed:
-        raise GuidedInputError(f"{label} contains an unknown key.")
+        raise GuidedInputError(f"{label} contains an unknown key.", code="content.unknown-field", subject="inputs")
     if required - value.keys():
-        raise GuidedInputError(f"{label} is missing a required key.")
+        raise GuidedInputError(
+            f"{label} is missing a required key.", code="content.required-field-missing", subject="inputs",
+        )
 
 
 def _site_defaults(value: Any) -> dict[str, Any]:
@@ -1195,8 +1208,11 @@ def load_direct_site(path: Path) -> Site:
         raise GuidedInputError("Site file kind must be text.")
     try:
         _validate_resource(data, "Site", path)
-    except ValueError:
-        raise GuidedInputError("Site file has an unsupported apiVersion or kind.") from None
+    except ValueError as error:
+        raise GuidedInputError(
+            "Site file has an unsupported apiVersion or kind.",
+            diagnostic=diagnostic_from_error(error, subject="site", source=path),
+        ) from error
     return Site.from_data(data, source=path, default_name=path.stem)
 
 
