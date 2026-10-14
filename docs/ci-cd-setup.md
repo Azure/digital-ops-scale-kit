@@ -197,12 +197,14 @@ The JSON format is identical on both platforms.
 
 Each key names a Site file directly under `sites/` or an extra trusted Site
 directory, without its `.yaml` or `.yml` extension. For `sites/selected.yaml`,
-use `selected`, even when the Site's `name:` is `inventory-site`. Overlays are
-written at the top of `sites.local/`, so a nested Site such as
-`sites/regions/selected.yaml` needs its overlay supplied as
-`sites.local/regions/selected.yaml`. The pipeline warns about any key that
-matches no Site file in `sites/` or `SITEOPS_EXTRA_SITES_DIRS`, and reports
-only the number of such keys when output redaction is enabled.
+use `selected`, even when the Site's `name:` is `inventory-site`. Keys contain
+only letters, digits, `_` and `-`, so they cannot name a nested Site such as
+`sites/regions/selected.yaml`. A key such as `regions/selected` stops the
+pipeline with `Invalid site name`. To override a nested Site, write its overlay
+to `sites.local/regions/selected.yaml` in a pipeline step before Site Ops runs.
+The pipeline warns about any key that matches no Site file in `sites/` or
+`SITEOPS_EXTRA_SITES_DIRS`, and reports only the number of such keys when
+output redaction is enabled.
 
 Override subscription, resource group, and parameters for each Site. Supports nested paths using dot notation (e.g., `parameters.clusterName`):
 

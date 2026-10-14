@@ -210,6 +210,14 @@ def test_nested_override_keys_keep_the_existing_validation(tmp_path):
         _load_override_script().generate_overlays({"regions/nested-site": {}}, tmp_path)
 
 
+def test_ci_guide_names_the_nested_key_rejection(tmp_path):
+    guide = " ".join((SCRIPT.parents[1] / "docs" / "ci-cd-setup.md").read_text(encoding="utf-8").split())
+    with pytest.raises(ValueError, match="^Invalid site name: 'regions/selected'"):
+        _load_override_script().generate_overlays({"regions/selected": {}}, tmp_path)
+    assert "A key such as `regions/selected` stops the pipeline with `Invalid site name`." in guide
+    assert "write its overlay to `sites.local/regions/selected.yaml`" in guide
+
+
 @pytest.mark.parametrize("flat", [
     {"parameters.value": "nested", "parameters": "scalar"},
     {"parameters": "scalar", "parameters.value": "nested"},
