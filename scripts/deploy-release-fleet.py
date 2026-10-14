@@ -23,7 +23,7 @@ from release_verification import ReleaseVerifier  # noqa: E402
 from siteops.arm_resources_azure_cli import _run_az  # noqa: E402
 from siteops.artifacts import load_artifact_json, open_regular_file  # noqa: E402
 
-RELEASES = {"one": "2607", "two": "2608"}
+RELEASES = {"one": "2607", "two": "2609"}
 SELECTOR = "name=fleet-one,name=fleet-two"
 EXPECTED_OPERATIONS = {
     "global-edge-site": "skipped", "edge-site": "skipped", "schema-registry": "succeeded",

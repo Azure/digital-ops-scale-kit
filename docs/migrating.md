@@ -61,7 +61,7 @@ Start with the changes that affect your workflow:
 | Repeat an option such as `-w`, or shorten option names | Review [option spelling](#option-spelling). |
 | Reference shipped manifests, partials or dataflow sets by path | Update [workspace content paths](#workspace-content-paths). |
 | Pass a manifest filename without a directory | Review [manifest names and paths](#manifest-names-and-paths). |
-| Rely on the workspace default AIO release | Review the [2608 default](#default-aio-release). |
+| Rely on the workspace default AIO release | Review the [2609 default](#default-aio-release). |
 | Select dataflow sets or read catalog step outputs | Update [resource sets](#resource-sets) and [catalog step outputs](#catalog-step-outputs). |
 | Author sites, manifests or parameter files | Review [preparation checks](#preparation-checks), [empty site mappings](#empty-site-mappings) and [parameter file selection](#parameter-file-selection). |
 | Write `when: ""` on a step or include | Omit `when:` or set it to `null`. See [empty conditions](#empty-conditions). |
@@ -325,11 +325,17 @@ workspace.
 
 ### Default AIO release
 
-`sites/base-site.yaml` now sets `aioRelease: "2608"`, where v1.0.0b6 set
-`"2607"`. A site that inherits it without its own `aioRelease` selects 2608 on
-its next deployment, and 2608 adds the OPC UA connector template. Pin
-`properties.aioRelease: "2607"` on a site that must stay on 2607, or move it
-with the [upgrade operation](../workspaces/iot-operations/manifests/aio-upgrade/README.md).
+`sites/base-site.yaml` now sets `aioRelease: "2609"`, where v1.0.0b6 set
+`"2607"`. Sites that do not pin `properties.aioRelease` target 2609 on their
+next deploy. Pin `properties.aioRelease: "2607"` to stay on the v1.0.0b6 release,
+or `properties.aioRelease: "2608"` to select that release.
+The guided installation and Secret Sync API profile also default to 2609.
+Use the [upgrade operation](../workspaces/iot-operations/manifests/aio-upgrade/README.md)
+for in-place upgrades of existing instances instead of rerunning installation.
+Moving off 2607 adds the OPC UA connector template unless OPC UA is disabled.
+Install and upgrade skip the template when the feature mode is `Disabled`.
+This includes the legacy `connectors` alias when `opcua` is absent.
+The canonical `opcua` feature takes precedence over `connectors`.
 See [AIO releases](aio-releases.md).
 
 ### Resource sets

@@ -16,7 +16,7 @@ Once running, the OPC UA connector polls the simulator over `opc.tcp://opcplc-00
 
 The sample creates its device, asset, Event Hub, and dataflow on every AIO release.
 
-AIO release `2608`, which Sites inherit by default, deploys the connector template
+AIO release `2609`, which Sites inherit by default, deploys the connector template
 during both install and upgrade. The supervisor
 then creates the connector pod on demand, and the complete telemetry path
 described above is available.

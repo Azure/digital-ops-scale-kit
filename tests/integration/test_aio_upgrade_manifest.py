@@ -30,7 +30,7 @@ from tests.integration.helpers.assertions import (
     site_names,
     site_results,
 )
-from tests.integration.helpers.kube import KubectlError, kubectl_json
+from tests.integration.helpers.kube import list_opcua_connector_templates
 from tests.integration.helpers.releases import load_aio_release
 
 pytestmark = [pytest.mark.integration]
@@ -51,7 +51,6 @@ CERT_MANAGER_TRUST_MANAGER_OVERRIDES = {
     "trust-manager.secretTargets.enabled",
     "trust-manager.secretTargets.authorizedSecretsAll",
 }
-OPC_UA_CONNECTOR_TEMPLATE_PREFIX = "azureiotoperationsconnectorforopcua-"
 
 
 def _release_configuration(orchestrator, site_name: str) -> dict:
@@ -555,7 +554,7 @@ class TestAioExtensionInvariants:
 
     def test_aio_release_train_preserved(self, aio_upgrade_result):
         """releaseTrain change is allowed only when the release config bumps
-        the train. Shipped release configs (2603 through 2608) all use `stable`,
+        the train. Shipped release configs (2603 through 2609) all use `stable`,
         so a mismatch here means the RP defaulted the train unexpectedly OR
         the release config was bumped (intentional, update the test).
         """
@@ -573,7 +572,7 @@ class TestAioExtensionInvariants:
 class TestOpcUaConnectorTemplateUpgrade:
     """Release-required connector templates are added during upgrade."""
 
-    def test_connector_template_present_after_upgrade(
+    def test_connector_template_matches_resolved_features_after_upgrade(
         self,
         aio_upgrade_result,
         orchestrator,
@@ -592,33 +591,16 @@ class TestOpcUaConnectorTemplateUpgrade:
             assert_step_succeeded(
                 aio_upgrade_result, name, "deploy-release-resources"
             )
-            try:
-                templates = kubectl_json(
-                    [
-                        "get",
-                        "connectortemplates.akri.iotoperations.azure.com",
-                        "-n",
-                        aio_namespace,
-                    ]
-                )
-            except KubectlError as e:
-                pytest.fail(
-                    f"Site '{name}': connector templates not retrievable after "
-                    f"upgrade in `{aio_namespace}`: {e}"
-                )
-            names = [
-                item.get("metadata", {}).get("name", "")
-                for item in templates.get("items", [])
-            ]
-            matching = [
-                value
-                for value in names
-                if value.startswith(OPC_UA_CONNECTOR_TEMPLATE_PREFIX)
-            ]
-            assert matching, (
-                f"Site '{name}': no OPC UA connector template is present after "
-                f"upgrade. The cluster reports {len(names)} connector "
-                "template(s), none for OPC UA."
+            resolve = assert_step_succeeded(aio_upgrade_result, name, "resolve-aio")
+            features = assert_output_exists(resolve, "features")
+            opcua_feature = features.get("opcua")
+            if opcua_feature is None:
+                opcua_feature = features.get("connectors") or {}
+            disabled = opcua_feature.get("mode") == "Disabled"
+            matching = list_opcua_connector_templates(aio_namespace)
+            assert bool(matching) is not disabled, (
+                f"Site '{name}': OPC UA template presence after upgrade "
+                "does not match the resolved instance feature mode."
             )
             checked += 1
 

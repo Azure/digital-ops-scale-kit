@@ -76,7 +76,7 @@ maximum of 59 characters. Existing saved Sites retain their names.
 Environment and country labels are optional. Add `--input environment=dev`
 or `--input country=US` when you want those labels and resource tags.
 Omitted values create neither labels nor tags. The default AIO release is
-2608, cert-manager is enabled, and Secret Sync is disabled. To list every
+2609, cert-manager is enabled, and Secret Sync is disabled. To list every
 optional input, such as `enableCertManager` and `brokerMemoryProfile`, run
 `siteops inputs aio-install` with the same `--source`.
 
@@ -179,7 +179,7 @@ siteops deploy aio-install --source "official@<release>" --input siteName=plant-
 
 ## Enable Secret Sync on an existing instance
 
-For an existing AIO 2607 or 2608 instance, supply its resource ID instead
+For an existing AIO 2607, 2608 or 2609 instance, supply its resource ID instead
 of running installation again:
 
 ```text
@@ -195,7 +195,7 @@ The reads do not enable cluster features or grant roles.
 
 The plan contains only instance resolution and Secret Sync enablement.
 It uses the actual instance name and does not reinstall or upgrade AIO.
-The shared typed contract supports existing AIO 2607 and 2608 instances.
+The shared typed contract supports existing AIO 2607, 2608 and 2609 instances.
 Configured Sites retain their release selection for other API generations.
 
 The default Site name comes from the associated cluster, matching the
@@ -241,8 +241,9 @@ deleting the existing cluster or resources owned by others.
 
 `aioRelease` is a typed answer mapped to the selected Site's
 `properties.aioRelease`. The packaged IoT Operations workspace supplies
-AIO release configurations for `2607` and `2608`, with `2608` as the current
-default. To use different AIO releases without saving Site files, prepare and
+the [supported AIO release configurations](aio-releases.md#available-aio-releases),
+including `2608`. `2609` is the default.
+To use different AIO releases without saving Site files, prepare and
 deploy each existing Arc cluster in a separate invocation:
 
 ```text

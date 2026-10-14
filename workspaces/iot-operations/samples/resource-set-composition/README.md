@@ -39,7 +39,7 @@ The boiler telemetry nodes follow the OPC PLC boiler simulation used by
 ## Prerequisites
 
 - AIO is installed on the cluster. The committed sample Site uses
-  AIO release `2608`.
+  AIO release `2609`.
 - cert-manager is enabled because the simulator creates a local certificate.
 - Arc Cluster Connect is enabled.
 - The deployment identity has Kubernetes permission to create Deployments,

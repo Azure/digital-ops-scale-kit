@@ -30,6 +30,7 @@
 #   E2E_AIO_RELEASE      AIO release selector (drives versioned-templates path)
 #   E2E_ENABLE_SECRET_SYNC
 #                        Whether the site enables Secret Sync (`true` or `false`)
+#   E2E_OPCUA_MODE       `Disabled` adds a feature override. `Stable` omits features.
 
 apiVersion: siteops/v1
 kind: Site
@@ -59,6 +60,7 @@ properties:
 
 parameters:
   clusterName: "${E2E_CLUSTER_NAME}"
+${E2E_OPCUA_FEATURES}
   brokerConfig:
     memoryProfile: Low
   defaultDataflowInstanceCount: 1

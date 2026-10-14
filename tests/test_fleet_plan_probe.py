@@ -32,12 +32,12 @@ def fleet_app(tmp_path_factory):
     (source / "parameters" / "common.yaml").write_text(
         'clusterName: "{{ site.parameters.clusterName }}"\nbrokerConfig: "{{ site.parameters.brokerConfig }}"\n',
     )
-    for release, version in (("2607", "1.4.41"), ("2608", "1.4.73")):
+    for release, version in (("2607", "1.4.41"), ("2609", "1.4.112")):
         (source / "parameters" / "aio-releases" / f"{release}.yaml").write_text(
             yaml.safe_dump({"aioVersion": version, "aioApiVersion": "2026-07-01",
                             "aioReleaseConfiguration": {} if release == "2607" else {"extension": {"wasmGraphControllerMqttTrust": True}},
-                            "certManagerVersion": "0.14.0" if release == "2607" else "1.0.0",
-                            "secretStoreVersion": "1.5.1" if release == "2607" else "1.5.2"}),
+                            "certManagerVersion": "0.14.0" if release == "2607" else "1.1.2",
+                            "secretStoreVersion": "1.5.1" if release == "2607" else "1.5.3"}),
         )
     steps = []
     for name in (
@@ -65,7 +65,7 @@ def fleet_app(tmp_path_factory):
     assert result.returncode == 0, result.stdout + result.stderr
     (app.root / "project" / "sites" / "one.yaml").unlink()
     targets = []
-    for slot, release in (("one", "2607"), ("two", "2608")):
+    for slot, release in (("one", "2607"), ("two", "2609")):
         target = {"slot": slot, "release": release, "name": f"fleet-{slot}",
                   "subscription": "00000000-0000-0000-0000-000000000001",
                   "resourceGroup": f"private-group-{slot}", "cluster": f"private-cluster-{slot}"}
@@ -85,7 +85,7 @@ def fleet_app(tmp_path_factory):
     return app, targets
 
 
-@pytest.mark.parametrize("fault", [None, "engine", "target", "release", "cluster"])
+@pytest.mark.parametrize("fault", [None, "engine", "target", "release", "old-slot-two-release", "cluster"])
 def test_installed_probe_observes_the_real_planner_and_keeps_values_private(fleet_app, fault):
     app, original = fleet_app
     targets = json.loads(json.dumps(original))
@@ -93,6 +93,8 @@ def test_installed_probe_observes_the_real_planner_and_keeps_values_private(flee
         targets[0]["resourceGroup"] = "other"
     elif fault == "release":
         targets[0]["release"] = "2608"
+    elif fault == "old-slot-two-release":
+        targets[1]["release"] = "2608"
     elif fault == "cluster":
         targets[0]["cluster"] = "other"
     name = fault or "valid"
@@ -116,4 +118,4 @@ def test_installed_probe_observes_the_real_planner_and_keeps_values_private(flee
         report = json.loads(result.stdout)
         assert report["targetCount"] == 2 and report["parallel"] == 2
         assert report["slots"]["one"]["version"] == "1.4.41"
-        assert report["slots"]["two"]["version"] == "1.4.73"
+        assert report["slots"]["two"]["version"] == "1.4.112"

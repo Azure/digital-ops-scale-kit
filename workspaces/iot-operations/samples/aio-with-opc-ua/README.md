@@ -38,7 +38,7 @@ Telemetry lags the deploy. The OPC UA connector reconciles the asset,
 establishes its session, and warms up polling before the first message
 reaches the broker, after which the dataflow forwards it to Event Hub.
 
-AIO release `2608`, which Sites inherit by default, deploys the template and
+AIO release `2609`, which Sites inherit by default, deploys the template and
 creates the connector pod on demand. AIO releases before 2607 deploy
 the connector statically. AIO release `2607` has the documented limitation
 of a missing connector template. See

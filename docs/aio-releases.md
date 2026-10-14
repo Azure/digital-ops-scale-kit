@@ -5,10 +5,10 @@ Azure IoT Operations (AIO) ships on a release cadence. Each AIO release pins spe
 ## How release selection works
 
 ```
-site.properties.aioRelease: "2608"
+site.properties.aioRelease: "2609"
             │
             ▼
-workspaces/iot-operations/parameters/aio-releases/2608.yaml
+workspaces/iot-operations/parameters/aio-releases/2609.yaml
             │
             ▼  (siteops auto-forwards matching params to Bicep)
 templates/aio/enablement.bicep       ──► cert-manager, secret store extensions
@@ -22,8 +22,8 @@ Each AIO release YAML has a stable schema at the top level.
 differ even when two AIO releases use the same ARM API generation:
 
 ```yaml
-# parameters/aio-releases/2608.yaml
-aioVersion: "1.4.73"            # AIO extension version pinned in Arc
+# parameters/aio-releases/2609.yaml
+aioVersion: "1.4.112"           # AIO extension version pinned in Arc
 aioTrain: stable                # Extension release train
 aioApiVersion: "2026-07-01"     # Microsoft.IoTOperations/instances API version
 adrApiVersion: "2026-04-01"     # Microsoft.DeviceRegistry/namespaces API version
@@ -32,20 +32,20 @@ aioReleaseConfiguration:
     wasmGraphControllerMqttTrust: true
   resources:
     opcUaConnector:
-      version: "1.4.10"
-certManagerVersion: "1.0.0"
+      version: "1.4.14"
+certManagerVersion: "1.1.2"
 certManagerTrain: stable
 certManagerConfigurationOverrides:
   trust-manager.secretTargets.enabled: "false"
   trust-manager.secretTargets.authorizedSecretsAll: "false"
-secretStoreVersion: "1.5.2"
+secretStoreVersion: "1.5.3"
 secretStoreTrain: stable
 ```
 
 The `aioApiVersion` and `adrApiVersion` values route CREATE and UPDATE operations through their matching versioned modules (for example `templates/aio/modules/instance-2026-07-01.bicep` and `templates/deps/modules/adr-ns-2026-04-01.bicep`). Configuration override objects specific to an AIO release are forwarded automatically to templates that declare them. Bicep cannot parameterize API version strings, so the dispatchers use `@allowed` + conditional modules. See [Adding a new AIO release](#adding-a-new-aio-release) below.
 
-The AIO release 2608 configuration also deploys the OPC UA connector template
-and supplies the MQTT trust settings required by its WebAssembly graph
+The AIO release 2608 and 2609 configurations also deploy the OPC UA connector template
+and supply the MQTT trust settings required by the WebAssembly graph
 controller. Install and upgrade use the same typed connector template module.
 Settings under `aioReleaseConfiguration.extension` belong to the AIO Arc
 extension. Settings under `aioReleaseConfiguration.resources` describe child
@@ -59,6 +59,13 @@ AIO release needs.
 AIO releases where it is not yet a default of the API generation.
 `extension.wasmGraphControllerMqttTrust` enables the derived MQTT trust settings
 required by the WebAssembly graph controller.
+
+The connector template is deployed only when its version is configured and
+the instance's effective OPC UA feature mode is not `Disabled`.
+`features.opcua` takes precedence over the legacy `features.connectors` alias.
+When `opcua` is absent, `connectors` supplies the feature. An omitted mode
+uses `Stable`. Upgrade reads the existing instance's resolved features
+rather than the Site's desired features.
 
 For a Site override, keep the map under `parameters`:
 
@@ -85,10 +92,10 @@ name: munich-prod
 inherits: base-site.yaml
 
 properties:
-  aioRelease: "2608"    # must match parameters/aio-releases/2608.yaml
+  aioRelease: "2609"    # must match parameters/aio-releases/2609.yaml
 ```
 
-If not specified, the Site inherits the value from its parent template. Every committed Site in this workspace inherits `base-site.yaml`, directly or through a shared template, and `base-site.yaml` declares `"2608"`. A manifest that loads the release file fails preparation for a Site that carries no `aioRelease` at all, reporting that the Site does not carry the property the path selects on.
+If not specified, the Site inherits the value from its parent template. Every committed Site in this workspace inherits `base-site.yaml`, directly or through a shared template, and `base-site.yaml` declares `"2609"`. A manifest that loads the release file fails preparation for a Site that carries no `aioRelease` at all, reporting that the Site does not carry the property the path selects on.
 
 ## Available AIO releases
 
@@ -103,17 +110,47 @@ Every file in `workspaces/iot-operations/parameters/aio-releases/` is a shipped 
 | `2605` | `2026-03-01` | `2026-04-01` | |
 | `2606` | `2026-03-01` | `2026-04-01` | |
 | `2607` | `2026-07-01` | `2026-04-01` | OPC connector template affected by [Microsoft known issue 1330](https://learn.microsoft.com/azure/iot-operations/troubleshoot/known-issues#opc-connector-template-missing) |
-| `2608` | `2026-07-01` | `2026-04-01` | Default in `base-site.yaml` |
+| `2608` | `2026-07-01` | `2026-04-01` | Selectable by an explicit pin |
+| `2609` | `2026-07-01` | `2026-04-01` | Default in `base-site.yaml`. Pins from AIO CLI v2.10.0 |
 
 Source of truth for every pinned version number is the YAML itself. Check it against the [IoT Operations release matrix](https://github.com/Azure/azure-iot-ops-cli-extension/wiki/IoT-Operations-versions) before shipping a new one.
+
+### Select 2609 or 2608
+
+2609 is the default for configured Sites and guided installation.
+2608 remains selectable through a Site pin or the guided `aioRelease` input.
+2609 uses the same AIO and ADR API versions as 2608.
+The [AIO CLI v2.10.0 release notes](https://github.com/Azure/azure-iot-ops-cli-extension/releases/tag/v2.10.0)
+record the fix that skips the OPC UA connector template when OPC UA is disabled.
+Scale Kit applies that guard to both install and upgrade.
+
+For a configured Site, set:
+
+```yaml
+properties:
+  aioRelease: "2609"
+```
+
+For guided installation on an existing Arc cluster, select 2609 with an input:
+
+```text
+siteops deploy aio-install --source "official@<release>" --input "cluster=<Arc-cluster-resource-ID>" --input aioRelease=2609
+```
+
+Use a Scale Kit source release that includes `2609.yaml`.
+To select 2608, set `properties.aioRelease: "2608"` on the Site or pass
+`--input aioRelease=2608` to guided installation.
+For an existing AIO installation, pin the Site to 2609 and follow the
+[upgrade operation guide](../workspaces/iot-operations/manifests/aio-upgrade/README.md)
+instead of running installation again.
 
 ## Upgrading an existing Site
 
 Follow the [upgrade operation guide](../workspaces/iot-operations/manifests/aio-upgrade/README.md)
 to prepare and deploy an AIO release change in place. The operation updates
 extensions and the resources that the AIO release requires rather than reapplying the
-greenfield instance configuration. An upgrade to 2608 adds the OPC UA
-connector template.
+greenfield instance configuration. Upgrades to 2608 or 2609 deploy the OPC UA
+connector template when OPC UA is enabled.
 
 ### Catalog families and upgrade order
 
@@ -132,7 +169,7 @@ This applies to every resource area a Site selects through `properties.resourceS
 Azure IoT Operations supports upgrade to any patch of the same minor version, or to the next minor version. Other transitions (downgrades, jumps across several minor versions, and moves between preview and GA) require uninstall and reinstall. See [Upgrade Azure IoT Operations](https://learn.microsoft.com/azure/iot-operations/deploy-iot-ops/howto-upgrade) for the authoritative rules.
 
 The optional E2E workflow can exercise selected upgrades between adjacent AIO releases,
-such as `2607` to `2608`. A passing dispatch establishes its selected
+such as `2608` to `2609`. A passing dispatch establishes its selected
 integration assertions. It is not a general readiness or support
 certification for another cluster or upgrade path.
 

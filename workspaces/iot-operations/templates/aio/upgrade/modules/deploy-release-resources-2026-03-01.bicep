@@ -15,3 +15,7 @@ param customLocationId string
 @description('Release-owned AIO settings that distinguish releases sharing this ARM API generation.')
 #disable-next-line no-unused-params
 param aioReleaseConfiguration object = {}
+
+@description('Resolved features of the existing IoT Operations instance.')
+#disable-next-line no-unused-params
+param features object = {}

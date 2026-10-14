@@ -1367,7 +1367,7 @@ def test_aio_input_inspection_distinguishes_required_and_defaulted(capsys):
     assert fields["subscription"]["derivableFrom"] == ["cluster"]
     assert fields["enableSecretSync"]["default"] is False
     assert fields["aioRelease"]["status"] == "defaulted"
-    assert fields["aioRelease"]["default"] == "2608"
+    assert fields["aioRelease"]["default"] == "2609"
     assert fields["enableCertManager"]["default"] is True
 
 
@@ -1585,7 +1585,7 @@ def test_aio_enabled_observes_prerequisites_before_one_plan(
 
 @pytest.mark.parametrize(
     ("cluster", "release"),
-    [("arc-2608", "2608"), ("arc-2607", "2607")],
+    [("arc-2608", "2608"), ("arc-2607", "2607"), ("arc-2609", "2609")],
 )
 def test_inline_aio_release_selects_one_cluster_for_each_deploy(
     cluster, release, capsys, tmp_path,
@@ -1836,7 +1836,7 @@ def test_aio_preparation_selects_each_site_release_configuration(tmp_path):
             "environment=dev", "country=US",
             f"aioRelease={release}",
         ])
-        for release in ("2608", "2607")
+        for release in ("2608", "2607", "2609")
     ]
     session = _aio_template_session(tmp_path, include_aio_version=True)
     with patch("siteops.orchestrator.TemplateCompilationSession", return_value=session):
@@ -1858,7 +1858,7 @@ def test_aio_preparation_selects_each_site_release_configuration(tmp_path):
             if isinstance(entry.key, LiteralValue) and entry.key.value == "aioVersion"
         )
         selected[target.name] = resolve_plan_value(value, {})
-    assert selected == {"plant-2608": "1.4.73", "plant-2607": "1.4.41"}
+    assert selected == {"plant-2608": "1.4.73", "plant-2607": "1.4.41", "plant-2609": "1.4.112"}
 
 
 def test_aio_executable_preparation_resolves_country_and_environment_tags(

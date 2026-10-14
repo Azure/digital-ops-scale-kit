@@ -60,11 +60,12 @@ def _parse_inputs(**changes: str) -> subprocess.CompletedProcess[str]:
     environment = {
         "INPUT_SCENARIO": "aio",
         "INPUT_CANDIDATE_SET": "false",
-        "INPUT_RELEASES": "2608",
+        "INPUT_RELEASES": "2609",
         "INPUT_RG": "",
         "INPUT_CLUSTER": "",
         "INPUT_UPGRADE_TO": "",
         "INPUT_SECRET_SYNC_MODES": "enabled",
+        "INPUT_OPCUA_MODES": "Stable",
         "INPUT_TESTS": "",
         "INPUT_PUBLISHED_RELEASE": "",
         "INPUT_PUBLISHED_SOURCE_SHA": "",
@@ -640,8 +641,9 @@ def test_target_input_mask_rejects_unsafe_values_without_echo(tmp_path, rg, clus
     ("published", "cluster_in"),
     [("true", ""), ("false", "arc-private-marker")],
 )
+@pytest.mark.parametrize("opcua_mode", ["Stable", "Disabled"])
 def test_computed_site_mask_preserves_published_and_source_targets(
-    tmp_path, published, cluster_in,
+    tmp_path, published, cluster_in, opcua_mode,
 ):
     output = tmp_path / "names.txt"
     result = subprocess.run(
@@ -652,6 +654,7 @@ def test_computed_site_mask_preserves_published_and_source_targets(
             "CL_IN": cluster_in,
             "RELEASE": "2608",
             "SECRET_SYNC_MODE": "disabled",
+            "E2E_OPCUA_MODE": opcua_mode,
             "RUN_ID": "1234567890",
             "RUN_ATTEMPT": "1",
             "GITHUB_OUTPUT": _bash_path(output),
@@ -670,6 +673,8 @@ def test_computed_site_mask_preserves_published_and_source_targets(
     else:
         assert values["cluster"].startswith("e2e-")
     assert values["site_name"].startswith("e2e-")
+    assert values["site_name"].endswith("-opcua-off") is (opcua_mode == "Disabled")
+    assert len(values["site_name"]) <= 59
     if published == "true":
         assert values["cluster"] == values["site_name"]
     assert result.stdout.splitlines() == [f"::add-mask::{values['site_name']}"]
@@ -780,7 +785,7 @@ def test_guided_published_journey_pins_qualified_aio_version():
         INPUT_RG="rg-example",
     )
     assert result.returncode != 0
-    assert "Published guided E2E currently requires aio-releases=2608" in result.stderr
+    assert "Published guided E2E currently requires aio-releases=2609" in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -861,6 +866,110 @@ def test_source_input_contract_keeps_existing_parallel_default():
     assert result.returncode == 0, result.stderr
     assert "published_mode=false" in result.stdout
     assert "max_parallel=20" in result.stdout
+
+
+@pytest.mark.parametrize(("secret_sync_modes", "tests"), [
+    ("enabled", ""),
+    ("disabled,enabled", "aio-upgrade"),
+])
+def test_source_e2e_accepts_2609_install_and_upgrade(secret_sync_modes, tests):
+    result = _parse_inputs(
+        INPUT_RELEASES="2608,2609", INPUT_UPGRADE_TO="2609",
+        INPUT_SECRET_SYNC_MODES=secret_sync_modes, INPUT_TESTS=tests,
+    )
+    assert result.returncode == 0, result.stderr
+    outputs = _outputs(result)
+    assert json.loads(outputs["versions"]) == ["2608", "2609"]
+    assert json.loads(outputs["secret_sync_modes"]) == secret_sync_modes.split(",")
+    assert outputs["upgrade_to"] == "2609"
+    assert outputs["published_mode"] == outputs["candidate_mode"] == "false"
+    assert outputs["pytest_paths"] == (
+        "tests/integration/test_aio_upgrade_manifest.py" if tests else "tests/integration/"
+    )
+    for release, upgrades in (("2608", True), ("2609", False)):
+        context = {
+            "needs": {"prep": {"result": "success", "outputs": {"upgrade-to": outputs["upgrade_to"]}}},
+            "matrix": {"aio-release": release},
+        }
+        for name in ("Re-render E2E site at upgrade-to", "Run upgrade-phase integration tests"):
+            assert truthy(evaluate(_e2e_step(name)["if"], context)) is upgrades
+
+
+def test_default_aio_release_is_consistent_across_site_guided_and_acceptance_routes():
+    workspace = ROOT / "workspaces" / "iot-operations"
+    base = yaml.safe_load((workspace / "sites" / "base-site.yaml").read_text(encoding="utf-8"))
+    guided = yaml.safe_load((workspace / "manifests" / "aio-install" / "inputs.yaml").read_text(encoding="utf-8"))
+    secretsync = yaml.safe_load((workspace / "manifests" / "secretsync" / "inputs.yaml").read_text(encoding="utf-8"))
+    workflow = yaml.safe_load(_workflow())
+    defaults = workflow[True]["workflow_dispatch"]["inputs"]
+    selected = [
+        base["properties"]["aioRelease"],
+        next(item["default"] for item in guided["inputs"] if item["name"] == "aioRelease"),
+        secretsync["siteDefaults"]["properties"]["aioRelease"],
+        defaults["aio-releases"]["default"],
+    ]
+    assert selected == ["2609"] * len(selected)
+    assert json.loads(_outputs(_parse_inputs())["versions"]) == ["2609"]
+    accepted = _parse_inputs(INPUT_SCENARIO="release-acceptance", INPUT_CANDIDATE_SET="true")
+    assert accepted.returncode == 0, accepted.stderr
+    assert json.loads(_outputs(accepted)["versions"]) == ["2609"]
+    guided_run = _parse_inputs(
+        INPUT_PUBLISHED_RELEASE="v1.0.0b7", INPUT_PUBLISHED_SOURCE_SHA="a" * 40,
+        INPUT_PUBLISHED_JOURNEY="guided", INPUT_RG="rg-example", INPUT_TESTS="aio-install",
+    )
+    assert guided_run.returncode == 0, guided_run.stderr
+    assert json.loads(_outputs(guided_run)["versions"]) == ["2609"]
+
+
+def test_source_e2e_can_cover_both_opcua_modes_with_secretsync_and_upgrade():
+    result = _parse_inputs(
+        INPUT_RELEASES="2608,2609", INPUT_UPGRADE_TO="2609", INPUT_OPCUA_MODES="Stable,Disabled",
+        INPUT_TESTS="aio-install,enable-secretsync,sync-secrets,aio-upgrade",
+    )
+    assert result.returncode == 0, result.stderr
+    outputs = _outputs(result)
+    assert json.loads(outputs["opcua_modes"]) == ["Stable", "Disabled"]
+    assert json.loads(outputs["versions"]) == ["2608", "2609"]
+    assert outputs["upgrade_to"] == "2609"
+    assert json.loads(outputs["secret_sync_modes"]) == ["enabled"]
+    workflow = yaml.safe_load(_workflow())
+    assert workflow["jobs"]["e2e"]["strategy"]["matrix"]["opcua-mode"] == (
+        "${{ fromJSON(needs.prep.outputs.opcua-modes) }}"
+    )
+    assert workflow["jobs"]["e2e"]["env"]["E2E_OPCUA_MODE"] == "${{ matrix.opcua-mode }}"
+    job = workflow["jobs"]["e2e"]
+    for mode in ("Stable", "Disabled"):
+        context = {
+            "needs": {"prep": {"outputs": {"candidate-mode": "false", "upgrade-to": "2609"}}},
+            "matrix": {"aio-release": "2608", "secret-sync-mode": "enabled", "opcua-mode": mode},
+        }
+        name = evaluate(job["name"], context)
+        assert name == f"e2e (2608, enabled{', OPC UA Disabled' if mode == 'Disabled' else ''})"
+        artifacts = [
+            step["with"]["name"] for step in job["steps"]
+            if step.get("with", {}).get("name", "").startswith("e2e-results-")
+        ]
+        assert len(artifacts) == 2
+        rendered = [
+            re.sub(r"\$\{\{(.*?)\}\}", lambda match: str(evaluate(match[1], context)), name)
+            for name in artifacts
+        ]
+        assert all(name.endswith(f"-opcua-{mode}") for name in rendered)
+
+
+@pytest.mark.parametrize(("changes", "message"), [
+    ({"INPUT_OPCUA_MODES": "Preview"}, "opcua-modes must select"),
+    ({"INPUT_OPCUA_MODES": "Disabled"}, "Disabled OPC UA requires explicit tests"),
+    ({"INPUT_OPCUA_MODES": "Disabled", "INPUT_TESTS": "opc-ua-solution"}, "Disabled OPC UA requires explicit tests"),
+    ({"INPUT_OPCUA_MODES": "Stable,Disabled", "INPUT_TESTS": "aio-install",
+      "INPUT_CLUSTER": "arc-fixed"}, "cluster-name cannot be combined"),
+    ({"INPUT_OPCUA_MODES": "Disabled", "INPUT_CANDIDATE_SET": "true"},
+     "Candidate acceptance selects its own Site cases"),
+])
+def test_opcua_matrix_rejects_invalid_or_incompatible_source_scope(changes, message):
+    result = _parse_inputs(**changes)
+    assert result.returncode != 0
+    assert message in result.stderr
 
 
 def test_published_engine_is_authenticated_and_cannot_come_from_checkout():
@@ -1724,6 +1833,25 @@ def test_published_readiness_is_bounded_and_existing_teardown_is_retained():
         assert value in workflow
 
 
+def test_2609_qualification_documents_a_second_full_stable_dispatch():
+    guide = (ROOT / "docs" / "e2e-testing.md").read_text(encoding="utf-8")
+    dispatches = []
+    for block in re.findall(r"```bash\n(.*?)```", guide, re.DOTALL):
+        tokens = shlex.split(block.replace("\\\n", " "))
+        if tokens[:4] != ["gh", "workflow", "run", "e2e-test.yaml"]:
+            continue
+        fields = dict(tokens[index + 1].split("=", 1) for index, token in enumerate(tokens) if token == "-f")
+        if fields.get("aio-releases") == "2609" and fields.get("opcua-modes") == "Stable":
+            dispatches.append(fields)
+    assert len(dispatches) == 1
+    fields = dispatches[0]
+    assert fields.get("tests", "") == ""
+    assert not fields.get("published-release") and not fields.get("candidate")
+    result = _parse_inputs(INPUT_RELEASES=fields["aio-releases"], INPUT_OPCUA_MODES=fields["opcua-modes"])
+    assert result.returncode == 0, result.stderr
+    assert _outputs(result)["pytest_paths"] == "tests/integration/"
+
+
 def test_published_guide_explains_private_persistent_cleanup_diagnostics():
     guide = " ".join(
         (ROOT / "docs" / "e2e-testing.md").read_text(encoding="utf-8").lower().split()
@@ -2275,7 +2403,7 @@ def test_candidate_request_selects_three_parallel_guided_cases(scenario):
     )} == {
         "candidate_mode": "true", "secret_sync_modes": '["disabled", "enabled", "existing"]',
         "max_parallel": "3", "published_mode": "true", "published_journey": "guided", "persistent": "false",
-        "versions": '["2608"]', "published_release": "", "rg_key": "ephemeral-42",
+        "versions": '["2609"]', "published_release": "", "rg_key": "ephemeral-42",
     }
     assert _outputs(_parse_inputs())["candidate_mode"] == "false"
     refused = _parse_inputs(INPUT_SCENARIO="release-acceptance")

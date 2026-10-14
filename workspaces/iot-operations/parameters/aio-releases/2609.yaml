@@ -1,0 +1,21 @@
+# AIO release 2609: version configuration
+# Source: https://github.com/Azure/azure-iot-ops-cli-extension/blob/v2.10.0/azext_edge/edge/providers/orchestration/template.py
+# API versions: https://github.com/Azure/azure-iot-ops-cli-extension/blob/v2.10.0/azext_edge/edge/util/az_client.py
+
+aioVersion: "1.4.112"
+aioTrain: stable
+aioApiVersion: "2026-07-01"
+adrApiVersion: "2026-04-01"
+aioReleaseConfiguration:
+  extension:
+    wasmGraphControllerMqttTrust: true
+  resources:
+    opcUaConnector:
+      version: "1.4.14"
+certManagerVersion: "1.1.2"
+certManagerTrain: stable
+certManagerConfigurationOverrides:
+  trust-manager.secretTargets.enabled: "false"
+  trust-manager.secretTargets.authorizedSecretsAll: "false"
+secretStoreVersion: "1.5.3"
+secretStoreTrain: stable

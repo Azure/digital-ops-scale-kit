@@ -333,6 +333,18 @@ def test_short_guide_downloads_enforce_the_same_https_policy_as_release_notes():
     assert "With an explicit commit, repeat installation" in " ".join(content.split())
 
 
+def test_aio_migration_distinguishes_the_b6_pin_from_the_optional_2608_release():
+    migration = (GUIDE.parent / "migrating.md").read_text(encoding="utf-8")
+    section = migration.split("### Default AIO release\n", 1)[1].split("\n### ", 1)[0]
+    prose = " ".join(section.split())
+    assert re.findall(r'properties\.aioRelease: "(\d+)"', section) == ["2607", "2608"]
+    assert 'Pin `properties.aioRelease: "2607"` to stay on the v1.0.0b6 release' in prose
+    assert '`properties.aioRelease: "2608"` to select that release' in prose
+    assert "Moving off 2607 adds the OPC UA connector template unless OPC UA is disabled" in prose
+    assert "`Disabled`" in section and "`connectors`" in section
+    assert "for in-place upgrades of existing instances instead of rerunning installation" in prose
+
+
 def test_preview_migration_describes_rejections_not_aliases():
     migration = (GUIDE.parent / "migrating.md").read_text(encoding="utf-8")
     for old, replacement in (

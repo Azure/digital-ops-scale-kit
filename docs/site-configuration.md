@@ -222,7 +222,7 @@ properties:
   # `parameters/aio-releases/<release>.yaml` gets loaded. This must be a
   # property, not a parameter: parameter-file path interpolation reads
   # `site.properties` and `site.labels`, never `site.parameters`.
-  aioRelease: "2608"
+  aioRelease: "2609"
 
   # Ordered resource sets. Each list item names a YAML file in the matching
   # `resource-sets/<area>/` directory. Omit an area for no selection, or use [] to

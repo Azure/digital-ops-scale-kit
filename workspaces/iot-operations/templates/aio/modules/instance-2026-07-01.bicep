@@ -97,6 +97,9 @@ var releaseResourceConfiguration = aioReleaseConfiguration.?resources ?? {}
 var opcUaConnectorConfiguration = releaseResourceConfiguration.?opcUaConnector ?? {}
 var releaseAioConfigurationOverrides = releaseExtensionConfiguration.?configurationOverrides ?? {}
 var opcuaConnectorVersion = string(opcUaConnectorConfiguration.?version ?? '')
+// Honor the legacy connectors alias. The canonical opcua feature takes precedence.
+var opcUaFeature = features.?opcua ?? features.?connectors ?? {}
+var opcUaFeatureMode = opcUaFeature.?mode ?? 'Stable'
 var configureWasmGraphControllerMqttTrust = bool(releaseExtensionConfiguration.?wasmGraphControllerMqttTrust ?? false)
 var releaseDerivedAioConfiguration = configureWasmGraphControllerMqttTrust
   ? {
@@ -333,7 +336,7 @@ resource artifactRegistryEndpoint 'Microsoft.IoTOperations/instances/registryEnd
   }
 }
 
-module opcUaConnectorTemplate './opcua-connector-template-2026-07-01.bicep' = if (!empty(opcuaConnectorVersion)) {
+module opcUaConnectorTemplate './opcua-connector-template-2026-07-01.bicep' = if (!empty(opcuaConnectorVersion) && opcUaFeatureMode != 'Disabled') {
   name: 'opcua-connector-template-${uniqueString(aioInstance.name)}'
   params: {
     aioInstanceName: aioInstance.name

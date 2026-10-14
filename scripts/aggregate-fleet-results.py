@@ -78,7 +78,7 @@ def aggregate(selected: FleetCandidate, root: Path, *, run: int, attempt: int) -
                or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}(?:-preview)?", row["apiVersion"]) is None
                for row in deployment["slots"].values())
         or any(deployment["slots"][slot].get("release") != release
-               for slot, release in (("one", "2607"), ("two", "2608")))
+               for slot, release in (("one", "2607"), ("two", "2609")))
     ):
         raise ValueError("The installed controller did not establish the required fleet outcome.")
     for slot, document in zip(("one", "two"), readiness, strict=True):

@@ -4,11 +4,11 @@ nameFromResource: cluster
 siteDefaults:
   properties:
     # Selects the shared API profile, not an observed or requested extension version.
-    aioRelease: "2608"
+    aioRelease: "2609"
 inputs:
   - name: instance
     type: azureResourceId
-    description: Existing AIO instance resource ID for the API used by releases 2607 and 2608.
+    description: Existing AIO instance resource ID for the API used by releases 2607, 2608 and 2609.
     resource:
       type: Microsoft.IoTOperations/instances
       apiVersion: "2026-07-01"

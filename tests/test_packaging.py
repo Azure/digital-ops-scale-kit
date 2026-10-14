@@ -295,7 +295,7 @@ def test_installed_acquired_aio_manual_inputs_and_configured_site(installed_acqu
         *options, "inputs", "aio-install", *inline_older,
         "--save-site", str(saved_older), "--offline-content",
     )
-    assert yaml.safe_load(saved.read_text(encoding="utf-8"))["properties"]["aioRelease"] == "2608"
+    assert yaml.safe_load(saved.read_text(encoding="utf-8"))["properties"]["aioRelease"] == "2609"
     assert yaml.safe_load(saved_older.read_text(encoding="utf-8"))["properties"]["aioRelease"] == "2607"
     fleet = json.loads(app.run(
         *options, "plan", "aio-install", "--describe",

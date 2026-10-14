@@ -17,6 +17,7 @@ Auto-computed when unset for local development. CI sets these explicitly:
     E2E_LOCATION         Defaults to `az group show -n $E2E_RESOURCE_GROUP --query location -o tsv`
     E2E_ENABLE_SECRET_SYNC
                          Defaults to `true`
+    E2E_OPCUA_MODE       Defaults to `Stable`, which omits features. `Disabled` adds the feature override.
 
 Usage:
     python scripts/render-e2e-site.py \
@@ -44,6 +45,7 @@ OPTIONAL_VARS = (
     "E2E_SUBSCRIPTION",
     "E2E_LOCATION",
     "E2E_ENABLE_SECRET_SYNC",
+    "E2E_OPCUA_MODE",
 )
 ALL_VARS = REQUIRED_VARS + OPTIONAL_VARS
 
@@ -93,6 +95,10 @@ def compute_defaults(values: dict[str, str]) -> dict[str, str]:
         out["E2E_ENABLE_SECRET_SYNC"] = "true"
     if out["E2E_ENABLE_SECRET_SYNC"] not in {"true", "false"}:
         raise RuntimeError("E2E_ENABLE_SECRET_SYNC must be `true` or `false`.")
+    if not out.get("E2E_OPCUA_MODE"):
+        out["E2E_OPCUA_MODE"] = "Stable"
+    if out["E2E_OPCUA_MODE"] not in {"Stable", "Disabled"}:
+        raise RuntimeError("E2E_OPCUA_MODE must be `Stable` or `Disabled`.")
 
     return out
 
@@ -117,11 +123,15 @@ def collect_values() -> dict[str, str]:
 
 def render(template_path: Path, values: dict[str, str]) -> str:
     template = string.Template(template_path.read_text(encoding="utf-8"))
+    opcua_features = (
+        "  features:\n    opcua:\n      mode: Disabled\n      settings: {}"
+        if values.get("E2E_OPCUA_MODE") == "Disabled" else ""
+    )
     # `safe_substitute` lets bare `$` characters (e.g. shell-style `$VAR` in
     # comments, or `$$` literals) pass through unchanged. The
     # `UNRESOLVED_PATTERN` check below still catches genuine missing
     # `${...}` placeholders, which is the failure mode that matters.
-    rendered = template.safe_substitute(values)
+    rendered = template.safe_substitute(values, E2E_OPCUA_FEATURES=opcua_features)
 
     leftovers = UNRESOLVED_PATTERN.findall(rendered)
     if leftovers:

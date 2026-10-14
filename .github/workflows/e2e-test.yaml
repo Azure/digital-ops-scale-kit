@@ -37,9 +37,9 @@ on:
         options: [aio, release-acceptance, fleet, fleet-cleanup, site-cleanup, windows-installer-preflight]
         default: aio
       aio-releases:
-        description: "AIO scenario only: comma-separated releases (e.g. 2607,2608). Fleet uses fixed 2607 and 2608 targets."
+        description: "AIO scenario only: comma-separated releases (e.g. 2608,2609). Fleet uses fixed 2607 and 2609 targets."
         type: string
-        default: "2608"
+        default: "2609"
       environment:
         description: GitHub Environment whose secrets/approvers apply.
         type: string
@@ -76,6 +76,10 @@ on:
         description: "AIO scenario only: enabled,disabled. Disabled omits Secret Sync, OIDC issuer and workload identity. Fleet has Secret Sync disabled."
         type: string
         default: "enabled"
+      opcua-modes:
+        description: "Source AIO scenario only: Stable,Disabled. Disabled requires explicit tests limited to aio-install,enable-secretsync,sync-secrets,aio-upgrade."
+        type: string
+        default: "Stable"
       tests:
         description: "Subset of integration test files to run, comma-separated. Each value maps to one tests/integration/test_<value>_manifest.py file and narrows which manifest gets deployed onto the cluster. Empty = run all. Valid values: aio-install, enable-secretsync, sync-secrets, opc-ua-solution, dataflow-sample, aio-resources, resource-set-samples, aio-upgrade. Useful for demos and focused debugging when paired with keep-cluster-alive-minutes."
         type: string
@@ -291,6 +295,7 @@ jobs:
       pytest-paths: ${{ steps.v.outputs.pytest_paths }}
       isolate-dataflow-sample: ${{ steps.v.outputs.isolate_dataflow_sample }}
       secret-sync-modes: ${{ steps.v.outputs.secret_sync_modes }}
+      opcua-modes: ${{ steps.v.outputs.opcua_modes }}
       max-parallel: ${{ steps.v.outputs.max_parallel }}
       published-mode: ${{ steps.v.outputs.published_mode }}
       published-release: ${{ steps.v.outputs.published_release }}
@@ -319,6 +324,7 @@ jobs:
           INPUT_RELEASES: "${{ inputs.aio-releases }}"
           INPUT_UPGRADE_TO: "${{ inputs.upgrade-to }}"
           INPUT_SECRET_SYNC_MODES: "${{ inputs.secret-sync-modes }}"
+          INPUT_OPCUA_MODES: "${{ inputs.opcua-modes }}"
           INPUT_TESTS: "${{ inputs.tests }}"
           INPUT_PUBLISHED_RELEASE: "${{ inputs.published-release }}"
           INPUT_PUBLISHED_SOURCE_SHA: "${{ inputs.published-source-sha }}"
@@ -417,11 +423,16 @@ jobs:
                   "secret-sync-modes entries not recognized: "
                   f"{invalid_secret_sync_modes}. Valid: ['disabled', 'enabled']."
               )
+          opcua_modes = list(dict.fromkeys(
+              mode.strip() for mode in os.environ["INPUT_OPCUA_MODES"].split(",") if mode.strip()
+          ))
+          if not opcua_modes or set(opcua_modes) - {"Stable", "Disabled"}:
+              sys.exit("opcua-modes must select Stable, Disabled, or both.")
           persistent = bool(rg_in)
-          if cl_in and (len(rs) > 1 or len(secret_sync_modes) > 1):
+          if cl_in and (len(rs) > 1 or len(secret_sync_modes) > 1 or len(opcua_modes) > 1):
               sys.exit(
                   "cluster-name cannot be combined with a matrix that has "
-                  "multiple AIO releases or Secret Sync modes. Each matrix "
+                  "multiple AIO releases or Secret Sync modes or OPC UA modes. Each matrix "
                   "cell registers its own cluster."
               )
           # Validate upgrade-to against shipped versions. Same-version cells
@@ -521,8 +532,10 @@ jobs:
           if published_mode:
               if len(rs) != 1:
                   sys.exit("Published E2E requires exactly one aio-releases entry.")
-              if published_journey == "guided" and rs != ["2608"]:
-                  sys.exit("Published guided E2E currently requires aio-releases=2608.")
+              if published_journey == "guided" and rs != ["2609"]:
+                  sys.exit("Published guided E2E currently requires aio-releases=2609.")
+              if opcua_modes != ["Stable"]:
+                  sys.exit("Published E2E requires opcua-modes=Stable.")
               if not persistent or cl_in:
                   sys.exit(
                       "Published E2E requires an existing resource group and an "
@@ -544,7 +557,8 @@ jobs:
           if candidate_mode:
               oid = target_inputs.get("custom-locations-oid", "")
               if (
-                  rs != ["2608"] or secret_sync_modes != ["enabled"] or tests_in
+                  rs != ["2609"] or secret_sync_modes != ["enabled"] or tests_in
+                  or opcua_modes != ["Stable"]
                   or published_mode or published_source_sha or published_journey != "configured"
                   or persistent or cl_in or upgrade_to or not isinstance(oid, str) or oid.strip()
                   or os.environ["INPUT_SKIP_TEARDOWN"].lower() == "true"
@@ -555,8 +569,17 @@ jobs:
                       "Leave the single Site options at their defaults."
                   )
               secret_sync_modes = ["disabled", "enabled", "existing"]
+          if "Disabled" in opcua_modes and (
+              not tests_in
+              or set(tests_in) - {"aio-install", "enable-secretsync", "sync-secrets", "aio-upgrade"}
+          ):
+              sys.exit(
+                  "Disabled OPC UA requires explicit tests limited to "
+                  "aio-install,enable-secretsync,sync-secrets,aio-upgrade."
+              )
           print(f"versions={json.dumps(rs)}")
           print(f"secret_sync_modes={json.dumps(secret_sync_modes)}")
+          print(f"opcua_modes={json.dumps(opcua_modes)}")
           print(f"max_parallel={3 if candidate_mode else 1 if persistent or published_mode else 20}")
           print(f"upgrade_to={upgrade_to}")
           print(f"persistent={'true' if persistent else 'false'}")
@@ -622,7 +645,7 @@ jobs:
           print(f"Site cases use {mode} resource groups.")
 
   e2e:
-    name: ${{ needs.prep.outputs.candidate-mode == 'true' && format('Site case ({0})', fromJSON('{"disabled":"site-aio","enabled":"site-combined","existing":"site-existing-secretsync"}')[matrix.secret-sync-mode]) || format('e2e ({0}, {1})', matrix.aio-release, matrix.secret-sync-mode) }}
+    name: ${{ needs.prep.outputs.candidate-mode == 'true' && format('Site case ({0})', fromJSON('{"disabled":"site-aio","enabled":"site-combined","existing":"site-existing-secretsync"}')[matrix.secret-sync-mode]) || format('e2e ({0}, {1}{2})', matrix.aio-release, matrix.secret-sync-mode, matrix.opcua-mode == 'Disabled' && ', OPC UA Disabled' || '') }}
     needs: [prep, site-groups]
     if: ${{ !cancelled() && needs.prep.result == 'success' && (needs.prep.outputs.candidate-mode != 'true' || needs.site-groups.result == 'success') }}
     runs-on: ubuntu-latest
@@ -642,7 +665,7 @@ jobs:
       # Ephemeral: rg_key is per-run and the release suffix distinguishes
       # cells, so matrix fan-out runs in parallel.
       # Candidate cases take both values from site-groups.
-      group: e2e-${{ needs.site-groups.outputs.rg-key || needs.prep.outputs.rg-key }}${{ (needs.prep.outputs.persistent == 'true' || needs.site-groups.outputs.groups == 'persistent') && '-persistent' || format('-{0}-secretsync-{1}', matrix.aio-release, matrix.secret-sync-mode) }}
+      group: e2e-${{ needs.site-groups.outputs.rg-key || needs.prep.outputs.rg-key }}${{ (needs.prep.outputs.persistent == 'true' || needs.site-groups.outputs.groups == 'persistent') && '-persistent' || format('-{0}-secretsync-{1}-opcua-{2}', matrix.aio-release, matrix.secret-sync-mode, matrix.opcua-mode) }}
       cancel-in-progress: false
     strategy:
       fail-fast: false
@@ -650,10 +673,12 @@ jobs:
       matrix:
         aio-release: ${{ fromJSON(needs.prep.outputs.versions) }}
         secret-sync-mode: ${{ fromJSON(needs.prep.outputs.secret-sync-modes) }}
+        opcua-mode: ${{ fromJSON(needs.prep.outputs.opcua-modes) }}
     env:
       PERSISTENT_RG: ${{ needs.prep.outputs.persistent }}
       PUBLISHED_JOURNEY: ${{ needs.prep.outputs.published-journey }}
       CANDIDATE_MODE: ${{ needs.prep.outputs.candidate-mode }}
+      E2E_OPCUA_MODE: ${{ matrix.opcua-mode }}
       DEBUG_USER_OID: ${{ secrets.DEBUG_USER_OID }}
       FLEET_CANDIDATE: ${{ inputs.candidate }}
       FLEET_RUN_ID: ${{ github.run_id }}
@@ -822,6 +847,10 @@ jobs:
           LONG_SUFFIX="${RUN_ID}-${RUN_ATTEMPT}-${SAFE_VER}-secretsync-${SECRET_SYNC_MODE}"
           SHORT_RUN="${RUN_ID: -8}-${RUN_ATTEMPT}"
           RESOURCE_SUFFIX="${SHORT_RUN}-${SAFE_VER}-${SYNC_SUFFIX}"
+          if [[ "${E2E_OPCUA_MODE:-Stable}" == "Disabled" ]]; then
+            LONG_SUFFIX="${LONG_SUFFIX}-opcua-off"
+            RESOURCE_SUFFIX="${RESOURCE_SUFFIX}-opcua-off"
+          fi
           # Candidate cases use the masked names owned by their run attempt.
           RG="${RG_IN:-${FLEET_RESOURCE_GROUP:-rg-e2e-$LONG_SUFFIX}}"
           CL="${CL_IN:-${FLEET_CLUSTER_NAME:-e2e-$RESOURCE_SUFFIX}}"
@@ -1743,7 +1772,7 @@ jobs:
         run: |
           set -euo pipefail
           pytest $PYTEST_PATHS -v -m integration --tb=long \
-            --junitxml="e2e-results-${AIO_RELEASE}-secretsync-${SECRET_SYNC_MODE}.xml"
+            --junitxml="e2e-results-${AIO_RELEASE}-secretsync-${SECRET_SYNC_MODE}-opcua-${E2E_OPCUA_MODE}.xml"
 
       - name: Deploy AIO through the published engine and package
         id: deploy
@@ -2258,8 +2287,8 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always() && needs.prep.outputs.published-mode != 'true'
         with:
-          name: e2e-results-${{ matrix.aio-release }}-secretsync-${{ matrix.secret-sync-mode }}
-          path: e2e-results-${{ matrix.aio-release }}-secretsync-${{ matrix.secret-sync-mode }}.xml
+          name: e2e-results-${{ matrix.aio-release }}-secretsync-${{ matrix.secret-sync-mode }}-opcua-${{ matrix.opcua-mode }}
+          path: e2e-results-${{ matrix.aio-release }}-secretsync-${{ matrix.secret-sync-mode }}-opcua-${{ matrix.opcua-mode }}.xml
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always() && needs.prep.outputs.published-mode == 'true' && env.CANDIDATE_MODE != 'true'
@@ -2316,13 +2345,13 @@ jobs:
         run: |
           set -euo pipefail
           pytest $PYTEST_PATHS -v -m integration --tb=long \
-            --junitxml="e2e-results-${AIO_RELEASE_FROM}-to-${AIO_RELEASE_TO}-secretsync-${SECRET_SYNC_MODE}.xml"
+            --junitxml="e2e-results-${AIO_RELEASE_FROM}-to-${AIO_RELEASE_TO}-secretsync-${SECRET_SYNC_MODE}-opcua-${E2E_OPCUA_MODE}.xml"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always() && needs.prep.outputs.upgrade-to != '' && needs.prep.outputs.upgrade-to != matrix.aio-release
         with:
-          name: e2e-results-${{ matrix.aio-release }}-to-${{ needs.prep.outputs.upgrade-to }}-secretsync-${{ matrix.secret-sync-mode }}
-          path: e2e-results-${{ matrix.aio-release }}-to-${{ needs.prep.outputs.upgrade-to }}-secretsync-${{ matrix.secret-sync-mode }}.xml
+          name: e2e-results-${{ matrix.aio-release }}-to-${{ needs.prep.outputs.upgrade-to }}-secretsync-${{ matrix.secret-sync-mode }}-opcua-${{ matrix.opcua-mode }}
+          path: e2e-results-${{ matrix.aio-release }}-to-${{ needs.prep.outputs.upgrade-to }}-secretsync-${{ matrix.secret-sync-mode }}-opcua-${{ matrix.opcua-mode }}.xml
 
       - name: Keep cluster alive (pre-teardown hold)
         if: always() && inputs.keep-cluster-alive-minutes > 0

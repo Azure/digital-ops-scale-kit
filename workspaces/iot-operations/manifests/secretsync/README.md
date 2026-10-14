@@ -8,7 +8,7 @@ by that manifest's Site capability flag.
 ## Use an existing instance ID
 
 With an approved source named `official` that you enrolled independently, select the release
-from its instructions and supply the existing AIO 2607 or 2608 instance ID:
+from its instructions and supply the existing AIO 2607, 2608 or 2609 instance ID:
 
 ```text
 siteops deploy secretsync --source "official@<release>" --input "instance=<AIO-instance-resource-ID>"
@@ -19,7 +19,7 @@ within the same subscription and resource group. They verify existing OIDC
 and workload identity before deployment. The operation uses the actual
 instance name and the API shared by those releases. It does not reinstall
 AIO, change extension versions or guess the installed AIO release.
-The `2608` content profile supplies the pinned API configuration only.
+The `2609` content profile supplies the pinned API configuration only.
 Deploy displays the prepared plan and asks for confirmation before executing
 it. Use `--yes` for unattended execution, or `plan` for a separate preview.
 

@@ -76,7 +76,7 @@ def test_extension_observation_checks_azure_state_not_the_echoed_site_property(t
     helper = module("deploy-release-fleet")
     scope = FleetScope("example/repository", "a" * 40, "b" * 64, "c" * 64, 42, 1,
                        "00000000-0000-0000-0000-000000000001")
-    slots = {"one": {"version": "1.4.41"}, "two": {"version": "1.4.73"}}
+    slots = {"one": {"version": "1.4.41"}, "two": {"version": "1.4.112"}}
     calls = []
 
     def runner(args):
@@ -136,7 +136,7 @@ def receipts(tmp_path):
             "resolvedParametersVerified": True, "extensionVersionsVerified": True,
             "podReadiness": "pending-host-observation", "workloadFunctionality": "not-checked",
             "slots": {"one": {"release": "2607", "version": "1.4.41", "apiVersion": "2026-07-01"},
-                      "two": {"release": "2608", "version": "1.4.73", "apiVersion": "2026-07-01"}},
+                      "two": {"release": "2609", "version": "1.4.112", "apiVersion": "2026-07-01"}},
         },
         "cleanup/cleanup.json": {
             **copy.deepcopy(common), "kind": "FleetCleanup", "groups": "ephemeral", "status": "complete",
@@ -156,7 +156,7 @@ def receipts(tmp_path):
 
 
 @pytest.mark.parametrize("fault", [None, "persistent", "missing", "duplicate", "candidate", "scope", "cleanup",
-                                   "invocations", "private-field", "groups"])
+                                   "invocations", "private-field", "groups", "old-slot-two-release"])
 def test_aggregator_rejects_missing_ambiguous_or_unbound_evidence(receipts, fault):
     selected, root, data = receipts
     helper = module("aggregate-fleet-results")
@@ -176,6 +176,8 @@ def test_aggregator_rejects_missing_ambiguous_or_unbound_evidence(receipts, faul
         data[name]["deployInvocations"] = 2
     elif fault == "private-field":
         data[name]["resourceGroup"] = "private-marker"
+    elif fault == "old-slot-two-release":
+        data[name]["slots"]["two"] = {"release": "2608", "version": "1.4.73", "apiVersion": "2026-07-01"}
     elif fault in {"persistent", "groups"}:
         name = "cleanup/cleanup.json"
         data[name]["groups"] = "persistent" if fault == "persistent" else "private-marker"
@@ -297,7 +299,7 @@ def test_controller_saves_two_sites_and_runs_exactly_one_deployment(
         if name.startswith("save-"):
             answers = json.loads(Path(arguments[arguments.index("--input-file") + 1]).read_text())["values"]
             assert answers["enableSecretSync"] is False and "existingVault" not in answers
-            assert answers["aioRelease"] == ("2607" if name == "save-one" else "2608")
+            assert answers["aioRelease"] == ("2607" if name == "save-one" else "2609")
             Path(arguments[arguments.index("--save-site") + 1]).write_text(json.dumps(answers))
         elif name == "inspect-plan":
             spec = json.loads(Path(arguments[arguments.index("--spec") + 1]).read_text())
@@ -307,7 +309,7 @@ def test_controller_saves_two_sites_and_runs_exactly_one_deployment(
             (logs / "inspect-plan.out").write_text(json.dumps({
                 "kind": "FleetPlanInspection", "operationIdentitiesVerified": True, "parametersVerified": True,
                 "slots": {"one": {"release": "2607", "version": "1.4.41", "apiVersion": "2026-07-01"},
-                          "two": {"release": "2608", "version": "1.4.73", "apiVersion": "2026-07-01"}},
+                          "two": {"release": "2609", "version": "1.4.112", "apiVersion": "2026-07-01"}},
             }))
         else:
             assert name == "deploy" and arguments.count("deploy") == 1

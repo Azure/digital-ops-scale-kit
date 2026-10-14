@@ -322,7 +322,7 @@ def test_aio_guidance_distinguishes_typed_defaults_and_packaged_tools(monkeypatc
     monkeypatch.setattr(browse_output, "_command_shell", lambda: "PowerShell")
     card = render_browse_plain(inspect_content(workspace, "aio-install"))
     assert "environment and country" in card
-    assert "typed AIO route defaults to 2608" in card
+    assert "typed AIO route defaults to 2609" in card
     assert "compiled ARM JSON" in card
     assert "Authored Site input guidance" in card
     assert card.count("descriptive") == 1
