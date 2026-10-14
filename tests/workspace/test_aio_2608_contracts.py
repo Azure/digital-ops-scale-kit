@@ -16,7 +16,7 @@ def _release(workspace: Path, release: str) -> dict:
 
 
 @pytest.mark.parametrize(("release_name", "aio", "connector", "cert_manager", "secret_store"), [
-    ("2608", "1.4.73", "1.4.10", "1.0.0", "1.5.2"),
+    ("2608", "1.4.73", "1.4.11", "1.0.0", "1.5.2"),
     ("2609", "1.4.112", "1.4.14", "1.1.2", "1.5.3"),
 ])
 def test_release_metadata_matches_the_public_release(workspace, release_name, aio, connector, cert_manager, secret_store):
@@ -47,7 +47,7 @@ def test_2608_enables_only_its_release_specific_aio_settings(workspace):
         },
         "resources": {
             "opcUaConnector": {
-                "version": "1.4.10",
+                "version": "1.4.11",
             },
         },
     }

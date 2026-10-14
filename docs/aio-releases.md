@@ -122,7 +122,8 @@ Source of truth for every pinned version number is the YAML itself. Check it aga
 2609 uses the same AIO and ADR API versions as 2608.
 The [AIO CLI v2.10.0 release notes](https://github.com/Azure/azure-iot-ops-cli-extension/releases/tag/v2.10.0)
 record the fix that skips the OPC UA connector template when OPC UA is disabled.
-Scale Kit applies that guard to both install and upgrade.
+Scale Kit applies that guard to both install and upgrade, for 2608 as well as
+2609, because both releases deploy the same connector template.
 
 For a configured Site, set:
 
