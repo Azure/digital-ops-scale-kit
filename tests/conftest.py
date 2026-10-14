@@ -1,9 +1,42 @@
 """Pytest fixtures for Site Ops tests."""
 
 import json
+import subprocess
 
 import pytest
 import yaml
+
+
+class _VersionOnlyToolRunner:
+    """Answer local tool version probes and refuse every other invocation."""
+
+    def __call__(self, argv: tuple[str, ...], timeout: int) -> subprocess.CompletedProcess[str]:
+        if argv[1:] == ("version", "--output", "json"):
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({"azure-cli": "2.87.0"}), stderr="")
+        if argv[1:] == ("bicep", "version"):
+            return subprocess.CompletedProcess(argv, 0, stdout="Bicep CLI version test", stderr="")
+        raise AssertionError(f"Unexpected local tool invocation: {argv}")
+
+
+@pytest.fixture
+def deterministic_local_tools(monkeypatch, tmp_path):
+    """Give executable plans host-independent stand-ins for Azure CLI and kubectl.
+
+    Executable preparation resolves `az` and reads its version. Without this,
+    a test that deploys through the orchestrator depends on the host having
+    Azure CLI on PATH.
+    """
+    from siteops.compilation import TemplateCompilationSession
+
+    def resolve_tool(name):
+        if name not in {"az", "kubectl"}:
+            raise AssertionError(f"Unexpected local tool resolution: {name}")
+        return str((tmp_path / "tools" / name).resolve())
+
+    monkeypatch.setattr(
+        "siteops.orchestrator.TemplateCompilationSession",
+        lambda: TemplateCompilationSession(command_runner=_VersionOnlyToolRunner(), tool_resolver=resolve_tool),
+    )
 
 
 @pytest.fixture(autouse=True)

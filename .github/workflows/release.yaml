@@ -58,10 +58,94 @@ jobs:
       id-token: write
       attestations: write
 
+  # Starts one acceptance run of e2e-test.yaml for this exact candidate. Dispatch
+  # accepts only a branch, so main must still point at the candidate commit.
+  accept:
+    name: Start candidate acceptance
+    needs: candidate
+    if: >-
+      needs.candidate.result == 'success' && needs.candidate.outputs.active == 'true' &&
+      needs.candidate.outputs.fleet-candidate != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Start acceptance for this exact candidate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE: ${{ needs.candidate.outputs.fleet-candidate }}
+        run: |
+          set -euo pipefail
+          python3 -c '
+          import json, os, re, subprocess
+          repository, commit = os.environ["GITHUB_REPOSITORY"], os.environ["SOURCE_SHA"]
+          raw = os.environ["CANDIDATE"]
+          try:
+              value = json.loads(raw) if len(raw) <= 16384 else {}
+              source, producer = value["source"], value["producer"]
+              attempt = producer["attempt"]
+              selected = (
+                  source == {"repository": repository, "commit": commit, "ref": "refs/heads/main"}
+                  and type(producer["run"]) is int and producer["run"] == int(os.environ["GITHUB_RUN_ID"])
+                  and type(attempt) is int and 1 <= attempt <= int(os.environ["GITHUB_RUN_ATTEMPT"])
+                  and producer["caller"] == ".github/workflows/release.yaml" and producer["preview"] is False
+              )
+          except (ValueError, TypeError, KeyError):
+              selected = False
+          if not selected or os.environ["GITHUB_REF"] != "refs/heads/main" or not re.fullmatch("[0-9a-f]{40}", commit):
+              raise SystemExit("::error::Only the main candidate of this release run can start acceptance.")
+
+          head = subprocess.run(["gh", "api", "repos/" + repository + "/git/ref/heads/main"],
+                                capture_output=True, text=True, timeout=60)
+          try:
+              target = json.loads(head.stdout)["object"] if head.returncode == 0 else {}
+          except (ValueError, TypeError, KeyError):
+              target = {}
+          if not isinstance(target, dict) or target.get("type") != "commit" or target.get("sha") != commit:
+              raise SystemExit(
+                  "::error::main no longer points at this candidate, so acceptance cannot select it. "
+                  "Start a new release run from the current main."
+              )
+
+          body = json.dumps({"ref": "main", "return_run_details": True, "inputs": {
+              "scenario": "release-acceptance", "candidate": raw, "environment": "dev", "location": "eastus2",
+          }})
+          result = subprocess.run([
+              "gh", "api", "--method", "POST", "--include",
+              "repos/" + repository + "/actions/workflows/e2e-test.yaml/dispatches", "--input", "-",
+          ], input=body, capture_output=True, text=True, timeout=60)
+          header, separator, response = result.stdout.partition("\n\n")
+          first = header.splitlines()[0] if header else ""
+          if result.returncode or not re.fullmatch(r"HTTP/\S+ 20[04](?: .*)?", first):
+              raise SystemExit("::error::GitHub did not start the acceptance run. Re-run this job.")
+          try:
+              details = json.loads(response) if separator and response.strip() else {}
+              run, url = details["workflow_run_id"], details["html_url"]
+          except (ValueError, TypeError, KeyError):
+              run, url = None, None
+          # GitHub accepted the dispatch. The run ID only links the summary, and publication
+          # finds its evidence independently, so a missing link must not prompt a second run.
+          if type(run) is not int or run <= 0 or url != "https://github.com/" + repository + "/actions/runs/" + str(run):
+              print("::warning::GitHub started acceptance without identifying the run. Find it under E2E Tests.")
+              link = "Find the newest Release acceptance run under E2E Tests"
+          else:
+              link = "[Open the Release acceptance run](" + url + ")"
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write(
+                  "## Candidate acceptance\n\n" + link + " for this candidate. "
+                  "Approve publication only after that run succeeds.\n"
+              )
+          '
+
   publish:
     name: Approve tag creation and publication
-    needs: [release-runner, candidate]
-    if: needs.candidate.result == 'success' && needs.candidate.outputs.active == 'true'
+    needs: [release-runner, candidate, accept]
+    if: >-
+      needs.candidate.result == 'success' && needs.candidate.outputs.active == 'true' &&
+      needs.accept.result == 'success'
     runs-on:
       - ${{ needs.release-runner.outputs.pool }}
     concurrency:
@@ -105,6 +189,228 @@ jobs:
           path: ${{ runner.temp }}/release-plan
           merge-multiple: true
           digest-mismatch: error
+
+      # The newest Release acceptance run bound to this candidate governs. Its run ID
+      # comes from GitHub run metadata, never from the accept job.
+      - name: Locate the governing acceptance run
+        id: acceptance
+        shell: bash
+        env:
+          CANDIDATE: ${{ needs.candidate.outputs.fleet-candidate }}
+          ADMISSION_ARTIFACT_ID: ${{ needs.candidate.outputs.admission-artifact-id }}
+        run: |
+          set -euo pipefail
+          python3 -c '
+          import json, os, re, subprocess
+          from pathlib import Path
+          repository, commit = os.environ["GITHUB_REPOSITORY"], os.environ["SOURCE_SHA"]
+          roles = ("admission", "plan", "inventory", "engine", "workspaces")
+          try:
+              raw = os.environ["CANDIDATE"]
+              value = json.loads(raw) if len(raw) <= 16384 else {}
+              producer, artifacts = value["producer"], value["artifacts"]
+              selected = (
+                  set(value) == {"apiVersion", "kind", "source", "producer", "artifacts"}
+                  and value["apiVersion"] == "siteops.release.acceptance/v1" and value["kind"] == "FleetCandidate"
+                  and value["source"] == {"repository": repository, "commit": commit, "ref": "refs/heads/main"}
+                  and os.environ["SOURCE_REF"] == "refs/heads/main"
+                  and set(producer) == {"run", "attempt", "caller", "preview"}
+                  and type(producer["run"]) is int and producer["run"] == int(os.environ["GITHUB_RUN_ID"])
+                  # A publish re-run reuses the candidate that an earlier attempt produced.
+                  and type(producer["attempt"]) is int
+                  and 1 <= producer["attempt"] <= int(os.environ["GITHUB_RUN_ATTEMPT"])
+                  and producer["caller"] == ".github/workflows/release.yaml" and producer["preview"] is False
+                  and set(artifacts) == set(roles)
+                  and all(set(artifacts[role]) == {"id", "sha256"} and type(artifacts[role]["id"]) is int
+                          and artifacts[role]["id"] > 0 and isinstance(artifacts[role]["sha256"], str)
+                          and re.fullmatch("[0-9a-f]{64}", artifacts[role]["sha256"]) for role in roles)
+                  and str(artifacts["admission"]["id"]) == os.environ["ADMISSION_ARTIFACT_ID"]
+                  and artifacts["plan"]["sha256"] == os.environ["APPROVED_PLAN_SHA"]
+                  and artifacts["inventory"]["sha256"] == os.environ["APPROVED_ASSET_LIST_SHA"]
+              )
+          except (ValueError, TypeError, KeyError):
+              selected = False
+          if not selected:
+              raise SystemExit("::error::The acceptance selection is not this approved main candidate.")
+          admission = artifacts["admission"]["sha256"]
+
+          def pages(path, key):
+              result = subprocess.run(["gh", "api", "--paginate", "--slurp", path], capture_output=True, timeout=120)
+              try:
+                  documents = json.loads(result.stdout) if result.returncode == 0 else None
+                  rows = [row for document in documents[:20] for row in document[key]]
+                  if len(documents) > 20 or not all(isinstance(row, dict) for row in rows):
+                      raise ValueError()
+                  return rows
+              except (ValueError, TypeError, KeyError):
+                  raise SystemExit("::error::GitHub could not list the acceptance evidence.") from None
+
+          prefix = "repos/" + repository + "/actions/"
+          runs = sorted((
+              row for row in pages(prefix + "workflows/e2e-test.yaml/runs?event=workflow_dispatch&branch=main"
+                                   "&head_sha=" + commit + "&per_page=100", "workflow_runs")
+              if row.get("path") == ".github/workflows/e2e-test.yaml" and row.get("event") == "workflow_dispatch"
+              and row.get("head_branch") == "main" and row.get("head_sha") == commit
+              and isinstance(row.get("repository"), dict) and row["repository"].get("full_name") == repository
+              and row.get("display_title") == "Release acceptance"
+          ), key=lambda row: row.get("id") if type(row.get("id")) is int else 0, reverse=True)
+          if any(type(row.get("id")) is not int or row["id"] <= 0 for row in runs) or len({row["id"] for row in runs}) != len(runs):
+              raise SystemExit("::error::GitHub returned ambiguous acceptance runs.")
+
+          governing = None
+          for run in runs:
+              if run.get("status") != "completed":
+                  raise SystemExit("::error::Acceptance for this commit is still running. Re-run publish after it completes.")
+              attempt = run.get("run_attempt")
+              listed = pages(prefix + "runs/" + str(run["id"]) + "/artifacts?per_page=100", "artifacts")
+              pattern = re.compile("release-acceptance-" + str(run["id"]) + "-[0-9]+-" + admission)
+              bound = [item for item in listed if isinstance(item.get("name"), str) and pattern.fullmatch(item["name"])]
+              if not bound:
+                  other = re.compile("release-acceptance-" + str(run["id"]) + "-[0-9]+-[0-9a-f]{64}")
+                  if any(isinstance(item.get("name"), str) and other.fullmatch(item["name"]) for item in listed):
+                      continue
+                  raise SystemExit("::error::The newest acceptance run for this commit recorded no result. Re-run it, or start acceptance for this candidate, then re-run publish.")
+              # Once any attempt bound this run, only its latest attempt may decide.
+              latest = [item for item in bound
+                        if item["name"] == "release-acceptance-%d-%s-%s" % (run["id"], attempt, admission)]
+              receipt = latest[0] if len(latest) == 1 else {}
+              origin = receipt.get("workflow_run")
+              if (
+                  type(attempt) is not int or attempt < 1 or len(latest) != 1 or receipt.get("expired") is not False
+                  or type(receipt.get("id")) is not int or receipt["id"] <= 0
+                  or type(receipt.get("size_in_bytes")) is not int or receipt["size_in_bytes"] <= 0
+                  or not isinstance(receipt.get("digest"), str)
+                  or not re.fullmatch("sha256:[0-9a-f]{64}", receipt["digest"])
+                  or not isinstance(origin, dict) or origin.get("id") != run["id"] or origin.get("head_sha") != commit
+              ):
+                  raise SystemExit("::error::The latest acceptance attempt for this candidate has no single valid receipt.")
+              governing = (run, attempt, receipt)
+              break
+          if governing is None:
+              raise SystemExit("::error::No acceptance evidence for this candidate. Re-run publish after the Release acceptance run completes.")
+          run, attempt, receipt = governing
+          if run.get("conclusion") != "success":
+              raise SystemExit("::error::The newest acceptance run for this candidate did not pass. Re-run it, then re-run publish.")
+          binding = {
+              "candidate": {
+                  "repository": repository, "sourceCommit": commit, "sourceRef": "refs/heads/main",
+                  "caller": producer["caller"], "producerRun": producer["run"], "producerAttempt": producer["attempt"],
+                  "preview": False, "admissionSha256": admission, "planSha256": artifacts["plan"]["sha256"],
+                  "inventorySha256": artifacts["inventory"]["sha256"],
+              },
+              "acceptance": {"run": run["id"], "attempt": attempt},
+          }
+          Path(os.environ["RUNNER_TEMP"], "acceptance-binding.json").write_text(json.dumps(binding), encoding="utf-8")
+          print("run-id=%d" % run["id"])
+          print("artifact-id=%d" % receipt["id"])
+          ' >> "$GITHUB_OUTPUT"
+
+      - name: Download the acceptance receipt
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.acceptance.outputs.artifact-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.acceptance.outputs.run-id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/release-acceptance
+          merge-multiple: true
+          digest-mismatch: error
+
+      - name: Verify the bound acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -c '
+          import hashlib, json, os
+          from pathlib import Path
+          root = Path(os.environ["RUNNER_TEMP"])
+
+          def canonical(value):
+              return json.dumps(value, sort_keys=True)
+
+          binding = json.loads((root / "acceptance-binding.json").read_text(encoding="utf-8"))
+          plan_raw = (root / "release-plan/plan.json").read_bytes()
+          try:
+              bundle = json.loads(plan_raw)["siteops"]["bundle"]
+          except (ValueError, TypeError, KeyError):
+              bundle = None
+          if hashlib.sha256(plan_raw).hexdigest() != os.environ["APPROVED_PLAN_SHA"] or type(bundle) is not bool:
+              raise SystemExit("::error::The approved release plan is unavailable for acceptance.")
+          directory = root / "release-acceptance"
+          path = directory / "release-acceptance.json"
+          if (
+              sorted(item.name for item in directory.iterdir()) != ["release-acceptance.json"]
+              or path.is_symlink() or not path.is_file() or path.stat().st_size > 65536
+          ):
+              raise SystemExit("::error::The acceptance artifact must hold exactly one bounded receipt.")
+          try:
+              receipt = json.loads(path.read_bytes())
+              rows = receipt["scenarios"]
+              keys = set(receipt)
+          except (ValueError, TypeError, KeyError):
+              raise SystemExit("::error::The acceptance receipt is unreadable.") from None
+          assertions = {
+              "installer": ["cells-complete", "bytes-in-inventory", "ubuntu-26.04", "windows-standard-user"],
+              "site-aio": [
+                  "engine-installed-origin", "candidate-project-pin", "guided-inspection-no-read",
+                  "prerequisite-refused-no-write", "guided-plan-operations", "manual-inline-configured-routes",
+                  "deploy-succeeded", "aio-readiness", "secretsync-absent",
+              ],
+              "site-existing-secretsync": [
+                  "engine-installed-origin", "candidate-project-pin", "guided-inspection-no-read",
+                  "guided-plan-operations", "deploy-succeeded", "secretsync-absent", "existing-vault-created",
+                  "existing-plan-operations", "existing-enable-succeeded", "aio-readiness", "secretsync-bound",
+                  "existing-vault-used",
+              ],
+              "site-combined": [
+                  "engine-installed-origin", "candidate-project-pin", "guided-inspection-no-read",
+                  "guided-plan-operations", "deploy-succeeded", "aio-readiness", "secretsync-bound",
+                  "vault-created-by-enablement",
+              ],
+              "fleet": [
+                  "two-targets", "one-invocation-parallel-2", "sentinel-excluded", "plan-parameters",
+                  "extension-versions", "pod-readiness",
+              ],
+          }
+          if (
+              keys != {"apiVersion", "kind", "candidate", "acceptance", "environment", "transport", "publicRelease",
+                       "status", "scenarios", "workloadFunctionality", "secretMaterialization"}
+              or receipt["apiVersion"] != "siteops.release.acceptance/v1" or receipt["kind"] != "ReleaseAcceptance"
+              or canonical(receipt["candidate"]) != canonical(binding["candidate"])
+              or canonical(receipt["acceptance"]) != canonical(binding["acceptance"])
+              or receipt["environment"] != "dev" or receipt["transport"] != "prepublication"
+              or receipt["publicRelease"] != "not-observed" or receipt["status"] != "passed"
+              or receipt["workloadFunctionality"] != "not-checked" or receipt["secretMaterialization"] != "not-checked"
+              or not isinstance(rows, list) or [row.get("scenario") if isinstance(row, dict) else None
+                                                for row in rows] != list(assertions)
+          ):
+              raise SystemExit("::error::The acceptance receipt does not bind this candidate in the dev environment.")
+          for row in rows:
+              name = row["scenario"]
+              if name == "installer" and not bundle:
+                  expected = {"status": "not-applicable", "assertions": [], "cleanup": "not-applicable"}
+              else:
+                  expected = {"status": "passed", "assertions": assertions[name],
+                              "cleanup": "not-applicable" if name == "installer" else "confirmed-absent"}
+              # Only the values the aggregator writes for each scenario are accepted.
+              groups = {"not-applicable"} if name == "installer" else {"ephemeral", "persistent"}
+              purge = {"purged", "not-applicable", "failed"} if name.startswith("site-") else {"not-applicable"}
+              if (
+                  set(row) != {"scenario", "status", "groups", "assertions", "cleanup", "vaultPurge"}
+                  or canonical({key: row[key] for key in expected}) != canonical(expected)
+                  or row["groups"] not in groups or row["vaultPurge"] not in purge
+              ):
+                  raise SystemExit("::error::Acceptance scenario " + name + " did not pass for this candidate.")
+          run = binding["acceptance"]
+          url = "https://github.com/" + os.environ["GITHUB_REPOSITORY"] + "/actions/runs/%d/attempts/%d" % (
+              run["run"], run["attempt"])
+          lines = ["## Bound candidate acceptance", "", "[Review the governing acceptance attempt](" + url + ").", "",
+                   "| Scenario | Status | Groups | Cleanup |", "|---|---|---|---|"]
+          lines += ["| %s | %s | %s | %s |" % (row["scenario"], row["status"], row["groups"], row["cleanup"])
+                    for row in rows]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("\n".join(lines) + "\n")
+          '
 
       - name: Download the reviewed release notes
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -708,3 +1014,24 @@ jobs:
             echo "- Source: \`$SOURCE_SHA\`"
             echo "- Immutable: \`$immutable\`"
           } >> "$GITHUB_STEP_SUMMARY"
+          # The short install command binds a release tag through its locked assets. The
+          # workflow token cannot read the repository setting before publication, so a
+          # mutable release is removed again and its tag is kept for the retry.
+          if [[ "$immutable" != "true" ]]; then
+            release_id="$(python3 -c '
+          import json, sys
+          value = json.load(open(sys.argv[1])).get("id")
+          if type(value) is not int or value <= 0:
+              raise SystemExit(1)
+          print(value)
+          ' "$RUNNER_TEMP/published-release.json")" || release_id=""
+            if [[ -n "$release_id" ]] &&
+               gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$release_id" > /dev/null; then
+              echo "- Mutable release deleted, tag kept: \`true\`" >> "$GITHUB_STEP_SUMMARY"
+              echo "::error::The published release is not immutable, so it was deleted and its tag kept. Enable immutable releases for this repository, then re-run this job."
+            else
+              echo "- Mutable release deleted, tag kept: \`false\`" >> "$GITHUB_STEP_SUMMARY"
+              echo "::error::The published release is not immutable and could not be deleted. Delete it, enable immutable releases for this repository, then re-run this job."
+            fi
+            exit 1
+          fi

@@ -1121,7 +1121,7 @@ class TestUnresolvedParameterPath:
             tmp_path, "properties:\n  setName: nested/../chosen\n"
         )
 
-        errors = orchestrator.validate(orchestrator.workspace / "manifests" / "test.yaml")
+        errors = orchestrator.validate(orchestrator.workspace / "manifests" / "test.yaml").local_messages()
 
         assert any("must not contain '..'" in error for error in errors)
 
@@ -1361,7 +1361,7 @@ steps:
 
         errors = Orchestrator(workspace).validate(
             workspace / "manifests" / "test.yaml"
-        )
+        ).local_messages()
         assert any("must be a mapping" in error for error in errors)
         with pytest.raises(ParameterSelectionError, match="must be a mapping"):
             self._resolve(workspace)
@@ -1380,14 +1380,12 @@ steps:
         workspace = self._workspace(tmp_path, ["private-device-set"])
         monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1")
 
-        errors = Orchestrator(workspace).validate(
+        result = Orchestrator(workspace).validate(
             workspace / "manifests" / "test.yaml"
         )
-
-        assert errors == [
-            "Parameter file selection failed. Re-run locally with output "
-            "redaction disabled for Site and path details."
-        ]
+        document = result.document("publishable", "test")
+        assert "private-device-set" not in json.dumps(document)
+        assert any(item["code"] == "content.file-missing" for item in document["diagnostics"])
 
     def _composition_workspace(self, tmp_path):
         workspace = tmp_path / "composition-workspace"
@@ -1552,7 +1550,7 @@ steps:
 
         errors = Orchestrator(workspace).validate(
             workspace / "manifests" / "resources.yaml"
-        )
+        ).local_messages()
 
         assert any("does not resolve to devices" in error for error in errors)
 
@@ -1571,14 +1569,14 @@ steps:
         )
         monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1")
 
-        errors = Orchestrator(workspace).validate(
+        result = Orchestrator(workspace).validate(
             workspace / "manifests" / "resources.yaml"
         )
-
-        assert errors == [
-            "Resource composition failed. Re-run locally with output "
-            "redaction disabled for source and identity details."
-        ]
+        document = result.document("publishable", "test")
+        assert [item["summary"] for item in document["diagnostics"]] == ["Resource composition failed."]
+        assert [item["code"] for item in document["diagnostics"]] == ["plan.composition-invalid"]
+        assert "private-device" not in json.dumps(document)
+        assert document["status"] == "invalid"
 
     def test_redacted_deploy_error_suppresses_composition_details(
         self,
@@ -1591,7 +1589,7 @@ steps:
         )
 
         assert "private-set" not in message
-        assert message.startswith("Resource composition failed")
+        assert "Resource composition failed" in message
 
     def test_redacted_deploy_error_suppresses_parameter_selection_details(
         self,
@@ -1604,7 +1602,7 @@ steps:
         )
 
         assert "private-set" not in message
-        assert message.startswith("Parameter file selection failed")
+        assert "Parameter file selection failed" in message
 
     def test_redacted_deploy_error_uses_typed_value_resolution_summary(
         self,
@@ -1645,7 +1643,7 @@ steps:
 
         errors = orchestrator.validate(
             workspace / "manifests" / "resources.yaml"
-        )
+        ).local_messages()
         assert any("site.parameters" in error for error in errors)
         with pytest.raises(CompositionError, match="site.parameters"):
             orchestrator.resolve_parameters(
@@ -1674,7 +1672,7 @@ steps:
 
         errors = orchestrator.validate(
             workspace / "manifests" / "resources.yaml"
-        )
+        ).local_messages()
         assert any("site.parameters" in error for error in errors)
         with pytest.raises(CompositionError, match="site.parameters"):
             orchestrator.resolve_parameters(
@@ -1704,7 +1702,7 @@ steps:
         raw = yaml.safe_load(manifest_path.read_text())
         raw["steps"][0]["parameters"] = ["parameters/step.yaml"]
         manifest_path.write_text(yaml.safe_dump(raw, sort_keys=False))
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
         assert any("Step parameter file" in error for error in errors)
         with pytest.raises(CompositionError, match="Step parameter file"):
             orchestrator.resolve_parameters(
@@ -2938,6 +2936,7 @@ class TestMultipleSubscriptionLevelSites:
         assert "global-0" in message
         assert "global-1" in message
 
+    @pytest.mark.usefixtures("deterministic_local_tools")
     def test_one_candidate_is_accepted(self, complete_workspace):
         """The guard rejects ambiguity, not subscription-scoped steps."""
         orchestrator = Orchestrator(complete_workspace)

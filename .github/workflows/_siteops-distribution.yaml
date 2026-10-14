@@ -482,7 +482,7 @@ jobs:
           retention-days: 30
 
   qualify:
-    name: Qualify bundle (${{ matrix.os }}, Python ${{ matrix.python }})
+    name: Qualify bundle (${{ matrix.os }}, Python ${{ matrix.python }}${{ matrix.account == 'standard' && ', standard user' || '' }})
     needs: [build, attest]
     runs-on: ${{ matrix.os }}
 
@@ -492,11 +492,20 @@ jobs:
       contents: read
       actions: read
 
+    # The base account key keeps the standard user entry from merging into the
+    # existing Windows 3.11 cell. The summary job lists the same cells.
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, windows-2025]
         python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        account: [runner]
+        include:
+          - os: ubuntu-26.04
+            python: "3.11"
+          - os: windows-2025
+            python: "3.11"
+            account: standard
 
     defaults:
       run:
@@ -696,6 +705,7 @@ jobs:
           echo "The verified archive and standalone wheel carry one identical application build."
 
       - name: Install the external qualification tooling
+        if: matrix.account != 'standard'
         env:
           PYTHON: ${{ steps.python.outputs.python-path }}
         run: |
@@ -950,7 +960,7 @@ jobs:
           echo "Admitted pinned uv and managed Python $MATRIX_PYTHON for this qualification cell."
 
       - name: Install with the signed Bash bootstrap
-        if: matrix.os == 'ubuntu-24.04'
+        if: runner.os == 'Linux'
         run: |
           set -euo pipefail
           umask 077
@@ -975,6 +985,25 @@ jobs:
           [[ "$caller" == ci.yaml || "$caller" == release.yaml ]] ||
             { echo "::error::The attested caller is not supported by the bootstrap."; exit 1; }
           release=siteops/v0.0.0-ci
+          script="$download/$BOOTSTRAP_SH"
+          if [[ "$MATRIX_PYTHON" == 3.11 ]]; then
+            source_directory="$owned/bootstrap-source"
+            mkdir -m 0700 -- "$source_directory"
+            cp "$download/$BOOTSTRAP_SH" "$download/$ARCHIVE_NAME" \
+              "$download/${ARCHIVE_NAME}${ATTESTATION_SUFFIX}" "$source_directory/"
+            preview_log="$owned/logs/bootstrap-sh-preview.log"
+            if ! bash "$source_directory/$BOOTSTRAP_SH" --release "$release" \
+              --repository "$SOURCE_REPOSITORY" --source-ref "$SOURCE_REF" --caller "$caller" \
+              --dry-run > "$preview_log" 2>&1; then
+              echo "::error::The signed Bash bootstrap did not verify the preview."
+              exit 1
+            fi
+            if [[ "$(grep -Fxc "Site Ops installation: Discovered source commit: $SOURCE_SHA." "$preview_log")" != 1 ]] ||
+               [[ -e "$XDG_DATA_HOME/siteops" || -L "$XDG_DATA_HOME/siteops" ]]; then
+              echo "::error::The signed Bash bootstrap preview did not preserve the selected source and data."
+              exit 1
+            fi
+          fi
           selection="$(printf '%s\0' "$SOURCE_REPOSITORY" "$release" "$SOURCE_SHA" "$SOURCE_REF" "$caller" |
             sha256sum | cut -d ' ' -f 1)"
           cache="$XDG_DATA_HOME/siteops/install-downloads/$selection"
@@ -982,7 +1011,7 @@ jobs:
           cp "$download/$ARCHIVE_NAME" "$cache/$ARCHIVE_NAME"
           cp "$download/${ARCHIVE_NAME}${ATTESTATION_SUFFIX}" \
             "$cache/${ARCHIVE_NAME}${ATTESTATION_SUFFIX}"
-          if ! bash "$download/$BOOTSTRAP_SH" --release "$release" \
+          if ! bash "$script" --release "$release" \
             --source-commit "$SOURCE_SHA" --repository "$SOURCE_REPOSITORY" \
             --source-ref "$SOURCE_REF" --caller "$caller" --yes \
             > "$owned/logs/bootstrap-sh.log" 2>&1; then
@@ -1012,7 +1041,7 @@ jobs:
           echo "The attested Bash bootstrap installed the verified bundle without a release download."
 
       - name: Install with the signed PowerShell bootstrap
-        if: matrix.os == 'windows-2025'
+        if: runner.os == 'Windows' && matrix.account != 'standard'
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
@@ -1067,6 +1096,34 @@ jobs:
           }
           $caller = $Matches[1] + '.yaml'
           $release = 'siteops/v0.0.0-ci'
+          if ($env:MATRIX_PYTHON -ceq '3.11') {
+              $sourceDirectory = Join-Path $owned 'bootstrap-source'
+              New-Item -ItemType Directory -Path $sourceDirectory | Out-Null
+              foreach ($name in @($env:BOOTSTRAP_PS1, $env:ARCHIVE_NAME,
+                                 ($env:ARCHIVE_NAME + $env:ATTESTATION_SUFFIX))) {
+                  Copy-Item -LiteralPath (Join-Path $download $name) -Destination $sourceDirectory
+              }
+              $previewScript = Join-Path $sourceDirectory $env:BOOTSTRAP_PS1
+              $previewLog = Join-Path $owned 'logs\bootstrap-ps1-preview.log'
+              $previousPreference = $ErrorActionPreference
+              try {
+                  $ErrorActionPreference = 'Continue'
+                  & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $previewScript `
+                      -Release $release -Repository $env:SOURCE_REPOSITORY `
+                      -SourceRef $env:SOURCE_REF -Caller $caller -DryRun *> $previewLog
+                  $previewStatus = $LASTEXITCODE
+              } finally { $ErrorActionPreference = $previousPreference }
+              if ($previewStatus -ne 0) {
+                  throw 'The signed PowerShell bootstrap did not verify the preview.'
+              }
+              $expectedLine = "Site Ops installation: Discovered source commit: $env:SOURCE_SHA."
+              $commitLines = @(Get-Content -LiteralPath $previewLog | Where-Object {
+                  [string]::Equals($_, $expectedLine, [StringComparison]::Ordinal)
+              })
+              if ($commitLines.Count -ne 1 -or @(Get-ChildItem -LiteralPath $bootstrapData -Force).Count) {
+                  throw 'The signed PowerShell bootstrap preview did not preserve the selected source and data.'
+              }
+          }
           $selection = (@($env:SOURCE_REPOSITORY, $release, $env:SOURCE_SHA,
                           $env:SOURCE_REF, $caller) -join [char]0) + [char]0
           $hasher = [Security.Cryptography.SHA256]::Create()
@@ -1153,7 +1210,367 @@ jobs:
           }
           Write-Host 'The attested PowerShell bootstrap installed the verified bundle without a release download.'
 
+      - name: Install as a standard user with the signed PowerShell bootstrap
+        if: runner.os == 'Windows' && matrix.account == 'standard'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Public failures name only these fixed categories. Bootstrap and wrapper logs stay in the profile.
+          function Stop-StandardUser([string]$Category) {
+              throw "The standard user installation did not pass ($Category)."
+          }
+          function Get-BootstrapFailure([string]$Log) {
+              foreach ($code in @('ROOT_PATH', 'ROOT_ANCESTOR_TYPE', 'ROOT_ANCESTOR_OWNER', 'ROOT_ANCESTOR_ACL',
+                                  'ROOT_DATA_CREATE', 'ROOT_DATA_TYPE', 'ROOT_DATA_OWNER', 'ROOT_DATA_ACL')) {
+                  if ($Log.Contains("Configure a private Site Ops data root. $code")) { return $code }
+              }
+              foreach ($code in @('TOOL_PATH', 'TOOL_TYPE', 'TOOL_OWNER', 'TOOL_ACL')) {
+                  if ($Log.Contains("Choose a private Windows tool location. $code")) { return $code }
+              }
+              if ($Log.Contains('The GitHub CLI executable must be owned by an administrator')) { return 'GH_ADMISSION' }
+              if ($Log.Contains('GitHub CLI 2.95 or newer is required')) { return 'GH_VERSION' }
+              return 'BOOTSTRAP'
+          }
+          function Get-PrincipalClass([string]$Sid, [string]$JobSid) {
+              switch -Exact ($Sid) {
+                  'S-1-5-32-544' { return 'administrators' }
+                  'S-1-5-18' { return 'system' }
+                  'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464' { return 'trustedinstaller' }
+                  'S-1-3-4' { return 'creator-owner' }
+                  $JobSid { return 'job-account' }
+              }
+              return 'other'
+          }
+          # Reports who owns and can change gh.exe and its parents, using the bootstrap's rights masks.
+          function Write-GitHubCliPreflight([string]$JobSid) {
+              $gh = $null
+              foreach ($entry in ([Environment]::GetEnvironmentVariable('Path', 'Machine') -split ';')) {
+                  if ($entry -cmatch '^[A-Za-z]:\\' -and
+                      (Test-Path -LiteralPath (Join-Path $entry 'gh.exe') -PathType Leaf)) {
+                      $gh = Join-Path $entry 'gh.exe'
+                      break
+                  }
+              }
+              if (-not $gh) {
+                  Write-Host 'GitHub CLI preflight: gh.exe is not on the machine PATH.'
+                  return
+              }
+              $node = $gh
+              for ($level = 0; $node; $level++) {
+                  $label = if ($level) { "parent $level" } else { 'gh.exe' }
+                  try {
+                      $acl = (Get-Item -LiteralPath $node -Force).GetAccessControl()
+                      $owner = Get-PrincipalClass $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value $JobSid
+                      $mask = if ($level) { 0x500D0140 } else { 0x500D0156 }
+                      $writers = @(foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+                          if ($rule.AccessControlType -eq 'Allow' -and ([int]$rule.FileSystemRights -band $mask) -and
+                              -not ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly)) {
+                              Get-PrincipalClass $rule.IdentityReference.Value $JobSid
+                          }
+                      }) | Sort-Object -Unique
+                      $list = if ($writers) { @($writers) -join ' ' } else { 'none' }
+                      Write-Host "GitHub CLI preflight: $label owner $owner, writers $list."
+                  } catch {
+                      Write-Host "GitHub CLI preflight: $label could not be read."
+                  }
+                  $parent = Split-Path -Parent $node
+                  $node = if ($parent -and $parent -ne $node) { $parent } else { $null }
+              }
+          }
+          function Grant-StagingAccess([string]$Path, [string]$Owner, [string]$User) {
+              $previousPreference = $ErrorActionPreference
+              try {
+                  $ErrorActionPreference = 'Continue'
+                  & icacls.exe $Path /inheritance:r /grant:r "*${Owner}:(OI)(CI)F" '*S-1-5-18:(OI)(CI)F' `
+                      "*${User}:(OI)(CI)RX" *> $null
+                  return $LASTEXITCODE -eq 0
+              } finally {
+                  $ErrorActionPreference = $previousPreference
+              }
+          }
+          # The standard user may only read and execute the staged files, never change or replace them.
+          # An elevated job gives a new folder an explicit Administrators rule. Administrators are trusted
+          # like SYSTEM, and the step separately confirms that the account is not a member.
+          function Test-StagingAccess([string]$Path, [string]$Owner, [string]$User) {
+              foreach ($item in @(Get-Item -LiteralPath $Path -Force) + @(Get-ChildItem -LiteralPath $Path -Force -Recurse)) {
+                  $acl = $item.GetAccessControl()
+                  if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -eq $User) { return $false }
+                  $rights = 0
+                  foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+                      $principal = $rule.IdentityReference.Value
+                      if ($principal -notin @($Owner, 'S-1-5-18', 'S-1-5-32-544', $User) -or
+                          $rule.AccessControlType -ne 'Allow') {
+                          return $false
+                      }
+                      if ($principal -eq $User) { $rights = $rights -bor [int]$rule.FileSystemRights }
+                  }
+                  if (($rights -band 0x500D0156) -or ($rights -band 0x200A9) -ne 0x200A9) { return $false }
+              }
+              return $true
+          }
+          # Lists processes owned by the account. A failed query throws so cleanup never assumes none remain.
+          function Get-StandardUserProcessIds([string]$Sid) {
+              foreach ($item in @(Get-CimInstance -ClassName Win32_Process -Filter 'ProcessId > 4' -ErrorAction Stop)) {
+                  $owner = Invoke-CimMethod -InputObject $item -MethodName GetOwnerSid -ErrorAction SilentlyContinue
+                  if ($owner -and $owner.Sid -eq $Sid) { [int]$item.ProcessId }
+              }
+          }
+          # Reports the owner and access classes of each staged item after the read only check fails.
+          function Write-StagingAccess([string]$Path, [string]$Owner, [string]$User) {
+              $expected = @($env:BOOTSTRAP_PS1, $env:ARCHIVE_NAME, ($env:ARCHIVE_NAME + $env:ATTESTATION_SUFFIX),
+                            'standard-user.ps1')
+              try {
+                  foreach ($item in @(Get-Item -LiteralPath $Path -Force) + @(Get-ChildItem -LiteralPath $Path -Force -Recurse)) {
+                      $label = if ($item.FullName -eq $Path) { 'folder' } elseif ($item.Name -cin $expected) {
+                          $item.Name
+                      } else { 'other item' }
+                      $acl = $item.GetAccessControl()
+                      $sids = @($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value)
+                      $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+                      $classes = @(foreach ($sid in $sids + @($rules | ForEach-Object { $_.IdentityReference.Value })) {
+                          if ($sid -eq $User) { 'standard-user' } else { Get-PrincipalClass $sid $Owner }
+                      })
+                      Write-Host "Staging access: $label owner $($classes[0])."
+                      for ($index = 0; $index -lt $rules.Count; $index++) {
+                          $rule = $rules[$index]
+                          $origin = if ($rule.IsInherited) { 'inherited' } else { 'explicit' }
+                          Write-Host ("Staging access: {0} rule {1} {2} 0x{3:X} {4}." -f $label, $classes[$index + 1],
+                              $rule.AccessControlType, [int]$rule.FileSystemRights, $origin)
+                      }
+                  }
+              } catch {
+                  Write-Host 'Staging access: the staged items could not be read.'
+              }
+          }
+
+          $download = Join-Path $env:RUNNER_TEMP 'siteops-download'
+          $staging = Join-Path $env:RUNNER_TEMP 'siteops-standard-user'
+          $userName = 'siteops-standard'
+          $jobSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+          if ($env:BUILDER_IDENTITY -cnotmatch '/\.github/workflows/(ci|release)\.yaml@') { Stop-StandardUser 'INPUT' }
+          $caller = $Matches[1] + '.yaml'
+          # Start-Process joins arguments with spaces, so every argument must be a plain token.
+          if ($env:SOURCE_SHA -cnotmatch '^[0-9a-f]{40}$' -or
+              $env:SOURCE_REPOSITORY -cnotmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' -or
+              $env:SOURCE_REF -cnotmatch '^refs/heads/[A-Za-z0-9._/-]+$' -or $env:SOURCE_REF.Contains('..') -or
+              $staging -cnotmatch '^[A-Za-z]:\\[A-Za-z0-9_.\\-]+$') {
+              Stop-StandardUser 'INPUT'
+          }
+          $selection = (@($env:SOURCE_REPOSITORY, 'siteops/v0.0.0-ci', $env:SOURCE_SHA,
+                          $env:SOURCE_REF, $caller) -join [char]0) + [char]0
+          $hasher = [Security.Cryptography.SHA256]::Create()
+          try {
+              $selectionId = [BitConverter]::ToString(
+                  $hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($selection))
+              ).Replace('-', '').ToLowerInvariant()
+          } finally { $hasher.Dispose() }
+          # Runs as the standard user. It creates the exact selection cache itself, so the user owns it.
+          $wrapper = @'
+          param(
+              [Parameter(Mandatory = $true)][string]$SourceCommit,
+              [Parameter(Mandatory = $true)][string]$Repository,
+              [Parameter(Mandatory = $true)][string]$SourceRef,
+              [Parameter(Mandatory = $true)][string]$Caller,
+              [Parameter(Mandatory = $true)][string]$Selection
+          )
+          $ErrorActionPreference = 'Stop'
+          foreach ($name in @('GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN',
+                              'PYTHONPATH', 'PYTHONHOME')) {
+              [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+          }
+          $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+          $administrator = [Security.Principal.WindowsPrincipal]::new($identity).IsInRole(
+              [Security.Principal.WindowsBuiltInRole]::Administrator
+          ) -or @($identity.Groups | Where-Object { $_.Value -eq 'S-1-5-32-544' }).Count -gt 0
+          $result = [ordered]@{ user = $identity.User.Value; administrator = $administrator; version = '' }
+          $results = Join-Path $env:LOCALAPPDATA 'siteops-qualification'
+          New-Item -ItemType Directory -Path $results -Force | Out-Null
+          $log = Join-Path $results 'bootstrap.log'
+          $status = 1
+          try {
+              if ($Selection -cnotmatch '^[0-9a-f]{64}$') { throw 'The cache selection is invalid.' }
+              $cache = Join-Path $env:LOCALAPPDATA "siteops\install-downloads\$Selection"
+              New-Item -ItemType Directory -Path $cache | Out-Null
+              foreach ($name in @('siteops-install.zip', 'siteops-install.zip.attestation.jsonl')) {
+                  Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $cache $name)
+              }
+              $previousPreference = $ErrorActionPreference
+              try {
+                  $ErrorActionPreference = 'Continue'
+                  & (Join-Path $PSHOME 'powershell.exe') -NoProfile -ExecutionPolicy Bypass `
+                      -File (Join-Path $PSScriptRoot 'siteops-bootstrap.ps1') -Release 'siteops/v0.0.0-ci' `
+                      -SourceCommit $SourceCommit -Repository $Repository -SourceRef $SourceRef `
+                      -Caller $Caller -Yes *> $log
+                  $status = $LASTEXITCODE
+                  if ($status -eq 0) {
+                      $command = Join-Path $env:USERPROFILE '.local\bin\siteops.exe'
+                      $result.version = [string](& $command --version 2> $null | Select-Object -First 1)
+                  }
+              } finally {
+                  $ErrorActionPreference = $previousPreference
+              }
+          } finally {
+              $result | ConvertTo-Json -Compress |
+                  Set-Content -LiteralPath (Join-Path $results 'result.json') -Encoding UTF8
+          }
+          exit $status
+          '@
+          Write-GitHubCliPreflight $jobSid
+
+          $userSid = $null
+          $secure = $null
+          $process = $null
+          $stagingCreated = $false
+          $installed = $false
+          try {
+              if (Get-LocalUser -Name $userName -ErrorAction SilentlyContinue) { Stop-StandardUser 'ACCOUNT' }
+              if (Test-Path -LiteralPath $staging) { Stop-StandardUser 'STAGING_EXISTS' }
+              $bytes = [byte[]]::new(24)
+              $generator = [Security.Cryptography.RandomNumberGenerator]::Create()
+              try { $generator.GetBytes($bytes) } finally { $generator.Dispose() }
+              # The fixed suffix satisfies the local complexity policy. The random part is the secret.
+              $password = [Convert]::ToBase64String($bytes) + 'Aa1!'
+              [Array]::Clear($bytes, 0, $bytes.Length)
+              Write-Host "::add-mask::$password"
+              $secure = [Security.SecureString]::new()
+              foreach ($character in $password.ToCharArray()) { $secure.AppendChar($character) }
+              $secure.MakeReadOnly()
+              $password = $null
+              try {
+                  $account = New-LocalUser -Name $userName -Password $secure -PasswordNeverExpires `
+                      -UserMayNotChangePassword -AccountNeverExpires `
+                      -Description 'Temporary Site Ops installer test account'
+                  $userSid = $account.SID.Value
+                  Add-LocalGroupMember -Group 'Users' -Member $userName
+                  $administrators = @(Get-LocalGroupMember -SID 'S-1-5-32-544' | ForEach-Object { $_.SID.Value })
+              } catch {
+                  Stop-StandardUser 'ACCOUNT'
+              }
+              if ($userSid -in $administrators) { Stop-StandardUser 'NOT_STANDARD' }
+
+              try {
+                  New-Item -ItemType Directory -Path $staging | Out-Null
+                  $stagingCreated = $true
+              } catch {
+                  Stop-StandardUser 'STAGING_CREATE'
+              }
+              if (-not (Grant-StagingAccess $staging $jobSid $userSid)) { Stop-StandardUser 'STAGING_GRANT' }
+              $copied = $true
+              try {
+                  foreach ($name in @($env:BOOTSTRAP_PS1, $env:ARCHIVE_NAME, ($env:ARCHIVE_NAME + $env:ATTESTATION_SUFFIX))) {
+                      Copy-Item -LiteralPath (Join-Path $download $name) -Destination (Join-Path $staging $name)
+                      if ((Get-FileHash -LiteralPath (Join-Path $download $name)).Hash -cne
+                          (Get-FileHash -LiteralPath (Join-Path $staging $name)).Hash) {
+                          $copied = $false
+                      }
+                  }
+                  Set-Content -LiteralPath (Join-Path $staging 'standard-user.ps1') -Value $wrapper -Encoding UTF8
+              } catch {
+                  $copied = $false
+              }
+              if (-not $copied) { Stop-StandardUser 'STAGING_COPY' }
+              try { $readOnly = Test-StagingAccess $staging $jobSid $userSid } catch { $readOnly = $false }
+              if (-not $readOnly) {
+                  Write-StagingAccess $staging $jobSid $userSid
+                  Stop-StandardUser 'STAGING_ACCESS'
+              }
+
+              $credential = [Management.Automation.PSCredential]::new($userName, $secure)
+              $arguments = @(
+                  '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+                  '-File', (Join-Path $staging 'standard-user.ps1'),
+                  '-SourceCommit', $env:SOURCE_SHA, '-Repository', $env:SOURCE_REPOSITORY,
+                  '-SourceRef', $env:SOURCE_REF, '-Caller', $caller, '-Selection', $selectionId
+              )
+              try {
+                  $process = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList $arguments `
+                      -Credential $credential -LoadUserProfile -WorkingDirectory $staging -PassThru
+                  $null = $process.Handle
+              } catch {
+                  Stop-StandardUser 'LAUNCH'
+              }
+              if (-not $process.WaitForExit(1200000)) { Stop-StandardUser 'TIMEOUT' }
+
+              try {
+                  $profilePath = (Get-ItemProperty -LiteralPath (
+                      "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$userSid"
+                  )).ProfileImagePath
+                  $results = Join-Path $profilePath 'AppData\Local\siteops-qualification'
+                  $privateLog = ''
+                  $log = Join-Path $results 'bootstrap.log'
+                  if ((Test-Path -LiteralPath $log -PathType Leaf) -and (Get-Item -LiteralPath $log).Length -le 4194304) {
+                      $privateLog = [string](Get-Content -LiteralPath $log -Raw)
+                  }
+                  $result = $null
+                  $resultPath = Join-Path $results 'result.json'
+                  if ((Test-Path -LiteralPath $resultPath -PathType Leaf) -and
+                      (Get-Item -LiteralPath $resultPath).Length -le 4096) {
+                      $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
+                  }
+              } catch {
+                  Stop-StandardUser 'RESULT'
+              }
+              if ($process.ExitCode -ne 0) { Stop-StandardUser (Get-BootstrapFailure $privateLog) }
+              if ($null -eq $result -or $result.user -cne $userSid) { Stop-StandardUser 'RESULT' }
+              if ($result.administrator -isnot [bool] -or $result.administrator) { Stop-StandardUser 'NOT_STANDARD' }
+              if (-not $privateLog.Contains('Rechecking the retained release without downloading')) {
+                  Stop-StandardUser 'CACHE_NOT_USED'
+              }
+              if ($privateLog -cnotmatch 'Provisioning uv-managed CPython 3\.11\.[0-9]+ ') { Stop-StandardUser 'RUNTIME' }
+              $leftover = Join-Path $profilePath 'AppData\Local\siteops\install-staging'
+              if (-not (Test-Path -LiteralPath $leftover -PathType Container) -or
+                  @(Get-ChildItem -LiteralPath $leftover -Force).Count) {
+                  Stop-StandardUser 'STAGING_LEFT'
+              }
+              if ($result.version -cne "siteops $env:PACKAGE_VERSION") { Stop-StandardUser 'VERSION' }
+              $installed = $true
+          } finally {
+              $previousPreference = $ErrorActionPreference
+              $ErrorActionPreference = 'Continue'
+              $cleanupFailed = $false
+              try {
+                  if ($process -and -not $process.HasExited) { & taskkill.exe /PID $process.Id /T /F *> $null }
+              } catch { }
+              if ($secure) { $secure.Dispose() }
+              if ($userSid) {
+                  # Processes that outlive the wrapper keep the profile loaded, so stop each one the account owns.
+                  try {
+                      for ($round = 0; $round -lt 5; $round++) {
+                          $remaining = @(Get-StandardUserProcessIds $userSid)
+                          if (-not $remaining) { break }
+                          foreach ($id in $remaining) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
+                          Start-Sleep -Seconds 2
+                      }
+                      if (@(Get-StandardUserProcessIds $userSid)) { $cleanupFailed = $true }
+                  } catch {
+                      $cleanupFailed = $true
+                  }
+                  try {
+                      Get-CimInstance -ClassName Win32_UserProfile -Filter "SID = '$userSid'" |
+                          Remove-CimInstance -ErrorAction Stop
+                  } catch {
+                      $cleanupFailed = $true
+                  }
+                  try {
+                      Remove-LocalUser -SID $userSid -ErrorAction Stop
+                  } catch {
+                      $cleanupFailed = $true
+                  }
+              }
+              if ($stagingCreated) {
+                  try { Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction Stop } catch { $cleanupFailed = $true }
+              }
+              $ErrorActionPreference = $previousPreference
+              # An earlier failure keeps its own category. A completed installation fails on incomplete cleanup.
+              if ($cleanupFailed) {
+                  Write-Host '::warning::The temporary standard user, its processes, profile or staging remain on this runner.'
+                  if ($installed) { Stop-StandardUser 'CLEANUP' }
+              }
+          }
+          Write-Host 'A standard user installed the verified bundle with the signed PowerShell bootstrap and its own uv and Python.'
+
       - name: Install Site Ops from the verified lock
+        if: matrix.account != 'standard'
         env:
           PYTHON: ${{ steps.python.outputs.python-path }}
         run: |
@@ -1285,6 +1702,7 @@ jobs:
           echo "The authenticated bundle installed, repeated, replaced, rejected tampering, and removed cleanly."
 
       - name: Install Site Ops from the standalone wheel
+        if: matrix.account != 'standard'
         env:
           UV_DEFAULT_INDEX: ${{ env.PACKAGE_INDEX_URL }}
         run: |
@@ -1406,7 +1824,7 @@ jobs:
           jobs_file="$RUNNER_TEMP/siteops-distribution-jobs.json"
           jobs_error="$RUNNER_TEMP/siteops-distribution-jobs.err"
           set +e
-          gh api \
+          gh api --paginate --slurp \
             "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" \
             > "$jobs_file" 2> "$jobs_error"
           jobs_api_status=$?
@@ -1420,20 +1838,20 @@ jobs:
           import sys
 
 
-          cells = [
-              (python, runner, column)
-              for python in ("3.10", "3.11", "3.12", "3.13", "3.14")
-              for runner, column in (
-                  ("ubuntu-24.04", "linux"),
-                  ("windows-2025", "windows"),
-              )
-          ]
-          pythons = list(dict.fromkeys(python for python, _, _ in cells))
+          # Every cell the qualify matrix declares. Any other qualification job fails the summary.
+          pythons = ["3.10", "3.11", "3.12", "3.13", "3.14"]
+          columns = ["linux", "ubuntu-26.04", "windows", "windows-standard-user"]
           expected = {
               f"Qualify bundle ({runner}, Python {python})": (python, column)
-              for python, runner, column in cells
+              for python in pythons
+              for runner, column in (("ubuntu-24.04", "linux"), ("windows-2025", "windows"))
           }
-          matches = {(python, column): [] for python, _, column in cells}
+          expected["Qualify bundle (ubuntu-26.04, Python 3.11)"] = ("3.11", "ubuntu-26.04")
+          expected["Qualify bundle (windows-2025, Python 3.11, standard user)"] = (
+              "3.11", "windows-standard-user",
+          )
+          matches = {cell: [] for cell in expected.values()}
+          unexpected = 0
           problem = None
 
           if os.environ["JOBS_API_STATUS"] != "0":
@@ -1441,10 +1859,14 @@ jobs:
               jobs = None
           else:
               try:
-                  document = json.loads(open(sys.argv[1], encoding="utf-8").read())
-                  jobs = document.get("jobs")
-                  if not isinstance(jobs, list):
-                      raise ValueError("jobs is not a list")
+                  pages = json.loads(open(sys.argv[1], encoding="utf-8").read())
+                  if not isinstance(pages, list) or not pages:
+                      raise ValueError("pages is not a list")
+                  jobs = []
+                  for page in pages:
+                      if not isinstance(page, dict) or not isinstance(page.get("jobs"), list):
+                          raise ValueError("jobs is not a list")
+                      jobs.extend(page["jobs"])
               except (OSError, ValueError, TypeError, json.JSONDecodeError):
                   problem = "GitHub returned an invalid job response."
                   jobs = None
@@ -1453,8 +1875,10 @@ jobs:
               for job in jobs:
                   if not isinstance(job, dict) or not isinstance(job.get("name"), str):
                       continue
-                  cell = expected.get(job["name"].rsplit(" / ", 1)[-1])
+                  name = job["name"].rsplit(" / ", 1)[-1]
+                  cell = expected.get(name)
                   if cell is None:
+                      unexpected += name.startswith("Qualify bundle (")
                       continue
                   matches[cell].append(job)
 
@@ -1468,6 +1892,8 @@ jobs:
           }
 
           def cell_status(python, column):
+              if (python, column) not in matches:
+                  return "n/a"
               if jobs is None:
                   return "unknown"
               candidates = matches[(python, column)]
@@ -1482,13 +1908,11 @@ jobs:
 
 
           matrix = [
-              {
-                  "python": python,
-                  "linux": cell_status(python, "linux"),
-                  "windows": cell_status(python, "windows"),
-              }
+              {"python": python, **{column: cell_status(python, column) for column in columns}}
               for python in pythons
           ]
+          statuses = [row[column] for row in matrix for column in columns if row[column] != "n/a"]
+          complete = unexpected == 0 and all(status == "passed" for status in statuses)
           encoded = json.dumps(matrix, separators=(",", ":"))
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write("qualification-matrix=" + encoded + "\n")
@@ -1497,10 +1921,6 @@ jobs:
               build = os.environ["BUILD_RESULT"]
               attest = os.environ["ATTEST_RESULT"]
               qualify = os.environ["QUALIFY_RESULT"]
-              all_passed = all(
-                  row["linux"] == "passed" and row["windows"] == "passed"
-                  for row in matrix
-              )
 
               if build != "success":
                   outcome = (
@@ -1512,7 +1932,7 @@ jobs:
                       "The bundle was built, but signing did not succeed. Review the "
                       "Attest bundle job and rerun after signing succeeds."
                   )
-              elif qualify != "success" or not all_passed:
+              elif qualify != "success" or not complete:
                   outcome = (
                       "One or more qualification cells did not pass. Open the corresponding "
                       "Qualify bundle job, correct the failure, and rerun this workflow."
@@ -1567,25 +1987,25 @@ jobs:
                   [
                       "### Installation checks",
                       "",
-                      "| Python | Linux | Windows |",
-                      "|---|---|---|",
+                      "| Python | Ubuntu 24.04 | Ubuntu 26.04 | Windows | Windows standard user |",
+                      "|---|---|---|---|---|",
                   ]
               )
               lines.extend(
-                  "| " + row["python"] + " | " + row["linux"] + " | " + row["windows"] + " |"
+                  "| " + " | ".join([row["python"], *(row[column] for column in columns)]) + " |"
                   for row in matrix
               )
-              if any(
-                  status in {"not-run", "unknown"}
-                  for row in matrix
-                  for status in (row["linux"], row["windows"])
-              ):
+              if any(status in {"not-run", "unknown"} for status in statuses):
                   lines.extend(
                       [
                           "",
                           "`not-run` means no matching qualification job was returned. "
                           "`unknown` means the job data was incomplete or ambiguous.",
                       ]
+                  )
+              if unexpected:
+                  lines.extend(
+                      ["", "GitHub returned a qualification job outside the expected cells."]
                   )
 
               lines.extend(
@@ -1616,8 +2036,6 @@ jobs:
           if problem is not None:
               print("::error::" + problem)
               raise SystemExit(1)
-          if os.environ["QUALIFY_RESULT"] == "success" and any(
-              row["linux"] != "passed" or row["windows"] != "passed" for row in matrix
-          ):
-              raise SystemExit("::error::GitHub did not return a complete successful qualification matrix.")
+          if not complete:
+              raise SystemExit("::error::Every expected qualification cell must pass exactly once.")
           PY

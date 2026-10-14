@@ -11,7 +11,10 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Workflows may set PYTHONSAFEPATH, so sibling helpers are found through an explicit path entry.
+sys.path.insert(1, str(Path(__file__).resolve().parent))
 
+from aio_readiness import active_pod_readiness  # noqa: E402
 from fleet_process import FleetProcessError, run  # noqa: E402
 from fleet_workflow import FleetBudget, FleetCandidate, scope_for  # noqa: E402
 
@@ -29,25 +32,7 @@ def ready(pods: dict, instances: dict) -> bool:
     if (not isinstance(instance, dict) or not isinstance(instance.get("metadata"), dict)
             or not isinstance(instance["metadata"].get("name"), str) or not instance["metadata"]["name"]):
         raise ValueError("Invalid instance identity.")
-    active = []
-    for pod in pods["items"]:
-        if not isinstance(pod, dict) or not isinstance(pod.get("status"), dict):
-            raise ValueError("Invalid pod status.")
-        status = pod["status"]
-        if status.get("phase") == "Succeeded":
-            continue
-        active.append(pod)
-        conditions = status.get("conditions")
-        if conditions is None:
-            return False
-        if not isinstance(conditions, list) or any(not isinstance(row, dict) for row in conditions):
-            raise ValueError("Invalid pod conditions.")
-        if (pod.get("metadata", {}).get("deletionTimestamp")
-                or status.get("phase") != "Running"
-                or not any(row.get("type") == "Ready" and row.get("status") == "True"
-                           for row in conditions)):
-            return False
-    return bool(active)
+    return active_pod_readiness(pods).ready
 
 
 def main() -> int:

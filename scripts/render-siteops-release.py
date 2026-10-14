@@ -17,7 +17,10 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from siteops_release_assets import (
+# Workflows may set PYTHONSAFEPATH, so sibling helpers are found through an explicit path entry.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from siteops_release_assets import (  # noqa: E402
     FrozenReleaseAssets,
     ReleaseAsset,
     native_engine_wheel,
@@ -123,7 +126,9 @@ def bootstrap_commands(
         "check its size and digest before execution. The digest binds the script to these "
         "reviewed instructions. It is not independent publisher authentication. "
         "The initial script trusts this release's HTTPS delivery. "
-        "The script separately authenticates the engine ZIP before extracting its installer helper.",
+        "The script separately authenticates the engine ZIP before extracting its installer helper. "
+        "For publisher provenance before any installer code runs, use the commands under "
+        "Verify the script before it runs.",
         "Source enrollment is a separate choice: "
         "add `--enroll-source NAME` or `-EnrollSource NAME` only for an approved source. "
         "For the official Azure/digital-ops-scale-kit publisher, the guided examples use `official`.",
@@ -131,6 +136,127 @@ def bootstrap_commands(
         "An organization policy may require an approved managed installation instead.",
     ]
     return commands, details
+
+
+def verified_bootstrap_commands(
+    tag: str, source: dict[str, str], downloads: str, caller: str, runner: str, proof: str,
+) -> list[str]:
+    """Render commands that run each script only after its proof matches this release's identity."""
+    repository, commit, source_ref = source["repository"], source["commit"], source["ref"]
+    return [
+        "Linux x64 with glibc:",
+        f"""```bash
+(
+  set -euo pipefail
+  umask 077
+  tag='{tag}' sha='{commit}'
+  repository='{repository}' source_ref='{source_ref}'
+  signer="https://github.com/$repository/.github/workflows/_siteops-distribution.yaml@$source_ref"
+  builder="https://github.com/$repository/.github/workflows/{caller}@$source_ref"
+  download="$(mktemp -d)"
+  script="$download/siteops-bootstrap.sh"
+  trap 'rm -f -- "$script" "$script{proof}"; rmdir -- "$download"' EXIT
+  curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \\
+    --tlsv1.2 --max-redirs 3 --max-time 120 --output "$script" \\
+    '{downloads}siteops-bootstrap.sh'
+  curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \\
+    --tlsv1.2 --max-redirs 3 --max-time 120 --output "$script{proof}" \\
+    '{downloads}siteops-bootstrap.sh{proof}'
+  query="length > 0 and all(.[]; .verificationResult.mediaType == \\"application/vnd.dev.sigstore.verificationresult+json;version=0.1\\" and (.verificationResult.signature.certificate | .buildConfigURI == \\"$builder\\" and .buildConfigDigest == \\"$sha\\" and .runnerEnvironment == \\"{runner}\\"))"
+  verified="$(gh attestation verify "$script" --bundle "$script{proof}" \\
+    --repo "$repository" --cert-identity "$signer" --source-ref "$source_ref" \\
+    --source-digest "$sha" --signer-digest "$sha" \\
+    --cert-oidc-issuer https://token.actions.githubusercontent.com \\
+    --predicate-type https://slsa.dev/provenance/v1 --hostname github.com \\
+    --digest-alg sha256 --format json --jq "$query")"
+  [[ "$verified" == true ]] || {{ echo "Script verification failed." >&2; exit 1; }}
+  bash "$script" --release "$tag" --source-commit "$sha" \\
+    --repository "$repository" --source-ref "$source_ref" --caller '{caller}'
+)
+```""",
+        "Windows x64, PowerShell:",
+        f"""```powershell
+& {{
+  $ErrorActionPreference = 'Stop'
+  Import-Module (Join-Path $PSHOME 'Modules\\Microsoft.PowerShell.Utility\\Microsoft.PowerShell.Utility.psd1')
+  $tag = '{tag}'; $sha = '{commit}'
+  $repository = '{repository}'; $sourceRef = '{source_ref}'
+  $signer = "https://github.com/$repository/.github/workflows/_siteops-distribution.yaml@$sourceRef"
+  $builder = "https://github.com/$repository/.github/workflows/{caller}@$sourceRef"
+  $download = Join-Path $env:TEMP ('siteops-bootstrap-' + [guid]::NewGuid())
+  New-Item -ItemType Directory -Path $download | Out-Null
+  $script = Join-Path $download 'siteops-bootstrap.ps1'
+  $proof = $script + '{proof}'
+  try {{
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    icacls $download /inheritance:r /grant:r "*${{sid}}:(OI)(CI)F" | Out-Null
+    if ($LASTEXITCODE -ne 0) {{ throw 'The download directory could not be protected.' }}
+    foreach ($name in @('siteops-bootstrap.ps1', 'siteops-bootstrap.ps1{proof}')) {{
+      & curl.exe --fail --silent --show-error --location --proto '=https' --proto-redir '=https' `
+        --tlsv1.2 --max-redirs 3 --max-time 120 `
+        --output (Join-Path $download $name) ('{downloads}' + $name)
+      if ($LASTEXITCODE -ne 0) {{ throw 'A bootstrap asset could not be downloaded.' }}
+    }}
+    $lines = [Collections.Generic.List[string]]::new(); $bytes = 0
+    $preference = $ErrorActionPreference
+    try {{
+      $ErrorActionPreference = 'Continue'
+      & gh.exe attestation verify $script --bundle $proof `
+        --repo $repository --cert-identity $signer --source-ref $sourceRef `
+        --source-digest $sha --signer-digest $sha `
+        --cert-oidc-issuer https://token.actions.githubusercontent.com `
+        --predicate-type https://slsa.dev/provenance/v1 --hostname github.com `
+        --digest-alg sha256 --format json 2>$null | ForEach-Object {{
+          $bytes += [Text.Encoding]::UTF8.GetByteCount($_) + 1
+          if ($bytes -gt 8388608) {{ throw 'Verification evidence is too large.' }}
+          $lines.Add($_)
+        }}
+      $status = $LASTEXITCODE
+    }} finally {{ $ErrorActionPreference = $preference }}
+    if ($status -ne 0 -or $lines.Count -eq 0) {{ throw 'Script verification failed.' }}
+    $observations = @((($lines -join "`n") | ConvertFrom-Json))
+    if ($observations.Count -lt 1 -or $observations.Count -gt 128) {{
+      throw 'Script verification returned an unsupported result count.'
+    }}
+    $expected = @{{
+      subjectAlternativeName = $signer
+      issuer = 'https://token.actions.githubusercontent.com'
+      sourceRepositoryURI = "https://github.com/$repository"
+      sourceRepositoryDigest = $sha
+      sourceRepositoryRef = $sourceRef
+      buildSignerDigest = $sha
+      buildConfigURI = $builder
+      buildConfigDigest = $sha
+      runnerEnvironment = '{runner}'
+    }}
+    foreach ($item in $observations) {{
+      $verified = $item.verificationResult
+      $certificate = $verified.signature.certificate
+      if ($verified -isnot [pscustomobject] -or $certificate -isnot [pscustomobject] -or
+          $verified.mediaType -isnot [string] -or
+          $verified.mediaType -cne 'application/vnd.dev.sigstore.verificationresult+json;version=0.1') {{
+        throw 'Unsupported verified script observation.'
+      }}
+      foreach ($key in $expected.Keys) {{
+        $value = $certificate.PSObject.Properties[$key].Value
+        if ($value -isnot [string] -or $value -cne $expected[$key]) {{
+          throw 'The verified script certificate differs from the selected release.'
+        }}
+      }}
+    }}
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script `
+      -Release $tag -SourceCommit $sha `
+      -Repository $repository -SourceRef $sourceRef -Caller '{caller}'
+    if ($LASTEXITCODE -ne 0) {{ throw 'Site Ops installation did not complete.' }}
+  }} finally {{
+    foreach ($path in @($script, $proof)) {{
+      if (Test-Path -LiteralPath $path) {{ Remove-Item -LiteralPath $path }}
+    }}
+    [IO.Directory]::Delete($download)
+  }}
+}}
+```""",
+    ]
 
 
 def render_notes(
@@ -248,6 +374,23 @@ def render_notes(
                 "rights, and asks before changing tools.",
             )
             bootstrap.extend(commands)
+            bootstrap.extend([
+                "<details><summary>Verify the script before it runs</summary>",
+                "Use these commands when your policy requires publisher provenance before any "
+                "installer code runs. They download the script and its detached proof into a fresh "
+                "private directory without a GitHub login. GitHub CLI then checks the proof against "
+                "this release's publisher, source commit, signing workflow, calling workflow and "
+                "runner class. The script runs only after every check passes. If a check fails, "
+                "stop rather than changing these values.",
+                f"Confirm that `{repository}` is the publisher you intend. These checks prove that "
+                "its workflows built the script, not that it is the right publisher. "
+                f"The [installation guide]({script_guide}) explains each check.",
+                *verified_bootstrap_commands(
+                    plan["release"]["tag"], source, downloads, callers[0], runner_environment,
+                    attestation_suffix,
+                ),
+                "</details>",
+            ])
         else:
             bootstrap.append(
                 "The bootstrap requires the approved `self-hosted` provenance policy. "
@@ -274,12 +417,6 @@ def render_notes(
         identity + f" Expected provenance runner class: `{runner_environment}`. "
         "The runner class does not identify a particular pool. "
         "Use these values with the guide verification policy.",
-        "For publisher provenance before any installer code runs, review this release tag, "
-        "publisher, source commit and source ref against your approved selection. "
-        f"[Verify the versioned script and its detached proof]({script_guide}) "
-        "with those identities before running it. HTTPS download alone does not authenticate "
-        "the publisher. If the guide's example publisher, source ref, workflows or runner "
-        "differ from this release, use this release's reviewed provenance values instead.",
         *bootstrap_details,
         "Runtime dependencies come from your configured package index as wheels when you use "
         "the wheel command. To name it explicitly, add `--default-index <your approved index>`. "
@@ -402,18 +539,25 @@ def render_summary(plan: dict[str, Any], notes: str, values: Mapping[str, str]) 
     if engine["bundle"]:
         matrix = json.loads(values["MATRIX"])
         expected = ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        columns = ("linux", "ubuntu-26.04", "windows", "windows-standard-user")
         if (
             not isinstance(matrix, list)
-            or any(not isinstance(row, dict) for row in matrix)
-            or [row.get("python") for row in matrix] != expected
+            or any(not isinstance(row, dict) or set(row) != {"python", *columns} for row in matrix)
+            or [row["python"] for row in matrix] != expected
         ):
             raise RenderingError("Incomplete installation qualification summary.")
-        lines.extend(["\n## Installation checks\n", "| Python | Linux | Windows |", "|---|---|---|"])
+        lines.extend([
+            "\n## Installation checks\n",
+            "| Python | Ubuntu 24.04 | Ubuntu 26.04 | Windows | Windows standard user |",
+            "|---|---|---|---|---|",
+        ])
         allowed = {"passed", "failed", "cancelled", "skipped", "not-run", "unknown"}
         for row in matrix:
-            if row.get("linux") not in allowed or row.get("windows") not in allowed:
+            # Ubuntu 26.04 and the Windows standard user run only with Python 3.11.
+            limited = set() if row["python"] == "3.11" else {"ubuntu-26.04", "windows-standard-user"}
+            if any(row[column] not in ({"n/a"} if column in limited else allowed) for column in columns):
                 raise RenderingError("Invalid qualification summary.")
-            lines.append(f"| {row['python']} | {row['linux']} | {row['windows']} |")
+            lines.append("| " + " | ".join([row["python"], *(row[column] for column in columns)]) + " |")
         lines.extend([
             f"\n[Download the attested release assets]({values['ARTIFACT_URL']})\n",
             "The Actions download contains the installation ZIP and standalone wheel. Each has "

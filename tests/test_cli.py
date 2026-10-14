@@ -30,6 +30,7 @@ from siteops.cli import (
     resolve_manifest_path,
     setup_logging,
 )
+from siteops.diagnostics import ValidationResult
 from siteops.models import Site
 from siteops.planning import (
     DiagnosticSeverity,
@@ -48,6 +49,7 @@ from siteops.results import (
     RunResult,
     SiteResult,
 )
+from tests.diagnostic_helpers import published
 
 
 def _prepared_plan():
@@ -394,11 +396,7 @@ class TestCmdValidate:
         document = json.loads(captured.out)
         assert exit_code == 1
         assert document["status"] == "invalid"
-        assert document["diagnostics"][0] == {
-            "code": "plan.validation-failed",
-            "severity": "error",
-            "summary": "Manifest validation failed.",
-        }
+        assert document["diagnostics"][0] == published("plan.validation-failed")
         assert "private-manifest" not in captured.out
         assert "private-step" not in captured.out
         assert "private/missing.bicep" not in captured.out
@@ -571,7 +569,7 @@ class TestCmdValidate:
         args.selector = "environment=test"
 
         with patch.object(orchestrator, "validate") as mock_validate:
-            mock_validate.return_value = []  # No errors
+            mock_validate.return_value = ValidationResult()
 
             cmd_validate(args, orchestrator)
 
@@ -859,7 +857,7 @@ class TestCmdDeploy:
 
         assert exit_code == 1
         captured = capsys.readouterr()
-        assert "Manifest not found" in captured.err
+        assert "Manifest not found" in captured.out + captured.err
 
     def test_deploy_no_sites_matched(self, complete_workspace, capsys):
         """Test deploy with no matching sites returns exit code 0."""
@@ -1579,8 +1577,6 @@ class TestMainArgumentParsing:
 
     @pytest.mark.parametrize("arguments", [
         ["validate", "aio-install", "--plan"],
-        ["validate", "aio-install", "--output", "json"],
-        ["validate", "aio-install", "--projection", "publishable"],
         ["validate", "aio-install", "--read-resources"],
         ["deploy", "aio-install", "--dry-run"],
         ["deploy", "aio-install", "--dry-run=true"],
@@ -2425,10 +2421,11 @@ class TestPlanOutputIsSeparateFromLogVerbosity:
             projection=None,
         )
         orchestrator = MagicMock()
-        orchestrator.validate.return_value = []
+        orchestrator.validate.return_value = ValidationResult()
         orchestrator.skipped_sites = []
-        result = MagicMock()
-        result.status = PlanStatus.PLANNED
+        from siteops.orchestrator import Orchestrator
+
+        result = Orchestrator(complete_workspace).build_plan(manifest, intent=PlanIntent.DESCRIBE)
         orchestrator.build_plan.return_value = result
 
         with patch(
@@ -2558,13 +2555,8 @@ steps:
 
         document = json.loads(capsys.readouterr().out)
         assert exit_code == 1
-        assert document["diagnostics"] == [
-            {
-                "code": "plan.target-set-incomplete",
-                "severity": "error",
-                "summary": "The selected target set is incomplete.",
-            }
-        ]
+        assert any(item["code"] == "plan.target-set-incomplete" for item in document["diagnostics"])
+        assert any(item["code"] == "content.syntax-invalid" for item in document["diagnostics"])
         assert "bad-site" not in json.dumps(document)
 
     def test_plan_reports_composition_error_without_traceback(
@@ -3040,11 +3032,7 @@ class TestDeployResultOutput:
         assert document["status"] == "invalid"
         assert document["exitCode"] == 1
         assert document["diagnostics"] == [
-            {
-                "code": "run.validation-failed",
-                "severity": "error",
-                "summary": "Manifest validation failed.",
-            }
+            published("run.validation-failed")
         ]
         assert "private-site" not in captured.out
         assert "private/path" not in captured.out
@@ -3088,7 +3076,9 @@ class TestDeployResultOutput:
 
         error = capsys.readouterr().err
         assert exit_code == 1
-        assert "Error: The deployment plan has 2 blocking problems:\n  - " in error
+        assert "Error:" in error
+        assert ("plan.capability-unavailable" in error) is redacted
+        assert "2 blocking problems" in error
         assert "`az extension add --name connectedk8s`" in error
         assert ("https://aka.ms/installazurecli" in error) is redacted
         assert ("Azure CLI was not found on PATH." in error) is not redacted
@@ -3126,7 +3116,7 @@ class TestDeployResultOutput:
         assert result["summary"]["operations"]["total"] == 0
         assert "missing.yaml" not in captured.out
 
-    def test_missing_manifest_in_json_mode_emits_no_run_document(
+    def test_missing_manifest_in_json_mode_emits_invalid_run_document(
         self, complete_workspace, capsys
     ):
         from siteops.orchestrator import Orchestrator
@@ -3144,8 +3134,9 @@ class TestDeployResultOutput:
 
         captured = capsys.readouterr()
         assert exit_code == 1
-        assert captured.out == ""
-        assert "Manifest not found" in captured.err
+        document = json.loads(captured.out)
+        assert document["status"] == "invalid"
+        assert document["diagnostics"][0]["code"] == "lookup.missing"
         build.assert_not_called()
         execute.assert_not_called()
 

@@ -22,6 +22,8 @@ from pathlib import Path
 from typing import Any, ClassVar, Protocol, TypeVar
 
 from siteops import yamlio
+from siteops.diagnostics import ContentError, diagnostic_from_error
+from siteops.sanitize import is_redaction_enabled
 
 
 class DataclassInstance(Protocol):
@@ -180,14 +182,18 @@ def validate_site_required(spec: dict, source: Path | str) -> None:
     """
     for key in _SITE_REQUIRED_SPEC_KEYS:
         if key not in spec:
-            raise ValueError(f"Missing required field '{key}' in Site: {source}")
+            raise ContentError(
+                f"Missing required field '{key}' in Site: {source}",
+                code="content.required-field-missing", subject="site", schema_field=key,
+            )
         value = spec[key]
         if value is None or (isinstance(value, str) and not value.strip()):
-            raise ValueError(
+            raise ContentError(
                 f"Required field '{key}' in Site '{source}' has no value. "
                 f"Give it one, inherit it from a parent template, or remove "
                 f"the key entirely, since a key written with no value "
-                f"overrides the inherited one."
+                f"overrides the inherited one.",
+                code="content.required-value-empty", subject="site", schema_field=key,
             )
 
 
@@ -217,12 +223,13 @@ def validate_site_keys(data: dict, source: Path | str) -> None:
         )
         if misplaced:
             named = ", ".join(f"`{key}`" for key in misplaced)
-            raise ValueError(
+            raise ContentError(
                 f"Site '{source}' mixes the two Site shapes. It declares `spec`, "
                 f"which is the envelope shape, and also carries {named} at the "
                 f"top level, where only the flat shape reads them. Move them "
                 f"under `metadata` or `spec`, or remove `spec` and put every "
-                f"field at the top level."
+                f"field at the top level.",
+                code="content.field-placement-invalid", subject="site", schema_field="spec",
             )
         _validate_known_keys(
             data, _SITE_NESTED_TOP_KEYS, path, "top-level", "Site", _SITE_TOP_LEVEL_ADVICE
@@ -242,10 +249,11 @@ def validate_site_keys(data: dict, source: Path | str) -> None:
             # Named rather than reported as an unknown key, since `inherits` is
             # a real field and the reader needs to know it is the placement
             # that is wrong rather than the spelling.
-            raise ValueError(
+            raise ContentError(
                 f"Site '{source}' declares `inherits` inside `spec`, which is "
                 f"never read. Move it to the top level of the file, alongside "
-                f"`apiVersion` and `kind`. Both Site shapes inherit that way."
+                f"`apiVersion` and `kind`. Both Site shapes inherit that way.",
+                code="content.field-placement-invalid", subject="site", schema_field="inherits",
             )
         _validate_known_keys(
             spec, _SITE_NESTED_SPEC_KEYS, path, "spec", "Site", _SITE_SPEC_ADVICE
@@ -264,17 +272,19 @@ def validate_site_keys(data: dict, source: Path | str) -> None:
         for key in _SITE_MAPPING_KEYS:
             if key in container and container[key] is not None:
                 if not isinstance(container[key], dict):
-                    raise ValueError(
+                    raise ContentError(
                         f"'{key}' in Site '{source}' must be a mapping, got "
-                        f"{type(container[key]).__name__}."
+                        f"{type(container[key]).__name__}.",
+                        code="content.invalid-type", subject="site", schema_field=key,
                     )
         for key in _SITE_STRING_KEYS:
             if key in container and container[key] is not None:
                 if not isinstance(container[key], str):
-                    raise ValueError(
+                    raise ContentError(
                         f"'{key}' in Site '{source}' must be text, got "
                         f"{type(container[key]).__name__}. Quote the value if "
-                        f"it is meant to be text."
+                        f"it is meant to be text.",
+                        code="content.invalid-type", subject="site", schema_field=key,
                     )
 
         # A label value is compared against a selector, which is text, so a
@@ -285,10 +295,11 @@ def validate_site_keys(data: dict, source: Path | str) -> None:
         if isinstance(labels, dict):
             for label, value in labels.items():
                 if not isinstance(value, str):
-                    raise ValueError(
+                    raise ContentError(
                         f"Label '{label}' in Site '{source}' must be text, got "
                         f"{type(value).__name__}. Selectors compare text, so "
-                        f"this label matches nothing. Quote the value."
+                        f"this label matches nothing. Quote the value.",
+                        code="content.invalid-type", subject="site", schema_field="labels",
                     )
 
 
@@ -347,17 +358,19 @@ def _require_collection(
     if value is None:
         return kind()
     if not isinstance(value, kind):
-        raise ValueError(
+        raise ContentError(
             f"'{key}' in '{source}' must be a {kind.__name__}, got "
-            f"{type(value).__name__}."
+            f"{type(value).__name__}.",
+            code="content.invalid-type",
         )
     if element_kind is not None:
         for index, element in enumerate(value):
             if not isinstance(element, element_kind):
-                raise ValueError(
+                raise ContentError(
                     f"Entry {index} of '{key}' in '{source}' must be "
                     f"{element_kind.__name__}, got {type(element).__name__}: "
-                    f"{element!r}. Quote the value if it is meant to be text."
+                    f"{element!r}. Quote the value if it is meant to be text.",
+                    code="content.invalid-type",
                 )
     return value
 
@@ -380,9 +393,11 @@ def _require_envelope_mapping(
         return {}
     if not isinstance(value, dict):
         label = kind if kind.startswith("Site") else kind.lower()
-        raise ValueError(
+        raise ContentError(
             f"'{key}' in {label} '{source}' must be a mapping, got "
-            f"{type(value).__name__}."
+            f"{type(value).__name__}.",
+            code="content.invalid-type",
+            subject="site" if kind.startswith("Site") else "manifest", schema_field=key,
         )
     return value
 
@@ -417,6 +432,12 @@ def _validate_known_keys(
             has a correct answer, and offering the nearest spelling instead
             sends the reader to a different field that is also wrong.
     """
+    if any(not isinstance(key, str) for key in actual):
+        raise ContentError(
+            f"{kind} '{path}' must have text mapping keys.",
+            code="content.invalid-type", subject="site" if kind.startswith("Site") else "manifest",
+            source=path,
+        )
     unknown = sorted(set(actual.keys()) - allowed)
     if not unknown:
         return
@@ -431,13 +452,18 @@ def _validate_known_keys(
             parts.append(f"`{key}` (did you mean `{suggestion}`?)")
         else:
             parts.append(f"`{key}`")
-    raise ValueError(
+    misplaced_selector = kind.startswith("Site") and bool({"selector", "siteSelector"} & set(unknown))
+    raise ContentError(
         f"{kind} '{path}' has unknown {context} key(s): {', '.join(parts)}. "
-        f"Allowed: {sorted(allowed)}."
+        f"Allowed: {sorted(allowed)}.",
+        code="content.site-selector-misplaced" if misplaced_selector else "content.unknown-field",
+        subject="site" if kind.startswith("Site") else "manifest",
+        schema_field="siteSelector" if misplaced_selector and "siteSelector" in unknown else None,
+        source=path,
     )
 
 
-class IncludeError(ValueError):
+class IncludeError(ContentError):
     """Raised when a manifest `include:` directive cannot be resolved.
 
     Subclass of ValueError so existing callers that catch ValueError still work.
@@ -589,17 +615,21 @@ class MultipleSubscriptionSitesError(ValueError):
     """
 
 
-class ParameterSelectionError(ValueError):
+class ParameterSelectionError(ContentError):
     """Raised for malformed, duplicated, legacy, or unresolved selections."""
 
+    diagnostic_subject = "parameters"
 
-class ConditionSyntaxError(ValueError):
+
+class ConditionSyntaxError(ContentError):
     """Raised when a `when:` expression does not match the supported grammar.
 
     Manifest parsing rejects unsupported syntax before the evaluator's
     defensive fallback can run it. The distinct type lets callers separate an
     authored condition error from unrelated model validation.
     """
+
+    diagnostic_code = "content.condition-invalid"
 
 
 def parse_selector(selector: str | None) -> dict[str, list[str]]:
@@ -712,33 +742,33 @@ def _normalize_site_identifier(identifier: str) -> str:
     trailing slash).
     """
     if not identifier:
-        raise ValueError("Site identifier must not be empty")
+        raise ContentError("Site identifier must not be empty", code="content.path-invalid")
     normalized = identifier.replace("\\", "/")
     if normalized.startswith("./"):
-        raise ValueError(
+        raise ContentError(
             f"Site identifier '{identifier}' must not start with `./`. "
-            f"Use the relative form (e.g., `regions/eu/munich`)."
+            f"Use the relative form (e.g., `regions/eu/munich`).", code="content.path-invalid",
         )
     if normalized.startswith("/"):
-        raise ValueError(
-            f"Site identifier '{identifier}' must be relative (no leading `/`)."
+        raise ContentError(
+            f"Site identifier '{identifier}' must be relative (no leading `/`).", code="content.path-invalid",
         )
     if normalized.endswith("/"):
-        raise ValueError(
-            f"Site identifier '{identifier}' must not end with `/`."
+        raise ContentError(
+            f"Site identifier '{identifier}' must not end with `/`.", code="content.path-invalid",
         )
     parts = normalized.split("/")
     if any(p == ".." for p in parts):
-        raise ValueError(
-            f"Site identifier '{identifier}' must not contain `..` segments."
+        raise ContentError(
+            f"Site identifier '{identifier}' must not contain `..` segments.", code="content.path-invalid",
         )
     if any(p == "." for p in parts):
-        raise ValueError(
-            f"Site identifier '{identifier}' must not contain `.` segments."
+        raise ContentError(
+            f"Site identifier '{identifier}' must not contain `.` segments.", code="content.path-invalid",
         )
     if any(not p for p in parts):
-        raise ValueError(
-            f"Site identifier '{identifier}' must not contain empty path segments."
+        raise ContentError(
+            f"Site identifier '{identifier}' must not contain empty path segments.", code="content.path-invalid",
         )
     return normalized
 
@@ -770,14 +800,28 @@ def _validate_resource(data: dict[str, Any], expected_kind: str | list[str], pat
 
     if api_version not in SUPPORTED_API_VERSIONS:
         supported = ", ".join(sorted(SUPPORTED_API_VERSIONS))
-        raise ValueError(f"Unsupported apiVersion '{api_version}' in {path}. Supported: {supported}")
+        raise ContentError(
+            f"Unsupported apiVersion '{api_version}' in {path}. Supported: {supported}",
+            code="content.schema-unsupported", schema_field="apiVersion",
+            subject="site" if any(k.startswith("Site") for k in expected_kinds) else "manifest",
+            source=path,
+        )
 
     if kind is not None and kind not in expected_kinds:
         if len(expected_kinds) == 1:
-            raise ValueError(f"Invalid kind '{kind}' in {path}. Expected '{expected_kinds[0]}'")
+            raise ContentError(
+                f"Invalid kind '{kind}' in {path}. Expected '{expected_kinds[0]}'",
+                code="content.schema-unsupported", schema_field="kind",
+                subject="site" if expected_kinds[0].startswith("Site") else "manifest", source=path,
+            )
         else:
             expected_str = ", ".join(f"'{k}'" for k in expected_kinds)
-            raise ValueError(f"Invalid kind '{kind}' in {path}. Expected one of: {expected_str}")
+            raise ContentError(
+                f"Invalid kind '{kind}' in {path}. Expected one of: {expected_str}",
+                code="content.schema-unsupported", schema_field="kind",
+                subject="site" if any(k.startswith("Site") for k in expected_kinds) else "manifest",
+                source=path,
+            )
 
     return api_version
 
@@ -1417,8 +1461,9 @@ class Manifest:
             try:
                 sites.append(_normalize_site_identifier(item))
             except ValueError as e:
-                raise ValueError(
-                    f"Invalid Site identifier in `{path}` `sites:` list: {e}"
+                raise ContentError(
+                    f"Invalid Site identifier in `{path}` `sites:` list: {e}",
+                    diagnostic=diagnostic_from_error(e, subject="manifest", source=path),
                 ) from e
 
         # `selector:` is the preferred manifest field. `siteSelector:` is
@@ -1431,10 +1476,14 @@ class Manifest:
             )
         if "siteSelector" in spec:
             import logging as _logging
-            _logging.getLogger("siteops.models").warning(
-                "%s uses deprecated `siteSelector:`. Rename to `selector:`.",
-                path,
-            )
+            if is_redaction_enabled():
+                _logging.getLogger("siteops.models").warning(
+                    "Manifest siteSelector is deprecated. Use selector on the Manifest."
+                )
+            else:
+                _logging.getLogger("siteops.models").warning(
+                    "%s uses deprecated `siteSelector:`. Rename to `selector:`.", path,
+                )
             site_selector = spec.get("siteSelector")
         else:
             site_selector = spec.get("selector")
@@ -2015,7 +2064,8 @@ def _resolve_steps_and_params(
             )
         except ValueError as exc:
             raise IncludeError(
-                f"Include '{raw_target}' in '{manifest_path}' could not be loaded as a Manifest: {exc}"
+                f"Include '{raw_target}' in '{manifest_path}' could not be loaded as a Manifest: {exc}",
+                diagnostic=diagnostic_from_error(exc, subject="include", source=target_path),
             ) from exc
 
         sub_steps, sub_params, sub_compositions = _resolve_steps_and_params(

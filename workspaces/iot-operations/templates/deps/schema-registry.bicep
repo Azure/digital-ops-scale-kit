@@ -41,6 +41,15 @@ var generatedStorageAccountName = !empty(storageAccountName)
 // (storage account → schema registry → storage account)
 var schemaRegistryResourceId = resourceId('Microsoft.DeviceRegistry/schemaRegistries', schemaRegistryName)
 
+// The service limits the namespace to 32 characters and requires it to be unique in the tenant.
+// A registry name that fits is used unchanged, so registries created earlier keep their
+// namespace. A longer name keeps its first 26 characters and gains a hash of the resource group
+// and the full name. Sites that share a name in one tenant set schemaRegistryName to keep their
+// namespaces distinct.
+var schemaRegistryNamespace = length(schemaRegistryName) <= 32
+  ? schemaRegistryName
+  : '${toLower(take(schemaRegistryName, 26))}${take(uniqueString(resourceGroup().id, schemaRegistryName), 6)}'
+
 resource storageAccount 'Microsoft.Storage/storageAccounts@2024-01-01' = {
   name: generatedStorageAccountName
   location: location
@@ -91,7 +100,7 @@ resource schemaRegistry 'Microsoft.DeviceRegistry/schemaRegistries@2025-10-01' =
     type: 'SystemAssigned'
   }
   properties: {
-    namespace: schemaRegistryName
+    namespace: schemaRegistryNamespace
     // Explicitly construct URL to avoid any trailing slash issues
     storageAccountContainerUrl: 'https://${storageAccount.name}.blob.${environment().suffixes.storage}/${containerName}'
   }

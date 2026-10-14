@@ -99,7 +99,7 @@ class TestBeginnerResourceSetSample:
             "dataflows": ["basic-routing"]
         }
 
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
         assert not errors, "\n".join(errors)
 
         _, composition, _ = orchestrator._resolve_manifest_parameters(
@@ -172,7 +172,7 @@ class TestAdvancedResourceSetSample:
         sites = orchestrator.resolve_sites(manifest)
 
         assert [site.name for site in sites] == ["catalog-composition"]
-        errors = orchestrator.validate(manifest_path)
+        errors = orchestrator.validate(manifest_path).local_messages()
         assert not errors, "\n".join(errors)
 
         _, composition, _ = orchestrator._resolve_manifest_parameters(

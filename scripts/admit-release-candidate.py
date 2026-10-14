@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Workflows may set PYTHONSAFEPATH, so sibling helpers are found through an explicit path entry.
+sys.path.insert(1, str(Path(__file__).resolve().parent))
 
 from release_verification import ReleaseVerifier  # noqa: E402
 from siteops_release_assets import (  # noqa: E402

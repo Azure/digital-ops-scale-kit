@@ -150,26 +150,55 @@ jobs:
 
           SUMMARY_FILE="$(Build.ArtifactStagingDirectory)/validation-summary.md"
           echo "## Manifest Validation" > "$SUMMARY_FILE"
+          umask 077
+          private="$(mktemp -d "$STATE_PARENT/siteops-validate.XXXXXX")"
+          cleanup() {
+            local status=$?
+            if rm -f "$private/stdout" "$private/stderr" 2>/dev/null && rmdir "$private" 2>/dev/null; then
+              :
+            else
+              echo "##vso[task.logissue type=error]Private validation files could not be removed."
+              if [[ $status -eq 0 ]]; then status=1; fi
+            fi
+            exit "$status"
+          }
+          trap cleanup EXIT
           EXIT_CODE=0
 
           for manifest in $MANIFESTS; do
             manifest_rel="${manifest#$WORKSPACE_DIR/}"
             echo "##[group]Validating $manifest"
             echo "### $manifest_rel" >> "$SUMMARY_FILE"
-            echo '```' >> "$SUMMARY_FILE"
 
             # Libraries without targets remain structurally valid. Executable
             # catalog coverage runs in the workspace tests, not this sweep.
-            if siteops -w "$WORKSPACE_DIR" validate "$manifest_rel" 2>&1 | tee -a "$SUMMARY_FILE"; then
-              echo "✓ Valid"
+            if siteops -w "$WORKSPACE_DIR" validate "$manifest_rel" --output json --projection publishable \
+                > "$private/stdout" 2> "$private/stderr"; then
+              code=0
             else
-              EXIT_CODE=1
+              code=$?
             fi
+            if [[ ! -f scripts/render-siteops-output.py ]]; then
+              if [[ $code -eq 2 ]]; then
+                echo "##vso[task.logissue type=error]Site Ops engine and template releases do not match. Use matching engine, setup, templates and helpers."
+              else
+                echo "##vso[task.logissue type=error]Diagnostic details are unavailable."
+              fi
+              report=1
+            elif python3 -I -S -B scripts/render-siteops-output.py "$private/stdout" \
+                --kind ValidationResult --exit-code "$code" --platform ado \
+                --summary "$SUMMARY_FILE"; then
+              report=0
+            else
+              report=$?
+            fi
+            if [[ $code -ne 0 || $report -ne 0 ]]; then EXIT_CODE=1; fi
 
-            echo '```' >> "$SUMMARY_FILE"
             echo "##[endgroup]"
           done
 
           echo "##vso[task.uploadsummary]$SUMMARY_FILE"
           exit $EXIT_CODE
         displayName: Validate manifest structure
+        env:
+          STATE_PARENT: $(Agent.TempDirectory)

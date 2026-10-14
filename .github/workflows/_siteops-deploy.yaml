@@ -200,51 +200,33 @@ jobs:
             PLAN_EXIT_CODE=$?
           fi
 
-          PLAN_STATUS=""
-          if PLAN_STATUS=$(python3 -c '
-          import json
-          import sys
-
-          with open(sys.argv[1], encoding="utf-8") as stream:
-              document = json.load(stream)
-          if (
-              document.get("apiVersion") != "siteops/v1alpha1"
-              or document.get("kind") != "DeploymentPlan"
-              or document.get("projection") != "publishable"
-              or document.get("status") not in {"planned", "invalid"}
-              or document.get("intent") != "executable"
-              or document.get("executable") is not (document.get("status") == "planned")
-          ):
-              raise SystemExit(1)
-          print(document["status"])
-          ' "$PLAN_STDOUT" 2>/dev/null); then
-            PLAN_DOCUMENT_VALID=1
-          else
-            PLAN_DOCUMENT_VALID=0
-          fi
-
-          if [[ $PLAN_EXIT_CODE -eq 0 && "$PLAN_STATUS" != "planned" ]]; then
-            PLAN_DOCUMENT_VALID=0
-          elif [[ $PLAN_EXIT_CODE -ne 0 && "$PLAN_STATUS" != "invalid" ]]; then
-            PLAN_DOCUMENT_VALID=0
-          fi
-
           echo "### Deployment Plan" >> "$GITHUB_STEP_SUMMARY"
-          if [[ $PLAN_DOCUMENT_VALID -eq 1 ]]; then
-            echo '```json' >> "$GITHUB_STEP_SUMMARY"
-            cat "$PLAN_STDOUT" >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          PLAN_DOCUMENT_VALID=0
+          PLAN_REPORT_EXIT_CODE=1
+          if [[ -f "$GITHUB_WORKSPACE/scripts/render-siteops-output.py" ]]; then
+            if python3 -I -S -B "$GITHUB_WORKSPACE/scripts/render-siteops-output.py" "$PLAN_STDOUT" \
+                --kind DeploymentPlan --exit-code "$PLAN_EXIT_CODE" --platform github \
+                --summary "$GITHUB_STEP_SUMMARY" --require-executable; then
+              PLAN_DOCUMENT_VALID=1
+            else
+              PLAN_REPORT_EXIT_CODE=$?
+            fi
           else
-            echo "Publishable plan output was unavailable." >> "$GITHUB_STEP_SUMMARY"
+            message="Diagnostic details are unavailable."
+            if [[ $PLAN_EXIT_CODE -eq 2 ]]; then message="Site Ops engine and template releases do not match. Use matching engine, setup, templates and helpers."; fi
+            echo "::error::$message"
+            echo "$message" >> "$GITHUB_STEP_SUMMARY"
           fi
 
           if [[ $PLAN_EXIT_CODE -ne 0 ]]; then
-            echo "::error::Executable plan preparation failed. Run the plan locally for private diagnostics."
+            if [[ $PLAN_EXIT_CODE -ne 2 ]]; then
+              echo "::error::Executable plan preparation failed. Run the plan locally for private diagnostics."
+            fi
             exit "$PLAN_EXIT_CODE"
           fi
           if [[ $PLAN_DOCUMENT_VALID -ne 1 ]]; then
             echo "::error::Site Ops returned an unsupported plan document."
-            exit 1
+            exit "$PLAN_REPORT_EXIT_CODE"
           fi
 
       - name: Deploy
@@ -285,61 +267,23 @@ jobs:
             DEPLOY_EXIT_CODE=$?
           fi
 
-          RUN_DOCUMENT_VALID=0
-          RUN_SUMMARY=""
-          if RUN_SUMMARY=$(python3 -c '
-          import json
-          import sys
-
-          with open(sys.argv[1], encoding="utf-8") as stream:
-              document = json.load(stream)
-          code = int(sys.argv[2])
-          summary = document.get("summary")
-          summary = summary if isinstance(summary, dict) else {}
-          sites = summary.get("sites")
-          sites = sites if isinstance(sites, dict) else {}
-          operations = summary.get("operations")
-          operations = operations if isinstance(operations, dict) else {}
-          interrupted = summary.get("interrupted")
-          status = document.get("status")
-          site_total = sites.get("total")
-          operation_total = operations.get("total")
-          if (
-              document.get("apiVersion") != "siteops/v1alpha1"
-              or document.get("kind") != "DeploymentRun"
-              or document.get("projection") != "publishable"
-              or status not in {
-                  "succeeded", "failed", "skipped", "not-run",
-                  "cancelled", "unknown", "invalid",
-              }
-              or type(document.get("exitCode")) is not int
-              or document["exitCode"] != code
-              or type(interrupted) is not bool
-              or type(site_total) is not int
-              or type(operation_total) is not int
-              or (code == 130) != interrupted
-              or (not interrupted
-                  and (code == 0) != (status in {"succeeded", "skipped"}))
-          ):
-              raise SystemExit(1)
-          flag = "yes" if interrupted else "no"
-          print(
-              f"Status {status}. Sites {site_total}. "
-              f"Operations {operation_total}. Interrupted {flag}."
-          )
-          ' "$RUN_STDOUT" "$DEPLOY_EXIT_CODE" 2>/dev/null); then
-            RUN_DOCUMENT_VALID=1
-          fi
-
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "### Deployment Result" >> "$GITHUB_STEP_SUMMARY"
-          if [[ $RUN_DOCUMENT_VALID -eq 1 ]]; then
-            echo "$RUN_SUMMARY" >> "$GITHUB_STEP_SUMMARY"
-            echo '```json' >> "$GITHUB_STEP_SUMMARY"
-            cat "$RUN_STDOUT" >> "$GITHUB_STEP_SUMMARY"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          RUN_DOCUMENT_VALID=0
+          RUN_REPORT_EXIT_CODE=1
+          if [[ -f "$GITHUB_WORKSPACE/scripts/render-siteops-output.py" ]]; then
+            if python3 -I -S -B "$GITHUB_WORKSPACE/scripts/render-siteops-output.py" "$RUN_STDOUT" \
+                --kind DeploymentRun --exit-code "$DEPLOY_EXIT_CODE" --platform github \
+                --summary "$GITHUB_STEP_SUMMARY"; then
+              RUN_DOCUMENT_VALID=1
+            else
+              RUN_REPORT_EXIT_CODE=$?
+            fi
           else
-            echo "Publishable deployment result was unavailable." >> "$GITHUB_STEP_SUMMARY"
+            message="Diagnostic details are unavailable."
+            if [[ $DEPLOY_EXIT_CODE -eq 2 ]]; then message="Site Ops engine and template releases do not match. Use matching engine, setup, templates and helpers."; fi
+            echo "::error::$message"
+            echo "$message" >> "$GITHUB_STEP_SUMMARY"
           fi
 
           if [[ $DEPLOY_EXIT_CODE -eq 130 ]]; then
@@ -347,12 +291,14 @@ jobs:
             exit "$DEPLOY_EXIT_CODE"
           fi
           if [[ $DEPLOY_EXIT_CODE -ne 0 ]]; then
-            echo "::error::Deployment did not complete successfully. Review the result summary."
+            if [[ $DEPLOY_EXIT_CODE -ne 2 ]]; then
+              echo "::error::Deployment did not complete successfully. Review the result summary."
+            fi
             exit "$DEPLOY_EXIT_CODE"
           fi
           if [[ $RUN_DOCUMENT_VALID -ne 1 ]]; then
             echo "::error::Site Ops returned an unsupported deployment result."
-            exit 1
+            exit "$RUN_REPORT_EXIT_CODE"
           fi
 
       - name: Azure Logout

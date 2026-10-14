@@ -13,6 +13,7 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
+from siteops.diagnostics import ContentDiagnostic, ProviderFailure, normalize_provider_failure
 from siteops.planning import (
     DiagnosticSeverity,
     OperationIdentity,
@@ -213,6 +214,7 @@ class RunDiagnostic:
     private_detail: str | None = field(default=None, repr=False, compare=False)
     serialized_detail: str | None = None
     public_summary: str | None = None
+    content_diagnostic: ContentDiagnostic | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.code, "Run diagnostic code")
@@ -277,6 +279,7 @@ class OperationResult:
         repr=False,
         compare=False,
     )
+    failure: ProviderFailure | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, OperationStatus):
@@ -296,6 +299,8 @@ class OperationResult:
                 raise ValueError("Succeeded operations cannot carry a reason.")
         elif self.reason is None:
             raise ValueError("Non-success operations require a typed reason.")
+        object.__setattr__(self, "failure", normalize_provider_failure(self.failure)
+                           if self.status in {OperationStatus.FAILED, OperationStatus.UNKNOWN} else None)
 
     @property
     def deployment_name(self) -> str | None:
@@ -533,6 +538,7 @@ def preparation_failure_result(result: PlanBuildResult) -> RunResult:
             private_detail=diagnostic.detail,
             serialized_detail=diagnostic.serialized_detail,
             public_summary=diagnostic.public_summary,
+            content_diagnostic=diagnostic.content_diagnostic,
         )
         for diagnostic in result.diagnostics
     )

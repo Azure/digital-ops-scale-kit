@@ -287,8 +287,13 @@ class TestWorkflowSecretSyncModes:
         assert "multiple AIO releases or Secret Sync modes" in workflow
         assert "Secret Sync requires OIDC issuer and workload identity" in workflow
         assert "matrix axis intentionally controls all three settings" in workflow
-        assert "max_parallel={1 if persistent or published_mode else 20}" in workflow
-        assert "max-parallel: ${{ fromJSON(needs.prep.outputs.max-parallel) }}" in workflow
+        # Ordinary runs keep their limits. Candidate acceptance sets its own, and its
+        # site-groups job serializes Site cases that share a persistent group.
+        assert "max_parallel={3 if candidate_mode else 1 if persistent or published_mode else 20}" in workflow
+        assert (
+            "max-parallel: ${{ fromJSON(needs.site-groups.outputs.max-parallel || "
+            "needs.prep.outputs.max-parallel) }}"
+        ) in workflow
         assert 'enabled) SYNC_SUFFIX="sync-on"' in workflow
         assert 'disabled) SYNC_SUFFIX="sync-off"' in workflow
         assert 'RESOURCE_SUFFIX="${SHORT_RUN}-${SAFE_VER}-${SYNC_SUFFIX}"' in workflow

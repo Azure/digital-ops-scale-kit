@@ -94,7 +94,7 @@ if [[ "$command_name" == "plan" ]]; then
       describe) intent="describe"; executable=false ;;
       not-executable) executable=false ;;
     esac
-    printf '{"apiVersion":"siteops/v1alpha1","kind":"DeploymentPlan","projection":"%s","status":"%s","intent":"%s","executable":%s}\n' "$projection" "$status" "$intent" "$executable"
+    printf '{"apiVersion":"siteops/v1alpha1","kind":"DeploymentPlan","engine":{"name":"siteops","version":"old"},"projection":"%s","status":"%s","intent":"%s","executable":%s,"summary":{"targetCount":0,"operationCount":0,"dispositions":{"execute":0,"skip":0,"blocked":0},"diagnosticCount":0},"diagnostics":[]}\n' "$projection" "$status" "$intent" "$executable"
   else
     printf 'not-json\n'
   fi
@@ -137,9 +137,20 @@ if [[ "$command_name" == "deploy" ]]; then
   esac
   summary_json=""
   if [[ "${FAKE_RUN_DOCUMENT_MODE:-valid}" != "no-summary" ]]; then
-    summary_json=$(printf '"summary":{"interrupted":%s,"operations":{"total":%s},"sites":{"total":%s}},' "$interrupted" "$operation_total" "$site_total")
+    counter_status="$status"
+    [[ "$counter_status" == "succeeded" || "$counter_status" == "failed" || "$counter_status" == "unknown" || "$counter_status" == "cancelled" || "$counter_status" == "skipped" ]] || counter_status=failed
+    operation_counts=""
+    site_counts=""
+    for outcome in succeeded failed skipped not-run cancelled unknown; do
+      op_count=0
+      site_count=0
+      if [[ "$outcome" == "$counter_status" ]]; then op_count="$operation_total"; site_count="$site_total"; fi
+      operation_counts+="$(printf '"%s":%s,' "$outcome" "$op_count")"
+      site_counts+="$(printf '"%s":%s,' "$outcome" "$site_count")"
+    done
+    summary_json=$(printf '"summary":{"interrupted":%s,"operations":{"total":%s,"counts":{%s}},"sites":{"total":%s,"counts":{%s}}},' "$interrupted" "$operation_total" "${operation_counts%,}" "$site_total" "${site_counts%,}")
   fi
-  printf '{"apiVersion":"%s","kind":"%s","projection":"%s","status":"%s","exitCode":%s,%s"diagnostics":[]}\n' "$api_version" "$kind" "$projection" "$status" "$document_exit" "$summary_json"
+  printf '{"apiVersion":"%s","kind":"%s","engine":{"name":"siteops","version":"old"},"projection":"%s","status":"%s","exitCode":%s,%s"diagnostics":[]}\n' "$api_version" "$kind" "$projection" "$status" "$document_exit" "$summary_json"
   exit "$run_exit"
 fi
 
@@ -202,15 +213,19 @@ def _run_delivery_plan_script(
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path, Path]:
     script, redaction = _delivery_plan_case(platform, run_step=run_step)
     bin_dir, invocation_log = _install_fake_delivery_tools(tmp_path)
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "render-siteops-output.py").write_bytes(
+        (REUSABLE_GITHUB_DEPLOY.parents[2] / "scripts" / "render-siteops-output.py").read_bytes(),
+    )
     if auxiliary_failure:
-        name = "cat" if auxiliary_failure == "report" else "rm"
-        code = 41 if name == "cat" else 42
+        name = "python3" if auxiliary_failure == "report" else "rm"
+        code = 41 if name == "python3" else 42
         selected_file = "siteops-run.json" if run_step else "siteops-plan.json"
         _write_executable(
             bin_dir / name,
             f'#!/usr/bin/env bash\ncase "$*" in\n'
             f'  *{selected_file}*) exit {code} ;;\n'
-            f'  *) exec /usr/bin/{name} "$@" ;;\nesac\n',
+            f'  *) exec {shlex.quote(_bash_path(Path(sys.executable))) if name == "python3" else "/usr/bin/rm"} "$@" ;;\nesac\n',
         )
     temp_dir = tmp_path / "runner-temp"
     summary_dir = tmp_path / "summaries"
@@ -239,6 +254,8 @@ def _run_delivery_plan_script(
         "DRY_RUN": "True" if dry_run else "False",
         "PLAN_TEMP_DIRECTORY": _bash_path(temp_dir),
         "PLAN_SUMMARY_DIRECTORY": _bash_path(summary_dir),
+        "TOOL_ROOT": _bash_path(tmp_path),
+        "GITHUB_WORKSPACE": _bash_path(tmp_path),
     }
     result = run_script(
         script, tmp_path, exports,
@@ -487,6 +504,26 @@ class TestDeployDropdownRegistration:
         assert 'deploy "$MANIFEST"' in script
 
     @pytest.mark.parametrize("platform", ["github", "azure-pipelines"])
+    def test_only_the_output_adapter_uses_isolated_python(self, platform):
+        path = REUSABLE_GITHUB_DEPLOY if platform == "github" else REUSABLE_ADO_DEPLOY
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+
+        def check_environment(value):
+            if isinstance(value, dict):
+                assert "PYTHONSAFEPATH" not in value.get("env", {})
+                for child in value.values():
+                    check_environment(child)
+            elif isinstance(value, list):
+                for child in value:
+                    check_environment(child)
+
+        check_environment(data)
+        scripts = (_delivery_plan_case(platform)[0],)
+        if platform == "github":
+            scripts += (_delivery_plan_case(platform, run_step=True)[0],)
+        assert sum(script.count("python3 -I -S -B") for script in scripts) == 2
+
+    @pytest.mark.parametrize("platform", ["github", "azure-pipelines"])
     @pytest.mark.parametrize(
         ("plan_exit", "valid_document", "document_mode", "expected_exit"),
         [
@@ -527,11 +564,11 @@ class TestDeployDropdownRegistration:
         assert "not-json" not in summary
         publishable = valid_document and document_mode == "valid"
         if publishable:
-            assert '"projection":"publishable"' in summary
             expected_status = "planned" if plan_exit == 0 else "invalid"
-            assert f'"status":"{expected_status}"' in summary
+            assert f"Plan result: {expected_status}." in summary
+            assert "```json" not in summary
         else:
-            assert "Publishable plan output was unavailable." in summary
+            assert "Diagnostic details are unavailable." in summary
 
         invocations = invocation_log.read_text(encoding="utf-8").splitlines()
         assert " plan " in f" {invocations[0]} "
@@ -617,18 +654,16 @@ class TestDeployDropdownRegistration:
         summary = summary_path.read_text(encoding="utf-8")
         assert "PRIVATE" not in result.stdout + result.stderr + summary
         if published:
-            assert '"kind":"DeploymentRun"' in summary
-            assert '"projection":"publishable"' in summary
             assert "Sites 1. Operations" in summary
             assert (
                 "Interrupted yes." if deploy_exit == 130 else "Interrupted no."
             ) in summary
             if mode == "skipped":
-                assert '"status":"skipped"' in summary
+                assert "Status skipped." in summary
                 assert "Operations 0." in summary
                 assert "Success" not in summary
         else:
-            assert "Publishable deployment result was unavailable." in summary
+            assert "Diagnostic details are unavailable." in summary
             assert "```json" not in summary
         invocations = invocation_log.read_text(encoding="utf-8").splitlines()
         assert len(invocations) == (1 if platform == "github" else 2)

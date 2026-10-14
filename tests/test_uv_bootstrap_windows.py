@@ -1371,7 +1371,8 @@ def test_native_staging_is_private_per_run_and_replaces_temporary_storage(tmp_pa
     program = _shell(shell)
     source = SCRIPT.read_text(encoding="utf-8")
     prefix = "$staging = Join-Path $data 'install-staging'\n"
-    setup = prefix + source.split(prefix, 1)[1].split("    $engineRelease = $Release\n", 1)[0]
+    # The staging setup ends where source discovery begins.
+    setup = prefix + source.split(prefix, 1)[1].split("    if (-not $commitSupplied) {\n", 1)[0]
     cleanup = "finally {\n" + source.split("\nfinally {\n", 1)[1]
     wrapper = tmp_path / "staging.ps1"
     wrapper.write_text(

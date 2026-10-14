@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from release_fleet import SLOTS, FleetScope, check_admission, expected_document
+from release_fleet import GROUP_NAME, SLOTS, FleetScope, check_admission, expected_document
 from siteops_release_assets import ENGINE_REFERENCE_FILES, FrozenReleaseAssets, publication_assets
 from workspace_engine import EngineSelection
 
@@ -23,6 +23,8 @@ ROLES = {
     "admission": "candidate-admission", "plan": "release-plan", "inventory": "release-assets",
     "engine": "workspace-engine", "workspaces": "workspace-release",
 }
+# Environment secrets that select persistent groups. Empty selects ephemeral groups.
+GROUP_SECRETS = {"site": "E2E_SITE_RESOURCE_GROUP", "fleet": "E2E_FLEET_RESOURCE_GROUPS"}
 
 
 class CoordinationError(ValueError):
@@ -145,12 +147,41 @@ def admission_for(candidate: FleetCandidate, root: Path) -> dict:
     return admission
 
 
-def scope_for(candidate: FleetCandidate, root: Path, *, run: int, attempt: int, subscription: str) -> FleetScope:
+def supplied_groups(kind: str, environ=os.environ) -> tuple[str, ...] | None:
+    """Read persistent group names from the environment secret for this kind.
+
+    The site secret holds one name. The fleet secret holds two names for slots
+    one and two, separated by one comma without spaces. If both secrets are
+    present, their group names must differ. Errors never echo values.
+    """
+    raw = environ.get(GROUP_SECRETS[kind], "")
+    if raw == "":
+        return None
+    values = tuple(raw.split(",")) if kind == "fleet" else (raw,)
+    if (len(values) != (2 if kind == "fleet" else 1) or any(GROUP_NAME.fullmatch(value) is None for value in values)
+            or len({value.casefold() for value in values}) != len(values)):
+        raise CoordinationError(f"{GROUP_SECRETS[kind]} must name {'two distinct resource groups' if kind == 'fleet' else 'one resource group'}.")
+    other = environ.get(GROUP_SECRETS["fleet" if kind == "site" else "site"], "")
+    if other and {value.casefold() for value in values} & {
+        value.casefold() for value in other.split(",")
+    }:
+        raise CoordinationError("The single Site group must differ from both fleet groups.")
+    return values
+
+
+def scope_for(candidate: FleetCandidate, root: Path, *, run: int, attempt: int, subscription: str,
+              slot: str | None = None) -> FleetScope:
+    """Select the fleet scope, or the single Site scope when a Site case slot is supplied.
+
+    The group mode comes from the environment secret for that kind, so every job
+    of one scenario derives the same private names and public binding.
+    """
     admission = admission_for(candidate, root)
+    kind = "site" if slot is not None else "fleet"
     return FleetScope(
         candidate.source["repository"], candidate.source["commit"],
         candidate.artifacts["admission"]["sha256"], admission["inventorySha256"],
-        run, attempt, subscription,
+        run, attempt, subscription, kind, (slot,) if slot is not None else SLOTS, supplied_groups(kind),
     )
 
 
@@ -214,6 +245,26 @@ def jobs(pages: list, *, run: int, attempt: int, commit: str) -> list[dict]:
                or type(job.get("run_id")) is not int or job["run_id"] != run
                or type(job.get("run_attempt")) is not int or job["run_attempt"] != attempt
                or job.get("head_sha") != commit for job in result)
+        or len({job["id"] for job in result}) != len(result)
+    ):
+        raise CoordinationError("The workflow job inventory is incomplete or belongs to another invocation.")
+    return result
+
+
+def run_jobs(pages: list, *, run: int, attempt: int, commit: str) -> list[dict]:
+    """Validate every recorded execution of this run's jobs up to the current attempt."""
+    if (not isinstance(pages, list) or not 1 <= len(pages) <= 32
+            or any(not isinstance(page, dict) or not isinstance(page.get("jobs"), list) for page in pages)):
+        raise CoordinationError("The workflow job inventory is invalid.")
+    result = [job for page in pages for job in page["jobs"]]
+    if (
+        not result or len(result) > 3000
+        or any(type(page.get("total_count")) is not int or page["total_count"] != len(result) for page in pages)
+        or any(not isinstance(job, dict) or type(job.get("id")) is not int
+               or type(job.get("run_id")) is not int or job["run_id"] != run
+               or type(job.get("run_attempt")) is not int or not 0 < job["run_attempt"] <= attempt
+               or job.get("head_sha") != commit or not isinstance(job.get("name"), str)
+               for job in result)
         or len({job["id"] for job in result}) != len(result)
     ):
         raise CoordinationError("The workflow job inventory is incomplete or belongs to another invocation.")

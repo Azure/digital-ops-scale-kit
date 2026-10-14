@@ -203,7 +203,7 @@ def test_production_admission_requires_explicit_repository_opt_in(tmp_path):
     ("_release-candidate.yaml", {"prepare", "workspace-assets", "engine-input", "engine-reference", "review"}, {"workspace-qualify", "workspace-qualified", "admit"}),
     ("_siteops-distribution.yaml", {"build", "attest"}, {"qualify", "summary"}),
     ("_workspace-distribution.yaml", {"build", "attest"}, set()),
-    ("release.yaml", {"publish"}, set()),
+    ("release.yaml", {"publish"}, {"accept"}),
     ("ci.yaml", set(), {"lint", "test", "linux-bootstrap", "windows-bootstrap", "validate", "overview"}),
 ])
 def test_runner_placement_follows_artifact_authority(name, secured, public):
@@ -269,7 +269,7 @@ def test_every_release_entry_point_requires_runner_admission():
     assert ci["jobs"]["installer-check"]["needs"] == "release-runner"
     assert "release-runner" in ci["jobs"]["release-preview"]["needs"]
     assert release["jobs"]["candidate"]["needs"] == "release-runner"
-    assert release["jobs"]["publish"]["needs"] == ["release-runner", "candidate"]
+    assert release["jobs"]["publish"]["needs"] == ["release-runner", "candidate", "accept"]
     for document, key in ((ci, "installer-check"), (ci, "release-preview"), (release, "candidate")):
         assert document["jobs"][key]["with"]["release-pool"] == "${{ needs.release-runner.outputs.pool }}"
     for key in ("distribution", "workspace-build"):

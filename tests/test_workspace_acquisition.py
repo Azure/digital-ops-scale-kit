@@ -99,9 +99,16 @@ def test_changed_proof_stops_before_retention(fixture, body):
 def test_retained_proof_reuse_does_not_read_the_original(fixture):
     fixture.cache.retain_proof(fixture.proof, fixture.source.entry.proof)
     fixture.proof.unlink()
-    before = (proof_root(fixture) / "proof.bin").stat()
+    retained = proof_root(fixture) / "proof.bin"
+
+    # Access time changes when the retained proof is read for verification.
+    def identity():
+        status = retained.stat()
+        return status.st_ino, status.st_size, status.st_mtime_ns
+
+    before = identity()
     fixture.cache.retain_proof(fixture.proof, fixture.source.entry.proof)
-    assert (proof_root(fixture) / "proof.bin").stat() == before
+    assert identity() == before
 
 
 def test_proof_shared_use_blocks_exclusive_retention(fixture):

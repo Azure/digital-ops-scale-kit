@@ -67,6 +67,7 @@ from siteops.planning import (
     serialize_plan,
     serialize_plan_json,
 )
+from tests.diagnostic_helpers import published
 
 
 def _template_unit(
@@ -1142,7 +1143,7 @@ def test_local_private_projection_omits_raw_diagnostic_detail():
     assert "detail" not in document["diagnostics"][0]
 
 
-def test_local_private_projection_can_include_explicit_value_free_detail():
+def test_local_private_projection_uses_registry_guidance_instead_of_producer_detail():
     result = PlanBuildResult(
         status=PlanStatus.INVALID,
         executable=False,
@@ -1164,9 +1165,8 @@ def test_local_private_projection_can_include_explicit_value_free_detail():
         engine_version="1.0.0b1",
     )
 
-    assert document["diagnostics"][0]["detail"] == (
-        "Add one subscription-level site."
-    )
+    assert document["diagnostics"] == [published("subscription-target.missing")]
+    assert "Add one subscription-level site." not in str(document)
 
 
 def test_publishable_and_redacted_plain_collapse_compiler_detail():
@@ -1193,11 +1193,7 @@ def test_publishable_and_redacted_plain_collapse_compiler_detail():
     plain = render_plain_plan(result, redacted=True)
 
     assert document["diagnostics"] == [
-        {
-            "code": "plan.compilation-failed",
-            "severity": "error",
-            "summary": "Template compilation failed.",
-        }
+        published("plan.compilation-failed")
     ]
     assert secret not in serialize_plan_json(
         result,
@@ -1522,11 +1518,7 @@ def test_publishable_projection_is_a_strict_allowlist():
         "diagnostics",
     }
     assert document["diagnostics"] == [
-        {
-            "code": "plan.diagnostic",
-            "severity": "error",
-            "summary": "Plan processing reported a diagnostic.",
-        }
+        published("plan.diagnostic")
     ]
 
 
@@ -1782,6 +1774,27 @@ def test_plain_plan_marks_steps_run_or_skipped_across_a_fleet():
     assert private.isascii() and public.isascii()
 
 
+def test_local_composition_and_plan_footer_show_each_cause_once():
+    from dataclasses import replace
+
+    from siteops.diagnostics import ContentDiagnostic
+    from siteops.planning import content_plan_diagnostic
+
+    issue = ContentDiagnostic("content.invalid-type", "Private composition cause.", "composition")
+    diagnostics = (
+        PlanDiagnostic("composition.invalid", DiagnosticSeverity.ERROR, "Composition failed.",
+                       detail=issue.private_detail),
+        content_plan_diagnostic(issue),
+    )
+    original = _gated_plan(("munich",))
+    target = replace(original.plan.targets[0], composition=PlanComposition((), (), (), ()),
+                     diagnostics=diagnostics)
+    plan = replace(original.plan, targets=(target,), composition_enabled=True)
+    result = replace(original, status=PlanStatus.INVALID, plan=plan, diagnostics=diagnostics)
+    assert render_plain_plan(result, redacted=False).count(issue.private_detail) == 1
+    assert serialize_plan(result, PlanProjection.LOCAL_PRIVATE, engine_version="test")["summary"]["diagnosticCount"] == 2
+
+
 def test_plain_plan_says_when_a_step_is_skipped_for_every_site():
     private = render_plain_plan(_gated_plan(("seattle", "tokyo")), redacted=False)
 
@@ -1931,6 +1944,7 @@ def test_not_executable_message_lists_every_blocking_diagnostic():
         "    Then rerun."
     )
     published = error.message(redacted=True)
+    assert "The deployment plan has 2 blocking problems:" in published
     assert "https://aka.ms/installazurecli" in published
     assert "`az extension add --name connectedk8s`" in published
     assert "Unrelated warning" not in published
@@ -1940,7 +1954,7 @@ def test_not_executable_message_keeps_one_diagnostic_as_its_own_text():
     error = _not_executable(_capability_error("validation.failed", "Step 'a' is invalid."))
 
     assert error.message(redacted=False) == "Step 'a' is invalid."
-    assert error.message(redacted=True) == "Manifest validation failed."
+    assert error.message(redacted=True).startswith("plan.validation-failed: Manifest validation failed.")
     assert str(error) == "Step 'a' is invalid."
 
 
@@ -1948,14 +1962,11 @@ def test_not_executable_message_keeps_one_diagnostic_as_its_own_text():
     "capability.bicep-compiler.missing", "compilation.tool-missing", "compilation.tool-unavailable",
 ])
 def test_published_bicep_compiler_failures_name_the_tool_and_fix(code):
-    from siteops.reporting import _PUBLISHABLE_RUN_DIAGNOSTICS as RUN_DIAGNOSTICS
-
     published = _not_executable(_capability_error(code, "Private detail.")).message(redacted=True)
-    assert published == (
-        "Azure CLI (`az`) with Bicep is required for Bicep template steps. Install Azure CLI "
-        "from https://aka.ms/installazurecli, run `az bicep install`, then rerun the command."
-    )
-    assert RUN_DIAGNOSTICS[code][1] == published
+    assert "plan.capability-unavailable" in published
+    assert "https://aka.ms/installazurecli" in published
+    assert "`az bicep install`" in published
+    assert "Private detail" not in published
 
 
 def test_not_executable_message_is_bounded():
@@ -1967,4 +1978,4 @@ def test_not_executable_message_is_bounded():
     assert lines[0] == "The deployment plan has 7 blocking problems:"
     assert lines[1:6] == [f"  - Problem {index}." for index in range(5)]
     assert lines[6] == "  2 more not shown. `siteops plan` lists every diagnostic."
-    assert error.message(redacted=True) == "Manifest validation failed."
+    assert error.message(redacted=True).startswith("plan.validation-failed: Manifest validation failed.")

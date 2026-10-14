@@ -81,7 +81,7 @@ class TestDataflowSemantics:
 
         errors = orchestrator.validate(
             workspace / "samples" / "dataflow-sample" / "manifest.yaml"
-        )
+        ).local_messages()
         assert not errors, "\n".join(errors)
 
     def test_selectable_worked_set_validates_through_the_catalog(
@@ -116,7 +116,7 @@ properties:
         errors = orchestrator.validate(
             workspace / "manifests" / "aio-resources" / "manifest.yaml",
             selector="name=catalog-reference-test",
-        )
+        ).local_messages()
 
         assert not errors, "\n".join(errors)
 

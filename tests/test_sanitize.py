@@ -10,11 +10,13 @@ asserting the local default would otherwise pass locally and fail in CI.
 """
 
 import io
+import json
 import logging
 from pathlib import Path
 
 import pytest
 
+from siteops.executor import ToolCallResult
 from siteops.orchestrator import Orchestrator, _ProgressOwner
 from siteops.planning import (
     OperationIdentity,
@@ -694,11 +696,12 @@ location: eastus
             orchestrator = Orchestrator(tmp_workspace)
             assert orchestrator.load_all_sites() == []
 
-        published = caplog.text + capsys.readouterr().err
+        assert caplog.text + capsys.readouterr().err == ""
+        published = json.dumps(orchestrator.skipped_sites[0].diagnostic.document())
         assert "private-site" not in published
         assert "private-resource-group" not in published
         assert str(site_path) not in published
-        assert "Site configuration could not be loaded" in published
+        assert "content.required-value-empty" in published
         assert orchestrator.skipped_sites[0][0] == "private-site"
 
     def test_deployment_command_and_timeout_warning_hide_the_site(
@@ -731,12 +734,12 @@ location: eastus
             )
 
         assert "private-site" not in caplog.text
-        assert "m-<site>-step-ts" in caplog.text
+        assert "[DRY-RUN] Azure CLI command" in caplog.text
 
         monkeypatch.setattr(
             executor,
             "_run_az",
-            lambda *args, **kwargs: (
+            lambda *args, **kwargs: ToolCallResult(
                 False,
                 "",
                 ENGINE_TIMEOUT_SENTINEL.format(
@@ -754,7 +757,7 @@ location: eastus
             )
 
         assert "private-site" not in caplog.text
-        assert "m-<site>-step-ts" in caplog.text
+        assert "Deployment submission timed out. Polling for provider state." in caplog.text
 
     def test_integration_failure_does_not_reinsert_the_site_name(
         self,
@@ -804,6 +807,7 @@ location: eastus
         self,
         clean_env,
         tmp_workspace,
+        capsys,
     ):
         import json
 
@@ -849,12 +853,19 @@ steps:
             encoding="utf-8",
         )
 
-        errors = Orchestrator(tmp_workspace).validate(manifest_path)
+        result = Orchestrator(tmp_workspace).validate(manifest_path)
+        assert any("private-site-a" in error for error in result.local_messages())
+        from argparse import Namespace
 
-        assert errors
-        assert all("private-site-a" not in error for error in errors)
-        assert all("private-site-b" not in error for error in errors)
-        assert any("<site>" in error for error in errors)
+        from siteops.cli import cmd_validate
+
+        assert cmd_validate(Namespace(workspace=tmp_workspace, manifest=manifest_path, selector=None),
+                            Orchestrator(tmp_workspace)) == 1
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "Validation failed" in captured.err
+        assert "private-site-a" not in captured.err
+        assert "private-site-b" not in captured.err
 
     def test_contextual_scrubbing_keeps_the_local_error(self, clean_env):
         error = "Deployment 'm-private-site-step-ts' failed"
@@ -1002,8 +1013,7 @@ class TestCommandScrubbing:
 
         assert "Contoso Prod" not in caplog.text
         assert "rg-contoso-munich" not in caplog.text
-        assert "<subscription>" in caplog.text
-        assert "<resource-group>" in caplog.text
+        assert "[DRY-RUN] Azure CLI command" in caplog.text
 
 
 class TestUserPrincipalNames:

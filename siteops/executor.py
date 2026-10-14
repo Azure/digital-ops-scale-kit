@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from siteops import __version__
+from siteops.diagnostics import OTHER_FAILURE, ProviderFailure, arm_failure, provider_document
 from siteops.process_args import prepare_process_args
 from siteops.runtime import (
     RuntimePathError,
@@ -42,6 +43,7 @@ from siteops.runtime import (
     describe_os_error,
 )
 from siteops.sanitize import (
+    is_redaction_enabled,
     scrub_command_for_output,
     scrub_for_output,
     scrub_site_for_output,
@@ -244,6 +246,54 @@ class WaitState(Enum):
     SATISFIED = "satisfied"
     FAILED = "failed"
     PENDING = "pending"
+
+
+@dataclass(frozen=True)
+class ToolCallResult:
+    success: bool
+    stdout: str = ""
+    stderr: str = ""
+    diagnostic: ProviderFailure | None = None
+
+
+@dataclass(frozen=True)
+class ConditionObservation:
+    state: WaitState
+    observed: str | None = None
+    error: str | None = None
+    diagnostic: ProviderFailure | None = None
+
+
+@dataclass(frozen=True)
+class ProxySession:
+    kubeconfig: str | None = None
+    diagnostic: ProviderFailure | None = None
+    error: str | None = None
+
+
+def _cli_failure(stdout: str, stderr: str) -> ProviderFailure:
+    if len(stderr) > 8192:
+        return OTHER_FAILURE
+    text = stderr
+    try:
+        envelope = json.loads(text)
+    except (ValueError, RecursionError):
+        if text.lstrip().startswith(("{", "[")):
+            return OTHER_FAILURE
+    else:
+        return arm_failure([envelope["error"]]) if type(envelope) is dict and "error" in envelope else OTHER_FAILURE
+    if _is_subscription_not_visible(text):
+        return ProviderFailure("subscription-not-visible")
+    if _is_missing_parameter_prompt(stdout[:8192], text):
+        return ProviderFailure("template-invalid")
+    match = re.match(r"(?:ERROR:\s*)?\(?((?:AuthorizationFailed|InvalidTemplate))\)?(?:\s*[: -]|$)", text)
+    if match:
+        return ProviderFailure("authorization-failed" if match[1] == "AuthorizationFailed" else "template-invalid")
+    return OTHER_FAILURE
+
+
+def _provider_error_text(detail: str, failure: ProviderFailure = OTHER_FAILURE) -> str:
+    return provider_document(failure)["summary"] if is_redaction_enabled() else detail
 
 
 # Azure CLI refuses locally when `--subscription` names a subscription the
@@ -733,6 +783,8 @@ def _probe_arc_proxy_ready(
             f"argv={scrub_command_for_output(cmd)!r} exit={result.returncode} "
             f"detail={scrub_for_output(first_line)[:200]!r}"
         )
+        if is_redaction_enabled():
+            last_observation = f"kubectl exited with code {result.returncode}"
         if _wait_or_stop(_ARC_PROXY_PROBE_READINESS_INTERVAL_S, stop_requested):
             return False
 
@@ -816,6 +868,7 @@ class DeploymentResult:
     error: str | None = None
     unconfirmed: UnconfirmedCompletion | None = None
     stopped_before_start: bool = False
+    failure: ProviderFailure | None = None
 
     def __post_init__(self) -> None:
         _validate_completion(self.success, self.unconfirmed, self.stopped_before_start)
@@ -838,6 +891,7 @@ class KubectlResult:
     error: str | None = None
     unconfirmed: UnconfirmedCompletion | None = None
     stopped_before_start: bool = False
+    failure: ProviderFailure | None = None
 
     def __post_init__(self) -> None:
         _validate_completion(self.success, self.unconfirmed, self.stopped_before_start)
@@ -864,6 +918,7 @@ class WaitResult:
     error: str | None = None
     unconfirmed: UnconfirmedCompletion | None = None
     stopped_before_start: bool = False
+    failure: ProviderFailure | None = None
 
     def __post_init__(self) -> None:
         _validate_completion(self.success, self.unconfirmed, self.stopped_before_start)
@@ -1129,7 +1184,7 @@ class AzCliExecutor:
         args: list[str],
         timeout: int = DEFAULT_AZ_TIMEOUT_SECONDS,
         site_name: str = "",
-    ) -> tuple[bool, str, str]:
+    ) -> ToolCallResult:
         """Run an Azure CLI command.
 
         Args:
@@ -1137,10 +1192,10 @@ class AzCliExecutor:
             timeout: Command timeout in seconds (default: 60 minutes)
 
         Returns:
-            Tuple of (success, stdout, stderr)
+            Private command output and typed failure evidence.
         """
         if not self.az_path:
-            return False, "", _AZURE_CLI_NOT_FOUND
+            return ToolCallResult(False, stderr=_AZURE_CLI_NOT_FOUND, diagnostic=ProviderFailure("tool-unavailable"))
 
         cmd = [self.az_path] + args
         # Rendered from the vector rather than scrubbed after joining, so a
@@ -1148,12 +1203,12 @@ class AzCliExecutor:
         # below carry the subscription and resource group the command targets.
         # This low-level dry-run path remains for compatibility tests. The CLI
         # uses executable planning for `deploy --dry-run`.
-        cmd_display = scrub_command_for_output(cmd)
+        cmd_display = "Azure CLI command" if is_redaction_enabled() else scrub_command_for_output(cmd)
         cmd_display = scrub_site_for_output(cmd_display, site_name) or ""
 
         if self.dry_run:
             logger.info(f"[DRY-RUN] {cmd_display}")
-            return True, "{}", ""
+            return ToolCallResult(True, "{}")
 
         logger.debug(f"Executing: {cmd_display}")
 
@@ -1174,18 +1229,22 @@ class AzCliExecutor:
                 check=False,
                 timeout=timeout,
             )
-            return result.returncode == 0, result.stdout or "", result.stderr or ""
+            stdout, stderr = result.stdout or "", result.stderr or ""
+            return ToolCallResult(result.returncode == 0, stdout, stderr,
+                                  None if result.returncode == 0 else _cli_failure(stdout, stderr))
         except subprocess.TimeoutExpired:
-            return False, "", ENGINE_TIMEOUT_SENTINEL.format(timeout=timeout)
+            return ToolCallResult(False, stderr=ENGINE_TIMEOUT_SENTINEL.format(timeout=timeout),
+                                  diagnostic=ProviderFailure("timeout"))
         except OSError as e:
-            return False, "", f"Failed to execute az command: {e}"
+            return ToolCallResult(False, stderr=f"Failed to execute az command: {e}",
+                                  diagnostic=ProviderFailure("tool-unavailable"))
 
     def _run_kubectl(
         self,
         args: list[str],
         timeout: int = DEFAULT_KUBECTL_TIMEOUT_SECONDS,
         kubeconfig: str | None = None,
-    ) -> tuple[bool, str, str]:
+    ) -> ToolCallResult:
         """Run a kubectl command.
 
         Args:
@@ -1197,20 +1256,21 @@ class AzCliExecutor:
                 pin kubectl to the per-proxy kubeconfig.
 
         Returns:
-            Tuple of (success, stdout, stderr)
+            Private command output and typed failure evidence.
         """
         if not self.kubectl_path:
-            return False, "", "kubectl not found in PATH. Install from https://kubernetes.io/docs/tasks/tools/"
+            return ToolCallResult(False, stderr="kubectl not found in PATH. Install from https://kubernetes.io/docs/tasks/tools/",
+                                  diagnostic=ProviderFailure("tool-unavailable"))
 
         cmd = [self.kubectl_path]
         if kubeconfig is not None:
             cmd.append(f"--kubeconfig={kubeconfig}")
         cmd.extend(args)
-        cmd_display = scrub_command_for_output(cmd)
+        cmd_display = "kubectl command" if is_redaction_enabled() else scrub_command_for_output(cmd)
 
         if self.dry_run:
             logger.info(f"[DRY-RUN] {cmd_display}")
-            return True, "", ""
+            return ToolCallResult(True)
 
         logger.debug(f"Executing: {cmd_display}")
 
@@ -1224,11 +1284,14 @@ class AzCliExecutor:
                 check=False,
                 timeout=timeout,
             )
-            return result.returncode == 0, result.stdout or "", result.stderr or ""
+            return ToolCallResult(result.returncode == 0, result.stdout or "", result.stderr or "",
+                                  None if result.returncode == 0 else OTHER_FAILURE)
         except subprocess.TimeoutExpired:
-            return False, "", ENGINE_TIMEOUT_SENTINEL.format(timeout=timeout)
+            return ToolCallResult(False, stderr=ENGINE_TIMEOUT_SENTINEL.format(timeout=timeout),
+                                  diagnostic=ProviderFailure("timeout"))
         except OSError as e:
-            return False, "", f"Failed to execute kubectl command: {e}"
+            return ToolCallResult(False, stderr=f"Failed to execute kubectl command: {e}",
+                                  diagnostic=ProviderFailure("tool-unavailable"))
 
     @contextmanager
     def _arc_proxy(
@@ -1238,7 +1301,7 @@ class AzCliExecutor:
         subscription: str,
         *,
         stop_requested: threading.Event | None = None,
-    ) -> Generator[str | None, None, None]:
+    ) -> Generator[ProxySession, None, None]:
         """Context manager for Arc-connected cluster proxy.
 
         Starts `az connectedk8s proxy` in the background, waits for it to
@@ -1254,32 +1317,33 @@ class AzCliExecutor:
             subscription: Azure subscription ID
 
         Yields:
-            Path to the per-proxy kubeconfig file when the proxy started
-            successfully, or None when it failed. Pass the path to
+            A session with the per-proxy kubeconfig path on success, or typed
+            failure evidence when startup fails. Pass the path to
             `_run_kubectl(..., kubeconfig=<path>)` so the call targets
             this proxy rather than the ambient context.
 
         Example:
-            with self._arc_proxy("my-cluster", "my-rg", "sub-id") as kubeconfig:
-                if kubeconfig is not None:
-                    self._run_kubectl(["apply", "-f", "config.yaml"], kubeconfig=kubeconfig)
+            with self._arc_proxy("my-cluster", "my-rg", "sub-id") as session:
+                if session.kubeconfig is not None:
+                    self._run_kubectl(["apply", "-f", "config.yaml"], kubeconfig=session.kubeconfig)
         """
         if _stopping(stop_requested):
-            yield None
+            yield ProxySession()
             return
         if self.dry_run:
             logger.info(
+                "Previewing an Arc proxy session." if is_redaction_enabled() else
                 scrub_for_output(
                     f"[DRY-RUN] az connectedk8s proxy -n {cluster_name} "
                     f"-g {resource_group} --subscription {subscription}"
                 )
             )
-            yield "dry-run-kubeconfig"
+            yield ProxySession("dry-run-kubeconfig")
             return
 
         if not self.az_path:
             logger.error(f"{_AZURE_CLI_NOT_FOUND} The Arc proxy cannot start without it.")
-            yield None
+            yield ProxySession(diagnostic=ProviderFailure("tool-unavailable"), error=_AZURE_CLI_NOT_FOUND)
             return
 
         proxy_process: subprocess.Popen | None = None
@@ -1289,6 +1353,8 @@ class AzCliExecutor:
         # be handed back the port that just failed.
         held_ports: list[int] = []
         started = False
+        failure = OTHER_FAILURE
+        detail = "Failed to establish Arc proxy connection"
         # Per-proxy kubeconfig so parallel proxies do not race the
         # ambient current-context in `~/.kube/config`. Created in this
         # executor's private scratch under the engine temp root, with an
@@ -1301,11 +1367,12 @@ class AzCliExecutor:
         except (RuntimePathError, OSError) as error:
             # Same contract as any other startup failure: report and yield
             # None so the caller returns a step failure.
-            logger.error(
+            detail = (
                 "Failed to allocate a private kubeconfig for the Arc proxy: "
                 f"{describe_os_error(error) if isinstance(error, OSError) else error}"
             )
-            yield None
+            logger.error(_provider_error_text(detail))
+            yield ProxySession(diagnostic=OTHER_FAILURE, error=detail)
             return
         os.close(kubeconfig_fd)
         # az, kubectl, and the yielded value all take the path as text.
@@ -1335,7 +1402,8 @@ class AzCliExecutor:
                     kubeconfig_path,
                 ]
 
-                logger.debug(f"Starting Arc proxy: {scrub_command_for_output(cmd)}")
+                logger.debug("Starting Arc proxy." if is_redaction_enabled()
+                             else f"Starting Arc proxy: {scrub_command_for_output(cmd)}")
 
                 # Empty stdin: without it, a missing connectedk8s extension
                 # makes az ask to install it and wait for an answer that never
@@ -1391,15 +1459,15 @@ class AzCliExecutor:
 
                 # Probe did not become ready. Determine cause.
                 if proxy_process.poll() is None:
+                    failure = ProviderFailure("timeout")
                     # The proxy is still running, so its port was not taken
                     # and it is not retried. Whether the port opened tells
                     # the operator which half of the startup stalled.
-                    logger.error(
-                        _arc_proxy_timeout_message(
-                            allocated_port,
-                            bound=_arc_proxy_port_open(allocated_port),
-                        )
+                    detail = _arc_proxy_timeout_message(
+                        allocated_port,
+                        bound=_arc_proxy_port_open(allocated_port),
                     )
+                    logger.error(detail)
                     try:
                         if os.name == "nt":
                             proxy_process.send_signal(signal.CTRL_BREAK_EVENT)
@@ -1435,18 +1503,23 @@ class AzCliExecutor:
 
                 # Not retryable: surface stderr and bail.
                 if drainer.extension_missing:
-                    logger.error(
+                    failure = ProviderFailure("tool-unavailable")
+                    guidance = (
                         "Arc proxy needs the Azure CLI connectedk8s extension. "
-                        f"Run `{CONNECTEDK8S_INSTALL_COMMAND}`, then retry. "
-                        f"Azure CLI reported: {scrub_for_output(stderr)}"
+                        f"Run `{CONNECTEDK8S_INSTALL_COMMAND}`, then retry."
                     )
+                    detail = f"{guidance} Azure CLI reported: {stderr}"
+                    logger.error(guidance if is_redaction_enabled() else scrub_for_output(detail))
                     break
-                logger.error(f"Arc proxy exited unexpectedly: {scrub_for_output(stderr)}")
+                detail = f"Arc proxy exited unexpectedly: {stderr}"
+                logger.error(_provider_error_text(detail))
                 break
 
         except Exception as e:
-            logger.error(f"Failed to start Arc proxy: {scrub_for_output(str(e))}")
-            yield None
+            failure = ProviderFailure("tool-unavailable") if isinstance(e, OSError) else OTHER_FAILURE
+            detail = f"Failed to start Arc proxy: {e}"
+            logger.error(_provider_error_text(detail, failure))
+            yield ProxySession(diagnostic=failure, error=detail)
 
         else:
             # Every yield sits outside the handler above. Inside the `try` it
@@ -1455,9 +1528,9 @@ class AzCliExecutor:
             # still runs, so cleanup is unchanged.
             if started:
                 logger.debug("Arc proxy established successfully")
-                yield kubeconfig_path
+                yield ProxySession(kubeconfig_path)
             else:
-                yield None
+                yield ProxySession(diagnostic=failure, error=detail)
 
         finally:
             if proxy_process is not None and proxy_process.poll() is None:
@@ -1481,12 +1554,14 @@ class AzCliExecutor:
                             "Proxy did not exit after kill. Reap will defer."
                         )
                 except Exception as e:
-                    logger.debug(f"Error during proxy cleanup: {e}")
+                    logger.debug("Arc proxy cleanup failed." if is_redaction_enabled()
+                                 else f"Error during proxy cleanup: {e}")
                     try:
                         proxy_process.kill()
                         proxy_process.wait(timeout=5)
                     except Exception as e:
-                        logger.debug(f"Failed to kill proxy process: {e}")
+                        logger.debug("Arc proxy termination failed." if is_redaction_enabled()
+                                     else f"Failed to kill proxy process: {e}")
 
             # Join briefly to retire the readers. The proxy being down does not
             # guarantee end of stream, since a descendant it started can still
@@ -1565,6 +1640,7 @@ class AzCliExecutor:
             raise
 
         logger.debug(
+            "Wrote deployment parameters." if is_redaction_enabled() else
             scrub_site_for_output(
                 f"Wrote deployment parameters for step '{step_name}' "
                 f"to {bounded_runtime_path(params_path)}",
@@ -1626,6 +1702,7 @@ class AzCliExecutor:
                 site_name=site_name,
                 deployment_name=deployment_name,
                 error=_AZURE_CLI_NOT_FOUND,
+                failure=ProviderFailure("tool-unavailable"),
             )
 
         if parameters:
@@ -1718,6 +1795,7 @@ class AzCliExecutor:
             terminal DeploymentResult for a fail-fast submit error.
         """
         last_error = ""
+        last_failure = None
         for attempt in range(1, DEFAULT_DEPLOYMENT_SUBMIT_MAX_RETRIES + 1):
             if _stopping(stop_requested):
                 return False, DeploymentResult(
@@ -1731,14 +1809,17 @@ class AzCliExecutor:
                         UnconfirmedCompletion.STOPPED_OBSERVING if attempt > 1 else None
                     ),
                     stopped_before_start=attempt == 1,
+                    failure=last_failure,
                 )
-            ok, stdout, stderr = self._run_az(
+            call = self._run_az(
                 submit_args,
                 timeout=DEFAULT_DEPLOYMENT_SUBMIT_TIMEOUT_SECONDS,
                 site_name=site_name,
             )
+            ok, stdout, stderr = call.success, call.stdout, call.stderr
             if ok:
                 return True, None
+            last_failure = call.diagnostic or _cli_failure(stdout, stderr)
             if _is_missing_parameter_prompt(stdout, stderr):
                 # Azure CLI names missing parameters before Azure Resource Manager
                 # validates the template, so no resource changed and this is definite.
@@ -1748,6 +1829,7 @@ class AzCliExecutor:
                     site_name=site_name,
                     deployment_name=deployment_name,
                     error=_missing_parameter_message(stdout, stderr),
+                    failure=ProviderFailure("template-invalid"),
                 )
             last_error = stderr
             category = _classify_az_error(stderr)
@@ -1759,6 +1841,7 @@ class AzCliExecutor:
                     False, step_name, site_name, deployment_name,
                     error="Stopped observing submission. Azure was not cancelled.",
                     unconfirmed=UnconfirmedCompletion.STOPPED_OBSERVING,
+                    failure=last_failure,
                 )
 
             if stderr == ENGINE_TIMEOUT_SENTINEL.format(
@@ -1767,6 +1850,8 @@ class AzCliExecutor:
                 # The engine's own timeout, not an ARM error. The PUT may have
                 # reached ARM, so poll and let the not-found grace decide.
                 logger.warning(
+                    "Deployment submission timed out. Polling for provider state."
+                    if is_redaction_enabled() else
                     scrub_site_for_output(
                         f"Submit of '{deployment_name}' timed out. Polling in "
                         "case ARM accepted the request.",
@@ -1801,6 +1886,7 @@ class AzCliExecutor:
                     UnconfirmedCompletion.SUBMIT_UNCLASSIFIED
                     if category == "unknown" else None
                 ),
+                failure=last_failure,
             )
 
         return True, None
@@ -1839,6 +1925,7 @@ class AzCliExecutor:
         last_clean_obs = start
         ever_visible = False
         last_obs_error: str | None = None
+        last_failure: ProviderFailure | None = None
         last_state: str | None = None
         poll_count = 0
 
@@ -1848,13 +1935,15 @@ class AzCliExecutor:
                     False, step_name, site_name, deployment_name,
                     error="Stopped local observation. Azure was not cancelled.",
                     unconfirmed=UnconfirmedCompletion.STOPPED_OBSERVING,
+                    failure=last_failure,
                 )
             poll_count += 1
-            ok, stdout, stderr = self._run_az(
+            call = self._run_az(
                 show_args,
                 timeout=DEFAULT_WAIT_POLL_AZ_TIMEOUT_SECONDS,
                 site_name=site_name,
             )
+            ok, stdout, stderr = call.success, call.stdout, call.stderr
 
             deployment_obj: dict[str, Any] | None = None
             observed_state: str | None = None
@@ -1872,11 +1961,13 @@ class AzCliExecutor:
                 ever_visible = True
                 last_clean_obs = time.monotonic()
                 last_obs_error = None
+                last_failure = None
                 last_state = observed_state
 
                 if observed_state in _DEPLOYMENT_TERMINAL_SUCCESS:
                     outputs = deployment_obj.get("properties", {}).get("outputs") or {}
                     logger.debug(
+                        "Deployment reached a successful provider state." if is_redaction_enabled() else
                         scrub_site_for_output(
                             f"Deployment '{deployment_name}' succeeded after "
                             f"{poll_count} poll(s)",
@@ -1892,8 +1983,9 @@ class AzCliExecutor:
                     )
 
                 if observed_state in _DEPLOYMENT_TERMINAL_FAILURE:
-                    detail = (
-                        _format_arm_error(deployment_obj.get("properties", {}).get("error"))
+                    node = deployment_obj.get("properties", {}).get("error")
+                    detail, failure = (
+                        (_format_arm_error(node), arm_failure([node]))
                         if _stopping(stop_requested)
                         else self._format_deployment_failure(
                             deployment_obj, ops_args, site_name,
@@ -1908,6 +2000,7 @@ class AzCliExecutor:
                             f"Deployment '{deployment_name}' reached terminal state "
                             f"'{observed_state}'. {detail}"
                         ),
+                        failure=failure,
                     )
                 # Intermediate state. Keep polling.
             else:
@@ -1916,6 +2009,8 @@ class AzCliExecutor:
                 last_obs_error = (
                     stderr or "deployment show returned no parseable provisioningState"
                 )
+                if not ok:
+                    last_failure = call.diagnostic or _cli_failure(stdout, stderr)
                 category = _classify_az_error(stderr) if stderr else "unknown"
                 now = time.monotonic()
 
@@ -1942,6 +2037,7 @@ class AzCliExecutor:
                         site_name=site_name,
                         deployment_name=deployment_name,
                         unconfirmed=UnconfirmedCompletion.OBSERVATION_LOST,
+                        failure=last_failure,
                         error=(
                             f"Lost the ability to observe deployment '{deployment_name}' for "
                             f"over {DEPLOYMENT_OBSERVATION_GRACE_SECONDS}s (last observed state: "
@@ -1958,6 +2054,7 @@ class AzCliExecutor:
                     site_name=site_name,
                     deployment_name=deployment_name,
                     unconfirmed=UnconfirmedCompletion.DEADLINE_EXCEEDED,
+                    failure=ProviderFailure("timeout"),
                     error=(
                         f"Deployment '{deployment_name}' did not reach a terminal state within "
                         f"{DEFAULT_AZ_TIMEOUT_SECONDS // 60}m (last observed state: "
@@ -1975,7 +2072,7 @@ class AzCliExecutor:
         deployment_obj: dict[str, Any],
         ops_args: list[str],
         site_name: str = "",
-    ) -> str:
+    ) -> tuple[str, ProviderFailure]:
         """Build a diagnostic for a Failed or Canceled deployment.
 
         The deployment's own `properties.error` is usually the shallow generic node ("At
@@ -1983,39 +2080,50 @@ class AzCliExecutor:
         lives in the deployment operations, so fetch those first and fall back to the
         top-level error only when the operations cannot be read.
         """
-        detail = self._fetch_failed_operations(ops_args, site_name)
+        properties = deployment_obj.get("properties", {})
+        error_node = properties.get("error")
+        root_failure = arm_failure([error_node])
+        detail, failure = self._fetch_failed_operations(ops_args, site_name)
+        if failure is not None and "error" in properties:
+            wrapper_only = (
+                type(error_node) is dict and error_node.get("code") == "DeploymentFailed"
+                and "innererror" not in error_node
+                and ("details" not in error_node or type(error_node["details"]) is list and not error_node["details"])
+            )
+            if not wrapper_only and root_failure != failure:
+                failure = OTHER_FAILURE
         if detail:
-            return detail
-        error_node = deployment_obj.get("properties", {}).get("error")
+            return detail, failure
         if error_node:
-            return _format_arm_error(error_node)
-        return "No error detail was reported by ARM."
+            return _format_arm_error(error_node), root_failure
+        return "No error detail was reported by ARM.", OTHER_FAILURE
 
     def _fetch_failed_operations(
         self,
         ops_args: list[str],
         site_name: str = "",
-    ) -> str | None:
+    ) -> tuple[str | None, ProviderFailure | None]:
         """Fetch failed deployment operations and format their root-cause errors.
 
-        Returns a joined diagnostic string, or None when the operations cannot be read so
-        the caller falls back to the deployment's top-level error.
+        Classify structured errors before private formatting. A failed enrichment
+        call supplies no evidence, so the caller can use the deployment root.
         """
-        ok, stdout, _stderr = self._run_az(
+        call = self._run_az(
             ops_args,
             timeout=DEFAULT_WAIT_POLL_AZ_TIMEOUT_SECONDS,
             site_name=site_name,
         )
-        if not ok or not stdout:
-            return None
+        if not call.success or not call.stdout:
+            return None, None
         try:
-            operations = json.loads(stdout)
+            operations = json.loads(call.stdout)
         except json.JSONDecodeError:
-            return None
+            return None, None
         if not isinstance(operations, list):
-            return None
+            return None, None
 
-        messages: list[str] = []
+        failed = []
+        nodes = []
         for operation in operations:
             if not isinstance(operation, dict):
                 continue
@@ -2024,8 +2132,15 @@ class AzCliExecutor:
                 continue
             status_message = props.get("statusMessage")
             error_node = None
-            if isinstance(status_message, dict):
-                error_node = status_message.get("error", status_message)
+            if type(status_message) is dict:
+                error_node = status_message.get("error")
+            nodes.append(error_node)
+            failed.append((props, status_message))
+
+        failure = arm_failure(nodes) if failed else None
+        messages: list[str] = []
+        for props, status_message in failed:
+            error_node = status_message.get("error", status_message) if isinstance(status_message, dict) else None
             target = props.get("targetResource") or {}
             target_label = _operation_target_label(target)
             formatted = (
@@ -2037,7 +2152,7 @@ class AzCliExecutor:
                 f"{target_label}: {formatted}" if target_label else formatted
             )
 
-        return ". ".join(messages) if messages else None
+        return (". ".join(messages) if messages else None), failure
 
     def deploy_resource_group(
         self,
@@ -2263,6 +2378,7 @@ class AzCliExecutor:
         if self.dry_run:
             files_display = ", ".join(files)
             logger.info(
+                "Previewing kubectl apply through an Arc proxy." if is_redaction_enabled() else
                 scrub_for_output(
                     f"[DRY-RUN] kubectl apply via Arc proxy ({cluster_name}): {files_display}"
                 )
@@ -2275,28 +2391,31 @@ class AzCliExecutor:
                 step_name=step_name,
                 site_name=site_name,
                 error="kubectl not found in PATH",
+                failure=ProviderFailure("tool-unavailable"),
             )
 
         with self._arc_proxy(
             cluster_name, resource_group, subscription, stop_requested=stop_requested,
-        ) as arc_kubeconfig:
+        ) as proxy:
             if _stopping(stop_requested):
                 return KubectlResult(False, step_name, site_name, stopped_before_start=True)
-            if arc_kubeconfig is None:
+            if proxy.kubeconfig is None:
                 return KubectlResult(
                     success=False,
                     step_name=step_name,
                     site_name=site_name,
-                    error="Failed to establish Arc proxy connection",
+                    error=proxy.error or "Failed to establish Arc proxy connection",
+                    failure=proxy.diagnostic,
                 )
 
             args = ["apply"]
             for f in resolved_files:
                 args.extend(["-f", f])
 
-            success, stdout, stderr = self._run_kubectl(args, kubeconfig=arc_kubeconfig)
+            call = self._run_kubectl(args, kubeconfig=proxy.kubeconfig)
+            success, stdout, stderr = call.success, call.stdout, call.stderr
 
-            if success and stdout:
+            if success and stdout and not is_redaction_enabled():
                 logger.debug(f"kubectl output:\n{scrub_for_output(stdout)}")
 
             return KubectlResult(
@@ -2305,6 +2424,7 @@ class AzCliExecutor:
                 site_name=site_name,
                 error=stderr if not success else None,
                 unconfirmed=UnconfirmedCompletion.APPLY_INCOMPLETE if not success else None,
+                failure=call.diagnostic,
             )
 
     @contextmanager
@@ -2317,10 +2437,11 @@ class AzCliExecutor:
         with nullcontext():
             yield
 
-    def _evaluate_condition(self, condition: Any, subscription: str) -> tuple[WaitState, str | None, str | None]:
+    def _evaluate_condition(self, condition: Any, subscription: str) -> ConditionObservation:
         """Take one observation of a wait condition.
 
-        Returns `(state, observed_value, error)`. `observed_value` is the value
+        Returns a typed state, observed value, private error and failure evidence.
+        The observed value is the value
         seen this poll (or None). `error` is a non-fatal poll error worth
         surfacing in the timeout diagnostic. On a PENDING state it also drives
         the consecutive-error circuit breaker.
@@ -2332,7 +2453,7 @@ class AzCliExecutor:
             return self._evaluate_arm_tag(condition, subscription)
         raise ValueError(f"Unsupported wait condition type: {condition.type}")
 
-    def _evaluate_arm_tag(self, condition: Any, subscription: str) -> tuple[WaitState, str | None, str | None]:
+    def _evaluate_arm_tag(self, condition: Any, subscription: str) -> ConditionObservation:
         """Take one observation of an arm-tag condition via `az resource show`."""
         args = [
             "resource",
@@ -2349,7 +2470,8 @@ class AzCliExecutor:
             # mutates global state and races across concurrent site threads.
             args.extend(["--subscription", subscription])
 
-        success, stdout, stderr = self._run_az(args, timeout=DEFAULT_WAIT_POLL_AZ_TIMEOUT_SECONDS)
+        call = self._run_az(args, timeout=DEFAULT_WAIT_POLL_AZ_TIMEOUT_SECONDS)
+        success, stdout, stderr = call.success, call.stdout, call.stderr
 
         if success:
             try:
@@ -2357,7 +2479,7 @@ class AzCliExecutor:
             except json.JSONDecodeError as e:
                 # A malformed tags payload is unexpected. Treat as a transient
                 # hiccup and keep polling, but surface it for the diagnostic.
-                return WaitState.PENDING, None, f"could not parse tags JSON: {e}"
+                return ConditionObservation(WaitState.PENDING, error=f"could not parse tags JSON: {e}")
             if not isinstance(tags, dict):
                 tags = {}
 
@@ -2368,37 +2490,39 @@ class AzCliExecutor:
             # Satisfied (exact) is checked before failed (glob), so a failure
             # glob can never override an exact success match.
             if observed == condition.expected_value:
-                return WaitState.SATISFIED, observed, None
+                return ConditionObservation(WaitState.SATISFIED, observed)
             if (
                 condition.failure_pattern
                 and observed is not None
                 and fnmatchcase(observed, condition.failure_pattern)
             ):
-                return WaitState.FAILED, observed, (
+                return ConditionObservation(WaitState.FAILED, observed, (
                     f"tag reached failure value '{observed}' matching failurePattern "
                     f"'{condition.failure_pattern}'"
-                )
+                ))
             # Tag absent or some intermediate value. Not ready yet.
-            return WaitState.PENDING, observed, None
+            return ConditionObservation(WaitState.PENDING, observed)
 
         # The `az` call failed. Classify so permanent errors fail fast instead
         # of polling for the full timeout.
         classification = _classify_az_error(stderr)
         message = stderr.strip()
         if classification == "resource_not_found":
-            return WaitState.FAILED, None, (
+            return ConditionObservation(WaitState.FAILED, None, (
                 f"resource not found: {condition.resource_id}. For arm-tag the resource is "
                 f"expected to exist before the wait. Check the resourceId (subscription, resource "
                 f"group, name). az error: {message}"
-            )
+            ), call.diagnostic)
         if classification == "permanent":
             if _is_subscription_not_visible(stderr):
-                return WaitState.FAILED, None, _subscription_not_visible_message(
+                return ConditionObservation(WaitState.FAILED, None, _subscription_not_visible_message(
                     stderr, submission=False
-                )
-            return WaitState.FAILED, None, f"permanent error polling tags: {message}"
+                ), call.diagnostic or ProviderFailure("subscription-not-visible"))
+            return ConditionObservation(WaitState.FAILED, None, f"permanent error polling tags: {message}",
+                                        call.diagnostic or _cli_failure(stdout, stderr))
         # transient or unknown: keep polling, surface for the diagnostic.
-        return WaitState.PENDING, None, message or "transient error polling tags"
+        return ConditionObservation(WaitState.PENDING, None, message or "transient error polling tags",
+                                    call.diagnostic or _cli_failure(stdout, stderr))
 
     def wait_for_condition(
         self,
@@ -2436,6 +2560,7 @@ class AzCliExecutor:
 
         if self.dry_run:
             logger.info(
+                "Previewing a wait condition." if is_redaction_enabled() else
                 scrub_for_output(
                     f"[DRY-RUN] would wait for {description} "
                     f"(timeout {timeout_minutes}m, poll {poll_interval_seconds}s)"
@@ -2447,6 +2572,7 @@ class AzCliExecutor:
         deadline = start + timeout_minutes * 60
         last_value: str | None = None
         last_error: str | None = None
+        last_failure: ProviderFailure | None = None
         poll_count = 0
         consecutive_errors = 0
 
@@ -2457,16 +2583,23 @@ class AzCliExecutor:
                         False, step_name, site_name,
                         error="Stopped observing the wait condition.",
                         unconfirmed=UnconfirmedCompletion.STOPPED_OBSERVING,
+                        failure=last_failure,
                     )
                 poll_count += 1
-                state, observed, error = self._evaluate_condition(condition, subscription)
+                observation = self._evaluate_condition(condition, subscription)
+                state, observed, error = observation.state, observation.observed, observation.error
                 if observed is not None:
                     last_value = observed
                 if error is not None:
                     last_error = error
+                if observation.diagnostic is not None:
+                    last_failure = observation.diagnostic
+                elif error is None:
+                    last_failure = None
 
                 if state == WaitState.SATISFIED:
                     logger.debug(
+                        "Wait condition satisfied." if is_redaction_enabled() else
                         scrub_for_output(f"{description} satisfied after {poll_count} poll(s)")
                     )
                     return WaitResult(success=True, step_name=step_name, site_name=site_name)
@@ -2484,6 +2617,7 @@ class AzCliExecutor:
                             poll_count=poll_count,
                             elapsed_seconds=time.monotonic() - start,
                         ),
+                        failure=last_failure,
                     )
 
                 # PENDING. Track consecutive polling errors for the breaker.
@@ -2495,6 +2629,7 @@ class AzCliExecutor:
                             step_name=step_name,
                             site_name=site_name,
                             unconfirmed=UnconfirmedCompletion.OBSERVATION_LOST,
+                            failure=last_failure,
                             error=_wait_failure_message(
                                 condition,
                                 reason=f"{consecutive_errors} consecutive polling errors",
@@ -2521,5 +2656,6 @@ class AzCliExecutor:
                             poll_count=poll_count,
                             elapsed_seconds=time.monotonic() - start,
                         ),
+                        failure=ProviderFailure("timeout"),
                     )
                 _wait_or_stop(min(poll_interval_seconds, remaining), stop_requested)

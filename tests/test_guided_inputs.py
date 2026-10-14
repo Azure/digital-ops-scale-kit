@@ -1298,7 +1298,8 @@ def test_site_parser_failure_is_not_classified_as_safe_guided_error(tmp_path):
     )
     with pytest.raises(ValueError, match="location") as rejected:
         load_contract(manifest).resolve()
-    assert type(rejected.value) is ValueError
+    assert isinstance(rejected.value, ValueError)
+    assert not isinstance(rejected.value, GuidedInputError)
 
 
 def test_example_fails_on_first_missing_required_input_before_site_parsing(tmp_path, monkeypatch):

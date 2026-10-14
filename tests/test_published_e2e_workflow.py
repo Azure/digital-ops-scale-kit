@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import runpy
 import shlex
 import shutil
 import stat
@@ -17,9 +18,12 @@ import pytest
 import yaml
 
 from siteops.reporting import _KIND as DEPLOYMENT_KIND
+from tests.acceptance_helpers import calls, double_environment, install_doubles
+from tests.actions_expressions import dispatch_inputs, evaluate, job_runs, truthy
 from tests.native_bundle import NETWORK_BLOCK, publish_assets
 from tests.native_bundle import bundle_factory as bundle_factory
 from tests.native_uv_consumers import linux_archives
+from tests.shell_helpers import run_script
 
 ROOT = Path(__file__).parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "e2e-test.yaml"
@@ -54,6 +58,8 @@ def _parse_inputs(**changes: str) -> subprocess.CompletedProcess[str]:
     match = re.search(r"<<'PY' >> \"\$GITHUB_OUTPUT\"\n(.*?)\n\s*PY", step["run"], re.S)
     assert match is not None
     environment = {
+        "INPUT_SCENARIO": "aio",
+        "INPUT_CANDIDATE_SET": "false",
         "INPUT_RELEASES": "2608",
         "INPUT_RG": "",
         "INPUT_CLUSTER": "",
@@ -71,6 +77,7 @@ def _parse_inputs(**changes: str) -> subprocess.CompletedProcess[str]:
     target = {
         "resource-group": environment.pop("INPUT_RG"),
         "cluster-name": environment.pop("INPUT_CLUSTER"),
+        "custom-locations-oid": environment.pop("INPUT_OID", ""),
     }
     with tempfile.TemporaryDirectory() as directory:
         event_path = Path(directory) / "event.json"
@@ -113,6 +120,16 @@ def _bash_executable() -> Path:
     ("Deploy AIO through the published engine and package", 1),
     ("Observe bounded AIO readiness", 3),
     ("Teardown (persistent mode, delta cleanup, keep RG)", 0),
+    ("Select exact candidate inputs", 0),
+    ("Bind candidate inputs and owned Site names", 0),
+    ("Install the candidate engine outside the checkout", 1),
+    ("Preflight the Site resource group", 0),
+    ("Prepare the Site resource group", 0),
+    ("Create the existing Key Vault", 1),
+    ("Enable Secret Sync on the existing instance", 3),
+    ("Remove Site resources created by this attempt", 0),
+    ("Resolve E2E_LOCATION", 0),
+    ("Record the Site case outcome", 0),
 ])
 def test_guided_workflow_shell_and_embedded_python_parse_without_execution(
     step, minimum_python,
@@ -147,18 +164,274 @@ def test_published_mode_is_explicit_and_bounded():
         assert value in workflow
 
 
+def _e2e_results(request="success", prep="success", fleet="success", groups="success", e2e="success"):
+    return {"fleet-request": request, "prep": prep, "fleet": fleet, "site-groups": groups, "e2e": e2e}
+
+
+@pytest.mark.parametrize(("inputs", "needs", "cancelled", "expected"), [
+    pytest.param({"scenario": "release-acceptance", "candidate": "selected"}, _e2e_results(), False,
+                 {"fleet-request", "prep", "fleet", "site-groups", "e2e", "acceptance"}, id="release-acceptance"),
+    pytest.param({"scenario": "aio", "candidate": ""}, _e2e_results(request="skipped", groups="skipped"), False,
+                 {"prep", "e2e"}, id="ordinary-aio-after-skipped-optional-jobs"),
+    pytest.param({"scenario": "aio", "candidate": "selected"}, _e2e_results(request="skipped"), False,
+                 {"prep", "site-groups", "e2e"}, id="standalone-candidate-aio"),
+    pytest.param({"scenario": "fleet", "candidate": "selected"}, _e2e_results(prep="skipped", groups="skipped"), False,
+                 {"fleet-request", "fleet"}, id="fleet-after-skipped-prep"),
+    pytest.param({"scenario": "fleet-cleanup", "candidate": ""}, _e2e_results(prep="skipped", groups="skipped"), False,
+                 {"fleet-request", "fleet-cleanup"}, id="fleet-cleanup"),
+    pytest.param({"scenario": "site-cleanup", "candidate": ""}, _e2e_results(prep="skipped", groups="skipped"), False,
+                 {"fleet-request", "fleet-cleanup"}, id="site-cleanup"),
+    pytest.param({"scenario": "windows-installer-preflight", "candidate": ""},
+                 _e2e_results(request="skipped", prep="skipped", groups="skipped"), False,
+                 set(), id="windows-probe-does-not-start-acceptance-work"),
+    pytest.param({"scenario": "release-acceptance", "candidate": ""}, _e2e_results(prep="failure", fleet="skipped"), False,
+                 {"fleet-request", "prep", "acceptance"}, id="missing-candidate-rejected-by-prep"),
+    pytest.param({"scenario": "release-acceptance", "candidate": "selected"},
+                 _e2e_results(request="failure", prep="skipped", fleet="skipped"), False,
+                 {"fleet-request", "site-groups", "acceptance"}, id="request-rejected"),
+    pytest.param({"scenario": "release-acceptance", "candidate": "selected"},
+                 _e2e_results(request="skipped", prep="skipped", fleet="skipped"), False,
+                 {"fleet-request", "site-groups", "acceptance"}, id="request-skipped"),
+    pytest.param({"scenario": "release-acceptance", "candidate": "selected"},
+                 _e2e_results(request="cancelled", prep="skipped", fleet="skipped"), False,
+                 {"fleet-request", "site-groups", "acceptance"}, id="request-cancelled"),
+    # Direct results are independent here so that a passed prep cannot mask a rejected request.
+    pytest.param({"scenario": "release-acceptance", "candidate": "selected"},
+                 _e2e_results(request="failure"), False,
+                 {"fleet-request", "site-groups", "e2e", "acceptance"}, id="request-rejected-despite-passed-prep"),
+    pytest.param({"scenario": "release-acceptance", "candidate": "selected"},
+                 _e2e_results(request="skipped"), False,
+                 {"fleet-request", "site-groups", "e2e", "acceptance"}, id="request-skipped-despite-passed-prep"),
+    pytest.param({"scenario": "release-acceptance", "candidate": "selected"},
+                 _e2e_results(prep="failure"), False,
+                 {"fleet-request", "prep", "site-groups", "acceptance"}, id="prep-rejected-despite-passed-request"),
+    pytest.param({"scenario": "release-acceptance", "candidate": "selected"},
+                 _e2e_results(prep="skipped"), False,
+                 {"fleet-request", "prep", "site-groups", "acceptance"}, id="prep-skipped-despite-passed-request"),
+    pytest.param({"scenario": "release-acceptance", "candidate": "selected"},
+                 _e2e_results(prep="cancelled"), False,
+                 {"fleet-request", "prep", "site-groups", "acceptance"}, id="prep-cancelled"),
+    pytest.param({"scenario": "release-acceptance", "candidate": "selected"}, _e2e_results(groups="failure"), False,
+                 {"fleet-request", "prep", "fleet", "site-groups", "acceptance"}, id="site-groups-rejected"),
+    pytest.param({"scenario": "release-acceptance", "candidate": "selected"}, _e2e_results(groups="skipped"), False,
+                 {"fleet-request", "prep", "fleet", "site-groups", "acceptance"}, id="site-groups-skipped"),
+    pytest.param({"scenario": "release-acceptance", "candidate": "selected"}, _e2e_results(groups="cancelled"), False,
+                 {"fleet-request", "prep", "fleet", "site-groups", "acceptance"}, id="site-groups-cancelled"),
+    pytest.param({"scenario": "release-acceptance", "candidate": "selected"}, _e2e_results(fleet="failure"), False,
+                 {"fleet-request", "prep", "fleet", "site-groups", "e2e", "acceptance"}, id="aggregate-fleet-failure"),
+    pytest.param({"scenario": "release-acceptance", "candidate": "selected"}, _e2e_results(e2e="failure"), False,
+                 {"fleet-request", "prep", "fleet", "site-groups", "e2e", "acceptance"}, id="aggregate-site-failure"),
+    pytest.param({"scenario": "release-acceptance", "candidate": "selected"},
+                 _e2e_results("failure", "skipped", "skipped", "skipped", "skipped"), True,
+                 {"acceptance"}, id="cancelled-release-still-aggregates"),
+    pytest.param({"scenario": "aio", "candidate": "selected"}, _e2e_results(), True, set(), id="cancelled-aio"),
+    pytest.param({"scenario": "fleet", "candidate": "selected"}, _e2e_results(), True, set(), id="cancelled-fleet"),
+    pytest.param({"scenario": "fleet-cleanup", "candidate": ""}, _e2e_results(), True, set(), id="cancelled-fleet-cleanup"),
+    pytest.param({"scenario": "site-cleanup", "candidate": ""}, _e2e_results(), True, set(), id="cancelled-site-cleanup"),
+    pytest.param({"scenario": "fleet-cleanup", "candidate": ""}, _e2e_results(request="failure", prep="skipped"), False,
+                 {"fleet-request"}, id="fleet-cleanup-request-rejected"),
+    pytest.param({"scenario": "site-cleanup", "candidate": ""}, _e2e_results(request="skipped", prep="skipped"), False,
+                 {"fleet-request"}, id="site-cleanup-request-skipped"),
+    pytest.param({"scenario": "fleet", "candidate": ""}, _e2e_results(request="failure", prep="skipped"), False,
+                 {"fleet-request"}, id="fleet-request-rejected"),
+    pytest.param({"scenario": "fleet", "candidate": ""}, _e2e_results(prep="failure"), False,
+                 {"fleet-request", "fleet"}, id="ordinary-fleet-does-not-require-prep"),
+    pytest.param({"scenario": "aio", "candidate": ""}, _e2e_results(request="failure", groups="failure"), False,
+                 {"prep", "e2e"}, id="ordinary-aio-does-not-require-optional-admissions"),
+    pytest.param({"scenario": "aio", "candidate": ""}, _e2e_results(prep="failure"), False,
+                 {"prep"}, id="ordinary-aio-prep-rejected"),
+    pytest.param({"scenario": "aio", "candidate": "selected"}, _e2e_results(groups="failure"), False,
+                 {"prep", "site-groups"}, id="standalone-candidate-needs-site-groups"),
+])
+def test_e2e_jobs_gate_work_on_scenarios_and_required_admissions(inputs, needs, cancelled, expected):
+    workflow = yaml.safe_load(_workflow())
+    declared = {
+        "fleet-request": [],
+        "prep": "fleet-request",
+        "fleet": ["fleet-request", "prep"],
+        "fleet-cleanup": "fleet-request",
+        "site-groups": [],
+        "e2e": ["prep", "site-groups"],
+        "acceptance": ["fleet-request", "fleet", "prep", "site-groups", "e2e"],
+    }
+    outputs = {"prep": {"candidate-mode": "true" if inputs["candidate"] else "false"}}
+    for job_id, dependencies in declared.items():
+        assert workflow["jobs"][job_id].get("needs", []) == dependencies
+        keys = [dependencies] if isinstance(dependencies, str) else dependencies
+        assert job_runs(
+            workflow, job_id, inputs=dispatch_inputs(workflow, inputs),
+            needs={key: needs[key] for key in keys},
+            outputs={key: value for key, value in outputs.items() if key in keys},
+            cancelled=cancelled,
+        ) is (job_id in expected), job_id
+
+
+def _e2e_step(selector):
+    steps = yaml.safe_load(_workflow())["jobs"]["e2e"]["steps"]
+    if selector.startswith("download:"):
+        path = "${{ runner.temp }}/fleet/" + selector.removeprefix("download:")
+        return next(step for step in steps if step.get("with", {}).get("path") == path)
+    return next(step for step in steps if selector in (step.get("name"), step.get("id"), step.get("uses")))
+
+
+@pytest.mark.parametrize(("selected", "expected"), [
+    pytest.param({}, True, id="ordinary-source-templates"),
+    pytest.param({"published-release": "v1.0.0"}, False, id="published-release"),
+    pytest.param({"candidate": "selected"}, False, id="candidate"),
+    pytest.param({"candidate": "selected", "published-release": "v1.0.0"}, False, id="both-transports"),
+])
+def test_prep_validates_templates_only_without_a_candidate_or_published_release(selected, expected):
+    workflow = yaml.safe_load(_workflow())
+    step = next(step for step in workflow["jobs"]["prep"]["steps"] if step.get("name") == "Validate Bicep templates")
+    assert truthy(evaluate(step["if"], {"inputs": dispatch_inputs(workflow, selected)})) is expected
+
+
+@pytest.mark.parametrize("selector", [
+    pytest.param("tools", id="candidate-tools"),
+    pytest.param("select", id="candidate-selection"),
+    pytest.param("download:admission", id="candidate-admission"),
+    pytest.param("download:plan", id="candidate-plan"),
+    pytest.param("download:inventory", id="candidate-inventory"),
+    pytest.param("download:engine", id="candidate-engine-assets"),
+    pytest.param("download:workspaces", id="candidate-workspace-assets"),
+    pytest.param("Bind candidate inputs and owned Site names", id="candidate-binding"),
+    pytest.param("candidate-engine", id="candidate-installation"),
+    pytest.param("site-preflight", id="site-preflight"),
+    pytest.param("Retain Site ownership", id="site-ownership"),
+    pytest.param("Prepare the Site resource group", id="site-preparation"),
+])
+@pytest.mark.parametrize(("candidate_mode", "expected"), [
+    pytest.param("true", True, id="candidate"),
+    pytest.param("false", False, id="ordinary"),
+    pytest.param("", False, id="missing-mode"),
+])
+def test_candidate_setup_and_site_preparation_run_only_for_candidate_mode(selector, candidate_mode, expected):
+    assert truthy(evaluate(_e2e_step(selector)["if"], {"env": {"CANDIDATE_MODE": candidate_mode}})) is expected
+
+
+@pytest.mark.parametrize(("candidate", "published", "expected"), [
+    pytest.param("true", "true", False, id="candidate-uses-no-public-release"),
+    pytest.param("true", "false", False, id="candidate-without-published-mode"),
+    pytest.param("false", "true", True, id="published-release"),
+    pytest.param("false", "false", False, id="source-mode"),
+    pytest.param("", "true", True, id="ordinary-without-candidate-output"),
+    pytest.param("false", "", False, id="missing-published-output"),
+])
+def test_public_release_setup_and_enrollment_exclude_candidate_cases(candidate, published, expected):
+    steps = yaml.safe_load(_workflow())["jobs"]["e2e"]["steps"]
+    guarded = [
+        step for step in steps
+        if any(token in json.dumps(step) for token in ("setup-published-siteops", "source enroll", "project pin"))
+    ]
+    assert {step.get("name") or step.get("uses") for step in guarded} == {
+        "./.github/actions/setup-published-siteops", "Prepare the published workspace project",
+    }
+    contexts = {"env": {"CANDIDATE_MODE": candidate}, "needs": {"prep": {"outputs": {"published-mode": published}}}}
+    for step in guarded:
+        assert truthy(evaluate(step["if"], contexts)) is expected
+
+
+@pytest.mark.parametrize(("persistent", "candidate", "snapshot", "create"), [
+    pytest.param("false", "false", False, True, id="ordinary-ephemeral"),
+    pytest.param("true", "false", True, False, id="ordinary-persistent"),
+    pytest.param("false", "true", True, False, id="candidate-ephemeral"),
+    pytest.param("true", "true", True, False, id="candidate-persistent"),
+])
+def test_group_snapshot_covers_candidates_and_creation_excludes_them(persistent, candidate, snapshot, create):
+    contexts = {"env": {"PERSISTENT_RG": persistent, "CANDIDATE_MODE": candidate}}
+    assert truthy(evaluate(_e2e_step("Snapshot RG resources (persistent mode)")["if"], contexts)) is snapshot
+    assert truthy(evaluate(_e2e_step("Create resource group (ephemeral mode)")["if"], contexts)) is create
+
+
+@pytest.mark.parametrize(("candidate", "debug_user", "expected"), [
+    pytest.param("false", "operator", True, id="ordinary-with-debug-user"),
+    pytest.param("false", "", False, id="ordinary-without-debug-user"),
+    pytest.param("true", "operator", False, id="candidate-with-debug-user"),
+    pytest.param("true", "", False, id="candidate-without-debug-user"),
+])
+def test_debug_cluster_access_requires_an_operator_outside_candidate_mode(candidate, debug_user, expected):
+    step = _e2e_step("Grant debug user cluster-admin on k3s (Arc proxy access)")
+    assert truthy(evaluate(
+        step["if"], {"env": {"CANDIDATE_MODE": candidate, "DEBUG_USER_OID": debug_user}},
+    )) is expected
+
+
+@pytest.mark.parametrize("selector", [
+    pytest.param("existing-vault", id="create-existing-vault"),
+    pytest.param("existing-enable", id="enable-existing-secret-sync"),
+])
+@pytest.mark.parametrize(("candidate", "slot", "expected"), [
+    pytest.param("true", "existing", True, id="candidate-existing"),
+    pytest.param("true", "enabled", False, id="candidate-enabled"),
+    pytest.param("true", "disabled", False, id="candidate-disabled"),
+    pytest.param("false", "existing", False, id="ordinary-existing"),
+    pytest.param("false", "enabled", False, id="ordinary-enabled"),
+    pytest.param("false", "disabled", False, id="ordinary-disabled"),
+])
+def test_existing_vault_setup_is_reserved_for_the_candidate_existing_case(selector, candidate, slot, expected):
+    assert truthy(evaluate(
+        _e2e_step(selector)["if"],
+        {"env": {"CANDIDATE_MODE": candidate}, "matrix": {"secret-sync-mode": slot}},
+    )) is expected
+
+
+@pytest.mark.parametrize(("published", "candidate", "cancelled", "prior_result", "expected"), [
+    pytest.param("true", "false", False, "success", True, id="ordinary-published"),
+    pytest.param("true", "true", False, "success", False, id="candidate-has-its-own-receipt"),
+    pytest.param("false", "false", False, "success", False, id="source-mode"),
+    pytest.param("", "false", False, "success", False, id="missing-published-output"),
+    pytest.param("true", "false", True, "failure", True, id="retain-cancelled-published-result"),
+    pytest.param("true", "false", False, "skipped", True, id="retain-skipped-published-result"),
+    pytest.param("true", "true", True, "failure", False, id="no-public-receipt-for-cancelled-candidate"),
+])
+def test_published_receipts_survive_failure_but_never_replace_candidate_receipts(
+    published, candidate, cancelled, prior_result, expected,
+):
+    steps = yaml.safe_load(_workflow())["jobs"]["e2e"]["steps"]
+    step = next(step for step in steps if step.get("with", {}).get("name", "").startswith("published-e2e-"))
+    contexts = {
+        "env": {"CANDIDATE_MODE": candidate},
+        "needs": {"prep": {"outputs": {"published-mode": published}}, "previous": {"result": prior_result}},
+    }
+    assert truthy(evaluate(step["if"], contexts, cancelled=cancelled)) is expected
+
+
+@pytest.mark.parametrize(("persistent", "candidate", "skip", "cancelled", "expected"), [
+    pytest.param("false", "false", False, False, True, id="ordinary-ephemeral"),
+    pytest.param("true", "false", False, False, False, id="ordinary-persistent"),
+    pytest.param("false", "true", False, False, False, id="candidate-ephemeral"),
+    pytest.param("true", "true", False, False, False, id="candidate-persistent"),
+    pytest.param("false", "false", True, False, False, id="operator-keeps-group"),
+    pytest.param("false", "false", False, True, True, id="cleanup-after-cancellation"),
+    pytest.param("false", "true", False, True, False, id="cancelled-candidate-uses-owned-cleanup"),
+])
+def test_ephemeral_teardown_cleans_ordinary_runs_without_deleting_candidate_groups(
+    persistent, candidate, skip, cancelled, expected,
+):
+    workflow = yaml.safe_load(_workflow())
+    contexts = {
+        "env": {"PERSISTENT_RG": persistent, "CANDIDATE_MODE": candidate},
+        "inputs": dispatch_inputs(workflow, skip_teardown=skip),
+        "needs": {"previous": {"result": "failure"}},
+    }
+    assert truthy(evaluate(
+        _e2e_step("Teardown (ephemeral mode, delete RG)")["if"], contexts, cancelled=cancelled,
+    )) is expected
+
+
 def test_windows_capability_probe_is_opt_in_without_azure_authority():
     workflow = yaml.safe_load(_workflow())
     inputs = workflow.get("on", workflow.get(True))["workflow_dispatch"]["inputs"]
     assert inputs["scenario"]["type"] == "choice"
     assert inputs["scenario"]["default"] == "aio"
     assert inputs["scenario"]["options"] == [
-        "aio", "fleet", "fleet-cleanup", "windows-installer-preflight",
+        "aio", "release-acceptance", "fleet", "fleet-cleanup", "site-cleanup",
+        "windows-installer-preflight",
     ]
 
     jobs = workflow["jobs"]
-    assert jobs["prep"]["if"] == "inputs.scenario == 'aio'"
-    assert jobs["e2e"]["needs"] == "prep"
+    assert jobs["prep"]["needs"] == "fleet-request"
+    assert jobs["e2e"]["needs"] == ["prep", "site-groups"]
     probe = jobs["windows-installer-preflight"]
     assert probe["if"] == "inputs.scenario == 'windows-installer-preflight'"
     assert probe["runs-on"] == "windows-2025"
@@ -456,14 +729,13 @@ def test_published_guided_journey_accepts_bounded_enabled_and_disabled_modes():
 def test_guided_published_run_requires_persistent_snapshot_before_observation():
     workflow = yaml.safe_load(_workflow())
     job = workflow["jobs"]["e2e"]
-    assert job["needs"] == "prep"
+    assert job["needs"] == ["prep", "site-groups"]
     assert job["env"]["PERSISTENT_RG"] == "${{ needs.prep.outputs.persistent }}"
     steps = job["steps"]
     snapshot = next(
         step for step in steps
         if step.get("name") == "Snapshot RG resources (persistent mode)"
     )
-    assert snapshot["if"] == "env.PERSISTENT_RG == 'true'"
     assert steps.index(snapshot) < next(
         index for index, step in enumerate(steps)
         if step.get("uses") == "./.github/actions/connect-arc"
@@ -1198,6 +1470,98 @@ def test_guided_published_deploy_uses_answers_and_read_gate():
     assert 'trust_args=(--approved-source guided)' in step
 
 
+def test_published_deploy_failure_reports_only_codes_and_counts(tmp_path):
+    failed = {
+        "apiVersion": "siteops/v1alpha1", "kind": DEPLOYMENT_KIND, "projection": "publishable", "status": "failed",
+        "exitCode": 1, "engine": {"name": "siteops", "version": "1.0.0b7"},
+        "summary": {"sites": {"total": 1, "counts": {"failed": 1}},
+                    "operations": {"total": 3, "counts": {"failed": 1, "skipped": 2, "succeeded": 0}}},
+        "diagnostics": [{"code": "run.diagnostic", "severity": "error", "summary": "private-marker summary"},
+                        {"code": "has spaces private-marker", "severity": "error", "summary": "x"}],
+    }
+    history = [
+        {"timestamp": "2026-10-10T20:02:14.1234567+00:00", "state": "Failed", "code": "InvalidTemplateDeployment",
+         "details": ["StorageAccountNameInvalid", "private-marker detail with spaces"]},
+        {"timestamp": "2026-10-10T19:00:00+00:00", "state": "Failed", "code": "OlderAttempt", "details": []},
+        {"timestamp": "2026-10-10T20:03:00Z", "state": "Succeeded", "code": None, "details": None},
+    ]
+    install_doubles(tmp_path, {
+        "siteops": [{"match": ["deploy", "aio-install"], "code": 1, "stdout": json.dumps(failed),
+                     "stderr": "provider message rg-private-marker\n"}],
+        "fleet-python": [{"match": ["scripts/coordinate-release-fleet.py", "policy"], "stdout": "policy\n"}],
+        "az": [{"match": ["deployment", "group", "list"], "stdout": json.dumps(history)}],
+    })
+    (tmp_path / "bin" / "python").write_text(
+        f"#!/usr/bin/env bash\nexec {shlex.quote(Path(sys.executable).as_posix())} \"$@\"\n", encoding="utf-8",
+        newline="\n",
+    )
+    result = run_script(_step_run("Deploy AIO through the published engine and package"), tmp_path, {
+        **double_environment(tmp_path), "RUNNER_TEMP": tmp_path.as_posix(), "PUBLISHED_JOURNEY": "guided",
+        "SITEOPS_E2E_PROJECT": (tmp_path / "project").as_posix(), "SITEOPS_E2E_ENGINE_VERSION": "1.0.0b7",
+        "RELEASE": "", "SOURCE_SHA": "a" * 40, "SITE_NAME": "site-private-marker",
+        "SITEOPS_E2E_TRUST": "policy", "SITEOPS_E2E_STATE": (tmp_path / "state").as_posix(),
+        "FLEET_PYTHON": "fleet-python", "E2E_RESOURCE_GROUP": "rg-private-marker",
+        # 2026-10-10T20:00:00Z
+        "JOB_START_EPOCH": "1791662400",
+    })
+    output = result.stdout + result.stderr
+    assert result.returncode == 1
+    assert "::error::The published Site Ops deployment failed." in result.stdout
+    assert "Deployment result: status failed, operations failed 1, skipped 2." in result.stdout
+    assert "Deployment diagnostics: run.diagnostic, unrecognized." in result.stdout
+    assert ("Azure deployment: Failed, error InvalidTemplateDeployment, details StorageAccountNameInvalid, "
+            "unrecognized.") in result.stdout
+    assert "OlderAttempt" not in output
+    assert "private-marker" not in output
+
+
+@pytest.mark.parametrize(("mode", "journey", "expected"), [
+    pytest.param("candidate", "guided", ["--trust-policy", "{policy}/policy.json", "--trusted-root", "{policy}/root.json"],
+                 id="candidate-policy-without-published-trust"),
+    pytest.param("published", "guided", ["--approved-source", "guided"], id="published-guided"),
+    pytest.param("published", "configured", ["--trust-policy", "{state}/policy.json", "--trusted-root",
+                                             "{state}/trusted-root.json"], id="published-configured"),
+])
+def test_published_deploy_reads_only_the_trust_inputs_its_mode_provides(tmp_path, mode, journey, expected):
+    # Each setup route exports its own trust inputs, and the step runs with `set -u`.
+    policy, state = (tmp_path / "policy-1").as_posix(), (tmp_path / "published").as_posix()
+    version = "1.0.0b7+build.42.1.g" + "a" * 12
+    document = {
+        "apiVersion": "siteops/v1alpha1", "kind": DEPLOYMENT_KIND, "projection": "publishable",
+        "status": "succeeded", "exitCode": 0, "engine": {"name": "siteops", "version": version},
+        "summary": {"sites": {"total": 1, "counts": {"succeeded": 1}},
+                    "operations": {"total": 5, "counts": {"succeeded": 5}}},
+    }
+    install_doubles(tmp_path, {
+        "siteops": [{"match": ["deploy", "aio-install", "--yes", "--offline-content"], "stdout": json.dumps(document)}],
+        "fleet-python": [{"match": ["scripts/coordinate-release-fleet.py", "policy"], "stdout": policy + "\n"}],
+    })
+    (tmp_path / "bin" / "python").write_text(
+        f"#!/usr/bin/env bash\nexec {shlex.quote(Path(sys.executable).as_posix())} \"$@\"\n", encoding="utf-8",
+        newline="\n",
+    )
+    environment = {
+        **double_environment(tmp_path), "RUNNER_TEMP": tmp_path.as_posix(), "PUBLISHED_JOURNEY": journey,
+        "SITEOPS_E2E_PROJECT": (tmp_path / "project").as_posix(), "SITEOPS_E2E_ENGINE_VERSION": version,
+        "RELEASE": "" if mode == "candidate" else "v1.0.0b7", "SOURCE_SHA": "a" * 40, "SITE_NAME": "site-one",
+    }
+    if mode == "candidate":
+        environment.update({"SITEOPS_E2E_TRUST": "policy", "SITEOPS_E2E_STATE": (tmp_path / "state").as_posix(),
+                            "FLEET_PYTHON": "fleet-python"})
+    else:
+        environment.update({"SITEOPS_E2E_POLICY": f"{state}/policy.json",
+                            "SITEOPS_E2E_TRUSTED_ROOT": f"{state}/trusted-root.json"})
+    result = run_script(_step_run("Deploy AIO through the published engine and package"), tmp_path, environment)
+    assert result.returncode == 0, result.stdout + result.stderr
+    deploys = [arguments for name, arguments in calls(tmp_path) if name == "siteops"]
+    assert len(deploys) == 1
+    trust = [value.format(policy=policy, state=state) for value in expected]
+    assert deploys[0][deploys[0].index("--project") + 2:deploys[0].index("deploy")] == trust
+    target = (["--input-file", (tmp_path / "published-answers.json").as_posix()] if journey == "guided"
+              else ["-l", "name=site-one"])
+    assert all(token in deploys[0] for token in target)
+
+
 def test_published_deploy_uses_only_the_pin_offline():
     workflow = _workflow()
 
@@ -1347,10 +1711,10 @@ def test_published_readiness_is_bounded_and_existing_teardown_is_retained():
         "microsoft.iotoperations/instances",
         "microsoft.deviceregistry/schemaregistries",
         "microsoft.deviceregistry/namespaces",
-        "for _ in {1..60}",
-        'status.get("phase") == "Running"',
-        'condition.get("type") == "Ready"',
-        "AIO instance projection and operator readiness did not converge within five minutes.",
+        "python scripts/observe-site-readiness.py",
+        "published-kubernetes-readiness.json",
+        '"activePods": kubernetes["activePods"]',
+        '"readyActivePods": kubernetes["readyActivePods"]',
         "PublishedPackageReadiness",
         "Snapshot RG resources (persistent mode)",
         "Teardown (persistent mode, delta cleanup, keep RG)",
@@ -1601,7 +1965,7 @@ def test_guided_enabled_readiness_requires_live_secret_sync_resources():
 
 def test_guided_enabled_observation_uses_run_delta_instead_of_site_tags(tmp_path):
     scripts = _embedded_python(_step_run("Observe bounded AIO readiness"))
-    selection = next(script for script in scripts if "for resource_type in" in script)
+    selection = next(script for script in scripts if "for resource_type, label in" in script)
     ownership = next((script for script in scripts if "prior_ids" in script), None)
     assert ownership is not None, "The published observer does not bind resources to this run."
 
@@ -1609,6 +1973,10 @@ def test_guided_enabled_observation_uses_run_delta_instead_of_site_tags(tmp_path
     old_identity = "/subscriptions/example/resourceGroups/rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/old"
     new_instance = "/subscriptions/example/resourceGroups/rg/providers/Microsoft.IoTOperations/instances/new"
     new_identity = "/subscriptions/example/resourceGroups/rg/providers/Microsoft.ManagedIdentity/userAssignedIdentities/new"
+    new_spc = (
+        "/subscriptions/example/resourceGroups/rg/providers/"
+        "Microsoft.SecretSyncController/azureKeyVaultSecretProviderClasses/new"
+    )
     resources = [
         {"id": old_instance, "name": "old", "type": "Microsoft.IoTOperations/instances",
          "tags": {"site": "test-site"}},
@@ -1616,6 +1984,8 @@ def test_guided_enabled_observation_uses_run_delta_instead_of_site_tags(tmp_path
          "tags": {"site": "test-site"}},
         {"id": new_instance, "name": "new", "type": "Microsoft.IoTOperations/instances"},
         {"id": new_identity, "name": "new", "type": "Microsoft.ManagedIdentity/userAssignedIdentities"},
+        {"id": new_spc, "name": "new",
+         "type": "Microsoft.SecretSyncController/azureKeyVaultSecretProviderClasses"},
     ]
     observed = tmp_path / "published-resources.json"
     observed.write_text(json.dumps(resources), encoding="utf-8")
@@ -1653,13 +2023,18 @@ def test_guided_enabled_observation_uses_run_delta_instead_of_site_tags(tmp_path
     created = run(ownership, observed, snapshot, owned)
     assert created.returncode == 0, "The run-owned resource observation failed."
     assert {item["id"] for item in json.loads(owned.read_text(encoding="utf-8"))} == {
-        new_instance, new_identity,
+        new_instance, new_identity, new_spc,
     }
     chosen = run(selection, owned)
     assert chosen.returncode == 0
-    assert chosen.stdout.splitlines() == ["new", new_instance]
+    assert chosen.stdout.splitlines() == ["new", new_instance, new_spc]
 
     current = json.loads(owned.read_text(encoding="utf-8"))
+    owned.write_text(json.dumps([item for item in current if item["id"] != new_spc]), encoding="utf-8")
+    missing_class = run(selection, owned)
+    assert missing_class.returncode != 0
+    assert "Guided Secret Sync provider class selection is incomplete." in missing_class.stderr
+
     owned.write_text(json.dumps([
         item for item in current if item["type"] == "Microsoft.ManagedIdentity/userAssignedIdentities"
     ]), encoding="utf-8")
@@ -1678,10 +2053,7 @@ def test_guided_enabled_observation_uses_run_delta_instead_of_site_tags(tmp_path
     assert "new-duplicate" not in duplicate.stderr
 
 
-@pytest.mark.parametrize("enabled", [False, True])
-def test_guided_readiness_receipt_asserts_enabled_state_without_private_ids(
-    tmp_path, enabled,
-):
+def _run_readiness_receipt(tmp_path, mode, *, provider_vault=None, owned_vault="kvcreated"):
     script = _embedded_python(_step_run("Observe bounded AIO readiness"))[-1]
     site = "private-site-name"
     spc_id = "/subscriptions/private/spc/private-name"
@@ -1691,14 +2063,14 @@ def test_guided_readiness_receipt_asserts_enabled_state_without_private_ids(
         {"type": "Microsoft.DeviceRegistry/schemaRegistries"},
         {"type": "Microsoft.DeviceRegistry/namespaces"},
     ]
-    if enabled:
+    if mode != "disabled":
         resources.extend([
             {"type": "Microsoft.SecretSyncController/azureKeyVaultSecretProviderClasses",
              "id": spc_id},
             {"type": "Microsoft.ManagedIdentity/userAssignedIdentities",
              "id": "/subscriptions/private/identity/private-name"},
-            {"type": "Microsoft.KeyVault/vaults",
-             "id": "/subscriptions/private/vault/private-name"},
+            {"type": "Microsoft.KeyVault/vaults", "name": owned_vault,
+             "id": f"/subscriptions/private/vault/{owned_vault}"},
         ])
         (tmp_path / "published-federated.json").write_text(
             json.dumps([{"name": "private-credential"}]), encoding="utf-8",
@@ -1709,8 +2081,11 @@ def test_guided_readiness_receipt_asserts_enabled_state_without_private_ids(
             }}),
             encoding="utf-8",
         )
+        (tmp_path / "published-spc.json").write_text(json.dumps({"properties": {
+            "keyvaultName": provider_vault or owned_vault.upper(),
+        }}), encoding="utf-8")
     owned_resources = list(resources)
-    if not enabled:
+    if mode == "disabled":
         resources.append({
             "type": "Microsoft.SecretSyncController/azureKeyVaultSecretProviderClasses",
             "id": "/subscriptions/private/spc/from-prior-run",
@@ -1720,12 +2095,16 @@ def test_guided_readiness_receipt_asserts_enabled_state_without_private_ids(
         "status": {"phase": "Running", "conditions": [
             {"type": "Ready", "status": "True"},
         ]},
-    }]}
-    instances = {"items": [{}]}
+    }, {"status": {"phase": "Succeeded"}}]}
+    instances = {"items": [{"metadata": {"name": "private-instance"}}]}
+    observer = runpy.run_path(str(ROOT / "scripts" / "observe-site-readiness.py"))
+    counts = observer["observe"](
+        query=lambda kind, timeout: pods if kind == "pods" else instances,
+        sleep=lambda _: pytest.fail("Ready observations must not sleep."),
+    )
     for filename, document in (
         ("resources.json", resources),
-        ("pods.json", pods),
-        ("instances.json", instances),
+        ("kubernetes.json", counts),
     ):
         (tmp_path / filename).write_text(json.dumps(document), encoding="utf-8")
     output = tmp_path / "readiness.json"
@@ -1735,30 +2114,66 @@ def test_guided_readiness_receipt_asserts_enabled_state_without_private_ids(
     environment = {
         "RUNNER_TEMP": str(tmp_path), "E2E_SITE_NAME": site,
         "E2E_JOURNEY": "guided",
-        "E2E_ENABLE_SECRET_SYNC": "true" if enabled else "false",
+        "E2E_ENABLE_SECRET_SYNC": "false" if mode == "disabled" else "true",
+        "E2E_SECRET_SYNC_MODE": mode,
     }
+    if mode == "existing":
+        environment["FLEET_VAULT_NAME"] = "kvexisting"
     if os.name == "nt":
         environment["SystemRoot"] = os.environ["SystemRoot"]
     result = subprocess.run(
         [
             sys.executable, "-c", script,
             str(tmp_path / "resources.json"),
-            str(tmp_path / "pods.json"),
-            str(tmp_path / "instances.json"),
+            str(tmp_path / "kubernetes.json"),
             str(output),
         ],
         env=environment, capture_output=True, text=True, timeout=15, check=False,
     )
+    public = result.stdout + result.stderr
+    for value in (spc_id, site, owned_vault, "kvexisting", *([provider_vault] if provider_vault else [])):
+        assert value not in public
+    return result, output, spc_id, site
+
+
+@pytest.mark.parametrize(("mode", "owned_vault"), [
+    ("disabled", "kvcreated"), ("enabled", "kvcreated"), ("existing", "kvexisting"),
+])
+def test_guided_readiness_receipt_asserts_enabled_state_without_private_ids(
+    tmp_path, mode, owned_vault,
+):
+    result, output, spc_id, site = _run_readiness_receipt(tmp_path, mode, owned_vault=owned_vault)
     assert result.returncode == 0, result.stderr
     receipt = json.loads(output.read_text(encoding="utf-8"))
-    assert receipt["secretSyncEnabled"] is enabled
+    assert (receipt["namespacePods"], receipt["activePods"], receipt["readyActivePods"]) == (2, 1, 1)
+    assert receipt["instanceCustomResources"] == 1
+    assert receipt["secretSyncEnabled"] is (mode != "disabled")
     assert spc_id not in json.dumps(receipt)
     assert site not in json.dumps(receipt)
-    if enabled:
+    assert owned_vault not in json.dumps(receipt)
+    if mode != "disabled":
         assert receipt["spcBoundToInstance"] is True
         assert receipt["federatedCredentials"] == 1
+        assert receipt["vaultBinding"] == ("existing" if mode == "existing" else "created")
     else:
         assert "federatedCredentials" not in receipt
+        assert "vaultBinding" not in receipt
+
+
+@pytest.mark.parametrize(("mode", "provider_vault", "owned_vault"), [
+    ("enabled", "kvother", "kvcreated"),
+    ("existing", "kvcreated", "kvcreated"),
+    ("existing", "kvexisting", "kvcreated"),
+])
+def test_guided_readiness_rejects_a_provider_class_bound_to_another_vault(
+    tmp_path, mode, provider_vault, owned_vault,
+):
+    result, output, _, _ = _run_readiness_receipt(
+        tmp_path, mode, provider_vault=provider_vault, owned_vault=owned_vault,
+    )
+    assert result.returncode != 0
+    assert "uses a vault other than the expected owned vault" in result.stderr
+    assert not output.exists()
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -1843,3 +2258,332 @@ def test_guided_private_plan_assertion_requires_expected_operations(
     )
     assert rejected.returncode != 0
     assert "unexpected operations" in rejected.stderr
+
+
+def _outputs(result):
+    return dict(line.split("=", 1) for line in result.stdout.splitlines())
+
+
+@pytest.mark.parametrize("scenario", ["release-acceptance", "aio"])
+def test_candidate_request_selects_three_parallel_guided_cases(scenario):
+    result = _parse_inputs(INPUT_SCENARIO=scenario, INPUT_CANDIDATE_SET="true")
+    assert result.returncode == 0, result.stderr
+    outputs = _outputs(result)
+    assert {key: outputs[key] for key in (
+        "candidate_mode", "secret_sync_modes", "max_parallel", "published_mode", "published_journey",
+        "persistent", "versions", "published_release", "rg_key",
+    )} == {
+        "candidate_mode": "true", "secret_sync_modes": '["disabled", "enabled", "existing"]',
+        "max_parallel": "3", "published_mode": "true", "published_journey": "guided", "persistent": "false",
+        "versions": '["2608"]', "published_release": "", "rg_key": "ephemeral-42",
+    }
+    assert _outputs(_parse_inputs())["candidate_mode"] == "false"
+    refused = _parse_inputs(INPUT_SCENARIO="release-acceptance")
+    assert refused.returncode != 0 and "requires the exact candidate selection" in refused.stderr
+
+
+@pytest.mark.parametrize(("changes", "message"), [
+    ({"INPUT_RG": "rg-private-marker"}, "Candidate acceptance selects its own Site cases"),
+    ({"INPUT_CLUSTER": "arc-private-marker"}, "Candidate acceptance selects its own Site cases"),
+    ({"INPUT_OID": "oid-private-marker"}, "Candidate acceptance selects its own Site cases"),
+    ({"INPUT_TESTS": "aio-install"}, "Candidate acceptance selects its own Site cases"),
+    ({"INPUT_RELEASES": "2607"}, "Candidate acceptance selects its own Site cases"),
+    ({"INPUT_SECRET_SYNC_MODES": "enabled,disabled", "INPUT_TESTS": "aio-upgrade"},
+     "Candidate acceptance selects its own Site cases"),
+    ({"INPUT_SKIP_TEARDOWN": "true"}, "Candidate acceptance selects its own Site cases"),
+    ({"INPUT_KEEP_ALIVE": "5"}, "Candidate acceptance selects its own Site cases"),
+    ({"INPUT_PUBLISHED_RELEASE": "v1.0.0", "INPUT_PUBLISHED_SOURCE_SHA": "a" * 40},
+     "Published E2E requires an existing resource group"),
+])
+def test_candidate_request_refuses_single_site_overrides_without_echoing_them(changes, message):
+    result = _parse_inputs(INPUT_SCENARIO="release-acceptance", INPUT_CANDIDATE_SET="true", **changes)
+    assert result.returncode != 0
+    assert not result.stdout
+    assert message in result.stderr
+    assert "private-marker" not in result.stderr
+
+
+def test_candidate_cases_use_masked_owned_names_and_a_distinct_existing_suffix(tmp_path):
+    output = tmp_path / "names.txt"
+    result = subprocess.run(
+        [str(_bash_executable()), "-c", _step_run("Compute names")],
+        env={**os.environ, "RG_IN": "", "CL_IN": "", "RELEASE": "2608", "SECRET_SYNC_MODE": "existing",
+             "RUN_ID": "1234567890", "RUN_ATTEMPT": "2", "GITHUB_OUTPUT": _bash_path(output),
+             "FLEET_RESOURCE_GROUP": "rg-siteops-site-private", "FLEET_CLUSTER_NAME": "arc-siteops-site-private"},
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    values = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+    assert values["rg"] == "rg-siteops-site-private"
+    assert values["cluster"] == "arc-siteops-site-private"
+    assert values["site_name"] == "e2e-34567890-2-2608-sync-existing"
+    assert "private" not in result.stdout
+
+
+def test_candidate_steps_never_read_enroll_or_pin_a_public_release():
+    job = yaml.safe_load(_workflow())["jobs"]["e2e"]
+    steps = job["steps"]
+    engine = next(step for step in steps if step.get("id") == "candidate-engine")
+    for value in ("scripts/qualify-workspace-engine.py", "--project-workspace workspaces/iot-operations",
+                  "--expected-runner-environment self-hosted", "Candidate E2E imported Site Ops from checkout.",
+                  "SITEOPS_E2E_TRUST=policy", 'rmdir "$project/sites"', 'echo "$state/command" >> "$GITHUB_PATH"'):
+        assert value in engine["run"]
+    assert "pip install" not in engine["run"] and "application/bin\" >> \"$GITHUB_PATH" not in engine["run"]
+    names = [step.get("name") or step.get("uses") for step in steps]
+    for earlier, later in (
+        ("Mask operator target inputs", "Bind candidate inputs and owned Site names"),
+        ("Select exact candidate inputs", "Bind candidate inputs and owned Site names"),
+        ("Bind candidate inputs and owned Site names", "Compute names"),
+        ("Install the candidate engine outside the checkout", "./.github/actions/create-k3s-cluster"),
+        ("Validate Custom Locations RP object ID", "Preflight the Site resource group"),
+        ("Snapshot RG resources (persistent mode)", "./.github/actions/connect-arc"),
+        ("Deploy AIO through the published engine and package", "Create the existing Key Vault"),
+        ("Enable Secret Sync on the existing instance", "Observe bounded AIO readiness"),
+    ):
+        assert names.index(earlier) < names.index(later), (earlier, later)
+    assert job["permissions"] == {"contents": "read", "actions": "read", "id-token": "write"}
+
+
+def _guided_rules(policy, *, plan):
+    trust = ["--trust-policy", f"{policy}/policy.json"]
+    return {
+        "siteops": [
+            {"match": ["inputs", "aio-install", "--example", *trust], "forbid": ["--approved-source"],
+             "write": {"--example": "cluster: null\nsiteName: example\n"},
+             "stdout": json.dumps({"kind": "SiteInputContract", "inputs": [
+                 {"name": "cluster", "type": "azureResourceId"},
+                 {"name": "location", "derivableFrom": ["cluster"]}]})},
+            {"match": ["inputs", "aio-install", "--input-file", *trust], "forbid": ["--approved-source"],
+             "code": 2, "stderr": "inputs.resource.read-required\n"},
+            {"match": ["deploy", "aio-install", *trust], "forbid": ["--approved-source"], "code": 1,
+             "stdout": json.dumps({"diagnostics": [{"code": "inputs.resource.requirement-unmet"}]})},
+            {"match": ["plan", "aio-install", *trust], "forbid": ["--approved-source"], "stdout": json.dumps(plan)},
+        ],
+        "az": [{"match": ["deployment", "group", "list"], "stdout": "[]"}],
+        "fleet-python": [{"match": ["scripts/coordinate-release-fleet.py", "policy"], "stdout": policy + "\n"}],
+    }
+
+
+@pytest.mark.parametrize("mode", ["disabled", "existing"])
+def test_candidate_guided_preparation_uses_fresh_policy_and_refuses_unready_secret_sync_only_when_disabled(
+    tmp_path, mode,
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    policy = (tmp_path / "policy-1").as_posix()
+    steps = {"global-edge-site": "skip", "edge-site": "skip", "schema-registry": "execute", "adr-ns": "execute",
+             "aio-enablement": "execute", "aio-instance": "execute", "schema-registry-role": "execute",
+             "resolve-aio": "skip", "secretsync": "skip"}
+    plan = {"status": "planned", "executable": True, "engine": {"version": "1.0.0b7"}, "plan": {
+        "manifest": {"targetSelection": "explicit-site"},
+        "submission": {"mode": "arm-json", "compilationBinding": "package-artifact"},
+        "targets": [{"operations": [{"identity": {"step": step}, "disposition": value}
+                                    for step, value in steps.items()]}]}}
+    install_doubles(tmp_path, _guided_rules(policy, plan=plan))
+    result = run_script(_step_run("Prepare guided AIO answers and plan"), tmp_path, {
+        **double_environment(tmp_path), "RUNNER_TEMP": tmp_path.as_posix(),
+        "SITEOPS_E2E_PROJECT": project.as_posix(), "SITEOPS_E2E_TRUST": "policy",
+        "SITEOPS_E2E_STATE": (tmp_path / "state").as_posix(), "FLEET_PYTHON": "fleet-python",
+        "SITEOPS_E2E_ENGINE_VERSION": "1.0.0b7", "E2E_SITE_NAME": "site-private-marker",
+        "E2E_SUBSCRIPTION": "00000000-0000-0000-0000-000000000001", "E2E_RESOURCE_GROUP": "rg-private-marker",
+        "E2E_CLUSTER_NAME": "arc-private-marker", "E2E_AIO_RELEASE": "2608",
+        "E2E_ENABLE_SECRET_SYNC": "false", "E2E_SECRET_SYNC_MODE": mode,
+    })
+    assert result.returncode == 0, result.stdout + result.stderr
+    recorded = calls(tmp_path)
+    commands = [arguments for name, arguments in recorded if name == "siteops"]
+    deploys = [arguments for arguments in commands if "deploy" in arguments]
+    assert len(deploys) == (1 if mode == "disabled" else 0)
+    assert all("--approved-source" not in arguments for arguments in commands)
+    assert sum(name == "fleet-python" for name, _ in recorded) == 1
+    assert all(line.startswith("::add-mask::") for line in result.stdout.splitlines() if "private-marker" in line)
+    assert "private-marker" not in result.stderr
+
+
+def _existing_vault_rules(*, resources, create_code=0):
+    return {"az": [
+        {"match": ["resource", "list", "--output", "json"], "stdout": json.dumps(resources)},
+        {"match": ["keyvault", "create", "--enable-rbac-authorization", "true"], "code": create_code,
+         "stderr": "provider detail vault-private-marker%0A\r\n"},
+    ]}
+
+
+@pytest.mark.parametrize("fault", [None, "secret-sync-present", "no-new-instance", "create-failed"])
+def test_existing_case_creates_its_vault_only_after_proving_secret_sync_absent(tmp_path, fault):
+    prior = "/subscriptions/x/resourceGroups/rg/providers/Microsoft.Storage/storageAccounts/old"
+    instance = "/subscriptions/x/resourceGroups/rg/providers/Microsoft.IoTOperations/instances/private-marker"
+    resources = [{"id": prior, "type": "Microsoft.Storage/storageAccounts"}]
+    if fault != "no-new-instance":
+        resources.append({"id": instance, "type": "Microsoft.IoTOperations/instances"})
+    if fault == "secret-sync-present":
+        resources.append({"id": instance + "-spc",
+                          "type": "Microsoft.SecretSyncController/azureKeyVaultSecretProviderClasses"})
+    (tmp_path / "e2e-teardown").mkdir()
+    (tmp_path / "e2e-teardown" / "pre-ids.txt").write_text(prior.upper() + "\n", encoding="utf-8")
+    install_doubles(tmp_path, _existing_vault_rules(resources=resources, create_code=int(fault == "create-failed")))
+    result = run_script(_step_run("Create the existing Key Vault"), tmp_path, {
+        **double_environment(tmp_path), "RUNNER_TEMP": tmp_path.as_posix(), "RG": "rg-private-marker",
+        "LOCATION": "eastus2", "AZURE_SUBSCRIPTION_ID": "00000000-0000-0000-0000-000000000001",
+        "FLEET_VAULT_NAME": "kv-private-marker", "FLEET_RUN_ID": "60", "FLEET_RUN_ATTEMPT": "1",
+    })
+    public = result.stdout + result.stderr
+    assert "private-marker" not in public
+    created = [arguments for name, arguments in calls(tmp_path) if "create" in arguments]
+    if fault is None:
+        assert result.returncode == 0, public
+        assert (tmp_path / "existing-instance.txt").read_text(encoding="utf-8") == instance
+        assert created == [[
+            "keyvault", "create", "--subscription", "00000000-0000-0000-0000-000000000001",
+            "--resource-group", "rg-private-marker", "--name", "kv-private-marker", "--location", "eastus2",
+            "--enable-rbac-authorization", "true", "--tags", "managedBy=siteops-site-acceptance", "runId=60",
+            "runAttempt=1", "--only-show-errors", "--output", "none"]]
+    else:
+        assert result.returncode != 0
+        assert bool(created) is (fault == "create-failed")
+        if fault == "create-failed":
+            assert "could not be created in the owned resource group" in public
+            assert "vault-private-marker" in (tmp_path / "existing-vault.err").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("fault", [None, "extra-operation", "deploy-failed"])
+def test_existing_case_enables_secret_sync_with_the_precreated_vault(tmp_path, fault):
+    policy = (tmp_path / "policy-1").as_posix()
+    operations = [{"identity": {"step": "resolve-aio"}, "disposition": "execute"},
+                  {"identity": {"step": "secretsync"}, "disposition": "execute"}]
+    if fault == "extra-operation":
+        operations.append({"identity": {"step": "aio-instance"}, "disposition": "execute"})
+    plan = {"status": "planned", "executable": True, "engine": {"version": "1.0.0b7"},
+            "plan": {"submission": {"mode": "arm-json", "compilationBinding": "package-artifact"},
+                     "targets": [{"operations": operations}]}}
+    run = {"apiVersion": "siteops/v1alpha1", "kind": "DeploymentRun", "projection": "publishable",
+           "status": "failed" if fault == "deploy-failed" else "succeeded", "exitCode": 0,
+           "engine": {"version": "1.0.0b7"},
+           "summary": {"sites": {"total": 1, "counts": {"succeeded": 1}},
+                       "operations": {"total": 2, "counts": {"succeeded": 2}}}}
+    trust = ["--trust-policy", f"{policy}/policy.json", "--trusted-root", f"{policy}/root.json"]
+    install_doubles(tmp_path, {
+        "siteops": [
+            {"match": ["plan", "secretsync", "--offline-content", *trust], "forbid": ["--approved-source"],
+             "stdout": json.dumps(plan)},
+            {"match": ["deploy", "secretsync", "--offline-content", "--yes", *trust],
+             "forbid": ["--approved-source"], "stdout": json.dumps(run)},
+        ],
+        "fleet-python": [{"match": ["policy"], "stdout": policy + "\n"}],
+    })
+    instance = "/subscriptions/x/resourceGroups/rg-private-marker/providers/Microsoft.IoTOperations/instances/i"
+    (tmp_path / "existing-instance.txt").write_text(instance, encoding="utf-8")
+    result = run_script(_step_run("Enable Secret Sync on the existing instance"), tmp_path, {
+        **double_environment(tmp_path), "RUNNER_TEMP": tmp_path.as_posix(),
+        "SITEOPS_E2E_PROJECT": (tmp_path / "project").as_posix(), "SITEOPS_E2E_STATE": "state",
+        "SITEOPS_E2E_ENGINE_VERSION": "1.0.0b7", "FLEET_PYTHON": "fleet-python",
+        "AZURE_SUBSCRIPTION_ID": "00000000-0000-0000-0000-000000000001", "E2E_RESOURCE_GROUP": "rg-private-marker",
+        "FLEET_VAULT_NAME": "kv-private-marker", "E2E_SITE_NAME": "site-private-marker",
+    })
+    assert "private-marker" not in result.stdout + result.stderr
+    answers = json.loads((tmp_path / "existing-answers.json").read_text(encoding="utf-8"))["values"]
+    assert answers == {
+        "instance": instance, "siteName": "site-private-marker", "environment": "e2e", "country": "US",
+        "existingVault": "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-private-marker"
+                         "/providers/Microsoft.KeyVault/vaults/kv-private-marker",
+    }
+    deploys = [arguments for name, arguments in calls(tmp_path) if name == "siteops" and "deploy" in arguments]
+    assert result.returncode == (0 if fault is None else 1)
+    assert len(deploys) == (0 if fault == "extra-operation" else 1)
+    if os.name == "posix":
+        assert (tmp_path / "existing-answers.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_candidate_deployment_receipt_names_prepublication_transport(tmp_path):
+    block = _embedded_python(_step_run("Deploy AIO through the published engine and package"))[0]
+    raw, output = tmp_path / "deployment.txt", tmp_path / "receipt.json"
+    raw.write_text(json.dumps({
+        "apiVersion": "siteops/v1alpha1", "kind": DEPLOYMENT_KIND, "projection": "publishable",
+        "status": "succeeded", "exitCode": 0, "engine": {"version": "1.0.0b7"},
+        "summary": {"sites": {"total": 1, "counts": {"succeeded": 1}},
+                    "operations": {"total": 7, "counts": {"succeeded": 7}}},
+    }), encoding="utf-8")
+    result = subprocess.run([sys.executable, "-c", block, str(raw), str(output), "", "a" * 40, "1.0.0b7"],
+                            capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads(output.read_text(encoding="utf-8"))
+    assert receipt["transport"] == "prepublication" and "release" not in receipt
+
+
+def _select_site_groups(site="", fleet=""):
+    workflow = yaml.safe_load(_workflow())
+    job = workflow["jobs"]["site-groups"]
+    with tempfile.TemporaryDirectory() as directory:
+        output = Path(directory) / "output"
+        result = subprocess.run(
+            [sys.executable, "-c", job["steps"][0]["run"]],
+            env={**os.environ, "SITE_GROUP": site, "FLEET_GROUPS": fleet,
+                 "RUN_ID": "42", "GITHUB_OUTPUT": str(output)},
+            capture_output=True, text=True, check=False,
+        )
+        values = dict(line.split("=", 1) for line in output.read_text().splitlines()) if output.exists() else {}
+    return result, values
+
+
+def test_site_group_selection_reads_only_environment_secrets_and_publishes_no_names():
+    job = yaml.safe_load(_workflow())["jobs"]["site-groups"]
+    assert job["environment"] == "${{ inputs.environment }}"
+    assert job["permissions"] == {}
+    assert set(job["outputs"]) == {"groups", "rg-key", "max-parallel"}
+    assert len(job["steps"]) == 1 and "uses" not in job["steps"][0]
+    assert job["steps"][0]["env"]["SITE_GROUP"] == "${{ secrets.E2E_SITE_RESOURCE_GROUP }}"
+    assert job["steps"][0]["env"]["FLEET_GROUPS"] == "${{ secrets.E2E_FLEET_RESOURCE_GROUPS }}"
+
+
+@pytest.mark.parametrize(("site", "fleet", "expected"), [
+    ("", "", {"groups": "ephemeral", "rg_key": "ephemeral-42", "max_parallel": "3"}),
+    ("", "rg-fleet-one,rg-fleet-two", {"groups": "ephemeral", "rg_key": "ephemeral-42", "max_parallel": "3"}),
+    ("RG-Private-Marker", "rg-fleet-one,rg-fleet-two", {"groups": "persistent", "max_parallel": "1"}),
+    ("rg-private-marker", "", {"groups": "persistent", "max_parallel": "1"}),
+    # Overlap is refused for every candidate Site run, standalone or release acceptance.
+    ("rg-private-marker", "rg-private-marker,rg-fleet-two", None),
+    ("rg-private-marker", "rg-fleet-one,RG-PRIVATE-MARKER", None),
+    ("rg private-marker", "", None),
+    ("rg-private-marker.", "", None),
+])
+def test_site_groups_select_parallel_ephemeral_or_serialized_persistent_cases(site, fleet, expected):
+    result, values = _select_site_groups(site, fleet)
+    assert "private-marker" not in result.stdout + result.stderr + json.dumps(values)
+    if expected is None:
+        assert result.returncode != 0 and not values
+        return
+    assert result.returncode == 0, result.stderr
+    if expected["groups"] == "persistent":
+        # Persistent cases share the key that persistent E2E uses for the same group.
+        ordinary = _outputs(_parse_inputs(INPUT_RG=site.lower()))["rg_key"]
+        expected = {**expected, "rg_key": ordinary}
+    assert values == expected
+
+
+def test_site_cases_schedule_from_site_groups_and_keep_ordinary_dispatches_unchanged():
+    job = yaml.safe_load(_workflow())["jobs"]["e2e"]
+    assert job["strategy"]["max-parallel"] == (
+        "${{ fromJSON(needs.site-groups.outputs.max-parallel || needs.prep.outputs.max-parallel) }}")
+    group = job["concurrency"]["group"]
+    assert group.startswith("e2e-${{ needs.site-groups.outputs.rg-key || needs.prep.outputs.rg-key }}")
+    assert "needs.site-groups.outputs.groups == 'persistent'" in group
+    assert job["env"]["E2E_SITE_RESOURCE_GROUP"] == (
+        "${{ needs.prep.outputs.candidate-mode == 'true' && secrets.E2E_SITE_RESOURCE_GROUP || '' }}")
+    steps = {step.get("name"): step for step in job["steps"]}
+    assert steps["Teardown (persistent mode, delta cleanup, keep RG)"]["if"] == (
+        "always() && env.PERSISTENT_RG == 'true' && !inputs.skip-teardown")
+    assert '--expect-groups "$SITE_GROUPS"' in steps["Bind candidate inputs and owned Site names"]["run"]
+    assert '"$CANDIDATE_MODE" == "true"' in steps["Resolve E2E_LOCATION"]["run"]
+
+
+@pytest.mark.parametrize(("persistent", "candidate", "expected"), [
+    ("false", "true", "westus3"), ("true", "false", "westus3"), ("false", "false", "eastus2"),
+])
+def test_candidate_cases_take_their_region_from_the_selected_group(tmp_path, persistent, candidate, expected):
+    install_doubles(tmp_path, {"az": [{"match": ["group", "show", "--query", "location"], "stdout": "westus3\n"}]})
+    output = tmp_path / "location.txt"
+    result = run_script(_step_run("Resolve E2E_LOCATION"), tmp_path, {
+        **double_environment(tmp_path), "PERSISTENT_RG": persistent, "CANDIDATE_MODE": candidate,
+        "AUTO_LOC": "eastus2", "RG": "rg-private-marker", "GITHUB_OUTPUT": output.as_posix(),
+    })
+    assert result.returncode == 0, result.stderr
+    assert output.read_text(encoding="utf-8") == f"location={expected}\n"

@@ -68,6 +68,12 @@ A run that does not succeed names the incomplete work and the next step:
   x munich-prod
       BadRequest: the dataflow endpoint template was rejected
 
+  Failure diagnostics
+  -------------------
+  x failed: other, 1 operation
+    Inspect the detailed error locally or in the Azure activity log.
+    Confirm unknown work before another deployment.
+
   Next: inspect affected resources, correct the error, and review a new
   plan before deploying again.
 ```
@@ -155,8 +161,10 @@ siteops -w <workspace> deploy <manifest> --yes --output json --projection publis
 
 For execution results and expected preparation failures, JSON mode writes
 one JSON document to stdout. Progress, diagnostics, and logging use stderr,
-so a caller can parse stdout directly. Argument errors, such as a missing
-manifest, are reported on stderr without a result document.
+so a caller can parse stdout directly. Usage errors, such as omitting the
+Manifest argument, are reported on stderr without a result document.
+An expected lookup or content error after the command's content context is
+admitted produces an invalid result instead.
 
 ```json
 {
@@ -169,15 +177,21 @@ manifest, are reported on stderr without a result document.
   "status": "succeeded",
   "summary": {
     "interrupted": false,
-    "operations": {"counts": {"skipped": 1, "succeeded": 3}, "total": 4},
-    "sites": {"counts": {"succeeded": 2}, "total": 2}
+    "operations": {
+      "counts": {"succeeded": 3, "failed": 0, "skipped": 1, "not-run": 0, "cancelled": 0, "unknown": 0},
+      "total": 4,
+      "failureDiagnostics": []
+    },
+    "sites": {
+      "counts": {"succeeded": 2, "failed": 0, "skipped": 0, "not-run": 0, "cancelled": 0, "unknown": 0},
+      "total": 2
+    }
   }
 }
 ```
 
-The counts above are abbreviated. Each `counts` object carries every status
-value, including the zero entries. `engine.version` identifies the installed
-Site Ops build.
+Each `counts` object carries every status, including zero entries.
+`engine.version` identifies the installed Site Ops build.
 
 The `siteops/v1alpha1` wire contract is preview. Consumers should reject an
 unsupported `apiVersion`, `kind`, or `projection`, and should treat
@@ -188,14 +202,80 @@ Each run generates a fresh identifier. It appears in `local-private` JSON for
 correlating one execution and is not published, so public automation should
 not depend on it.
 
+## Read failure diagnostics
+
+Each failed or unknown logical operation has one failure category. The category
+explains the outcome but does not change its status, retries or exit code.
+
+| Category | Meaning | Admitted structured Azure code |
+|---|---|---|
+| `subscription-not-visible` | The account cannot see the subscription | `SubscriptionNotFound` |
+| `authorization-failed` | The identity lacks access for the operation | `AuthorizationFailed` |
+| `template-invalid` | The template or its parameters were rejected | `InvalidTemplate` |
+| `tool-unavailable` | A required local tool is unavailable | None |
+| `timeout` | Local execution or observation reached its deadline | None |
+| `other` | The cause is unrecognized or completion cannot be established | None |
+
+Azure codes are admitted only from supported structured error fields, with
+exact case. Text alone can explain a category but cannot supply an Azure code.
+`QuotaExceeded` remains `other` without a code. A generic `DeploymentFailed`
+wrapper is not published. Repeated matching ARM causes reduce to one
+category and code. Mixed, unrecognized or malformed causes use `other`.
+See the [diagnostic index](diagnostics.md) for fixed guidance.
+
+Both projections add `summary.operations.failureDiagnostics` beside `counts`
+and `total`, never inside the counters. Groups are keyed by status, category
+and optional Azure code, sorted with failed before unknown. Each failed or
+unknown operation contributes once. Provider attempts, Sites and nested ARM
+resource operations are not the unit of counting.
+
+For example, this operations summary records one failed and one unknown
+operation:
+
+```json
+{
+  "counts": {"succeeded": 0, "failed": 1, "skipped": 0, "not-run": 0, "cancelled": 0, "unknown": 1},
+  "total": 2,
+  "failureDiagnostics": [
+    {
+      "status": "failed",
+      "category": "subscription-not-visible",
+      "azureCode": "SubscriptionNotFound",
+      "count": 1,
+      "summary": "The target subscription is not visible to the current Azure account.",
+      "guidance": "Check the subscriptions visible to the current account and use an identity with access to the target subscription.",
+      "documentation": "https://github.com/Azure/digital-ops-scale-kit/blob/main/docs/diagnostics.md#providersubscription-not-visible"
+    },
+    {
+      "status": "unknown",
+      "category": "timeout",
+      "count": 1,
+      "summary": "The local execution or observation deadline was reached.",
+      "guidance": "Confirm the provider state before another deployment. A local deadline does not establish whether cloud work completed.",
+      "documentation": "https://github.com/Azure/digital-ops-scale-kit/blob/main/docs/diagnostics.md#providertimeout"
+    }
+  ]
+}
+```
+
+Group counts sum to `counts.failed` and `counts.unknown` separately.
+No such work produces an empty array. Skipped, cancelled, not-run and succeeded
+operations have no failure category. Invalid preparation has result diagnostics,
+not a counted provider rejection.
+
+Content diagnostics remain one JSON record per occurrence. Human output groups
+identical public records as `N occurrences`, not `N operations`.
+`summary.diagnosticCount`, when present, still counts serialized records.
+Each private context remains attached to its own record.
+
 ## Choose a projection
 
 Two projections are available, matching the plan surface:
 
 | Projection | Intended destination | Detail |
 |---|---|---|
-| `local-private` | An authorized local terminal or private file | Site and step identities, per operation status, timing, deployment names, typed reasons |
-| `publishable` | CI logs, summaries, artifacts, and reports | Aggregate counts, run status, exit code, generic typed diagnostics |
+| `local-private` | An authorized local terminal or private file | Site and step identities, per operation status, timing, deployment names, typed reasons and failure metadata |
+| `publishable` | CI logs, summaries, artifacts, and reports | Aggregate counts, run status, exit code, typed diagnostics and failure groups |
 
 ```bash
 siteops -w <workspace> deploy <manifest> --yes --output json \
@@ -209,13 +289,15 @@ enabled.
 
 The publishable projection is built from an allowlist rather than by redacting
 the local document. It omits Site names, step names, deployment names, paths,
-provider outputs, and raw error text. Diagnostic codes and summaries are fixed
-category text, so a diagnostic written by a producer is never published
-verbatim. An unrecognized category publishes a generic entry.
+provider outputs, and raw error text. Diagnostic summary, guidance and
+documentation come from the engine registry, not a producer's message.
+Documentation links always point to the fixed main branch
+[diagnostic index](diagnostics.md). An unrecognized provider cause uses `other`.
 
-The `local-private` projection carries identities and typed reasons. It never
-serializes operation outputs or raw provider errors. A reason or diagnostic
-adds detail only when its producer supplied a separate value free message.
+The `local-private` projection carries identities, typed reasons and an
+operation's failure category with optional admitted code and registry text.
+Neither JSON projection serializes raw provider messages, outputs or parameter
+values. Authorized local plain output retains detailed errors.
 
 Redacted plain output renders the same allowlisted fields as the publishable
 JSON. Local plain output keeps the detailed view, including private reason
@@ -283,3 +365,47 @@ Capture the explicit publishable JSON from stdout and keep stderr as a separate
 private stream. The shipped GitHub Actions and Azure Pipelines templates do
 this, validate the envelope before publishing anything, and preserve the
 process exit code. See [ci-cd-setup.md](ci-cd-setup.md).
+
+## Validate a Manifest
+
+Check syntax, files and static references without compiling templates or
+reading Azure resources:
+
+```bash
+siteops -w <workspace> validate <manifest> --output json --projection publishable
+```
+
+Validation writes one `ValidationResult` to stdout. Plain output remains the
+default. A reusable Manifest without requested targeting is valid and reports
+`targetResolution: not-requested`:
+
+```json
+{
+  "apiVersion": "siteops/v1alpha1",
+  "kind": "ValidationResult",
+  "projection": "publishable",
+  "engine": {"name": "siteops", "version": "1.0.0b1"},
+  "status": "valid",
+  "exitCode": 0,
+  "summary": {"diagnosticCount": 0, "targetResolution": "not-requested"},
+  "diagnostics": []
+}
+```
+
+Completed validation exits `0` for valid content and `1` for invalid content.
+Warnings alone do not invalidate it. `summary.diagnosticCount` counts records
+of all severities. Requested targeting reports `complete` or `incomplete`.
+Expected lookup and content failures after content admission produce an invalid
+document with diagnostic codes and registry guidance.
+
+JSON defaults to `local-private` for a private destination and `publishable`
+when redaction is enabled. Explicit `publishable` is also allowed locally.
+`local-private` adds recorded source context but no raw errors or source
+excerpts. Privacy and option refusals exit `1` before content access, with
+stderr only. `--projection` requires `--output json`, and private JSON is
+refused while redaction is enabled.
+
+Usage errors exit `2` without a result. Failures before content admission,
+unexpected internal errors and interruption do not fabricate a completed
+`ValidationResult`. Interruption exits `130`. JSON stdout is separate from
+stderr logging and plain error guidance.

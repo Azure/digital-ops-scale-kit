@@ -21,6 +21,10 @@ applying resource sets between changing the pin and completing the upgrade.
 The extension update preserves existing configuration, release train and
 identity settings, while applying the changes that the AIO release owns.
 
+Site extension override maps merge over the existing settings, so they can add
+or change keys but cannot remove them. See the
+[install Site settings](../aio-install/README.md#configure-the-site) for the maps.
+
 ## Review and deploy
 
 From the repository root, replace `<site>` with the configured Site:

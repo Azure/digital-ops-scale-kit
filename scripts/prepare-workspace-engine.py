@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Workflows may set PYTHONSAFEPATH, so sibling helpers are found through an explicit path entry.
+sys.path.insert(1, str(Path(__file__).resolve().parent))
 
 from release_verification import ReleaseVerifier  # noqa: E402
 from siteops_release import bind_prepared_plan, load_release_intent  # noqa: E402

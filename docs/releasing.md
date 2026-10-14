@@ -215,8 +215,10 @@ can consume it through [content release selection](install-siteops.md#install-th
 Direct engine installation commands remain supported.
 
 The default preview's final summary shows one matrix of Python versions and
-platforms, plus a link to the attested release assets. Individual job logs
-remain available for diagnosis.
+platforms, plus a link to the attested release assets. Ubuntu 26.04 and the
+Windows standard user run only with Python 3.11, so other rows show `n/a` in
+those columns. The installer check fails unless every declared cell passes
+exactly once. Individual job logs remain available for diagnosis.
 
 This path needs no `siteops-release` environment. Its jobs have no permission
 to write repository contents, request no publishing approval, and
@@ -233,6 +235,27 @@ and qualification required by its declaration. Script commands that accept
 `--dry-run` can instead perform unsigned local preparation. The flag alone
 does not imply signing. The approval UI and release upload still require a
 configured environment and explicit approval.
+
+### Read the Windows standard user check
+
+The **Qualify bundle (windows-2025, Python 3.11, standard user)** job creates
+a temporary local account in the Users group. It stages the verified bootstrap
+and bundle in a folder that account can only read and execute, then runs the
+signed bootstrap unchanged as that account. The account acquires its own uv
+and Python, consumes the staged bundle without a download, and installs Site
+Ops in its own profile. The job then removes the account, its profile and the
+staging folder.
+
+The job log starts with `GitHub CLI preflight` lines that report the owner and
+writer classes of `gh.exe` and each parent folder. The bootstrap admits GitHub
+CLI only when Administrators, SYSTEM, TrustedInstaller or the current user own
+and control it, so a `job-account` or `other` class explains a `GH_ADMISSION`
+failure. A failure names one fixed category, such as `ROOT_DATA_ACL`,
+`TOOL_OWNER`, `GH_ADMISSION`, `GH_VERSION`, `STAGING_ACCESS`,
+`CACHE_NOT_USED` or `TIMEOUT`. Before `STAGING_ACCESS`, `Staging access` lines
+report the owner and access rules of each staged item by class, such as
+`job-account` or `standard-user`. The
+bootstrap log stays in the temporary profile and is never published.
 
 ## Fleet resource ownership
 
@@ -272,15 +295,16 @@ ownership checks. Never substitute a search across the subscription or general
 resource janitor. Keep provider diagnostics and allocation state private.
 These helpers do not install Site Ops, deploy AIO or establish workload health.
 
-The producer's **Fleet qualification selection** summary identifies the
-exact admitted plan, engine, workspaces and inventory for the manual
-`scenario=fleet` E2E path. See [fleet acceptance and its runtime budget](e2e-testing.md#qualify-one-exact-candidate-across-two-sites).
+The producer's **Exact candidate selection** summary identifies the
+exact admitted plan, engine, workspaces and inventory for Site and fleet acceptance.
+The manual `scenario=fleet` E2E path uses the same selection.
+See [fleet acceptance and its runtime budget](e2e-testing.md#qualify-one-exact-candidate-across-two-sites).
 That path installs the selected engine outside checkout, seeds the normal
 operator project, coordinates two live hosts, and requires bound deployment,
 readiness and cleanup receipts. It does not rebuild candidate assets.
-The Release workflow does not run this path or other live scenarios. Before
-approving publication, confirm the required live evidence for the same
-unchanged candidate.
+The Release workflow runs the fleet as part of
+[candidate acceptance](#accept-the-candidate). A manual `scenario=fleet` run
+remains available for diagnosis but does not satisfy publication.
 
 ## Qualify the Azure Pipelines templates
 
@@ -470,6 +494,12 @@ The current beta policy still keeps the source package at `1.0.0b1`.
 Do not create another Site Ops beta tag without an approved change to the
 version policy.
 
+Publication now requires [candidate acceptance](#accept-the-candidate), which
+deploys the release's `workspaces/iot-operations` workspace. A release that
+contains only the engine has no workspace to accept, so it cannot be published
+until engine only acceptance is defined. Release the engine together with
+content instead.
+
 ### Release content against an existing engine
 
 ```json
@@ -572,15 +602,19 @@ Read release files from A
 Run CI for A
 Build and attest the requested engine and workspace assets
 Qualify native installation and workspace consumption as applicable
+Admit the frozen candidate
           |
           v
-Review the candidate summary and applicable content evidence
+Start one Release acceptance run for that exact candidate
+          |
+          v
+Review the candidate summary and the passed acceptance run
           |
           v
 Approve tag creation and publication
           |
           v
-Tag A and publish the same qualified bytes
+Verify the bound acceptance, then tag A and publish the same qualified bytes
 ```
 
 Use one release folder for each PR that prepares a release. A push to `main` that
@@ -640,8 +674,112 @@ routing descriptor. Workspace package delivery is described in
 The workflow runs CI and applicable engine and workspace qualification. For
 content releases, the reviewer must also confirm the applicable content/AIO
 evidence and any valid evidence carried forward from earlier qualification.
-The release workflow does not deploy Azure resources or infer workload health
-from installation success.
+The release run itself deploys no Azure resources. It starts a separate
+acceptance run that deploys and removes test resources in the `dev`
+environment. Neither run infers workload health from installation success.
+
+## Accept the candidate
+
+After candidate admission, the **Start candidate acceptance** job starts one
+**E2E Tests** run titled **Release acceptance** on `main` for the exact
+candidate. Its job summary links that run. The acceptance run uses the `dev`
+environment in `eastus2`, runs the single Site cases and the fleet in parallel
+and aggregates one receipt for the candidate:
+
+| Scenario | Evidence |
+|---|---|
+| `installer` | Every declared installer cell passed for the frozen bundle, including Ubuntu 26.04 and the Windows standard user |
+| `site-aio` | Guided AIO installation on one Site with Secret Sync absent |
+| `site-existing-secretsync` | Secret Sync enabled on an existing instance with a precreated vault |
+| `site-combined` | AIO and Secret Sync deployed together |
+| `fleet` | Two Sites deployed by one installed invocation with `--parallel 2` |
+
+Each Site and fleet scenario removes its resources and must confirm their
+absence. Acceptance does not check workload data flow or secret
+materialization. A candidate without the `workspaces/iot-operations` workspace
+has no acceptance selection, so it cannot be published.
+
+### Configure the acceptance environment
+
+Acceptance reuses the `dev` environment and its `AZURE_CLIENT_ID`,
+`AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` and `CUSTOM_LOCATIONS_OID` secrets.
+By default, each attempt creates new resource groups and deletes them, which
+needs Owner on the subscription. To use existing groups instead, add these
+`dev` environment secrets:
+
+| Secret | Value | Effect |
+|---|---|---|
+| `E2E_SITE_RESOURCE_GROUP` | One existing group name | The single Site cases run one after another in that group |
+| `E2E_FLEET_RESOURCE_GROUPS` | Two group names separated by a comma, without spaces | Each fleet slot uses one of them |
+
+Each name uses only letters, digits, `.`, `_`, `(`, `)` and `-`, has at most
+90 characters and does not end with `.`. All names must differ, including the
+Site group and both fleet groups. Each receipt row records whether its
+scenario used `ephemeral` or `persistent` groups. Publication accepts either
+mode.
+
+### Hold merges until acceptance starts
+
+Dispatch selects a branch, not a commit, so **Start candidate acceptance**
+first confirms that `main` still points at the candidate commit. Hold merges
+to `main` from the release merge until that job succeeds. If `main` moved
+first, the job fails, and rerunning it fails again. Start a new Release run
+from the current `main`, as described in
+[Retry or prepare a new candidate](#retry-or-prepare-a-new-candidate).
+
+### Find and rerun the acceptance run
+
+Open the link in the **Start candidate acceptance** summary, or open
+**Actions > E2E Tests** and select the newest run titled
+**Release acceptance** at the candidate commit.
+
+- A single Site case failed: use **Re-run failed jobs** in that run.
+- The fleet failed: use **Re-run all jobs**. A partial fleet rerun stops in
+  its first step.
+
+Reruns keep the candidate and write a new receipt for each attempt. The
+latest attempt decides. Resources left by an earlier attempt are removed by
+its own cleanup, or by a separately approved `scenario=site-cleanup` or
+`scenario=fleet-cleanup` run with the same `candidate`.
+Set `original-run` and `original-attempt` to the run and attempt that need reconciliation.
+In persistent groups, that run removes only what the original attempt
+created, as described in [Read the result and retry](e2e-testing.md#read-the-result-and-retry).
+
+### How publication binds acceptance
+
+After approval, the publish job finds the newest **Release acceptance** run of
+`.github/workflows/e2e-test.yaml` on `main` at the candidate commit that
+carries a receipt for this candidate. A newer run that is still in progress
+or completed without recording a result stops publication. Runs bound to
+another candidate are skipped. The governing run must have completed successfully,
+and its latest attempt must have exactly one unexpired receipt. That receipt must
+name this candidate's source, release run and attempt, admission, plan and
+inventory digests, the `dev` environment, and every required scenario as
+passed with resources confirmed absent. Previews, other branches, other
+workflow files and other candidates never satisfy it. All of these checks
+run before any tag or release write.
+
+Approve only after the acceptance run succeeds. An earlier approval does not
+wait for it. Publication then fails before any write, and you rerun the failed
+publish job after acceptance completes, which requests approval again. A
+publish rerun keeps the candidate from the original attempt.
+
+### Approver checklist
+
+1. The candidate summary shows the expected release, tag action, source
+   commit, notes, digests and installer matrix.
+2. The **Release acceptance** run for this candidate succeeded, and its result
+   lists every scenario as `passed` with cleanup `confirmed-absent`.
+3. Azure Cloud Shell and a Codespace for `Azure-Samples/explore-iot-operations`
+   each installed the candidate from its Actions download and proof, following
+   [the installation guide](install-siteops.md). Record OS and tool versions,
+   the candidate identity, the installed command origin, selected inputs, plan,
+   deployment, readiness and cleanup in private notes. These runs use staged
+   candidate assets, not a public download.
+4. For content releases, the applicable content and AIO evidence is confirmed.
+5. Immutable releases are enabled in the repository settings. The workflow
+   token cannot read that setting, so this confirmation is the only check
+   before publication.
 
 ## Approve publication
 
@@ -669,18 +807,21 @@ reviewer must approve the run.
 
 After approval, the workflow:
 
-1. Downloads and verifies the same release file, notes, frozen asset list, and
+1. Locates the governing acceptance run and verifies its receipt for this
+   exact candidate, as described in
+   [How publication binds acceptance](#how-publication-binds-acceptance).
+2. Downloads and verifies the same release file, notes, frozen asset list, and
    qualified release assets.
-2. Confirms the release file has not changed and the referenced engine, if any,
+3. Confirms the release file has not changed and the referenced engine, if any,
    still has the same release identity and tag target.
-3. Creates a missing tag at the approved commit, or reuses a tag already
+4. Creates a missing tag at the approved commit, or reuses a tag already
    pointing there. It never moves a conflicting tag.
-4. Reauthenticates the ZIP and standalone wheel, confirms their byte identity,
+5. Reauthenticates the ZIP and standalone wheel, confirms their byte identity,
    and reauthenticates each declared workspace package. It compares workspace
    routing, source, package identity and compatibility metadata with the approved
    declaration before creating the release with its unchanged payload.
-5. Confirms every uploaded asset digest and verifies GitHub's release
-   attestation when immutable releases are enabled.
+6. Confirms every uploaded asset digest, requires the published release to be
+   immutable, and verifies GitHub's release attestation.
 
 The destination is the repository running the workflow. Official publication
 occurs in `Azure/digital-ops-scale-kit`. A fork's workflow writes only to that
@@ -688,9 +829,27 @@ fork. Existing releases are never overwritten.
 
 With native installation assets, GitHub CLI creates a draft, uploads the files,
 and then publishes. This temporary draft is not a separate stage for human review.
-If immutability is enabled, GitHub locks the uploaded assets and tag when
-publication completes. Titles and release notes remain editable through
-GitHub's normal controls. The workflow does not enable immutability itself.
+Enable immutable releases in the repository settings before publishing.
+GitHub then locks the uploaded assets and tag when publication completes, so
+the short install command can rely on a release tag's download location.
+Titles and release notes remain editable through GitHub's normal controls.
+The workflow cannot enable immutability or read the setting, because the
+workflow token has no administration permission. When the published release
+is not immutable, the publish job deletes that release, keeps its tag at the
+approved commit and fails. Enable immutable releases, then re-run the publish
+job. It reuses the tag and creates the release again.
+
+### Check the published install commands
+
+Candidate qualification stages its assets, because a candidate has no release
+download location. After publication, run the README's short install command
+for the new tag on Linux, in Azure Cloud Shell or a Codespace, and on Windows.
+Each run must download the script and the engine from the release, report the
+discovered source commit, install and approve the `official` source. Record the
+tag, the discovered commit and the installed version in private notes. If a
+command fails, do not announce the release. Add a line to the editable
+release notes that directs operators to its pinned commands, then fix the
+README or bootstrap through the normal review process.
 
 ## Retry or prepare a new candidate
 
@@ -709,6 +868,13 @@ run rather than approving it.
 Publication consumes the exact reviewed artifact IDs and hashes, rather than
 choosing a different successful build later. A failed publishing operation can
 have partial effects, so inspect its result before retrying.
+
+Rerunning all jobs rebuilds the candidate with a new admission, so earlier
+acceptance no longer applies and a new acceptance run starts. To retry only
+acceptance, rerun the acceptance run as described in
+[Find and rerun the acceptance run](#find-and-rerun-the-acceptance-run), then
+rerun the failed publish job. Candidate artifacts, reruns and pending
+approvals expire after 30 days.
 
 To prepare a new candidate manually, open **Actions > Release (approval
 required) > Run workflow** and enter:

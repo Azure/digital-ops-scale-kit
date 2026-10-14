@@ -11,7 +11,10 @@ import stat
 import sys
 from pathlib import Path
 
-from siteops_release_assets import (
+# Workflows may set PYTHONSAFEPATH, so sibling helpers are found through an explicit path entry.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from siteops_release_assets import (  # noqa: E402
     ENGINE_REFERENCE_FILES,
     ENGINE_REFERENCE_NAME,
     MAX_ENGINE_REFERENCE_BYTES,

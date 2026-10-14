@@ -17,16 +17,24 @@
 # The E2E site itself is rendered at runtime via scripts/render-e2e-site.py
 # into $RUNNER_TEMP/e2e-sites/ and picked up by the orchestrator through
 # SITEOPS_EXTRA_SITES_DIRS, so we never commit an Azure-specific site file.
+#
+# Release acceptance runs the three single Site cases and the two Site fleet
+# for one exact candidate in parallel. Each scenario selects ephemeral or
+# persistent groups from its own environment secret. Ephemeral Site cases run
+# in parallel, each in a new group named for its run attempt. Persistent Site
+# cases share the E2E_SITE_RESOURCE_GROUP group and run one after another.
+# A failed Site case can be rerun alone. The fleet reruns as a unit.
 
 name: E2E Tests
+run-name: ${{ inputs.scenario == 'release-acceptance' && 'Release acceptance' || 'E2E Tests' }}
 
 on:
   workflow_dispatch:
     inputs:
       scenario:
-        description: Select AIO E2E, exact-candidate fleet qualification/reconciliation, or a Windows installer check.
+        description: Select AIO E2E, release acceptance of one exact candidate, fleet qualification, owned resource reconciliation, or a Windows installer check.
         type: choice
-        options: [aio, fleet, fleet-cleanup, windows-installer-preflight]
+        options: [aio, release-acceptance, fleet, fleet-cleanup, site-cleanup, windows-installer-preflight]
         default: aio
       aio-releases:
         description: "AIO scenario only: comma-separated releases (e.g. 2607,2608). Fleet uses fixed 2607 and 2608 targets."
@@ -85,16 +93,16 @@ on:
         type: choice
         options: [configured, guided]
         default: configured
-      fleet-candidate:
-        description: "Fleet modes only: exact FleetCandidate JSON from the producer's admission summary."
+      candidate:
+        description: "Candidate scenarios use the FleetCandidate JSON from the producer's Exact candidate selection summary."
         type: string
         default: ""
-      fleet-original-run:
-        description: "Fleet cleanup only: original acceptance workflow run ID."
+      original-run:
+        description: "Cleanup scenarios use the original acceptance workflow run ID."
         type: string
         default: ""
-      fleet-original-attempt:
-        description: "Fleet cleanup only: original acceptance workflow attempt."
+      original-attempt:
+        description: "Cleanup scenarios use the original acceptance workflow attempt."
         type: string
         default: ""
 
@@ -113,7 +121,7 @@ env:
 jobs:
   fleet-request:
     name: Validate fleet request
-    if: inputs.scenario == 'fleet' || inputs.scenario == 'fleet-cleanup'
+    if: contains(fromJSON('["fleet", "fleet-cleanup", "release-acceptance", "site-cleanup"]'), inputs.scenario)
     runs-on: ubuntu-24.04
     permissions: {}
     steps:
@@ -123,34 +131,35 @@ jobs:
           import json, os, re
           with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as stream:
               request = json.load(stream)["inputs"]
-          if not request.get("fleet-candidate"):
-              raise SystemExit("Fleet scenarios require the exact candidate selection.")
+          if not request.get("candidate"):
+              raise SystemExit("Candidate scenarios require the exact candidate selection.")
           if (str(request.get("skip-teardown", "false")).lower() == "true"
                   or str(request.get("keep-cluster-alive-minutes", "0")) not in {"", "0"}
                   or any(request.get(key, "").strip() for key in (
                       "resource-group", "cluster-name", "custom-locations-oid", "upgrade-to",
                       "tests", "published-release", "published-source-sha",
                   ))):
-              raise SystemExit("Fleet scenarios use two owned targets and mandatory cleanup, not single-Site overrides.")
-          prior = (request.get("fleet-original-run", ""), request.get("fleet-original-attempt", ""))
-          if request["scenario"] == "fleet-cleanup":
+              raise SystemExit("Candidate scenarios use owned targets and mandatory cleanup, not single-Site overrides.")
+          prior = (request.get("original-run", ""), request.get("original-attempt", ""))
+          if request["scenario"] in {"fleet-cleanup", "site-cleanup"}:
               if not all(re.fullmatch("[1-9][0-9]{0,19}", value) for value in prior):
-                  raise SystemExit("Fleet reconciliation requires the original run and attempt.")
+                  raise SystemExit("Reconciliation requires the original run and attempt.")
           elif any(prior):
-              raise SystemExit("Original run inputs apply only to fleet cleanup.")
-          print("The fleet request has an explicit bounded scope.")
+              raise SystemExit("Original run inputs apply only to cleanup scenarios.")
+          print("The candidate request has an explicit bounded scope.")
 
   fleet:
     name: Fleet
-    needs: fleet-request
-    if: inputs.scenario == 'fleet'
+    # Release acceptance starts the fleet only after the Site case inputs are also admitted.
+    needs: [fleet-request, prep]
+    if: ${{ !cancelled() && needs.fleet-request.result == 'success' && (inputs.scenario == 'fleet' || (inputs.scenario == 'release-acceptance' && needs.prep.result == 'success')) }}
     uses: ./.github/workflows/_fleet-acceptance.yaml
     permissions:
       contents: read
       actions: read
       id-token: write
     with:
-      candidate: ${{ inputs.fleet-candidate }}
+      candidate: ${{ inputs.candidate }}
       environment: ${{ inputs.environment }}
       location: ${{ inputs.location }}
     secrets:
@@ -158,25 +167,30 @@ jobs:
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       CUSTOM_LOCATIONS_OID: ${{ secrets.CUSTOM_LOCATIONS_OID }}
+      E2E_FLEET_RESOURCE_GROUPS: ${{ secrets.E2E_FLEET_RESOURCE_GROUPS }}
+      E2E_SITE_RESOURCE_GROUP: ${{ secrets.E2E_SITE_RESOURCE_GROUP }}
 
   fleet-cleanup:
-    name: Fleet reconciliation
+    name: Owned resource reconciliation
     needs: fleet-request
-    if: inputs.scenario == 'fleet-cleanup'
+    if: inputs.scenario == 'fleet-cleanup' || inputs.scenario == 'site-cleanup'
     uses: ./.github/workflows/_fleet-reconcile.yaml
     permissions:
       contents: read
       actions: read
       id-token: write
     with:
-      candidate: ${{ inputs.fleet-candidate }}
-      original-run: ${{ inputs.fleet-original-run }}
-      original-attempt: ${{ inputs.fleet-original-attempt }}
+      candidate: ${{ inputs.candidate }}
+      original-run: ${{ inputs.original-run }}
+      original-attempt: ${{ inputs.original-attempt }}
       environment: ${{ inputs.environment }}
+      kind: ${{ inputs.scenario == 'site-cleanup' && 'site' || 'fleet' }}
     secrets:
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      E2E_SITE_RESOURCE_GROUP: ${{ secrets.E2E_SITE_RESOURCE_GROUP }}
+      E2E_FLEET_RESOURCE_GROUPS: ${{ secrets.E2E_FLEET_RESOURCE_GROUPS }}
 
   windows-installer-preflight:
     if: inputs.scenario == 'windows-installer-preflight'
@@ -265,7 +279,9 @@ jobs:
           }
 
   prep:
-    if: inputs.scenario == 'aio'
+    # Release acceptance starts no Site case unless the candidate request was admitted.
+    needs: fleet-request
+    if: ${{ !cancelled() && (inputs.scenario == 'aio' || (inputs.scenario == 'release-acceptance' && needs.fleet-request.result == 'success')) }}
     runs-on: ubuntu-latest
     outputs:
       versions: ${{ steps.v.outputs.versions }}
@@ -280,6 +296,7 @@ jobs:
       published-release: ${{ steps.v.outputs.published_release }}
       published-source-sha: ${{ steps.v.outputs.published_source_sha }}
       published-journey: ${{ steps.v.outputs.published_journey }}
+      candidate-mode: ${{ steps.v.outputs.candidate_mode }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -289,7 +306,7 @@ jobs:
       # this runs before the matrix provisions a cluster. Warnings are fatal
       # here, which is what catches an unknown resource type or API version.
       - name: Validate Bicep templates
-        if: inputs.published-release == ''
+        if: inputs.published-release == '' && inputs.candidate == ''
         shell: pwsh
         run: ./scripts/validate-bicep.ps1
 
@@ -297,6 +314,8 @@ jobs:
         id: v
         shell: bash
         env:
+          INPUT_SCENARIO: "${{ inputs.scenario }}"
+          INPUT_CANDIDATE_SET: "${{ inputs.candidate != '' }}"
           INPUT_RELEASES: "${{ inputs.aio-releases }}"
           INPUT_UPGRADE_TO: "${{ inputs.upgrade-to }}"
           INPUT_SECRET_SYNC_MODES: "${{ inputs.secret-sync-modes }}"
@@ -517,13 +536,33 @@ jobs:
                   sys.exit("Published E2E cannot skip teardown.")
               if float(os.environ["INPUT_KEEP_ALIVE"] or 0) != 0:
                   sys.exit("Published E2E cannot keep the cluster alive.")
+          # A candidate run selects its own three guided Site cases, each in a
+          # new resource group owned by its run attempt.
+          candidate_mode = os.environ["INPUT_CANDIDATE_SET"] == "true"
+          if os.environ["INPUT_SCENARIO"] == "release-acceptance" and not candidate_mode:
+              sys.exit("Release acceptance requires the exact candidate selection.")
+          if candidate_mode:
+              oid = target_inputs.get("custom-locations-oid", "")
+              if (
+                  rs != ["2608"] or secret_sync_modes != ["enabled"] or tests_in
+                  or published_mode or published_source_sha or published_journey != "configured"
+                  or persistent or cl_in or upgrade_to or not isinstance(oid, str) or oid.strip()
+                  or os.environ["INPUT_SKIP_TEARDOWN"].lower() == "true"
+                  or float(os.environ["INPUT_KEEP_ALIVE"] or 0) != 0
+              ):
+                  sys.exit(
+                      "Candidate acceptance selects its own Site cases. "
+                      "Leave the single Site options at their defaults."
+                  )
+              secret_sync_modes = ["disabled", "enabled", "existing"]
           print(f"versions={json.dumps(rs)}")
           print(f"secret_sync_modes={json.dumps(secret_sync_modes)}")
-          print(f"max_parallel={1 if persistent or published_mode else 20}")
+          print(f"max_parallel={3 if candidate_mode else 1 if persistent or published_mode else 20}")
           print(f"upgrade_to={upgrade_to}")
           print(f"persistent={'true' if persistent else 'false'}")
-          print(f"published_mode={'true' if published_mode else 'false'}")
-          print(f"published_journey={published_journey}")
+          print(f"published_mode={'true' if published_mode or candidate_mode else 'false'}")
+          print(f"published_journey={'guided' if candidate_mode else published_journey}")
+          print(f"candidate_mode={'true' if candidate_mode else 'false'}")
           print(f"published_release={published_release}")
           print(f"published_source_sha={published_source_sha}")
           print(f"pytest_paths={pytest_paths}")
@@ -545,31 +584,83 @@ jobs:
           print(f"rg_key={rg_key}")
           PY
 
+  # Persistent Site cases share one group, so the matrix must know the mode
+  # before it starts. Only the mode and a hash of the group leave this job.
+  site-groups:
+    name: Select Site case resource groups
+    if: inputs.candidate != '' && (inputs.scenario == 'aio' || inputs.scenario == 'release-acceptance')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: ${{ inputs.environment }}
+    permissions: {}
+    outputs:
+      groups: ${{ steps.groups.outputs.groups }}
+      rg-key: ${{ steps.groups.outputs.rg_key }}
+      max-parallel: ${{ steps.groups.outputs.max_parallel }}
+    steps:
+      - name: Select ephemeral or persistent Site groups
+        id: groups
+        shell: python
+        env:
+          SITE_GROUP: ${{ secrets.E2E_SITE_RESOURCE_GROUP }}
+          FLEET_GROUPS: ${{ secrets.E2E_FLEET_RESOURCE_GROUPS }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          import hashlib, os, re
+          name = re.compile(r"[A-Za-z0-9._()-]{0,89}[A-Za-z0-9_()-]")
+          site, fleet = os.environ["SITE_GROUP"], os.environ["FLEET_GROUPS"]
+          if site and name.fullmatch(site) is None:
+              raise SystemExit("E2E_SITE_RESOURCE_GROUP must name one resource group.")
+          if site and site.casefold() in {value.casefold() for value in fleet.split(",")}:
+              raise SystemExit("The single Site group must differ from both fleet groups.")
+          # The persistent key matches persistent E2E for the same group, so both serialize.
+          key = ("persistent-" + hashlib.sha256(site.casefold().encode("utf-8")).hexdigest()
+                 if site else "ephemeral-" + os.environ["RUN_ID"])
+          mode = "persistent" if site else "ephemeral"
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"groups={mode}\nrg_key={key}\nmax_parallel={1 if site else 3}\n")
+          print(f"Site cases use {mode} resource groups.")
+
   e2e:
-    needs: prep
+    name: ${{ needs.prep.outputs.candidate-mode == 'true' && format('Site case ({0})', fromJSON('{"disabled":"site-aio","enabled":"site-combined","existing":"site-existing-secretsync"}')[matrix.secret-sync-mode]) || format('e2e ({0}, {1})', matrix.aio-release, matrix.secret-sync-mode) }}
+    needs: [prep, site-groups]
+    if: ${{ !cancelled() && needs.prep.result == 'success' && (needs.prep.outputs.candidate-mode != 'true' || needs.site-groups.result == 'success') }}
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
     # Ephemeral runs remove their resource group. Persistent runs remove only
-    # resources created during the run. The timeout leaves room for the
-    # `always()` teardown step, since cancellation can skip cleanup.
-    timeout-minutes: ${{ (inputs.keep-cluster-alive-minutes > 0 || inputs.upgrade-to != '') && 360 || 180 }}
+    # resources created during the run. A candidate Site case removes its owned
+    # group and confirms absence. The timeout leaves room for the `always()`
+    # teardown step, since cancellation can skip cleanup.
+    timeout-minutes: ${{ (inputs.keep-cluster-alive-minutes > 0 || inputs.upgrade-to != '') && 360 || (needs.prep.outputs.candidate-mode == 'true' && 240 || 180) }}
     concurrency:
       # Persistent: matrix cells share rg_key and omit the release suffix, so
       # they serialize (same RG can only host one AIO deploy at a time).
       # Ephemeral: rg_key is per-run and the release suffix distinguishes
       # cells, so matrix fan-out runs in parallel.
-      group: e2e-${{ needs.prep.outputs.rg-key }}${{ needs.prep.outputs.persistent == 'true' && '-persistent' || format('-{0}-secretsync-{1}', matrix.aio-release, matrix.secret-sync-mode) }}
+      # Candidate cases take both values from site-groups.
+      group: e2e-${{ needs.site-groups.outputs.rg-key || needs.prep.outputs.rg-key }}${{ (needs.prep.outputs.persistent == 'true' || needs.site-groups.outputs.groups == 'persistent') && '-persistent' || format('-{0}-secretsync-{1}', matrix.aio-release, matrix.secret-sync-mode) }}
       cancel-in-progress: false
     strategy:
       fail-fast: false
-      max-parallel: ${{ fromJSON(needs.prep.outputs.max-parallel) }}
+      max-parallel: ${{ fromJSON(needs.site-groups.outputs.max-parallel || needs.prep.outputs.max-parallel) }}
       matrix:
         aio-release: ${{ fromJSON(needs.prep.outputs.versions) }}
         secret-sync-mode: ${{ fromJSON(needs.prep.outputs.secret-sync-modes) }}
     env:
       PERSISTENT_RG: ${{ needs.prep.outputs.persistent }}
       PUBLISHED_JOURNEY: ${{ needs.prep.outputs.published-journey }}
+      CANDIDATE_MODE: ${{ needs.prep.outputs.candidate-mode }}
       DEBUG_USER_OID: ${{ secrets.DEBUG_USER_OID }}
+      FLEET_CANDIDATE: ${{ inputs.candidate }}
+      FLEET_RUN_ID: ${{ github.run_id }}
+      FLEET_RUN_ATTEMPT: ${{ github.run_attempt }}
+      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      SITE_GROUPS: ${{ needs.site-groups.outputs.groups }}
+      E2E_SITE_RESOURCE_GROUP: ${{ needs.prep.outputs.candidate-mode == 'true' && secrets.E2E_SITE_RESOURCE_GROUP || '' }}
     steps:
       # Step headers show env values before shell commands can mask them.
       - name: Mask operator target inputs
@@ -620,6 +711,87 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/setup-fleet-tools
+        if: env.CANDIDATE_MODE == 'true'
+        id: tools
+
+      - name: Select exact candidate inputs
+        id: select
+        if: env.CANDIDATE_MODE == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHON: ${{ steps.tools.outputs.python }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir "$RUNNER_TEMP/fleet"
+          "$PYTHON" -B scripts/coordinate-release-fleet.py select --root "$RUNNER_TEMP/fleet"
+          echo "FLEET_PYTHON=$PYTHON" >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: env.CANDIDATE_MODE == 'true'
+        with:
+          artifact-ids: ${{ steps.select.outputs.admission-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.select.outputs.producer-run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/fleet/admission
+          merge-multiple: true
+          digest-mismatch: error
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: env.CANDIDATE_MODE == 'true'
+        with:
+          artifact-ids: ${{ steps.select.outputs.plan-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.select.outputs.producer-run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/fleet/plan
+          merge-multiple: true
+          digest-mismatch: error
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: env.CANDIDATE_MODE == 'true'
+        with:
+          artifact-ids: ${{ steps.select.outputs.inventory-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.select.outputs.producer-run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/fleet/inventory
+          merge-multiple: true
+          digest-mismatch: error
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: env.CANDIDATE_MODE == 'true'
+        with:
+          artifact-ids: ${{ steps.select.outputs.engine-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.select.outputs.producer-run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/fleet/engine
+          merge-multiple: true
+          digest-mismatch: error
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: env.CANDIDATE_MODE == 'true'
+        with:
+          artifact-ids: ${{ steps.select.outputs.workspaces-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.select.outputs.producer-run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/fleet/workspaces
+          merge-multiple: true
+          digest-mismatch: error
+
+      # Masks the owned names before any later step header can show them.
+      - name: Bind candidate inputs and owned Site names
+        if: env.CANDIDATE_MODE == 'true'
+        shell: bash
+        env:
+          SLOT: ${{ matrix.secret-sync-mode }}
+        run: |
+          set -euo pipefail
+          "$FLEET_PYTHON" -B scripts/coordinate-release-fleet.py check-inputs --root "$RUNNER_TEMP/fleet"
+          "$FLEET_PYTHON" -B scripts/coordinate-release-fleet.py scope --root "$RUNNER_TEMP/fleet" \
+            --kind site --slot "$SLOT" --expect-groups "$SITE_GROUPS"
+
       - name: Compute names
         id: names
         shell: bash
@@ -644,13 +816,15 @@ jobs:
           case "$SECRET_SYNC_MODE" in
             enabled) SYNC_SUFFIX="sync-on" ;;
             disabled) SYNC_SUFFIX="sync-off" ;;
+            existing) SYNC_SUFFIX="sync-existing" ;;
             *) echo "::error::Unexpected Secret Sync mode '$SECRET_SYNC_MODE'"; exit 1 ;;
           esac
           LONG_SUFFIX="${RUN_ID}-${RUN_ATTEMPT}-${SAFE_VER}-secretsync-${SECRET_SYNC_MODE}"
           SHORT_RUN="${RUN_ID: -8}-${RUN_ATTEMPT}"
           RESOURCE_SUFFIX="${SHORT_RUN}-${SAFE_VER}-${SYNC_SUFFIX}"
-          RG="${RG_IN:-rg-e2e-$LONG_SUFFIX}"
-          CL="${CL_IN:-e2e-$RESOURCE_SUFFIX}"
+          # Candidate cases use the masked names owned by their run attempt.
+          RG="${RG_IN:-${FLEET_RESOURCE_GROUP:-rg-e2e-$LONG_SUFFIX}}"
+          CL="${CL_IN:-${FLEET_CLUSTER_NAME:-e2e-$RESOURCE_SUFFIX}}"
           SN="e2e-$RESOURCE_SUFFIX"
           echo "::add-mask::$SN"
           echo "rg=$RG" >> "$GITHUB_OUTPUT"
@@ -659,7 +833,7 @@ jobs:
           echo "job_start_epoch=$(date +%s)" >> "$GITHUB_OUTPUT"
 
       - uses: ./.github/actions/setup-published-siteops
-        if: needs.prep.outputs.published-mode == 'true'
+        if: needs.prep.outputs.published-mode == 'true' && env.CANDIDATE_MODE != 'true'
         with:
           repository: ${{ github.repository }}
           release: ${{ needs.prep.outputs.published-release }}
@@ -668,7 +842,7 @@ jobs:
           state: ${{ runner.temp }}/published-siteops
 
       - name: Prepare the published workspace project
-        if: needs.prep.outputs.published-mode == 'true'
+        if: needs.prep.outputs.published-mode == 'true' && env.CANDIDATE_MODE != 'true'
         shell: bash
         env:
           RELEASE: ${{ needs.prep.outputs.published-release }}
@@ -749,6 +923,74 @@ jobs:
             echo "GH_CONFIG_DIR=$gh_config"
           } >> "$GITHUB_ENV"
 
+      # The candidate is labeled prepublication. No public release is read,
+      # no source is enrolled and nothing is pinned from a public release.
+      - name: Install the candidate engine outside the checkout
+        id: candidate-engine
+        if: env.CANDIDATE_MODE == 'true'
+        timeout-minutes: 35
+        shell: bash
+        env:
+          ENGINE_SHA: ${{ steps.select.outputs.engine-sha }}
+          WORKSPACES_SHA: ${{ steps.select.outputs.workspaces-sha }}
+          PLAN_SHA: ${{ steps.select.outputs.plan-sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          root="$RUNNER_TEMP/fleet"
+          state="$root/controller"
+          gh attestation trusted-root > "$root/trusted-root.json" 2> "$root/trusted-root.err"
+          caller="$("$FLEET_PYTHON" -c 'import json,os; print(json.loads(os.environ["FLEET_CANDIDATE"])["producer"]["caller"])')"
+          if ! "$FLEET_PYTHON" -B scripts/qualify-workspace-engine.py \
+            --engine "$root/engine" --expected-engine-selection-sha256 "$ENGINE_SHA" \
+            --workspaces "$root/workspaces" --expected-workspace-inventory-sha256 "$WORKSPACES_SHA" \
+            --plan "$root/plan/plan.json" --expected-plan-sha "$PLAN_SHA" \
+            --project-workspace workspaces/iot-operations \
+            --trusted-root "$root/trusted-root.json" --gh "$(command -v gh)" \
+            --builder-workflow "$caller" --expected-runner-environment self-hosted \
+            --platform linux-x86_64 --state "$state" --output "$root/qualification.json" \
+            > "$root/qualification.out" 2> "$root/qualification.err"; then
+            echo "::error::The candidate engine could not be installed and qualified outside the checkout."
+            exit 1
+          fi
+          version="$("$FLEET_PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["engineVersion"])' \
+            "$root/qualification.json")"
+          if ! "$state/application/bin/python" -I - \
+            "$GITHUB_WORKSPACE" "$state/application" "$version" \
+            > "$root/origin.log" 2>&1 <<'PY'
+          import importlib.metadata
+          import sys
+          from pathlib import Path
+
+          source = Path(sys.argv[1]).resolve()
+          import siteops
+
+          module = Path(siteops.__file__).resolve()
+          if module.is_relative_to(source) or not module.is_relative_to(Path(sys.argv[2]).resolve()):
+              raise SystemExit("Candidate E2E imported Site Ops from checkout.")
+          if importlib.metadata.version("siteops") != sys.argv[3]:
+              raise SystemExit("The installed Site Ops package version changed.")
+          PY
+          then
+            echo "::error::The installed candidate engine has an unexpected origin or version."
+            exit 1
+          fi
+          project="$state/probe-state/operator"
+          # Guided cases begin without configured Sites. A nonempty directory fails here.
+          rmdir "$project/sites"
+          # Expose only the installed command, not the application interpreter.
+          mkdir "$state/command"
+          ln -s "$state/application/bin/siteops" "$state/command/siteops"
+          {
+            echo "SITEOPS_E2E_PROJECT=$project"
+            echo "SITEOPS_CACHE_DIR=$state/probe-state/cache"
+            echo "SITEOPS_E2E_ENGINE_VERSION=$version"
+            echo "SITEOPS_E2E_STATE=$state"
+            echo "SITEOPS_E2E_TRUST=policy"
+            echo "PYTHONSAFEPATH=1"
+          } >> "$GITHUB_ENV"
+          echo "$state/command" >> "$GITHUB_PATH"
+
       - uses: ./.github/actions/create-k3s-cluster
 
       - uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
@@ -797,8 +1039,57 @@ jobs:
             exit 1
           fi
 
+      # Ownership is committed and uploaded before any Azure write. An ephemeral
+      # case commits a creation marker. A persistent case commits a keyed
+      # snapshot of the supplied group and refuses one that hosts AIO.
+      - name: Preflight the Site resource group
+        id: site-preflight
+        if: env.CANDIDATE_MODE == 'true'
+        shell: bash
+        env:
+          ADMISSION_SHA: ${{ steps.select.outputs.admission-sha }}
+          SLOT: ${{ matrix.secret-sync-mode }}
+        run: |
+          set -euo pipefail
+          umask 077
+          root="$RUNNER_TEMP/fleet"
+          "$FLEET_PYTHON" -B scripts/manage-release-fleet.py preflight --kind site --slot "$SLOT" \
+            --admission "$root/admission/receipt.json" --expected-admission-sha "$ADMISSION_SHA" \
+            --allocation-state "$root/allocation.json" \
+            --private-logs "$root/preflight-private" --output "$root/ownership.json"
+          echo "ownership-sha=$(sha256sum "$root/ownership.json" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+
+      - name: Retain Site ownership
+        if: env.CANDIDATE_MODE == 'true'
+        timeout-minutes: 5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: site-ownership-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.secret-sync-mode }}
+          path: ${{ runner.temp }}/fleet/ownership.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 30
+
+      - name: Prepare the Site resource group
+        if: env.CANDIDATE_MODE == 'true'
+        shell: bash
+        env:
+          ADMISSION_SHA: ${{ steps.select.outputs.admission-sha }}
+          OWNERSHIP_SHA: ${{ steps.site-preflight.outputs.ownership-sha }}
+          LOCATION: ${{ inputs.location }}
+          SLOT: ${{ matrix.secret-sync-mode }}
+        run: |
+          set -euo pipefail
+          umask 077
+          root="$RUNNER_TEMP/fleet"
+          "$FLEET_PYTHON" -B scripts/manage-release-fleet.py create --execute --kind site --slot "$SLOT" \
+            --admission "$root/admission/receipt.json" --expected-admission-sha "$ADMISSION_SHA" \
+            --ownership "$root/ownership.json" --expected-ownership-sha "$OWNERSHIP_SHA" \
+            --allocation-state "$root/allocation.json" \
+            --location "$LOCATION" --private-logs "$root/create-private" --output "$root/created.json"
+
       - name: Snapshot RG resources (persistent mode)
-        if: env.PERSISTENT_RG == 'true'
+        if: env.PERSISTENT_RG == 'true' || env.CANDIDATE_MODE == 'true'
         shell: bash
         env:
           RG: "${{ steps.names.outputs.rg }}"
@@ -822,7 +1113,7 @@ jobs:
 
       - name: Create resource group (ephemeral mode)
         id: create-rg
-        if: env.PERSISTENT_RG != 'true'
+        if: env.PERSISTENT_RG != 'true' && env.CANDIDATE_MODE != 'true'
         shell: bash
         env:
           RG: ${{ steps.names.outputs.rg }}
@@ -859,7 +1150,7 @@ jobs:
         # `az group show` to keep them aligned.
         run: |
           set -euo pipefail
-          if [[ "$PERSISTENT_RG" == "true" ]]; then
+          if [[ "$PERSISTENT_RG" == "true" || "$CANDIDATE_MODE" == "true" ]]; then
             LOC=$(az group show --name "$RG" --query location -o tsv)
           else
             LOC="$AUTO_LOC"
@@ -963,10 +1254,12 @@ jobs:
           private-provider-errors: ${{ needs.prep.outputs.published-mode }}
           # Secret Sync requires OIDC issuer and workload identity, so one
           # matrix axis intentionally controls all three settings.
-          enable-workload-identity: ${{ matrix.secret-sync-mode == 'enabled' && 'true' || 'false' }}
+          enable-workload-identity: ${{ matrix.secret-sync-mode != 'disabled' && 'true' || 'false' }}
 
       - name: Prepare guided AIO answers and plan
+        id: guided
         if: needs.prep.outputs.published-mode == 'true' && needs.prep.outputs.published-journey == 'guided'
+        timeout-minutes: 20
         shell: bash
         env:
           E2E_SITE_NAME: ${{ steps.names.outputs.site_name }}
@@ -975,9 +1268,16 @@ jobs:
           E2E_CLUSTER_NAME: ${{ steps.names.outputs.cluster }}
           E2E_AIO_RELEASE: ${{ matrix.aio-release }}
           E2E_ENABLE_SECRET_SYNC: ${{ matrix.secret-sync-mode == 'enabled' && 'true' || 'false' }}
+          E2E_SECRET_SYNC_MODE: ${{ matrix.secret-sync-mode }}
         run: |
           set -euo pipefail
           umask 077
+          trust_args=(--approved-source guided)
+          if [[ "${SITEOPS_E2E_TRUST:-}" == "policy" ]]; then
+            policy="$("$FLEET_PYTHON" -B scripts/coordinate-release-fleet.py policy \
+              --root "$RUNNER_TEMP/fleet" --state "$SITEOPS_E2E_STATE")"
+            trust_args=(--trust-policy "$policy/policy.json" --trusted-root "$policy/root.json")
+          fi
           if [[ -e "$SITEOPS_E2E_PROJECT/sites" ]]; then
             echo "::error::Guided package use must not require configured Sites."
             exit 1
@@ -1017,7 +1317,7 @@ jobs:
           PY
           if ! siteops \
             --project "$SITEOPS_E2E_PROJECT" \
-            --approved-source guided \
+            "${trust_args[@]}" \
             inputs aio-install --offline-content --example "$RUNNER_TEMP/published-example.yaml" \
             --output json > "$RUNNER_TEMP/published-inspection.json" \
             2> "$RUNNER_TEMP/published-inspection.err"; then
@@ -1026,7 +1326,7 @@ jobs:
           fi
           if siteops \
             --project "$SITEOPS_E2E_PROJECT" \
-            --approved-source guided \
+            "${trust_args[@]}" \
             inputs aio-install --offline-content --input-file "$RUNNER_TEMP/published-answers.json" \
             --output json > "$RUNNER_TEMP/published-no-read.json" \
             2> "$RUNNER_TEMP/published-no-read.err"; then
@@ -1054,7 +1354,7 @@ jobs:
           ):
               raise SystemExit("Guided input inspection or no-read admission failed.")
           PY
-          if [[ "$E2E_ENABLE_SECRET_SYNC" == "false" ]]; then
+          if [[ "$E2E_SECRET_SYNC_MODE" == "disabled" ]]; then
             python3 - <<'PY'
           import json
           import os
@@ -1071,7 +1371,7 @@ jobs:
               > "$RUNNER_TEMP/published-before-negative.json"
             if siteops \
               --project "$SITEOPS_E2E_PROJECT" \
-              --approved-source guided \
+              "${trust_args[@]}" \
               deploy aio-install --offline-content \
               --yes \
               --input-file "$RUNNER_TEMP/published-unready-answers.json" \
@@ -1100,7 +1400,7 @@ jobs:
           fi
           if ! SITEOPS_REDACT_OUTPUT=0 siteops \
             --project "$SITEOPS_E2E_PROJECT" \
-            --approved-source guided \
+            "${trust_args[@]}" \
             plan aio-install --offline-content \
             --input-file "$RUNNER_TEMP/published-answers.json" \
             --output json --projection local-private \
@@ -1147,7 +1447,9 @@ jobs:
           PY
 
       - name: Check published guided disabled Site routes
+        id: routes
         if: needs.prep.outputs.published-mode == 'true' && needs.prep.outputs.published-journey == 'guided' && matrix.secret-sync-mode == 'disabled'
+        timeout-minutes: 20
         shell: bash
         env:
           E2E_SITE_NAME: ${{ steps.names.outputs.site_name }}
@@ -1159,6 +1461,12 @@ jobs:
         run: |
           set -euo pipefail
           umask 077
+          trust_args=(--approved-source guided)
+          if [[ "${SITEOPS_E2E_TRUST:-}" == "policy" ]]; then
+            policy="$("$FLEET_PYTHON" -B scripts/coordinate-release-fleet.py policy \
+              --root "$RUNNER_TEMP/fleet" --state "$SITEOPS_E2E_STATE")"
+            trust_args=(--trust-policy "$policy/policy.json" --trusted-root "$policy/root.json")
+          fi
           python3 - <<'PY'
           import json
           import os
@@ -1189,7 +1497,7 @@ jobs:
               json.dump({**source, "values": manual}, stream, sort_keys=True)
           PY
           if ! SITEOPS_REDACT_OUTPUT=0 siteops \
-            --project "$SITEOPS_E2E_PROJECT" --approved-source guided \
+            --project "$SITEOPS_E2E_PROJECT" "${trust_args[@]}" \
             plan aio-install --offline-content \
             --input-file "$RUNNER_TEMP/published-manual-answers.json" \
             --output json --projection local-private \
@@ -1199,7 +1507,7 @@ jobs:
             exit 1
           fi
           if ! SITEOPS_REDACT_OUTPUT=0 siteops \
-            --project "$SITEOPS_E2E_PROJECT" --approved-source guided \
+            --project "$SITEOPS_E2E_PROJECT" "${trust_args[@]}" \
             plan aio-install --offline-content \
             --input "siteName=$E2E_SITE_NAME" \
             --input "subscription=$E2E_SUBSCRIPTION" \
@@ -1218,7 +1526,7 @@ jobs:
           mkdir "$SITEOPS_E2E_PROJECT/sites"
           site="$SITEOPS_E2E_PROJECT/sites/$E2E_SITE_NAME.yaml"
           if ! siteops \
-            --project "$SITEOPS_E2E_PROJECT" --approved-source guided \
+            --project "$SITEOPS_E2E_PROJECT" "${trust_args[@]}" \
             inputs aio-install --offline-content \
             --input-file "$RUNNER_TEMP/published-manual-answers.json" \
             --save-site "$site" \
@@ -1229,7 +1537,7 @@ jobs:
           fi
           site_before="$(sha256sum "$site" | cut -d ' ' -f 1)"
           if ! SITEOPS_REDACT_OUTPUT=0 siteops \
-            --project "$SITEOPS_E2E_PROJECT" --approved-source guided \
+            --project "$SITEOPS_E2E_PROJECT" "${trust_args[@]}" \
             plan aio-install --offline-content -l "name=$E2E_SITE_NAME" \
             --output json --projection local-private \
             > "$RUNNER_TEMP/published-configured-plan.json" \
@@ -1366,7 +1674,7 @@ jobs:
             --dry-run=client -o yaml | kubectl apply -f -
 
       - name: Grant debug user cluster-admin on k3s (Arc proxy access)
-        if: env.DEBUG_USER_OID != ''
+        if: env.DEBUG_USER_OID != '' && env.CANDIDATE_MODE != 'true'
         shell: bash
         # Bind a human user (or group) to cluster-admin so they can inspect
         # the k3s cluster via `az connectedk8s proxy`. Cluster-admin is
@@ -1438,24 +1746,36 @@ jobs:
             --junitxml="e2e-results-${AIO_RELEASE}-secretsync-${SECRET_SYNC_MODE}.xml"
 
       - name: Deploy AIO through the published engine and package
+        id: deploy
         if: needs.prep.outputs.published-mode == 'true'
+        timeout-minutes: 90
         shell: bash
         env:
           RELEASE: ${{ needs.prep.outputs.published-release }}
-          SOURCE_SHA: ${{ needs.prep.outputs.published-source-sha }}
+          SOURCE_SHA: ${{ env.CANDIDATE_MODE == 'true' && github.sha || needs.prep.outputs.published-source-sha }}
           SITE_NAME: ${{ steps.names.outputs.site_name }}
           E2E_JOURNEY: ${{ needs.prep.outputs.published-journey }}
+          E2E_RESOURCE_GROUP: ${{ steps.names.outputs.rg }}
+          JOB_START_EPOCH: ${{ steps.names.outputs.job_start_epoch }}
         run: |
           set -euo pipefail
+          target_args=(-l "name=$SITE_NAME")
+          if [[ "$PUBLISHED_JOURNEY" == "guided" ]]; then
+            target_args=(--input-file "$RUNNER_TEMP/published-answers.json")
+          fi
+          # Each mode reads only the trust inputs its own setup step provides.
+          if [[ "${SITEOPS_E2E_TRUST:-}" == "policy" ]]; then
+            policy="$("$FLEET_PYTHON" -B scripts/coordinate-release-fleet.py policy \
+              --root "$RUNNER_TEMP/fleet" --state "$SITEOPS_E2E_STATE")"
+            trust_args=(--trust-policy "$policy/policy.json" --trusted-root "$policy/root.json")
+          elif [[ "$PUBLISHED_JOURNEY" == "guided" ]]; then
+            trust_args=(--approved-source guided)
+          else
+            trust_args=(--trust-policy "$SITEOPS_E2E_POLICY" --trusted-root "$SITEOPS_E2E_TRUSTED_ROOT")
+          fi
           run_root="$RUNNER_TEMP/published-run"
           mkdir "$run_root"
           cd "$run_root"
-          target_args=(-l "name=$SITE_NAME")
-          trust_args=(--trust-policy "$SITEOPS_E2E_POLICY" --trusted-root "$SITEOPS_E2E_TRUSTED_ROOT")
-          if [[ "$PUBLISHED_JOURNEY" == "guided" ]]; then
-            target_args=(--input-file "$RUNNER_TEMP/published-answers.json")
-            trust_args=(--approved-source guided)
-          fi
           if ! siteops \
             --project "$SITEOPS_E2E_PROJECT" \
             "${trust_args[@]}" \
@@ -1467,6 +1787,52 @@ jobs:
             > "$RUNNER_TEMP/published-deploy-output.txt" \
             2> "$RUNNER_TEMP/published-deploy-output.err"; then
             echo "::error::The published Site Ops deployment failed."
+            # Only enumerated statuses, counts and error codes leave the runner. Messages stay private.
+            deployments="$RUNNER_TEMP/published-deploy-arm.json"
+            az deployment group list -g "$E2E_RESOURCE_GROUP" \
+              --query '[].{timestamp:properties.timestamp,state:properties.provisioningState,code:properties.error.code,details:properties.error.details[].code}' \
+              -o json > "$deployments" 2>/dev/null || echo '[]' > "$deployments"
+            python - "$RUNNER_TEMP/published-deploy-output.txt" "$deployments" "$JOB_START_EPOCH" <<'PY' || true
+          import json
+          import re
+          import sys
+          from datetime import datetime
+
+          token = re.compile(r"[A-Za-z0-9._-]{1,80}")
+
+          def safe(value):
+              return value if isinstance(value, str) and token.fullmatch(value) else "unrecognized"
+
+          try:
+              result = json.loads(open(sys.argv[1], encoding="utf-8").read())
+              operations = result["summary"]["operations"]["counts"]
+              print("Deployment result: status " + safe(result.get("status")) + ", operations " + ", ".join(
+                  safe(key) + " " + str(value) for key, value in sorted(operations.items())
+                  if type(value) is int and value) + ".")
+              codes = sorted({safe(item.get("code")) for item in result.get("diagnostics") or []
+                              if isinstance(item, dict)})
+              print("Deployment diagnostics: " + (", ".join(codes) or "none") + ".")
+          except (OSError, ValueError, KeyError, TypeError, AttributeError):
+              print("Deployment result: unreadable.")
+          try:
+              start = int(sys.argv[3])
+              rows = json.loads(open(sys.argv[2], encoding="utf-8").read())
+          except (OSError, ValueError):
+              start, rows = 0, None
+          if not isinstance(rows, list):
+              print("Azure deployment history: unreadable.")
+              rows = []
+          for row in rows:
+              try:
+                  stamp = datetime.fromisoformat(str(row.get("timestamp")).replace("Z", "+00:00"))
+                  if stamp.tzinfo is None or stamp.timestamp() < start or row.get("state") == "Succeeded":
+                      continue
+              except (ValueError, TypeError, AttributeError):
+                  continue
+              details = [safe(code) for code in row.get("details") or []][:5]
+              print("Azure deployment: " + safe(row.get("state")) + ", error " + safe(row.get("code"))
+                    + (", details " + ", ".join(details) if details else "") + ".")
+          PY
             exit 1
           fi
           python - "$RUNNER_TEMP/published-deploy-output.txt" \
@@ -1510,19 +1876,179 @@ jobs:
               "succeededOperations": operation_counts["succeeded"],
               "status": result["status"],
           }
+          if not sys.argv[3]:
+              # A candidate deployment observes no public release.
+              del receipt["release"]
+              receipt["transport"] = "prepublication"
           Path(sys.argv[2]).write_text(
               json.dumps(receipt, indent=2, sort_keys=True) + "\n",
               encoding="utf-8",
           )
           PY
 
+      # The existing case installs AIO without Secret Sync, then enables it on
+      # that instance with a vault created beforehand in the owned group.
+      - name: Create the existing Key Vault
+        id: existing-vault
+        if: env.CANDIDATE_MODE == 'true' && matrix.secret-sync-mode == 'existing'
+        timeout-minutes: 10
+        shell: bash
+        env:
+          RG: ${{ steps.names.outputs.rg }}
+          LOCATION: ${{ steps.loc.outputs.location }}
+        run: |
+          set -euo pipefail
+          umask 077
+          if ! az resource list --resource-group "$RG" --output json \
+            > "$RUNNER_TEMP/existing-before.json" 2> "$RUNNER_TEMP/existing-before.err"; then
+            echo "::error::The existing instance could not be observed."
+            exit 1
+          fi
+          python3 - "$RUNNER_TEMP/existing-before.json" "$RUNNER_TEMP/e2e-teardown/pre-ids.txt" \
+            "$RUNNER_TEMP/existing-instance.txt" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          try:
+              resources = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+              prior = {
+                  line.strip().rstrip("/").casefold()
+                  for line in Path(sys.argv[2]).read_text(encoding="utf-8").splitlines()
+                  if line.strip()
+              }
+          except (OSError, UnicodeError, ValueError):
+              raise SystemExit("The existing instance observation is unavailable.") from None
+          if not isinstance(resources, list) or any(
+              not isinstance(item, dict) or not isinstance(item.get("id"), str)
+              or not isinstance(item.get("type"), str) for item in resources
+          ):
+              raise SystemExit("The existing instance observation is invalid.")
+          owned = [item for item in resources if item["id"].rstrip("/").casefold() not in prior]
+          types = [item["type"].casefold() for item in owned]
+          instances = [item["id"] for item in owned
+                       if item["type"].casefold() == "microsoft.iotoperations/instances"]
+          if len(instances) != 1 or any(kind in types for kind in (
+              "microsoft.secretsynccontroller/azurekeyvaultsecretproviderclasses",
+              "microsoft.managedidentity/userassignedidentities",
+              "microsoft.keyvault/vaults",
+          )):
+              raise SystemExit("The existing instance must have one AIO instance and no Secret Sync resources.")
+          Path(sys.argv[3]).write_text(instances[0], encoding="utf-8")
+          PY
+          if ! az keyvault create --subscription "$AZURE_SUBSCRIPTION_ID" --resource-group "$RG" \
+            --name "$FLEET_VAULT_NAME" --location "$LOCATION" --enable-rbac-authorization true \
+            --tags managedBy=siteops-site-acceptance "runId=$FLEET_RUN_ID" "runAttempt=$FLEET_RUN_ATTEMPT" \
+            --only-show-errors --output none \
+            > "$RUNNER_TEMP/existing-vault.out" 2> "$RUNNER_TEMP/existing-vault.err"; then
+            echo "::error::The existing Key Vault could not be created in the owned resource group."
+            exit 1
+          fi
+
+      - name: Enable Secret Sync on the existing instance
+        id: existing-enable
+        if: env.CANDIDATE_MODE == 'true' && matrix.secret-sync-mode == 'existing'
+        timeout-minutes: 45
+        shell: bash
+        env:
+          E2E_SITE_NAME: ${{ steps.names.outputs.site_name }}
+          E2E_RESOURCE_GROUP: ${{ steps.names.outputs.rg }}
+        run: |
+          set -euo pipefail
+          umask 077
+          policy="$("$FLEET_PYTHON" -B scripts/coordinate-release-fleet.py policy \
+            --root "$RUNNER_TEMP/fleet" --state "$SITEOPS_E2E_STATE")"
+          trust_args=(--trust-policy "$policy/policy.json" --trusted-root "$policy/root.json")
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"])
+          vault = (
+              "/subscriptions/" + os.environ["AZURE_SUBSCRIPTION_ID"]
+              + "/resourceGroups/" + os.environ["E2E_RESOURCE_GROUP"]
+              + "/providers/Microsoft.KeyVault/vaults/" + os.environ["FLEET_VAULT_NAME"]
+          )
+          document = {"apiVersion": "siteops.inputs/v1", "kind": "SiteInputValues", "values": {
+              "instance": (root / "existing-instance.txt").read_text(encoding="utf-8"),
+              "existingVault": vault, "siteName": os.environ["E2E_SITE_NAME"],
+              "environment": "e2e", "country": "US",
+          }}
+          descriptor = os.open(root / "existing-answers.json", os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+          with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+              json.dump(document, stream, sort_keys=True)
+          PY
+          if ! SITEOPS_REDACT_OUTPUT=0 siteops \
+            --project "$SITEOPS_E2E_PROJECT" "${trust_args[@]}" \
+            plan secretsync --offline-content \
+            --input-file "$RUNNER_TEMP/existing-answers.json" \
+            --output json --projection local-private \
+            > "$RUNNER_TEMP/existing-plan.json" 2> "$RUNNER_TEMP/existing-plan.err"; then
+            echo "::error::The installed engine could not prepare Secret Sync on the existing instance."
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          try:
+              raw = json.loads((Path(os.environ["RUNNER_TEMP"]) / "existing-plan.json").read_text(encoding="utf-8"))
+              plan = raw["plan"]
+              targets = plan["targets"]
+              actual = {item["identity"]["step"]: item["disposition"] for item in targets[0]["operations"]}
+          except (OSError, ValueError, KeyError, TypeError, IndexError):
+              raise SystemExit("The existing instance plan is invalid.") from None
+          if (
+              raw.get("status") != "planned" or raw.get("executable") is not True
+              or raw.get("engine", {}).get("version") != os.environ["SITEOPS_E2E_ENGINE_VERSION"]
+              or len(targets) != 1 or len(targets[0]["operations"]) != 2
+              or plan.get("submission") != {"mode": "arm-json", "compilationBinding": "package-artifact"}
+              or actual != {"resolve-aio": "execute", "secretsync": "execute"}
+          ):
+              raise SystemExit("The existing instance plan has unexpected operations.")
+          PY
+          if ! siteops \
+            --project "$SITEOPS_E2E_PROJECT" "${trust_args[@]}" \
+            deploy secretsync --offline-content --yes \
+            --input-file "$RUNNER_TEMP/existing-answers.json" --output json \
+            > "$RUNNER_TEMP/existing-deploy.json" 2> "$RUNNER_TEMP/existing-deploy.err"; then
+            echo "::error::Secret Sync enablement on the existing instance failed."
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          try:
+              result = json.loads((Path(os.environ["RUNNER_TEMP"]) / "existing-deploy.json").read_text(encoding="utf-8"))
+              sites = result["summary"]["sites"]
+              operations = result["summary"]["operations"]
+          except (OSError, ValueError, KeyError, TypeError):
+              raise SystemExit("The existing instance deployment result is invalid.") from None
+          if (
+              result.get("apiVersion") != "siteops/v1alpha1" or result.get("kind") != "DeploymentRun"
+              or result.get("projection") != "publishable" or result.get("status") != "succeeded"
+              or type(result.get("exitCode")) is not int or result["exitCode"] != 0
+              or result.get("engine", {}).get("version") != os.environ["SITEOPS_E2E_ENGINE_VERSION"]
+              or sites.get("total") != 1 or sites.get("counts", {}).get("succeeded") != 1
+              or operations.get("total") != 2 or operations.get("counts", {}).get("succeeded") != 2
+          ):
+              raise SystemExit("The existing instance deployment did not succeed.")
+          PY
+
       - name: Observe bounded AIO readiness
+        id: readiness
         if: needs.prep.outputs.published-mode == 'true'
+        timeout-minutes: 20
         shell: bash
         env:
           RG: ${{ steps.names.outputs.rg }}
           E2E_JOURNEY: ${{ needs.prep.outputs.published-journey }}
-          E2E_ENABLE_SECRET_SYNC: ${{ matrix.secret-sync-mode == 'enabled' && 'true' || 'false' }}
+          E2E_ENABLE_SECRET_SYNC: ${{ matrix.secret-sync-mode != 'disabled' && 'true' || 'false' }}
+          E2E_SECRET_SYNC_MODE: ${{ matrix.secret-sync-mode }}
         run: |
           set -euo pipefail
           umask 077
@@ -1571,74 +2097,30 @@ jobs:
               raise SystemExit("Published guided resource observation could not be stored.") from None
           PY
           fi
-          ready=false
-          for _ in {1..60}; do
-            kubectl get pods --namespace azure-iot-operations --output json \
-              > "$RUNNER_TEMP/published-pods.json"
-            if ! kubectl get instance.iotoperations.azure.com \
-              --namespace azure-iot-operations --output json \
-              > "$RUNNER_TEMP/published-instances.json" 2> /dev/null; then
-              printf '{"items":[]}\n' > "$RUNNER_TEMP/published-instances.json"
-            fi
-            if python - \
-              "$RUNNER_TEMP/published-pods.json" \
-              "$RUNNER_TEMP/published-instances.json" <<'PY'
-          import json
-          import sys
-          from pathlib import Path
-
-          pods = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-          instances = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
-          if not instances.get("items"):
-              raise SystemExit(1)
-          for pod in pods.get("items", []):
-              status = pod.get("status", {})
-              conditions = status.get("conditions", [])
-              if status.get("phase") == "Running" and any(
-                  condition.get("type") == "Ready"
-                  and condition.get("status") == "True"
-                  for condition in conditions
-                  if isinstance(condition, dict)
-              ):
-                  raise SystemExit(0)
-          raise SystemExit(1)
-          PY
-            then
-              ready=true
-              break
-            fi
-            sleep 5
-          done
-          if [[ "$ready" != "true" ]]; then
-            echo "::error::AIO instance projection and operator readiness did not converge within five minutes."
-            exit 1
-          fi
+          python scripts/observe-site-readiness.py \
+            --output "$RUNNER_TEMP/published-kubernetes-readiness.json"
           if [[ "$E2E_JOURNEY" == "guided" && "$E2E_ENABLE_SECRET_SYNC" == "true" ]]; then
             mapfile -t secret_resources < <(python3 - "$RUNNER_TEMP/published-owned-resources.json" <<'PY'
           import json
           import sys
           from pathlib import Path
           owned = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-          for resource_type in (
-              "microsoft.managedidentity/userassignedidentities",
-              "microsoft.iotoperations/instances",
+          for resource_type, label in (
+              ("microsoft.managedidentity/userassignedidentities", "managed identity"),
+              ("microsoft.iotoperations/instances", "AIO instance"),
+              ("microsoft.secretsynccontroller/azurekeyvaultsecretproviderclasses", "provider class"),
           ):
               matching = [
                   item for item in owned
                   if item.get("type", "").lower() == resource_type
               ]
               if len(matching) != 1:
-                  label = (
-                      "managed identity"
-                      if resource_type.startswith("microsoft.managedidentity/")
-                      else "AIO instance"
-                  )
                   raise SystemExit(f"Guided Secret Sync {label} selection is incomplete.")
               print(matching[0]["name"] if resource_type.startswith("microsoft.managedidentity")
                     else matching[0]["id"])
           PY
             )
-            if [[ "${#secret_resources[@]}" -ne 2 ]]; then
+            if [[ "${#secret_resources[@]}" -ne 3 ]]; then
               echo "::error::Guided Secret Sync resources could not be selected."
               exit 1
             fi
@@ -1651,11 +2133,15 @@ jobs:
               --only-show-errors -o json \
               > "$RUNNER_TEMP/published-aio-instance.json" \
               2> "$RUNNER_TEMP/published-aio-instance.err"
+            az resource show --ids "${secret_resources[2]}" \
+              --api-version 2024-08-21-preview \
+              --only-show-errors -o json \
+              > "$RUNNER_TEMP/published-spc.json" \
+              2> "$RUNNER_TEMP/published-spc.err"
           fi
           python - \
             "$RUNNER_TEMP/published-resources.json" \
-            "$RUNNER_TEMP/published-pods.json" \
-            "$RUNNER_TEMP/published-instances.json" \
+            "$RUNNER_TEMP/published-kubernetes-readiness.json" \
             "$RUNNER_TEMP/published-readiness.json" <<'PY'
           import json
           import os
@@ -1663,8 +2149,7 @@ jobs:
           from pathlib import Path
 
           resources = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-          pods = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
-          instances = json.loads(Path(sys.argv[3]).read_text(encoding="utf-8"))
+          kubernetes = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
           if not isinstance(resources, list):
               raise SystemExit("Azure resource observation is invalid.")
           types = [
@@ -1675,27 +2160,15 @@ jobs:
           instance_count = types.count("microsoft.iotoperations/instances")
           schema_count = types.count("microsoft.deviceregistry/schemaregistries")
           namespace_count = types.count("microsoft.deviceregistry/namespaces")
-          pod_count = len(pods.get("items", []))
-          ready_pod_count = sum(
-              pod.get("status", {}).get("phase") == "Running"
-              and any(
-                  condition.get("type") == "Ready"
-                  and condition.get("status") == "True"
-                  for condition in pod.get("status", {}).get("conditions", [])
-                  if isinstance(condition, dict)
-              )
-              for pod in pods.get("items", [])
-              if isinstance(pod, dict)
-          )
-          custom_resource_count = len(instances.get("items", []))
-          if min(
-              instance_count,
-              schema_count,
-              namespace_count,
-              pod_count,
-              ready_pod_count,
-              custom_resource_count,
-          ) < 1:
+          if (
+              min(instance_count, schema_count, namespace_count) < 1
+              or not isinstance(kubernetes, dict)
+              or not all(type(kubernetes.get(key)) is int and kubernetes[key] >= 1 for key in (
+                  "namespacePods", "activePods", "readyActivePods", "instanceCustomResources"
+              ))
+              or kubernetes["readyActivePods"] != kubernetes["activePods"]
+              or kubernetes["namespacePods"] < kubernetes["activePods"]
+          ):
               raise SystemExit("The bounded AIO readiness observations are incomplete.")
           receipt = {
               "apiVersion": "siteops.e2e/v1",
@@ -1703,9 +2176,10 @@ jobs:
               "aioInstances": instance_count,
               "schemaRegistries": schema_count,
               "deviceRegistryNamespaces": namespace_count,
-              "namespacePods": pod_count,
-              "readyOperatorPods": ready_pod_count,
-              "instanceCustomResources": custom_resource_count,
+              "namespacePods": kubernetes["namespacePods"],
+              "activePods": kubernetes["activePods"],
+              "readyActivePods": kubernetes["readyActivePods"],
+              "instanceCustomResources": kubernetes["instanceCustomResources"],
           }
           if os.environ["E2E_JOURNEY"] == "guided":
               owned = json.loads(
@@ -1746,6 +2220,22 @@ jobs:
                       or not isinstance(federated, list) or not federated
                   ):
                       raise SystemExit("Guided Secret Sync infrastructure observations failed.")
+                  # The provider class must name the one owned vault: the vault
+                  # created beforehand for the existing case, otherwise the
+                  # vault created by enablement.
+                  existing = os.environ["E2E_SECRET_SYNC_MODE"] == "existing"
+                  spc = json.loads((root / "published-spc.json").read_text(encoding="utf-8"))
+                  selected = spc.get("properties", {}).get("keyvaultName") if isinstance(spc, dict) else None
+                  owned_vault = next(
+                      item.get("name") for item in owned
+                      if item.get("type", "").lower() == "microsoft.keyvault/vaults"
+                  )
+                  expected_vault = os.environ.get("FLEET_VAULT_NAME", "") if existing else owned_vault
+                  if (
+                      not isinstance(selected, str) or not isinstance(owned_vault, str) or not expected_vault
+                      or not selected.casefold() == owned_vault.casefold() == expected_vault.casefold()
+                  ):
+                      raise SystemExit("Guided Secret Sync uses a vault other than the expected owned vault.")
                   receipt.update({
                       "secretSyncEnabled": True,
                       "secretProviderClasses": len(spcs),
@@ -1753,12 +2243,13 @@ jobs:
                       "keyVaults": vaults,
                       "federatedCredentials": len(federated),
                       "spcBoundToInstance": bound,
+                      "vaultBinding": "existing" if existing else "created",
                   })
               else:
                   if spcs or identities or vaults:
                       raise SystemExit("Guided disabled path created Secret Sync resources.")
                   receipt["secretSyncEnabled"] = False
-          Path(sys.argv[4]).write_text(
+          Path(sys.argv[3]).write_text(
               json.dumps(receipt, indent=2, sort_keys=True) + "\n",
               encoding="utf-8",
           )
@@ -1771,7 +2262,7 @@ jobs:
           path: e2e-results-${{ matrix.aio-release }}-secretsync-${{ matrix.secret-sync-mode }}.xml
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: always() && needs.prep.outputs.published-mode == 'true'
+        if: always() && needs.prep.outputs.published-mode == 'true' && env.CANDIDATE_MODE != 'true'
         with:
           name: published-e2e-${{ matrix.aio-release }}-${{ matrix.secret-sync-mode }}-${{ needs.prep.outputs.published-journey }}
           path: |
@@ -1870,7 +2361,7 @@ jobs:
           done
 
       - name: Teardown (ephemeral mode, delete RG)
-        if: always() && env.PERSISTENT_RG != 'true' && !inputs.skip-teardown
+        if: always() && env.PERSISTENT_RG != 'true' && env.CANDIDATE_MODE != 'true' && !inputs.skip-teardown
         shell: bash
         env:
           RG: "${{ steps.names.outputs.rg }}"
@@ -2075,3 +2566,223 @@ jobs:
             echo "::warning::Persistent-mode teardown left $residual resource(s) created by this run in the selected RG."
             echo "- Persistent-mode teardown incomplete ($residual residual resource(s))" >> "$GITHUB_STEP_SUMMARY"
           fi
+
+      # Runs after any failure. An ephemeral case deletes its own group. A
+      # persistent case deletes only resources outside its committed snapshot
+      # and never the group. Both confirm absence, then purge only vaults this
+      # attempt created.
+      - name: Remove Site resources created by this attempt
+        id: site-cleanup
+        if: always() && env.CANDIDATE_MODE == 'true' && steps.site-preflight.outcome == 'success'
+        timeout-minutes: 30
+        shell: bash
+        env:
+          ADMISSION_SHA: ${{ steps.select.outputs.admission-sha }}
+          OWNERSHIP_SHA: ${{ steps.site-preflight.outputs.ownership-sha }}
+          SLOT: ${{ matrix.secret-sync-mode }}
+        run: |
+          set -euo pipefail
+          umask 077
+          root="$RUNNER_TEMP/fleet"
+          "$FLEET_PYTHON" -B scripts/manage-release-fleet.py cleanup --execute --kind site --slot "$SLOT" \
+            --admission "$root/admission/receipt.json" --expected-admission-sha "$ADMISSION_SHA" \
+            --ownership "$root/ownership.json" --expected-ownership-sha "$OWNERSHIP_SHA" \
+            --private-logs "$root/cleanup-private" --output "$root/site-cleanup.json"
+
+      - name: Record the Site case outcome
+        if: always() && env.CANDIDATE_MODE == 'true' && steps.select.outcome == 'success'
+        timeout-minutes: 5
+        shell: bash
+        env:
+          SLOT: ${{ matrix.secret-sync-mode }}
+          OUTCOME_ENGINE: ${{ steps.candidate-engine.outcome }}
+          OUTCOME_GUIDED: ${{ steps.guided.outcome }}
+          OUTCOME_ROUTES: ${{ steps.routes.outcome }}
+          OUTCOME_DEPLOY: ${{ steps.deploy.outcome }}
+          OUTCOME_EXISTING_VAULT: ${{ steps.existing-vault.outcome }}
+          OUTCOME_EXISTING_ENABLE: ${{ steps.existing-enable.outcome }}
+          OUTCOME_READINESS: ${{ steps.readiness.outcome }}
+          OUTCOME_PREFLIGHT: ${{ steps.site-preflight.outcome }}
+        run: |
+          set -euo pipefail
+          umask 077
+          root="$RUNNER_TEMP/fleet"
+          mkdir "$RUNNER_TEMP/site-acceptance"
+          "$FLEET_PYTHON" -B scripts/aggregate-release-acceptance.py site-outcome --root "$root" --slot "$SLOT" \
+            --qualification "$root/qualification.json" --readiness "$RUNNER_TEMP/published-readiness.json" \
+            --cleanup "$root/site-cleanup.json" --output "$RUNNER_TEMP/site-acceptance/outcome.json"
+
+      - name: Retain the Site case outcome
+        if: always() && env.CANDIDATE_MODE == 'true' && steps.select.outcome == 'success'
+        timeout-minutes: 5
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: site-outcome-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.secret-sync-mode }}
+          path: ${{ runner.temp }}/site-acceptance/outcome.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 30
+
+  acceptance:
+    name: Release acceptance result
+    needs: [fleet-request, fleet, prep, site-groups, e2e]
+    if: always() && inputs.scenario == 'release-acceptance'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    env:
+      FLEET_CANDIDATE: ${{ inputs.candidate }}
+    steps:
+      # Binding uses only the runner's Python and reads no network source, so every run whose
+      # candidate names this commit records a result, even when checkout or tool setup fails.
+      - name: Bind the exact candidate
+        id: bind
+        shell: python
+        run: |
+          import json, os, re
+          try:
+              raw = os.environ["FLEET_CANDIDATE"]
+              value = json.loads(raw) if len(raw) <= 16384 else None
+              admission = value["artifacts"]["admission"]["sha256"]
+              bound = (
+                  value["apiVersion"] == "siteops.release.acceptance/v1" and value["kind"] == "FleetCandidate"
+                  and value["source"]["repository"] == os.environ["GITHUB_REPOSITORY"]
+                  and value["source"]["commit"] == os.environ["GITHUB_SHA"]
+                  and isinstance(admission, str) and re.fullmatch("[0-9a-f]{64}", admission) is not None
+              )
+          except (ValueError, TypeError, KeyError):
+              bound = False
+          if not bound:
+              raise SystemExit("The candidate does not name this commit, so this run records no result.")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("admission-sha=" + admission + "\n")
+          print("This run records its result for the selected candidate.")
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-fleet-tools
+        id: tools
+      - name: Select exact candidate inputs
+        id: select
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHON: ${{ steps.tools.outputs.python }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir "$RUNNER_TEMP/acceptance"
+          "$PYTHON" -B scripts/coordinate-release-fleet.py select --root "$RUNNER_TEMP/acceptance" \
+            --jobs-output "$RUNNER_TEMP/acceptance/producer-jobs.json"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.select.outputs.admission-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.select.outputs.producer-run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/acceptance/admission
+          merge-multiple: true
+          digest-mismatch: error
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.select.outputs.plan-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.select.outputs.producer-run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/acceptance/plan
+          merge-multiple: true
+          digest-mismatch: error
+      - name: Select the latest evidence for each scenario
+        id: evidence
+        if: always() && steps.select.outcome == 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHON: ${{ steps.tools.outputs.python }}
+        run: |
+          set -euo pipefail
+          "$PYTHON" -B scripts/coordinate-release-fleet.py evidence --root "$RUNNER_TEMP/acceptance"
+      # One artifact per download keeps each receipt in its own named directory.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        id: download-disabled
+        if: always() && steps.evidence.outputs.disabled-id != ''
+        with:
+          artifact-ids: ${{ steps.evidence.outputs.disabled-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/acceptance/evidence/disabled
+          digest-mismatch: error
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        id: download-enabled
+        if: always() && steps.evidence.outputs.enabled-id != ''
+        with:
+          artifact-ids: ${{ steps.evidence.outputs.enabled-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/acceptance/evidence/enabled
+          digest-mismatch: error
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        id: download-existing
+        if: always() && steps.evidence.outputs.existing-id != ''
+        with:
+          artifact-ids: ${{ steps.evidence.outputs.existing-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/acceptance/evidence/existing
+          digest-mismatch: error
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        id: download-fleet
+        if: always() && steps.evidence.outputs.fleet-id != ''
+        with:
+          artifact-ids: ${{ steps.evidence.outputs.fleet-id }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/acceptance/evidence/fleet
+          digest-mismatch: error
+      # Runs after a failed selection or download too, so this run always records a
+      # bound result. Evidence counts only when its own download step succeeded.
+      - name: Require every scenario for this candidate
+        if: always() && steps.bind.outcome == 'success'
+        shell: bash
+        env:
+          PYTHON: ${{ steps.tools.outputs.python }}
+          ACCEPTANCE_ENVIRONMENT: ${{ inputs.environment }}
+          ACCEPTANCE_NEEDS: ${{ toJSON(needs) }}
+          DOWNLOAD_DISABLED: ${{ steps.download-disabled.outcome }}
+          DOWNLOAD_ENABLED: ${{ steps.download-enabled.outcome }}
+          DOWNLOAD_EXISTING: ${{ steps.download-existing.outcome }}
+          DOWNLOAD_FLEET: ${{ steps.download-fleet.outcome }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/acceptance"
+          "$PYTHON" -B scripts/aggregate-release-acceptance.py aggregate --root "$RUNNER_TEMP/acceptance" \
+            --workflow .github/workflows/_siteops-distribution.yaml \
+            --output "$RUNNER_TEMP/acceptance/release-acceptance.json"
+      # Without the aggregator's receipt, a failing placeholder keeps this newer run in charge of publication.
+      - name: Keep a failing result when aggregation wrote none
+        if: always() && steps.bind.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/acceptance"
+          result="$RUNNER_TEMP/acceptance/release-acceptance.json"
+          if [[ ! -s "$result" ]]; then
+            printf '%s\n' '{"kind":"ReleaseAcceptance","status":"failed"}' > "$result"
+            echo "::error::Aggregation wrote no receipt, so this run records a failing result."
+          fi
+      # A failing receipt is retained too, so a newer failed run governs publication.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always() && steps.bind.outcome == 'success'
+        with:
+          name: release-acceptance-${{ github.run_id }}-${{ github.run_attempt }}-${{ steps.bind.outputs.admission-sha }}
+          path: ${{ runner.temp }}/acceptance/release-acceptance.json
+          if-no-files-found: error
+          overwrite: false
+          retention-days: 30

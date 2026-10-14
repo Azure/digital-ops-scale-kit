@@ -288,6 +288,64 @@ verify_release_asset() {
     fail "The selected asset's provenance could not be verified."
   [[ "$verified" == true ]] || fail "The asset certificate does not match the selected release."
 }
+discover_source_commit() {
+  local subject="$1" workflow="$2" signer builder template verified line digest="" candidate
+  local media san issuer repo revision ref signer_revision config config_revision runner extra
+  signer="https://github.com/$repository/.github/workflows/$workflow@$source_ref"
+  builder="https://github.com/$repository/.github/workflows/$caller@$source_ref"
+  # Quoted fields cannot introduce tabs or records into this closed observation format.
+  template='{{range .}}{{printf "%q" .verificationResult.mediaType}}{{"\t"}}{{with .verificationResult.signature.certificate}}{{printf "%q\t%q\t%q\t%q\t%q\t%q\t%q\t%q\t%q" .subjectAlternativeName .issuer .sourceRepositoryURI .sourceRepositoryDigest .sourceRepositoryRef .buildSignerDigest .buildConfigURI .buildConfigDigest .runnerEnvironment}}{{end}}{{"\n"}}{{end}}'
+  verified="$(timeout --kill-after=5 120 "$gh" attestation verify "$subject" \
+    --bundle "$subject.attestation.jsonl" --repo "$repository" \
+    --cert-identity "$signer" --source-ref "$source_ref" \
+    --cert-oidc-issuer https://token.actions.githubusercontent.com \
+    --predicate-type https://slsa.dev/provenance/v1 --hostname github.com \
+    --digest-alg sha256 --format json --template "$template" 2>/dev/null | head -c 8388609)" ||
+    fail "The source discovery provenance could not be verified."
+  [[ -n "$verified" && ${#verified} -le 8388608 ]] ||
+    fail "The source commit could not be discovered from verified evidence."
+  local count=0
+  while IFS= read -r line; do
+    ((count += 1))
+    IFS=$'\t' read -r media san issuer repo revision ref signer_revision config config_revision runner extra <<< "$line"
+    [[ $count -le 128 && -z "$extra" &&
+       "$media" == '"application/vnd.dev.sigstore.verificationresult+json;version=0.1"' &&
+       "$san" == "\"$signer\"" && "$issuer" == '"https://token.actions.githubusercontent.com"' &&
+       "$repo" == "\"https://github.com/$repository\"" && "$ref" == "\"$source_ref\"" &&
+       "$config" == "\"$builder\"" && "$runner" == '"self-hosted"' &&
+       "$revision" =~ ^\"([0-9a-f]{40})\"$ ]] ||
+      fail "The source commit could not be discovered from verified evidence."
+    candidate="${BASH_REMATCH[1]}"
+    [[ "$signer_revision" == "\"$candidate\"" && "$config_revision" == "\"$candidate\"" &&
+       ( -z "$digest" || "$digest" == "$candidate" ) ]] ||
+      fail "The source commit could not be discovered from verified evidence."
+    digest="$candidate"
+  done <<< "$verified"
+  printf '%s\n' "$digest"
+}
+select_local_discovery_assets() {
+  local self="${BASH_SOURCE[1]:-}" directory asset
+  discovery_assets=""
+  [[ -n "$self" ]] || return 0
+  self="${self#./}"
+  [[ "$self" == /* ]] || self="$PWD/$self"
+  directory="${self%/*}"
+  [[ -e "$directory/$discovery_subject" || -L "$directory/$discovery_subject" ||
+     -e "$directory/$discovery_subject.attestation.jsonl" || -L "$directory/$discovery_subject.attestation.jsonl" ]] ||
+    return 0
+  admit_file "$self" ||
+    fail "The bootstrap script must use a trusted file location for source discovery."
+  directory="${admitted%/*}"
+  for asset in "$discovery_subject" "$discovery_subject.attestation.jsonl"; do
+    limit=536870912
+    if [[ "$asset" == siteops-engine.json ]]; then limit=16384; fi
+    if [[ "$asset" == *.attestation.jsonl ]]; then limit=2097152; fi
+    admit_file "$directory/$asset" && [[ -s "$directory/$asset" ]] &&
+      (( $(wc -c < "$directory/$asset") <= limit )) ||
+      fail "The source discovery asset or proof is unavailable or oversized."
+  done
+  discovery_assets="$directory"
+}
 prepare_runtime() {
   [[ "${runtime_prepared:-false}" == false ]] || return 0
   local disabled='^(0|false)?$'
@@ -391,6 +449,7 @@ release=""
 content_release=""
 runtime_prepared=false
 commit=""
+commit_supplied=false
 repository="Azure/digital-ops-scale-kit"
 source_ref="refs/heads/main"
 caller="release.yaml"
@@ -406,7 +465,7 @@ while (($#)); do
       case "$1" in
         --release) release="$2" ;;
         --content-release) content_release="$2" ;;
-        --source-commit) commit="$2" ;;
+        --source-commit) commit="$2"; commit_supplied=true ;;
         --repository) repository="$2" ;;
         --source-ref) source_ref="$2" ;;
         --caller) caller="$2" ;;
@@ -425,7 +484,9 @@ if [[ -n "$content_release" ]]; then
   release="$content_release"
 fi
 [[ "$release" =~ ^(siteops/)?v[0-9][0-9A-Za-z._-]{0,100}$ ]] || fail "Select an exact release tag."
-[[ "$commit" =~ ^[0-9a-f]{40}$ ]] || fail "Supply the approved full source commit."
+if $commit_supplied; then
+  [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || fail "Supply the approved full source commit."
+fi
 [[ "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "Supply an OWNER/REPO publisher."
 [[ "$source_ref" =~ ^refs/heads/[A-Za-z0-9._/-]+$ && "$source_ref" != *..* ]] || fail "Supply an exact source branch."
 [[ "$caller" == release.yaml || "$caller" == ci.yaml ]] || fail "Select a supported calling workflow."
@@ -457,7 +518,26 @@ fi
 
 data="${XDG_DATA_HOME:-$HOME/.local/share}/siteops"
 [[ "$data" == /* && "$data" != /siteops ]] || fail "Select an absolute private data location."
-stage "Release: $release ($commit) from $repository."
+discovery_assets=""
+discovery_subject=siteops-install.zip
+discovery_workflow=_siteops-distribution.yaml
+if [[ -n "$content_release" ]]; then
+  discovery_subject=siteops-engine.json
+  discovery_workflow=_release-candidate.yaml
+fi
+if ! $commit_supplied && $dry_run; then
+  select_local_discovery_assets
+  [[ -n "$discovery_assets" ]] ||
+    fail "Source discovery in preview requires the release asset and proof beside the bootstrap script."
+  commit="$(discover_source_commit "$discovery_assets/$discovery_subject" "$discovery_workflow")"
+  verify_release_asset "$discovery_assets/$discovery_subject" "$commit" "$source_ref" "$caller" "$discovery_workflow"
+  stage "Discovered source commit: $commit."
+fi
+if [[ -n "$commit" ]]; then
+  stage "Release: $release ($commit) from $repository."
+else
+  stage "Release: $release from $repository. The source commit will be discovered."
+fi
 stage "Uses the installed GitHub CLI, checksum-pinned uv 0.12.20, and uv-managed Python."
 stage "No administrator rights or OS packages are used. No account is signed in."
 stage "Existing uv and Python installations are not upgraded."
@@ -523,6 +603,28 @@ staging="$(mktemp -d "$staging_root/run.XXXXXXXXXX")" && admit_directory "$stagi
 staging="$admitted"
 mkdir -m 0700 -- "$staging/tmp"
 export TMPDIR="$staging/tmp"
+if ! $commit_supplied; then
+  discovery_assets="$staging"
+  if [[ -n "$content_release" ]]; then
+    discovery_assets="$staging/reference"
+    mkdir -m 0700 -- "$discovery_assets"
+  fi
+  encoded_release="${release//\//%2F}"
+  for asset in "$discovery_subject" "$discovery_subject.attestation.jsonl"; do
+    limit=536870912
+    if [[ "$asset" == siteops-engine.json ]]; then limit=16384; fi
+    if [[ "$asset" == *.attestation.jsonl ]]; then limit=2097152; fi
+    curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+      --tlsv1.2 --max-redirs 3 --max-time 180 --max-filesize "$limit" \
+      -o "$discovery_assets/$asset" "https://github.com/$repository/releases/download/$encoded_release/$asset" ||
+      fail "The source discovery asset or proof is unavailable or oversized."
+    admit_file "$discovery_assets/$asset" private && [[ -s "$discovery_assets/$asset" ]] &&
+      (( $(wc -c < "$discovery_assets/$asset") <= limit )) ||
+      fail "The source discovery asset or proof is unavailable or oversized."
+  done
+  commit="$(discover_source_commit "$discovery_assets/$discovery_subject" "$discovery_workflow")"
+  stage "Discovered source commit: $commit."
+fi
 engine_release="$release"
 engine_commit="$commit"
 engine_ref="$source_ref"
@@ -541,6 +643,9 @@ if [[ -n "$content_release" ]]; then
       [[ "$(find "$reference_cache" -mindepth 1 -maxdepth 1 -printf x | wc -c)" == 2 ]] ||
       fail "Retained engine reference bytes are incomplete. Inspect them before retrying."
     stage "Rechecking the retained content release's engine selection."
+  elif [[ -n "$discovery_assets" ]]; then
+    reference_download="$discovery_assets"
+    reference_assets="$discovery_assets"
   else
     reference_download="$staging/reference"
     mkdir -m 0700 "$reference_download"
@@ -589,7 +694,7 @@ if [[ -e "$cache" || -L "$cache" ]]; then
     fail "Retained release bytes are incomplete. Inspect them before retrying."
   assets="$cache"
   stage "Rechecking the retained release without downloading its assets."
-else
+elif [[ -z "$discovery_assets" || -n "$content_release" ]]; then
   for asset in siteops-install.zip siteops-install.zip.attestation.jsonl; do
     limit=536870912
     if [[ "$asset" == *.attestation.jsonl ]]; then limit=2097152; fi

@@ -12,7 +12,7 @@ on:
         required: true
         type: string
       location:
-        description: Approved Azure region for both new resource groups.
+        description: Approved Azure region for both new ephemeral groups. Persistent groups keep their own region.
         required: true
         type: string
     secrets:
@@ -23,6 +23,13 @@ on:
       AZURE_SUBSCRIPTION_ID:
         required: false
       CUSTOM_LOCATIONS_OID:
+        required: false
+      # Two persistent groups for slots one and two, separated by a comma.
+      # Empty selects two new ephemeral groups.
+      E2E_FLEET_RESOURCE_GROUPS:
+        required: false
+      # The single Site group, read only to refuse a fleet group that matches it.
+      E2E_SITE_RESOURCE_GROUP:
         required: false
 
 permissions:
@@ -59,6 +66,7 @@ jobs:
       workspaces-id: ${{ steps.select.outputs.workspaces-id }}
       workspaces-sha: ${{ steps.select.outputs.workspaces-sha }}
       producer-run: ${{ steps.select.outputs.producer-run }}
+      attempt: ${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -146,7 +154,19 @@ jobs:
       started-at: ${{ steps.preflight.outputs.started-at }}
     env:
       AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      E2E_FLEET_RESOURCE_GROUPS: ${{ secrets.E2E_FLEET_RESOURCE_GROUPS }}
+      E2E_SITE_RESOURCE_GROUP: ${{ secrets.E2E_SITE_RESOURCE_GROUP }}
     steps:
+      # Rerunning only failed jobs would mix this attempt with earlier outputs.
+      - name: Require one complete fleet attempt
+        shell: bash
+        env:
+          SELECTED_ATTEMPT: ${{ needs.select.outputs.attempt }}
+        run: |
+          if [[ "$SELECTED_ATTEMPT" != "$GITHUB_RUN_ATTEMPT" ]]; then
+            echo "::error::The fleet runs as one unit. Use Re-run all jobs for a new attempt. Reconcile an earlier attempt with scenario fleet-cleanup if its cleanup did not complete."
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
@@ -194,7 +214,7 @@ jobs:
           if-no-files-found: error
           overwrite: false
           retention-days: 30
-      - name: Create owned resource groups
+      - name: Prepare fleet resource groups
         shell: bash
         env:
           PYTHON: ${{ steps.tools.outputs.python }}
@@ -227,9 +247,21 @@ jobs:
       id-token: write
     env:
       AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      E2E_FLEET_RESOURCE_GROUPS: ${{ secrets.E2E_FLEET_RESOURCE_GROUPS }}
+      E2E_SITE_RESOURCE_GROUP: ${{ secrets.E2E_SITE_RESOURCE_GROUP }}
       SLOT: ${{ matrix.slot }}
       FLEET_STARTED_AT: ${{ needs.prepare.outputs.started-at }}
     steps:
+      # Rerunning only failed jobs would mix this attempt with earlier outputs.
+      - name: Require one complete fleet attempt
+        shell: bash
+        env:
+          SELECTED_ATTEMPT: ${{ needs.select.outputs.attempt }}
+        run: |
+          if [[ "$SELECTED_ATTEMPT" != "$GITHUB_RUN_ATTEMPT" ]]; then
+            echo "::error::The fleet runs as one unit. Use Re-run all jobs for a new attempt. Reconcile an earlier attempt with scenario fleet-cleanup if its cleanup did not complete."
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
@@ -296,7 +328,7 @@ jobs:
         with:
           cluster-name: ${{ env.FLEET_CLUSTER_NAME }}
           resource-group: ${{ env.FLEET_RESOURCE_GROUP }}
-          location: ${{ inputs.location }}
+          location: ${{ env.FLEET_LOCATION }}
           enable-workload-identity: "false"
           custom-locations-oid: ${{ secrets.CUSTOM_LOCATIONS_OID }}
           private-provider-errors: "true"
@@ -361,8 +393,20 @@ jobs:
       id-token: write
     env:
       AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      E2E_FLEET_RESOURCE_GROUPS: ${{ secrets.E2E_FLEET_RESOURCE_GROUPS }}
+      E2E_SITE_RESOURCE_GROUP: ${{ secrets.E2E_SITE_RESOURCE_GROUP }}
       FLEET_STARTED_AT: ${{ needs.prepare.outputs.started-at }}
     steps:
+      # Rerunning only failed jobs would mix this attempt with earlier outputs.
+      - name: Require one complete fleet attempt
+        shell: bash
+        env:
+          SELECTED_ATTEMPT: ${{ needs.select.outputs.attempt }}
+        run: |
+          if [[ "$SELECTED_ATTEMPT" != "$GITHUB_RUN_ATTEMPT" ]]; then
+            echo "::error::The fleet runs as one unit. Use Re-run all jobs for a new attempt. Reconcile an earlier attempt with scenario fleet-cleanup if its cleanup did not complete."
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
@@ -541,7 +585,19 @@ jobs:
       id-token: write
     env:
       AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      E2E_FLEET_RESOURCE_GROUPS: ${{ secrets.E2E_FLEET_RESOURCE_GROUPS }}
+      E2E_SITE_RESOURCE_GROUP: ${{ secrets.E2E_SITE_RESOURCE_GROUP }}
     steps:
+      # Rerunning only failed jobs would mix this attempt with earlier outputs.
+      - name: Require one complete fleet attempt
+        shell: bash
+        env:
+          SELECTED_ATTEMPT: ${{ needs.select.outputs.attempt }}
+        run: |
+          if [[ "$SELECTED_ATTEMPT" != "$GITHUB_RUN_ATTEMPT" ]]; then
+            echo "::error::The fleet runs as one unit. Use Re-run all jobs for a new attempt. Reconcile an earlier attempt with scenario fleet-cleanup if its cleanup did not complete."
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
@@ -621,8 +677,11 @@ jobs:
         shell: python
         env:
           RESULTS: ${{ toJSON(needs) }}
+          SELECTED_ATTEMPT: ${{ needs.select.outputs.attempt }}
         run: |
           import json, os
+          if os.environ["SELECTED_ATTEMPT"] != os.environ["GITHUB_RUN_ATTEMPT"]:
+              raise SystemExit("The fleet runs as one unit. Use Re-run all jobs for a new attempt.")
           results = json.loads(os.environ["RESULTS"])
           required = {"select", "prepare", "hosts", "controller", "cleanup"}
           if set(results) != required or any(results[key]["result"] != "success" for key in required):

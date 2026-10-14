@@ -23,7 +23,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from siteops_distribution import (
+# Workflows may set PYTHONSAFEPATH, so sibling helpers are found through an explicit path entry.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from siteops_distribution import (  # noqa: E402
     INSTALLER_NAME,
     BundleManifest,
     BundleTarget,
@@ -31,7 +34,7 @@ from siteops_distribution import (
     PayloadFile,
     verify_payload,
 )
-from source_snapshot import (
+from source_snapshot import (  # noqa: E402
     SourceSnapshotError,
     export_tracked_source,
     safe_archive_path,

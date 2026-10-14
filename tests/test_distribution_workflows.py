@@ -11,6 +11,7 @@ fakes, so a change that widens the boundary fails here.
 
 import copy
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -23,6 +24,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.actions_expressions import evaluate, truthy
 from tests.native_bundle import (
     NETWORK_BLOCK,
     native_only,
@@ -64,6 +66,11 @@ PREDICATE_TYPE = "https://slsa.dev/provenance/v1"
 SIGNER_WORKFLOW = ".github/workflows/_siteops-distribution.yaml"
 QUALIFIED_PLATFORMS = ("ubuntu-24.04", "windows-2025")
 QUALIFIED_PYTHONS = ("3.10", "3.11", "3.12", "3.13", "3.14")
+EXTRA_CELLS = (
+    "Qualify bundle (ubuntu-26.04, Python 3.11)",
+    "Qualify bundle (windows-2025, Python 3.11, standard user)",
+)
+STANDARD_USER_STEP = "Install as a standard user with the signed PowerShell bootstrap"
 WHEEL_NAME = "siteops-1.0.0b1+build.42.1.gcccccccccccc-py3-none-any.whl"
 
 ACTION_PINS = {
@@ -410,13 +417,132 @@ def test_every_action_is_pinned_to_the_reviewed_commit():
 
 def test_qualification_runs_on_hosted_windows_and_linux_without_write_access():
     qualify = REUSABLE["jobs"]["qualify"]
-    assert qualify["strategy"]["matrix"]["os"] == list(QUALIFIED_PLATFORMS)
-    assert qualify["strategy"]["matrix"]["python"] == list(QUALIFIED_PYTHONS)
+    assert qualify["strategy"]["matrix"] == {
+        "os": list(QUALIFIED_PLATFORMS),
+        "python": list(QUALIFIED_PYTHONS),
+        "account": ["runner"],
+        "include": [
+            {"os": "ubuntu-26.04", "python": "3.11"},
+            {"os": "windows-2025", "python": "3.11", "account": "standard"},
+        ],
+    }
+    assert qualify["strategy"]["fail-fast"] is False
     assert _step(qualify, "Setup Python")["with"]["python-version"] == "${{ matrix.python }}"
-    assert qualify["name"] == "Qualify bundle (${{ matrix.os }}, Python ${{ matrix.python }})"
+    assert qualify["name"] == (
+        "Qualify bundle (${{ matrix.os }}, Python ${{ matrix.python }}"
+        "${{ matrix.account == 'standard' && ', standard user' || '' }})"
+    )
     assert qualify["runs-on"] == "${{ matrix.os }}"
     assert qualify["permissions"] == {"contents": "read", "actions": "read"}
     assert qualify["needs"] == ["build", "attest"]
+
+
+def _matrix_cells(matrix: dict) -> list[dict]:
+    """Expand a literal matrix with GitHub's include rules, which never merge into added cells."""
+    base = {key: value for key, value in matrix.items() if key != "include"}
+    originals = [dict(zip(base, values, strict=True)) for values in itertools.product(*base.values())]
+    cells = [dict(cell) for cell in originals]
+    added = []
+    for entry in matrix.get("include", []):
+        targets = [
+            cell for original, cell in zip(originals, cells, strict=True)
+            if all(original[key] == value for key, value in entry.items() if key in original)
+        ]
+        for cell in targets:
+            cell.update(entry)
+        if not targets:
+            added.append(dict(entry))
+    return cells + added
+
+
+def _cell_name(cell: dict) -> str:
+    suffix = ", standard user" if cell.get("account") == "standard" else ""
+    return f"Qualify bundle ({cell['os']}, Python {cell['python']}{suffix})"
+
+
+def _all_cell_names() -> list[str]:
+    return [
+        f"Qualify bundle ({platform}, Python {python})"
+        for python in QUALIFIED_PYTHONS for platform in QUALIFIED_PLATFORMS
+    ] + list(EXTRA_CELLS)
+
+
+def test_matrix_expansion_follows_the_documented_include_rules():
+    assert _matrix_cells({
+        "fruit": ["apple", "pear"], "animal": ["cat", "dog"],
+        "include": [{"color": "green"}, {"color": "pink", "animal": "cat"},
+                    {"fruit": "apple", "shape": "circle"}, {"fruit": "banana"},
+                    {"fruit": "banana", "animal": "cat"}],
+    }) == [
+        {"fruit": "apple", "animal": "cat", "color": "pink", "shape": "circle"},
+        {"fruit": "apple", "animal": "dog", "color": "green", "shape": "circle"},
+        {"fruit": "pear", "animal": "cat", "color": "pink"},
+        {"fruit": "pear", "animal": "dog", "color": "green"},
+        {"fruit": "banana"}, {"fruit": "banana", "animal": "cat"},
+    ]
+
+
+def test_qualification_matrix_adds_ubuntu_26_04_and_standard_user_cells():
+    matrix = REUSABLE["jobs"]["qualify"]["strategy"]["matrix"]
+    names = [_cell_name(cell) for cell in _matrix_cells(matrix)]
+    assert sorted(names) == sorted(_all_cell_names())
+    assert len(set(names)) == len(names)
+    # Without the base account key, the standard user entry would replace the Windows 3.11 cell.
+    merged = [_cell_name(cell) for cell in _matrix_cells({
+        key: value for key, value in matrix.items() if key != "account"
+    })]
+    assert "Qualify bundle (windows-2025, Python 3.11)" not in merged
+    assert len(merged) == len(names) - 1
+
+
+@pytest.mark.parametrize("cell", [
+    pytest.param(cell, id=_cell_name(cell))
+    for cell in _matrix_cells(REUSABLE["jobs"]["qualify"]["strategy"]["matrix"])
+])
+def test_each_qualification_cell_runs_only_its_installation_path(cell):
+    qualify = REUSABLE["jobs"]["qualify"]
+    shared = [
+        "Confirm the GitHub CLI verification capabilities", "Setup Python", "Download the attested assets",
+        "Verify installation assets before use", "Extract the verified bundle",
+        "Confirm the bundle describes this build",
+    ]
+    runner = ["Install the external qualification tooling"]
+    after = ["Install Site Ops from the verified lock", "Install Site Ops from the standalone wheel"]
+    expected = {
+        "ubuntu": shared + runner + ["Install with the signed Bash bootstrap"] + after,
+        "windows": shared + runner + ["Install with the signed PowerShell bootstrap"] + after,
+        "standard": shared + [STANDARD_USER_STEP],
+    }
+    kind = "standard" if cell.get("account") == "standard" else cell["os"].split("-")[0]
+    contexts = {
+        "matrix": cell,
+        "runner": {"os": "Windows" if cell["os"].startswith("windows-") else "Linux"},
+    }
+    steps = [step["name"] for step in qualify["steps"] if truthy(evaluate(step.get("if", "true"), contexts))]
+    assert steps == expected[kind]
+
+
+@pytest.mark.parametrize(("runner", "account", "expected"), [
+    pytest.param("Linux", "runner", {"bash", "tooling", "lock", "wheel"}, id="linux-runner"),
+    pytest.param("Windows", "runner", {"powershell", "tooling", "lock", "wheel"}, id="windows-runner"),
+    pytest.param("Windows", "standard", {"standard"}, id="windows-standard-user"),
+    pytest.param("Linux", None, {"bash", "tooling", "lock", "wheel"}, id="linux-missing-account"),
+    pytest.param("Windows", None, {"powershell", "tooling", "lock", "wheel"}, id="windows-missing-account"),
+    pytest.param("macOS", "runner", {"tooling", "lock", "wheel"}, id="other-runner-has-no-bootstrap"),
+    pytest.param("macOS", "standard", set(), id="standard-user-requires-windows"),
+])
+def test_qualification_installation_guards_use_runner_os_and_account(runner, account, expected):
+    names = {
+        "bash": "Install with the signed Bash bootstrap",
+        "powershell": "Install with the signed PowerShell bootstrap",
+        "standard": STANDARD_USER_STEP,
+        "tooling": "Install the external qualification tooling",
+        "lock": "Install Site Ops from the verified lock",
+        "wheel": "Install Site Ops from the standalone wheel",
+    }
+    contexts = {"runner": {"os": runner}, "matrix": {} if account is None else {"account": account}}
+    for key, name in names.items():
+        assert truthy(evaluate(_step(REUSABLE["jobs"]["qualify"], name)["if"], contexts)) is (key in expected), name
 
 
 def test_qualification_uses_the_cell_runtime_and_packaged_uv_helper():
@@ -508,6 +634,7 @@ def test_qualification_verifies_before_it_extracts():
     for name in ("Install with the signed Bash bootstrap", "Install with the signed PowerShell bootstrap"):
         assert names.index("Install the external qualification tooling") < names.index(name)
         assert names.index(name) < names.index("Install Site Ops from the verified lock")
+    assert names.index("Confirm the bundle describes this build") < names.index(STANDARD_USER_STEP)
     assert names.index("Install Site Ops from the verified lock") < names.index(
         "Install Site Ops from the standalone wheel"
     )
@@ -517,10 +644,11 @@ def test_qualification_runs_both_signed_scripts_with_private_preseeded_assets():
     qualify = REUSABLE["jobs"]["qualify"]
     for name, platform, argument in (
         ("Install with the signed Bash bootstrap", "ubuntu-24.04", "--yes"),
-        ("Install with the signed PowerShell bootstrap", "windows-2025", "-Yes"),
+        (
+            "Install with the signed PowerShell bootstrap", "windows-2025", "-Yes",
+        ),
     ):
         step = _step(qualify, name)
-        assert step["if"] == f"matrix.os == '{platform}'"
         if platform == "windows-2025":
             assert step["shell"] == "powershell"
         script = step["run"]
@@ -538,9 +666,174 @@ def test_qualification_runs_both_signed_scripts_with_private_preseeded_assets():
         assert "GH_TOKEN" in script and "GITHUB_TOKEN" in script
         assert "az login" not in script and "--with-azure-cli" not in script
     bash_step = _script(qualify, "Install with the signed Bash bootstrap")
-    assert 'bash "$download/$BOOTSTRAP_SH"' in bash_step
+    assert 'script="$download/$BOOTSTRAP_SH"' in bash_step
+    assert 'bash "$script"' in bash_step
     windows_step = _script(qualify, "Install with the signed PowerShell bootstrap")
     assert "powershell.exe -NoProfile -ExecutionPolicy Bypass -File" in windows_step
+
+
+def _run_linux_bootstrap_cell(tmp_path, python, fault="none"):
+    source = _script(REUSABLE["jobs"]["qualify"], "Install with the signed Bash bootstrap")
+    block = 'script="$download/$BOOTSTRAP_SH"\n' + source.split(
+        'script="$download/$BOOTSTRAP_SH"\n', 1,
+    )[1].split("if ! grep", 1)[0]
+    download = tmp_path / "download"
+    download.mkdir()
+    (tmp_path / "logs").mkdir()
+    log = tmp_path / "arguments.txt"
+    _write_executable(download / BOOTSTRAP_SH, r'''#!/usr/bin/env bash
+{
+  printf '=== gh ===\n'
+  printf '%s\n' "$@"
+} >> "$TEST_ARGUMENTS"
+if [[ " $* " == *" --dry-run "* ]]; then
+  case "$TEST_PREVIEW_FAULT" in
+    fail) exit 9 ;;
+    missing) exit 0 ;;
+    wrong) echo 'Site Ops installation: Discovered source commit: wrong.'; exit 0 ;;
+    write) mkdir -p "$XDG_DATA_HOME/siteops" ;;
+    duplicate) printf 'Site Ops installation: Discovered source commit: %s.\n' "$SOURCE_SHA" ;;
+  esac
+  printf 'Site Ops installation: Discovered source commit: %s.\n' "$SOURCE_SHA"
+fi
+''')
+    for name in (ARCHIVE_NAME, ARCHIVE_NAME + ATTESTATION_SUFFIX):
+        (download / name).write_bytes(b"staged signed asset")
+    adapter = (
+        'mkdir() { if [[ "$1" == -m && "$2" == 0700 && "$3" == -- ]]; then command mkdir -- "$4"; '
+        'elif [[ "$1" == -p && $# == 2 ]]; then command mkdir -p -- "$2"; else return 99; fi; }\n'
+        if sys.platform == "win32" else ""
+    )
+    result = _run_script(
+        'set -euo pipefail\n' + adapter + 'download="$TEST_DOWNLOAD";owned="$TEST_ROOT"\n'
+        "release=siteops/v0.0.0-ci\ncaller=ci.yaml\n" + block,
+        tmp_path,
+        {
+            "TEST_DOWNLOAD": _bash_path(download), "TEST_ROOT": _bash_path(tmp_path),
+            "TEST_ARGUMENTS": _bash_path(log), "BOOTSTRAP_SH": BOOTSTRAP_SH,
+            "XDG_DATA_HOME": _bash_path(tmp_path / "data"),
+            "TEST_PREVIEW_FAULT": fault,
+            "ARCHIVE_NAME": ARCHIVE_NAME, "ATTESTATION_SUFFIX": ATTESTATION_SUFFIX,
+            "MATRIX_PYTHON": python, "SOURCE_SHA": "c" * 40, "SOURCE_REPOSITORY": "example/publisher",
+            "SOURCE_REF": "refs/heads/feature",
+        },
+    )
+    return result, log, download
+
+
+@pytest.mark.parametrize("python", QUALIFIED_PYTHONS)
+def test_linux_runner_cells_select_discovery_only_for_python_311(tmp_path, python):
+    result, log, download = _run_linux_bootstrap_cell(tmp_path, python)
+    assert result.returncode == 0, result.stdout + result.stderr
+    pinned = ["--release", "siteops/v0.0.0-ci", "--source-commit", "c" * 40,
+        "--repository", "example/publisher", "--source-ref", "refs/heads/feature",
+        "--caller", "ci.yaml", "--yes"]
+    preview = [
+        "--release", "siteops/v0.0.0-ci", "--repository", "example/publisher",
+        "--source-ref", "refs/heads/feature", "--caller", "ci.yaml", "--dry-run",
+    ]
+    assert _invocations(log) == ([preview, pinned] if python == "3.11" else [pinned])
+    assert (tmp_path / "bootstrap-source" / BOOTSTRAP_SH).exists() is (python == "3.11")
+    if python == "3.11":
+        for name in (BOOTSTRAP_SH, ARCHIVE_NAME, ARCHIVE_NAME + ATTESTATION_SUFFIX):
+            assert (tmp_path / "bootstrap-source" / name).read_bytes() == (download / name).read_bytes()
+
+
+@pytest.mark.parametrize("fault", ["fail", "missing", "wrong", "write", "duplicate"])
+def test_linux_preview_must_pin_the_source_without_creating_data(tmp_path, fault):
+    result, log, _ = _run_linux_bootstrap_cell(tmp_path, "3.11", fault)
+    assert result.returncode != 0
+    assert len(_invocations(log)) == 1
+    expected = "did not verify the preview" if fault == "fail" else (
+        "preview did not preserve the selected source and data"
+    )
+    assert expected in result.stdout + result.stderr
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Runner invocation uses native PowerShell 5.1.")
+@pytest.mark.parametrize("python", QUALIFIED_PYTHONS)
+def test_windows_runner_cells_select_discovery_only_for_python_311(tmp_path, python):
+    child = (
+        '[IO.File]::AppendAllText($env:TEST_ARGUMENTS, '
+        '((ConvertTo-Json -InputObject $PSBoundParameters -Compress) + "`n"))\n'
+        'if ($DryRun) { Write-Host "Site Ops installation: Discovered source commit: $env:SOURCE_SHA." }\nexit 0\n'
+    )
+    log = tmp_path / "arguments.json"
+    for name in (ARCHIVE_NAME, ARCHIVE_NAME + ATTESTATION_SUFFIX):
+        (tmp_path / name).write_bytes(b"staged signed asset")
+    result = _run_windows_bootstrap_qualifier(
+        tmp_path, child,
+        {"MATRIX_PYTHON": python, "TEST_ARGUMENTS": str(log),
+         "ARCHIVE_NAME": ARCHIVE_NAME, "ATTESTATION_SUFFIX": ATTESTATION_SUFFIX},
+        success_marker=True, stage_source=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert len(calls) == (2 if python == "3.11" else 1)
+    arguments = calls[-1]
+    assert arguments["SourceCommit"] == "c" * 40
+    assert arguments["Release"] == "siteops/v0.0.0-ci"
+    assert arguments["Repository"] == "example/publisher"
+    assert arguments["SourceRef"] == "refs/heads/feat/siteops-guided-inputs"
+    assert arguments["Caller"] == "ci.yaml"
+    assert arguments["Yes"]["IsPresent"]
+    assert "DryRun" not in arguments
+    if python == "3.11":
+        preview = calls[0]
+        assert preview["DryRun"]["IsPresent"]
+        assert "SourceCommit" not in preview and "Yes" not in preview
+        assert {key: value for key, value in preview.items() if key != "DryRun"} == {
+            key: value for key, value in arguments.items() if key not in {"SourceCommit", "Yes"}
+        }
+    assert (tmp_path / "bootstrap-source").exists() is (python == "3.11")
+    if python == "3.11":
+        assert (tmp_path / "bootstrap-source" / "bootstrap.ps1").read_bytes() == (tmp_path / "bootstrap.ps1").read_bytes()
+        for name in (ARCHIVE_NAME, ARCHIVE_NAME + ATTESTATION_SUFFIX):
+            assert (tmp_path / "bootstrap-source" / name).read_bytes() == (tmp_path / name).read_bytes()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Preview qualification runs native PowerShell 5.1.")
+@pytest.mark.parametrize("fault", ["fail", "missing", "wrong", "write", "duplicate"])
+def test_windows_preview_must_pin_the_source_without_creating_data(tmp_path, fault):
+    log = tmp_path / "arguments.jsonl"
+    for name in (ARCHIVE_NAME, ARCHIVE_NAME + ATTESTATION_SUFFIX):
+        (tmp_path / name).write_bytes(b"staged signed asset")
+    child = r'''
+[IO.File]::AppendAllText($env:TEST_ARGUMENTS, ((ConvertTo-Json -InputObject $PSBoundParameters -Compress) + "`n"))
+if (-not $DryRun) { throw 'The preview boundary allowed installation.' }
+switch ($env:TEST_PREVIEW_FAULT) {
+    'fail' { exit 9 }
+    'missing' { exit 0 }
+    'wrong' { Write-Host 'Site Ops installation: Discovered source commit: wrong.'; exit 0 }
+    'write' { New-Item -ItemType Directory -Path (Join-Path $env:TEST_ROOT 'profile\siteops\unexpected')|Out-Null }
+    'duplicate' { Write-Host "Site Ops installation: Discovered source commit: $env:SOURCE_SHA." }
+}
+Write-Host "Site Ops installation: Discovered source commit: $env:SOURCE_SHA."
+exit 0
+'''
+    result = _run_windows_bootstrap_qualifier(
+        tmp_path, child,
+        {"MATRIX_PYTHON": "3.11", "TEST_ARGUMENTS": str(log), "TEST_PREVIEW_FAULT": fault,
+         "ARCHIVE_NAME": ARCHIVE_NAME, "ATTESTATION_SUFFIX": ATTESTATION_SUFFIX},
+        stage_source=True,
+    )
+    assert result.returncode != 0
+    assert len(log.read_text(encoding="utf-8").splitlines()) == 1
+    expected = "did not verify the preview" if fault == "fail" else (
+        "preview did not preserve the selected source and data"
+    )
+    assert expected in " ".join((result.stdout + result.stderr).split())
+
+
+def test_standard_user_cell_keeps_the_explicit_commit_route():
+    source = _script(REUSABLE["jobs"]["qualify"], STANDARD_USER_STEP)
+    assert "-SourceCommit $SourceCommit -Repository $Repository -SourceRef $SourceRef" in source
+    assert "'-SourceCommit', $env:SOURCE_SHA" in source
+    assert "sourceArguments" not in source and "MATRIX_PYTHON" not in source
+    matrix = REUSABLE["jobs"]["qualify"]["strategy"]["matrix"]
+    assert matrix["python"] == list(QUALIFIED_PYTHONS)
+    assert {"os": "ubuntu-26.04", "python": "3.11"} in matrix["include"]
+    assert {"os": "windows-2025", "python": "3.11", "account": "standard"} in matrix["include"]
 
 
 def test_every_qualification_consumer_checks_the_matrix_app_runtime():
@@ -585,7 +878,7 @@ def test_signed_bash_qualification_resolves_caller_before_branch_path(
 
 def test_windows_bootstrap_qualification_captures_native_stderr_then_checks_exit():
     script = _script(REUSABLE["jobs"]["qualify"], "Install with the signed PowerShell bootstrap")
-    invocation = script.index("& powershell.exe -NoProfile -ExecutionPolicy Bypass -File")
+    invocation = script.index("& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script")
     assert "$ErrorActionPreference = 'Continue'" in script[invocation - 170:invocation]
     assert "$bootstrapStatus = $LASTEXITCODE" in script[invocation:invocation + 310]
     assert "$ErrorActionPreference = $previousPreference" in script[invocation:invocation + 420]
@@ -621,7 +914,7 @@ def test_windows_bootstrap_qualification_owns_every_preloaded_cache_directory():
     assert "foreach ($directory in @($cacheRoot, $cache))" in preload
     assert '& icacls.exe $directory /setowner "*$sid"' in preload
     assert "-Force" not in preload
-    assert script.index(preload) < script.index("& powershell.exe -NoProfile -ExecutionPolicy Bypass")
+    assert script.index(preload) < script.index("& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script")
     bootstrap = (REPO_ROOT / "scripts" / "bootstrap" / "siteops-bootstrap.ps1").read_text(
         encoding="utf-8",
     )
@@ -761,6 +1054,7 @@ def _run_windows_bootstrap_qualifier(
     extra_env: dict[str, str],
     *,
     success_marker: bool = False,
+    stage_source: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     script = _script(REUSABLE["jobs"]["qualify"], "Install with the signed PowerShell bootstrap")
     block = script.split("$log = Join-Path $owned 'logs\\bootstrap-ps1.log'\n", 1)[1].split(
@@ -770,16 +1064,23 @@ def _run_windows_bootstrap_qualifier(
     fake = tmp_path / "bootstrap.ps1"
     fake.write_text(
         "param([string]$Release,[string]$SourceCommit,[string]$Repository,"
-        "[string]$SourceRef,[string]$Caller,[switch]$Yes)\n" + child,
+        "[string]$SourceRef,[string]$Caller,[switch]$Yes,[switch]$DryRun)\n" + child,
         encoding="utf-8",
+    )
+    staging = (
+        script.split("$release = 'siteops/v0.0.0-ci'\n", 1)[1].split("$selection = ", 1)[0]
+        if stage_source else ""
     )
     wrapper = tmp_path / "qualify.ps1"
     wrapper.write_text(
         "$ErrorActionPreference='Stop'\n"
         "$owned=$env:TEST_ROOT;$download=$owned\n"
+        "$bootstrapData=Join-Path $owned 'profile\\siteops'\n"
+        "New-Item -ItemType Directory -Path $bootstrapData -Force|Out-Null\n"
         "$script=Join-Path $download $env:BOOTSTRAP_PS1\n"
-        "$log=Join-Path $owned 'logs\\bootstrap-ps1.log'\n"
         "$release='siteops/v0.0.0-ci';$caller='ci.yaml'\n"
+        + staging
+        + "$log=Join-Path $owned 'logs\\bootstrap-ps1.log'\n"
         + block + ("\n'CAPTURE_ACCEPTED'\n" if success_marker else "\n"),
         encoding="utf-8",
     )
@@ -895,6 +1196,481 @@ def test_windows_qualification_preserves_child_exit_with_private_stderr(
         )
 
 
+# --- Standard user qualification ---------------------------------------------
+
+# Closed doubles for the account, process and profile commands. Functions take
+# precedence over cmdlets, so the real step body runs unchanged after them.
+# CmdletBinding rejects any parameter a double does not declare.
+_STANDARD_USER_DOUBLES = r"""
+$record = [ordered]@{ calls = [Collections.Generic.List[string]]::new(); start = $null }
+function Save-Record { $record | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $env:TEST_RECORD -Encoding UTF8 }
+function Get-LocalUser {
+    [CmdletBinding()] param([Parameter(Mandatory = $true)][string]$Name)
+    $record.calls.Add("Get-LocalUser $Name"); Save-Record
+    if ($env:TEST_SCENARIO -eq 'existing-user') { [pscustomobject]@{ Name = $Name } }
+}
+function New-LocalUser {
+    [CmdletBinding()] param(
+        [Parameter(Mandatory = $true)][string]$Name, [Parameter(Mandatory = $true)][Security.SecureString]$Password,
+        [switch]$PasswordNeverExpires, [switch]$UserMayNotChangePassword, [switch]$AccountNeverExpires,
+        [ValidateLength(0, 48)][string]$Description
+    )
+    if (-not ($PasswordNeverExpires -and $UserMayNotChangePassword -and $AccountNeverExpires)) { throw 'Unexpected account policy.' }
+    $record.calls.Add("New-LocalUser $Name"); Save-Record
+    [pscustomobject]@{ SID = [Security.Principal.SecurityIdentifier]'S-1-5-32-545' }
+}
+function Add-LocalGroupMember {
+    [CmdletBinding()] param([Parameter(Mandatory = $true)][string]$Group, [Parameter(Mandatory = $true)][string]$Member)
+    $record.calls.Add("Add-LocalGroupMember $Group $Member"); Save-Record
+}
+function Get-LocalGroupMember {
+    [CmdletBinding()] param([Parameter(Mandatory = $true)][string]$SID)
+    $record.calls.Add("Get-LocalGroupMember $SID"); Save-Record
+    if ($env:TEST_SCENARIO -eq 'administrator-member') { [pscustomobject]@{ SID = [Security.Principal.SecurityIdentifier]'S-1-5-32-545' } }
+}
+function Start-Process {
+    [CmdletBinding()] param(
+        [Parameter(Mandatory = $true)][string]$FilePath, [Parameter(Mandatory = $true)][string[]]$ArgumentList,
+        [Parameter(Mandatory = $true)][pscredential]$Credential, [switch]$LoadUserProfile,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory, [switch]$PassThru
+    )
+    $secret = $Credential.GetNetworkCredential().Password
+    $leaks = @()
+    if (($ArgumentList -join ' ').Contains($secret)) { $leaks += 'arguments' }
+    if (@(Get-ChildItem Env: | Where-Object { $_.Value -and $_.Value.Contains($secret) }).Count) { $leaks += 'environment' }
+    foreach ($file in Get-ChildItem -LiteralPath $WorkingDirectory -File -Recurse) {
+        if ([IO.File]::ReadAllText($file.FullName).Contains($secret)) { $leaks += 'staging' }
+    }
+    $rights = 0
+    foreach ($item in @(Get-Item -LiteralPath $WorkingDirectory) + @(Get-ChildItem -LiteralPath $WorkingDirectory)) {
+        foreach ($rule in $item.GetAccessControl().GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+            if ($rule.IdentityReference.Value -eq 'S-1-5-32-545') { $rights = $rights -bor [int]$rule.FileSystemRights }
+        }
+    }
+    Copy-Item -LiteralPath (Join-Path $WorkingDirectory 'standard-user.ps1') -Destination $env:TEST_WRAPPER
+    $record.start = [ordered]@{
+        file = $FilePath; arguments = @($ArgumentList); user = $Credential.UserName; secret = $secret
+        loadProfile = [bool]$LoadUserProfile; directory = $WorkingDirectory; passThru = [bool]$PassThru
+        leaks = @($leaks); userRights = $rights
+        staged = [string[]]@(Get-ChildItem -LiteralPath $WorkingDirectory | ForEach-Object { $_.Name } | Sort-Object)
+    }
+    Save-Record
+    $local = Join-Path $env:TEST_PROFILE 'AppData\Local'
+    $results = Join-Path $local 'siteops-qualification'
+    $staging = Join-Path $local 'siteops\install-staging'
+    New-Item -ItemType Directory -Path $results, $staging -Force | Out-Null
+    $log = "Site Ops installation: Rechecking the retained release without downloading its assets.`n" +
+        "Site Ops installation: Provisioning uv-managed CPython 3.11.16 without command aliases or registry changes.`n"
+    $result = [ordered]@{ user = 'S-1-5-32-545'; administrator = $false; version = "siteops $env:PACKAGE_VERSION" }
+    $exit = 0
+    switch ($env:TEST_SCENARIO) {
+        'bootstrap-failure' { $log = "Site Ops installation failed: $env:TEST_MESSAGE PRIVATE_PATH"; $exit = 1 }
+        'administrator' { $result.administrator = $true }
+        'cache-not-used' { $log = $log.Replace('Rechecking the retained release without downloading', 'Downloading') }
+        'runtime' { $log = $log.Replace('CPython 3.11.16', 'CPython 3.12.4') }
+        'leftover' { New-Item -ItemType File -Path (Join-Path $staging 'PRIVATE_PATH') | Out-Null }
+        'version' { $result.version = 'siteops 0.0.0' }
+        'missing-result' { $result = $null }
+    }
+    Set-Content -LiteralPath (Join-Path $results 'bootstrap.log') -Value $log
+    if ($result) { $result | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $results 'result.json') }
+    $process = [pscustomobject]@{ Id = 4242; ExitCode = $exit; HasExited = $env:TEST_SCENARIO -ne 'timeout'; Handle = 1 }
+    $process | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { param($Milliseconds) $this.HasExited }
+    return $process
+}
+function Get-ItemProperty {
+    [CmdletBinding()] param([Parameter(Mandatory = $true)][string]$LiteralPath)
+    if ($LiteralPath -cne 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\S-1-5-32-545') {
+        throw 'Unexpected registry read.'
+    }
+    [pscustomobject]@{ ProfileImagePath = $env:TEST_PROFILE }
+}
+function Get-CimInstance {
+    [CmdletBinding()] param([Parameter(Mandatory = $true)][string]$ClassName, [Parameter(Mandatory = $true)][string]$Filter)
+    if ($ClassName -eq 'Win32_Process') {
+        # A system process is always present. Only the account's own process may be stopped.
+        if ($env:TEST_CLEANUP -eq 'process-query-fails') { throw 'Synthetic process query failure.' }
+        $items = @([pscustomobject]@{ ProcessId = 900; Owner = 'S-1-5-18' })
+        if ($env:TEST_CLEANUP -eq 'lingering-process' -or
+            ($env:TEST_CLEANUP -eq 'stopped-process' -and -not $stopped.Contains(777))) {
+            $items += [pscustomobject]@{ ProcessId = 777; Owner = 'S-1-5-32-545' }
+        }
+        return $items
+    }
+    $record.calls.Add("Get-CimInstance $ClassName $Filter"); Save-Record
+    [pscustomobject]@{ SID = 'S-1-5-32-545' }
+}
+$stopped = [Collections.Generic.List[int]]::new()
+function Invoke-CimMethod {
+    [CmdletBinding()] param([Parameter(Mandatory = $true)]$InputObject, [Parameter(Mandatory = $true)][string]$MethodName)
+    if ($MethodName -cne 'GetOwnerSid') { throw 'Unexpected CIM method.' }
+    [pscustomobject]@{ Sid = $InputObject.Owner }
+}
+function Stop-Process {
+    [CmdletBinding()] param([Parameter(Mandatory = $true)][int]$Id, [switch]$Force)
+    $record.calls.Add("Stop-Process $Id"); Save-Record
+    $stopped.Add($Id)
+}
+function Start-Sleep { [CmdletBinding()] param([Parameter(Mandatory = $true)][int]$Seconds) }
+function Remove-CimInstance {
+    [CmdletBinding()] param([Parameter(Mandatory = $true, ValueFromPipeline = $true)]$InputObject)
+    process {
+        $record.calls.Add('Remove-CimInstance ' + $InputObject.SID); Save-Record
+        if ($env:TEST_CLEANUP -eq 'profile-remains') { throw 'Synthetic profile removal failure.' }
+    }
+}
+function Remove-LocalUser {
+    [CmdletBinding()] param([Parameter(Mandatory = $true)][string]$SID)
+    $record.calls.Add("Remove-LocalUser $SID"); Save-Record
+    if ($env:TEST_CLEANUP -eq 'account-remains') { throw 'Synthetic account removal failure.' }
+}
+function taskkill.exe { $record.calls.Add('taskkill ' + ($args -join ' ')); Save-Record }
+# Runs the real icacls, except that a staging scenario refuses the grant, grants the user write access,
+# adds the explicit Administrators rule an elevated runner gives a new folder, or adds an untrusted reader.
+function icacls.exe {
+    if ($env:TEST_SCENARIO -eq 'staging-grant') { $global:LASTEXITCODE = 5; return }
+    $arguments = @(foreach ($argument in $args) {
+        if ($env:TEST_SCENARIO -eq 'staging-access') { $argument -replace ':\(OI\)\(CI\)RX$', ':(OI)(CI)M' } else { $argument }
+    })
+    $native = (Get-Command icacls.exe -CommandType Application | Select-Object -First 1).Source
+    & $native @arguments
+    $status = $LASTEXITCODE
+    $extra = @{ 'elevated-folder' = '*S-1-5-32-544:F'; 'other-principal' = '*S-1-5-11:R' }[$env:TEST_SCENARIO]
+    if ($extra -and $status -eq 0) { & $native $args[0] /grant $extra *> $null; $status = $LASTEXITCODE }
+    $global:LASTEXITCODE = $status
+}
+"""
+
+
+def _standard_user_selection() -> str:
+    identity = "\0".join(["example/publisher", "siteops/v0.0.0-ci", "c" * 40, "refs/heads/main", "release.yaml"])
+    return hashlib.sha256((identity + "\0").encode()).hexdigest()
+
+
+def _run_standard_user_step(tmp_path: Path, scenario: str, **extra: str):
+    runner_temp = tmp_path / "runner"
+    download = runner_temp / "siteops-download"
+    download.mkdir(parents=True)
+    for name in (BOOTSTRAP_PS1, ARCHIVE_NAME, ARCHIVE_NAME + ATTESTATION_SUFFIX):
+        if scenario == "staging-copy" and name.endswith(ATTESTATION_SUFFIX):
+            continue
+        (download / name).write_text("synthetic " + name, encoding="utf-8")
+    if scenario == "existing-staging":
+        (runner_temp / "siteops-standard-user").mkdir()
+    script = tmp_path / "step.ps1"
+    script.write_text(
+        _STANDARD_USER_DOUBLES + _script(REUSABLE["jobs"]["qualify"], STANDARD_USER_STEP), encoding="utf-8-sig",
+    )
+    record = tmp_path / "record.json"
+    # A PowerShell 7 parent's module path hides Windows PowerShell's own modules, unlike a runner step.
+    inherited = {name: value for name, value in os.environ.items() if name.upper() != "PSMODULEPATH"}
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        cwd=tmp_path, capture_output=True, text=True, timeout=120,
+        env={
+            **inherited, "RUNNER_TEMP": str(runner_temp), "TEST_SCENARIO": scenario,
+            "TEST_RECORD": str(record), "TEST_PROFILE": str(tmp_path / "profile"),
+            "TEST_WRAPPER": str(tmp_path / "staged-wrapper.ps1"),
+            "SOURCE_SHA": "c" * 40, "SOURCE_REPOSITORY": "example/publisher", "SOURCE_REF": "refs/heads/main",
+            "BUILDER_IDENTITY": "https://github.com/example/publisher/.github/workflows/release.yaml@refs/heads/main",
+            "PACKAGE_VERSION": "1.0.0b1+build.42.1.gcccccccccccc", "ARCHIVE_NAME": ARCHIVE_NAME,
+            "ATTESTATION_SUFFIX": ATTESTATION_SUFFIX, "BOOTSTRAP_PS1": BOOTSTRAP_PS1, **extra,
+        },
+    )
+    recorded = json.loads(record.read_text(encoding="utf-8-sig")) if record.exists() else {"calls": [], "start": None}
+    return result, recorded, runner_temp / "siteops-standard-user"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="The standard user step runs in Windows PowerShell 5.1.")
+def test_windows_qualification_standard_user_installs_from_read_only_staging(tmp_path):
+    result, recorded, staging = _run_standard_user_step(tmp_path, "success")
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert "A standard user installed the verified bundle" in result.stdout
+    start = recorded["start"]
+    secret = start["secret"]
+    # The password is masked before any other use and appears nowhere else.
+    assert len(secret) == 36 and secret.endswith("Aa1!")
+    lines = result.stdout.splitlines()
+    mask = next(index for index, line in enumerate(lines) if secret in line)
+    assert lines[mask] == "::add-mask::" + secret
+    assert secret not in "\n".join(lines[mask + 1:]) + result.stderr
+    assert start["leaks"] == []
+    assert start["user"] == "siteops-standard"
+    assert start["loadProfile"] is True and start["passThru"] is True
+    assert start["file"].lower().endswith("\\windowspowershell\\v1.0\\powershell.exe")
+    assert start["directory"] == str(staging)
+    assert start["arguments"] == [
+        "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+        "-File", str(staging / "standard-user.ps1"),
+        "-SourceCommit", "c" * 40, "-Repository", "example/publisher", "-SourceRef", "refs/heads/main",
+        "-Caller", "release.yaml", "-Selection", _standard_user_selection(),
+    ]
+    assert sorted(start["staged"]) == sorted([ARCHIVE_NAME, ARCHIVE_NAME + ATTESTATION_SUFFIX, BOOTSTRAP_PS1, "standard-user.ps1"])
+    step = _script(REUSABLE["jobs"]["qualify"], STANDARD_USER_STEP)
+    reviewed = step.split("$wrapper = @'\n", 1)[1].split("\n'@\n", 1)[0]
+    staged_wrapper = (tmp_path / "staged-wrapper.ps1").read_text(encoding="utf-8-sig")
+    assert staged_wrapper.replace("\r\n", "\n").strip() == reviewed.strip()
+    # Read and execute only, independent of the step's own access check.
+    assert start["userRights"] & 0x200A9 == 0x200A9
+    assert start["userRights"] & 0x500D0156 == 0
+    assert recorded["calls"][:3] == [
+        "Get-LocalUser siteops-standard", "New-LocalUser siteops-standard",
+        "Add-LocalGroupMember Users siteops-standard",
+    ]
+    assert recorded["calls"][-3:] == [
+        "Get-CimInstance Win32_UserProfile SID = 'S-1-5-32-545'",
+        "Remove-CimInstance S-1-5-32-545", "Remove-LocalUser S-1-5-32-545",
+    ]
+    assert not staging.exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="The standard user step runs in Windows PowerShell 5.1.")
+@pytest.mark.parametrize(("scenario", "category", "message"), [
+    *[
+        ("bootstrap-failure", code, f"Configure a private Site Ops data root. {code} Use trusted directories.")
+        for code in ("ROOT_PATH", "ROOT_ANCESTOR_TYPE", "ROOT_ANCESTOR_OWNER", "ROOT_ANCESTOR_ACL",
+                     "ROOT_DATA_CREATE", "ROOT_DATA_TYPE", "ROOT_DATA_OWNER", "ROOT_DATA_ACL")
+    ],
+    *[
+        ("bootstrap-failure", code, f"Choose a private Windows tool location. {code} Use trusted directories.")
+        for code in ("TOOL_PATH", "TOOL_TYPE", "TOOL_OWNER", "TOOL_ACL")
+    ],
+    ("bootstrap-failure", "GH_ADMISSION", "The GitHub CLI executable must be owned by an administrator or the current user."),
+    ("bootstrap-failure", "GH_VERSION", "GitHub CLI 2.95 or newer is required."),
+    ("bootstrap-failure", "BOOTSTRAP", "An unclassified failure."),
+    ("timeout", "TIMEOUT", ""),
+    ("administrator", "NOT_STANDARD", ""),
+    ("administrator-member", "NOT_STANDARD", ""),
+    ("cache-not-used", "CACHE_NOT_USED", ""),
+    ("runtime", "RUNTIME", ""),
+    ("leftover", "STAGING_LEFT", ""),
+    ("staging-grant", "STAGING_GRANT", ""),
+    ("staging-copy", "STAGING_COPY", ""),
+    ("staging-access", "STAGING_ACCESS", ""),
+    ("other-principal", "STAGING_ACCESS", ""),
+    ("version", "VERSION", ""),
+    ("missing-result", "RESULT", ""),
+])
+def test_windows_qualification_standard_user_reports_fixed_failure_categories(
+    tmp_path, scenario, category, message,
+):
+    result, recorded, staging = _run_standard_user_step(tmp_path, scenario, TEST_MESSAGE=message)
+    output = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert f"The standard user installation did not pass ({category})." in output
+    assert "PRIVATE_PATH" not in output
+    assert "A standard user installed the verified bundle" not in output
+    assert ("taskkill /PID 4242 /T /F" in recorded["calls"]) is (scenario == "timeout")
+    assert recorded["calls"][-1] == "Remove-LocalUser S-1-5-32-545"
+    assert not staging.exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="The standard user step runs in Windows PowerShell 5.1.")
+@pytest.mark.parametrize("fault", ["lingering-process", "process-query-fails", "profile-remains", "account-remains"])
+def test_windows_qualification_standard_user_fails_when_cleanup_is_incomplete(tmp_path, fault):
+    result, recorded, staging = _run_standard_user_step(tmp_path, "success", TEST_CLEANUP=fault)
+    output = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "The standard user installation did not pass (CLEANUP)." in output
+    assert "A standard user installed the verified bundle" not in output
+    # One failed removal never skips the others.
+    assert recorded["calls"][-2:] == ["Remove-CimInstance S-1-5-32-545", "Remove-LocalUser S-1-5-32-545"]
+    assert "Stop-Process 900" not in recorded["calls"]
+    assert not staging.exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="The standard user step runs in Windows PowerShell 5.1.")
+def test_windows_qualification_standard_user_stops_only_the_accounts_remaining_processes(tmp_path):
+    result, recorded, _ = _run_standard_user_step(tmp_path, "success", TEST_CLEANUP="stopped-process")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "A standard user installed the verified bundle" in result.stdout
+    assert recorded["calls"].count("Stop-Process 777") == 1
+    assert "Stop-Process 900" not in recorded["calls"]
+    assert recorded["calls"].index("Stop-Process 777") < recorded["calls"].index("Remove-CimInstance S-1-5-32-545")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="The standard user step runs in Windows PowerShell 5.1.")
+def test_windows_qualification_standard_user_keeps_the_earlier_failure_category(tmp_path):
+    result, _, _ = _run_standard_user_step(tmp_path, "version", TEST_CLEANUP="profile-remains")
+    output = result.stdout + result.stderr
+    assert "The standard user installation did not pass (VERSION)." in output
+    assert "(CLEANUP)" not in output
+    assert "::warning::The temporary standard user, its processes, profile or staging remain" in result.stdout
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="The standard user step runs in Windows PowerShell 5.1.")
+def test_windows_qualification_standard_user_trusts_the_administrators_rule_of_an_elevated_folder(tmp_path):
+    # An elevated job creates the staging folder with an explicit Administrators rule.
+    result, recorded, _ = _run_standard_user_step(tmp_path, "elevated-folder")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "A standard user installed the verified bundle" in result.stdout
+    assert recorded["start"]["userRights"] & 0x500D0156 == 0
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="The standard user step runs in Windows PowerShell 5.1.")
+def test_windows_qualification_standard_user_reports_staging_access_by_class(tmp_path):
+    result, _, staging = _run_standard_user_step(tmp_path, "staging-access")
+    output = result.stdout + result.stderr
+    assert "The standard user installation did not pass (STAGING_ACCESS)." in output
+    lines = [line for line in result.stdout.splitlines() if line.startswith("Staging access: ")]
+    # A local folder is owned by the job account. An elevated runner makes Administrators the owner.
+    assert any(re.fullmatch(r"Staging access: folder owner (job-account|administrators)\.", line) for line in lines)
+    # The user's modify grant is the reason the check failed, reported as a class and a rights mask.
+    assert any(re.fullmatch(r"Staging access: folder rule standard-user Allow 0x[0-9A-F]+ explicit\.", line)
+               for line in lines)
+    assert any(line.startswith(f"Staging access: {BOOTSTRAP_PS1} rule standard-user Allow ") for line in lines)
+    diagnostics = "\n".join(lines)
+    assert "S-1-" not in diagnostics and str(tmp_path) not in diagnostics
+    assert not staging.exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="The standard user step runs in Windows PowerShell 5.1.")
+@pytest.mark.parametrize(("scenario", "category", "extra"), [
+    ("existing-user", "ACCOUNT", {}),
+    ("existing-staging", "STAGING_EXISTS", {}),
+    ("input", "INPUT", {"SOURCE_REF": "refs/heads/main extra"}),
+])
+def test_windows_qualification_standard_user_keeps_what_it_did_not_create(tmp_path, scenario, category, extra):
+    result, recorded, staging = _run_standard_user_step(tmp_path, scenario, **extra)
+    assert result.returncode != 0
+    assert f"The standard user installation did not pass ({category})." in result.stdout + result.stderr
+    assert not any(call.startswith(("New-LocalUser", "Remove-LocalUser", "Remove-CimInstance"))
+                   for call in recorded["calls"])
+    assert "::add-mask::" not in result.stdout
+    assert staging.exists() is (scenario == "existing-staging")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Native Windows PowerShell 5.1 parses the step.")
+def test_windows_qualification_standard_user_step_structure():
+    from tests.powershell_ast import describe
+
+    step = _step(REUSABLE["jobs"]["qualify"], STANDARD_USER_STEP)
+    assert step["shell"] == "powershell" and "env" not in step
+    outer = describe(step["run"])
+    assert outer["errors"] == []
+    wrapper_source = [item["value"] for item in outer["hereStrings"] if item["target"] == "$wrapper"]
+    assert len(wrapper_source) == 1
+    wrapper = describe(wrapper_source[0])
+    assert wrapper["errors"] == []
+    commands = {item["name"].lower() for item in outer["commands"] + wrapper["commands"]}
+    assert not commands & {"register-scheduledtask", "new-scheduledtaskaction", "schtasks", "schtasks.exe"}
+
+    def uses(name):
+        return [item for item in outer["variables"] if item["name"] == name]
+
+    password = [item for item in uses("password") if not item["assigned"]]
+    assert [(item["parent"], item["command"], item["parentText"]) for item in password] == [
+        ("ExpandableStringExpressionAst", "Write-Host", '"::add-mask::$password"'),
+        ("InvokeMemberExpressionAst", "", "$password.ToCharArray()"),
+    ]
+    assert all(item["command"] in {"", "New-LocalUser"} for item in uses("secure"))
+    assert {item["command"] for item in uses("credential") if not item["assigned"]} == {"Start-Process"}
+    assert not any(item["assignmentTarget"].lower().startswith("$env:") for item in outer["variables"])
+    arguments = next(item for item in outer["variables"] if item["name"] == "arguments" and item["assigned"])
+    assert "$env:SOURCE_SHA" in arguments["parentText"]
+    assert not re.search(r"\$(password|secure|credential)\b", arguments["parentText"])
+    start = [item for item in outer["commands"] if item["name"] == "Start-Process"]
+    assert len(start) == 1
+    assert set(start[0]["parameters"]) == {
+        "FilePath", "ArgumentList", "Credential", "LoadUserProfile", "WorkingDirectory", "PassThru",
+    }
+    grants = [" ".join(item["text"].split()) for item in outer["commands"] if item["name"] == "icacls.exe"]
+    assert grants == [
+        "& icacls.exe $Path /inheritance:r /grant:r \"*${Owner}:(OI)(CI)F\" '*S-1-5-18:(OI)(CI)F' ` "
+        "\"*${User}:(OI)(CI)RX\" *> $null"
+    ]
+    cleanup = [text for text in outer["finallyBlocks"] if "Remove-LocalUser" in text]
+    assert len(cleanup) == 1
+    for fragment in ("taskkill.exe", "Get-StandardUserProcessIds $userSid", "Stop-Process -Id $id",
+                     "Remove-CimInstance", "Remove-LocalUser -SID $userSid",
+                     "Remove-Item -LiteralPath $staging", "$secure.Dispose()"):
+        assert fragment in cleanup[0]
+    calls = [item["text"] for item in outer["commands"] if item["name"] == "Stop-StandardUser"]
+    categories = {re.fullmatch(r"Stop-StandardUser '([A-Z_]+)'", text).group(1)
+                  for text in calls if "Get-BootstrapFailure" not in text}
+    assert categories == {"INPUT", "ACCOUNT", "NOT_STANDARD", "STAGING_EXISTS", "STAGING_CREATE", "STAGING_GRANT",
+                          "STAGING_COPY", "STAGING_ACCESS", "LAUNCH", "TIMEOUT", "RESULT",
+                          "CACHE_NOT_USED", "RUNTIME", "STAGING_LEFT", "VERSION", "CLEANUP"}
+    bootstrap = [item for item in wrapper["commands"] if "-Release" in item["text"]]
+    assert len(bootstrap) == 1
+    assert "(Join-Path $PSScriptRoot 'siteops-bootstrap.ps1') -Release 'siteops/v0.0.0-ci'" in bootstrap[0]["text"]
+    assert set(bootstrap[0]["parameters"]) >= {"File", "Release", "SourceCommit", "Repository", "SourceRef",
+                                                 "Caller", "Yes"}
+
+
+def test_standard_user_classification_matches_the_bootstrap_messages():
+    step = _script(REUSABLE["jobs"]["qualify"], STANDARD_USER_STEP)
+    bootstrap = (REPO_ROOT / "scripts" / "bootstrap" / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
+    for fragment in (
+        'Configure a private Site Ops data root. $Code', 'Choose a private Windows tool location. $Code',
+        'The GitHub CLI executable must be owned by an administrator',
+        'GitHub CLI 2.95 or newer is required', 'Rechecking the retained release without downloading',
+        "Provisioning uv-managed CPython 3.11.",
+    ):
+        assert fragment.replace("$Code", "") in bootstrap, fragment
+    for code in re.findall(r"Reject '((?:ROOT|TOOL)_[A-Z_]+)'", bootstrap):
+        assert f"'{code}'" in step, code
+    # The staged names are the workflow's own asset names.
+    assert "'siteops-install.zip', 'siteops-install.zip.attestation.jsonl'" in step
+    assert REUSABLE["env"]["ARCHIVE_NAME"] + REUSABLE["env"]["ATTESTATION_SUFFIX"] == (
+        "siteops-install.zip.attestation.jsonl"
+    )
+    assert "(Join-Path $PSScriptRoot 'siteops-bootstrap.ps1')" in step
+    assert REUSABLE["env"]["BOOTSTRAP_PS1"] == "siteops-bootstrap.ps1"
+    assert "Register-ScheduledTask" not in step and "schtasks" not in step
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="The GitHub CLI preflight reads Windows ACLs.")
+def test_windows_qualification_standard_user_preflight_reports_fixed_classes():
+    from tests.powershell_ast import describe, function_source, run
+
+    outer = describe(_script(REUSABLE["jobs"]["qualify"], STANDARD_USER_STEP))
+    functions = function_source(outer, "Get-PrincipalClass") + "\n" + function_source(
+        outer, "Write-GitHubCliPreflight",
+    )
+    result = run(
+        functions + "\n$job = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value\n"
+        "foreach ($sid in @('S-1-5-32-544', 'S-1-5-18', "
+        "'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464', 'S-1-3-4', $job, 'S-1-5-32-545')) {\n"
+        "    Write-Host ('class ' + (Get-PrincipalClass $sid $job))\n}\n"
+        "Write-GitHubCliPreflight $job\n",
+    )
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert lines[:6] == [f"class {name}" for name in (
+        "administrators", "system", "trustedinstaller", "creator-owner", "job-account", "other",
+    )]
+    classes = r"(administrators|system|trustedinstaller|creator-owner|job-account|other)"
+    pattern = re.compile(
+        rf"GitHub CLI preflight: (gh\.exe is not on the machine PATH\.|"
+        rf"(gh\.exe|parent [0-9]+) (could not be read\.|owner {classes}, writers (none|{classes}( {classes})*)\.))"
+    )
+    assert lines[6:] and all(pattern.fullmatch(line) for line in lines[6:]), lines[6:]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="The staging grant uses Windows ACLs.")
+@pytest.mark.parametrize(("extra_grant", "expected"), [
+    (None, "True"), ("*S-1-5-32-545:(OI)(CI)M", "False"), ("*S-1-1-0:(OI)(CI)RX", "False"),
+])
+def test_windows_qualification_standard_user_staging_is_read_and_execute_only(tmp_path, extra_grant, expected):
+    from tests.powershell_ast import describe, function_source, run
+
+    outer = describe(_script(REUSABLE["jobs"]["qualify"], STANDARD_USER_STEP))
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "siteops-bootstrap.ps1").write_text("synthetic", encoding="utf-8")
+    extra = f"& icacls.exe $path /grant '{extra_grant}' *> $null\n" if extra_grant else ""
+    result = run(
+        function_source(outer, "Grant-StagingAccess") + "\n" + function_source(outer, "Test-StagingAccess") + "\n"
+        f"$path = '{staging}'\n$owner = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value\n"
+        "if (-not (Grant-StagingAccess $path $owner 'S-1-5-32-545')) { throw 'grant failed' }\n"
+        + extra + "Write-Host (Test-StagingAccess $path $owner 'S-1-5-32-545')\n",
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == expected
+
+
 def test_bootstrap_qualification_shells_parse():
     bash_step = _script(REUSABLE["jobs"]["qualify"], "Install with the signed Bash bootstrap")
     parsed = subprocess.run(
@@ -902,20 +1678,19 @@ def test_bootstrap_qualification_shells_parse():
     )
     assert parsed.returncode == 0, parsed.stderr
     if sys.platform == "win32":
-        windows_step = _script(
-            REUSABLE["jobs"]["qualify"], "Install with the signed PowerShell bootstrap",
-        )
-        parsed = subprocess.run(
-            [
-                "powershell.exe", "-NoProfile", "-Command",
-                "$tokens=$null;$errors=$null;"
-                "[System.Management.Automation.Language.Parser]::ParseInput("
-                "[Console]::In.ReadToEnd(),[ref]$tokens,[ref]$errors)|Out-Null;"
-                "if($errors.Count){$errors|ForEach-Object{Write-Error $_};exit 1}",
-            ],
-            input=windows_step, text=True, capture_output=True, timeout=20,
-        )
-        assert parsed.returncode == 0, parsed.stderr
+        for name in ("Install with the signed PowerShell bootstrap", STANDARD_USER_STEP):
+            windows_step = _script(REUSABLE["jobs"]["qualify"], name)
+            parsed = subprocess.run(
+                [
+                    "powershell.exe", "-NoProfile", "-Command",
+                    "$tokens=$null;$errors=$null;"
+                    "[System.Management.Automation.Language.Parser]::ParseInput("
+                    "[Console]::In.ReadToEnd(),[ref]$tokens,[ref]$errors)|Out-Null;"
+                    "if($errors.Count){$errors|ForEach-Object{Write-Error $_};exit 1}",
+                ],
+                input=windows_step, text=True, capture_output=True, timeout=20,
+            )
+            assert parsed.returncode == 0, parsed.stderr
 
 
 def test_qualification_policy_pins_the_caller_source_and_local_signer():
@@ -1254,11 +2029,13 @@ def test_distribution_summary_uses_only_fixed_outputs_and_job_conclusions():
     assert report["env"]["GH_TOKEN"] == "${{ github.token }}"
     assert report["env"]["REPORT_SUMMARY"] == "${{ inputs.report-summary }}"
     script = report["run"]
+    assert "gh api --paginate --slurp" in script
     assert (
         "actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100"
         in script
     )
-    assert 'cell = expected.get(job["name"].rsplit(" / ", 1)[-1])' in script
+    assert 'name = job["name"].rsplit(" / ", 1)[-1]' in script
+    assert "cell = expected.get(name)" in script
     assert "logs/" not in script
     assert "stdout" not in script
     assert "stderr" not in script
@@ -1366,19 +2143,21 @@ def test_the_archive_name_is_the_same_literal_everywhere():
 
 def _qualification_jobs() -> list[dict]:
     return [
-        {
-            "name": f"Qualify bundle ({platform}, Python {python})",
-            "status": "completed",
-            "conclusion": "success",
-        }
-        for python in QUALIFIED_PYTHONS
-        for platform in QUALIFIED_PLATFORMS
+        {"name": name, "status": "completed", "conclusion": "success"}
+        for name in _all_cell_names()
     ]
 
 
-def _expected_matrix(state: str) -> list[dict[str, str]]:
-    """Return the qualification matrix the summary encodes when every cell agrees."""
-    return [{"python": python, "linux": state, "windows": state} for python in QUALIFIED_PYTHONS]
+def _expected_matrix(state: str, **cells) -> list[dict[str, str]]:
+    """Return the qualification matrix the summary encodes, with optional per-cell overrides."""
+    rows = []
+    for python in QUALIFIED_PYTHONS:
+        extra = state if python == "3.11" else "n/a"
+        row = {"python": python, "linux": state, "ubuntu-26.04": extra, "windows": state,
+               "windows-standard-user": extra}
+        row.update(cells.get(python, {}))
+        rows.append(row)
+    return rows
 
 
 def _run_distribution_summary(
@@ -1390,10 +2169,13 @@ def _run_distribution_summary(
     attest_result: str = "success",
     qualify_result: str = "success",
     api_exit: str = "0",
+    page_size: int = 100,
 ):
     _, log = _fake_tools(tmp_path)
     response = tmp_path / "jobs.json"
-    response.write_text(json.dumps({"jobs": jobs}), encoding="utf-8")
+    # gh api --paginate --slurp returns one document per page.
+    pages = [{"jobs": jobs[index:index + page_size]} for index in range(0, max(len(jobs), 1), page_size)]
+    response.write_text(json.dumps(pages), encoding="utf-8")
     output = tmp_path / "github-output.txt"
     summary = tmp_path / "github-summary.md"
     runner_temp = tmp_path / "runner-temp"
@@ -1453,6 +2235,8 @@ def test_distribution_summary_reports_the_complete_success_matrix(tmp_path):
     assert _invocations(log) == [
         [
             "api",
+            "--paginate",
+            "--slurp",
             "repos/example/publisher/actions/runs/42/attempts/2/jobs?per_page=100",
         ]
     ]
@@ -1467,8 +2251,10 @@ def test_distribution_summary_reports_the_complete_success_matrix(tmp_path):
         "(https://github.com/example/publisher/actions/runs/42/artifacts/987)"
         in summary
     )
+    assert "| Python | Ubuntu 24.04 | Ubuntu 26.04 | Windows | Windows standard user |" in summary
     for python in QUALIFIED_PYTHONS:
-        assert f"| {python} | passed | passed |" in summary
+        extra = "passed" if python == "3.11" else "n/a"
+        assert f"| {python} | passed | {extra} | passed | {extra} |" in summary
     for value in (
         "Source SHA",
         "Source ref",
@@ -1518,13 +2304,57 @@ def test_distribution_summary_reports_nonpassing_cells_honestly(tmp_path, case, 
         tmp_path, jobs, qualify_result="failure"
     )
 
-    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "Every expected qualification cell must pass exactly once." in result.stdout + result.stderr
     matrix = json.loads(encoded)
-    assert matrix[2] == {"python": "3.12", "linux": expected, "windows": "passed"}
-    assert len(matrix) == len(QUALIFIED_PYTHONS)
+    assert matrix == _expected_matrix("passed", **{"3.12": {"linux": expected}})
     summary = summary_path.read_text(encoding="utf-8")
-    assert f"| 3.12 | {expected} | passed |" in summary
+    assert f"| 3.12 | {expected} | n/a | passed | n/a |" in summary
     assert "One or more qualification cells did not pass." in summary
+
+
+@pytest.mark.parametrize("cell", [*EXTRA_CELLS, "Qualify bundle (windows-2025, Python 3.11)"])
+@pytest.mark.parametrize(("case", "status"), [("missing", "not-run"), ("failure", "failed")])
+def test_distribution_summary_requires_every_declared_cell(tmp_path, cell, case, status):
+    jobs = _qualification_jobs()
+    selected = next(job for job in jobs if job["name"] == cell)
+    if case == "missing":
+        jobs.remove(selected)
+    else:
+        selected["conclusion"] = case
+    # The aggregate qualify result alone cannot stand in for a missing cell.
+    result, encoded, summary_path, _ = _run_distribution_summary(tmp_path, jobs)
+
+    assert result.returncode != 0
+    column = {
+        EXTRA_CELLS[0]: "ubuntu-26.04", EXTRA_CELLS[1]: "windows-standard-user",
+    }.get(cell, "windows")
+    assert json.loads(encoded) == _expected_matrix("passed", **{"3.11": {column: status}})
+    assert "One or more qualification cells did not pass." in summary_path.read_text(encoding="utf-8")
+
+
+def test_distribution_summary_rejects_a_cell_outside_the_declared_matrix(tmp_path):
+    jobs = _qualification_jobs() + [
+        {"name": "Qualify bundle (ubuntu-22.04, Python 3.11)", "status": "completed", "conclusion": "success"},
+    ]
+    result, encoded, summary_path, _ = _run_distribution_summary(tmp_path, jobs)
+    assert result.returncode != 0
+    assert json.loads(encoded) == _expected_matrix("passed")
+    assert "outside the expected cells" in summary_path.read_text(encoding="utf-8")
+    # Unrelated jobs in the same run remain valid neighbors.
+    neighbors = _qualification_jobs() + [
+        {"name": name, "status": "completed", "conclusion": "failure"}
+        for name in ("Build bundle", "Qualify workspace engine (windows, Python 3.11)")
+    ]
+    (tmp_path / "neighbors").mkdir()
+    result, _, _, _ = _run_distribution_summary(tmp_path / "neighbors", neighbors)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_distribution_summary_reads_every_page_of_jobs(tmp_path):
+    result, encoded, _, _ = _run_distribution_summary(tmp_path, _qualification_jobs(), page_size=5)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(encoded) == _expected_matrix("passed")
 
 
 @pytest.mark.parametrize("prefix", ["Rehearse distribution", "Rehearse release / Candidate installation"])
@@ -1534,7 +2364,7 @@ def test_distribution_summary_accepts_real_reusable_workflow_job_names(tmp_path,
         job["name"] = prefix + " / " + job["name"]
     result, encoded, _, _ = _run_distribution_summary(tmp_path, jobs)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert all(row["linux"] == row["windows"] == "passed" for row in json.loads(encoded))
+    assert json.loads(encoded) == _expected_matrix("passed")
 
 
 def test_distribution_summary_refuses_ambiguous_success_claim(tmp_path):
@@ -1553,7 +2383,9 @@ def test_distribution_summary_refuses_ambiguous_success_claim(tmp_path):
     assert json.loads(encoded)[0] == {
         "python": "3.10",
         "linux": "unknown",
+        "ubuntu-26.04": "n/a",
         "windows": "passed",
+        "windows-standard-user": "n/a",
     }
 
 
@@ -1575,7 +2407,8 @@ def test_distribution_summary_keeps_earlier_failure_visible(
         qualify_result="skipped",
     )
 
-    assert result.returncode == 0, result.stdout + result.stderr
+    # The summary still explains the earlier failure, and its own job fails with the run.
+    assert result.returncode != 0
     assert json.loads(encoded) == _expected_matrix("not-run")
     summary = summary_path.read_text(encoding="utf-8")
     assert guidance in summary
@@ -1597,6 +2430,12 @@ def test_report_summary_false_suppresses_only_presentation(tmp_path):
     assert _invocations(log)
     assert REUSABLE["jobs"]["summary"]["needs"] == ["build", "attest", "qualify"]
     assert "if" not in REUSABLE["jobs"]["qualify"]
+    # Suppressing presentation never suppresses the completeness requirement.
+    (tmp_path / "incomplete").mkdir()
+    result, _, _, _ = _run_distribution_summary(
+        tmp_path / "incomplete", _qualification_jobs()[:-1], report_summary=False
+    )
+    assert result.returncode != 0
 
 
 def test_distribution_summary_fails_without_job_conclusions_and_publishes_nothing(tmp_path):
@@ -2449,9 +3288,10 @@ def test_every_run_block_matches_its_declared_shell(tmp_path):
             compile(script, label, "exec")
             continue
         if shell == "powershell":
-            assert label == (
-                "_siteops-distribution.yaml:qualify:Install with the signed PowerShell bootstrap"
-            )
+            assert label in {
+                "_siteops-distribution.yaml:qualify:Install with the signed PowerShell bootstrap",
+                f"_siteops-distribution.yaml:qualify:{STANDARD_USER_STEP}",
+            }
             continue
         assert shell == "bash", f"Add syntax coverage for {label}: {shell}"
         path = tmp_path / "block.sh"

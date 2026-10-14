@@ -67,7 +67,7 @@ def test_fleet_scope_refuses_single_site_or_cleanup_bypasses_without_printing_va
 ):
     script = WORKFLOW["jobs"]["fleet-request"]["steps"][0]["run"]
     path = tmp_path / "event.json"
-    path.write_text(json.dumps({"inputs": {"scenario": "fleet", "fleet-candidate": "fixture", field: value}}))
+    path.write_text(json.dumps({"inputs": {"scenario": "fleet", "candidate": "fixture", field: value}}))
     monkeypatch.setenv("GITHUB_EVENT_PATH", str(path))
     with pytest.raises(SystemExit):
         exec(compile(script, "<fleet-request>", "exec"), {})
@@ -77,7 +77,12 @@ def test_fleet_scope_refuses_single_site_or_cleanup_bypasses_without_printing_va
 
 @pytest.mark.parametrize("mode,prior,expected", [
     ("fleet", ("", ""), True), ("fleet", ("42", "1"), False),
+    ("release-acceptance", ("", ""), True), ("release-acceptance", ("42", "1"), False),
     ("fleet-cleanup", ("42", "1"), True), ("fleet-cleanup", ("", ""), False),
+    ("site-cleanup", ("42", "1"), True), ("site-cleanup", ("", ""), False),
+    ("fleet-cleanup", ("42", ""), False), ("site-cleanup", ("", "1"), False),
+    ("fleet-cleanup", ("0", "1"), False), ("site-cleanup", ("42", "0"), False),
+    ("fleet-cleanup", ("invalid", "1"), False), ("site-cleanup", ("42", "invalid"), False),
 ])
 def test_fleet_request_distinguishes_new_acceptance_and_original_run_cleanup(
     tmp_path, monkeypatch, mode, prior, expected,
@@ -85,8 +90,8 @@ def test_fleet_request_distinguishes_new_acceptance_and_original_run_cleanup(
     script = WORKFLOW["jobs"]["fleet-request"]["steps"][0]["run"]
     path = tmp_path / "event.json"
     path.write_text(json.dumps({"inputs": {
-        "scenario": mode, "fleet-candidate": "fixture", "fleet-original-run": prior[0],
-        "fleet-original-attempt": prior[1],
+        "scenario": mode, "candidate": "fixture", "original-run": prior[0],
+        "original-attempt": prior[1],
     }}))
     monkeypatch.setenv("GITHUB_EVENT_PATH", str(path))
     if expected:
@@ -94,3 +99,15 @@ def test_fleet_request_distinguishes_new_acceptance_and_original_run_cleanup(
     else:
         with pytest.raises(SystemExit):
             exec(compile(script, "<fleet-request>", "exec"), {})
+
+
+def test_cleanup_dispatch_inputs_bind_the_original_run_and_attempt():
+    inputs = WORKFLOW.get("on", WORKFLOW.get(True))["workflow_dispatch"]["inputs"]
+    reconcile = yaml.safe_load((ROOT / ".github/workflows/_fleet-reconcile.yaml").read_text())
+    required = reconcile.get("on", reconcile.get(True))["workflow_call"]["inputs"]
+    for name in ("original-run", "original-attempt"):
+        assert inputs[name]["type"] == required[name]["type"] == "string"
+        assert inputs[name]["default"] == ""
+        assert f"fleet-{name}" not in inputs
+        assert WORKFLOW["jobs"]["fleet-cleanup"]["with"][name] == f"${{{{ inputs.{name} }}}}"
+    assert "Exact candidate selection" in inputs["candidate"]["description"]

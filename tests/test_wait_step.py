@@ -16,6 +16,7 @@ from siteops.executor import (
     DEFAULT_WAIT_POLL_AZ_TIMEOUT_SECONDS,
     WAIT_MAX_CONSECUTIVE_ERRORS,
     AzCliExecutor,
+    ToolCallResult,
     WaitResult,
     WaitState,
     _classify_az_error,
@@ -256,53 +257,60 @@ class TestEvaluateArmTag:
 
     def test_satisfied(self, tmp_workspace):
         ex = self._executor(tmp_workspace)
-        with patch.object(ex, "_run_az", return_value=(True, _tags_json("succeeded"), "")):
-            state, observed, error = ex._evaluate_arm_tag(_condition(), "sub")
+        with patch.object(ex, "_run_az", return_value=ToolCallResult(True, _tags_json("succeeded"), "")):
+            call = ex._evaluate_arm_tag(_condition(), "sub")
+            state, observed, error = call.state, call.observed, call.error
         assert state == WaitState.SATISFIED
         assert observed == "succeeded"
         assert error is None
 
     def test_failure_glob(self, tmp_workspace):
         ex = self._executor(tmp_workspace)
-        with patch.object(ex, "_run_az", return_value=(True, _tags_json("failed-phase-2"), "")):
-            state, observed, error = ex._evaluate_arm_tag(_condition(), "sub")
+        with patch.object(ex, "_run_az", return_value=ToolCallResult(True, _tags_json("failed-phase-2"), "")):
+            call = ex._evaluate_arm_tag(_condition(), "sub")
+            state, observed, error = call.state, call.observed, call.error
         assert state == WaitState.FAILED
         assert observed == "failed-phase-2"
         assert "failurePattern" in error
 
     def test_intermediate_value_is_pending(self, tmp_workspace):
         ex = self._executor(tmp_workspace)
-        with patch.object(ex, "_run_az", return_value=(True, _tags_json("running"), "")):
-            state, observed, error = ex._evaluate_arm_tag(_condition(), "sub")
+        with patch.object(ex, "_run_az", return_value=ToolCallResult(True, _tags_json("running"), "")):
+            call = ex._evaluate_arm_tag(_condition(), "sub")
+            state, observed, error = call.state, call.observed, call.error
         assert state == WaitState.PENDING
         assert observed == "running"
         assert error is None
 
     def test_tag_absent_is_pending(self, tmp_workspace):
         ex = self._executor(tmp_workspace)
-        with patch.object(ex, "_run_az", return_value=(True, "{}", "")):
-            state, observed, error = ex._evaluate_arm_tag(_condition(), "sub")
+        with patch.object(ex, "_run_az", return_value=ToolCallResult(True, "{}", "")):
+            call = ex._evaluate_arm_tag(_condition(), "sub")
+            state, observed, _error = call.state, call.observed, call.error
         assert state == WaitState.PENDING
         assert observed is None
 
     def test_permanent_error_fails(self, tmp_workspace):
         ex = self._executor(tmp_workspace)
-        with patch.object(ex, "_run_az", return_value=(False, "", "AuthorizationFailed")):
-            state, observed, error = ex._evaluate_arm_tag(_condition(), "sub")
+        with patch.object(ex, "_run_az", return_value=ToolCallResult(False, "", "AuthorizationFailed")):
+            call = ex._evaluate_arm_tag(_condition(), "sub")
+            state, _observed, error = call.state, call.observed, call.error
         assert state == WaitState.FAILED
         assert "permanent error" in error
 
     def test_resource_not_found_fails(self, tmp_workspace):
         ex = self._executor(tmp_workspace)
-        with patch.object(ex, "_run_az", return_value=(False, "", "(ResourceNotFound) was not found")):
-            state, observed, error = ex._evaluate_arm_tag(_condition(), "sub")
+        with patch.object(ex, "_run_az", return_value=ToolCallResult(False, "", "(ResourceNotFound) was not found")):
+            call = ex._evaluate_arm_tag(_condition(), "sub")
+            state, _observed, error = call.state, call.observed, call.error
         assert state == WaitState.FAILED
         assert "resource not found" in error
 
     def test_transient_error_is_pending_with_error(self, tmp_workspace):
         ex = self._executor(tmp_workspace)
-        with patch.object(ex, "_run_az", return_value=(False, "", "status code: 429 TooManyRequests")):
-            state, observed, error = ex._evaluate_arm_tag(_condition(), "sub")
+        with patch.object(ex, "_run_az", return_value=ToolCallResult(False, "", "status code: 429 TooManyRequests")):
+            call = ex._evaluate_arm_tag(_condition(), "sub")
+            state, _observed, error = call.state, call.observed, call.error
         assert state == WaitState.PENDING
         assert error is not None
 
@@ -310,13 +318,14 @@ class TestEvaluateArmTag:
         # expectedValue exact match wins even if a loose failure glob could match.
         ex = self._executor(tmp_workspace)
         cond = _condition(expected_value="done", failure_pattern="d*g")  # no overlap at construct
-        with patch.object(ex, "_run_az", return_value=(True, _tags_json("done"), "")):
-            state, _observed, _error = ex._evaluate_arm_tag(cond, "sub")
+        with patch.object(ex, "_run_az", return_value=ToolCallResult(True, _tags_json("done"), "")):
+            call = ex._evaluate_arm_tag(cond, "sub")
+            state, _observed, _error = call.state, call.observed, call.error
         assert state == WaitState.SATISFIED
 
     def test_subscription_passed_inline(self, tmp_workspace):
         ex = self._executor(tmp_workspace)
-        with patch.object(ex, "_run_az", return_value=(True, _tags_json("succeeded"), "")) as mock_az:
+        with patch.object(ex, "_run_az", return_value=ToolCallResult(True, _tags_json("succeeded"), "")) as mock_az:
             ex._evaluate_arm_tag(_condition(), "my-sub")
         args = mock_az.call_args[0][0]
         assert "--subscription" in args
@@ -336,7 +345,7 @@ class TestWaitForCondition:
 
     def test_satisfied_first_poll(self, tmp_workspace):
         ex = self._executor(tmp_workspace)
-        with patch.object(ex, "_run_az", return_value=(True, _tags_json("succeeded"), "")):
+        with patch.object(ex, "_run_az", return_value=ToolCallResult(True, _tags_json("succeeded"), "")):
             result = ex.wait_for_condition(_condition(), 1, 1, "sub", "step", "site")
         assert isinstance(result, WaitResult)
         assert result.success is True
@@ -345,9 +354,9 @@ class TestWaitForCondition:
     def test_satisfied_after_pending(self, tmp_workspace):
         ex = self._executor(tmp_workspace)
         responses = [
-            (True, _tags_json("running"), ""),
-            (True, _tags_json("running"), ""),
-            (True, _tags_json("succeeded"), ""),
+            ToolCallResult(True, _tags_json("running"), ""),
+            ToolCallResult(True, _tags_json("running"), ""),
+            ToolCallResult(True, _tags_json("succeeded"), ""),
         ]
         with patch.object(ex, "_run_az", side_effect=responses):
             with patch("siteops.executor.time.sleep"):
@@ -356,7 +365,7 @@ class TestWaitForCondition:
 
     def test_failure_glob_fails_fast(self, tmp_workspace):
         ex = self._executor(tmp_workspace)
-        with patch.object(ex, "_run_az", return_value=(True, _tags_json("failed-phase-3"), "")):
+        with patch.object(ex, "_run_az", return_value=ToolCallResult(True, _tags_json("failed-phase-3"), "")):
             with patch("siteops.executor.time.sleep") as mock_sleep:
                 result = ex.wait_for_condition(_condition(), 45, 30, "sub", "step", "site")
         assert result.success is False
@@ -365,7 +374,7 @@ class TestWaitForCondition:
 
     def test_permanent_error_fails_fast(self, tmp_workspace):
         ex = self._executor(tmp_workspace)
-        with patch.object(ex, "_run_az", return_value=(False, "", "AuthorizationFailed: 403")):
+        with patch.object(ex, "_run_az", return_value=ToolCallResult(False, "", "AuthorizationFailed: 403")):
             with patch("siteops.executor.time.sleep") as mock_sleep:
                 result = ex.wait_for_condition(_condition(), 45, 30, "sub", "step", "site")
         assert result.success is False
@@ -382,7 +391,7 @@ class TestWaitForCondition:
             except StopIteration:
                 return 10_000.0
 
-        with patch.object(ex, "_run_az", return_value=(True, _tags_json("running"), "")):
+        with patch.object(ex, "_run_az", return_value=ToolCallResult(True, _tags_json("running"), "")):
             with patch("siteops.executor.time.monotonic", side_effect=fake_monotonic):
                 with patch("siteops.executor.time.sleep"):
                     result = ex.wait_for_condition(_condition(), 1, 30, "sub", "step", "site")
@@ -393,7 +402,7 @@ class TestWaitForCondition:
 
     def test_circuit_breaker_on_consecutive_errors(self, tmp_workspace):
         ex = self._executor(tmp_workspace)
-        with patch.object(ex, "_run_az", return_value=(False, "", "status code: 503")):
+        with patch.object(ex, "_run_az", return_value=ToolCallResult(False, "", "status code: 503")):
             with patch("siteops.executor.time.sleep"):
                 result = ex.wait_for_condition(_condition(), 600, 1, "sub", "step", "site")
         assert result.success is False
@@ -402,8 +411,8 @@ class TestWaitForCondition:
     def test_transient_errors_reset_on_success(self, tmp_workspace):
         # A run of transient errors shorter than the breaker, then satisfied.
         ex = self._executor(tmp_workspace)
-        responses = [(False, "", "status code: 503")] * (WAIT_MAX_CONSECUTIVE_ERRORS - 1)
-        responses.append((True, _tags_json("succeeded"), ""))
+        responses = [ToolCallResult(False, "", "status code: 503")] * (WAIT_MAX_CONSECUTIVE_ERRORS - 1)
+        responses.append(ToolCallResult(True, _tags_json("succeeded"), ""))
         with patch.object(ex, "_run_az", side_effect=responses):
             with patch("siteops.executor.time.sleep"):
                 result = ex.wait_for_condition(_condition(), 600, 1, "sub", "step", "site")
@@ -487,7 +496,7 @@ class TestWaitStepManifestValidation:
         ]
         path = self._write_manifest(tmp_workspace, steps)
         orch = Orchestrator(tmp_workspace)
-        errors = orch.validate(path)
+        errors = orch.validate(path).local_messages()
         assert any("references unknown step 'nonexistent'" in e for e in errors)
 
     def test_reference_to_later_step_errors(self, tmp_workspace):
@@ -507,7 +516,7 @@ class TestWaitStepManifestValidation:
         (tmp_workspace / "templates" / "x.bicep").write_text("// noop", encoding="utf-8")
         path = self._write_manifest(tmp_workspace, steps)
         orch = Orchestrator(tmp_workspace)
-        errors = orch.validate(path)
+        errors = orch.validate(path).local_messages()
         assert any("does not execute before it" in e for e in errors)
 
     def test_valid_prior_reference_passes(self, tmp_workspace):
@@ -527,7 +536,7 @@ class TestWaitStepManifestValidation:
         (tmp_workspace / "templates" / "x.bicep").write_text("// noop", encoding="utf-8")
         path = self._write_manifest(tmp_workspace, steps)
         orch = Orchestrator(tmp_workspace)
-        errors = orch.validate(path)
+        errors = orch.validate(path).local_messages()
         assert not any("wait condition" in e for e in errors)
 
 

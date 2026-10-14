@@ -54,6 +54,12 @@ from siteops.command_context import (
     resolve_source_request,
 )
 from siteops.composition import CompositionError, report_composition_error
+from siteops.diagnostics import (
+    ContentDiagnostic,
+    ValidationResult,
+    diagnostic_from_error,
+    render_diagnostics,
+)
 from siteops.guided_inputs import (
     GuidedInputError,
     InputContract,
@@ -87,6 +93,7 @@ from siteops.planning import (
     PlanNotExecutableError,
     PlanProjection,
     PlanStatus,
+    content_plan_diagnostic,
     render_plain_plan,
     serialize_plan_json,
 )
@@ -104,7 +111,9 @@ from siteops.reporting import (
     TextProgressReporter,
     _wrap,
     render_plain_run,
+    render_plain_validation,
     serialize_run_json,
+    serialize_validation_json,
 )
 from siteops.results import (
     ProgressEvent,
@@ -178,7 +187,7 @@ def _missing_manifest_path(manifest: str | Path, workspace: Path | None) -> Mani
     return error
 
 
-def _command_manifest(args: argparse.Namespace) -> Path | None:
+def _command_manifest(args: argparse.Namespace, *, report_errors: bool = True) -> Path | None:
     try:
         binding = getattr(args, "package_binding", None)
         if binding is not None:
@@ -190,16 +199,33 @@ def _command_manifest(args: argparse.Namespace) -> Path | None:
         if not path.is_file():
             raise _missing_manifest_path(args.manifest, args.workspace)
     except (ManifestSelectionError, BrowseError) as error:
-        print(f"Error: {_multiline_text(_error_text(error))}", file=sys.stderr)
-        if isinstance(error, ManifestSelectionError) and error.paths and not is_redaction_enabled():
-            print("Explicit paths:", file=sys.stderr)
-            for choice in error.paths:
-                print(f"  {_content_text(explicit_manifest_reference(choice))}", file=sys.stderr)
+        if not report_errors:
+            raise
+        _write_manifest_error(error)
         return None
     if isinstance(args.manifest, str) and not is_explicit_manifest_path(args.manifest):
         if not is_redaction_enabled():
             print(f"Manifest: {_content_text(_workspace_relative(path, args.workspace))}", file=sys.stderr)
     return path
+
+
+def _write_manifest_error(error: Exception) -> None:
+    print(f"Error: {_multiline_text(_error_text(error))}", file=sys.stderr)
+    if isinstance(error, ManifestSelectionError) and error.paths and not is_redaction_enabled():
+        print("Explicit paths:", file=sys.stderr)
+        for choice in error.paths:
+            print(f"  {_content_text(explicit_manifest_reference(choice))}", file=sys.stderr)
+
+
+def _add_output_options(parser: argparse.ArgumentParser, output_help: str, *, plan: bool = False) -> None:
+    parser.add_argument("--output", choices=("plain", "json"), default="plain", help=output_help)
+    parser.add_argument(
+        "--projection", choices=("local-private", "publishable"), default=None,
+        help=(
+            f"JSON {'plan ' if plan else ''}projection, valid with --output json. Defaults to "
+            "publishable when output redaction is enabled, otherwise local-private."
+        ),
+    )
 
 
 def _workspace_relative(path: Path, workspace: Path | None) -> str:
@@ -678,13 +704,15 @@ def _write_plan_result(
             )
         )
         return
-    print(
-        render_plain_plan(
-            result,
-            redacted=is_redaction_enabled(),
-        ),
-        end="",
-    )
+    redacted = is_redaction_enabled()
+    if not redacted:
+        print(render_plain_plan(result, redacted=False), end="")
+        return
+    print(render_plain_plan(replace(result, diagnostics=()), redacted=redacted), end="")
+    if result.diagnostics:
+        if redacted:
+            document = json.loads(serialize_plan_json(result, PlanProjection.PUBLISHABLE, engine_version=__version__))
+            print("\n".join(render_diagnostics(document["diagnostics"])), file=sys.stderr)
 
 
 class ExplicitSiteConflict(GuidedInputError):
@@ -700,6 +728,10 @@ class ResourceReadError(GuidedInputError):
 
 
 def _guided_error_detail(error: Exception) -> str:
+    if is_redaction_enabled() and isinstance(error, GuidedInputError) and (
+        error.diagnostic.code.startswith("content.") and error.diagnostic.code != "content.other"
+    ):
+        return report_site_load_error(error)
     return _error_text(error) if isinstance(error, GuidedInputError) else report_site_load_error(error)
 
 
@@ -733,12 +765,25 @@ def _explicit_site_failure(
             else "Typed Site inputs are unavailable or invalid. Inspect this "
             "manifest with `siteops inputs` and correct the answers."
         )
-    return _validation_failure_result(
+    result = _validation_failure_result(
         [_guided_error_detail(error)],
         intent=intent,
         code=code,
         summary=summary,
         public_summary=summary if isinstance(error, GuidedInputError) else None,
+    )
+    issue = diagnostic_from_error(error, subject="site" if getattr(args, "site_file", None) else "inputs")
+    if issue.code == "content.other" and isinstance(error, (ResourceReadError, ResourceInputError, ExplicitSiteConflict)):
+        return result
+    return replace(result, diagnostics=(*result.diagnostics, content_plan_diagnostic(issue)))
+
+
+def _manifest_failure(error: Exception, intent: PlanIntent) -> PlanBuildResult:
+    code = error.code if isinstance(error, ManifestSelectionError) else "content.other"
+    issue = ContentDiagnostic(code, getattr(error, "private_message", None) or str(error), "manifest")
+    return PlanBuildResult(
+        status=PlanStatus.INVALID, executable=False, plan=None, intent=intent,
+        diagnostics=(content_plan_diagnostic(issue),),
     )
 
 
@@ -912,6 +957,8 @@ def _resolve_typed_site(
         resource = contract.resource_request(field, bound, observations)
         name = field.name
         print(
+            f"Reading declared resource {index}/{len(resource_fields)}."
+            if is_redaction_enabled() else
             f"Reading declared resource {_content_text(name)} "
             f"{index}/{len(resource_fields)} using {_content_text(reader.identity.name)}.",
             file=sys.stderr,
@@ -983,8 +1030,8 @@ def cmd_inputs(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
                 manifest_path,
                 sites=[resolved_site],
             )
-            if errors:
-                raise ValueError("Site validation failed: " + "; ".join(errors))
+            if errors.diagnostics:
+                raise ValueError("Site validation failed: " + "; ".join(errors.local_messages()))
         description = contract.describe()
         preview: str | None = None
         if resolved_site is not None:
@@ -1129,14 +1176,19 @@ def cmd_inputs(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
 
 def cmd_plan(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     """Validate and prepare a deployment plan without executing it."""
-    manifest_path = _command_manifest(args)
-    if manifest_path is None:
-        return 1
-
     try:
         json_output, projection = _output_settings(args)
     except ValueError as error:
         print(f"Error: {error}", file=sys.stderr)
+        return 1
+    try:
+        manifest_path = _command_manifest(args, report_errors=False)
+    except (ManifestSelectionError, BrowseError) as error:
+        if not json_output:
+            _write_manifest_error(error)
+            return 1
+        result = _manifest_failure(error, PlanIntent.EXECUTABLE)
+        _write_plan_result(result, json_output=json_output, projection=projection)
         return 1
 
     selector = getattr(args, "selector", None)
@@ -1269,15 +1321,20 @@ def _require_interactive_deployment(args: argparse.Namespace) -> None:
 
 def cmd_deploy(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     """Prepare once, obtain deployment consent and execute that reviewed plan."""
-    manifest_path = _command_manifest(args)
-    if manifest_path is None:
-        return 1
-
     try:
         json_output, projection = _output_settings(args)
     except ValueError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
+    try:
+        manifest_path = _command_manifest(args, report_errors=False)
+    except (ManifestSelectionError, BrowseError) as error:
+        if not json_output:
+            _write_manifest_error(error)
+            return 1
+        result = preparation_failure_result(_manifest_failure(error, PlanIntent.EXECUTABLE))
+        _write_run_result(result, json_output=json_output, projection=projection)
+        return result.exit_code
 
     try:
         explicit_site = _explicit_site(args, manifest_path, orchestrator)
@@ -1435,35 +1492,51 @@ def cmd_validate(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
     """Validate manifest structure and static references without resource reads."""
     selector = getattr(args, "selector", None)
 
-    manifest_path = _command_manifest(args)
-    if manifest_path is None:
-        return 1
     try:
+        json_output, projection = _output_settings(args)
+    except ValueError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        return 1
+    manifest_path = None
+    manifest = None
+    try:
+        manifest_path = _command_manifest(args, report_errors=False)
         manifest = orchestrator.load_manifest(manifest_path)
         explicit_site = _explicit_site(args, manifest_path, orchestrator)
+    except (ManifestSelectionError, BrowseError) as error:
+        if not json_output:
+            _write_manifest_error(error)
+            return 1
+        code = error.code if isinstance(error, ManifestSelectionError) else "content.other"
+        result = ValidationResult((ContentDiagnostic(code, str(error), "manifest"),), "incomplete")
     except (ValueError, OSError, yaml.YAMLError) as error:
-        _write_plain_validation_errors([_guided_error_detail(error)])
-        return 1
-
-    site_options = {"sites": [explicit_site]} if explicit_site is not None else {}
-    errors = orchestrator.validate(
-        manifest_path,
-        selector=selector,
-        manifest=manifest,
-        **site_options,
-    )
-    if errors:
-        _write_plain_validation_errors(errors)
-        return 1
-
-    print(f"\n{terminal.SUCCEEDED} Manifest is valid: {_content_text(manifest.name)}\n")
-    if explicit_site is None and not selector and not manifest.sites and not manifest.site_selector:
+        issue = diagnostic_from_error(
+            error, subject="site" if getattr(args, "site_file", None) else "manifest", source=manifest_path,
+        )
+        if isinstance(error, (ResourceReadError, ResourceInputError)):
+            issue = replace(issue, code=error.code)
+        elif isinstance(error, ExplicitSiteConflict):
+            issue = replace(issue, code="plan.targeting.conflict")
+        result = ValidationResult(
+            (issue,),
+            "incomplete", manifest_name=manifest.name if manifest is not None else None,
+            source_path=manifest_path,
+        )
+    else:
+        site_options = {"sites": [explicit_site]} if explicit_site is not None else {}
+        result = orchestrator.validate(manifest_path, selector=selector, manifest=manifest, **site_options)
+    if json_output:
+        print(serialize_validation_json(result, projection, engine_version=__version__), end="")
+    else:
+        print(render_plain_validation(result, redacted=is_redaction_enabled()),
+              file=sys.stderr if result.exit_code else sys.stdout, end="")
+    if not json_output and not result.exit_code and result.target_resolution == "not-requested":
         print(
             "  Note: library manifest (no `sites:` or `selector:`). "
             "Pass `-l <key>=<value>` at deploy time, or run "
             "`siteops validate <manifest> -l ...` to exercise resolution.\n"
         )
-    return 0
+    return result.exit_code
 
 
 def _origin_suffix(prov: dict[str, str] | None, key: str) -> str:
@@ -1709,6 +1782,20 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
             print(f"\nError: {_multiline_text(report_site_load_error(e))}\n", file=sys.stderr)
             return 1
 
+    if orchestrator.skipped_sites:
+        if is_redaction_enabled():
+            print("\n".join(render_diagnostics(
+                failure.diagnostic.document() for failure in orchestrator.skipped_sites
+            )), file=sys.stderr)
+        else:
+            print(f"\n{terminal.WARNING} Skipped {len(orchestrator.skipped_sites)} Site(s) due to errors:",
+                  file=sys.stderr)
+            for failure in orchestrator.skipped_sites:
+                first, *rest = terminal.sanitize_lines(failure.diagnostic.private_detail)
+                print(f"  {terminal.BULLET} {_content_text(failure.name)}: {first}", file=sys.stderr)
+                for line in rest:
+                    print(f"    {line}", file=sys.stderr)
+
     if not sites:
         if orchestrator.skipped_sites:
             # Reported before the two cases below, since both of those describe
@@ -1749,7 +1836,7 @@ def cmd_sites(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         # visible to a wrapper script and to CI rather than only to a reader.
         print(
             f"Error: {len(orchestrator.skipped_sites)} Site(s) could not be "
-            f"loaded, so this listing is incomplete. Fix the files named above.",
+            f"loaded, so this listing is incomplete. Correct the Site loading diagnostics.",
             file=sys.stderr,
         )
         return 1
@@ -2267,6 +2354,7 @@ def main() -> None:
         metavar="KEY=VALUE",
         help=_TARGET_SELECTOR_HELP,
     )
+    _add_output_options(p_validate, "Validation result format (default: plain).")
 
     # plan command
     p_plan = subparsers.add_parser(
@@ -2303,22 +2391,7 @@ def main() -> None:
         metavar="N",
         help=f"{_PARALLEL_HELP} Recorded in the plan.",
     )
-    p_plan.add_argument(
-        "--output",
-        choices=("plain", "json"),
-        default="plain",
-        help="Plan output format (default: plain).",
-    )
-    p_plan.add_argument(
-        "--projection",
-        choices=("local-private", "publishable"),
-        default=None,
-        help=(
-            "JSON plan projection, valid with --output json. Defaults to "
-            "publishable when output redaction is enabled, otherwise "
-            "local-private."
-        ),
-    )
+    _add_output_options(p_plan, "Plan output format (default: plain).", plan=True)
 
     # deploy command
     p_deploy = subparsers.add_parser(
@@ -2357,21 +2430,7 @@ def main() -> None:
         metavar="N",
         help=_PARALLEL_HELP,
     )
-    p_deploy.add_argument(
-        "--output",
-        choices=("plain", "json"),
-        default="plain",
-        help="Final result format. JSON requires --yes (default: plain).",
-    )
-    p_deploy.add_argument(
-        "--projection",
-        choices=("local-private", "publishable"),
-        default=None,
-        help=(
-            "JSON projection, valid with --output json. Defaults to publishable "
-            "when output redaction is enabled, otherwise local-private."
-        ),
-    )
+    _add_output_options(p_deploy, "Final result format. JSON requires --yes (default: plain).")
     for command in (p_plan, p_deploy, p_validate):
         command.add_argument(
             "--site-file", type=Path, action=_SingleValueOption, metavar="FILE",
@@ -2570,7 +2629,7 @@ def main() -> None:
         "inputs": cmd_inputs,
         "sites": cmd_sites,
     }
-    if args.command in {"plan", "deploy"}:
+    if args.command in {"plan", "deploy", "validate"}:
         try:
             _output_settings(args)
         except ValueError as error:

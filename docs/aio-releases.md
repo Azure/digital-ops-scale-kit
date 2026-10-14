@@ -60,6 +60,19 @@ AIO releases where it is not yet a default of the API generation.
 `extension.wasmGraphControllerMqttTrust` enables the derived MQTT trust settings
 required by the WebAssembly graph controller.
 
+For a Site override, keep the map under `parameters`:
+
+```yaml
+parameters:
+  aioConfigurationOverrides:
+    "<setting.key>": "<value>"
+```
+
+Site values win over the release settings and template defaults. Values must
+be strings and are visible in Azure, not secret storage. See
+[configure the install Site](../workspaces/iot-operations/manifests/aio-install/README.md#configure-the-site)
+for all extension override maps and the saved Site route for guided users.
+
 ## Pinning a Site to an AIO release
 
 Set `properties.aioRelease` on the Site (or on a parent via inheritance). The value must be the filename (without extension) of a YAML under `parameters/aio-releases/`.

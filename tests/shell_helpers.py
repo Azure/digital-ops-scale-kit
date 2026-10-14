@@ -41,9 +41,9 @@ def required_openssl() -> Path:
     return Path(resolved)
 
 
-def bash_path(path: Path) -> str:
-    """Return a native or Git Bash path for an absolute local path."""
-    resolved = path.resolve()
+def bash_path(path: Path, *, preserve_symlinks: bool = False) -> str:
+    """Return a native or Git Bash path, retaining executable symlinks when requested."""
+    resolved = path.absolute() if preserve_symlinks else path.resolve()
     if sys.platform != "win32":
         return resolved.as_posix()
     posix = resolved.as_posix()

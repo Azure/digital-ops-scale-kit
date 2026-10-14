@@ -11,6 +11,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# Workflows may set PYTHONSAFEPATH, so sibling helpers are found through an explicit path entry.
+sys.path.insert(1, str(Path(__file__).resolve().parent))
 
 from fleet_workflow import FleetCandidate  # noqa: E402
 
@@ -91,7 +93,8 @@ def aggregate(selected: FleetCandidate, root: Path, *, run: int, attempt: int) -
         ):
             raise ValueError("A fleet host did not establish the required readiness outcome.")
     if (
-        set(cleanup) != {"apiVersion", "kind", "context", "scopeKey", "slots", "status", "operationExit"}
+        set(cleanup) != {"apiVersion", "kind", "groups", "context", "scopeKey", "slots", "status", "operationExit"}
+        or cleanup.get("groups") not in {"ephemeral", "persistent"}
         or cleanup.get("kind") != "FleetCleanup" or cleanup.get("status") != "complete"
         or type(cleanup.get("operationExit")) is not int or cleanup["operationExit"] != 0
         or not isinstance(cleanup.get("slots"), dict) or set(cleanup["slots"]) != {"one", "two"}
@@ -100,7 +103,8 @@ def aggregate(selected: FleetCandidate, root: Path, *, run: int, attempt: int) -
         raise ValueError("Owned fleet cleanup was not confirmed for both slots.")
     return {
         "apiVersion": "siteops.release.acceptance/v1", "kind": "FleetAcceptance",
-        "context": context, "status": "passed", "targetCount": 2, "deployInvocations": 1,
+        "context": context, "groups": cleanup["groups"], "status": "passed", "targetCount": 2,
+        "deployInvocations": 1,
         "planParameters": "checked", "extensionVersions": "checked", "podReadiness": "checked",
         "cleanup": "confirmed-absent", "workloadFunctionality": "not-checked",
     }

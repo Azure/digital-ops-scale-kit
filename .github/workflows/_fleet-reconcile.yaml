@@ -7,17 +7,22 @@ on:
         required: true
         type: string
       original-run:
-        description: Original fleet acceptance workflow run ID.
+        description: Original acceptance workflow run ID.
         required: true
         type: string
       original-attempt:
-        description: Original fleet acceptance attempt.
+        description: Original acceptance attempt.
         required: true
         type: string
       environment:
         description: Approved environment with the original Azure subscription and scoped identity.
         required: true
         type: string
+      kind:
+        description: Reconcile the two fleet groups, or the group of each single Site case from that attempt.
+        required: false
+        type: string
+        default: fleet
     secrets:
       AZURE_CLIENT_ID:
         required: false
@@ -25,23 +30,36 @@ on:
         required: false
       AZURE_SUBSCRIPTION_ID:
         required: false
+      E2E_SITE_RESOURCE_GROUP:
+        required: false
+      E2E_FLEET_RESOURCE_GROUPS:
+        required: false
 permissions:
   contents: read
   actions: read
   id-token: write
 jobs:
   reconcile:
-    name: Reconcile original fleet
+    name: ${{ inputs.kind == 'site' && format('Reconcile original Site case ({0})', fromJSON('{"disabled":"site-aio","enabled":"site-combined","existing":"site-existing-secretsync"}')[matrix.slot]) || 'Reconcile original fleet' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     environment: ${{ inputs.environment }}
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: ${{ fromJSON(inputs.kind == 'site' && '["disabled", "enabled", "existing"]' || '["fleet"]') }}
     env:
       FLEET_CANDIDATE: ${{ inputs.candidate }}
       FLEET_RUN_ID: ${{ inputs.original-run }}
       FLEET_RUN_ATTEMPT: ${{ inputs.original-attempt }}
       AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      # The same group secrets as the original run select its persistent groups.
+      E2E_SITE_RESOURCE_GROUP: ${{ secrets.E2E_SITE_RESOURCE_GROUP }}
+      E2E_FLEET_RESOURCE_GROUPS: ${{ secrets.E2E_FLEET_RESOURCE_GROUPS }}
       AZURE_CORE_OUTPUT: none
       SITEOPS_REDACT_OUTPUT: "1"
+      KIND: ${{ inputs.kind }}
+      SLOT: ${{ matrix.slot }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -77,8 +95,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          "$PYTHON" -B scripts/coordinate-release-fleet.py ownership --root "$RUNNER_TEMP/fleet"
+          scope=()
+          if [[ "$KIND" == "site" ]]; then
+            scope=(--kind site --slot "$SLOT")
+          fi
+          "$PYTHON" -B scripts/coordinate-release-fleet.py ownership --root "$RUNNER_TEMP/fleet" "${scope[@]}"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: steps.ownership.outputs.ownership-id != ''
         with:
           artifact-ids: ${{ steps.ownership.outputs.ownership-id }}
           repository: ${{ github.repository }}
@@ -88,29 +111,41 @@ jobs:
           merge-multiple: true
           digest-mismatch: error
       - uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
+        if: steps.ownership.outputs.ownership-id != ''
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: Reconcile original owned groups
+        id: reconcile
+        if: steps.ownership.outputs.ownership-id != ''
         shell: bash
         env:
           PYTHON: ${{ steps.tools.outputs.python }}
           ADMISSION_SHA: ${{ steps.select.outputs.admission-sha }}
+          ORIGINAL_COMPLETED: ${{ steps.ownership.outputs.original-completed }}
         run: |
           set -euo pipefail
           umask 077
+          scope=()
+          if [[ "$KIND" == "site" ]]; then
+            scope=(--kind site --slot "$SLOT")
+          fi
+          bound=()
+          if [[ -n "$ORIGINAL_COMPLETED" ]]; then
+            bound=(--created-before "$ORIGINAL_COMPLETED")
+          fi
           # The preceding download verifies the selected original artifact's digest.
           OWNERSHIP_SHA="$(sha256sum "$RUNNER_TEMP/fleet/ownership/ownership.json" | cut -d ' ' -f 1)"
-          "$PYTHON" -B scripts/manage-release-fleet.py cleanup --execute \
+          "$PYTHON" -B scripts/manage-release-fleet.py cleanup --execute "${scope[@]}" "${bound[@]}" \
             --admission "$RUNNER_TEMP/fleet/admission/receipt.json" --expected-admission-sha "$ADMISSION_SHA" \
             --ownership "$RUNNER_TEMP/fleet/ownership/ownership.json" --expected-ownership-sha "$OWNERSHIP_SHA" \
             --private-logs "$RUNNER_TEMP/fleet/reconcile-private" --output "$RUNNER_TEMP/fleet/reconciled.json"
       - name: Retain reconciliation outcome
-        if: always()
+        if: always() && steps.ownership.outputs.ownership-id != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: fleet-reconciliation-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ inputs.kind == 'site' && format('site-reconciliation-{0}-{1}-{2}', github.run_id, github.run_attempt, matrix.slot) || format('fleet-reconciliation-{0}-{1}', github.run_id, github.run_attempt) }}
           path: ${{ runner.temp }}/fleet/reconciled.json
           if-no-files-found: error
           overwrite: false

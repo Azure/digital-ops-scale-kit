@@ -61,16 +61,43 @@ stages:
               set -euo pipefail
               umask 077
               private="$(mktemp -d "$STATE_PARENT/siteops-validate.XXXXXX")"
-              args=(-w "$WORKSPACE" validate "$MANIFEST")
+              cleanup() {
+                local status=$?
+                if [[ ${VALIDATE_EXIT_CODE:-0} -ne 0 ]]; then status=$VALIDATE_EXIT_CODE; fi
+                if rm -f "$private/stdout" "$private/stderr" 2>/dev/null && rmdir "$private" 2>/dev/null; then
+                  :
+                else
+                  echo "##vso[task.logissue type=error]Private validation files could not be removed."
+                  if [[ $status -eq 0 ]]; then status=1; fi
+                fi
+                exit "$status"
+              }
+              trap cleanup EXIT
+              args=(-w "$WORKSPACE" validate "$MANIFEST" --output json --projection publishable)
               [[ -n "$SELECTOR" ]] && args+=(-l "$SELECTOR")
               [[ -n "$SITE_FILE" ]] && args+=(--site-file "$SITE_FILE")
               if siteops "${args[@]}" > "$private/stdout" 2> "$private/stderr"; then
-                echo "Manifest structure and static references are valid."
+                VALIDATE_EXIT_CODE=0
               else
-                code=$?
-                echo "##vso[task.logissue type=error]Structural validation failed. Reproduce locally for private diagnostics."
-                exit "$code"
+                VALIDATE_EXIT_CODE=$?
               fi
+              if [[ -f "$TOOL_ROOT/scripts/render-siteops-output.py" ]]; then
+                if python3 -I -S -B "$TOOL_ROOT/scripts/render-siteops-output.py" "$private/stdout" \
+                    --kind ValidationResult --exit-code "$VALIDATE_EXIT_CODE" --platform ado; then
+                  REPORT_EXIT_CODE=0
+                else
+                  REPORT_EXIT_CODE=$?
+                fi
+              else
+                if [[ $VALIDATE_EXIT_CODE -eq 2 ]]; then
+                  echo "##vso[task.logissue type=error]Site Ops engine and template releases do not match. Use matching engine, setup, templates and helpers."
+                else
+                  echo "##vso[task.logissue type=error]Diagnostic details are unavailable."
+                fi
+                REPORT_EXIT_CODE=1
+              fi
+              if [[ $VALIDATE_EXIT_CODE -ne 0 ]]; then exit "$VALIDATE_EXIT_CODE"; fi
+              exit "$REPORT_EXIT_CODE"
             displayName: Validate caller content
             workingDirectory: $(SITEOPS_WORKSPACE_ROOT)
             env:
@@ -79,3 +106,4 @@ stages:
               SELECTOR: ${{ parameters.selector }}
               SITE_FILE: ${{ parameters.siteFile }}
               STATE_PARENT: $(Agent.TempDirectory)
+              TOOL_ROOT: $(SITEOPS_TEMPLATE_ROOT)

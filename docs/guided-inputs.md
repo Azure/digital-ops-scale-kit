@@ -294,6 +294,9 @@ Site must be complete and cannot inherit from packaged example Sites.
 Configured Sites can continue to use the existing inheritance and overlay
 rules.
 
+Settings outside the typed inputs belong in the saved Site, such as
+[AIO extension configuration overrides](../workspaces/iot-operations/manifests/aio-install/README.md#configure-the-site).
+
 Use one resource group per AIO instance. A Site built from a cluster ID
 takes that cluster's resource group, so connect each Arc cluster in its own
 resource group before you save its Site.

@@ -12,8 +12,11 @@ from siteops.executor import (
     DEFAULT_DEPLOYMENT_SUBMIT_TIMEOUT_SECONDS,
     ENGINE_TIMEOUT_SENTINEL,
     AzCliExecutor,
+    ConditionObservation,
     DeploymentResult,
     KubectlResult,
+    ProxySession,
+    ToolCallResult,
     UnconfirmedCompletion,
     WaitResult,
     WaitState,
@@ -63,7 +66,7 @@ def test_terminal_observation_survives_a_simultaneous_stop(
 
     def observe(*args, **kwargs):
         stop.set()
-        return True, json.dumps({"properties": {"provisioningState": state}}), ""
+        return ToolCallResult(True, json.dumps({"properties": {"provisioningState": state}}), "")
 
     monkeypatch.setattr(executor, "_run_az", observe)
     result = executor._poll_deployment([], [], "deployment", "step", "site", stop)
@@ -76,11 +79,11 @@ def test_terminal_observation_survives_a_simultaneous_stop(
 @pytest.mark.parametrize(
     ("observation", "setting", "unconfirmed"),
     [
-        ((False, "", "ResourceNotFound"), "DEPLOYMENT_NOTFOUND_GRACE_SECONDS",
+        (ToolCallResult(False, "", "ResourceNotFound"), "DEPLOYMENT_NOTFOUND_GRACE_SECONDS",
          UnconfirmedCompletion.NEVER_VISIBLE),
-        ((False, "", "AuthorizationFailed"), "DEPLOYMENT_OBSERVATION_GRACE_SECONDS",
+        (ToolCallResult(False, "", "AuthorizationFailed"), "DEPLOYMENT_OBSERVATION_GRACE_SECONDS",
          UnconfirmedCompletion.OBSERVATION_LOST),
-        ((True, '{"properties":{"provisioningState":"Running"}}', ""),
+        (ToolCallResult(True, '{"properties":{"provisioningState":"Running"}}', ""),
          "DEFAULT_AZ_TIMEOUT_SECONDS", UnconfirmedCompletion.DEADLINE_EXCEEDED),
     ],
 )
@@ -105,7 +108,7 @@ def test_observation_deadlines_do_not_claim_remote_failure(
 def test_submit_rejection_is_distinct_from_unclassified_failure(
     executor, monkeypatch, message, unconfirmed,
 ):
-    monkeypatch.setattr(executor, "_run_az", lambda *a, **k: (False, "", message))
+    monkeypatch.setattr(executor, "_run_az", lambda *a, **k: ToolCallResult(False, "", message))
 
     proceed, result = executor._submit_deployment([], "deployment", "step", "site")
 
@@ -137,7 +140,7 @@ def test_submit_response_survives_a_simultaneous_stop(
 
     def submit(*args, **kwargs):
         stop.set()
-        return False, "", message
+        return ToolCallResult(False, "", message)
 
     call = MagicMock(side_effect=submit)
     monkeypatch.setattr(executor, "_run_az", call)
@@ -203,7 +206,7 @@ def test_stopping_after_submit_retains_uncertain_completion(executor, monkeypatc
 
     def submit(*args, **kwargs):
         stop.set()
-        return True, "", ""
+        return ToolCallResult(True, "", "")
 
     call = MagicMock(side_effect=submit)
     monkeypatch.setattr(executor, "_run_az", call)
@@ -219,7 +222,7 @@ def test_stopping_after_submit_retains_uncertain_completion(executor, monkeypatc
 
 def test_stop_wakes_submit_backoff_without_another_attempt(executor, monkeypatch):
     stop = threading.Event()
-    call = MagicMock(return_value=(False, "", "ServiceUnavailable"))
+    call = MagicMock(return_value=ToolCallResult(False, "", "ServiceUnavailable"))
     monkeypatch.setattr(executor, "_run_az", call)
 
     def wait(seconds):
@@ -244,7 +247,7 @@ def test_stop_after_wait_observation_preserves_known_success(
 
     def observe(*args):
         stop.set()
-        return state, "ready" if state is WaitState.SATISFIED else "waiting", None
+        return ConditionObservation(state, "ready" if state is WaitState.SATISFIED else "waiting")
 
     monkeypatch.setattr(executor, "_evaluate_condition", observe)
     result = executor.wait_for_condition(
@@ -271,8 +274,8 @@ def test_cancelled_proxy_probe_never_starts_a_call(executor):
 
 
 def test_failed_kubectl_apply_does_not_claim_no_changes(executor, monkeypatch):
-    monkeypatch.setattr(executor, "_arc_proxy", lambda *a, **k: nullcontext("fake-config"))
-    monkeypatch.setattr(executor, "_run_kubectl", lambda *a, **k: (False, "", "connection lost"))
+    monkeypatch.setattr(executor, "_arc_proxy", lambda *a, **k: nullcontext(ProxySession("fake-config")))
+    monkeypatch.setattr(executor, "_run_kubectl", lambda *a, **k: ToolCallResult(False, "", "connection lost"))
 
     result = executor.kubectl_apply(
         "cluster", "rg", "subscription", ["https://example.invalid/manifest"],
@@ -292,7 +295,7 @@ def test_real_executor_stop_is_recorded_by_typed_core(executor, monkeypatch, tmp
     def command(args, **kwargs):
         if "create" in args:
             stop.set()
-            return True, "", ""
+            return ToolCallResult(True, "", "")
         raise AssertionError("No new observations after stopping")
 
     monkeypatch.setattr(executor, "_run_az", command)
@@ -375,13 +378,13 @@ def test_parallel_stop_joins_provider_workers_before_cleanup(
     def command(args, **kwargs):
         nonlocal active
         if "create" in args:
-            return True, "", ""
+            return ToolCallResult(True, "", "")
         with lock:
             active += 1
         try:
             rendezvous.wait(timeout=5)
             stop.set()
-            return True, '{"properties":{"provisioningState":"Running"}}', ""
+            return ToolCallResult(True, '{"properties":{"provisioningState":"Running"}}', "")
         finally:
             with lock:
                 active -= 1

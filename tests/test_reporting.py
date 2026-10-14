@@ -34,6 +34,7 @@ from siteops.results import (
     SiteStatus,
 )
 from siteops.sanitize import REDACT_ENV, is_redaction_enabled
+from tests.diagnostic_helpers import published
 
 _PRIVATE_SENTINELS = (
     "private-run-id",
@@ -145,7 +146,6 @@ def test_a_successful_run_says_its_deployment_operations_succeeded(redacted):
 
 def test_publishable_capability_diagnostics_name_the_tool_and_remedy():
     from siteops.planning import (
-        PUBLISHABLE_CAPABILITY_SUMMARIES,
         DiagnosticSeverity,
         PlanBuildResult,
         PlanDiagnostic,
@@ -171,14 +171,10 @@ def test_publishable_capability_diagnostics_name_the_tool_and_remedy():
     ))
 
     assert document["diagnostics"] == [
-        {
-            "code": "run.capability-unavailable",
-            "severity": "error",
-            "summary": PUBLISHABLE_CAPABILITY_SUMMARIES[code],
-        }
+        published("run.capability-unavailable", source_code=code)
         for code in codes
     ]
-    summaries = " ".join(diagnostic["summary"] for diagnostic in document["diagnostics"])
+    summaries = " ".join(diagnostic["guidance"] for diagnostic in document["diagnostics"])
     assert "https://aka.ms/installazurecli" in summaries
     assert "`az extension add --name connectedk8s`" in summaries
     assert "private-tool-path" not in json.dumps(document)
@@ -220,11 +216,7 @@ def test_publishable_json_is_an_allowlist_with_complete_counts():
     assert document == {
         "apiVersion": "siteops/v1alpha1",
         "diagnostics": [
-            {
-                "code": "run.diagnostic",
-                "severity": "warning",
-                "summary": "The deployment run reported a diagnostic.",
-            }
+            published("run.diagnostic", "warning")
         ],
         "engine": {"name": "siteops", "version": "9.8.7"},
         "exitCode": 1,
@@ -234,6 +226,12 @@ def test_publishable_json_is_an_allowlist_with_complete_counts():
         "summary": {
             "interrupted": False,
             "operations": {
+                "failureDiagnostics": [
+                    {"status": "failed", "count": 1, "category": "other",
+                     "summary": "The operation failed or its completion could not be established.",
+                     "guidance": "Inspect the detailed error locally or in the Azure activity log. Confirm unknown work before another deployment.",
+                     "documentation": "https://github.com/Azure/digital-ops-scale-kit/blob/main/docs/diagnostics.md#providerother"},
+                ],
                 "counts": {
                     "cancelled": 0,
                     "failed": 1,
@@ -294,23 +292,13 @@ def test_publishable_diagnostics_use_fixed_run_categories():
     )
 
     assert document["diagnostics"] == [
-        {
-            "code": "run.interrupted",
-            "severity": "warning",
-            "summary": (
-                "Execution was interrupted before every operation finished."
-            ),
-        },
-        {
-            "code": "run.validation-failed",
-            "severity": "error",
-            "summary": "Manifest validation failed.",
-        },
+        published("run.interrupted", "warning"),
+        published("run.validation-failed"),
     ]
     assert "private" not in json.dumps(document)
 
 
-def test_local_private_diagnostics_keep_value_free_serialized_detail():
+def test_local_private_diagnostics_use_registry_text_and_omit_producer_detail():
     serialized = serialize_run_json(
         _private_run(),
         PlanProjection.LOCAL_PRIVATE,
@@ -319,14 +307,9 @@ def test_local_private_diagnostics_keep_value_free_serialized_detail():
 
     document = json.loads(serialized)
 
-    assert document["diagnostics"] == [
-        {
-            "code": "private-diagnostic-code",
-            "severity": "warning",
-            "summary": "private-diagnostic-summary for private-site",
-            "serializedDetail": "private-diagnostic-serialized",
-        }
-    ]
+    expected = published("run.diagnostic", "warning")
+    expected["code"] = "private-diagnostic-code"
+    assert document["diagnostics"] == [expected]
     assert "private-diagnostic-detail" not in serialized
 
 

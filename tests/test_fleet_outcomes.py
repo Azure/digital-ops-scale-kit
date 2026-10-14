@@ -139,7 +139,8 @@ def receipts(tmp_path):
                       "two": {"release": "2608", "version": "1.4.73", "apiVersion": "2026-07-01"}},
         },
         "cleanup/cleanup.json": {
-            **copy.deepcopy(common), "kind": "FleetCleanup", "status": "complete", "operationExit": 0,
+            **copy.deepcopy(common), "kind": "FleetCleanup", "groups": "ephemeral", "status": "complete",
+            "operationExit": 0,
             "slots": {name: {"state": "absent", "reason": "confirmed-absent"} for name in ("one", "two")},
         },
         **{f"readiness/fleet-readiness-50-1-{slot}/readiness.json": {
@@ -154,7 +155,8 @@ def receipts(tmp_path):
     return selected, tmp_path, data
 
 
-@pytest.mark.parametrize("fault", [None, "missing", "duplicate", "candidate", "scope", "cleanup", "invocations", "private-field"])
+@pytest.mark.parametrize("fault", [None, "persistent", "missing", "duplicate", "candidate", "scope", "cleanup",
+                                   "invocations", "private-field", "groups"])
 def test_aggregator_rejects_missing_ambiguous_or_unbound_evidence(receipts, fault):
     selected, root, data = receipts
     helper = module("aggregate-fleet-results")
@@ -174,15 +176,30 @@ def test_aggregator_rejects_missing_ambiguous_or_unbound_evidence(receipts, faul
         data[name]["deployInvocations"] = 2
     elif fault == "private-field":
         data[name]["resourceGroup"] = "private-marker"
+    elif fault in {"persistent", "groups"}:
+        name = "cleanup/cleanup.json"
+        data[name]["groups"] = "persistent" if fault == "persistent" else "private-marker"
     if fault not in {"missing", "duplicate"}:
         root.joinpath(*name.split("/")).write_text(json.dumps(data[name]))
-    if fault:
+    if fault and fault != "persistent":
         with pytest.raises((ValueError, OSError)):
             helper.aggregate(selected, root, run=50, attempt=1)
     else:
         report = helper.aggregate(selected, root, run=50, attempt=1)
         assert report["status"] == "passed" and report["cleanup"] == "confirmed-absent"
         assert report["workloadFunctionality"] == "not-checked"
+        assert report["groups"] == ("persistent" if fault else "ephemeral")
+
+
+def test_release_acceptance_consumes_the_exact_fleet_acceptance_receipt(receipts):
+    from release_acceptance import ASSERTIONS, check_fleet
+
+    selected, root, _ = receipts
+    report = module("aggregate-fleet-results").aggregate(selected, root, run=50, attempt=1)
+    row = check_fleet(json.loads(json.dumps(report)), report["context"])
+    assert row["status"] == "passed" and row["assertions"] == list(ASSERTIONS["fleet"])
+    assert check_fleet({**report, "targetCount": 1}, report["context"])["status"] == "failed"
+    assert check_fleet(report, {**report["context"], "attempt": 2})["status"] == "ambiguous"
 
 
 @pytest.mark.parametrize(("failure", "expected"), [

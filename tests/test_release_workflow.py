@@ -1,5 +1,6 @@
 """Exercise the declaration-driven publisher through its actual workflow steps."""
 
+import ast
 import copy
 import hashlib
 import importlib.util
@@ -16,6 +17,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.actions_expressions import job_runs
 from tests.release_helpers import CLI, _commit, _write_record, _write_source_version
 from tests.release_helpers import repository as repository
 from tests.shell_helpers import bash_path, write_executable
@@ -42,6 +44,9 @@ ENGINE_ASSETS = (ARCHIVE, PROOF, WHEEL, WHEEL_PROOF, *BOOTSTRAP)
 RENDERER = ROOT / "scripts" / "render-siteops-release.py"
 ASSET_MODEL = ROOT / "scripts" / "siteops_release_assets.py"
 PAYLOAD_TOOL = ROOT / "scripts" / "stage-release-payload.py"
+VERIFIED = "<details><summary>Verify the script before it runs</summary>"
+PROVENANCE = "<details><summary>Provenance, verification and maintenance</summary>"
+SIGNER_WORKFLOW = ".github/workflows/_siteops-distribution.yaml"
 
 
 def step(job, name):
@@ -62,16 +67,25 @@ def renderer():
     return module
 
 
+def qualification_matrix(state="passed", **cells):
+    """Return the summary rows the distribution workflow emits, with optional (python, column) overrides."""
+    rows = []
+    for version in ("3.10", "3.11", "3.12", "3.13", "3.14"):
+        limited = "n/a" if version != "3.11" else state
+        row = {"python": version, "linux": state, "ubuntu-26.04": limited, "windows": state,
+               "windows-standard-user": limited}
+        row.update(cells.get(version, {}))
+        rows.append(row)
+    return rows
+
+
 def summary_values(**overrides):
     return {
         "DRY_RUN": "false", "ENGINE_VERSION": "1.0.0b1+build.42",
         "CI_URL": f"https://github.com/{REPO}/actions/runs/42",
         "BUNDLE_SHA": "a" * 64, "WHEEL_NAME": WHEEL, "WHEEL_SHA": "b" * 64,
         "ASSET_LIST_SHA": "d" * 64, "ARCHIVE_NAME": ARCHIVE, "TAG_EXISTS": "false",
-        "MATRIX": json.dumps([
-            {"python": version, "linux": "passed", "windows": "passed"}
-            for version in ("3.10", "3.11", "3.12", "3.13", "3.14")
-        ]),
+        "MATRIX": json.dumps(qualification_matrix()),
         "ARTIFACT_URL": f"https://github.com/{REPO}/actions/runs/42/artifacts/99",
         **overrides,
     }
@@ -265,6 +279,8 @@ from pathlib import Path
 args = sys.argv[1:]
 with open(os.environ["FAKE_CALLS"], "a") as output:
     output.write(json.dumps(args) + "\\n")
+    if "--input" in args:
+        output.write(json.dumps(["<input>", sys.stdin.read()]) + "\\n")
 if args[:2] == ["attestation", "verify"]:
     expected = os.environ.get("EXPECTED_SIGNER_IDENTITY")
     if Path(args[2]).name == "siteops-engine.json":
@@ -287,6 +303,11 @@ responses = json.loads(Path(os.environ["FAKE_RESPONSES"]).read_text())
 if endpoint not in responses:
     raise SystemExit("Unexpected fake GitHub request: " + str(endpoint))
 response = responses[endpoint]
+method = args[args.index("--method") + 1] if "--method" in args else "GET"
+if response.get("method", method) != method:
+    raise SystemExit("Unexpected fake GitHub method: " + method)
+if any(flag not in args for flag in response.get("flags", [])):
+    raise SystemExit("A fake GitHub request lacks a required flag.")
 status = response["status"]
 if "--include" in args:
     print("HTTP/2.0 " + str(status) + (" Not Found" if status == 404 else " Result"))
@@ -457,8 +478,7 @@ def test_publication_uses_only_the_completed_candidate_and_required_approval():
     condition = " ".join(JOBS["review"]["if"].split())
     assert "needs.distribution.result == 'success'" in condition
     assert "needs.distribution.result == 'skipped'" in condition
-    assert JOBS["publish"]["needs"] == ["release-runner", "candidate"]
-    assert JOBS["publish"]["if"] == "needs.candidate.result == 'success' && needs.candidate.outputs.active == 'true'"
+    assert JOBS["publish"]["needs"] == ["release-runner", "candidate", "accept"]
     assert JOBS["candidate"]["uses"] == "./.github/workflows/_release-candidate.yaml"
     assert JOBS["candidate"]["with"]["dry-run"] is False
     assert JOBS["publish"]["environment"] == "siteops-release"
@@ -1194,7 +1214,7 @@ def test_published_identity_comes_from_approval_not_changed_local_bytes(candidat
     candidate["responses"][f"repos/{REPO}/releases/tags/v1.0.0b8"] = {
         "status": 200,
         "body": {
-            "tag_name": "v1.0.0b8", "draft": False, "prerelease": True, "immutable": False,
+            "tag_name": "v1.0.0b8", "draft": False, "prerelease": True, "immutable": True,
             "assets": [
                 {**asset, "digest": "sha256:" + asset["sha256"], "state": "uploaded"}
                 for asset in inventory["assets"]
@@ -1349,7 +1369,11 @@ def test_dry_run_summary_stops_at_preview_without_approval_instructions(candidat
     assert summary.startswith("# Release preview (no publication)")
     assert "No tag, GitHub Release, or approval request was created." in summary
     assert "Approve and deploy" not in summary
-    assert summary.count("| Python | Linux | Windows |") == 1
+    assert summary.count(
+        "| Python | Ubuntu 24.04 | Ubuntu 26.04 | Windows | Windows standard user |"
+    ) == 1
+    assert "| 3.10 | passed | n/a | passed | n/a |" in summary
+    assert "| 3.11 | passed | passed | passed | passed |" in summary
     assert "Download the attested release assets" in summary
     assert WHEEL in summary
 
@@ -1408,11 +1432,13 @@ def test_install_notes_bind_downloads_and_commands_to_the_selected_release(candi
     assert "uv does not automatically verify GitHub attestations" in notes
     assert (
         f"https://github.com/{REPO}/blob/{SHA}/docs/install-siteops.md#verify-the-bootstrap-script"
-        in notes
+        in _verified_section(notes)
     )
-    assert "with those identities before running it" in notes
-    assert "HTTPS download alone does not authenticate the publisher" in notes
-    assert "use this release's reviewed provenance values instead" in notes
+    assert f"Confirm that `{REPO}` is the publisher you intend" in notes
+    assert "not that it is the right publisher" in notes
+    assert "It is not independent publisher authentication" in notes
+    assert "use the commands under Verify the script before it runs" in notes
+    assert "use this release's reviewed provenance values instead" not in notes
     assert "configured-Site fleet selectors remain supported" in notes
     assert "A project pin selects content, not operator Site configuration" in notes
     assert "`--reinstall`" in notes
@@ -1428,9 +1454,7 @@ def test_install_notes_bind_downloads_and_commands_to_the_selected_release(candi
     assert "Invoke-WebRequest" not in notes and "urllib.request" not in notes
     assert "uv 0.12.20" in notes
     assert "uv-managed CPython" in notes
-    routes, details = notes.split(
-        "<details><summary>Provenance, verification and maintenance</summary>\n\n", 1,
-    )
+    routes, details = notes.split(PROVENANCE + "\n\n", 1)
     details = details.split("\n\n</details>", 1)[0]
     assert "```" not in details
     assert "Expected publisher" not in routes and "Source commit" not in routes
@@ -1438,7 +1462,6 @@ def test_install_notes_bind_downloads_and_commands_to_the_selected_release(candi
         f"Expected publisher: `{REPO}`", f"Source commit: `{SHA}`",
         f'Source ref: `{candidate["plan"]["source"]["ref"]}`',
         "Expected provenance runner class: `self-hosted`",
-        f"https://github.com/{REPO}/blob/{SHA}/docs/install-siteops.md#verify-the-bootstrap-script",
         f"https://github.com/{REPO}/blob/{SHA}/docs/install-siteops.md#choose-an-installation-route",
         *(base + name for name in ENGINE_ASSETS),
     ):
@@ -1521,17 +1544,63 @@ def test_generated_bootstrap_entries_bind_the_full_selection(candidate, runner, 
         assert "az login" not in block and "gh auth" not in block
     assert "not independent publisher authentication" in notes
     assert "before any installer code runs" in notes
-    details = notes.split("<details><summary>Provenance, verification and maintenance</summary>", 1)[1]
+    details = notes.split(PROVENANCE, 1)[1]
     assert f"Expected calling workflow: `{caller}`" in details
-    assert notes.index("```powershell") < notes.index("<details>")
+    assert notes.index("```powershell") < notes.index(PROVENANCE)
     enrollment = f"```console\nsiteops source enroll example --source github:{REPO}\n```"
     if caller == "release.yaml":
-        assert notes.index("```powershell") < notes.index(enrollment) < notes.index("<details>")
+        assert notes.index("```powershell") < notes.index(enrollment) < notes.index(PROVENANCE)
         assert "### Enroll the content source" in notes
         assert "renew the 30 day enrollment" in notes
-        assert "approval" not in notes.split("<details>", 1)[0]
+        assert "approval" not in notes.split(PROVENANCE, 1)[0]
     else:
-        assert "### Enroll the content source" not in notes and "source enroll" not in notes.split("<details>", 1)[0]
+        assert "### Enroll the content source" not in notes and "source enroll" not in notes.split(PROVENANCE, 1)[0]
+
+
+def _verified_section(notes):
+    assert notes.count(VERIFIED) == 1, "Missing the collapsed verified bootstrap commands."
+    return notes.split(VERIFIED, 1)[1].split("\n</details>", 1)[0]
+
+
+def _verified_block(notes, language):
+    return _bootstrap_block(_verified_section(notes), language)
+
+
+@pytest.mark.parametrize("caller", ["release.yaml", "ci.yaml"])
+def test_generated_verified_bootstrap_binds_the_full_selection(candidate, runner, caller):
+    tag = "siteops/v1.1.0"
+    candidate["plan"]["release"]["tag"] = tag
+    result, _, _ = runner("review", "Render the final release notes", extra={
+        "ENGINE_VERSION": "1.0.0b1",
+        "BUILDER_IDENTITY": f"https://github.com/{REPO}/.github/workflows/{caller}@refs/heads/main",
+    })
+    assert result.returncode == 0, result.stdout + result.stderr
+    notes = (candidate["root"] / "publish-notes.md").read_text(encoding="utf-8")
+    section = _verified_section(notes)
+    https = notes.index("```powershell")
+    assert https < notes.index(VERIFIED) < notes.index(PROVENANCE)
+    if caller == "release.yaml":
+        assert notes.index(VERIFIED) < notes.index("### Enroll the content source")
+    prose = " ".join(section.split("```", 1)[0].split())
+    assert f"Confirm that `{REPO}` is the publisher you intend." in prose
+    assert "not that it is the right publisher" in prose
+    assert (
+        f"[installation guide](https://github.com/{REPO}/blob/{SHA}/docs/install-siteops.md"
+        "#verify-the-bootstrap-script)" in prose
+    )
+    base = downloads_url(tag).removesuffix(ARCHIVE)
+    for language, filename in (("bash", "siteops-bootstrap.sh"), ("powershell", "siteops-bootstrap.ps1")):
+        block = _verified_block(notes, language)
+        for identity in (
+            f"'{tag}'", f"'{SHA}'", f"'{REPO}'", "'refs/heads/main'", f"/{caller}@",
+            "/_siteops-distribution.yaml@", "self-hosted", base, filename + ".attestation.jsonl",
+        ):
+            assert identity in block
+        assert re.search(r"<[a-z][\w-]*>", block) is None
+        assert "latest" not in block and "--yes" not in block and "-Yes" not in block
+        assert "enroll" not in block.lower()
+        assert "az login" not in block and "gh auth" not in block
+    assert "source enroll" not in section
 
 
 @pytest.mark.parametrize(("repository", "ref", "builder", "runner_class", "expected"), [
@@ -1602,6 +1671,7 @@ def test_hosted_runner_notes_do_not_offer_incompatible_bootstrap(candidate, runn
     notes = (candidate["root"] / "publish-notes.md").read_text(encoding="utf-8")
     assert "uv tool install" in notes
     assert "```bash" not in notes and "```powershell" not in notes
+    assert "Verify the script before it runs" not in notes
     assert "bootstrap requires the approved `self-hosted` provenance policy" in notes
     assert "### Enroll the content source" not in notes
 
@@ -1691,7 +1761,7 @@ if ($env:CASE -eq 'acl-failed') {
             **os.environ, "CASE": case, "TEMP": str(tmp_path),
             "SCRIPT_BYTES": str(candidate["root"] / "release-bundle" / "siteops-bootstrap.ps1"),
             "BOOTSTRAP_ARGS": str(arguments), "DOWNLOAD_ARGS": str(downloads),
-        }, capture_output=True, text=True, timeout=30,
+        }, capture_output=True, text=True, timeout=120,
     )
     assert (result.returncode == 0) is (case == "success"), result.stdout + result.stderr
     assert arguments.exists() is (case in {"success", "installer-failed"})
@@ -1711,6 +1781,390 @@ if ($env:CASE -eq 'acl-failed') {
             assert download_args[download_args.index(option) + 1] == value
         assert "--tlsv1.2" in download_args and "--max-filesize" in download_args
     assert not list(tmp_path.glob("siteops-bootstrap-*/siteops-bootstrap.ps1"))
+
+
+@pytest.fixture(scope="module")
+def verified_notes(renderer):
+    """Render the selected release's notes once for executable verified command cases."""
+    from siteops_release_assets import FrozenReleaseAssets
+
+    source = {"repository": REPO, "commit": SHA, "ref": "refs/heads/main"}
+    assets = FrozenReleaseAssets.from_document({
+        "apiVersion": "siteops.release.assets/v2", "kind": "SiteOpsReleaseAssets", "source": source,
+        "assets": [{"name": name, "size": 7, "sha256": digest(name.encode())} for name in ENGINE_ASSETS],
+        "engine": None,
+    })
+    plan = {"source": source, "release": {"tag": "v1.0.0b8"}, "siteops": {"bundle": True, "releaseTag": None}}
+    return renderer.render_notes(
+        plan, "## Changes\n", assets, engine_version="1.0.0b1", archive_name=ARCHIVE,
+        attestation_suffix=".attestation.jsonl", runner_environment="self-hosted",
+        builder_identity=f"https://github.com/{REPO}/.github/workflows/release.yaml@refs/heads/main",
+    )
+
+
+def _guide_verified_block(language):
+    """Return the guide's verified example with this fixture's release selection."""
+    guide = (ROOT / "docs" / "install-siteops.md").read_text(encoding="utf-8")
+    section = guide.split("### Verify the bootstrap script\n", 1)[1].split("\n### ", 1)[0]
+    return _bootstrap_block(section, language).replace("<approved-release-tag>", "v1.0.0b8").replace(
+        "<full-source-commit>", SHA,
+    ).replace("Azure/digital-ops-scale-kit", REPO)
+
+
+CERTIFICATE_MISMATCHES = {
+    "subjectAlternativeName": f"https://github.com/{REPO}/.github/workflows/other.yaml@refs/heads/main",
+    "issuer": "https://issuer.invalid",
+    "sourceRepositoryURI": "https://github.com/other/publisher",
+    "sourceRepositoryDigest": "d" * 40,
+    "sourceRepositoryRef": "refs/heads/other",
+    "buildSignerDigest": "d" * 40,
+    "buildConfigURI": f"https://github.com/{REPO}/.github/workflows/ci.yaml@refs/heads/main",
+    "buildConfigDigest": "d" * 40,
+    "runnerEnvironment": "github-hosted",
+}
+EXPECTED_SCRIPT_QUERY = (
+    'length > 0 and all(.[]; .verificationResult.mediaType == '
+    '"application/vnd.dev.sigstore.verificationresult+json;version=0.1" and '
+    '(.verificationResult.signature.certificate | .buildConfigURI == '
+    f'"https://github.com/{REPO}/.github/workflows/release.yaml@refs/heads/main" and '
+    f'.buildConfigDigest == "{SHA}" and .runnerEnvironment == "self-hosted"))'
+)
+
+
+def _script_observations(case):
+    """Return synthetic evidence for a case. A certificate field name selects one changed field."""
+    valid = verified_observation(
+        REPO, SHA, "refs/heads/main", SIGNER_WORKFLOW, ".github/workflows/release.yaml",
+    )
+    changed = copy.deepcopy(valid)
+    certificate = changed["verificationResult"]["signature"]["certificate"]
+    if case == "empty":
+        return []
+    if case == "too-many":
+        return [valid] * 129
+    if case == "one-of-two":
+        certificate["runnerEnvironment"] = "github-hosted"
+        return [valid, changed]
+    if case == "media-type":
+        changed["verificationResult"]["mediaType"] = (
+            "application/vnd.dev.sigstore.verificationresult+json;version=0.2"
+        )
+    elif case in CERTIFICATE_MISMATCHES:
+        certificate[case] = CERTIFICATE_MISMATCHES[case]
+    return [changed]
+
+
+def _expected_gh_options():
+    return {
+        "--repo": REPO,
+        "--cert-identity": f"https://github.com/{REPO}/{SIGNER_WORKFLOW}@refs/heads/main",
+        "--source-ref": "refs/heads/main", "--source-digest": SHA, "--signer-digest": SHA,
+        "--cert-oidc-issuer": "https://token.actions.githubusercontent.com",
+        "--predicate-type": "https://slsa.dev/provenance/v1", "--hostname": "github.com",
+        "--digest-alg": "sha256", "--format": "json",
+    }
+
+
+def _gh_options(arguments):
+    """Split one recorded verification call into its subject and unique options."""
+    assert arguments[:2] == ["attestation", "verify"] and len(arguments) % 2 == 1
+    options = dict(zip(arguments[3::2], arguments[4::2]))
+    assert len(options) == len(arguments[3:]) // 2
+    assert options.pop("--bundle") == arguments[2] + ".attestation.jsonl"
+    return arguments[2], options
+
+
+def _requested_assets(case, filename):
+    base = downloads_url("v1.0.0b8").removesuffix(ARCHIVE)
+    requested = [base + filename, base + filename + ".attestation.jsonl"]
+    return requested[:1] if case == "script-download-failed" else requested
+
+
+def _assert_bounded_downloads(calls):
+    for call in calls:
+        for option, value in (("--proto", "=https"), ("--proto-redir", "=https"),
+                              ("--max-redirs", "3"), ("--max-time", "120")):
+            assert call[call.index(option) + 1] == value
+        assert "--tlsv1.2" in call and "--fail" in call
+
+
+# Emulates gh's `--jq` evaluation for the policy shape the commands use and rejects any other call.
+GH_POLICY_EVALUATOR = r'''import json
+import os
+import re
+import sys
+from pathlib import Path
+
+
+def reject(reason):
+    print(reason, file=sys.stderr)
+    raise SystemExit(99)
+
+
+arguments = Path(os.environ["GH_ARGS"]).read_bytes().decode("utf-8").split("\0")[:-1]
+subject, names, values = arguments[2], arguments[3::2], arguments[4::2]
+if len(names) != len(values) or len(set(names)) != len(names):
+    reject("Unexpected gh arguments.")
+options = dict(zip(names, values))
+query = options.pop("--jq", "")
+expected = json.loads(Path(os.environ["GH_EXPECTED"]).read_text(encoding="utf-8"))
+if options != {**expected, "--bundle": subject + ".attestation.jsonl"}:
+    reject("Unexpected gh options.")
+policy = re.fullmatch(
+    r'length > 0 and all\(\.\[\]; \.verificationResult\.mediaType == "([^"]+)" and '
+    r'\(\.verificationResult\.signature\.certificate \| (.+)\)\)',
+    query,
+)
+if policy is None:
+    reject("Unexpected gh policy.")
+checks = [re.fullmatch(r'\.([A-Za-z]+) == "([^"]*)"', term) for term in policy[2].split(" and ")]
+if not all(checks):
+    reject("Unexpected gh policy.")
+observations = json.loads(Path(os.environ["OBSERVATIONS"]).read_text(encoding="utf-8"))
+print(json.dumps(len(observations) > 0 and all(
+    item["verificationResult"]["mediaType"] == policy[1] and all(
+        item["verificationResult"]["signature"]["certificate"].get(check[1]) == check[2]
+        for check in checks
+    )
+    for item in observations
+)))
+'''
+BASH_VERIFY_DOUBLES = r"""
+curl() {
+    local output='' url="${!#}"
+    printf '%s\n' "$@" --end-- >> "$DOWNLOAD_ARGS"
+    while (($#)); do
+        if [[ "$1" == --output ]]; then output="$2"; shift 2; else shift; fi
+    done
+    case "$url" in
+      "${DOWNLOADS}siteops-bootstrap.sh")
+        [[ "$CASE" != script-download-failed ]] || return 22
+        cp "$SCRIPT_BYTES" "$output" ;;
+      "${DOWNLOADS}siteops-bootstrap.sh.attestation.jsonl")
+        [[ "$CASE" != proof-download-failed ]] || return 22
+        cp "$PROOF_BYTES" "$output" ;;
+      *) echo 'Unexpected download.' >&2; return 99 ;;
+    esac
+}
+gh() {
+    printf '%s\0' "$@" > "$GH_ARGS"
+    [[ "${1-} ${2-}" == 'attestation verify' ]] || { echo 'Unexpected gh command.' >&2; return 99; }
+    [[ "$CASE" != gh-failed ]] || return 1
+    [[ "$CASE" != no-output ]] || return 0
+    cmp -s -- "$3" "$SCRIPT_BYTES" && cmp -s -- "$3.attestation.jsonl" "$PROOF_BYTES" || return 1
+    "$FAKE_PYTHON" "$GH_EVALUATOR"
+}
+bash() {
+    printf '%s\n' "$@" > "$BOOTSTRAP_ARGS"
+    [[ "$CASE" != installer-failed ]]
+}
+uv() { echo 'Unexpected manager invocation.' >&2; return 98; }
+pipx() { echo 'Unexpected legacy manager invocation.' >&2; return 98; }
+powershell() { echo 'Unexpected shell invocation.' >&2; return 98; }
+"""
+BASH_VERIFY_CASES = (
+    "success", "installer-failed", "script-download-failed", "proof-download-failed", "gh-failed",
+    "no-output", "empty", "one-of-two", "media-type", "buildConfigURI", "buildConfigDigest",
+    "runnerEnvironment",
+)
+GUIDE_BASH_VERIFY_CASES = (
+    "success", "gh-failed", "empty", "one-of-two", "media-type", "buildConfigURI",
+    "buildConfigDigest", "runnerEnvironment",
+)
+
+
+@pytest.mark.parametrize(("source", "case"), [
+    *(("notes", case) for case in BASH_VERIFY_CASES),
+    *(("guide", case) for case in GUIDE_BASH_VERIFY_CASES),
+])
+def test_verified_bash_bootstrap_runs_the_script_only_after_a_matching_proof(
+    verified_notes, tmp_path, source, case,
+):
+    command = _verified_block(verified_notes, "bash") if source == "notes" else _guide_verified_block("bash")
+    script_bytes, proof_bytes = tmp_path / "script.sh", tmp_path / "script.sh.attestation.jsonl"
+    script_bytes.write_bytes(b"echo SCRIPT_RAN\n")
+    proof_bytes.write_bytes(b'{"synthetic": "proof"}\n')
+    evaluator, expected = tmp_path / "gh-evaluator.py", tmp_path / "gh-expected.json"
+    evaluator.write_text(GH_POLICY_EVALUATOR, encoding="utf-8")
+    expected.write_text(json.dumps(_expected_gh_options()), encoding="utf-8")
+    observations = tmp_path / "observations.json"
+    observations.write_text(json.dumps(_script_observations(case)), encoding="utf-8")
+    verified, installed, downloads = (
+        tmp_path / "gh-args.bin", tmp_path / "installer-args.txt", tmp_path / "download-args.txt",
+    )
+    result = _run_script(BASH_VERIFY_DOUBLES + command, tmp_path, {
+        "CASE": case, "TMPDIR": bash_path(tmp_path),
+        "DOWNLOADS": downloads_url("v1.0.0b8").removesuffix(ARCHIVE),
+        "SCRIPT_BYTES": bash_path(script_bytes), "PROOF_BYTES": bash_path(proof_bytes),
+        "FAKE_PYTHON": Path(sys.executable).as_posix(), "GH_EVALUATOR": evaluator.as_posix(),
+        "GH_ARGS": verified.as_posix(), "GH_EXPECTED": expected.as_posix(),
+        "OBSERVATIONS": observations.as_posix(),
+        "BOOTSTRAP_ARGS": bash_path(installed), "DOWNLOAD_ARGS": bash_path(downloads),
+    })
+    output = result.stdout + result.stderr
+    assert (result.returncode == 0) is (case == "success"), output
+    assert "Unexpected" not in output
+    assert installed.exists() is (case in {"success", "installer-failed"}), output
+    if installed.exists():
+        invoked = installed.read_text(encoding="utf-8").splitlines()
+        assert invoked[0].endswith("/siteops-bootstrap.sh")
+        assert invoked[1:] == ["--release", "v1.0.0b8", "--source-commit", SHA] + (
+            ["--repository", REPO, "--source-ref", "refs/heads/main", "--caller", "release.yaml"]
+            if source == "notes" else []
+        )
+    calls = [call.splitlines() for call in downloads.read_text(encoding="utf-8").split("--end--\n") if call]
+    assert [call[-1] for call in calls] == _requested_assets(case, "siteops-bootstrap.sh")
+    _assert_bounded_downloads(calls)
+    assert verified.exists() is (case not in {"script-download-failed", "proof-download-failed"})
+    if verified.exists():
+        subject, options = _gh_options(verified.read_bytes().decode("utf-8").split("\0")[:-1])
+        assert subject.endswith("/siteops-bootstrap.sh")
+        assert options.pop("--jq") == EXPECTED_SCRIPT_QUERY
+        assert options == _expected_gh_options()
+    if source == "notes":
+        assert not list(tmp_path.glob("tmp.*"))
+
+
+POWERSHELL_VERIFY_DOUBLES = r"""
+function curl.exe {
+    $call = @($args | ForEach-Object { [string]$_ })
+    Add-Content -LiteralPath $env:DOWNLOAD_ARGS -Encoding UTF8 -Value (ConvertTo-Json -Compress -InputObject $call)
+    $output = $call[[Array]::IndexOf($call, '--output') + 1]
+    if ($call[-1] -ceq $env:DOWNLOADS + 'siteops-bootstrap.ps1') {
+        $source = $env:SCRIPT_BYTES; $failure = 'script-download-failed'
+    } elseif ($call[-1] -ceq $env:DOWNLOADS + 'siteops-bootstrap.ps1.attestation.jsonl') {
+        $source = $env:PROOF_BYTES; $failure = 'proof-download-failed'
+    } else { throw 'Unexpected download.' }
+    if ($env:CASE -eq $failure) { $global:LASTEXITCODE = 22; return }
+    [IO.File]::WriteAllBytes($output, [IO.File]::ReadAllBytes($source))
+    $global:LASTEXITCODE = 0
+}
+function Test-SameBytes([string]$Left, [string]$Right) {
+    [Convert]::ToBase64String([IO.File]::ReadAllBytes($Left)) -ceq
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($Right))
+}
+function gh.exe {
+    $call = @($args | ForEach-Object { [string]$_ })
+    ConvertTo-Json -InputObject $call | Set-Content -LiteralPath $env:GH_ARGS -Encoding UTF8
+    if ($call.Count -lt 3 -or $call[0] -cne 'attestation' -or $call[1] -cne 'verify') { throw 'Unexpected gh command.' }
+    $bundle = $call[[Array]::IndexOf($call, '--bundle') + 1]
+    if ($env:CASE -eq 'gh-failed' -or -not (Test-SameBytes $call[2] $env:SCRIPT_BYTES) -or
+        -not (Test-SameBytes $bundle $env:PROOF_BYTES)) {
+        $global:LASTEXITCODE = 1; return
+    }
+    if ($env:CASE -eq 'oversized') { 'x' * 8388609 }
+    elseif ($env:CASE -ne 'no-output') { Get-Content -LiteralPath $env:OBSERVATIONS -Raw }
+    $global:LASTEXITCODE = 0
+}
+function powershell.exe {
+    ConvertTo-Json -InputObject @($args | ForEach-Object { [string]$_ }) |
+        Set-Content -LiteralPath $env:BOOTSTRAP_ARGS -Encoding UTF8
+    $global:LASTEXITCODE = if ($env:CASE -eq 'installer-failed') { 7 } else { 0 }
+}
+function uv { throw 'Unexpected manager invocation.' }
+function pipx { throw 'Unexpected legacy manager invocation.' }
+function bash { throw 'Unexpected shell invocation.' }
+"""
+POWERSHELL_VERIFY_FAILURES = {
+    "installer-failed": "Site Ops installation did not complete.",
+    "script-download-failed": "could not be downloaded.",
+    "proof-download-failed": "could not be downloaded.",
+    "gh-failed": "Script verification failed.",
+    "no-output": "Script verification failed.",
+    "empty": "Script verification returned an unsupported result count.",
+    "too-many": "Script verification returned an unsupported result count.",
+    "oversized": "Verification evidence is too large.",
+    "media-type": "Unsupported verified script observation.",
+    "one-of-two": "The verified script certificate differs from the selected release.",
+    **dict.fromkeys(
+        CERTIFICATE_MISMATCHES, "The verified script certificate differs from the selected release.",
+    ),
+}
+GUIDE_POWERSHELL_VERIFY_CASES = (
+    "success", "empty", "too-many", "oversized", "one-of-two", "media-type", *CERTIFICATE_MISMATCHES,
+)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Native Windows PowerShell command handling.")
+@pytest.mark.parametrize(("source", "case"), [
+    *(("notes", case) for case in ("success", *POWERSHELL_VERIFY_FAILURES)),
+    *(("guide", case) for case in GUIDE_POWERSHELL_VERIFY_CASES),
+])
+def test_verified_powershell_bootstrap_runs_the_script_only_after_a_matching_proof(
+    verified_notes, tmp_path, source, case,
+):
+    command = (
+        _verified_block(verified_notes, "powershell") if source == "notes"
+        else _guide_verified_block("powershell")
+    )
+    script_bytes, proof_bytes = tmp_path / "script.ps1", tmp_path / "script.ps1.attestation.jsonl"
+    script_bytes.write_bytes(b"'SCRIPT_RAN'\r\n")
+    proof_bytes.write_bytes(b'{"synthetic": "proof"}\n')
+    observations = tmp_path / "observations.json"
+    observations.write_text(json.dumps(_script_observations(case)), encoding="utf-8")
+    verified, installed, downloads = (
+        tmp_path / "gh-args.json", tmp_path / "installer-args.json", tmp_path / "download-args.jsonl",
+    )
+    wrapper = tmp_path / "entry.ps1"
+    wrapper.write_text(POWERSHELL_VERIFY_DOUBLES + command, encoding="utf-8")
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
+        cwd=tmp_path, env={
+            **os.environ, "CASE": case, "TEMP": str(tmp_path),
+            "DOWNLOADS": downloads_url("v1.0.0b8").removesuffix(ARCHIVE),
+            "SCRIPT_BYTES": str(script_bytes), "PROOF_BYTES": str(proof_bytes),
+            "OBSERVATIONS": str(observations), "GH_ARGS": str(verified),
+            "BOOTSTRAP_ARGS": str(installed), "DOWNLOAD_ARGS": str(downloads),
+        }, capture_output=True, text=True, timeout=120,
+    )
+    output = result.stdout + result.stderr
+    assert (result.returncode == 0) is (case == "success"), output
+    assert "Unexpected" not in output
+    if case != "success":
+        assert POWERSHELL_VERIFY_FAILURES[case] in " ".join(output.split()), output
+    assert installed.exists() is (case in {"success", "installer-failed"}), output
+    if installed.exists():
+        invoked = json.loads(installed.read_text(encoding="utf-8-sig"))
+        assert invoked[:4] == ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]
+        assert invoked[4].endswith("\\siteops-bootstrap.ps1")
+        assert invoked[5:] == ["-Release", "v1.0.0b8", "-SourceCommit", SHA] + (
+            ["-Repository", REPO, "-SourceRef", "refs/heads/main", "-Caller", "release.yaml"]
+            if source == "notes" else []
+        )
+    calls = [json.loads(line) for line in downloads.read_text(encoding="utf-8-sig").splitlines()]
+    assert [call[-1] for call in calls] == _requested_assets(case, "siteops-bootstrap.ps1")
+    _assert_bounded_downloads(calls)
+    assert verified.exists() is (case not in {"script-download-failed", "proof-download-failed"})
+    if verified.exists():
+        subject, options = _gh_options(json.loads(verified.read_text(encoding="utf-8-sig")))
+        assert subject.endswith("\\siteops-bootstrap.ps1")
+        assert options == _expected_gh_options()
+    if source == "notes":
+        assert not list(tmp_path.glob("siteops-bootstrap-*"))
+
+
+def test_installation_guides_name_the_rendered_release_note_labels(verified_notes):
+    readme = " ".join((ROOT / "README.md").read_text(encoding="utf-8").split())
+    guide = " ".join((ROOT / "docs" / "install-siteops.md").read_text(encoding="utf-8").split())
+    # The short README route leaves script checks and uv instructions in the rendered notes.
+    for label, rendered in (
+        ("Install Site Ops", "\n## Install Site Ops\n"),
+        ("Already have uv", "\n### Already have uv\n"),
+        ("Bootstrap without uv", "\n### Bootstrap without uv\n"),
+    ):
+        assert rendered in verified_notes
+        if label == "Already have uv":
+            assert f"**{label}** section" in readme
+        elif label == "Install Site Ops":
+            assert "### 1. Install Site Ops and approve the official source" in readme
+        else:
+            assert "### Bootstrap from HTTPS" in (ROOT / "docs" / "install-siteops.md").read_text(encoding="utf-8")
+    assert "bash siteops-bootstrap.sh --release <release> --enroll-source official" in readme
+    assert r"-File .\siteops-bootstrap.ps1" in readme
+    assert '-Release "<release>" -EnrollSource official' in readme
+    assert VERIFIED in verified_notes
+    for label in ("Install Site Ops", "Verify the script before it runs"):
+        assert f"`{label}`" in guide
 
 
 @pytest.mark.parametrize(
@@ -1738,7 +2192,11 @@ def test_summary_nests_markdown_headings_without_changing_published_notes(
     assert authored.encode() == before
 
 
-@pytest.mark.parametrize("matrix", ["[]", "{}", '[null]', '[{"python":"3.10"}]'])
+@pytest.mark.parametrize("matrix", [
+    "[]", "{}", '[null]', '[{"python":"3.10"}]',
+    json.dumps([{"python": version, "linux": "passed", "windows": "passed"}
+                for version in ("3.10", "3.11", "3.12", "3.13", "3.14")]),
+])
 def test_invalid_rendering_inputs_leave_existing_summary_unchanged(candidate, runner, matrix):
     _render_install_notes(candidate, runner)
     summary = candidate["root"].parent / "summary.md"
@@ -1750,6 +2208,25 @@ def test_invalid_rendering_inputs_leave_existing_summary_unchanged(candidate, ru
     assert result.returncode != 0
     assert "Incomplete installation qualification summary" in result.stdout + result.stderr
     assert summary.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize(("cells", "valid"), [
+    ({"3.11": {"windows-standard-user": "failed", "ubuntu-26.04": "not-run"}}, True),
+    ({"3.12": {"ubuntu-26.04": "passed"}}, False),
+    ({"3.10": {"windows-standard-user": "unknown"}}, False),
+    ({"3.11": {"windows-standard-user": "n/a"}}, False),
+    ({"3.11": {"ubuntu-26.04": "n/a"}}, False),
+    ({"3.13": {"linux": "n/a"}}, False),
+])
+def test_summary_renders_extra_installer_cells_only_for_their_python(candidate, renderer, cells, valid):
+    values = summary_values(MATRIX=json.dumps(qualification_matrix(**cells)))
+    if not valid:
+        with pytest.raises(renderer.RenderingError, match="Invalid qualification summary"):
+            renderer.render_summary(candidate["plan"], "## Changes\n", values)
+        return
+    summary = renderer.render_summary(candidate["plan"], "## Changes\n", values)
+    assert "| 3.11 | passed | not-run | passed | failed |" in summary
+    assert "| 3.14 | passed | n/a | passed | n/a |" in summary
 
 
 @pytest.mark.parametrize("bundle", [False, True])
@@ -1778,8 +2255,8 @@ def test_publication_uploads_only_declared_assets(candidate, runner, bundle):
     assert len(asset_arguments) == (8 if bundle else 0)
 
 
-@pytest.mark.parametrize("immutable", [False, True])
-def test_published_asset_digests_and_immutable_release_are_checked(candidate, runner, immutable):
+@pytest.mark.parametrize("immutable, deleted", [(False, True), (False, False), (True, None)])
+def test_published_asset_digests_and_immutable_release_are_checked(candidate, runner, immutable, deleted):
     tag = candidate["plan"]["release"]["tag"]
     assets = [
         {"name": name, "size": (candidate["root"] / "release-bundle" / name).stat().st_size,
@@ -1789,15 +2266,31 @@ def test_published_asset_digests_and_immutable_release_are_checked(candidate, ru
     endpoint = f"repos/{REPO}/releases/tags/{tag}"
     candidate["responses"][endpoint] = {
         "status": 200,
-        "body": {"tag_name": tag, "draft": False, "prerelease": True, "immutable": immutable, "assets": assets},
+        "body": {"id": 42, "tag_name": tag, "draft": False, "prerelease": True, "immutable": immutable,
+                 "assets": assets},
     }
+    candidate["responses"][f"repos/{REPO}/releases/42"] = {"status": 204 if deleted else 500, "method": "DELETE"}
     result, _, calls = runner(
         "publish", "Confirm published assets and immutability",
         extra={"PRERELEASE": "true", "BUNDLE": "true"},
     )
-    assert result.returncode == 0, result.stdout + result.stderr
+    output = result.stdout + result.stderr
+    # A published release must be immutable, so its assets cannot change after approval.
+    assert (result.returncode == 0) is immutable, output
+    summary = (candidate["root"].parent / "summary.md").read_text(encoding="utf-8")
+    assert f"- Immutable: `{str(immutable).lower()}`" in summary
     assert any(call[:2] == ["release", "verify"] for call in calls) is immutable
     assert len([call for call in calls if call[:2] == ["release", "verify-asset"]]) == (8 if immutable else 0)
+    # The workflow cannot read the repository setting first, so it removes a mutable release.
+    delete = ["api", "--method", "DELETE", f"repos/{REPO}/releases/42"]
+    assert (delete in calls) is not immutable
+    assert ("::error::The published release is not immutable, so it was deleted and its tag kept."
+            in output) is (deleted is True)
+    assert ("::error::The published release is not immutable and could not be deleted." in output) is (deleted is False)
+    if not immutable:
+        assert f"- Mutable release deleted, tag kept: `{str(deleted).lower()}`" in summary
+        assert not any(call[:2] == ["api", "--method"] and "git/refs" in " ".join(call) for call in calls)
+    candidate["responses"][endpoint]["body"]["immutable"] = True
     assets[0]["digest"] = "sha256:" + "a" * 64
     result, _, _ = runner(
         "publish", "Confirm published assets and immutability",
@@ -1828,6 +2321,8 @@ def test_complete_workspace_candidate_reaches_only_the_approved_publication_set(
     assert result.returncode == 0, result.stdout + result.stderr
     notes = (root / "publish-notes.md").read_text()
     assert "## Workspace content" in notes and "siteops-workspaces.json" in notes
+    # The README quick start sends readers to this section for the exact deploy command.
+    assert "**Workspace content**" in (ROOT / "README.md").read_text(encoding="utf-8")
     assert f"https://github.com/{REPO}/blob/{SHA}/docs/projects.md#run-project-pin" in notes
     assert "`siteops project pin` with `--release`" in notes
     workspace_section = notes.split("## Workspace content", 1)[1]
@@ -1921,3 +2416,568 @@ def test_workspace_publisher_rechecks_routing_and_verified_metadata(candidate, r
     if fault in {"source", "kit"}:
         assert "verified workspace differs from the reviewed source contract" in result.stdout + result.stderr
     assert not any("--method" in call or call[:2] == ["release", "create"] for call in calls)
+
+
+# --- Candidate acceptance gate ------------------------------------------------
+
+ADMISSION = "a" * 64
+ACCEPTANCE_RUN = 7000
+RUNS = (
+    f"repos/{REPO}/actions/workflows/e2e-test.yaml/runs?event=workflow_dispatch&branch=main"
+    f"&head_sha={SHA}&per_page=100"
+)
+MAIN_REF = f"repos/{REPO}/git/ref/heads/main"
+DISPATCH = f"repos/{REPO}/actions/workflows/e2e-test.yaml/dispatches"
+LISTING = {"status": 200, "method": "GET", "flags": ["--paginate", "--slurp"]}
+
+
+def _contract_constant(name):
+    """Read a literal from the acceptance producer without importing its runtime dependencies."""
+    tree = ast.parse((ROOT / "scripts" / "release_acceptance.py").read_text(encoding="utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(getattr(target, "id", None) == name for target in node.targets):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"The acceptance producer defines no {name}.")
+
+
+def _fleet_candidate(candidate, **producer):
+    return {
+        "apiVersion": "siteops.release.acceptance/v1", "kind": "FleetCandidate",
+        "source": {"repository": REPO, "commit": SHA, "ref": "refs/heads/main"},
+        "producer": {"run": 42, "attempt": 1, "caller": ".github/workflows/release.yaml", "preview": False,
+                     **producer},
+        "artifacts": {
+            "admission": {"id": 501, "sha256": ADMISSION},
+            "plan": {"id": 502, "sha256": digest(json.dumps(candidate["plan"]).encode())},
+            "inventory": {"id": 503, "sha256": digest(
+                (candidate["root"] / "release-assets" / "release-assets.json").read_bytes())},
+            "engine": {"id": 504, "sha256": "e" * 64}, "workspaces": {"id": 505, "sha256": "f" * 64},
+        },
+    }
+
+
+def _acceptance_run(run_id=ACCEPTANCE_RUN, attempt=1, **fields):
+    return {
+        "id": run_id, "run_attempt": attempt, "path": ".github/workflows/e2e-test.yaml",
+        "event": "workflow_dispatch", "head_branch": "main", "head_sha": SHA,
+        "repository": {"full_name": REPO}, "display_title": "Release acceptance",
+        "status": "completed", "conclusion": "success", **fields,
+    }
+
+
+def _receipt_artifact(run_id=ACCEPTANCE_RUN, attempt=1, admission=ADMISSION, **fields):
+    return {
+        "id": run_id * 10 + attempt, "name": f"release-acceptance-{run_id}-{attempt}-{admission}",
+        "expired": False, "size_in_bytes": 900, "digest": "sha256:" + "d" * 64,
+        "workflow_run": {"id": run_id, "head_sha": SHA}, **fields,
+    }
+
+
+def _serve_acceptance(candidate, runs, artifacts):
+    candidate["responses"][RUNS] = {**LISTING, "body": [{"total_count": len(runs), "workflow_runs": runs}]}
+    for run in runs:
+        listed = artifacts.get(run["id"], [])
+        # Two pages prove that every page of the artifact list is read.
+        candidate["responses"][f"repos/{REPO}/actions/runs/{run['id']}/artifacts?per_page=100"] = {
+            **LISTING, "body": [{"total_count": len(listed), "artifacts": listed[:1]},
+                                {"total_count": len(listed), "artifacts": listed[1:]}],
+        }
+
+
+def _release_receipt(candidate, *, run=ACCEPTANCE_RUN, attempt=1, producer_attempt=1, bundle=True):
+    assertions = _contract_constant("ASSERTIONS")
+    rows = []
+    for name in _contract_constant("SCENARIOS"):
+        installer = name == "installer"
+        rows.append({
+            "scenario": name, "status": "not-applicable" if installer and not bundle else "passed",
+            "groups": "not-applicable" if installer else ("ephemeral" if name == "fleet" else "persistent"),
+            "assertions": [] if installer and not bundle else list(assertions[name]),
+            "cleanup": "not-applicable" if installer else "confirmed-absent",
+            # Vault purge never gates publication.
+            "vaultPurge": "failed" if name == "site-combined" else "not-applicable",
+        })
+    selection = _fleet_candidate(candidate, attempt=producer_attempt)
+    return {
+        "apiVersion": "siteops.release.acceptance/v1", "kind": "ReleaseAcceptance",
+        "candidate": {
+            "repository": REPO, "sourceCommit": SHA, "sourceRef": "refs/heads/main",
+            "caller": ".github/workflows/release.yaml", "producerRun": 42, "producerAttempt": producer_attempt,
+            "preview": False, "admissionSha256": ADMISSION,
+            "planSha256": selection["artifacts"]["plan"]["sha256"],
+            "inventorySha256": selection["artifacts"]["inventory"]["sha256"],
+        },
+        "acceptance": {"run": run, "attempt": attempt}, "environment": "dev", "transport": "prepublication",
+        "publicRelease": "not-observed", "status": "passed", "scenarios": rows,
+        "workloadFunctionality": "not-checked", "secretMaterialization": "not-checked",
+    }
+
+
+def _locate(runner, candidate, *, selection=None, run_attempt="1"):
+    return runner("publish", "Locate the governing acceptance run", extra={
+        "CANDIDATE": json.dumps(selection or _fleet_candidate(candidate)), "ADMISSION_ARTIFACT_ID": "501",
+        "GITHUB_RUN_ATTEMPT": run_attempt,
+    })
+
+
+def _verify(runner, candidate, receipt, *, run_attempt="1", producer_attempt=1, acceptance_attempt=1,
+            extra_file=False):
+    _serve_acceptance(candidate, [_acceptance_run(attempt=acceptance_attempt)], {
+        ACCEPTANCE_RUN: [_receipt_artifact(attempt=acceptance_attempt)],
+    })
+    located, outputs, before = _locate(
+        runner, candidate, selection=_fleet_candidate(candidate, attempt=producer_attempt), run_attempt=run_attempt,
+    )
+    assert located.returncode == 0, located.stdout + located.stderr
+    directory = candidate["root"] / "release-acceptance"
+    shutil.rmtree(directory, ignore_errors=True)
+    directory.mkdir()
+    (directory / "release-acceptance.json").write_text(json.dumps(receipt), encoding="utf-8")
+    if extra_file:
+        (directory / "notes.txt").write_text("unexpected", encoding="utf-8")
+    result, _, calls = runner("publish", "Verify the bound acceptance", extra={"GITHUB_RUN_ATTEMPT": run_attempt})
+    return result, calls[len(before):]
+
+
+def _inline_literal(job, name, variable):
+    program = re.search(r"\bpython3 -c '([^']*)'", step(job, name)["run"])[1]
+    for node in ast.parse(program).body:
+        if isinstance(node, ast.Assign) and any(getattr(target, "id", None) == variable for target in node.targets):
+            return ast.literal_eval(node.value)
+    raise AssertionError(f"{name} defines no {variable}.")
+
+
+def _accept(runner, candidate, *, selection=None, ref="refs/heads/main", run_attempt="1"):
+    raw = json.dumps(selection or _fleet_candidate(candidate), sort_keys=True, separators=(",", ":"))
+    result, _, calls = runner("accept", "Start acceptance for this exact candidate", extra={
+        "CANDIDATE": raw, "GITHUB_REF": ref, "GITHUB_RUN_ATTEMPT": run_attempt,
+    })
+    return result, calls, raw
+
+
+def _serve_dispatch(candidate, *, head=SHA, status=200, body=None):
+    candidate["responses"][MAIN_REF] = {
+        "status": 200, "method": "GET",
+        "body": {"ref": "refs/heads/main", "object": {"sha": head, "type": "commit"}},
+    }
+    candidate["responses"][DISPATCH] = {
+        "status": status, "method": "POST",
+        "flags": ["--include", "--input"],
+        "body": body if body is not None else {
+            "workflow_run_id": ACCEPTANCE_RUN, "run_url": f"https://api.github.com/repos/{REPO}/actions/runs/7000",
+            "html_url": f"https://github.com/{REPO}/actions/runs/{ACCEPTANCE_RUN}",
+        },
+    }
+
+
+def test_accept_holds_only_dispatch_authority_without_source_or_azure():
+    accept = JOBS["accept"]
+    assert accept["needs"] == "candidate"
+    assert accept["permissions"] == {"actions": "write", "contents": "read"}
+    assert accept["runs-on"] == "ubuntu-24.04"
+    assert "environment" not in accept and "uses" not in accept
+    assert [item.get("uses") for item in accept["steps"]] == [None]
+    started = step("accept", "Start acceptance for this exact candidate")
+    assert started["env"] == {
+        "GH_TOKEN": "${{ github.token }}", "CANDIDATE": "${{ needs.candidate.outputs.fleet-candidate }}",
+    }
+    assert "${{" not in started["run"]
+    # Only this job can start workflows, and the release workflow never reads secrets.
+    writers = [name for name, job in WORKFLOW["jobs"].items() if job.get("permissions", {}).get("actions") == "write"]
+    assert writers == ["accept"]
+    release_text = (ROOT / ".github" / "workflows" / "release.yaml").read_text(encoding="utf-8")
+    assert "secrets." not in release_text
+    # Normal CI never dispatches acceptance or acquires Azure authority.
+    ci_text = (ROOT / ".github" / "workflows" / "ci.yaml").read_text(encoding="utf-8")
+    for marker in ("e2e-test.yaml", "dispatches", "azure/login", "AZURE_CLIENT_ID", "secrets."):
+        assert marker not in ci_text, marker
+    assert not any(job.get("permissions", {}).get("actions") == "write" for job in CI_WORKFLOW["jobs"].values())
+
+
+@pytest.mark.parametrize(("result", "active", "candidate", "cancelled", "expected"), [
+    pytest.param("success", "true", "exact-candidate", False, True, id="active-candidate"),
+    pytest.param("success", "false", "exact-candidate", False, False, id="inactive-candidate"),
+    pytest.param("success", "", "exact-candidate", False, False, id="missing-active-output"),
+    pytest.param("success", "true", "", False, False, id="no-fleet-candidate"),
+    pytest.param("success", "true", None, False, False, id="missing-candidate-output"),
+    pytest.param("failure", "true", "exact-candidate", False, False, id="candidate-failed"),
+    pytest.param("skipped", "true", "exact-candidate", False, False, id="candidate-skipped"),
+    pytest.param("cancelled", "true", "exact-candidate", False, False, id="candidate-cancelled"),
+    pytest.param("success", "true", "exact-candidate", True, False, id="run-cancelled"),
+])
+def test_accept_dispatches_only_an_active_successful_fleet_candidate(
+    result, active, candidate, cancelled, expected,
+):
+    outputs = {"active": active}
+    if candidate is not None:
+        outputs["fleet-candidate"] = candidate
+    assert job_runs(
+        WORKFLOW, "accept", inputs={}, needs={"candidate": result},
+        outputs={"candidate": outputs}, cancelled=cancelled,
+    ) is expected
+
+
+@pytest.mark.parametrize(("needs", "active", "cancelled", "expected"), [
+    pytest.param({"release-runner": "success", "candidate": "success", "accept": "success"},
+                 "true", False, True, id="approved-candidate"),
+    pytest.param({"release-runner": "success", "candidate": "success", "accept": "success"},
+                 "false", False, False, id="inactive-candidate"),
+    pytest.param({"release-runner": "success", "candidate": "success", "accept": "success"},
+                 "", False, False, id="missing-active-output"),
+    pytest.param({"release-runner": "failure", "candidate": "success", "accept": "success"},
+                 "true", False, False, id="runner-failed"),
+    pytest.param({"release-runner": "skipped", "candidate": "success", "accept": "success"},
+                 "true", False, False, id="runner-skipped"),
+    pytest.param({"release-runner": "cancelled", "candidate": "success", "accept": "success"},
+                 "true", False, False, id="runner-cancelled"),
+    pytest.param({"release-runner": "success", "candidate": "failure", "accept": "success"},
+                 "true", False, False, id="candidate-failed"),
+    pytest.param({"release-runner": "success", "candidate": "skipped", "accept": "success"},
+                 "true", False, False, id="candidate-skipped"),
+    pytest.param({"release-runner": "success", "candidate": "cancelled", "accept": "success"},
+                 "true", False, False, id="candidate-cancelled"),
+    pytest.param({"release-runner": "success", "candidate": "success", "accept": "failure"},
+                 "true", False, False, id="acceptance-failed"),
+    pytest.param({"release-runner": "success", "candidate": "success", "accept": "skipped"},
+                 "true", False, False, id="acceptance-skipped"),
+    pytest.param({"release-runner": "success", "candidate": "success", "accept": "cancelled"},
+                 "true", False, False, id="acceptance-cancelled"),
+    pytest.param({"release-runner": "success", "candidate": "success", "accept": "success"},
+                 "true", True, False, id="run-cancelled"),
+])
+def test_publish_requires_successful_candidate_acceptance_and_runner(needs, active, cancelled, expected):
+    assert job_runs(
+        WORKFLOW, "publish", inputs={}, needs=needs,
+        outputs={"candidate": {"active": active}}, cancelled=cancelled,
+    ) is expected
+
+
+@pytest.mark.parametrize("run_attempt", ["1", "2"])
+def test_accept_starts_acceptance_for_the_exact_candidate(candidate, runner, run_attempt):
+    _serve_dispatch(candidate)
+    result, calls, raw = _accept(runner, candidate, run_attempt=run_attempt)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert calls[:2] == [
+        ["api", MAIN_REF],
+        ["api", "--method", "POST", "--include", DISPATCH, "--input", "-"],
+    ]
+    assert calls[2][0] == "<input>" and len(calls) == 3
+    assert json.loads(calls[2][1]) == {"ref": "main", "return_run_details": True, "inputs": {
+        "scenario": "release-acceptance", "candidate": raw, "environment": "dev", "location": "eastus2",
+    }}
+    summary = (candidate["root"].parent / "summary.md").read_text(encoding="utf-8")
+    assert f"(https://github.com/{REPO}/actions/runs/{ACCEPTANCE_RUN})" in summary
+
+
+@pytest.mark.parametrize("response", [
+    {"status": 204, "body": {}},
+    {"body": {"html_url": f"https://github.com/{REPO}/actions/runs/{ACCEPTANCE_RUN}"}},
+    {"body": {"workflow_run_id": ACCEPTANCE_RUN, "html_url": "https://example.com/runs/7000"}},
+], ids=["no-content", "missing-run", "other-run-link"])
+def test_accepted_dispatch_without_run_details_never_prompts_a_second_run(candidate, runner, response):
+    _serve_dispatch(candidate, **response)
+    result, calls, _ = _accept(runner, candidate)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "::warning::GitHub started acceptance without identifying the run" in result.stdout
+    assert sum(DISPATCH in call for call in calls) == 1
+    summary = (candidate["root"].parent / "summary.md").read_text(encoding="utf-8")
+    assert "Find the newest Release acceptance run under E2E Tests" in summary
+    assert "https://example.com" not in summary
+
+
+@pytest.mark.parametrize("fault", [
+    "moved-main", "rejected",
+    "preview", "other-producer", "later-attempt", "other-commit", "other-ref", "unreadable",
+])
+def test_accept_fails_closed(candidate, runner, fault):
+    selection = _fleet_candidate(candidate)
+    response = {}
+    ref = "refs/heads/main"
+    if fault == "moved-main":
+        response["head"] = "d" * 40
+    elif fault == "rejected":
+        response["status"] = 422
+    elif fault == "preview":
+        selection["producer"].update(preview=True, caller=".github/workflows/ci.yaml")
+    elif fault == "other-producer":
+        selection["producer"]["run"] = 41
+    elif fault == "later-attempt":
+        selection["producer"]["attempt"] = 2
+    elif fault == "other-commit":
+        selection["source"]["commit"] = "d" * 40
+    elif fault == "other-ref":
+        ref = "refs/heads/feature"
+    _serve_dispatch(candidate, **response)
+    if fault == "unreadable":
+        result, _, calls = runner("accept", "Start acceptance for this exact candidate", extra={
+            "CANDIDATE": "[]", "GITHUB_REF": ref,
+        })
+    else:
+        result, calls, _ = _accept(runner, candidate, selection=selection, ref=ref)
+    assert result.returncode != 0
+    assert "::error::" in result.stdout + result.stderr
+    dispatched = any(DISPATCH in call for call in calls)
+    assert dispatched is (fault == "rejected")
+    if fault not in {"moved-main", "rejected"}:
+        assert calls == []
+
+
+def test_publish_binds_acceptance_before_any_other_input_or_write():
+    publish = JOBS["publish"]
+    names = [item["name"] for item in publish["steps"]]
+    for earlier, later in (
+        ("Download the pinned declaration", "Locate the governing acceptance run"),
+        ("Locate the governing acceptance run", "Download the acceptance receipt"),
+        ("Download the acceptance receipt", "Verify the bound acceptance"),
+        ("Verify the bound acceptance", "Download the reviewed release notes"),
+        ("Verify the bound acceptance", "Create only the approved missing tag"),
+    ):
+        assert names.index(earlier) < names.index(later)
+    located = step("publish", "Locate the governing acceptance run")
+    assert located["env"] == {
+        "CANDIDATE": "${{ needs.candidate.outputs.fleet-candidate }}",
+        "ADMISSION_ARTIFACT_ID": "${{ needs.candidate.outputs.admission-artifact-id }}",
+    }
+    assert step("publish", "Download the acceptance receipt")["with"] == {
+        "artifact-ids": "${{ steps.acceptance.outputs.artifact-id }}", "repository": "${{ github.repository }}",
+        "run-id": "${{ steps.acceptance.outputs.run-id }}", "github-token": "${{ github.token }}",
+        "path": "${{ runner.temp }}/release-acceptance", "merge-multiple": True, "digest-mismatch": "error",
+    }
+    assert "${{" not in located["run"] and "${{" not in step("publish", "Verify the bound acceptance")["run"]
+
+
+@pytest.mark.parametrize("case", ["single", "rerun-attempt", "newer-other-admission", "newer-bound-pass", "publish-rerun"])
+def test_publish_locates_the_newest_bound_acceptance(candidate, runner, case):
+    runs = [_acceptance_run()]
+    artifacts = {ACCEPTANCE_RUN: [_receipt_artifact(), {"id": 1, "name": "site-outcome-7000-1-disabled"}]}
+    selection = _fleet_candidate(candidate)
+    run_attempt = "1"
+    expected = (ACCEPTANCE_RUN, ACCEPTANCE_RUN * 10 + 1)
+    if case == "rerun-attempt":
+        runs = [_acceptance_run(attempt=2)]
+        artifacts[ACCEPTANCE_RUN] = [_receipt_artifact(attempt=1), _receipt_artifact(attempt=2)]
+        expected = (ACCEPTANCE_RUN, ACCEPTANCE_RUN * 10 + 2)
+    elif case == "newer-other-admission":
+        # A newer run for another candidate at this commit does not govern this one.
+        runs.insert(0, _acceptance_run(run_id=7100, conclusion="failure"))
+        artifacts[7100] = [_receipt_artifact(run_id=7100, admission="b" * 64)]
+    elif case == "newer-bound-pass":
+        runs.insert(0, _acceptance_run(run_id=7100, attempt=2))
+        artifacts[7100] = [_receipt_artifact(run_id=7100, attempt=1), _receipt_artifact(run_id=7100, attempt=2)]
+        expected = (7100, 71002)
+    elif case == "publish-rerun":
+        run_attempt = "2"
+    _serve_acceptance(candidate, runs, artifacts)
+    result, outputs, calls = _locate(runner, candidate, selection=selection, run_attempt=run_attempt)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (int(outputs["run-id"]), int(outputs["artifact-id"])) == expected
+    binding = json.loads((candidate["root"] / "acceptance-binding.json").read_text(encoding="utf-8"))
+    governing = next(run for run in runs if run["id"] == expected[0])
+    assert binding["acceptance"] == {"run": governing["id"], "attempt": governing["run_attempt"]}
+    assert binding["candidate"]["producerAttempt"] == 1
+    assert all(call[:3] == ["api", "--paginate", "--slurp"] for call in calls)
+
+
+@pytest.mark.parametrize("fault", [
+    "no-runs", "running", "newer-running", "superseded-attempt", "latest-receipt-missing",
+    "newer-bound-failure", "duplicate", "expired", "missing-digest", "other-origin",
+    "other-path", "other-event", "other-branch", "other-commit", "other-repository", "other-title",
+    "other-candidate", "preview", "other-producer", "later-producer-attempt", "other-admission-id",
+    "other-plan", "listing-failure",
+    "newer-no-result", "newer-unrelated-artifact", "newer-malformed-receipt", "newer-wrong-run-receipt",
+])
+def test_publish_rejects_unbound_or_unsettled_acceptance(candidate, runner, fault):
+    runs = [_acceptance_run()]
+    artifacts = {ACCEPTANCE_RUN: [_receipt_artifact()]}
+    selection = _fleet_candidate(candidate)
+    if fault == "no-runs":
+        runs, artifacts = [], {}
+    elif fault == "running":
+        runs[0].update(status="in_progress", conclusion=None)
+    elif fault == "newer-running":
+        runs.insert(0, _acceptance_run(run_id=7100, status="queued", conclusion=None))
+    elif fault == "superseded-attempt":
+        # The older passing attempt cannot stand in for the failing latest attempt.
+        runs = [_acceptance_run(attempt=2, conclusion="failure")]
+        artifacts[ACCEPTANCE_RUN] = [_receipt_artifact(attempt=1), _receipt_artifact(attempt=2)]
+    elif fault == "latest-receipt-missing":
+        runs = [_acceptance_run(attempt=2)]
+    elif fault == "newer-bound-failure":
+        runs.insert(0, _acceptance_run(run_id=7100, conclusion="failure"))
+        artifacts[7100] = [_receipt_artifact(run_id=7100)]
+    elif fault in {"newer-no-result", "newer-unrelated-artifact", "newer-malformed-receipt", "newer-wrong-run-receipt"}:
+        runs.insert(0, _acceptance_run(run_id=7100))
+        artifacts[7100] = {
+            "newer-no-result": [],
+            "newer-unrelated-artifact": [{"name": "site-outcome-7100-1-disabled"}],
+            "newer-malformed-receipt": [{"name": "release-acceptance-7100-1-not-an-admission"}],
+            "newer-wrong-run-receipt": [_receipt_artifact(run_id=7200, admission="b" * 64)],
+        }[fault]
+    elif fault == "duplicate":
+        artifacts[ACCEPTANCE_RUN].append(_receipt_artifact(id=99))
+    elif fault == "expired":
+        artifacts[ACCEPTANCE_RUN] = [_receipt_artifact(expired=True)]
+    elif fault == "missing-digest":
+        artifacts[ACCEPTANCE_RUN] = [_receipt_artifact(digest=None)]
+    elif fault == "other-origin":
+        artifacts[ACCEPTANCE_RUN] = [_receipt_artifact(workflow_run={"id": 1, "head_sha": SHA})]
+    elif fault.startswith("other-") and fault[6:] in {"path", "event", "branch", "commit", "repository", "title"}:
+        field, value = {
+            "path": ("path", ".github/workflows/e2e-copy.yaml"), "event": ("event", "push"),
+            "branch": ("head_branch", "feature"), "commit": ("head_sha", "d" * 40),
+            "repository": ("repository", {"full_name": "fork/publisher"}), "title": ("display_title", "E2E Tests"),
+        }[fault[6:]]
+        runs[0][field] = value
+    elif fault == "other-candidate":
+        artifacts[ACCEPTANCE_RUN] = [_receipt_artifact(admission="b" * 64)]
+    elif fault == "preview":
+        selection["producer"].update(preview=True, caller=".github/workflows/ci.yaml")
+    elif fault == "other-producer":
+        selection["producer"]["run"] = 41
+    elif fault == "later-producer-attempt":
+        selection["producer"]["attempt"] = 2
+    elif fault == "other-admission-id":
+        selection["artifacts"]["admission"]["id"] = 600
+    elif fault == "other-plan":
+        selection["artifacts"]["plan"]["sha256"] = "b" * 64
+    _serve_acceptance(candidate, runs, artifacts)
+    if fault == "listing-failure":
+        candidate["responses"][RUNS]["status"] = 500
+    result, outputs, calls = _locate(runner, candidate, selection=selection)
+    output = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "run-id" not in outputs and "artifact-id" not in outputs
+    assert not (candidate["root"] / "acceptance-binding.json").exists()
+    message = {
+        "running": "still running", "newer-running": "still running", "superseded-attempt": "did not pass",
+        "newer-bound-failure": "did not pass", "no-runs": "No acceptance evidence",
+        "other-candidate": "No acceptance evidence", "latest-receipt-missing": "no single valid receipt",
+        "listing-failure": "could not list",
+        **dict.fromkeys(("newer-no-result", "newer-unrelated-artifact", "newer-malformed-receipt",
+                         "newer-wrong-run-receipt"), (
+            "::error::The newest acceptance run for this commit recorded no result. "
+            "Re-run it, or start acceptance for this candidate, then re-run publish."
+        )),
+    }.get(fault)
+    if message:
+        assert message in output
+    if fault in {"preview", "other-producer", "later-producer-attempt", "other-admission-id", "other-plan"}:
+        assert "not this approved main candidate" in output and calls == []
+    assert not any("--method" in call for call in calls)
+
+
+@pytest.mark.parametrize(("run_attempt", "producer_attempt", "acceptance_attempt", "bundle"), [
+    ("1", 1, 1, True), ("2", 1, 1, True), ("2", 2, 1, True), ("1", 1, 3, True), ("1", 1, 1, False),
+])
+def test_publish_accepts_a_receipt_bound_to_this_candidate(
+    candidate, runner, run_attempt, producer_attempt, acceptance_attempt, bundle,
+):
+    candidate["plan"]["siteops"]["bundle"] = bundle
+    receipt = _release_receipt(candidate, attempt=acceptance_attempt, producer_attempt=producer_attempt, bundle=bundle)
+    result, calls = _verify(runner, candidate, receipt, run_attempt=run_attempt, producer_attempt=producer_attempt,
+                            acceptance_attempt=acceptance_attempt)
+    assert result.returncode == 0, result.stdout + result.stderr
+    summary = (candidate["root"].parent / "summary.md").read_text(encoding="utf-8")
+    assert f"/actions/runs/{ACCEPTANCE_RUN}/attempts/{acceptance_attempt})" in summary
+    assert "| fleet | passed | ephemeral | confirmed-absent |" in summary
+    assert "| site-aio | passed | persistent | confirmed-absent |" in summary
+    assert calls == []
+
+
+@pytest.mark.parametrize("fault", [
+    "other-repository", "other-commit", "other-producer-run", "producer-run-text", "other-producer-attempt",
+    "preview", "other-admission", "other-plan", "other-inventory", "other-acceptance-run",
+    "older-acceptance-attempt", "environment", "transport", "status", "failed-row", "residual-cleanup",
+    "missing-assertion", "reordered-rows", "extra-key", "row-extra-key", "unknown-groups", "extra-file",
+    "installer-not-applicable", "installer-cleanup", "installer-groups", "site-groups-unknown",
+    "fleet-groups-not-applicable", "fleet-purged", "installer-purged", "site-purge-not-attempted",
+])
+def test_publish_rejects_a_receipt_that_does_not_bind(candidate, runner, fault):
+    receipt = _release_receipt(candidate)
+    rows = {row["scenario"]: row for row in receipt["scenarios"]}
+    changes = {
+        "other-repository": ("candidate", "repository", "fork/publisher"),
+        "other-commit": ("candidate", "sourceCommit", "d" * 40),
+        "other-producer-run": ("candidate", "producerRun", 41),
+        "producer-run-text": ("candidate", "producerRun", "42"),
+        "other-producer-attempt": ("candidate", "producerAttempt", 2),
+        "preview": ("candidate", "preview", True),
+        "other-admission": ("candidate", "admissionSha256", "b" * 64),
+        "other-plan": ("candidate", "planSha256", "b" * 64),
+        "other-inventory": ("candidate", "inventorySha256", "b" * 64),
+        "other-acceptance-run": ("acceptance", "run", 7100),
+        "older-acceptance-attempt": ("acceptance", "attempt", 0),
+    }
+    if fault in changes:
+        section, key, value = changes[fault]
+        receipt[section][key] = value
+    elif fault in {"environment", "transport", "status"}:
+        receipt[fault] = {"environment": "prod", "transport": "public", "status": "failed"}[fault]
+    elif fault == "failed-row":
+        rows["site-existing-secretsync"]["status"] = "failed"
+    elif fault == "residual-cleanup":
+        rows["fleet"]["cleanup"] = "residual"
+    elif fault == "missing-assertion":
+        rows["site-combined"]["assertions"].remove("vault-created-by-enablement")
+    elif fault == "reordered-rows":
+        receipt["scenarios"].reverse()
+    elif fault == "extra-key":
+        receipt["note"] = "PRIVATE_NOTE"
+    elif fault == "row-extra-key":
+        rows["site-aio"]["resourceGroup"] = "PRIVATE_GROUP"
+    elif fault == "unknown-groups":
+        rows["site-aio"]["groups"] = "shared"
+    elif fault == "installer-not-applicable":
+        rows["installer"].update(status="not-applicable", assertions=[])
+    elif fault == "installer-cleanup":
+        rows["installer"]["cleanup"] = "confirmed-absent"
+    elif fault in {"installer-groups", "site-groups-unknown", "fleet-groups-not-applicable"}:
+        scenario, value = {"installer-groups": ("installer", "persistent"),
+                           "site-groups-unknown": ("site-aio", "unknown"),
+                           "fleet-groups-not-applicable": ("fleet", "not-applicable")}[fault]
+        rows[scenario]["groups"] = value
+    elif fault in {"fleet-purged", "installer-purged", "site-purge-not-attempted"}:
+        scenario, value = {"fleet-purged": ("fleet", "purged"), "installer-purged": ("installer", "failed"),
+                           "site-purge-not-attempted": ("site-aio", "not-attempted")}[fault]
+        rows[scenario]["vaultPurge"] = value
+    result, calls = _verify(runner, candidate, receipt, extra_file=fault == "extra-file")
+    output = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "::error::" in output
+    assert "PRIVATE_" not in output
+    summary = candidate["root"].parent / "summary.md"
+    assert not summary.exists() or "Bound candidate acceptance" not in summary.read_text(encoding="utf-8")
+    assert calls == []
+
+
+@pytest.mark.parametrize(("scenario", "key", "value"), [
+    ("site-aio", "vaultPurge", "purged"), ("site-existing-secretsync", "vaultPurge", "failed"),
+    ("site-combined", "vaultPurge", "not-applicable"), ("site-aio", "groups", "ephemeral"),
+    ("fleet", "groups", "persistent"),
+])
+def test_publish_accepts_every_row_value_the_aggregator_writes(candidate, runner, scenario, key, value):
+    receipt = _release_receipt(candidate)
+    next(row for row in receipt["scenarios"] if row["scenario"] == scenario)[key] = value
+    result, _ = _verify(runner, candidate, receipt)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_publish_accepts_the_receipt_the_acceptance_aggregator_writes(candidate, runner):
+    spec = importlib.util.spec_from_file_location("release_acceptance_contract", ROOT / "scripts" / "release_acceptance.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    from fleet_workflow import FleetCandidate
+
+    selection = FleetCandidate.parse(
+        json.dumps(_fleet_candidate(candidate)).encode(), repository=REPO, commit=SHA, ref="refs/heads/main",
+    )
+    rows = [module.row("installer", "passed", module.ASSERTIONS["installer"])] + [
+        module.row(name, "passed", module.ASSERTIONS[name], "confirmed-absent", groups="persistent")
+        for name in module.SCENARIOS[1:]
+    ]
+    receipt = module.receipt(selection, run=ACCEPTANCE_RUN, attempt=1, environment="dev", rows=rows, complete=True)
+    result, _ = _verify(runner, candidate, receipt)
+    assert result.returncode == 0, result.stdout + result.stderr
+    inline = _inline_literal("publish", "Verify the bound acceptance", "assertions")
+    assert list(inline) == list(module.SCENARIOS)
+    assert {name: tuple(values) for name, values in inline.items()} == module.ASSERTIONS

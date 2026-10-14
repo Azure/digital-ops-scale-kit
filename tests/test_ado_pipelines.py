@@ -392,7 +392,16 @@ def test_manifest_discovery_requires_a_complete_nonempty_inventory(tmp_path, pla
         (workspace / "manifests").rmdir()
     if case == "discovery-failure":
         write_executable(binary / "find", "#!/usr/bin/env bash\nexit 37\n")
-    write_executable(binary / "siteops", "#!/usr/bin/env bash\necho called >> calls\n")
+    write_executable(binary / "siteops", """#!/usr/bin/env bash
+echo called >> calls
+echo '{"apiVersion":"siteops/v1alpha1","kind":"ValidationResult","engine":{"name":"siteops","version":"1.0.0"},"projection":"publishable","status":"valid","exitCode":0,"summary":{"diagnosticCount":0,"targetResolution":"complete"},"diagnostics":[]}'
+""")
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "render-siteops-output.py").write_bytes(
+        (ROOT / "scripts" / "render-siteops-output.py").read_bytes(),
+    )
+    write_executable(binary / "python3",
+                     f'#!/usr/bin/env bash\nexec "{bash_path(Path(sys.executable))}" "$@"\n')
     summary = tmp_path / "summary.md"
     github = ROOT / ".github" / "workflows" / "ci.yaml"
     script = _step(github if platform == "github" else CI,
@@ -401,7 +410,8 @@ def test_manifest_discovery_requires_a_complete_nonempty_inventory(tmp_path, pla
     body = body.replace("$(Build.ArtifactStagingDirectory)", bash_path(tmp_path))
     result = run_script(
         body, tmp_path,
-        {"WORKSPACE_DIR": "workspaces/iot-operations", "GITHUB_OUTPUT": bash_path(summary)},
+        {"WORKSPACE_DIR": "workspaces/iot-operations", "GITHUB_OUTPUT": bash_path(summary),
+         "STATE_PARENT": bash_path(tmp_path)},
         shell_options=("-e", "-o", "pipefail") if platform == "github" else (),
     )
     assert (result.returncode == 0) is (case == "valid"), (result.stdout, result.stderr)
@@ -414,6 +424,9 @@ def test_manifest_discovery_requires_a_complete_nonempty_inventory(tmp_path, pla
 def test_override_masks_encode_values_as_single_logging_commands(tmp_path, platform, integration):
     binary = tmp_path / "bin"
     binary.mkdir()
+    sites = tmp_path / "workspace" / "sites"
+    sites.mkdir(parents=True)
+    (sites / "test-site.yaml").write_text("kind: Site\n", encoding="utf-8")
     scripts = tmp_path / "scripts"
     scripts.mkdir()
     for name in ("generate-site-overrides.py", "mask-site-overrides.py"):

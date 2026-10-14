@@ -22,6 +22,14 @@ from siteops.compilation import (
     VersionProvenance,
     detect_template_kind,
 )
+from siteops.diagnostics import (
+    CAPABILITY_SUMMARIES,
+    ContentDiagnostic,
+    public_document,
+    public_entry,
+    render_diagnostics,
+    resolve_member,
+)
 
 STEP_OUTPUT_PATTERN = re.compile(
     r"\{\{\s*steps\.([a-zA-Z0-9_-]+)\.outputs\."
@@ -180,12 +188,15 @@ class PlanNotExecutableError(ValueError):
             for diagnostic in self.result.diagnostics
             if diagnostic.severity is DiagnosticSeverity.ERROR
         ] or list(self.result.diagnostics)
-        texts = list(dict.fromkeys(
-            _publishable_diagnostic(diagnostic)["summary"]
-            if redacted
-            else diagnostic.detail or diagnostic.summary
-            for diagnostic in diagnostics
-        ))
+        texts = []
+        for diagnostic in diagnostics:
+            if redacted:
+                public = _publishable_diagnostic(diagnostic)
+                text = f"{public['code']}: {public['summary']}\n{public['guidance']}\n{public['documentation']}"
+            else:
+                text = diagnostic.detail or diagnostic.summary
+            if text not in texts:
+                texts.append(text)
         if not texts:
             return "The deployment plan is not executable."
         if len(texts) == 1:
@@ -213,8 +224,11 @@ _DESCRIBE_NOTE = (
 class PlanValueResolutionError(ValueError):
     """Runtime failure with separate local and publishable messages."""
 
-    def __init__(self, detail: str, public_message: str):
+    def __init__(
+        self, detail: str, public_message: str, *, diagnostic: ContentDiagnostic | None = None,
+    ):
         self.public_message = public_message
+        self.diagnostic = diagnostic
         super().__init__(detail)
 
 
@@ -687,6 +701,7 @@ class PlanDiagnostic:
     detail: str | None = None
     serialized_detail: str | None = None
     public_summary: str | None = None
+    content_diagnostic: ContentDiagnostic | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.code, "Diagnostic code")
@@ -1394,7 +1409,7 @@ def render_plain_plan(
     plan = result.plan
     if plan is None:
         lines = ["Deployment plan is unavailable."]
-        for diagnostic in result.diagnostics:
+        for diagnostic in _distinct_local_diagnostics(result.diagnostics):
             lines.extend(_diagnostic_lines(diagnostic, indent="  "))
         lines.append("")
         return _plain_text(lines)
@@ -1460,9 +1475,10 @@ def render_plain_plan(
             if target.kind is TargetKind.RESOURCE_GROUP else "      Scope: subscription",
         ))
 
+    presented_details: set[str] = set()
     if plan.composition_enabled:
         lines.extend(("", "  Resource composition:"))
-        _render_local_composition(lines, plan.targets)
+        _render_local_composition(lines, plan.targets, presented_details)
 
     operations_by_step: dict[str, list[PreparedOperation]] = {}
     for target in plan.targets:
@@ -1479,9 +1495,13 @@ def render_plain_plan(
             len(plan.targets),
         )
 
-    if result.diagnostics:
+    remaining_diagnostics = tuple(
+        diagnostic for diagnostic in _distinct_local_diagnostics(result.diagnostics)
+        if (diagnostic.detail or diagnostic.summary) not in presented_details
+    )
+    if remaining_diagnostics:
         lines.extend(("", "  Diagnostics:"))
-        for diagnostic in result.diagnostics:
+        for diagnostic in remaining_diagnostics:
             lines.extend(_diagnostic_lines(diagnostic, indent="    "))
 
     disposition_counts = {
@@ -1530,6 +1550,23 @@ def _diagnostic_lines(diagnostic: PlanDiagnostic, *, indent: str) -> list[str]:
         f"{indent}{diagnostic.severity.value.capitalize()}: {first}",
         *(f"{indent}  {line}" for line in rest),
     ]
+
+
+def _distinct_local_diagnostics(diagnostics: tuple[PlanDiagnostic, ...]) -> tuple[PlanDiagnostic, ...]:
+    typed_details = {
+        diagnostic.detail or diagnostic.summary
+        for diagnostic in diagnostics if diagnostic.content_diagnostic is not None
+    }
+    seen = set()
+    result = []
+    for diagnostic in diagnostics:
+        detail = diagnostic.detail or diagnostic.summary
+        if diagnostic.content_diagnostic is None and detail in typed_details:
+            continue
+        if detail not in seen:
+            result.append(diagnostic)
+            seen.add(detail)
+    return tuple(result)
 
 
 def _operation_counts(dispositions: Mapping[str, int]) -> str:
@@ -1585,10 +1622,7 @@ def _render_publishable_plan(document: Mapping[str, Any]) -> str:
         )
     if document["diagnostics"]:
         lines.extend(("", "  Diagnostics:"))
-        lines.extend(
-            f"    {diagnostic['severity'].capitalize()}: {diagnostic['summary']}"
-            for diagnostic in document["diagnostics"]
-        )
+        lines.extend(render_diagnostics(document["diagnostics"], indent="    "))
     lines.append("")
     return _plain_text(lines)
 
@@ -1596,13 +1630,18 @@ def _render_publishable_plan(document: Mapping[str, Any]) -> str:
 def _render_local_composition(
     lines: list[str],
     targets: tuple[PreparedTarget, ...],
+    presented_details: set[str],
 ) -> None:
     for target in targets:
         lines.append(f"    {target.name}:")
         if target.diagnostics:
-            for diagnostic in target.diagnostics:
+            for diagnostic in _distinct_local_diagnostics(target.diagnostics):
+                detail = diagnostic.detail or diagnostic.summary
+                if detail in presented_details:
+                    continue
+                presented_details.add(detail)
                 first, *rest = terminal.sanitize_lines(
-                    diagnostic.detail or diagnostic.summary
+                    detail
                 )
                 lines.append(f"      error: {first}")
                 lines.extend(f"        {line}" for line in rest)
@@ -1800,131 +1839,27 @@ def _render_data_reference(reference: DataReference) -> str:
 # Fixed tool names and remedies that plan and run projections both publish.
 # Bicep templates compile through Azure CLI, so template compiler failures
 # share one remedy.
-BICEP_COMPILER_SUMMARY = (
-    "Azure CLI (`az`) with Bicep is required for Bicep template steps. Install "
-    "Azure CLI from https://aka.ms/installazurecli, run `az bicep install`, "
-    "then rerun the command."
-)
-PUBLISHABLE_CAPABILITY_SUMMARIES = {
-    "capability.arm-control-plane.missing": (
-        "Azure CLI (`az`) is required for deployment and wait steps. Install "
-        "it from https://aka.ms/installazurecli, then rerun the command."
-    ),
-    "capability.bicep-compiler.missing": BICEP_COMPILER_SUMMARY,
-    "capability.kubectl.missing": (
-        "kubectl is required for kubectl steps. Install it from "
-        "https://kubernetes.io/docs/tasks/tools/, then rerun the command."
-    ),
-    "capability.arc-proxy.missing": (
-        "Azure CLI (`az`) and its connectedk8s extension are required for "
-        "kubectl steps. Install Azure CLI from https://aka.ms/installazurecli, "
-        "run `az extension add --name connectedk8s`, then rerun the command."
-    ),
-}
+PUBLISHABLE_CAPABILITY_SUMMARIES = CAPABILITY_SUMMARIES
 
-_PUBLISHABLE_DIAGNOSTICS = {
-    "composition.invalid": (
-        "plan.composition-invalid",
-        "Resource composition failed. Set SITEOPS_REDACT_OUTPUT=0, then rerun "
-        "the command locally for source and identity details.",
-    ),
-    **{
-        code: ("plan.capability-unavailable", summary)
-        for code, summary in PUBLISHABLE_CAPABILITY_SUMMARIES.items()
-    },
-    "compilation.failed": (
-        "plan.compilation-failed",
-        "Template compilation failed.",
-    ),
-    "compilation.input-changed": (
-        "plan.compilation-failed",
-        "Template compilation failed.",
-    ),
-    "compilation.module-unavailable": (
-        "plan.compilation-failed",
-        "Template compilation failed.",
-    ),
-    "compilation.output-invalid": (
-        "plan.compilation-failed",
-        "Template compilation failed.",
-    ),
-    "compilation.source-unreadable": (
-        "plan.compilation-failed",
-        "Template compilation failed.",
-    ),
-    "compilation.timeout": (
-        "plan.compilation-failed",
-        "Template compilation failed.",
-    ),
-    "compilation.tool-missing": (
-        "plan.capability-unavailable",
-        BICEP_COMPILER_SUMMARY,
-    ),
-    "compilation.tool-unavailable": (
-        "plan.capability-unavailable",
-        BICEP_COMPILER_SUMMARY,
-    ),
-    "operation-preparation.invalid": (
-        "plan.operation-preparation-failed",
-        "Operation preparation failed.",
-    ),
-    "operation.dependency-blocked": (
-        "plan.dependency-blocked",
-        "A required prior operation is unavailable.",
-    ),
-    "parameter-selection.invalid": (
-        "plan.parameter-selection-invalid",
-        "Parameter file selection failed. Set SITEOPS_REDACT_OUTPUT=0, then "
-        "rerun the command locally for Site and path details.",
-    ),
-    "plan.targeting.required": (
-        "plan.targeting-required",
-        "Add `sites:` or `selector:` to the manifest, or pass "
-        "`-l <key>=<value>`.",
-    ),
-    "plan.targeting.empty": (
-        "plan.targeting-empty",
-        "No Sites matched the selected criteria.",
-    ),
-    "plan.target-set-incomplete": (
-        "plan.target-set-incomplete",
-        "The selected target set is incomplete.",
-    ),
-    "subscription-target.missing": (
-        "plan.subscription-target-missing",
-        "A required subscription target is missing.",
-    ),
-    "validation.failed": (
-        "plan.validation-failed",
-        "Manifest validation failed.",
-    ),
-}
+
+def content_plan_diagnostic(issue: ContentDiagnostic) -> PlanDiagnostic:
+    entry = public_entry(resolve_member(issue.code, "DeploymentPlan"), issue.subject)
+    return PlanDiagnostic(
+        code=issue.code, severity=DiagnosticSeverity.ERROR, summary=entry.summary,
+        detail=issue.private_detail or entry.summary, content_diagnostic=issue,
+    )
 
 
 def _publishable_diagnostic(
     diagnostic: PlanDiagnostic,
+    *, private: bool = False,
 ) -> dict[str, str]:
-    if diagnostic.public_summary is not None and (
-        diagnostic.code in {"inputs.invalid", "site.invalid", "plan.targeting.conflict"}
-        or diagnostic.code.startswith("inputs.resource.")
-    ):
-        return {
-            "code": diagnostic.code,
-            "severity": diagnostic.severity.value,
-            "summary": diagnostic.public_summary,
-        }
-    code, summary = _PUBLISHABLE_DIAGNOSTICS.get(
-        diagnostic.code,
-        (
-            "plan.diagnostic",
-            "Plan processing reported a diagnostic.",
-        ),
+    content = diagnostic.content_diagnostic
+    return public_document(
+        resolve_member(diagnostic.code, "DeploymentPlan", private=private), diagnostic.severity.value,
+        subject=content.subject if content else None,
+        schema_field=content.schema_field if content else None,
     )
-    return {
-        "code": code,
-        "severity": diagnostic.severity.value,
-        "summary": summary,
-    }
 
 
 def serialize_plan(
@@ -2076,13 +2011,12 @@ def _local_private_plan_document(
 def _local_diagnostic_document(
     diagnostic: PlanDiagnostic,
 ) -> dict[str, Any]:
-    document = {
-        "code": diagnostic.code,
-        "severity": diagnostic.severity.value,
-        "summary": diagnostic.summary,
-    }
-    if diagnostic.serialized_detail is not None:
-        document["detail"] = diagnostic.serialized_detail
+    document: dict[str, Any] = _publishable_diagnostic(diagnostic, private=True)
+    document["code"] = diagnostic.code
+    if diagnostic.content_diagnostic is not None:
+        context = diagnostic.content_diagnostic.document(private=True).get("context")
+        if context:
+            document["context"] = context
     return document
 
 
