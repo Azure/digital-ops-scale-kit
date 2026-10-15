@@ -180,7 +180,7 @@ jobs:
               raise SystemExit("::error::Release artifacts require the admitted Linux self-hosted runner.")
 
       - name: Download the pinned declaration
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.candidate.outputs.plan-artifact-id }}
           repository: ${{ github.repository }}
@@ -306,7 +306,7 @@ jobs:
           ' >> "$GITHUB_OUTPUT"
 
       - name: Download the acceptance receipt
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ steps.acceptance.outputs.artifact-id }}
           repository: ${{ github.repository }}
@@ -413,7 +413,7 @@ jobs:
           '
 
       - name: Download the reviewed release notes
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.candidate.outputs.notes-artifact-id }}
           repository: ${{ github.repository }}
@@ -424,7 +424,7 @@ jobs:
           digest-mismatch: error
 
       - name: Download the frozen asset list
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.candidate.outputs.assets-artifact-id }}
           repository: ${{ github.repository }}
@@ -436,7 +436,7 @@ jobs:
 
       - name: Download the qualified release assets
         if: needs.candidate.outputs.bundle == 'true' || needs.candidate.outputs.workspaces == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.candidate.outputs.payload-artifact-id }}
           repository: ${{ github.repository }}
