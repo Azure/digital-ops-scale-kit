@@ -299,7 +299,7 @@ jobs:
       - name: Retain the declaration and notes
         id: upload
         if: steps.plan.outputs.active == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-plan-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/release-plan
@@ -503,7 +503,7 @@ jobs:
 
       - name: Retain verified workspace assets
         id: upload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: workspace-release-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/workspace-release
@@ -658,7 +658,7 @@ jobs:
 
       - name: Retain selected engine inputs
         id: upload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: workspace-engine-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/selected-engine
@@ -669,7 +669,7 @@ jobs:
 
       - name: Retain the engine reference subject
         id: reference-upload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: engine-reference-subject-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/engine-reference/siteops-engine.json
@@ -781,7 +781,7 @@ jobs:
 
       - name: Retain signed engine reference
         id: upload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: engine-reference-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/engine-reference-attested
@@ -928,7 +928,7 @@ jobs:
           fi
 
       - name: Retain workspace qualification result
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: workspace-qualification-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.platform }}-${{ matrix.python }}
           path: ${{ runner.temp }}/workspace-qualification.json
@@ -1605,7 +1605,7 @@ jobs:
       - name: Retain the complete publication payload
         id: payload-upload
         if: needs.prepare.outputs.bundle == 'true' || needs.prepare.outputs.workspaces == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-payload-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/release-payload
@@ -1626,7 +1626,7 @@ jobs:
 
       - name: Retain the final release notes
         id: notes-upload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-notes-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/publish-notes.md
@@ -1636,7 +1636,7 @@ jobs:
 
       - name: Retain the frozen asset list
         id: assets-upload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-assets-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/final-release-assets/release-assets.json
@@ -1798,7 +1798,7 @@ jobs:
 
       - name: Retain the admission receipt
         id: upload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: candidate-admission-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/candidate-admission/receipt.json
