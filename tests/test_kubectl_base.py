@@ -9,6 +9,11 @@ is unit-tested here.
 
 from __future__ import annotations
 
+from unittest.mock import Mock
+
+import pytest
+
+from tests.integration.helpers import kube
 from tests.integration.helpers.kube import _kubectl_base
 
 
@@ -40,3 +45,25 @@ def test_base_read_at_every_call_not_cached(monkeypatch):
     second = _kubectl_base()
     assert first == ["kubectl", "--kubeconfig", "/path/one"]
     assert second == ["kubectl", "--kubeconfig", "/path/two"]
+
+
+@pytest.mark.parametrize("crd_present", [False, True])
+def test_opcua_template_discovery_handles_a_disabled_feature(monkeypatch, crd_present):
+    resource = "connectortemplates.akri.iotoperations.azure.com"
+    read = Mock(side_effect=[
+        {"items": [{"metadata": {"name": resource}}] if crd_present else []},
+        {"items": [{"metadata": {"name": "azureiotoperationsconnectorforopcua-one"}},
+                   {"metadata": {"name": "unrelated"}}]},
+    ])
+    monkeypatch.setattr(kube, "kubectl_json", read)
+    assert kube.list_opcua_connector_templates("aio") == (
+        ["azureiotoperationsconnectorforopcua-one"] if crd_present else []
+    )
+    assert read.call_count == (2 if crd_present else 1)
+
+
+def test_opcua_template_discovery_does_not_hide_cluster_read_errors(monkeypatch):
+    read = Mock(side_effect=kube.KubectlError("denied", 1, "Forbidden"))
+    monkeypatch.setattr(kube, "kubectl_json", read)
+    with pytest.raises(kube.KubectlError, match="denied"):
+        kube.list_opcua_connector_templates("aio")

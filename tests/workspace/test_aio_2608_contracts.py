@@ -1,7 +1,8 @@
-"""Workspace contracts for the AIO 2608 release."""
+"""Workspace contracts for the AIO 2608 and 2609 releases."""
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 
@@ -14,17 +15,25 @@ def _release(workspace: Path, release: str) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
-def test_2608_release_metadata_matches_the_public_matrix(workspace):
-    release = _release(workspace, "2608")
+@pytest.mark.parametrize(("release_name", "aio", "connector", "cert_manager", "secret_store"), [
+    ("2608", "1.4.73", "1.4.11", "1.0.0", "1.5.2"),
+    ("2609", "1.4.112", "1.4.14", "1.1.2", "1.5.3"),
+])
+def test_release_metadata_matches_the_public_release(workspace, release_name, aio, connector, cert_manager, secret_store):
+    release = _release(workspace, release_name)
 
-    assert release["aioVersion"] == "1.4.73"
+    assert release["aioVersion"] == aio
     assert release["aioTrain"] == "stable"
     assert release["aioApiVersion"] == "2026-07-01"
     assert release["adrApiVersion"] == "2026-04-01"
-    assert release["certManagerVersion"] == "1.0.0"
+    assert release["certManagerVersion"] == cert_manager
     assert release["certManagerTrain"] == "stable"
-    assert release["secretStoreVersion"] == "1.5.2"
+    assert release["secretStoreVersion"] == secret_store
     assert release["secretStoreTrain"] == "stable"
+    assert release["aioReleaseConfiguration"] == {
+        "extension": {"wasmGraphControllerMqttTrust": True},
+        "resources": {"opcUaConnector": {"version": connector}},
+    }
 
 
 def test_2608_enables_only_its_release_specific_aio_settings(workspace):
@@ -38,7 +47,7 @@ def test_2608_enables_only_its_release_specific_aio_settings(workspace):
         },
         "resources": {
             "opcUaConnector": {
-                "version": "1.4.10",
+                "version": "1.4.11",
             },
         },
     }
@@ -70,8 +79,9 @@ def test_connector_template_module_is_shared_by_install_and_upgrade(workspace):
     assert module_path in create_module
     assert module_path in upgrade_module
     assert module_path not in update_extensions
-    assert "if (!empty(opcuaConnectorVersion))" in create_module
-    assert "if (!empty(opcuaConnectorVersion))" in upgrade_module
+    condition = "if (!empty(opcuaConnectorVersion) && opcUaFeatureMode != 'Disabled')"
+    assert condition in create_module
+    assert condition in upgrade_module
     assert "uniqueString(aioInstance.name)" in create_module
     assert "uniqueString(aioInstanceName)" in upgrade_module
     assert "aioApiVersion == '2026-07-01'" in upgrade_dispatcher
@@ -242,8 +252,9 @@ def test_2608_wasm_mqtt_trust_flows_through_install_and_upgrade(workspace):
     assert "wasmGraphControllerMqttTrust" in update_extensions
 
 
-def test_2608_cert_manager_defaults_match_the_release(workspace):
-    release = _release(workspace, "2608")
+@pytest.mark.parametrize("release_name", ["2608", "2609"])
+def test_cert_manager_defaults_match_the_release(workspace, release_name):
+    release = _release(workspace, release_name)
 
     assert release["certManagerConfigurationOverrides"] == {
         "trust-manager.secretTargets.enabled": "false",

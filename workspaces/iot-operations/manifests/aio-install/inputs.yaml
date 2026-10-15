@@ -81,7 +81,7 @@ inputs:
     type: string
     description: AIO release configuration selected by this workspace.
     sitePath: properties.aioRelease
-    default: "2608"
+    default: "2609"
   - name: enableCertManager
     type: boolean
     description: Install the cert-manager Arc extension.

@@ -5,6 +5,7 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
+import pytest
 import yaml
 
 from siteops.orchestrator import Orchestrator
@@ -157,7 +158,8 @@ class TestSiteInvariants:
                 f"`selector: scope=subscription`."
             )
 
-    def test_e2e_fallback_inherits_resolves(self, tmp_path, workspace):
+    @pytest.mark.parametrize("release", [None, "2608", "2609"])
+    def test_e2e_fallback_inherits_resolves(self, tmp_path, workspace, release):
         """A site file in an extras dir with `inherits: base-site.yaml` should
         resolve via the workspace fallback (this is what the e2e workflow
         relies on when the rendered site lives in a tmp dir)."""
@@ -171,14 +173,14 @@ class TestSiteInvariants:
             "subscription: '00000000-0000-0000-0000-000000000000'\n"
             "resourceGroup: rg-fallback\n"
             "location: eastus\n"
+            + (f'properties:\n  aioRelease: "{release}"\n' if release else "")
         )
 
         from siteops.orchestrator import Orchestrator
         orch = Orchestrator(workspace, extra_trusted_sites_dirs=[tmp_path / "rendered"])
         site = orch.load_site("fallback-test-site")
         assert site.name == "fallback-test-site"
-        # The base inherits should have been applied: aioRelease comes from base-site.yaml.
-        assert site.properties.get("aioRelease") == "2608"
+        assert site.properties.get("aioRelease") == (release or "2609")
 
     def test_extras_dir_overlays_workspace_site_with_same_name(self, tmp_path, workspace):
         """When an extras dir contains a site file with the same name as one

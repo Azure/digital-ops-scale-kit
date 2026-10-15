@@ -46,6 +46,7 @@ FULL_ENV = {
     "E2E_SUBSCRIPTION": "00000000-0000-0000-0000-000000000000",
     "E2E_LOCATION": "eastus2",
     "E2E_ENABLE_SECRET_SYNC": "true",
+    "E2E_OPCUA_MODE": "Stable",
 }
 
 
@@ -148,6 +149,11 @@ class TestComputeDefaults:
         with pytest.raises(RuntimeError, match="must be `true` or `false`"):
             render_e2e_site.compute_defaults(values)
 
+    def test_opcua_mode_defaults_to_stable_and_rejects_invalid_values(self):
+        assert render_e2e_site.compute_defaults(FULL_ENV)["E2E_OPCUA_MODE"] == "Stable"
+        with pytest.raises(RuntimeError, match="E2E_OPCUA_MODE"):
+            render_e2e_site.compute_defaults({**FULL_ENV, "E2E_OPCUA_MODE": "enabled"})
+
 
 class TestRender:
     def _make_template(self, tmp_path: Path, body: str) -> Path:
@@ -228,6 +234,28 @@ class TestRealTemplate:
         doc = yaml.safe_load(out)
         assert doc["properties"]["deployOptions"]["enableSecretSync"] is False
 
+    @pytest.mark.parametrize("mode", [None, "Stable", "Disabled"])
+    def test_opcua_mode_reaches_the_resolved_site(self, tmp_path, mode):
+        root = Path(__file__).parent.parent
+        template = root / "tests" / "e2e" / "sites" / "e2e-test.yaml.tmpl"
+        values = dict(FULL_ENV)
+        values.pop("E2E_OPCUA_MODE")
+        if mode is not None:
+            values["E2E_OPCUA_MODE"] = mode
+        rendered = render_e2e_site.render(template, values)
+        document = yaml.safe_load(rendered)
+        (tmp_path / "site.yaml").write_text(rendered, encoding="utf-8")
+        site = Orchestrator(root / "workspaces" / "iot-operations", extra_trusted_sites_dirs=[tmp_path]).load_site(
+            FULL_ENV["E2E_SITE_NAME"],
+        )
+        if mode == "Disabled":
+            expected = {"opcua": {"mode": "Disabled", "settings": {}}}
+            assert document["parameters"]["features"] == expected
+            assert site.parameters["features"] == expected
+        else:
+            assert "features" not in document["parameters"]
+            assert "features" not in site.parameters
+
     def test_published_template_is_a_self_contained_operator_site(self, tmp_path):
         template = (
             Path(__file__).parent.parent
@@ -241,6 +269,7 @@ class TestRealTemplate:
         document = yaml.safe_load(rendered)
 
         assert "inherits" not in document
+        assert "features" not in document["parameters"]
         assert document["properties"]["deployOptions"] == {
             "enableGlobalSite": False,
             "enableEdgeSite": False,

@@ -106,7 +106,7 @@ Both steps are gated by a `when` condition on their includes in `aio-install` an
 
 ### Option 2: Standalone enablement on existing instances
 
-For AIO 2607 or 2608, the [guided route with an instance ID](guided-inputs.md#enable-secret-sync-on-an-existing-instance)
+For AIO 2607, 2608 or 2609, the [guided route with an instance ID](guided-inputs.md#enable-secret-sync-on-an-existing-instance)
 needs only the existing instance resource ID and explicit read permission.
 It resolves the related cluster and checks identity prerequisites before
 deployment. Optional answers select an existing vault or override Site labels.

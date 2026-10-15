@@ -810,7 +810,7 @@ AIO_RELEASE_EXTENSION_OPTIONAL_FIELDS = {
 }
 AIO_RELEASE_EXTENSION_SCOPED_FIELDS = {
     "securityPkiSubjectName": ({2605, 2606}, bool),
-    "wasmGraphControllerMqttTrust": ({2608}, bool),
+    "wasmGraphControllerMqttTrust": ({2608, 2609}, bool),
 }
 AIO_RELEASE_RESOURCE_SCOPED_FIELDS = {
     "opcUaConnector": (2608, dict),

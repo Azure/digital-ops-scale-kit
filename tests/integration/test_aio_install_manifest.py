@@ -17,7 +17,7 @@ from tests.integration.helpers.assertions import (
     site_results,
 )
 from tests.integration.helpers.azure import run_az
-from tests.integration.helpers.kube import is_pod_ready, list_pods
+from tests.integration.helpers.kube import is_pod_ready, list_opcua_connector_templates, list_pods
 from tests.integration.helpers.releases import load_aio_release
 
 pytestmark = [pytest.mark.integration]
@@ -169,6 +169,26 @@ class TestAioInstallVersioning:
                 f"expected {expected!r} (from {version_config.name}), "
                 f"deployed {deployed_version!r}. The versioned-templates dispatch "
                 f"selected the wrong API version or the version YAML is stale."
+            )
+
+    def test_opcua_connector_template_matches_feature_mode(
+        self, aio_install_result, orchestrator, aio_namespace, kubectl_available,
+    ):
+        for name in site_names(aio_install_result):
+            _, release = load_aio_release(orchestrator, name, WORKSPACE_PATH)
+            connector = release["aioReleaseConfiguration"].get("resources", {}).get("opcUaConnector", {})
+            if not connector.get("version"):
+                continue
+            assert_step_succeeded(aio_install_result, name, "aio-instance")
+            site = orchestrator.load_site(name)
+            features = site.parameters.get("features") or {}
+            opcua_feature = features.get("opcua")
+            if opcua_feature is None:
+                opcua_feature = features.get("connectors") or {}
+            disabled = opcua_feature.get("mode") == "Disabled"
+            templates = list_opcua_connector_templates(aio_namespace)
+            assert bool(templates) is not disabled, (
+                f"Site '{name}': OPC UA template presence does not match its feature mode"
             )
 
     def test_security_pki_settings_match_release_contract(

@@ -3,3 +3,4 @@
 # aioInstanceName comes from the common parameter file attached at manifest level.
 
 customLocationId: "{{ steps.resolve-aio.outputs.customLocationId }}"
+features: "{{ steps.resolve-aio.outputs.features }}"

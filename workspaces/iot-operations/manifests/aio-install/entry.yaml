@@ -30,7 +30,7 @@ inputs:
     type: string
     requirement: required
     sensitivity: non-sensitive
-    description: The resolved Site needs an AIO release. The configured example inherits one, while the typed AIO route defaults to 2608.
+    description: The resolved Site needs an AIO release. The configured example inherits one, while the typed AIO route defaults to 2609.
     defaultBehavior: Review the effective AIO release in the selected Site before deployment.
     source: sites/base-site.yaml
   - field: labels

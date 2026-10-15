@@ -13,13 +13,19 @@ param customLocationId string
 @description('Release-owned AIO settings that distinguish releases sharing this ARM API generation.')
 param aioReleaseConfiguration object = {}
 
+@description('Resolved features of the existing IoT Operations instance.')
+param features object = {}
+
 // Keep resource interpretation aligned with instance-2026-07-01.bicep so
 // greenfield install and upgrade deploy the same release requirements.
 var releaseResourceConfiguration = aioReleaseConfiguration.?resources ?? {}
 var opcUaConnectorConfiguration = releaseResourceConfiguration.?opcUaConnector ?? {}
 var opcuaConnectorVersion = string(opcUaConnectorConfiguration.?version ?? '')
+// Honor the legacy connectors alias. The canonical opcua feature takes precedence.
+var opcUaFeature = features.?opcua ?? features.?connectors ?? {}
+var opcUaFeatureMode = opcUaFeature.?mode ?? 'Stable'
 
-module opcUaConnectorTemplate '../../modules/opcua-connector-template-2026-07-01.bicep' = if (!empty(opcuaConnectorVersion)) {
+module opcUaConnectorTemplate '../../modules/opcua-connector-template-2026-07-01.bicep' = if (!empty(opcuaConnectorVersion) && opcUaFeatureMode != 'Disabled') {
   name: 'opcua-connector-template-${uniqueString(aioInstanceName)}'
   params: {
     aioInstanceName: aioInstanceName

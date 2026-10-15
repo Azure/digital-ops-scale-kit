@@ -128,6 +128,19 @@ def kubectl_text(args: list[str], *, timeout: int = 30) -> str:
     return proc.stdout
 
 
+def list_opcua_connector_templates(namespace: str) -> list[str]:
+    """Return OPC UA template names, including when the feature installs no CRD."""
+    resource = "connectortemplates.akri.iotoperations.azure.com"
+    crds = kubectl_json(["get", "customresourcedefinitions"])
+    if not any(item["metadata"]["name"] == resource for item in crds["items"]):
+        return []
+    templates = kubectl_json(["get", resource, "-n", namespace])
+    return [
+        item["metadata"]["name"] for item in templates["items"]
+        if item["metadata"]["name"].startswith("azureiotoperationsconnectorforopcua-")
+    ]
+
+
 def _is_not_found(error: KubectlError) -> bool:
     """True when the error is the standard kubectl NotFound diagnostic."""
     text = error.stderr.lower()

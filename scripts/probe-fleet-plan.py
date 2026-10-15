@@ -40,7 +40,7 @@ def inspect(spec: dict) -> dict:
             } for row in rows)
             or {row["slot"] for row in rows} != {"one", "two"}
             or any(row["name"] != f"fleet-{row['slot']}"
-                   or row["release"] != {"one": "2607", "two": "2608"}[row["slot"]] for row in rows)):
+                   or row["release"] != {"one": "2607", "two": "2609"}[row["slot"]] for row in rows)):
         raise ValueError("The fleet target specification is incomplete.")
     wanted = {row["name"]: row for row in rows}
     observed = []

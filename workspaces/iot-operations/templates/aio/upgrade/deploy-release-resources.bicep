@@ -27,12 +27,16 @@ param aioApiVersion string
 @description('Release-owned AIO settings that distinguish releases sharing an ARM API generation.')
 param aioReleaseConfiguration object = {}
 
+@description('Resolved features of the existing IoT Operations instance.')
+param features object = {}
+
 module releaseResources_2025 './modules/deploy-release-resources-2025-10-01.bicep' = if (aioApiVersion == '2025-10-01') {
   name: 'deploy-release-resources-2025-10-${uniqueString(aioInstanceName)}'
   params: {
     aioInstanceName: aioInstanceName
     aioReleaseConfiguration: aioReleaseConfiguration
     customLocationId: customLocationId
+    features: features
   }
 }
 
@@ -42,6 +46,7 @@ module releaseResources_2026_03 './modules/deploy-release-resources-2026-03-01.b
     aioInstanceName: aioInstanceName
     aioReleaseConfiguration: aioReleaseConfiguration
     customLocationId: customLocationId
+    features: features
   }
 }
 
@@ -51,5 +56,6 @@ module releaseResources_2026_07 './modules/deploy-release-resources-2026-07-01.b
     aioInstanceName: aioInstanceName
     aioReleaseConfiguration: aioReleaseConfiguration
     customLocationId: customLocationId
+    features: features
   }
 }

@@ -141,7 +141,7 @@ slots use those persistent groups instead, as described in
 [Choose ephemeral or persistent resource groups](#choose-ephemeral-or-persistent-resource-groups).
 Each host then connects its cluster in its group's region.
 
-The two configured Sites select AIO `2607` and `2608`, Secret Sync disabled
+The two configured Sites select AIO `2607` and `2609`, Secret Sync disabled
 and the existing E2E Low broker memory profile. Acceptance checks exact Site
 identities, operation identities and dispositions, effective AIO release parameters,
 the installed engine version, actual deployed extension versions, Kubernetes
@@ -357,7 +357,7 @@ From the **Actions** tab, dispatch **E2E Tests** with the defaults to run one AI
 | Input | Typical value | Notes |
 |-------|--------------|-------|
 | `scenario` | `aio` | `aio` runs the AIO matrix described on this page. `release-acceptance` and `site-cleanup` run [release acceptance](#accept-one-release-candidate). `fleet` and `fleet-cleanup` run [fleet qualification](#qualify-one-exact-candidate-across-two-sites). `windows-installer-preflight` runs the [Windows runner check](#check-a-windows-runner-before-installer-qualification). |
-| `aio-releases` | `2608` or `2607,2608` | Separated by commas. Ephemeral mode runs them in parallel. Persistent mode serializes cells in the same RG. See [aio-releases.md](aio-releases.md) for how AIO releases are defined and pinned. |
+| `aio-releases` | `2609` or `2608,2609` | Separated by commas. Ephemeral mode runs them in parallel. Persistent mode serializes cells in the same RG. See [aio-releases.md](aio-releases.md) for how AIO releases are defined and pinned. |
 | `environment` | `dev` | GitHub Environment whose secrets/approvers apply. |
 | `location` | `eastus2` | ephemeral mode only. Persistent derives from the RG. |
 | `resource-group` | empty (ephemeral) or existing RG (persistent) | |
@@ -366,8 +366,9 @@ From the **Actions** tab, dispatch **E2E Tests** with the defaults to run one AI
 | `skip-teardown` | false | Preserve the deployment for inspection. Scope depends on mode (see below). |
 | `keep-cluster-alive-minutes` | `0` | Hold the runner for N min before teardown for debugging. Clamped to what is left of the job budget so teardown still runs. Nothing should be added to the persistent RG during the hold (it'll be deleted by teardown). |
 | `tests` | empty (run all) or `aio-install,enable-secretsync` | Allowlist of test phases to deploy and run, separated by commas. Valid values: `aio-install`, `enable-secretsync`, `sync-secrets`, `opc-ua-solution`, `dataflow-sample`, `aio-resources`, `resource-set-samples`, `aio-upgrade`. Useful for demos and focused debugging when paired with `keep-cluster-alive-minutes`. |
-| `upgrade-to` | empty or `2608` | Optional AIO release to upgrade to after the install phase tests pass. Empty skips the upgrade phase. Each cell skips it when it equals the cell's `aio-releases` value. Requires `aio-upgrade` to be in the `tests` allowlist (or `tests` empty). |
+| `upgrade-to` | empty or `2609` | Optional AIO release to upgrade to after the install phase tests pass. Empty skips the upgrade phase. Each cell skips it when it equals the cell's `aio-releases` value. Requires `aio-upgrade` to be in the `tests` allowlist (or `tests` empty). |
 | `secret-sync-modes` | `enabled` or `enabled,disabled` | Matrix modes for Secret Sync and workload identity. Use `enabled,disabled` with `tests=aio-upgrade` to qualify upgrade behavior with and without the OIDC profile. |
+| `opcua-modes` | `Stable` or `Stable,Disabled` | Source AIO runs only. `Disabled` requires explicit tests limited to `aio-install`, `enable-secretsync`, `sync-secrets` and `aio-upgrade`. Published and candidate acceptance runs require `Stable`. |
 | `published-release` | empty or an exact tag | Empty keeps the integration suite that runs from the checkout source. A tag selects the bounded, verified published package mode below. |
 | `published-source-sha` | empty or a full commit | Required with `published-release`. Must be the exact commit targeted by the published tag. |
 | `published-journey` | `configured` | Applies only with `published-release`. `configured` deploys a configured Site, and `guided` deploys one guided Site. See below. |
@@ -378,11 +379,46 @@ Qualify both AIO upgrade optionality paths in one dispatch:
 
 ```bash
 gh workflow run e2e-test.yaml \
-  -f aio-releases=2607 \
-  -f upgrade-to=2608 \
+  -f aio-releases=2608 \
+  -f upgrade-to=2609 \
   -f tests=aio-upgrade \
   -f secret-sync-modes=enabled,disabled
 ```
+
+To cover fresh 2609 installation, 2608 to 2609 upgrade, Secret Sync and both
+OPC UA feature modes in one source run, use:
+
+```bash
+gh workflow run e2e-test.yaml \
+  -f aio-releases=2608,2609 \
+  -f upgrade-to=2609 \
+  -f opcua-modes=Stable,Disabled \
+  -f secret-sync-modes=enabled \
+  -f tests=aio-install,enable-secretsync,sync-secrets,aio-upgrade
+```
+
+This creates four cells. Both 2608 cells upgrade to 2609 after installation
+tests pass. Both 2609 cells skip the extra upgrade phase.
+The rendered Site sets `parameters.features.opcua.mode` to `Disabled` only
+for the Disabled cells. Stable cells omit features and exercise the default mode.
+Install and upgrade tests require an OPC UA connector template for `Stable`
+and no template for `Disabled`. This checks fresh test Sites, not removal of
+a template that an earlier deployment already created.
+The selected phases do not test OPC UA data delivery.
+Resource names and result artifacts distinguish the OPC UA modes.
+
+For 2609 qualification, retain evidence from a second dispatch with the full
+default test selection:
+
+```bash
+gh workflow run e2e-test.yaml \
+  -f aio-releases=2609 \
+  -f opcua-modes=Stable
+```
+
+Leave `tests` empty. This runs the full integration suite, including
+`opc-ua-solution`, on 2609. The restricted Disabled matrix above does not run
+that phase. Both dispatches form part of the 2609 qualification evidence.
 
 ### Qualify a published engine and workspace
 
@@ -424,7 +460,7 @@ Published qualification is deliberately bounded:
 |---|---|
 | `published-release` | Exact approved published tag |
 | `published-source-sha` | Exact full source commit |
-| `aio-releases` | One AIO release. Guided mode uses `2608`. |
+| `aio-releases` | One AIO release. Guided mode uses `2609`. |
 | `tests` | `aio-install` |
 | `published-journey` | `configured` or `guided` |
 | `secret-sync-modes` | `disabled` for configured Sites. Guided supports `disabled`, `enabled` or both. |
@@ -468,7 +504,7 @@ gh workflow run e2e-test.yaml \
   --ref main \
   -f published-release=<approved-published-release> \
   -f published-source-sha=<full-main-commit> \
-  -f aio-releases=2608 \
+  -f aio-releases=2609 \
   -f resource-group=<dedicated-existing-rg> \
   -f published-journey=guided \
   -f tests=aio-install \
@@ -535,7 +571,7 @@ Set the required variables. The renderer fills in defaults for the optional ones
 ```powershell
 $env:E2E_RESOURCE_GROUP = "rg-e2e-dev"
 $env:E2E_CLUSTER_NAME   = "arc-e2e-dev"
-$env:E2E_AIO_RELEASE    = "2608"
+$env:E2E_AIO_RELEASE    = "2609"
 $env:E2E_SITE_NAME      = "e2e-local-$([DateTimeOffset]::Now.ToUnixTimeSeconds())"
 
 $sitesDir = Join-Path $env:TEMP "e2e-sites"
@@ -552,7 +588,7 @@ pytest tests/integration/ -v -m integration
 ```bash
 export E2E_RESOURCE_GROUP=rg-e2e-dev
 export E2E_CLUSTER_NAME=arc-e2e-dev
-export E2E_AIO_RELEASE=2608
+export E2E_AIO_RELEASE=2609
 export E2E_SITE_NAME="e2e-local-$(date +%s)"
 
 SITES_DIR="${TMPDIR:-/tmp}/e2e-sites"
@@ -574,7 +610,7 @@ To exercise an upgrade between AIO releases locally, install at one AIO release 
 
 ```bash
 # Re-render with the upgrade target. Same E2E_SITE_NAME so the file overwrites in place.
-export E2E_AIO_RELEASE=2608
+export E2E_AIO_RELEASE=2609
 python scripts/render-e2e-site.py --output-dir "$SITES_DIR"
 
 export SITEOPS_E2E_UPGRADE_PHASE=1
