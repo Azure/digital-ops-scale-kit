@@ -120,11 +120,15 @@ schema registry namespace must be unique in your Microsoft Entra tenant.
 Sites built with typed inputs set `useScopedSchemaRegistryNamespace: true`
 under `parameters`, which adds a hash of the resource group and registry name
 to the namespace, so they can share a name with Sites in other resource
-groups. A Site file you write yourself keeps the plain namespace unless it
-sets that parameter. Give such a Site a name that no other Site in the tenant
-uses, or set the parameter when you create the Site. Keep the setting
-unchanged for a Site whose registry already exists, because changing it
-changes the namespace.
+groups. A Site file you write yourself uses the registry name as the namespace
+when it fits in 32 characters, unless it sets that parameter. Give such a Site
+a name that no other Site in the tenant uses, or set the parameter when you
+create the Site.
+
+A registry keeps the namespace it was created with, so redeploy an existing
+installation from its original Site file. Typed inputs set the parameter even
+when you supply the previous `siteName`, so a Site rebuilt that way does not
+match a registry created without it.
 
 **Site at subscription level** (for shared resources):
 
