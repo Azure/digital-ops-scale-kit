@@ -130,6 +130,29 @@ installation from its original Site file. Typed inputs set the parameter even
 when you supply the previous `siteName`, so a Site rebuilt that way does not
 match a registry created without it.
 
+#### Rebuild a Site for a registry created without the setting
+
+If you no longer have the Site file for such a registry, save a new one with
+the original Site name, cluster ID and AIO release:
+
+```text
+siteops inputs aio-install --source "official@<release>" --input siteName=<original-name> --input "cluster=<Arc-cluster-resource-ID>" --input aioRelease=<original-AIO-release> --read-resources --save-site ./plant-one.yaml
+```
+
+In the saved file, change `useScopedSchemaRegistryNamespace` under
+`parameters` to `false`. Restore any other settings from the original
+deployment, because reading the cluster recovers its location and names, not
+the whole configuration. Review the plan, then deploy from the file:
+
+```text
+siteops plan aio-install --source "official@<release>" --site-file ./plant-one.yaml
+siteops deploy aio-install --source "official@<release>" --site-file ./plant-one.yaml
+```
+
+Keep the file for later deployments. Use `false` only for a registry created
+without the setting, and keep `true` for a registry created with it. Keep the
+existing registry rather than deleting it to change its namespace.
+
 **Site at subscription level** (for shared resources):
 
 ```yaml

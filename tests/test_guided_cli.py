@@ -1958,6 +1958,16 @@ def test_aio_cluster_only_answers_prepare_without_optional_labels(tmp_path, caps
     assert calls == [_CLUSTER_ID]
 
 
+def _parameter_by_step(target, name):
+    found = {}
+    for operation in target.operations:
+        parameters = getattr(operation.details, "parameters", None)
+        for entry in parameters.entries if parameters is not None else ():
+            if isinstance(entry.key, LiteralValue) and entry.key.value == name:
+                found[operation.identity.step] = resolve_plan_value(entry.value, {})
+    return found
+
+
 def test_typed_aio_sites_scope_only_the_schema_registry_namespace(tmp_path):
     workspace = Path(__file__).resolve().parents[1] / "workspaces" / "iot-operations"
     manifest = workspace / "manifests" / "aio-install" / "manifest.yaml"
@@ -1971,6 +1981,7 @@ def test_typed_aio_sites_scope_only_the_schema_registry_namespace(tmp_path):
         key: value for key, value in site.parameters.items()
         if key != "useScopedSchemaRegistryNamespace"
     })
+    legacy = replace(site, parameters={**site.parameters, "useScopedSchemaRegistryNamespace": False})
 
     def flags(candidate):
         session = _aio_template_session(tmp_path)
@@ -1979,19 +1990,52 @@ def test_typed_aio_sites_scope_only_the_schema_registry_namespace(tmp_path):
                 manifest, sites=[candidate], intent=PlanIntent.EXECUTABLE,
             )
         assert result.status is PlanStatus.PLANNED, result.diagnostics
-        found = {}
-        for operation in result.plan.targets[0].operations:
-            parameters = getattr(operation.details, "parameters", None)
-            for entry in parameters.entries if parameters is not None else ():
-                if (
-                    isinstance(entry.key, LiteralValue)
-                    and entry.key.value == "useScopedSchemaRegistryNamespace"
-                ):
-                    found[operation.identity.step] = resolve_plan_value(entry.value, {})
-        return found
+        return _parameter_by_step(result.plan.targets[0], "useScopedSchemaRegistryNamespace")
 
     assert flags(site) == {"schema-registry": True}
+    assert flags(legacy) == {"schema-registry": False}
     assert flags(configured) == {}
+
+
+def test_saved_site_keeps_an_explicit_false_namespace_setting(tmp_path, capsys):
+    workspace = Path(__file__).resolve().parents[1] / "workspaces" / "iot-operations"
+    site_file = tmp_path / "plant-one.yaml"
+
+    def read(ref, *, facts):
+        return ArmResourceObservation(ref.resource_id, ref.resource_type, "eastus", ref.name, {})
+
+    reader = SimpleNamespace(identity=SimpleNamespace(name="fixture", version="1"), read=read)
+    with patch("siteops.cli.new_arm_reader", return_value=reader):
+        assert _invoke([
+            "-w", str(workspace), "inputs", "aio-install",
+            "--input", "siteName=plant-one", "--input", f"cluster={_CLUSTER_ID}",
+            "--input", "aioRelease=2608", "--read-resources", "--save-site", str(site_file),
+        ]) == 0
+    capsys.readouterr()
+    document = yaml.safe_load(site_file.read_text(encoding="utf-8"))
+    assert document["parameters"]["useScopedSchemaRegistryNamespace"] is True
+    document["parameters"]["useScopedSchemaRegistryNamespace"] = False
+    site_file.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+    session = _aio_template_session(tmp_path, include_aio_version=True)
+    with (
+        patch("siteops.cli.new_arm_reader", side_effect=AssertionError("A Site file needs no resource read")),
+        patch("siteops.cli.load_contract", side_effect=AssertionError("A Site file bypasses the typed contract")),
+        patch("siteops.orchestrator.TemplateCompilationSession", return_value=session),
+        patch.object(Orchestrator, "execute_plan", return_value=RunResult.from_sites((), elapsed=0)) as execute,
+    ):
+        assert _invoke([
+            "-w", str(workspace), "plan", "aio-install", "--site-file", str(site_file), "--output", "json",
+        ]) == 0
+        execute.assert_not_called()
+        capsys.readouterr()
+        assert _invoke([
+            "-w", str(workspace), "deploy", "aio-install", "--site-file", str(site_file), "--yes",
+        ]) == 0
+    target = execute.call_args.args[0].plan.targets[0]
+    assert target.name == "plant-one"
+    assert _parameter_by_step(target, "useScopedSchemaRegistryNamespace") == {"schema-registry": False}
+    assert _parameter_by_step(target, "aioVersion") == {"aio-instance": "1.4.73"}
 
 
 def test_aio_resource_named_sites_save_reload_and_obey_fleet_selection(tmp_path, capsys):
