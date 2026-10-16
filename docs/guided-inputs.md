@@ -66,10 +66,15 @@ configured Sites without changing its existing pin. A
 [project pin](projects.md#run-project-pin) is optional for this single Site
 and useful for repeatable fleets or `--offline-content`.
 
-Site Ops generates a stable name from a lowercase cluster prefix and a hash
-of its full resource ID. Review that name in the plan. Add
-`--input siteName=plant-one` to the deploy command (and any separate plan)
-to choose a different name.
+Without `siteName`, Site Ops names the Site after the cluster and adds a short
+code derived from the cluster's full resource ID, for example
+`plant-a-bafdd6123574`. The same cluster always gets the same name. The code
+keeps names distinct when clusters in other resource groups or subscriptions
+share a name, because the Site name also becomes part of the schema registry
+namespace, which must be unique in your Microsoft Entra tenant. Review the
+name in the plan. To choose your own, add `--input siteName=plant-one` to the
+deploy command (and any separate plan), and pick a name that no other Site in
+your tenant uses.
 Typed Site names use lowercase letters, digits and interior hyphens, with a
 maximum of 59 characters. Existing saved Sites retain their names.
 

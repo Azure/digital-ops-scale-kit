@@ -114,6 +114,13 @@ inventory checks Site identities before writing. A later plan loads that
 inventory again so concurrent or subsequent configuration changes are
 still checked.
 
+Give each Site a name that no other Site in your Microsoft Entra tenant uses,
+including Sites in other projects, resource groups and subscriptions. The IoT
+Operations workspace uses the Site name in Azure resource names, such as
+`<name>-aio` for the instance and `<name>-sr` for the schema registry. The
+schema registry namespace must be unique in the tenant, so two Sites with the
+same name can conflict when the second one deploys.
+
 **Site at subscription level** (for shared resources):
 
 ```yaml
