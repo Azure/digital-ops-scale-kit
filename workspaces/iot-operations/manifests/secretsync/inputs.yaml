@@ -19,7 +19,7 @@ inputs:
       name: aioInstanceName
   - name: siteName
     type: string
-    description: Optional Site name override. The default comes from the associated cluster identity.
+    description: Optional Site name. The default is the associated cluster's name in lowercase.
     sitePath: name
     format: dnsLabel
     maxLength: 59

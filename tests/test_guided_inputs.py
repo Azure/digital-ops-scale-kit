@@ -1,6 +1,5 @@
 """Boundaries for declarative inputs that construct exactly one ordinary Site."""
 
-import hashlib
 import os
 import stat
 from dataclasses import FrozenInstanceError
@@ -208,14 +207,16 @@ def _named_resource_contract(tmp_path):
     return load_contract(manifest)
 
 
-@pytest.mark.parametrize("cluster_name", ["arc-first", "A_Very.Long_Cluster.Name_With_More_Characters"])
-def test_resource_name_default_is_stable_and_uses_full_identity(tmp_path, cluster_name):
+@pytest.mark.parametrize(
+    ("cluster_name", "site_name"),
+    [("Arc-First", "arc-first"), ("1plant--a", "1plant--a"), ("a" * 59, "a" * 59)],
+)
+def test_resource_name_default_is_the_lowercase_resource_name(tmp_path, cluster_name, site_name):
     contract = _named_resource_contract(tmp_path)
     resource = (
         "/subscriptions/00000000-0000-0000-0000-000000000001/"
         f"resourceGroups/rg-first/providers/Microsoft.Kubernetes/connectedClusters/{cluster_name}"
     )
-    names = []
     for resource_id in (resource, resource.upper(), resource.replace("rg-first", "rg-second")):
         bound = contract.bind(inline=[f"cluster={resource_id}"])
         assert "siteName" not in bound.active_values
@@ -224,15 +225,27 @@ def test_resource_name_default_is_stable_and_uses_full_identity(tmp_path, cluste
             resource_id, ref.resource_type, "eastus", ref.name, {},
         )
         site = contract.build_site(bound, {"cluster": observation})
-        prefix = "arc-first" if cluster_name == "arc-first" else "a-very-long-cluste"
-        assert site.name == prefix + "-" + hashlib.sha256(
-            resource_id.casefold().encode("ascii"),
-        ).hexdigest()[:12]
-        assert len(site.name) <= 31
+        assert site.name == site_name
         assert site.labels == {}
-        names.append(site.name)
-    assert names[0] == names[1]
-    assert names[0] != names[2]
+
+
+@pytest.mark.parametrize("cluster_name", ["arc_first", "arc.first", "a" * 60])
+def test_resource_name_default_asks_for_a_name_the_contract_accepts(tmp_path, cluster_name):
+    contract = _named_resource_contract(tmp_path)
+    resource = (
+        "/subscriptions/00000000-0000-0000-0000-000000000001/"
+        f"resourceGroups/rg-first/providers/Microsoft.Kubernetes/connectedClusters/{cluster_name}"
+    )
+    bound = contract.bind(inline=[f"cluster={resource}"])
+    ref = bound.resources[0].ref
+    observation = ArmResourceObservation(resource, ref.resource_type, "eastus", ref.name, {})
+    with pytest.raises(ValueError, match="The cluster name does not fit input 'siteName'") as error:
+        contract.build_site(bound, {"cluster": observation})
+    assert "Supply `--input siteName=<name>`." in str(error.value)
+    assert cluster_name not in str(error.value)
+    assert f"The cluster name '{cluster_name}' does not fit" in error.value.private_message
+    named = contract.bind(inline=["siteName=arc-one", f"cluster={resource}"])
+    assert contract.build_site(named, {"cluster": observation}).name == "arc-one"
 
 
 def test_resource_name_default_retains_overrides_and_manual_route(tmp_path):
@@ -363,7 +376,7 @@ def test_resource_name_default_is_generic_and_rejects_conflicting_name_derivatio
     site = contract.build_site(bound, {
         "storage": ArmResourceObservation(resource, "Microsoft.Storage/storageAccounts", "eastus", "example", {}),
     })
-    assert site.name.startswith("example-")
+    assert site.name == "example"
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
     document["inputs"][-1]["derive"]["name"] = "siteName"
     path.write_text(yaml.safe_dump(document), encoding="utf-8")
@@ -458,7 +471,7 @@ def test_declared_links_build_one_site_without_asking_for_related_ids(tmp_path):
     ]
     site = contract.build_site(bound, _linked_observations())
     assert site.parameters == {"instanceName": "machine-one", "clusterName": "cluster-one"}
-    assert site.name.startswith("machine-one-")
+    assert site.name == "machine-one"
     assert "customLocation" not in contract.example()["values"]
     assert "cluster" not in contract.example()["values"]
 
@@ -524,9 +537,7 @@ def test_related_resource_name_uses_cluster_identity_and_example_uses_root_input
     assert contract.example()["values"] == {"instance": None}
     bound = contract.bind(inline=[f"instance={_LINKED_INSTANCE_ID}"])
     site = contract.build_site(bound, _linked_observations())
-    assert site.name == "cluster-one-" + hashlib.sha256(
-        _LINKED_CLUSTER_ID.casefold().encode("ascii"),
-    ).hexdigest()[:12]
+    assert site.name == "cluster-one"
 
 
 @pytest.mark.parametrize("bad_source", ["missing", "identity", "extra-reference"])

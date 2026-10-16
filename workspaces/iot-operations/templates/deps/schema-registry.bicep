@@ -4,7 +4,8 @@
 // Hardens the storage account (RBAC-only, deny by default, schema-registry MI granted
 // Storage Blob Data Contributor on the container).
 //
-// Inputs:  schemaRegistryName, optional storageAccountName/containerName/location/tags.
+// Inputs:  schemaRegistryName, optional storageAccountName/containerName/location/tags and
+//          useScopedSchemaRegistryNamespace.
 // Outputs: schemaRegistry { id, name, principalId }, storageAccount { id, name, containerUrl }.
 // -------------------------------------------------------------------------------------
 
@@ -22,6 +23,9 @@ param storageAccountName string = ''
 
 @description('Name of the blob container for schema storage.')
 param containerName string = 'schemas'
+
+@description('Include a hash of the resource group and registry name in the schema registry namespace, so Sites that share a name in one tenant keep distinct namespaces. Defaults to false, which keeps existing namespaces. Keep the setting unchanged for an existing registry.')
+param useScopedSchemaRegistryNamespace bool = false
 
 @description('Location for all resources. Defaults to resource group location.')
 param location string = resourceGroup().location
@@ -42,13 +46,17 @@ var generatedStorageAccountName = !empty(storageAccountName)
 var schemaRegistryResourceId = resourceId('Microsoft.DeviceRegistry/schemaRegistries', schemaRegistryName)
 
 // The service limits the namespace to 32 characters and requires it to be unique in the tenant.
-// A registry name that fits is used unchanged, so registries created earlier keep their
-// namespace. A longer name keeps its first 26 characters and gains a hash of the resource group
-// and the full name. Sites that share a name in one tenant set schemaRegistryName to keep their
-// namespaces distinct.
-var schemaRegistryNamespace = length(schemaRegistryName) <= 32
+// With useScopedSchemaRegistryNamespace, the namespace keeps up to 18 characters of the name and
+// adds the 13 character hash of the resource group and the full name, so Sites that share a name
+// in one tenant keep distinct namespaces. Otherwise a registry name that fits is used unchanged,
+// so registries created earlier keep their namespace, and a longer name keeps its first 26
+// characters and gains part of that hash.
+var legacySchemaRegistryNamespace = length(schemaRegistryName) <= 32
   ? schemaRegistryName
   : '${toLower(take(schemaRegistryName, 26))}${take(uniqueString(resourceGroup().id, schemaRegistryName), 6)}'
+var schemaRegistryNamespace = useScopedSchemaRegistryNamespace
+  ? '${toLower(take(schemaRegistryName, 18))}-${uniqueString(resourceGroup().id, schemaRegistryName)}'
+  : legacySchemaRegistryNamespace
 
 resource storageAccount 'Microsoft.Storage/storageAccounts@2024-01-01' = {
   name: generatedStorageAccountName

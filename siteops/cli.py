@@ -1106,7 +1106,10 @@ def cmd_inputs(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
                     if field.get("derivableFrom"):
                         status += " or derived from " + ", ".join(field["derivableFrom"])
                     if field.get("defaultFromResource"):
-                        status = "generated from " + field["defaultFromResource"] + ", or supplied"
+                        status = (
+                            "defaults to the " + field["defaultFromResource"]
+                            + " name in lowercase, or supplied"
+                        )
                     for line in _wrap(
                         f"{_content_text(field['name'])} "
                         f"({_content_text(field['type'])}, {_content_text(status)})"

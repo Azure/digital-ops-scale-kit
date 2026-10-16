@@ -8,10 +8,12 @@ siteDefaults:
       enableEdgeSite: false
   parameters:
     defaultDataflowInstanceCount: 1
+    # Sites built from typed inputs keep distinct schema registry namespaces when they share a name.
+    useScopedSchemaRegistryNamespace: true
 inputs:
   - name: siteName
     type: string
-    description: Optional name override with a cluster ID. Required for a manual Site.
+    description: Optional with a cluster ID, which supplies the cluster's name in lowercase. Required for a manual Site.
     sitePath: name
     format: dnsLabel
     maxLength: 59
