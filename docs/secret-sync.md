@@ -341,3 +341,13 @@ Role assignments use deterministic names via `guid(keyVault.id, principalId, rol
 ### Key Vault RBAC not enabled
 
 The enablement template creates Key Vaults with `enableRbacAuthorization: true`. If you bring your own Key Vault, role assignments will still be created successfully regardless of the Key Vault's authorization mode, but they will not take effect until RBAC authorization is enabled. Ensure `enableRbacAuthorization: true` is set on the Key Vault for the managed identity to authenticate.
+
+### The IoT Operations portal does not show the Key Vault's secrets
+
+Secret Sync enablement grants Key Vault roles to its managed identity, not to your account. To view or manage the vault's secrets yourself, for example in the IoT Operations portal, assign your account a Key Vault data role such as Key Vault Secrets Officer at the vault scope:
+
+```bash
+az role assignment create --assignee "$(az ad signed-in-user show --query id -o tsv)" --role "Key Vault Secrets Officer" --scope <Key-Vault-resource-ID>
+```
+
+A new role assignment can take several minutes to take effect.

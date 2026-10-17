@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import copy
 import difflib
-import hashlib
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -1079,12 +1078,20 @@ class InputContract:
                     item for item in self.fields if item.site_path == ("name",)
                 )
                 if name_field.name not in values:
-                    prefix = re.sub(r"[^a-z0-9]+", "-", resource.ref.name.casefold()).strip("-")
-                    prefix = prefix[:18].rstrip("-")
-                    suffix = hashlib.sha256(
-                        resource.ref.resource_id.casefold().encode("ascii"),
-                    ).hexdigest()[:12]
-                    values[name_field.name] = f"{prefix}-{suffix}"
+                    # ARM names ignore case, so the lowercase name identifies the same resource.
+                    default = resource.ref.name.casefold()
+                    try:
+                        name_field.validate(default, f"Input '{name_field.name}'")
+                    except GuidedInputError as invalid:
+                        problem = f"name does not fit input '{name_field.name}'"
+                        remedy = f"Supply `--input {name_field.name}=<name>`. {invalid}"
+                        error = GuidedInputError(f"The {field.name} {problem}. {remedy}")
+                        error.private_message = (
+                            f"The {field.name} name '{resource.ref.name}' does not fit input "
+                            f"'{name_field.name}'. {remedy}"
+                        )
+                        raise error from None
+                    values[name_field.name] = default
                     sources[name_field.name] = f"resource '{field.name}'"
         for field in self.fields:
             if field.resource is not None:

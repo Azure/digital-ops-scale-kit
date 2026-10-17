@@ -391,6 +391,20 @@ complete. The error codes are `inputs.invalid` and
 **Solution**: Add the named `--input`, or run `siteops inputs MANIFEST` to list
 the required answers. See [guided inputs](guided-inputs.md).
 
+### "name does not fit input 'siteName'"
+
+```
+Error: The cluster name 'Plant_A' does not fit input 'siteName'. Supply `--input siteName=<name>`. Input 'siteName' must be a lowercase DNS label, starting and ending with a letter or digit, with at most 63 characters.
+```
+
+**Cause**: Without `siteName`, the Site takes the cluster's name in lowercase.
+This cluster's name is not a valid Site name, for example because it contains
+an underscore or is longer than 59 characters. Redacted output omits the
+cluster name.
+
+**Solution**: Add `--input siteName=<name>` with lowercase letters, digits and
+interior hyphens.
+
 ### "already exists. Choose a new file name"
 
 ```

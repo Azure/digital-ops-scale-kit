@@ -1767,7 +1767,12 @@ def _aio_template_session(
         target = Path(argv[argv.index("--outfile") + 1])
         parameters = (
             {"tags": {"type": "object"}}
-            if source.name in {"schema-registry.bicep", "adr-ns.bicep"}
+            if source.name == "adr-ns.bicep"
+            else {
+                "tags": {"type": "object"},
+                "useScopedSchemaRegistryNamespace": {"type": "bool", "defaultValue": False},
+            }
+            if source.name == "schema-registry.bicep"
             else {"existingKeyVaultResourceId": {"type": "string", "defaultValue": ""}}
             if source.name == "enable-secretsync.bicep" else {}
         )
@@ -1949,50 +1954,131 @@ def test_aio_cluster_only_answers_prepare_without_optional_labels(tmp_path, caps
         ]) == 0
     document = json.loads(capsys.readouterr().out)
     assert len(document["plan"]["targets"]) == 1
-    assert document["plan"]["targets"][0]["name"].startswith("arc-first-")
+    assert document["plan"]["targets"][0]["name"] == "arc-first"
     assert calls == [_CLUSTER_ID]
 
 
-def test_aio_generated_sites_save_reload_and_obey_fleet_selection(tmp_path, capsys):
-    root = Path(__file__).resolve().parents[1]
-    workspace = root / "workspaces" / "iot-operations"
-    project = tmp_path / "factory"
-    (project / "sites").mkdir(parents=True)
-    resources = [_CLUSTER_ID, _CLUSTER_ID.replace("rg-first", "rg-second")]
-    contract = load_contract(workspace / "manifests" / "aio-install" / "manifest.yaml")
-    names = []
+def _parameter_by_step(target, name):
+    found = {}
+    for operation in target.operations:
+        parameters = getattr(operation.details, "parameters", None)
+        for entry in parameters.entries if parameters is not None else ():
+            if isinstance(entry.key, LiteralValue) and entry.key.value == name:
+                found[operation.identity.step] = resolve_plan_value(entry.value, {})
+    return found
+
+
+def test_typed_aio_sites_scope_only_the_schema_registry_namespace(tmp_path):
+    workspace = Path(__file__).resolve().parents[1] / "workspaces" / "iot-operations"
+    manifest = workspace / "manifests" / "aio-install" / "manifest.yaml"
+    site = load_contract(manifest).resolve(inline=[
+        "siteName=plant-one",
+        "subscription=00000000-0000-0000-0000-000000000001",
+        "resourceGroup=rg-existing", "location=eastus", "clusterName=existing-arc",
+    ])
+    assert site.parameters["useScopedSchemaRegistryNamespace"] is True
+    configured = replace(site, parameters={
+        key: value for key, value in site.parameters.items()
+        if key != "useScopedSchemaRegistryNamespace"
+    })
+    legacy = replace(site, parameters={**site.parameters, "useScopedSchemaRegistryNamespace": False})
+
+    def flags(candidate):
+        session = _aio_template_session(tmp_path)
+        with patch("siteops.orchestrator.TemplateCompilationSession", return_value=session):
+            result = Orchestrator(workspace).build_plan(
+                manifest, sites=[candidate], intent=PlanIntent.EXECUTABLE,
+            )
+        assert result.status is PlanStatus.PLANNED, result.diagnostics
+        return _parameter_by_step(result.plan.targets[0], "useScopedSchemaRegistryNamespace")
+
+    assert flags(site) == {"schema-registry": True}
+    assert flags(legacy) == {"schema-registry": False}
+    assert flags(configured) == {}
+
+
+def test_saved_site_keeps_an_explicit_false_namespace_setting(tmp_path, capsys):
+    workspace = Path(__file__).resolve().parents[1] / "workspaces" / "iot-operations"
+    site_file = tmp_path / "plant-one.yaml"
 
     def read(ref, *, facts):
         return ArmResourceObservation(ref.resource_id, ref.resource_type, "eastus", ref.name, {})
 
     reader = SimpleNamespace(identity=SimpleNamespace(name="fixture", version="1"), read=read)
     with patch("siteops.cli.new_arm_reader", return_value=reader):
-        for resource in resources:
-            bound = contract.bind(inline=[f"cluster={resource}"])
-            site = contract.build_site(bound, {"cluster": read(bound.resources[0].ref, facts=frozenset())})
-            path = project / "sites" / f"{site.name}.yaml"
-            assert _invoke([
-                "--project", str(project), "-w", str(workspace), "inputs", "aio-install",
-                "--input", f"cluster={resource}", "--read-resources", "--save-site", str(path),
-            ]) == 0
-            assert Site.from_file(path).name == site.name
-            assert Site.from_file(path).labels == {}
-            names.append(site.name)
-            capsys.readouterr()
-        assert names[0] != names[1]
         assert _invoke([
+            "-w", str(workspace), "inputs", "aio-install",
+            "--input", "siteName=plant-one", "--input", f"cluster={_CLUSTER_ID}",
+            "--input", "aioRelease=2608", "--read-resources", "--save-site", str(site_file),
+        ]) == 0
+    capsys.readouterr()
+    document = yaml.safe_load(site_file.read_text(encoding="utf-8"))
+    assert document["parameters"]["useScopedSchemaRegistryNamespace"] is True
+    document["parameters"]["useScopedSchemaRegistryNamespace"] = False
+    site_file.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+    session = _aio_template_session(tmp_path, include_aio_version=True)
+    with (
+        patch("siteops.cli.new_arm_reader", side_effect=AssertionError("A Site file needs no resource read")),
+        patch("siteops.cli.load_contract", side_effect=AssertionError("A Site file bypasses the typed contract")),
+        patch("siteops.orchestrator.TemplateCompilationSession", return_value=session),
+        patch.object(Orchestrator, "execute_plan", return_value=RunResult.from_sites((), elapsed=0)) as execute,
+    ):
+        assert _invoke([
+            "-w", str(workspace), "plan", "aio-install", "--site-file", str(site_file), "--output", "json",
+        ]) == 0
+        execute.assert_not_called()
+        capsys.readouterr()
+        assert _invoke([
+            "-w", str(workspace), "deploy", "aio-install", "--site-file", str(site_file), "--yes",
+        ]) == 0
+    target = execute.call_args.args[0].plan.targets[0]
+    assert target.name == "plant-one"
+    assert _parameter_by_step(target, "useScopedSchemaRegistryNamespace") == {"schema-registry": False}
+    assert _parameter_by_step(target, "aioVersion") == {"aio-instance": "1.4.73"}
+
+
+def test_aio_resource_named_sites_save_reload_and_obey_fleet_selection(tmp_path, capsys):
+    root = Path(__file__).resolve().parents[1]
+    workspace = root / "workspaces" / "iot-operations"
+    project = tmp_path / "factory"
+    (project / "sites").mkdir(parents=True)
+    other_group = _CLUSTER_ID.replace("rg-first", "rg-second")
+    first = project / "sites" / "arc-first.yaml"
+    second = project / "sites" / "arc-second.yaml"
+
+    def read(ref, *, facts):
+        return ArmResourceObservation(ref.resource_id, ref.resource_type, "eastus", ref.name, {})
+
+    def save(path, *answers):
+        inline = [item for answer in answers for item in ("--input", answer)]
+        return _invoke([
             "--project", str(project), "-w", str(workspace), "inputs", "aio-install",
-            "--input", f"cluster={resources[0].upper()}", "--read-resources",
-            "--save-site", str(project / "sites" / f"{names[0]}.yaml"),
-        ]) == 1
+            *inline, "--read-resources", "--save-site", str(path),
+        ])
+
+    reader = SimpleNamespace(identity=SimpleNamespace(name="fixture", version="1"), read=read)
+    with patch("siteops.cli.new_arm_reader", return_value=reader):
+        assert save(first, f"cluster={_CLUSTER_ID}") == 0
+        saved = Site.from_file(first)
+        assert saved.name == "arc-first"
+        assert saved.labels == {}
+        assert saved.parameters["useScopedSchemaRegistryNamespace"] is True
+        capsys.readouterr()
+        # A cluster with the same name in another resource group needs its own Site name here.
+        assert save(second, f"cluster={other_group}") == 1
+        assert not second.exists()
+        capsys.readouterr()
+        assert save(second, "siteName=arc-second", f"cluster={other_group}") == 0
+        assert Site.from_file(second).name == "arc-second"
         capsys.readouterr()
     with patch("siteops.cli.new_arm_reader", side_effect=AssertionError("Saved Sites do not read resources")):
         assert _invoke([
             "--project", str(project), "-w", str(workspace),
-            "plan", "aio-install", "-l", f"name={names[0]}", "--describe", "--output", "json",
+            "plan", "aio-install", "-l", "name=arc-first", "--describe", "--output", "json",
         ]) == 0
     document = json.loads(capsys.readouterr().out)
-    assert [target["name"] for target in document["plan"]["targets"]] == [names[0]]
+    assert [target["name"] for target in document["plan"]["targets"]] == ["arc-first"]
     orchestrator = Orchestrator(workspace, site_config_root=project)
     assert orchestrator.resolve_sites(orchestrator.load_manifest(
         workspace / "manifests" / "aio-install" / "manifest.yaml",

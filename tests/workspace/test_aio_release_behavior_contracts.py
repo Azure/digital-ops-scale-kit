@@ -223,6 +223,12 @@ def test_schema_registry_namespace_fits_the_service_limit_for_every_guided_site_
     long_form = "'${toLower(take(schemaRegistryName, 26))}${take(uniqueString(resourceGroup().id, schemaRegistryName), 6)}'"
     assert long_form in template
     assert 26 + 6 == 32
+    # Typed inputs scope every namespace to its resource group, so Sites that share a name stay distinct.
+    assert "param useScopedSchemaRegistryNamespace bool = false" in template
+    scoped = "'${toLower(take(schemaRegistryName, 18))}-${uniqueString(resourceGroup().id, schemaRegistryName)}'"
+    assert f"useScopedSchemaRegistryNamespace\n  ? {scoped}\n  : legacySchemaRegistryNamespace" in template
+    assert 18 + 1 + 13 == 32
+    assert contract["siteDefaults"]["parameters"]["useScopedSchemaRegistryNamespace"] is True
 
 
 def test_security_pki_defaults_follow_released_aio_behavior(workspace):

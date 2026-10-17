@@ -66,10 +66,14 @@ configured Sites without changing its existing pin. A
 [project pin](projects.md#run-project-pin) is optional for this single Site
 and useful for repeatable fleets or `--offline-content`.
 
-Site Ops generates a stable name from a lowercase cluster prefix and a hash
-of its full resource ID. Review that name in the plan. Add
-`--input siteName=plant-one` to the deploy command (and any separate plan)
-to choose a different name.
+Without `siteName`, the Site takes the cluster's name in lowercase, so the
+cluster `plant-a` deploys as the Site `plant-a`. Clusters in different resource
+groups can share a name, and each of their Sites still gets its own schema
+registry namespace. To choose a different name, add
+`--input siteName=plant-one` to the deploy command (and any separate plan).
+When the cluster's name is not a valid Site name, for example because it
+contains an underscore, the command stops before deploying and asks for
+`siteName`.
 Typed Site names use lowercase letters, digits and interior hyphens, with a
 maximum of 59 characters. Existing saved Sites retain their names.
 
@@ -284,8 +288,9 @@ A Site saved outside that inventory remains available by explicit path.
 An inline Site remains in memory unless you explicitly choose `--save-site`.
 Saving a Site built from resource observations does not store the
 observations or recheck their prerequisites on later `--site-file` use.
-If you retain the generated name, use the name shown by the input preview
-as the Site filename and selector. Without an environment label, the saved
+If you keep the cluster's name as the Site name, use it as the Site filename
+and selector. Two clusters with the same name need different Site names in
+one project, so supply `siteName` for the second. Without an environment label, the saved
 Site does not match the manifest's default `environment=dev` selector.
 Use an explicit name selection or supply intentional fleet labels.
 Keep Site and answer files outside the content cache and verified package.

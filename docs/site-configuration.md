@@ -114,6 +114,45 @@ inventory checks Site identities before writing. A later plan loads that
 inventory again so concurrent or subsequent configuration changes are
 still checked.
 
+The IoT Operations workspace uses the Site name in Azure resource names, such
+as `<name>-aio` for the instance and `<name>-sr` for the schema registry. The
+schema registry namespace must be unique in your Microsoft Entra tenant.
+Sites built with typed inputs set `useScopedSchemaRegistryNamespace: true`
+under `parameters`, which adds a hash of the resource group and registry name
+to the namespace, so they can share a name with Sites in other resource
+groups. A Site file you write yourself uses the registry name as the namespace
+when it fits in 32 characters, unless it sets that parameter. Give such a Site
+a name that no other Site in the tenant uses, or set the parameter when you
+create the Site.
+
+A registry keeps the namespace it was created with, so redeploy an existing
+installation from its original Site file. Typed inputs set the parameter even
+when you supply the previous `siteName`, so a Site rebuilt that way does not
+match a registry created without it.
+
+#### Rebuild a Site for a registry created without the setting
+
+If you no longer have the Site file for such a registry, save a new one with
+the original Site name, cluster ID and AIO release:
+
+```text
+siteops inputs aio-install --source "official@<release>" --input siteName=<original-name> --input "cluster=<Arc-cluster-resource-ID>" --input aioRelease=<original-AIO-release> --read-resources --save-site ./plant-one.yaml
+```
+
+In the saved file, change `useScopedSchemaRegistryNamespace` under
+`parameters` to `false`. Restore any other settings from the original
+deployment, because reading the cluster recovers its location and names, not
+the whole configuration. Review the plan, then deploy from the file:
+
+```text
+siteops plan aio-install --source "official@<release>" --site-file ./plant-one.yaml
+siteops deploy aio-install --source "official@<release>" --site-file ./plant-one.yaml
+```
+
+Keep the file for later deployments. Use `false` only for a registry created
+without the setting, and keep `true` for a registry created with it. Keep the
+existing registry rather than deleting it to change its namespace.
+
 **Site at subscription level** (for shared resources):
 
 ```yaml

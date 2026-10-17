@@ -174,19 +174,18 @@ ID does not trigger an Azure read. The example remains incomplete until
 the operator supplies every requirement through one route.
 
 An optional `nameFromResource: cluster` at the top level selects an unconditional
-declared resource to generate the Site name after its authorized read.
+declared resource whose name becomes the default Site name after its authorized read.
 The contract must also declare a required unconditional string input mapped
 to `name`, without another default, derivation or conditional readers.
-An explicit name overrides generation. Without the resource, that name
+An explicit name overrides the default. Without the resource, that name
 remains required for the manual route.
 
-The generated name combines a lowercase, sanitized prefix of the resource
-name, at most 18 characters long, with a hyphen and 12 hexadecimal SHA-256
-characters from the full resource ID after case normalization. Identical IDs retain their names
-across case variations, while different resource groups or subscriptions
-contribute to the hash. With this declaration, `inputs --example` prefers
-the resource route and omits the fields it supplies. The AIO example
-therefore contains only `cluster: null`.
+The default is the resource name in lowercase, so resource IDs that differ
+only in case give the same name. It must meet the name input's declared
+`format` and `maxLength`. Otherwise the command stops after the authorized
+read, before any deployment, and asks for the name input. With this
+declaration, `inputs --example` prefers the resource route and omits the
+fields it supplies. The AIO example therefore contains only `cluster: null`.
 
 A resource role can follow an earlier role through a declared relationship:
 
