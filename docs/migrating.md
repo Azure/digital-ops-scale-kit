@@ -51,7 +51,7 @@ Start with the changes that affect your workflow:
 
 | If you... | What to change |
 |---|---|
-| Installed Site Ops with `pip install -e .` | [Reinstall, or install an identified release](#site-ops-installation). |
+| Installed Site Ops with `pip install -e .` | [Run it again](#site-ops-installation) after updating your clone. |
 | Check the installed release with `siteops --version` | Expect the [engine version](#reported-version), `1.0.0b1`, with a build suffix for an installed release. |
 | Deploy with Azure CLI older than 2.70.0 | Run `az upgrade`. See [Azure CLI version](#azure-cli-version). |
 | Run `plan` or `deploy` for Bicep or kubectl steps | Install the [local tools](#local-tool-checks) those steps use. |
@@ -83,16 +83,18 @@ Start with the changes that affect your workflow:
 
 ### Site Ops installation
 
-The v1.0.0b6 guide installed Site Ops with `pip install -e .` in a clone. The
-engine now also depends on `packaging`, so run `pip install -e .` again after
-updating a clone.
+pip installations keep working. After updating a clone, run `pip install -e .`
+again, because the engine now also depends on `packaging`. In Azure
+Pipelines, `siteopsSource` still installs Site Ops with pip from the source
+you name, such as a tagged Git source. See
+[Azure Pipelines templates](#azure-pipelines-templates).
 
-The editable installation is now a contributor workflow. To run an identified
-engine instead, use the command from the selected release:
+To install the engine built for a release instead, use the command from that
+release's notes:
 [native `uv tool install`](install-siteops.md#install-the-release-wheel) of the
 release wheel, or the [verified bootstrap](install-siteops.md#bootstrap-from-https).
-Deactivate or uninstall the editable installation first, then confirm the
-version with `siteops --version`.
+Deactivate or uninstall the pip installation first, then confirm the version
+with `siteops --version`.
 
 ### Reported version
 
