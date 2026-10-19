@@ -51,7 +51,7 @@ Start with the changes that affect your workflow:
 
 | If you... | What to change |
 |---|---|
-| Installed Site Ops with `pip install -e .` | [Reinstall, or install an identified release](#site-ops-installation). |
+| Installed Site Ops with `pip install -e .` | [Run it again](#site-ops-installation) after updating your clone. |
 | Check the installed release with `siteops --version` | Expect the [engine version](#reported-version), `1.0.0b1`, with a build suffix for an installed release. |
 | Deploy with Azure CLI older than 2.70.0 | Run `az upgrade`. See [Azure CLI version](#azure-cli-version). |
 | Run `plan` or `deploy` for Bicep or kubectl steps | Install the [local tools](#local-tool-checks) those steps use. |
@@ -72,6 +72,7 @@ Start with the changes that affect your workflow:
 | Use the Azure Pipelines templates | Choose an [engine selection](#azure-pipelines-templates). |
 | Reference the Azure Pipelines templates from another repository | Set [`templateRepository`](#template-repositories-and-copied-templates) to the repository resource alias. |
 | Copy the Azure Pipelines templates into your repository | Copy one [matching set](#template-repositories-and-copied-templates) from the same release. |
+| Set `siteopsSource` in your pipeline | Keep the template `ref` on [the same release](#template-repositories-and-copied-templates). |
 | Use `SITE_OVERRIDES` in Azure Pipelines | Define the variable and review [override validation](#site-overrides). |
 | Pass absolute paths to the deployment pipelines | Use [relative paths](#pipeline-checkout-paths). |
 | Queue `.pipelines/deploy.yaml` with `siteopsSource` | Set `release` and `sourceCommit` instead. See [Azure Pipelines templates](#azure-pipelines-templates). |
@@ -83,16 +84,17 @@ Start with the changes that affect your workflow:
 
 ### Site Ops installation
 
-The v1.0.0b6 guide installed Site Ops with `pip install -e .` in a clone. The
-engine now also depends on `packaging`, so run `pip install -e .` again after
-updating a clone.
+After updating a clone, run `pip install -e .` again, because the engine now
+also depends on `packaging`. In Azure Pipelines, `siteopsSource` installs Site
+Ops with pip from the source you name, such as a tagged Git source. See
+[Azure Pipelines templates](#azure-pipelines-templates).
 
-The editable installation is now a contributor workflow. To run an identified
-engine instead, use the command from the selected release:
+You can also install the engine built for a release, using the command from
+that release's notes:
 [native `uv tool install`](install-siteops.md#install-the-release-wheel) of the
 release wheel, or the [verified bootstrap](install-siteops.md#bootstrap-from-https).
-Deactivate or uninstall the editable installation first, then confirm the
-version with `siteops --version`.
+Deactivate or uninstall the pip installation first, then confirm the version
+with `siteops --version`.
 
 ### Reported version
 
@@ -541,6 +543,11 @@ the same release and replace the whole set when you upgrade. See
 [templates your pipeline uses](ci-cd-setup.md#templates-your-pipeline-uses)
 for the files each route needs.
 
+When you set `siteopsSource`, use the same release as the template `ref`. A
+template older than its engine can report success for a command the engine
+rejected. With v1.0.0b2 or v1.0.0b3 templates, for example, the validation
+step succeeds even though validation never ran.
+
 ### Site overrides
 
 Define `SITE_OVERRIDES` in Azure Pipelines, empty when you do not use
@@ -813,6 +820,8 @@ Repeating another key, such as `-l country=a -l country=b`, fails with
 Define `SITE_OVERRIDES` in Azure Pipelines, empty when you do not use
 overrides. Invalid JSON, including the literal `$(SITE_OVERRIDES)` of an
 undefined variable, fails the override step.
+
+Validation errors now fail the validation step, so Deploy does not run.
 
 The `manifest` input of `.pipelines/deploy.yaml` and
 `.github/workflows/deploy.yaml` is a path relative to the workspace, such as

@@ -427,7 +427,7 @@ an existing cluster connected to Azure Arc.
 
 The script verifies `siteops` inside its child shell and prints its
 `Command directory:` on success. If `siteops` is not on the parent shell's
-current PATH, open a new shell or add the printed directory for this session:
+current PATH, add the printed directory for this session:
 
 ```bash
 export PATH="<printed command directory>:$PATH"
@@ -436,6 +436,9 @@ export PATH="<printed command directory>:$PATH"
 ```powershell
 $env:PATH = "<printed command directory>;" + $env:PATH
 ```
+
+For new terminals, run `uv tool update-shell`, then open a new terminal. If
+`uv` is not on `PATH`, run the `uv` in the printed directory.
 
 The printed directory can differ when a native manager location was
 explicitly selected. Do not assume a fixed command directory.
