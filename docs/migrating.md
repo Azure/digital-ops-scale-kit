@@ -2,11 +2,13 @@
 
 Use this guide when upgrading the Scale Kit you run. Sections are newest
 first. Apply the sections between your current and target releases,
-starting with the oldest applicable release. The sections start at
-v1.0.0b6. From an earlier release, first apply the migration notes in the
+starting with the oldest applicable release. From a release before
+v1.0.0b6, also apply the migration notes in the
 [v1.0.0b4 release notes](https://github.com/Azure/digital-ops-scale-kit/releases/tag/v1.0.0b4)
 and review the
 [v1.0.0b5 release notes](https://github.com/Azure/digital-ops-scale-kit/releases/tag/v1.0.0b5).
+The v1.0.0b4 and v1.0.0b3 sections correct and supplement those releases'
+notes.
 
 To upgrade deployed Azure IoT Operations or Kubernetes instead, see
 [aio-releases.md](aio-releases.md) and the `aio-upgrade` and
@@ -50,22 +52,28 @@ Start with the changes that affect your workflow:
 | If you... | What to change |
 |---|---|
 | Installed Site Ops with `pip install -e .` | [Reinstall, or install an identified release](#site-ops-installation). |
-| Check the installed release with `siteops --version` | Expect the [engine version](#reported-version), `1.0.0b1` with a build suffix. |
+| Check the installed release with `siteops --version` | Expect the [engine version](#reported-version), `1.0.0b1`, with a build suffix for an installed release. |
 | Deploy with Azure CLI older than 2.70.0 | Run `az upgrade`. See [Azure CLI version](#azure-cli-version). |
 | Run `plan` or `deploy` for Bicep or kubectl steps | Install the [local tools](#local-tool-checks) those steps use. |
 | Run `deploy` from a script or pipeline | Add [`--yes`](#deployment-confirmation). |
 | Preview with `deploy --dry-run` or `validate --plan` | Use [`siteops plan`](#plan-replaces-preview-options). |
 | Use `sites --render`, read plain `sites` output or run `sites` in CI | Review [site inspection](#inspect-sites). |
-| Match text in plain output or error messages | Review [plain output](#plain-output) and [error messages](#error-messages). |
+| Capture `deploy` output or match text in plain output or error messages | Review [plain output](#plain-output) and [error messages](#error-messages). |
 | Capture validation JSON or publish pipeline diagnostics | Review [diagnostic output](#diagnostic-output) and copy the matching renderer with your templates. |
 | Repeat an option such as `-w`, or shorten option names | Review [option spelling](#option-spelling). |
 | Reference shipped manifests, partials or dataflow sets by path | Update [workspace content paths](#workspace-content-paths). |
 | Pass a manifest filename without a directory | Review [manifest names and paths](#manifest-names-and-paths). |
 | Rely on the workspace default AIO release | Review the [2609 default](#default-aio-release). |
+| Pin AIO 2603 through 2606 and use the OPC UA connector | Review the [connector certificate settings](#connector-certificate-settings). |
 | Select dataflow sets or read catalog step outputs | Update [resource sets](#resource-sets) and [catalog step outputs](#catalog-step-outputs). |
 | Author sites, manifests or parameter files | Review [preparation checks](#preparation-checks), [empty site mappings](#empty-site-mappings) and [parameter file selection](#parameter-file-selection). |
+| Find Azure deployments by name in a script | Review [Azure deployment names](#azure-deployment-names). |
 | Write `when: ""` on a step or include | Omit `when:` or set it to `null`. See [empty conditions](#empty-conditions). |
 | Use the Azure Pipelines templates | Choose an [engine selection](#azure-pipelines-templates). |
+| Reference the Azure Pipelines templates from another repository | Set [`templateRepository`](#template-repositories-and-copied-templates) to the repository resource alias. |
+| Copy the Azure Pipelines templates into your repository | Copy one [matching set](#template-repositories-and-copied-templates) from the same release. |
+| Use `SITE_OVERRIDES` in Azure Pipelines | Define the variable and review [override validation](#site-overrides). |
+| Pass absolute paths to the deployment pipelines | Use [relative paths](#pipeline-checkout-paths). |
 | Queue `.pipelines/deploy.yaml` with `siteopsSource` | Set `release` and `sourceCommit` instead. See [Azure Pipelines templates](#azure-pipelines-templates). |
 | Set `serviceConnections` or `secretGroups` in the Azure Pipelines deploy or integration pipeline | Move the names into the [Environment settings block](#azure-pipelines-environment-settings). |
 | Call the reusable GitHub Actions workflow | Pass the selector [as a secret](#github-actions-workflows). |
@@ -97,8 +105,8 @@ for example:
 siteops 1.0.0b1+build.12345.1.gabcdef123456
 ```
 
-An editable installation from a clone at the v1.0.0b7 tag reports
-`siteops 1.0.0b1`. See [Use the installed CLI](install-siteops.md#use-the-installed-cli).
+An installation from source, such as a Git pip source or an editable clone at
+the v1.0.0b7 tag, reports `siteops 1.0.0b1`. See [Use the installed CLI](install-siteops.md#use-the-installed-cli).
 
 ### Azure CLI version
 
@@ -209,6 +217,10 @@ Redacted success reports `+ Manifest structure and static references are valid.`
 Validation errors use stderr. Scripts should test the exit code rather than
 this text.
 
+`deploy` progress and its confirmation prompt use stderr, and the final
+summary uses stdout. Capture both streams to log a deployment. For
+automation, use `--output json` and the exit code.
+
 `deploy` progress and summary lines use new text:
 
 | v1.0.0b6 | v1.0.0b7 |
@@ -227,9 +239,8 @@ A run without steps at subscription scope starts with
 
 ### Error messages
 
-Plain errors start with `Error:`. `cache` and `index` errors no longer start
-with a code such as `cache.entry-missing:` or `index.approval:`, and
-`validate` reports `Error: Validation failed with N error(s):`. Plan and run
+Plain errors start with `Error:`. `validate` reports
+`Error: Validation failed with N error(s):`. Plan and run
 diagnostics are labeled `Error:` and `Warning:`. JSON output keeps the codes.
 Messages capitalize Site, for example `No Sites matched the specified criteria`.
 
@@ -243,8 +254,7 @@ siteops: error: -w is a global option. Put it before the command: siteops -w PAT
 ### Diagnostic output
 
 Redacted output preserves content causes such as `content.duplicate-key` and
-`content.unknown-field`, with fixed guidance and documentation links. Existing
-published plan and run codes remain available. The
+`content.unknown-field`, with fixed guidance and documentation links. The
 [diagnostic index](diagnostics.md) explains each code without publishing values,
 paths or provider messages.
 
@@ -254,17 +264,15 @@ JSON keeps one diagnostic record per occurrence. Human output can group
 identical public records as `N occurrences`, without changing record counts
 or private context.
 
-Run JSON adds `summary.operations.failureDiagnostics` beside the existing
-`counts` and `total`. Groups count logical operations, not provider attempts or
-nested ARM resources. Failed and unknown remain separate. Neither JSON
-projection includes raw provider messages.
+Run JSON reports `summary.operations.failureDiagnostics` beside `counts` and
+`total`. Groups count logical operations, not provider attempts or nested ARM
+resources. Failed and unknown remain separate. Neither JSON projection
+includes raw provider messages.
 
-`local-private` plan diagnostics omit producer `detail` and run diagnostics
-omit `serializedDetail`, and both use registry text for their summaries.
-
-Update copied templates with `scripts/render-siteops-output.py` from the same
-release. Supported older plan and run documents can omit the added fields.
-An unsupported engine invocation that exits `2` without a result prints
+The pipeline templates capture publishable JSON and render it with
+`scripts/render-siteops-output.py`. Use the templates, helpers and engine
+from the same release. An unsupported engine invocation that exits `2`
+without a result prints
 `Site Ops engine and template releases do not match. Use matching engine, setup, templates and helpers.`
 and keeps exit `2`, without probing or retrying. See
 [CI diagnostic output](ci-cd-setup.md#ci-diagnostic-output).
@@ -337,6 +345,15 @@ Install and upgrade skip the template when the feature mode is `Disabled`.
 This includes the legacy `connectors` alias when `opcua` is absent.
 The canonical `opcua` feature takes precedence over `connectors`.
 See [AIO releases](aio-releases.md).
+
+### Connector certificate settings
+
+On AIO 2603 through 2606, installation and upgrade now set the OPC UA
+connector's `connectors.values.securityPki.applicationUri`. On 2605 and 2606
+they also set `connectors.values.securityPki.subjectName`. Both match the
+values 2607 and later use. Upgrade keeps a value already set. If an OPC UA
+server trusts the connector by other values, set them in
+`aioConfigurationOverrides`.
 
 ### Resource sets
 
@@ -462,6 +479,13 @@ that v1.0.0b6 `deploy` warned about or left to Azure:
   must use HTTPS. A path outside the workspace reports
   `Kubectl file must stay within the workspace`.
 
+### Azure deployment names
+
+When `<manifest>-<Site>-<step>` exceeds 49 characters, its Azure deployment
+name now keeps the first 38 characters and adds a 10 character SHA-256
+suffix, instead of 42 characters and a 6 character MD5 suffix. Update scripts
+that look up these deployments by name. Resource names are unchanged.
+
 ### Azure Pipelines templates
 
 With an empty `siteopsSource`, the v1.0.0b6 templates installed the checkout
@@ -495,6 +519,48 @@ as the `siteopsSource` parameter of `templates/siteops-deploy.yaml`.
 
 `dryRun` now prepares an executable plan with `plan` rather than running
 `deploy --dry-run`, and deployment passes `--yes`.
+
+### Template repositories and copied templates
+
+When your pipeline references the stage templates from another repository,
+set `templateRepository` to that repository resource's alias. For a reference
+ending in `@scalekit`, pass `templateRepository: scalekit`. The templates run
+helper scripts from the repository that holds them, and the default `self`
+looks in your own checkout. `siteopsSource` installs the engine but does not
+supply those helpers. Without `templateRepository`, a release engine
+selection stops while installing Site Ops, and a `siteopsSource` selection
+stops after it:
+
+```text
+Release installation requires the matching automation scripts. Select templateRepository or copy the matching helpers.
+The templates need their matching automation scripts. Set templateRepository to the repository resource that holds the templates, or copy the matching helpers.
+```
+
+If you copy the templates into your repository, copy one matching set from
+the same release and replace the whole set when you upgrade. See
+[templates your pipeline uses](ci-cd-setup.md#templates-your-pipeline-uses)
+for the files each route needs.
+
+### Site overrides
+
+Define `SITE_OVERRIDES` in Azure Pipelines, empty when you do not use
+overrides. An undefined variable reaches the template as the literal text
+`$(SITE_OVERRIDES)` and is not treated as empty.
+
+Invalid JSON stops with
+`Site overrides could not be masked. Check the JSON locally.` Set each field
+through one path, so combine `parameters.brokerConfig` and
+`parameters.brokerConfig.memoryProfile` into one mapping. Empty field path
+segments, strings containing NUL and input longer than 1,048,576 characters
+also fail.
+
+### Pipeline checkout paths
+
+Pass workspace and Site file paths relative to your checkout, and manifest
+paths relative to the workspace. Absolute paths, leading backslashes and
+Windows drive paths now fail input validation in the Azure Pipelines
+templates. The reusable GitHub Actions deployment workflow applies the same
+rule to its workspace and manifest inputs. Local CLI commands are unaffected.
 
 ### Azure Pipelines environment settings
 
@@ -640,6 +706,10 @@ sites:
 An unquoted entry was left out of the target set without a word, which means deploying to fewer
 sites than the command named.
 
+**An include's `when:` must use the supported syntax.** A malformed expression fails while the
+manifest loads with `Invalid 'when' condition syntax on include of ...`. It used to log a warning
+and run the included steps on every site.
+
 ### Parameters
 
 **A parameter name carrying an unresolved template fails the step.** Previously such a name was
@@ -713,5 +783,87 @@ manifest that referenced the old path reports `Parameter file not found` and doe
 | `siteops validate m.yaml -v` | `siteops validate m.yaml --plan` |
 | `siteops sites -v` | `siteops sites --show-sources` |
 
-`siteops deploy --dry-run` prints the plan on its own. Running `-v` where one of these flags is
-meant prints a note naming the flag.
+`siteops deploy --dry-run` prints the plan on its own. Put `-v` before the
+command when you want debug logging. A trailing `-v`, such as
+`siteops validate m.yaml -v`, reports `unrecognized arguments: -v` and exits
+with code 2. Update copied validation commands and pipeline templates too.
+
+## To v1.0.0b4
+
+This section corrects and supplements the
+[v1.0.0b4 release notes](https://github.com/Azure/digital-ops-scale-kit/releases/tag/v1.0.0b4).
+
+### Deployment options
+
+Rename `deployOptions.includeGlobalSite` and `includeEdgeSite` to
+`enableGlobalSite` and `enableEdgeSite`. The old names have no aliases and no
+longer affect a deployment. `sites/base-site.yaml` also changed
+the `edge-site` step's default from `includeEdgeSite: true` to
+`enableEdgeSite: false`. Set `enableEdgeSite: true` on Sites that should keep
+deploying it.
+
+### Selectors
+
+Only `name` can repeat in a selector, and its values match any of them.
+Repeating another key, such as `-l country=a -l country=b`, fails with
+`may only appear once`. An empty key or value also fails.
+
+### Pipelines
+
+Define `SITE_OVERRIDES` in Azure Pipelines, empty when you do not use
+overrides. Invalid JSON, including the literal `$(SITE_OVERRIDES)` of an
+undefined variable, fails the override step.
+
+The `manifest` input of `.pipelines/deploy.yaml` and
+`.github/workflows/deploy.yaml` is a path relative to the workspace, such as
+`manifests/aio-install.yaml` instead of `aio-install`.
+
+### Sites and manifests
+
+- A parent declared `kind: Site` fails with `Cannot inherit from kind 'Site'`.
+  Move shared settings into a `kind: SiteTemplate` file.
+- An overlay that changes `name` fails with `cannot rename the site`. Use
+  `inherits:` or rename the base file.
+- Manifest `sites` entries use the relative form, such as `regions/eu/munich`,
+  without a leading `./`.
+- A manifest key Site Ops does not read fails with `has unknown ... key(s)`.
+
+### Content paths
+
+Update references to the moved shared files under `workspaces/iot-operations`:
+
+| v1.0.0b3 | v1.0.0b4 |
+|---|---|
+| `parameters/common.yaml` | `parameters/common/common.yaml` |
+| `parameters/chaining.yaml` | `parameters/inputs/aio-instance.yaml` |
+| `parameters/post-instance.yaml` | `parameters/outputs/aio-instance.yaml` |
+| `parameters/secretsync-chaining.yaml` | `parameters/inputs/secretsync.yaml` |
+| `templates/iot-ops/common/resolve-aio.bicep` | `templates/aio/resolve-aio.bicep` |
+| `templates/iot-ops/common/modules/` | `templates/common/modules/` |
+| `templates/iot-ops/deps/` | `templates/deps/` |
+
+### Secret Sync template
+
+`templates/secretsync/sync-secrets.bicep` replaces
+`templates/iot-ops/secretsync/sync-secret.bicep`. Pass a `secrets` array, put
+the values in `secretValues` keyed by secret name, and supply
+`managedIdentityClientId` and `instanceLocation`. Read results from
+`materializedSecrets` or `secretCount` instead of the former single secret
+outputs.
+
+### Python callers
+
+`Manifest.from_file` requires `workspace_root`, for example
+`Manifest.from_file(path, workspace_root=workspace)`.
+
+## To v1.0.0b3
+
+This section supplements the
+[v1.0.0b3 release notes](https://github.com/Azure/digital-ops-scale-kit/releases/tag/v1.0.0b3).
+
+### Site overrides in Azure Pipelines
+
+With a nonempty `SITE_OVERRIDES`, the deployment template runs
+`scripts/generate-site-overrides.py` from your own checkout. If your pipeline
+references the template from another repository, copy that script from the
+same release into your repository at the same path.

@@ -846,9 +846,41 @@ Do not combine release, source and `installDev` selections.
 
 Older releases without the signed reference require their explicit engine
 selection. There is no lookup of the newest compatible engine and no
-silent fallback to editable installation. Referenced templates are the
-recommended route. If you copy templates, retain their matching shared
-templates and `scripts/render-siteops-output.py` from the same release.
+silent fallback to editable installation.
+
+#### Templates your pipeline uses
+
+Reference the two stage templates, `siteops-validate.yaml` and
+`siteops-deploy.yaml`, and pass their parameters. `setup-siteops.yaml` is a
+supported steps template for pipelines that install Site Ops themselves.
+The other templates and the helper scripts are internal parts of the stage
+templates and can change between releases.
+
+The stage templates run helper scripts from the repository that holds the
+templates. When your pipeline references them from another repository, set
+`templateRepository` to that repository resource's alias, as in the example
+above. Otherwise the templates look for the helpers in your own checkout. A
+release engine selection then stops while installing Site Ops, and a
+`siteopsSource` selection stops after it:
+
+```text
+Release installation requires the matching automation scripts. Select templateRepository or copy the matching helpers.
+The templates need their matching automation scripts. Set templateRepository to the repository resource that holds the templates, or copy the matching helpers.
+```
+
+Define `SITE_OVERRIDES` in your pipeline, empty when you do not use
+overrides, as the example does. An undefined variable reaches the template
+as the literal text `$(SITE_OVERRIDES)`.
+
+Referenced templates are the recommended route. If you copy the templates
+into your repository instead, copy one matching set from the same release
+and replace the whole set when you upgrade:
+
+| Your pipeline uses | Copy from the same release |
+|---|---|
+| Either stage template | The stage template, `setup-siteops.yaml`, `siteops-context.yaml`, `siteops-checkout.yaml`, `siteops-inputs.yaml` and `scripts/render-siteops-output.py` |
+| `SITE_OVERRIDES` | Also `scripts/mask-site-overrides.py` and `scripts/generate-site-overrides.py` |
+| The release engine selection | Also `scripts/install-siteops-consumer.py`, `scripts/fleet_process.py` and `scripts/bootstrap/siteops-bootstrap.sh` |
 
 ### ADO project setup
 

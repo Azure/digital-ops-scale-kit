@@ -262,6 +262,9 @@ def test_override_preparation_preserves_failures_and_empty_values(
 ):
     binary = tmp_path / "bin"
     binary.mkdir()
+    (tmp_path / "scripts").mkdir()
+    for name in ("generate-site-overrides.py", "mask-site-overrides.py"):
+        (tmp_path / "scripts" / name).write_text("")
     write_executable(binary / "python3", """#!/usr/bin/env bash
 case "$*" in
   '-I -S -B ./scripts/generate-site-overrides.py workspace') echo generator >> calls; exit "$GENERATOR_EXIT" ;;
@@ -615,3 +618,39 @@ def test_consumer_ci_validation_uses_global_verbosity_without_provider_calls(
     with pytest.raises(SystemExit) as caught:
         main()
     assert caught.value.code == (2 if legacy_verbose else 0)
+
+
+_REQUIRED = object()
+# Parameters that consumer pipelines pass to the templates they reference. Existing names, types
+# and defaults stay unchanged, and a new parameter must have a default.
+_CONSUMER_TEMPLATE_PARAMETERS = {
+    "siteops-validate.yaml": {
+        "templateRepository": ("string", "self"), "workspace": ("string", "workspaces/iot-operations"),
+        "manifest": ("string", _REQUIRED), "selector": ("string", ""), "siteFile": ("string", ""),
+        "siteopsSource": ("string", ""), "release": ("string", ""), "sourceCommit": ("string", ""),
+        "repository": ("string", ""), "stageName": ("string", "validate"),
+    },
+    "siteops-deploy.yaml": {
+        "serviceConnection": ("string", _REQUIRED), "keepAzSessionActive": ("boolean", False),
+        "workspace": ("string", "workspaces/iot-operations"), "manifest": ("string", _REQUIRED),
+        "environment": ("string", ""), "selector": ("string", ""), "siteFile": ("string", ""),
+        "dryRun": ("boolean", False), "siteopsSource": ("string", ""), "release": ("string", ""),
+        "sourceCommit": ("string", ""), "repository": ("string", ""), "stageName": ("string", "deploy"),
+        "templateRepository": ("string", "self"),
+    },
+    "setup-siteops.yaml": {
+        "pythonVersion": ("string", "3.11"), "installDev": ("boolean", False), "siteopsSource": ("string", ""),
+        "enableCache": ("boolean", True), "sourceDirectory": ("string", "$(Build.SourcesDirectory)"),
+        "templateRepository": ("string", "self"), "release": ("string", ""), "sourceCommit": ("string", ""),
+        "repository": ("string", ""),
+    },
+}
+
+
+@pytest.mark.parametrize("name", sorted(_CONSUMER_TEMPLATE_PARAMETERS))
+def test_consumer_template_parameters_stay_compatible(name):
+    rows = yaml.safe_load((TEMPLATES / name).read_text(encoding="utf-8"))["parameters"]
+    actual = {row["name"]: (row.get("type", "string"), row.get("default", _REQUIRED)) for row in rows}
+    expected = _CONSUMER_TEMPLATE_PARAMETERS[name]
+    assert {key: actual.get(key) for key in expected} == expected
+    assert [key for key in actual if key not in expected and actual[key][1] is _REQUIRED] == []
