@@ -275,6 +275,11 @@ scripts from this release. See
 - This is a Scale Kit beta release. The Site Ops source version remains
   `1.0.0b1`, and the included engine artifact has a distinct build suffix.
   The generated installation section reports its exact package version.
+- If `siteops` is not found in a new terminal after installation, as is
+  common on Windows, run `uv tool update-shell` and open a new terminal. If
+  `uv` is not on `PATH`, run the `uv` in the command directory the installer
+  prints. Before installing, remove an older `siteops`, such as a pip
+  installation, so it does not take precedence.
 - Installation and source enrollment do not sign in to Azure or authorize
   resource changes. Planning with a resource ID performs bounded reads.
   Deployment requires its own confirmation and can incur Azure charges.
