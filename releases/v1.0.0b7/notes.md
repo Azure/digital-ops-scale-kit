@@ -243,7 +243,8 @@ for engine selection, fleet targeting and diagnostic rendering in automation.
 
 Read the [v1.0.0b6 to v1.0.0b7 migration guide](https://github.com/Azure/digital-ops-scale-kit/blob/v1.0.0b7/docs/migrating.md#to-v100b7)
 before updating existing workspaces, scripts or pipelines. It compares this
-release with v1.0.0b6.
+release with v1.0.0b6. From an earlier release, start with the guide's
+section for the release after yours.
 
 The breaking changes to check first are Site selected parameter paths and
 catalog resource set selections. Keep dynamic parameter paths relative
@@ -262,6 +263,12 @@ Update automation to use `plan` in place of `deploy --dry-run` and
 requires `--yes`. Review moved Manifest and resource set paths, the
 Azure CLI minimum, and matching pipeline templates and result helpers
 in the migration guide.
+
+An Azure Pipelines pipeline that references the templates from another
+repository, for example with `@scalekit`, sets `templateRepository` to that
+repository resource's alias. Copied templates need the matching helper
+scripts from this release. See
+[template repositories and copied templates](https://github.com/Azure/digital-ops-scale-kit/blob/v1.0.0b7/docs/migrating.md#template-repositories-and-copied-templates).
 
 ## Operational notes
 
