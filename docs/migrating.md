@@ -50,7 +50,7 @@ Start with the changes that affect your workflow:
 | If you... | What to change |
 |---|---|
 | Installed Site Ops with `pip install -e .` | [Reinstall, or install an identified release](#site-ops-installation). |
-| Check the installed release with `siteops --version` | Expect the [engine version](#reported-version), `1.0.0b1` with a build suffix. |
+| Check the installed release with `siteops --version` | Expect the [engine version](#reported-version), `1.0.0b1`, with a build suffix for an installed release. |
 | Deploy with Azure CLI older than 2.70.0 | Run `az upgrade`. See [Azure CLI version](#azure-cli-version). |
 | Run `plan` or `deploy` for Bicep or kubectl steps | Install the [local tools](#local-tool-checks) those steps use. |
 | Run `deploy` from a script or pipeline | Add [`--yes`](#deployment-confirmation). |
@@ -66,6 +66,10 @@ Start with the changes that affect your workflow:
 | Author sites, manifests or parameter files | Review [preparation checks](#preparation-checks), [empty site mappings](#empty-site-mappings) and [parameter file selection](#parameter-file-selection). |
 | Write `when: ""` on a step or include | Omit `when:` or set it to `null`. See [empty conditions](#empty-conditions). |
 | Use the Azure Pipelines templates | Choose an [engine selection](#azure-pipelines-templates). |
+| Reference the Azure Pipelines templates from another repository | Set [`templateRepository`](#template-repositories-and-copied-templates) to the repository resource alias. |
+| Copy the Azure Pipelines templates into your repository | Copy one [matching set](#template-repositories-and-copied-templates) from the same release. |
+| Use `SITE_OVERRIDES` in Azure Pipelines | Define the variable and review [override validation](#site-overrides). |
+| Pass absolute paths to the deployment pipelines | Use [relative paths](#pipeline-checkout-paths). |
 | Queue `.pipelines/deploy.yaml` with `siteopsSource` | Set `release` and `sourceCommit` instead. See [Azure Pipelines templates](#azure-pipelines-templates). |
 | Set `serviceConnections` or `secretGroups` in the Azure Pipelines deploy or integration pipeline | Move the names into the [Environment settings block](#azure-pipelines-environment-settings). |
 | Call the reusable GitHub Actions workflow | Pass the selector [as a secret](#github-actions-workflows). |
@@ -97,8 +101,8 @@ for example:
 siteops 1.0.0b1+build.12345.1.gabcdef123456
 ```
 
-An editable installation from a clone at the v1.0.0b7 tag reports
-`siteops 1.0.0b1`. See [Use the installed CLI](install-siteops.md#use-the-installed-cli).
+An installation from source, such as a Git pip source or an editable clone at
+the v1.0.0b7 tag, reports `siteops 1.0.0b1`. See [Use the installed CLI](install-siteops.md#use-the-installed-cli).
 
 ### Azure CLI version
 
@@ -227,9 +231,8 @@ A run without steps at subscription scope starts with
 
 ### Error messages
 
-Plain errors start with `Error:`. `cache` and `index` errors no longer start
-with a code such as `cache.entry-missing:` or `index.approval:`, and
-`validate` reports `Error: Validation failed with N error(s):`. Plan and run
+Plain errors start with `Error:`. `validate` reports
+`Error: Validation failed with N error(s):`. Plan and run
 diagnostics are labeled `Error:` and `Warning:`. JSON output keeps the codes.
 Messages capitalize Site, for example `No Sites matched the specified criteria`.
 
@@ -243,8 +246,7 @@ siteops: error: -w is a global option. Put it before the command: siteops -w PAT
 ### Diagnostic output
 
 Redacted output preserves content causes such as `content.duplicate-key` and
-`content.unknown-field`, with fixed guidance and documentation links. Existing
-published plan and run codes remain available. The
+`content.unknown-field`, with fixed guidance and documentation links. The
 [diagnostic index](diagnostics.md) explains each code without publishing values,
 paths or provider messages.
 
@@ -254,17 +256,15 @@ JSON keeps one diagnostic record per occurrence. Human output can group
 identical public records as `N occurrences`, without changing record counts
 or private context.
 
-Run JSON adds `summary.operations.failureDiagnostics` beside the existing
-`counts` and `total`. Groups count logical operations, not provider attempts or
-nested ARM resources. Failed and unknown remain separate. Neither JSON
-projection includes raw provider messages.
+Run JSON reports `summary.operations.failureDiagnostics` beside `counts` and
+`total`. Groups count logical operations, not provider attempts or nested ARM
+resources. Failed and unknown remain separate. Neither JSON projection
+includes raw provider messages.
 
-`local-private` plan diagnostics omit producer `detail` and run diagnostics
-omit `serializedDetail`, and both use registry text for their summaries.
-
-Update copied templates with `scripts/render-siteops-output.py` from the same
-release. Supported older plan and run documents can omit the added fields.
-An unsupported engine invocation that exits `2` without a result prints
+The pipeline templates capture publishable JSON and render it with
+`scripts/render-siteops-output.py`. Use the templates, helpers and engine
+from the same release. An unsupported engine invocation that exits `2`
+without a result prints
 `Site Ops engine and template releases do not match. Use matching engine, setup, templates and helpers.`
 and keeps exit `2`, without probing or retrying. See
 [CI diagnostic output](ci-cd-setup.md#ci-diagnostic-output).
@@ -496,6 +496,49 @@ as the `siteopsSource` parameter of `templates/siteops-deploy.yaml`.
 `dryRun` now prepares an executable plan with `plan` rather than running
 `deploy --dry-run`, and deployment passes `--yes`.
 
+### Template repositories and copied templates
+
+When your pipeline references the stage templates from another repository,
+set `templateRepository` to that repository resource's alias. For a reference
+ending in `@scalekit`, pass `templateRepository: scalekit`. The templates run
+helper scripts from the repository that holds them, and the default `self`
+looks in your own checkout. `siteopsSource` installs the engine but does not
+supply those helpers. Without `templateRepository`, a release engine
+selection stops while installing Site Ops, and a `siteopsSource` selection
+stops after it:
+
+```text
+Release installation requires the matching automation scripts. Select templateRepository or copy the matching helpers.
+The templates need their matching automation scripts. Set templateRepository to the repository resource that holds the templates, or copy the matching helpers.
+```
+
+If you copy the templates into your repository, copy one matching set from
+the same release and replace the whole set when you upgrade. See
+[templates your pipeline uses](ci-cd-setup.md#templates-your-pipeline-uses)
+for the files each route needs.
+
+### Site overrides
+
+Define `SITE_OVERRIDES` in Azure Pipelines, empty when you do not use
+overrides. An undefined variable reaches the template as the literal text
+`$(SITE_OVERRIDES)` and is not treated as empty.
+
+The templates now mask override values before generating Site overlays.
+Invalid JSON stops with
+`Site overrides could not be masked. Check the JSON locally.` Set each field
+through one path. An override cannot set both `parameters.brokerConfig` and
+`parameters.brokerConfig.memoryProfile`, so combine them into one mapping.
+Empty field path segments, strings containing NUL and input longer than
+1,048,576 characters also fail.
+
+### Pipeline checkout paths
+
+Pass workspace and Site file paths relative to your checkout, and manifest
+paths relative to the workspace. Absolute paths, leading backslashes and Windows drive paths now fail input
+validation in the Azure Pipelines templates. The reusable GitHub Actions
+deployment workflow applies the same rule to its workspace and manifest
+inputs. Local CLI commands are unaffected.
+
 ### Azure Pipelines environment settings
 
 In v1.0.0b6, `.pipelines/deploy.yaml` and `.pipelines/integration-test.yaml`
@@ -713,5 +756,7 @@ manifest that referenced the old path reports `Parameter file not found` and doe
 | `siteops validate m.yaml -v` | `siteops validate m.yaml --plan` |
 | `siteops sites -v` | `siteops sites --show-sources` |
 
-`siteops deploy --dry-run` prints the plan on its own. Running `-v` where one of these flags is
-meant prints a note naming the flag.
+`siteops deploy --dry-run` prints the plan on its own. Put `-v` before the
+command when you want debug logging. A trailing `-v`, such as
+`siteops validate m.yaml -v`, reports `unrecognized arguments: -v` and exits
+with code 2. Update copied validation commands and pipeline templates too.

@@ -13,6 +13,17 @@ parameters:
 steps:
   - script: |
       set -euo pipefail
+      if [[ ! -f "$TEMPLATE_ROOT/scripts/render-siteops-output.py" ]]; then
+        echo "##vso[task.logissue type=error]The templates need their matching automation scripts. Set templateRepository to the repository resource that holds the templates, or copy the matching helpers."
+        exit 1
+      fi
+    displayName: Check template helpers
+    workingDirectory: $(SITEOPS_WORKSPACE_ROOT)
+    env:
+      TEMPLATE_ROOT: $(SITEOPS_TEMPLATE_ROOT)
+
+  - script: |
+      set -euo pipefail
       # Paths stay relative to the checkout: no parent segments and no absolute or drive paths.
       for value in "$WORKSPACE" "$MANIFEST" "$SITE_FILE"; do
         if [[ "$value" == *".."* || "$value" == /* || "$value" == \\* || "$value" =~ ^[A-Za-z]: ]]; then
@@ -43,6 +54,12 @@ steps:
         echo "No site overrides configured, using committed sites"
         exit 0
       fi
+      for helper in mask-site-overrides.py generate-site-overrides.py; do
+        if [[ ! -f "$TEMPLATE_ROOT/scripts/$helper" ]]; then
+          echo "##vso[task.logissue type=error]Site overrides need the matching automation scripts. Set templateRepository to the repository resource that holds the templates, or copy the matching helpers."
+          exit 1
+        fi
+      done
       python3 -I -S -B "$TEMPLATE_ROOT/scripts/mask-site-overrides.py" azure-pipelines
       printf '%s' "$SITE_OVERRIDES" |
         python3 -I -S -B "$TEMPLATE_ROOT/scripts/generate-site-overrides.py" "$WORKSPACE"

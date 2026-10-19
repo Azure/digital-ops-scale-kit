@@ -586,6 +586,26 @@ az deployment sub show --name <deployment> --subscription <subscription>
 For a kubectl or wait operation, inspect its resources or condition at the
 target. See [run-output.md](run-output.md).
 
+## Azure Pipelines templates
+
+### "The templates need their matching automation scripts"
+
+```
+Release installation requires the matching automation scripts. Select templateRepository or copy the matching helpers.
+The templates need their matching automation scripts. Set templateRepository to the repository resource that holds the templates, or copy the matching helpers.
+Site overrides need the matching automation scripts. Set templateRepository to the repository resource that holds the templates, or copy the matching helpers.
+```
+
+**Cause**: The stage templates run helper scripts from the repository that
+holds the templates. A pipeline that references them from another repository
+without `templateRepository` makes its own checkout that repository, so the
+helpers are missing. Copied templates report the same message when a helper
+from the matching set was not copied.
+
+**Solution**: Set `templateRepository` to the alias of the repository
+resource that holds the templates, or copy the complete matching set. See
+[templates your pipeline uses](ci-cd-setup.md#templates-your-pipeline-uses).
+
 ## Arc proxy issues
 
 ### "Failed to establish Arc proxy"

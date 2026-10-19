@@ -227,6 +227,35 @@ def test_site_file_and_selector_validation_is_explicit(tmp_path, site_file, sele
     assert result.returncode == expected
 
 
+_HELPER_GUIDANCE = "Set templateRepository to the repository resource that holds the templates"
+
+
+def test_template_helpers_are_checked_before_inputs(tmp_path):
+    steps = yaml.safe_load((TEMPLATES / "siteops-inputs.yaml").read_text(encoding="utf-8"))["steps"]
+    assert steps[0]["displayName"] == "Check template helpers"
+    tooling = tmp_path / "tooling"
+    (tooling / "scripts").mkdir(parents=True)
+    script = step(TEMPLATES / "siteops-inputs.yaml", "Check template helpers")["script"]
+    missing = run_script(script, tmp_path, {"TEMPLATE_ROOT": bash_path(tooling)}, shell_options=())
+    assert missing.returncode == 1
+    assert _HELPER_GUIDANCE in missing.stdout
+    (tooling / "scripts" / "render-siteops-output.py").write_text("")
+    present = run_script(script, tmp_path, {"TEMPLATE_ROOT": bash_path(tooling)}, shell_options=())
+    assert present.returncode == 0, present.stdout + present.stderr
+
+
+@pytest.mark.parametrize("overrides,expected", [("", 0), ('{"plant-one":{"location":"eastus"}}', 1)])
+def test_site_overrides_need_their_helpers_only_when_set(tmp_path, overrides, expected):
+    (tmp_path / "workspace").mkdir()
+    tooling = tmp_path / "tooling"
+    (tooling / "scripts").mkdir(parents=True)
+    result = run_script(step(TEMPLATES / "siteops-inputs.yaml", "Setup site overrides")["script"], tmp_path, {
+        "TEMPLATE_ROOT": bash_path(tooling), "WORKSPACE": "workspace", "SITE_OVERRIDES": overrides,
+    }, shell_options=())
+    assert result.returncode == expected
+    assert (_HELPER_GUIDANCE in result.stdout) is bool(expected)
+
+
 def _github_validate_inputs():
     flow = yaml.safe_load((ROOT / ".github/workflows/_siteops-deploy.yaml").read_text(encoding="utf-8"))
     steps = [entry for job in flow["jobs"].values() for entry in job.get("steps", [])]
