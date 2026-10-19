@@ -23,14 +23,16 @@ and deployment confirmation remain separate choices.
 
 The Arc cluster resource ID is the only required answer for guided AIO
 installation. Site Ops reads the cluster to derive the subscription, resource
-group, region and cluster name, and names the Site after the cluster.
+group, region and cluster name, and names the Site after the cluster in
+lowercase. To choose another name, or when the cluster's name is not a valid
+Site name, add `--input siteName=<name>`.
 Environment and country labels are optional.
 
 Use an existing Arc cluster in its own resource group, Azure CLI 2.70.0 or
 newer signed in with deployment and role assignment permissions, and
-GitHub CLI 2.95 or newer. Enroll `official` using the instructions below,
-then replace the cluster placeholder. This command installs AIO and enables
-Secret Sync together:
+GitHub CLI 2.95 or a later 2.x release. Enroll `official` using the
+instructions below, then replace the cluster placeholder. This command
+installs AIO and enables Secret Sync together:
 
 ```text
 siteops deploy aio-install --source "official@v1.0.0b7" --input "cluster=<Arc-cluster-resource-ID>" --input enableSecretSync=true
@@ -50,8 +52,10 @@ siteops deploy secretsync --source "official@v1.0.0b7" --input "instance=<AIO-in
 This route resolves the instance and its associated cluster, uses the actual
 instance name, and performs Secret Sync enablement without reinstalling or
 upgrading AIO. Add `existingVault` to use an existing Key Vault.
-Answer files, optional name overrides and saved Sites use the same typed
-input contract. See [guided inputs](https://github.com/Azure/digital-ops-scale-kit/blob/v1.0.0b7/docs/guided-inputs.md).
+Answer files and inline answers use the same typed input contract. A Site
+saved from those answers is an ordinary Site file, and later deployments
+from it use the saved values without reading the cluster again.
+See [guided inputs](https://github.com/Azure/digital-ops-scale-kit/blob/v1.0.0b7/docs/guided-inputs.md).
 
 ### 3. Review a prepared plan and read deployment outcomes
 
@@ -71,11 +75,12 @@ confirm, and executes that same plan. A separate `plan` invocation is a
 preview, not a saved execution artifact. Add `--yes` for CI, JSON output or
 other unattended deployment.
 
-Verified Packages use ARM JSON compiled by the producer. Local workspaces
-retain source Bicep submission and record the compilation observed during
-preparation. Progress uses stderr, and final JSON output is one document
-on stdout. Results retain each Site's and operation's outcome, including
-partial failure, skipped work, cancellation and unconfirmed completion.
+Verified packages deploy the templates their publisher compiled. A local
+workspace submits its Bicep source, and the plan records the compilation
+checked during preparation. Progress uses stderr, and final JSON output is
+one document on stdout. Results retain each Site's and operation's outcome,
+including partial failure, skipped work, cancellation and unconfirmed
+completion.
 
 A successful deployment reports completed operations. Check AIO readiness
 and the workload's functional result separately before proceeding.
@@ -83,7 +88,7 @@ See [plan output](https://github.com/Azure/digital-ops-scale-kit/blob/v1.0.0b7/d
 [run output](https://github.com/Azure/digital-ops-scale-kit/blob/v1.0.0b7/docs/run-output.md)
 and [check the result](https://github.com/Azure/digital-ops-scale-kit/blob/v1.0.0b7/docs/guided-inputs.md#check-the-result).
 
-### 4. Browse, acquire and publish complete workspace Packages
+### 4. Browse, acquire and publish complete workspace packages
 
 Keep your Site configuration separate from the content you consume.
 After enrolling `official`, acquire this release's workspace and inspect
@@ -94,10 +99,10 @@ siteops --approved-source official project pin .\factory --release v1.0.0b7
 siteops --approved-source official --project .\factory browse aio-install
 ```
 
-The project pin selects an exact Package and leaves your Sites unchanged.
+The project pin selects an exact package and leaves your Sites unchanged.
 Package use verifies provenance, byte integrity, compatibility and current
 source policy. Add `--offline-content` to content commands in a pinned
-project to use cached Package and proof bytes. This restricts content
+project to use cached package and proof bytes. This restricts content
 acquisition, not Azure reads or deployment.
 
 `browse` shows requirements, effects, guides and typed input availability
@@ -105,15 +110,16 @@ without loading Site values or invoking deployment tools. Remote
 `browse --source` reads published descriptions rather than deployable
 content.
 
-Content authors publish index descriptions with
+Content authors generate a public content index with
 `siteops -w workspaces\iot-operations index --public` in a reviewed local
-checkout. Reviewed release declarations build and sign complete workspace
-Packages, including compiled templates and their documentation.
+checkout, then commit the generated files. Reviewed release declarations
+build and sign complete workspace packages, including compiled templates
+and their documentation.
 A signed engine reference identifies the exact engine selected for a
 content release. Source enrollment remains the consumer's decision.
 See [projects](https://github.com/Azure/digital-ops-scale-kit/blob/v1.0.0b7/docs/projects.md),
 [browsing](https://github.com/Azure/digital-ops-scale-kit/blob/v1.0.0b7/docs/browse-content.md)
-and [workspace Packages](https://github.com/Azure/digital-ops-scale-kit/blob/v1.0.0b7/docs/workspace-packages.md).
+and [workspace packages](https://github.com/Azure/digital-ops-scale-kit/blob/v1.0.0b7/docs/workspace-packages.md).
 
 ### 5. Qualify the exact release candidate before publication
 
@@ -243,7 +249,9 @@ The breaking changes to check first are Site selected parameter paths and
 catalog resource set selections. Keep dynamic parameter paths relative
 and inside the workspace, with no `..` segments. Replace scalar resource
 set selections with ordered lists, omit an area for no selection, and
-use `[]` to clear an inherited list.
+use `[]` to clear an inherited list. Remove the `none` selection, and give
+a directly attached dataflow parameter file the `path` and `collections`
+form shown in the migration guide.
 
 The inherited AIO default changes from 2607 to 2609. Pin
 `properties.aioRelease: "2607"` to retain the v1.0.0b6 AIO release, or
