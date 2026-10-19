@@ -72,6 +72,7 @@ Start with the changes that affect your workflow:
 | Use the Azure Pipelines templates | Choose an [engine selection](#azure-pipelines-templates). |
 | Reference the Azure Pipelines templates from another repository | Set [`templateRepository`](#template-repositories-and-copied-templates) to the repository resource alias. |
 | Copy the Azure Pipelines templates into your repository | Copy one [matching set](#template-repositories-and-copied-templates) from the same release. |
+| Set `siteopsSource` in your pipeline | Keep the template `ref` on [the same release](#template-repositories-and-copied-templates). |
 | Use `SITE_OVERRIDES` in Azure Pipelines | Define the variable and review [override validation](#site-overrides). |
 | Pass absolute paths to the deployment pipelines | Use [relative paths](#pipeline-checkout-paths). |
 | Queue `.pipelines/deploy.yaml` with `siteopsSource` | Set `release` and `sourceCommit` instead. See [Azure Pipelines templates](#azure-pipelines-templates). |
@@ -542,6 +543,11 @@ the same release and replace the whole set when you upgrade. See
 [templates your pipeline uses](ci-cd-setup.md#templates-your-pipeline-uses)
 for the files each route needs.
 
+When you set `siteopsSource`, use the same release as the template `ref`. A
+template older than its engine can report success for a command the engine
+rejected. With v1.0.0b2 or v1.0.0b3 templates, for example, the validation
+step succeeds even though validation never ran.
+
 ### Site overrides
 
 Define `SITE_OVERRIDES` in Azure Pipelines, empty when you do not use
@@ -814,6 +820,8 @@ Repeating another key, such as `-l country=a -l country=b`, fails with
 Define `SITE_OVERRIDES` in Azure Pipelines, empty when you do not use
 overrides. Invalid JSON, including the literal `$(SITE_OVERRIDES)` of an
 undefined variable, fails the override step.
+
+Validation errors now fail the validation step, so Deploy does not run.
 
 The `manifest` input of `.pipelines/deploy.yaml` and
 `.github/workflows/deploy.yaml` is a path relative to the workspace, such as
