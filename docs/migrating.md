@@ -83,14 +83,13 @@ Start with the changes that affect your workflow:
 
 ### Site Ops installation
 
-pip installations keep working. After updating a clone, run `pip install -e .`
-again, because the engine now also depends on `packaging`. In Azure
-Pipelines, `siteopsSource` still installs Site Ops with pip from the source
-you name, such as a tagged Git source. See
+After updating a clone, run `pip install -e .` again, because the engine now
+also depends on `packaging`. In Azure Pipelines, `siteopsSource` installs Site
+Ops with pip from the source you name, such as a tagged Git source. See
 [Azure Pipelines templates](#azure-pipelines-templates).
 
-To install the engine built for a release instead, use the command from that
-release's notes:
+You can also install the engine built for a release, using the command from
+that release's notes:
 [native `uv tool install`](install-siteops.md#install-the-release-wheel) of the
 release wheel, or the [verified bootstrap](install-siteops.md#bootstrap-from-https).
 Deactivate or uninstall the pip installation first, then confirm the version
