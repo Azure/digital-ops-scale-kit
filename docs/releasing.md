@@ -853,11 +853,10 @@ command fails, do not announce the release. Add a line to the editable
 release notes that directs operators to its pinned commands, then fix the
 README or bootstrap through the normal review process.
 
-When these checks pass, update the README's recommended release in a
-documentation pull request before announcing the release. Recommend a release
-that has workspace content. It either includes Site Ops or links to the engine
-release to install, so an engine-only release leaves the recommendation
-unchanged. Do not change the recommendation in the release pull request,
+When these checks pass, update the release linked in the README quickstart's
+first sentence, in a documentation pull request, before announcing the
+release. Recommend a release that has workspace content. An engine-only
+release does not change the recommendation. Do not change the recommendation in the release pull request,
 because its tag does not exist until publication.
 
 ## Retry or prepare a new candidate
