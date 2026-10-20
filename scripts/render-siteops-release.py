@@ -263,7 +263,19 @@ _BLOCK_START = re.compile(
     r"(?:#{1,6}(?:[ \t]|$)|>|[-+*](?:[ \t]|$)|[0-9]{1,9}[.)](?:[ \t]|$)|`{3,}|~{3,}|<"
     r"|\[[^\]]*\]:|(?:[-*_][ \t]*){3,}$|=+[ \t]*$|-+[ \t]*$)"
 )
-_LIST_ITEM = re.compile(r"(?:[-+*]|[0-9]{1,9}[.)])[ \t]+\S")
+_LIST_ITEM = re.compile(r"(?:[-+*]|[0-9]{1,9}[.)])[ \t]+(\S.*)")
+_RAW_HTML = re.compile(r"<(pre|script|style|textarea)(?:[\s>]|$)", re.IGNORECASE)
+
+
+def _html_terminator(stripped: str) -> str | None:
+    """Return the closing text of an HTML block that a blank line does not end."""
+    raw = _RAW_HTML.match(stripped)
+    if raw:
+        return "</" + raw[1].lower() + ">"
+    for opener, closer in (("<!--", "-->"), ("<?", "?>"), ("<![CDATA[", "]]>")):
+        if stripped.startswith(opener):
+            return closer
+    return ">" if re.match(r"<![A-Za-z]", stripped) else None
 
 
 def unwrap_paragraphs(text: str) -> str:
@@ -275,14 +287,21 @@ def unwrap_paragraphs(text: str) -> str:
     """
     output: list[str] = []
     fence = None
+    html_until = None
     in_html = joinable = False
     for line in text.split("\n"):
         stripped = line.lstrip(" \t")
+        indent = len(line[: len(line) - len(stripped)].expandtabs(4))
         if fence:
             output.append(line)
             closing = re.match(r"(`{3,}|~{3,})[ \t]*$", stripped)
-            if closing and closing[1][0] == fence[0] and len(closing[1]) >= fence[1]:
+            if closing and closing[1][0] == fence[0] and len(closing[1]) >= fence[1] and indent <= fence[2] + 3:
                 fence = None
+            continue
+        if html_until:
+            output.append(line)
+            if html_until in line.lower():
+                html_until = None
             continue
         if not stripped:
             output.append(line)
@@ -290,19 +309,29 @@ def unwrap_paragraphs(text: str) -> str:
             continue
         opener = re.match(r"`{3,}|~{3,}", stripped)
         if opener:
-            fence = (opener[0][0], len(opener[0]))
-        in_html = in_html or stripped.startswith("<")
-        block = bool(opener) or in_html or "|" in line or _BLOCK_START.match(stripped) is not None
-        hard_break = line.endswith(("  ", "\\"))
+            fence = (opener[0][0], len(opener[0]), indent)
+        if stripped.startswith("<") and not in_html:
+            terminator = _html_terminator(stripped)
+            if terminator and terminator not in stripped.lower()[1:]:
+                html_until = terminator
+            in_html = terminator is None
+        block = bool(opener) or in_html or html_until is not None or "|" in line
+        block = block or _BLOCK_START.match(stripped) is not None
+        # Trailing whitespace can be significant, for example inside a code span.
+        final = line.endswith(("\\", " ", "\t"))
         if joinable and not block:
-            output[-1] = output[-1].rstrip(" \t") + " " + stripped
-            joinable = not hard_break
+            output[-1] = output[-1] + " " + stripped
+            joinable = not final
             continue
         output.append(line)
         if block:
-            joinable = not (opener or in_html or hard_break or "|" in line) and bool(_LIST_ITEM.match(stripped))
+            item = _LIST_ITEM.match(stripped)
+            joinable = (
+                item is not None and _BLOCK_START.match(item[1]) is None
+                and not (opener or in_html or html_until or final or "|" in line) and indent < 4
+            )
         else:
-            joinable = len(line[: len(line) - len(stripped)].expandtabs(4)) < 4 and not hard_break
+            joinable = indent < 4 and not final
     return "\n".join(output)
 
 

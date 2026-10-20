@@ -2226,6 +2226,15 @@ def test_release_notes_join_soft_wrapped_paragraphs_and_list_items(renderer):
     "[guide]: https://example.invalid/guide\n[other]: https://example.invalid/other\n",
     "Text\n***\nMore\n",
     "Step text\n2. not a list here\n",
+    "- ~~~bash\n  echo one\n  ~~~\n",
+    "- ## Upgrade\n  Details\n",
+    "- - -\nText\n",
+    "~~~\nfirst\n    ~~~\nsecond\nthird\n~~~\n",
+    "<pre>\n\nfirst line\nsecond line\n</pre>\n",
+    "<!-- note\n\nfirst\nsecond\n-->\n",
+    "<!NOTE first\n\nsecond\nthird\n>\n",
+    "Use `--input \"label=one \ntwo\"` here\n",
+    "Text\n\n    - indented code\n    more\n",
 ])
 def test_release_notes_keep_lines_whose_structure_matters(renderer, authored):
     assert renderer.unwrap_paragraphs(authored) == authored
