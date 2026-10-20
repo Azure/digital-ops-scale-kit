@@ -2159,7 +2159,7 @@ def test_installation_guides_name_the_rendered_release_note_labels(verified_note
             assert "### 1. Install Site Ops and approve the official source" in readme
         else:
             assert "### Bootstrap from HTTPS" in (ROOT / "docs" / "install-siteops.md").read_text(encoding="utf-8")
-    assert "bash siteops-bootstrap.sh --release <release> --enroll-source official" in readme
+    assert 'bash siteops-bootstrap.sh --release "<release>" --enroll-source official' in readme
     assert r"-File .\siteops-bootstrap.ps1" in readme
     assert '-Release "<release>" -EnrollSource official' in readme
     assert VERIFIED in verified_notes
@@ -2190,6 +2190,76 @@ def test_summary_nests_markdown_headings_without_changing_published_notes(
         if literal in authored:
             assert literal in summary
     assert authored.encode() == before
+
+
+def test_release_notes_join_soft_wrapped_paragraphs_and_list_items(renderer):
+    authored = (
+        "## Highlights\n\n"
+        "Site Ops now installs from a\nsigned release.\n\n"
+        "- Devices and assets deploy\n  from resource sets.\n"
+        "  - Nested items keep\n    their own lines.\n"
+        "1. Upgrade the templates\n   first.\n\n"
+        "  A list paragraph after a blank\n  line also joins.\n"
+    )
+    assert renderer.unwrap_paragraphs(authored) == (
+        "## Highlights\n\n"
+        "Site Ops now installs from a signed release.\n\n"
+        "- Devices and assets deploy from resource sets.\n"
+        "  - Nested items keep their own lines.\n"
+        "1. Upgrade the templates first.\n\n"
+        "  A list paragraph after a blank line also joins.\n"
+    )
+
+
+@pytest.mark.parametrize("authored", [
+    "Before\n```bash\nfirst line\nsecond line\n```\nAfter\n",
+    "~~~~\n~~~\nstill fenced\n~~~~\n",
+    "| Column | Value |\n| --- | --- |\n| a | b |\n",
+    "<details><summary>More</summary>\nraw line\nanother\n</details>\n",
+    "> Quoted line\n> and its continuation\n",
+    "Hard break with spaces  \nnext line\n",
+    "Hard break with a backslash\\\nnext line\n",
+    "Title\n=====\n",
+    "Title\n-----\n",
+    "## Heading\nFirst paragraph line\n",
+    "Text\n\n    indented code\n    second code line\n",
+    "[guide]: https://example.invalid/guide\n[other]: https://example.invalid/other\n",
+    "Text\n***\nMore\n",
+    "Step text\n2. not a list here\n",
+])
+def test_release_notes_keep_lines_whose_structure_matters(renderer, authored):
+    assert renderer.unwrap_paragraphs(authored) == authored
+
+
+@pytest.mark.parametrize("path", sorted(ROOT.glob("releases/*/notes.md")), ids=lambda path: path.parent.name)
+def test_authored_release_notes_unwrap_without_changing_their_text(renderer, path):
+    authored = path.read_text(encoding="utf-8")
+    unwrapped = renderer.unwrap_paragraphs(authored)
+    assert "".join(unwrapped.split()) == "".join(authored.split())
+    assert renderer.unwrap_paragraphs(unwrapped) == unwrapped
+    fenced = re.compile(r"^```.*?^```", re.MULTILINE | re.DOTALL)
+    assert fenced.findall(unwrapped) == fenced.findall(authored)
+
+
+def test_published_notes_unwrap_the_authored_text_only(verified_notes, renderer):
+    plan_notes = verified_notes
+    assert plan_notes.startswith("## Changes\n\n## Install Site Ops\n\n")
+    source = {"repository": REPO, "commit": SHA, "ref": "refs/heads/main"}
+    from siteops_release_assets import FrozenReleaseAssets
+
+    assets = FrozenReleaseAssets.from_document({
+        "apiVersion": "siteops.release.assets/v2", "kind": "SiteOpsReleaseAssets", "source": source,
+        "assets": [{"name": name, "size": 7, "sha256": digest(name.encode())} for name in ENGINE_ASSETS],
+        "engine": None,
+    })
+    plan = {"source": source, "release": {"tag": "v1.0.0b8"}, "siteops": {"bundle": True, "releaseTag": None}}
+    notes = renderer.render_notes(
+        plan, "## Highlights\n\nA wrapped\nparagraph.\n", assets, engine_version="1.0.0b1",
+        archive_name=ARCHIVE, attestation_suffix=".attestation.jsonl", runner_environment="self-hosted",
+        builder_identity=f"https://github.com/{REPO}/.github/workflows/release.yaml@refs/heads/main",
+    )
+    assert notes.startswith("## Highlights\n\nA wrapped paragraph.\n\n## Install Site Ops\n\n")
+    assert notes.split("## Install Site Ops\n\n", 1)[1] == plan_notes.split("## Install Site Ops\n\n", 1)[1]
 
 
 @pytest.mark.parametrize("matrix", [

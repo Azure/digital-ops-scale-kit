@@ -438,7 +438,9 @@ this release. Include `## Upgrading` when existing users must take action,
 linking to the applicable migration instructions. The GitHub release title
 already identifies the release, so the notes do not need another title.
 
-Write the changes and guidance specific to the release in `notes.md`. The workflow
+Write the changes and guidance specific to the release in `notes.md`. Wrap its
+lines as you like: GitHub shows each newline in a release body as a line break,
+so the workflow joins wrapped paragraph and list lines before publishing. The workflow
 adds **Install Site Ops** automatically. It includes the exact versioned wheel
 URL for native uv, the configured package index policy, and complete Bash
 and PowerShell bootstrap commands bound to the frozen script bytes and
@@ -850,6 +852,13 @@ tag, the discovered commit and the installed version in private notes. If a
 command fails, do not announce the release. Add a line to the editable
 release notes that directs operators to its pinned commands, then fix the
 README or bootstrap through the normal review process.
+
+When these checks pass, update the README's recommended release in a
+documentation pull request before announcing the release. Recommend a release
+that has workspace content. It either includes Site Ops or links to the engine
+release to install, so an engine-only release leaves the recommendation
+unchanged. Do not change the recommendation in the release pull request,
+because its tag does not exist until publication.
 
 ## Retry or prepare a new candidate
 

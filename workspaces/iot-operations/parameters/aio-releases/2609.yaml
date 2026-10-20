@@ -1,6 +1,7 @@
 # AIO release 2609: version configuration
-# Source: https://github.com/Azure/azure-iot-ops-cli-extension/blob/v2.10.0/azext_edge/edge/providers/orchestration/template.py
-# API versions: https://github.com/Azure/azure-iot-ops-cli-extension/blob/v2.10.0/azext_edge/edge/util/az_client.py
+# Source: https://github.com/Azure/azure-iot-ops-cli-extension/wiki/IoT-Operations-versions#2609
+# OPC UA connector template version: release/azure-iot-operations-instance.bicep
+# at https://github.com/Azure/azure-iot-operations/tree/v1.4.112
 
 aioVersion: "1.4.112"
 aioTrain: stable

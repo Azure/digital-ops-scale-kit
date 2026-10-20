@@ -259,6 +259,53 @@ def verified_bootstrap_commands(
     ]
 
 
+_BLOCK_START = re.compile(
+    r"(?:#{1,6}(?:[ \t]|$)|>|[-+*](?:[ \t]|$)|[0-9]{1,9}[.)](?:[ \t]|$)|`{3,}|~{3,}|<"
+    r"|\[[^\]]*\]:|(?:[-*_][ \t]*){3,}$|=+[ \t]*$|-+[ \t]*$)"
+)
+_LIST_ITEM = re.compile(r"(?:[-+*]|[0-9]{1,9}[.)])[ \t]+\S")
+
+
+def unwrap_paragraphs(text: str) -> str:
+    """Join soft-wrapped paragraph and list item lines.
+
+    GitHub shows each newline in a release body as a line break. Lines whose
+    structure matters, such as fences, HTML, tables, quotes, headings, hard
+    breaks and indented code, stay as written. An ambiguous line is never joined.
+    """
+    output: list[str] = []
+    fence = None
+    in_html = joinable = False
+    for line in text.split("\n"):
+        stripped = line.lstrip(" \t")
+        if fence:
+            output.append(line)
+            closing = re.match(r"(`{3,}|~{3,})[ \t]*$", stripped)
+            if closing and closing[1][0] == fence[0] and len(closing[1]) >= fence[1]:
+                fence = None
+            continue
+        if not stripped:
+            output.append(line)
+            in_html = joinable = False
+            continue
+        opener = re.match(r"`{3,}|~{3,}", stripped)
+        if opener:
+            fence = (opener[0][0], len(opener[0]))
+        in_html = in_html or stripped.startswith("<")
+        block = bool(opener) or in_html or "|" in line or _BLOCK_START.match(stripped) is not None
+        hard_break = line.endswith(("  ", "\\"))
+        if joinable and not block:
+            output[-1] = output[-1].rstrip(" \t") + " " + stripped
+            joinable = not hard_break
+            continue
+        output.append(line)
+        if block:
+            joinable = not (opener or in_html or hard_break or "|" in line) and bool(_LIST_ITEM.match(stripped))
+        else:
+            joinable = len(line[: len(line) - len(stripped)].expandtabs(4)) < 4 and not hard_break
+    return "\n".join(output)
+
+
 def render_notes(
     plan: dict[str, Any],
     authored: str,
@@ -279,7 +326,7 @@ def render_notes(
         raise RenderingError("The release asset inventory describes a different source.")
     repository = source["repository"]
     home = "https://github.com/" + repository
-    notes = authored.rstrip() + "\n\n## Install Site Ops\n\n"
+    notes = unwrap_paragraphs(authored).rstrip() + "\n\n## Install Site Ops\n\n"
     enrollment = source_enrollment(repository, source["ref"], builder_identity, runner_environment)
     workspace_notes = ""
     if workspace:

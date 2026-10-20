@@ -70,8 +70,8 @@ Replace `<release>` with an approved release that includes an engine:
 ```bash
 curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
   --tlsv1.2 --output siteops-bootstrap.sh \
-  https://github.com/Azure/digital-ops-scale-kit/releases/download/<release>/siteops-bootstrap.sh &&
-bash siteops-bootstrap.sh --release <release>
+  "https://github.com/Azure/digital-ops-scale-kit/releases/download/<release>/siteops-bootstrap.sh" &&
+bash siteops-bootstrap.sh --release "<release>"
 ```
 
 ```powershell

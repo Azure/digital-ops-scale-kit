@@ -24,10 +24,11 @@ steps:
 
   - script: |
       set -euo pipefail
-      # Paths stay relative to the checkout: no parent segments and no absolute or drive paths.
+      # The workspace and Site file are relative to the checkout, and the manifest to the workspace.
+      # None may be absolute, a drive path or contain "..".
       for value in "$WORKSPACE" "$MANIFEST" "$SITE_FILE"; do
         if [[ "$value" == *".."* || "$value" == /* || "$value" == \\* || "$value" =~ ^[A-Za-z]: ]]; then
-          echo "##vso[task.logissue type=error]Workspace, manifest and Site file paths must be relative to the checkout."
+          echo "##vso[task.logissue type=error]Workspace, manifest and Site file paths must be relative and must not contain '..'. The workspace and Site file are relative to the checkout, and the manifest to the workspace."
           exit 1
         fi
       done
