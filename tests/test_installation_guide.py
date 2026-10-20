@@ -28,13 +28,13 @@ def test_root_quickstart_connects_install_to_aio_without_hiding_fleet_use():
     prose = " ".join(journey.split())
     for phrase in (
         "https://github.com/Azure/digital-ops-scale-kit/releases)",
-        "replace `<release>` below with that tag",
-        "Run the commands from your home directory or another directory that only you can change.",
+        "replace `<release>` with that tag",
+        "Run them from your home directory or another directory that only you can change.",
         "Linux x64, including Azure Cloud Shell and GitHub Codespaces",
         "Windows x64, Windows PowerShell",
         "**Already have uv**",
         "**Workspace content**",
-        "A release that contains only content links to the engine release to use instead.",
+        "A release that contains only content links to the engine release to install.",
         "docs/install-siteops.md#choose-an-installation-route",
         "To verify the script before it runs, or to pin a reviewed source commit",
         "https://github.com/cli/cli#installation",
@@ -89,7 +89,7 @@ def test_root_quickstart_connects_install_to_aio_without_hiding_fleet_use():
     for language in ("bash", "powershell"):
         assert not re.search(r"\bv[0-9]+\.[0-9]+", _block(install, language))
     recommended = re.search(
-        r"Recommended for this quickstart: \[([^\]<>]+)\]"
+        r"This quickstart uses the recommended release, \[([^\]<>]+)\]"
         r"\(https://github\.com/Azure/digital-ops-scale-kit/releases/tag/([^)\s]+)\)",
         prose,
     )
