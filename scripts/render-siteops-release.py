@@ -263,39 +263,57 @@ _BLOCK_START = re.compile(
     r"(?:#{1,6}(?:[ \t]|$)|>|[-+*](?:[ \t]|$)|[0-9]{1,9}[.)](?:[ \t]|$)|`{3,}|~{3,}|<"
     r"|\[[^\]]*\]:|(?:[-*_][ \t]*){3,}$|=+[ \t]*$|-+[ \t]*$)"
 )
-_LIST_ITEM = re.compile(r"(?:[-+*]|[0-9]{1,9}[.)])[ \t]+(\S.*)")
-_RAW_HTML = re.compile(r"<(pre|script|style|textarea)(?:[\s>]|$)", re.IGNORECASE)
+# One to four spaces after the marker. More spaces or a tab can start indented code.
+_LIST_ITEM = re.compile(r"(?:[-+*]|[0-9]{1,9}[.)]) {1,4}(\S.*)")
+_FENCE_RUN = re.compile(r"`{3,}|~{3,}")
+_RAW_HTML = re.compile(
+    r"<(?:(pre|script|style|textarea)(?=[\s>]|$)|(!--)|(\?)|(!\[CDATA\[)|(![A-Za-z]))", re.IGNORECASE,
+)
 
 
-def _html_terminator(stripped: str) -> str | None:
-    """Return the closing text of an HTML block that a blank line does not end."""
-    raw = _RAW_HTML.match(stripped)
-    if raw:
-        return "</" + raw[1].lower() + ">"
-    for opener, closer in (("<!--", "-->"), ("<?", "?>"), ("<![CDATA[", "]]>")):
-        if stripped.startswith(opener):
-            return closer
-    return ">" if re.match(r"<![A-Za-z]", stripped) else None
+def _fence_opener(expanded: str) -> tuple[str, int, int] | None:
+    """Return the character, length and column of a possible fence anywhere in a line."""
+    run = _FENCE_RUN.search(expanded)
+    if run is None or (run[0][0] == "`" and "`" in expanded[run.end():]):
+        return None
+    return run[0][0], len(run[0]), run.start()
+
+
+def _html_terminator(line: str) -> str | None:
+    """Return the closing text of raw HTML in a line that a blank line does not end."""
+    raw = _RAW_HTML.search(line)
+    if raw is None:
+        return None
+    closer = (
+        "</" + raw[1].lower() + ">" if raw[1] else "-->" if raw[2] else "?>" if raw[3]
+        else "]]>" if raw[4] else ">"
+    )
+    return None if closer in line.lower()[raw.end():] else closer
 
 
 def unwrap_paragraphs(text: str) -> str:
     """Join soft-wrapped paragraph and list item lines.
 
-    GitHub shows each newline in a release body as a line break. Lines whose
-    structure matters, such as fences, HTML, tables, quotes, headings, hard
-    breaks and indented code, stay as written. An ambiguous line is never joined.
+    GitHub shows each newline in a release body as a line break. Two lines are
+    joined only when both are plain prose outside anything that could be a code
+    fence or raw HTML. Uncertain regions stay protected until a certain end, so
+    an ambiguous line is never joined.
     """
+    if "\r" in text:
+        return text
     output: list[str] = []
     fence = None
     html_until = None
     in_html = joinable = False
     for line in text.split("\n"):
         stripped = line.lstrip(" \t")
-        indent = len(line[: len(line) - len(stripped)].expandtabs(4))
+        expanded = line.expandtabs(4)
+        indent = len(expanded) - len(expanded.lstrip(" "))
         if fence:
             output.append(line)
-            closing = re.match(r"(`{3,}|~{3,})[ \t]*$", stripped)
-            if closing and closing[1][0] == fence[0] and len(closing[1]) >= fence[1] and indent <= fence[2] + 3:
+            closing = re.fullmatch(r"(`{3,}|~{3,})[ \t]*", stripped)
+            # Only a closer in the opener's column is certain; anything else stays protected.
+            if closing and closing[1][0] == fence[0] and len(closing[1]) >= fence[1] and indent == fence[2]:
                 fence = None
             continue
         if html_until:
@@ -307,16 +325,11 @@ def unwrap_paragraphs(text: str) -> str:
             output.append(line)
             in_html = joinable = False
             continue
-        opener = re.match(r"`{3,}|~{3,}", stripped)
-        if opener:
-            fence = (opener[0][0], len(opener[0]), indent)
-        if stripped.startswith("<") and not in_html:
-            terminator = _html_terminator(stripped)
-            if terminator and terminator not in stripped.lower()[1:]:
-                html_until = terminator
-            in_html = terminator is None
-        block = bool(opener) or in_html or html_until is not None or "|" in line
-        block = block or _BLOCK_START.match(stripped) is not None
+        fence = _fence_opener(expanded)
+        html_until = None if fence else _html_terminator(line)
+        protected = fence is not None or html_until is not None or _RAW_HTML.search(line) is not None
+        in_html = in_html or stripped.startswith("<")
+        block = protected or in_html or "|" in line or _BLOCK_START.match(stripped) is not None
         # Trailing whitespace can be significant, for example inside a code span.
         final = line.endswith(("\\", " ", "\t"))
         if joinable and not block:
@@ -328,7 +341,7 @@ def unwrap_paragraphs(text: str) -> str:
             item = _LIST_ITEM.match(stripped)
             joinable = (
                 item is not None and _BLOCK_START.match(item[1]) is None
-                and not (opener or in_html or html_until or final or "|" in line) and indent < 4
+                and not (protected or in_html or final or "|" in line) and indent < 4
             )
         else:
             joinable = indent < 4 and not final

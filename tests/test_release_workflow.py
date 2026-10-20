@@ -2199,7 +2199,8 @@ def test_release_notes_join_soft_wrapped_paragraphs_and_list_items(renderer):
         "- Devices and assets deploy\n  from resource sets.\n"
         "  - Nested items keep\n    their own lines.\n"
         "1. Upgrade the templates\n   first.\n\n"
-        "  A list paragraph after a blank\n  line also joins.\n"
+        "  A list paragraph after a blank\n  line also joins.\n\n"
+        "Inline ```code``` spans\nstill join.\n"
     )
     assert renderer.unwrap_paragraphs(authored) == (
         "## Highlights\n\n"
@@ -2207,7 +2208,8 @@ def test_release_notes_join_soft_wrapped_paragraphs_and_list_items(renderer):
         "- Devices and assets deploy from resource sets.\n"
         "  - Nested items keep their own lines.\n"
         "1. Upgrade the templates first.\n\n"
-        "  A list paragraph after a blank line also joins.\n"
+        "  A list paragraph after a blank line also joins.\n\n"
+        "Inline ```code``` spans still join.\n"
     )
 
 
@@ -2235,6 +2237,15 @@ def test_release_notes_join_soft_wrapped_paragraphs_and_list_items(renderer):
     "<!NOTE first\n\nsecond\nthird\n>\n",
     "Use `--input \"label=one \ntwo\"` here\n",
     "Text\n\n    - indented code\n    more\n",
+    "- ~~~bash\n  echo one\n  echo two\n  ~~~\n",
+    "-     echo one\n      echo two\n",
+    "1.     echo one\n       echo two\n",
+    " ~~~\nfirst\n    ~~~\nsecond\nthird\n~~~\n",
+    "- item\n\n    ```\n    code\n\n```\nnew fence a\nnew fence b\n```\n",
+    "- <pre>\n  first\n  second\n  </pre>\n",
+    "Intro <pre>\nfirst\nsecond\n</pre>\n",
+    "<div>\n<pre>\n\nfirst\nsecond\n</pre>\n</div>\n",
+    "A wrapped\r\nline\r\n",
 ])
 def test_release_notes_keep_lines_whose_structure_matters(renderer, authored):
     assert renderer.unwrap_paragraphs(authored) == authored
