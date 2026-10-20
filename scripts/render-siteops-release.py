@@ -259,95 +259,6 @@ def verified_bootstrap_commands(
     ]
 
 
-_BLOCK_START = re.compile(
-    r"(?:#{1,6}(?:[ \t]|$)|>|[-+*](?:[ \t]|$)|[0-9]{1,9}[.)](?:[ \t]|$)|`{3,}|~{3,}|<"
-    r"|\[[^\]]*\]:|(?:[-*_][ \t]*){3,}$|=+[ \t]*$|-+[ \t]*$)"
-)
-# One to four spaces after the marker. More spaces or a tab can start indented code.
-_LIST_ITEM = re.compile(r"(?:[-+*]|[0-9]{1,9}[.)]) {1,4}(\S.*)")
-_FENCE_RUN = re.compile(r"`{3,}|~{3,}")
-_RAW_HTML = re.compile(
-    r"<(?:(pre|script|style|textarea)(?=[\s>]|$)|(!--)|(\?)|(!\[CDATA\[)|(![A-Za-z]))", re.IGNORECASE,
-)
-
-
-def _fence_opener(expanded: str) -> tuple[str, int, int] | None:
-    """Return the character, length and column of a possible fence anywhere in a line."""
-    run = _FENCE_RUN.search(expanded)
-    if run is None or (run[0][0] == "`" and "`" in expanded[run.end():]):
-        return None
-    return run[0][0], len(run[0]), run.start()
-
-
-def _html_terminator(line: str) -> str | None:
-    """Return the closing text of raw HTML in a line that a blank line does not end."""
-    raw = _RAW_HTML.search(line)
-    if raw is None:
-        return None
-    closer = (
-        "</" + raw[1].lower() + ">" if raw[1] else "-->" if raw[2] else "?>" if raw[3]
-        else "]]>" if raw[4] else ">"
-    )
-    return None if closer in line.lower()[raw.end():] else closer
-
-
-def unwrap_paragraphs(text: str) -> str:
-    """Join soft-wrapped paragraph and list item lines.
-
-    GitHub shows each newline in a release body as a line break. Two lines are
-    joined only when both are plain prose outside anything that could be a code
-    fence or raw HTML. Uncertain regions stay protected until a certain end, so
-    an ambiguous line is never joined.
-    """
-    if "\r" in text:
-        return text
-    output: list[str] = []
-    fence = None
-    html_until = None
-    in_html = joinable = False
-    for line in text.split("\n"):
-        stripped = line.lstrip(" \t")
-        expanded = line.expandtabs(4)
-        indent = len(expanded) - len(expanded.lstrip(" "))
-        if fence:
-            output.append(line)
-            closing = re.fullmatch(r"(`{3,}|~{3,})[ \t]*", stripped)
-            # Only a closer in the opener's column is certain; anything else stays protected.
-            if closing and closing[1][0] == fence[0] and len(closing[1]) >= fence[1] and indent == fence[2]:
-                fence = None
-            continue
-        if html_until:
-            output.append(line)
-            if html_until in line.lower():
-                html_until = None
-            continue
-        if not stripped:
-            output.append(line)
-            in_html = joinable = False
-            continue
-        fence = _fence_opener(expanded)
-        html_until = None if fence else _html_terminator(line)
-        protected = fence is not None or html_until is not None or _RAW_HTML.search(line) is not None
-        in_html = in_html or stripped.startswith("<")
-        block = protected or in_html or "|" in line or _BLOCK_START.match(stripped) is not None
-        # Trailing whitespace can be significant, for example inside a code span.
-        final = line.endswith(("\\", " ", "\t"))
-        if joinable and not block:
-            output[-1] = output[-1] + " " + stripped
-            joinable = not final
-            continue
-        output.append(line)
-        if block:
-            item = _LIST_ITEM.match(stripped)
-            joinable = (
-                item is not None and _BLOCK_START.match(item[1]) is None
-                and not (protected or in_html or final or "|" in line) and indent < 4
-            )
-        else:
-            joinable = indent < 4 and not final
-    return "\n".join(output)
-
-
 def render_notes(
     plan: dict[str, Any],
     authored: str,
@@ -368,7 +279,7 @@ def render_notes(
         raise RenderingError("The release asset inventory describes a different source.")
     repository = source["repository"]
     home = "https://github.com/" + repository
-    notes = unwrap_paragraphs(authored).rstrip() + "\n\n## Install Site Ops\n\n"
+    notes = authored.rstrip() + "\n\n## Install Site Ops\n\n"
     enrollment = source_enrollment(repository, source["ref"], builder_identity, runner_environment)
     workspace_notes = ""
     if workspace:

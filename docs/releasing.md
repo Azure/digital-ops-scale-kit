@@ -438,9 +438,9 @@ this release. Include `## Upgrading` when existing users must take action,
 linking to the applicable migration instructions. The GitHub release title
 already identifies the release, so the notes do not need another title.
 
-Write the changes and guidance specific to the release in `notes.md`. Wrap its
-lines as you like: GitHub shows each newline in a release body as a line break,
-so the workflow joins wrapped paragraph and list lines before publishing. The workflow
+Write the changes and guidance specific to the release in `notes.md`. Write each
+paragraph and list item on one line, because GitHub shows each newline in a
+release body as a line break. The workflow
 adds **Install Site Ops** automatically. It includes the exact versioned wheel
 URL for native uv, the configured package index policy, and complete Bash
 and PowerShell bootstrap commands bound to the frozen script bytes and
