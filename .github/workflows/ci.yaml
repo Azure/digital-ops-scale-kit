@@ -18,6 +18,10 @@ on:
       - ".github/actions/**"
       - ".github/release-examples/**"
       - ".pipelines/**"
+      - "plugins/**"
+      - ".github/plugin/**"
+      - "docs/**"
+      - "README.md"
   pull_request:
     branches: [main]
     paths:
@@ -32,6 +36,10 @@ on:
       - ".github/actions/**"
       - ".github/release-examples/**"
       - ".pipelines/**"
+      - "plugins/**"
+      - ".github/plugin/**"
+      - "docs/**"
+      - "README.md"
   workflow_dispatch:
     inputs:
       run-mode:

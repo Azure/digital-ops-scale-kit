@@ -14,6 +14,7 @@ deployment.
 |---|---|
 | Install an identified Site Ops release | [Install Site Ops](install-siteops.md) |
 | Deploy AIO to one existing cluster | [Guided inputs](guided-inputs.md) |
+| Ask GitHub Copilot to install Site Ops and deploy AIO | [Site Ops plugin](../plugins/siteops/README.md) |
 | Install AIO and enable Secret Sync together | [Combined installation](guided-inputs.md#install-aio-with-secret-sync) |
 | Enable Secret Sync on an existing AIO instance | [Inputs for an existing instance](guided-inputs.md#enable-secret-sync-on-an-existing-instance) |
 | Deploy AIO with a configured example Site | [Local checkout guide](getting-started.md) |

@@ -1,0 +1,18 @@
+{
+  "name": "scale-kit",
+  "owner": {
+    "name": "Microsoft"
+  },
+  "metadata": {
+    "description": "GitHub Copilot plugins for Site Ops and Scale Kit.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "siteops",
+      "description": "Install Site Ops and use it to deploy, upgrade and troubleshoot Azure IoT Operations on Kubernetes clusters connected to Azure Arc, confirming each plan before it runs.",
+      "version": "0.1.0",
+      "source": "./plugins/siteops"
+    }
+  ]
+}

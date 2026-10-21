@@ -14,6 +14,7 @@ adding workspace content, or reviewing a change that crosses both layers.
 | Delivery | `.github/` and `.pipelines/` | CI, deployment, integration, and release automation |
 | Build and release tooling | `scripts/` and `releases/` | Engine and workspace package builders, installation bootstraps, CI helpers, and reviewed release declarations |
 | Operator guidance | `README.md` and `docs/` | Getting started, operation, reference, migration, and release guidance |
+| Copilot plugin | `plugins/` and `.github/plugin/` | Skills that teach GitHub Copilot to install Site Ops and deploy, upgrade and troubleshoot AIO, and the marketplace that lists them |
 
 Keep Azure IoT Operations meaning in the workspace. Add engine behavior only
 when another workspace could use the same contract without importing AIO

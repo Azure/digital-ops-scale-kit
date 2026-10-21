@@ -149,6 +149,20 @@ reapplying `aio-install` can overwrite their settings. See
 the [local checkout guide](docs/getting-started.md) for fleet workflows and
 content beyond AIO.
 
+## Use Site Ops from GitHub Copilot
+
+Ask GitHub Copilot in plain language, for example "Deploy AIO to my Arc
+cluster plant-one". The Site Ops plugin installs Site Ops, deploys and
+upgrades AIO, and shows you each plan before it deploys. In Copilot CLI:
+
+```text
+copilot plugin marketplace add Azure/digital-ops-scale-kit
+copilot plugin install siteops@scale-kit
+```
+
+The [plugin guide](plugins/siteops/README.md) covers VS Code, the Copilot
+app and every skill.
+
 ## Browse deployment choices
 
 With a workspace pinned from an approved source, browse its packaged content
