@@ -1,0 +1,13 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "siteops",
+  "version": "0.1.0",
+  "description": "Install Site Ops and use it to deploy, upgrade and troubleshoot Azure IoT Operations on Kubernetes clusters connected to Azure Arc, confirming each plan before it runs.",
+  "author": {
+    "name": "Microsoft"
+  },
+  "homepage": "https://github.com/Azure/digital-ops-scale-kit/tree/main/plugins/siteops",
+  "repository": "https://github.com/Azure/digital-ops-scale-kit",
+  "license": "MIT",
+  "keywords": ["azure-iot-operations", "azure-arc", "siteops", "deployment", "kubernetes"]
+}
