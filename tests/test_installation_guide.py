@@ -28,13 +28,13 @@ def test_root_quickstart_connects_install_to_aio_without_hiding_fleet_use():
     prose = " ".join(journey.split())
     for phrase in (
         "https://github.com/Azure/digital-ops-scale-kit/releases)",
-        "replace `<release>` with its tag",
-        "Run the commands from your home directory or another directory that only you can change.",
+        "replace `<release>` with that tag",
+        "Run them from your home directory or another directory that only you can change.",
         "Linux x64, including Azure Cloud Shell and GitHub Codespaces",
         "Windows x64, Windows PowerShell",
         "**Already have uv**",
         "**Workspace content**",
-        "A release that contains only content links to the engine release to use instead.",
+        "A release that contains only content links to the engine release to install.",
         "docs/install-siteops.md#choose-an-installation-route",
         "To verify the script before it runs, or to pin a reviewed source commit",
         "https://github.com/cli/cli#installation",
@@ -85,7 +85,16 @@ def test_root_quickstart_connects_install_to_aio_without_hiding_fleet_use():
     assert "| Your machine |" not in install
     assert "--source-commit" not in _block(install, "bash")
     assert "-SourceCommit" not in _block(install, "powershell")
-    assert not re.search(r"\bv[0-9]+\.[0-9]+", install)
+    # Only the recommendation names a release. The commands stay the same between releases.
+    for language in ("bash", "powershell"):
+        assert not re.search(r"\bv[0-9]+\.[0-9]+", _block(install, language))
+    recommended = re.search(
+        r"This quickstart uses the recommended release, \[([^\]<>]+)\]"
+        r"\(https://github\.com/Azure/digital-ops-scale-kit/releases/tag/([^)\s]+)\)",
+        prose,
+    )
+    assert recommended and recommended[1] == recommended[2].replace("%2F", "/")
+    assert "**Install Site Ops** and **Workspace content**" in prose
     assert "**Already have uv** section, then run `siteops source enroll official`" in prose
     assert "--source-commit" not in install and "-SourceCommit" not in install
     assert "### 4." not in journey
@@ -127,6 +136,23 @@ exit "$TEST_DOWNLOAD_EXIT"
     )
     assert (result.returncode == 0) is (download_exit == 0)
     assert ("BOOTSTRAP_RAN" in result.stdout) is (download_exit == 0)
+
+
+def test_readme_bash_install_command_pasted_unedited_fails_as_a_download(tmp_path):
+    # Unquoted, `<release>` would be read as a shell redirection rather than a URL.
+    readme = (GUIDE.parent.parent / "README.md").read_text(encoding="utf-8")
+    section = readme.split(INSTALL_HEADING, 1)[1].split("\n### 2.", 1)[0]
+    (tmp_path / "bin").mkdir()
+    write_executable(tmp_path / "bin" / "curl", """#!/usr/bin/env bash
+printf '%s\\n' "${@: -1}" > curl-url.txt
+exit 22
+""")
+    result = run_script(_block(section, "bash"), tmp_path, {}, shell_options=())
+    assert result.returncode == 22
+    assert (tmp_path / "curl-url.txt").read_text(encoding="utf-8").strip() == (
+        "https://github.com/Azure/digital-ops-scale-kit/releases/download/<release>/siteops-bootstrap.sh"
+    )
+    assert "No such file" not in result.stderr
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="The Windows README command uses native PowerShell 5.1.")
@@ -288,7 +314,7 @@ def test_https_bootstrap_guide_defers_to_the_generated_release_command():
     section = _section("### Bootstrap from HTTPS")
     prose = " ".join(section.split())
     assert "<approved-release-tag>" not in section
-    assert _block(section, "bash").splitlines()[-1] == "bash siteops-bootstrap.sh --release <release>"
+    assert _block(section, "bash").splitlines()[-1] == 'bash siteops-bootstrap.sh --release "<release>"'
     assert "Assemble an approved selection manually" not in GUIDE.read_text(encoding="utf-8")
     for phrase in (
         "`Install Site Ops` section",

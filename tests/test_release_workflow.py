@@ -2159,7 +2159,7 @@ def test_installation_guides_name_the_rendered_release_note_labels(verified_note
             assert "### 1. Install Site Ops and approve the official source" in readme
         else:
             assert "### Bootstrap from HTTPS" in (ROOT / "docs" / "install-siteops.md").read_text(encoding="utf-8")
-    assert "bash siteops-bootstrap.sh --release <release> --enroll-source official" in readme
+    assert 'bash siteops-bootstrap.sh --release "<release>" --enroll-source official' in readme
     assert r"-File .\siteops-bootstrap.ps1" in readme
     assert '-Release "<release>" -EnrollSource official' in readme
     assert VERIFIED in verified_notes

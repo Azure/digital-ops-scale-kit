@@ -92,10 +92,11 @@ jobs:
       - name: Validate inputs
         shell: bash
         run: |
-          # Paths stay relative to the checkout: no parent segments and no absolute or drive paths.
+          # The workspace is relative to the checkout, and the manifest to the workspace.
+          # Neither may be absolute, a drive path or contain "..".
           for value in "$INPUT_WORKSPACE" "$INPUT_MANIFEST"; do
             if [[ "$value" == *".."* || "$value" == /* || "$value" == \\* || "$value" =~ ^[A-Za-z]: ]]; then
-              echo "::error::Workspace and manifest paths must be relative to the checkout."
+              echo "::error::Use relative paths without '..': the workspace from the checkout, the manifest from the workspace."
               exit 1
             fi
           done

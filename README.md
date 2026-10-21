@@ -61,20 +61,26 @@ Before you start, have:
 
 ### 1. Install Site Ops and approve the official source
 
-Pick a release from the
-[releases page](https://github.com/Azure/digital-ops-scale-kit/releases) and
-replace `<release>` with its tag. A release that contains only content links
-to the engine release to use instead. For an engine tag of the form
-`siteops/v<version>`, write the slash as `%2F` in the download URL only.
-Run the commands from your home directory or another directory that only you can change.
+This quickstart uses the recommended release,
+[v1.0.0b7](https://github.com/Azure/digital-ops-scale-kit/releases/tag/v1.0.0b7),
+a beta that includes Site Ops. Its release page has ready-to-copy install and
+deploy commands under **Install Site Ops** and **Workspace content**. To use
+the commands below instead, replace `<release>` with that tag. Run them from
+your home directory or another directory that only you can change.
+
+To use a different release, pick one from the
+[releases page](https://github.com/Azure/digital-ops-scale-kit/releases).
+A release that contains only content links to the engine release to install.
+For an engine tag such as `siteops/v<version>`, write the slash as `%2F` in
+the download URL only.
 
 Linux x64, including Azure Cloud Shell and GitHub Codespaces:
 
 ```bash
 curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
   --tlsv1.2 --output siteops-bootstrap.sh \
-  https://github.com/Azure/digital-ops-scale-kit/releases/download/<release>/siteops-bootstrap.sh &&
-bash siteops-bootstrap.sh --release <release> --enroll-source official
+  "https://github.com/Azure/digital-ops-scale-kit/releases/download/<release>/siteops-bootstrap.sh" &&
+bash siteops-bootstrap.sh --release "<release>" --enroll-source official
 ```
 
 Windows x64, Windows PowerShell:

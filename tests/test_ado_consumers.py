@@ -279,7 +279,8 @@ def test_workspace_and_manifest_paths_must_be_relative(tmp_path, platform, field
         script = step(TEMPLATES / "siteops-inputs.yaml", "Validate inputs")["script"]
     result = run_script(script, tmp_path, environment, shell_options=())
     assert result.returncode == expected
-    assert ("must be relative to the checkout" in result.stdout) is bool(expected)
+    assert ("Use relative paths without '..'" in result.stdout) is bool(expected)
+    assert ("the manifest from the workspace" in result.stdout) is bool(expected)
 
 
 @pytest.mark.parametrize("site_file", [
@@ -296,7 +297,8 @@ def test_site_file_path_must_be_relative(tmp_path, site_file):
         "SITE_FILE": site_file, "SELECTOR": "environment=dev",
     }, shell_options=())
     assert result.returncode == 1
-    assert "must be relative to the checkout" in result.stdout
+    assert "Use relative paths without '..'" in result.stdout
+    assert "the workspace and Site file from the checkout" in result.stdout
 
 
 @pytest.mark.parametrize("site_file,selector", [
