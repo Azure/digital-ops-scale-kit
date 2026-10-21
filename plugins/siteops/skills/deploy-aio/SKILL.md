@@ -147,14 +147,15 @@ install-siteops skill.
 ## 4. Identify the target
 
 For AIO installation, find the cluster. If the user gave its resource ID,
-use it. If they named the cluster, look it up by name, and add
-`--subscription <subscription-ID>` when they named a subscription:
+use it. Otherwise look it up, and add `--subscription <subscription-ID>`
+whenever the user named a subscription. If they named the cluster, look it
+up by name:
 
 ```text
 az resource list --resource-type Microsoft.Kubernetes/connectedClusters --name <cluster-name> --query "[].id" --output tsv
 ```
 
-If the user did not name one, list every cluster:
+If they did not name one, list every cluster:
 
 ```text
 az resource list --resource-type Microsoft.Kubernetes/connectedClusters --query "[].id" --output tsv
@@ -184,22 +185,30 @@ the earlier run. After the cause is fixed, you may prepare the same
 installation again with the same inputs.
 
 For Secret Sync on an existing instance, use the instance resource ID if
-the user gave it. Otherwise list the AIO instances, and add
-`--subscription <subscription-ID>` when the user named a subscription:
+the user gave it. If they named the instance, list the AIO instances and
+match that exact name, adding `--subscription <subscription-ID>` when they
+named a subscription:
 
 ```text
 az resource list --resource-type Microsoft.IoTOperations/instances --query "[].id" --output tsv
 ```
 
-Match the instance name the user gave. If they named a cluster instead,
-look for the cluster name followed by `-aio`, such as `plant-one-aio`,
-because Site Ops names an instance after its Site. With exactly one match,
-use it. With several or none, ask the user which instance, or which
-subscription holds it. Secret Sync needs an instance that runs AIO 2607,
-2608 or 2609, and Site Ops does not check its release. If the user has not
-said which release it runs, ask. For an older release, stop and explain
-that AIO must be upgraded first. Offer the upgrade-aio skill when the
-instance name ends in `-aio`.
+If they named the cluster instead, find it as above, then run the instance
+query with the cluster's subscription and resource group, as for the
+existing AIO check. Do not pick an instance because its name resembles the
+cluster's name. Site Ops names an instance after its Site, and the Site
+name can differ from the cluster name.
+
+For either lookup, use exactly one match. With several, show them and ask
+which one. With none, if the user named an instance, ask which subscription
+holds it. If they named a cluster, AIO is not installed there, so offer the
+route that installs AIO with Secret Sync. If the user also wants a
+`siteName`, show the instance resource ID and ask them to confirm it before
+planning. Secret Sync needs an instance that runs AIO 2607, 2608 or 2609,
+and Site Ops does not check its release. If the user has not said which
+release it runs, ask. For an older release, stop and explain that AIO must
+be upgraded first. Offer the upgrade-aio skill when the instance name ends
+in `-aio`.
 
 ## 5. Use the defaults
 
@@ -235,6 +244,12 @@ resources with the user's Azure CLI identity but changes nothing.
 Continue only when the plan prints `Executable: yes`. Otherwise show the
 lines after `Diagnostics:` or `Deployment plan is unavailable.`, diagnose
 them with the troubleshoot-siteops skill and do not deploy.
+
+For `secretsync`, Site Ops names the Site after the cluster that the
+instance runs on, in lowercase, unless `siteName` is set. If the user named
+a cluster, compare its name with the plan's Site name, ignoring case. If
+they differ, the instance runs on another cluster. Tell the user the plan's
+Site, ask which instance to use, and do not offer to deploy.
 
 Summarize the plan in this form. Take the Site, resource group, region and
 operation counts from the plan output. For `aio-install`, the AIO release is
