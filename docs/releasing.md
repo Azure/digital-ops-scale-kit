@@ -721,6 +721,12 @@ Site group and both fleet groups. Each receipt row records whether its
 scenario used `ephemeral` or `persistent` groups. Publication accepts either
 mode.
 
+Owner on each existing group does not cover purging the soft deleted Key
+Vaults that the Site cases create, because those records belong to the
+subscription. Their receipt rows then record the vault purge as `failed`,
+which does not block publication. To let acceptance purge them, follow
+[Allow the vault purge with persistent groups](e2e-testing.md#allow-the-vault-purge-with-persistent-groups).
+
 ### Hold merges until acceptance starts
 
 Dispatch selects a branch, not a commit, so **Start candidate acceptance**
