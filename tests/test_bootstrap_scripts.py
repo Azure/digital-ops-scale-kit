@@ -558,7 +558,7 @@ def test_bootstraps_run_github_cli_without_telemetry():
 def test_bash_bootstrap_admits_private_data_root_before_retained_tool_use():
     bash = (SCRIPTS / "siteops-bootstrap.sh").read_text(encoding="utf-8")
     for invocation in ("\n  prepare_runtime\n", "\nprepare_runtime\n"):
-        assert bash.index('admit_directory "$data" private') < bash.index(invocation)
+        assert bash.index('\nadmit_directory "$data" private || refuse_data_root\n') < bash.index(invocation)
     runtime = re.search(r"(?ms)^prepare_runtime\(\) \{.*?^\}", bash).group()
     assert "\n  select_uv\n" in runtime
 
@@ -566,7 +566,7 @@ def test_bash_bootstrap_admits_private_data_root_before_retained_tool_use():
 def test_windows_bootstrap_admits_private_data_root_before_retained_tool_use():
     powershell = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
     assert "function Require-PrivateDataRoot(" in powershell
-    assert powershell.index("Require-PrivateDataRoot $data") < powershell.index(
+    assert powershell.index("\nRequire-PrivateDataRoot $data\n") < powershell.index(
         "$uv = Select-Uv $data $download $curl",
     )
 
@@ -582,6 +582,26 @@ def test_windows_bootstrap_owns_new_data_root_before_private_acl_and_admission()
     )
     assert "if (-not $owned) {" in create
     assert "Reject 'ROOT_DATA_OWNER'" in create
+
+
+def test_bootstraps_check_the_existing_data_root_between_preview_and_consent():
+    bash = (SCRIPTS / "siteops-bootstrap.sh").read_text(encoding="utf-8").splitlines()
+    check = bash.index('admit_directory "$data" private check || refuse_data_root')
+    assert bash.index("if $dry_run; then") < check < bash.index("if ! $approve; then")
+    assert check < bash.index('admit_directory "$data" private || refuse_data_root')
+    walk = re.search(
+        r"(?ms)^admit_directory\(\) \{.*?^\}", (SCRIPTS / "siteops-bootstrap.sh").read_text(encoding="utf-8"),
+    ).group()
+    missing = walk.split('if [[ "$create" == check ]]; then', 1)[1].split("fi", 1)[0]
+    assert "mkdir" not in missing and '[[ -w "${current%/*}/" ]]' in missing
+    powershell = [line.strip() for line in (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8").splitlines()]
+    check = powershell.index("Require-PrivateDataRoot $data -NoCreate")
+    assert powershell.index("if ($DryRun) {") < check < powershell.index("if (-not $Yes) {")
+    assert check < powershell.index("Require-PrivateDataRoot $data")
+    root = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8").split(
+        "function Require-PrivateDataRoot(", 1,
+    )[1].split("\nfunction ", 1)[0]
+    assert root.index("if ($NoCreate) { return }") < root.index("New-Item -ItemType Directory -Path $Path")
 
 
 def test_bootstrap_failures_are_distinguishable_from_progress():
@@ -1373,6 +1393,131 @@ def test_bash_preview_and_unattended_refusal_do_not_acquire_tools(tmp_path):
     assert denied.returncode != 0
     assert "pass --yes" in denied.stderr
     assert not (tmp_path / "state").exists()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Real POSIX ownership and a terminal prompt need Linux.")
+@pytest.mark.parametrize("case", ["missing", "existing", "shared-parent", "open-root"])
+def test_bash_checks_the_data_root_before_asking_for_consent(tmp_path, case):
+    import pty
+
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    gh = tools / "gh"
+    gh.write_text("#!/usr/bin/env bash\necho 'gh version 2.95.0 (fixture)'\n", encoding="utf-8")
+    for path, mode in ((tmp_path, 0o700), (tools, 0o755), (gh, 0o755)):
+        path.chmod(mode)
+    parent = tmp_path / "data"
+    parent.mkdir(mode=0o700)
+    root = parent / "siteops"
+    if case == "shared-parent":
+        parent.chmod(0o777)
+    elif case in ("existing", "open-root"):
+        root.mkdir(mode=0o700)
+        root.chmod(0o755 if case == "open-root" else 0o700)
+    primary, terminal = pty.openpty()
+    try:
+        os.write(primary, b"n\n")
+        result = subprocess.run(
+            [
+                "bash", str(SCRIPTS / "siteops-bootstrap.sh"),
+                "--release", "siteops/v1.0.0b1", "--source-commit", SOURCE_SHA,
+            ],
+            stdin=terminal, capture_output=True, text=True, timeout=20,
+            env={
+                **os.environ, "HOME": str(tmp_path), "XDG_DATA_HOME": str(parent),
+                "PATH": f"{tools}{os.pathsep}{os.environ['PATH']}",
+            },
+        )
+    finally:
+        os.close(primary)
+        os.close(terminal)
+    assert result.returncode != 0
+    prompt = "Install missing tools and the selected Site Ops build?"
+    if case in ("missing", "existing"):
+        assert prompt in result.stderr, result.stdout + result.stderr
+        assert "Installation was not approved." in result.stderr
+    else:
+        assert "Configure a private Site Ops data root" in result.stderr, result.stdout + result.stderr
+        assert prompt not in result.stderr
+    assert root.exists() is (case != "missing" and case != "shared-parent")
+    assert not (root / "install-staging").exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows ACL admission needs Windows.")
+@pytest.mark.parametrize("shared", [False, True])
+def test_powershell_checks_the_data_root_before_asking_for_consent(tmp_path, shared):
+    if shutil.which("gh") is None:
+        pytest.skip("GitHub CLI is unavailable.")
+    local = tmp_path / "local"
+    local.mkdir()
+    users = "*S-1-5-32-545"
+    if shared:
+        grant = subprocess.run(
+            ["icacls.exe", str(local), "/grant", f"{users}:(OI)(CI)M"],
+            capture_output=True, text=True, timeout=20,
+        )
+        if grant.returncode:
+            pytest.skip("The local test user cannot change the fixture directory ACL.")
+    try:
+        result = subprocess.run(
+            [
+                "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                str(SCRIPTS / "siteops-bootstrap.ps1"),
+                "-Release", "siteops/v1.0.0b1", "-SourceCommit", SOURCE_SHA,
+            ],
+            env={**os.environ, "LOCALAPPDATA": str(local)},
+            input="", capture_output=True, text=True, timeout=30,
+        )
+    finally:
+        if shared:
+            subprocess.run(
+                ["icacls.exe", str(local), "/remove:g", users],
+                capture_output=True, text=True, check=True, timeout=20,
+            )
+    assert result.returncode != 0
+    output = "".join((result.stdout + result.stderr).split())
+    if shared:
+        assert "ConfigureaprivateSiteOpsdataroot.ROOT_ANCESTOR_ACL" in output, result.stderr
+        assert "pass-Yes" not in output
+    else:
+        assert "Inautomation,pass-Yesafterreviewingthechanges." in output, result.stderr
+    assert not (local / "siteops").exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows ACL admission needs Windows.")
+@pytest.mark.parametrize("case", ["missing", "existing", "open-root"])
+def test_windows_data_root_check_creates_nothing(tmp_path, case):
+    root = tmp_path / "local" / "siteops"
+    root.parent.mkdir()
+    setup = ""
+    if case != "missing":
+        setup = "Require-PrivateDataRoot $env:TEST_DATA_ROOT\n"
+    if case == "open-root":
+        setup += (
+            "& icacls.exe $env:TEST_DATA_ROOT /grant '*S-1-5-32-545:(OI)(CI)M' | Out-Null\n"
+            "if ($LASTEXITCODE -ne 0) { throw 'Fixture ACL setup failed.' }\n"
+        )
+    wrapper = tmp_path / "check-root.ps1"
+    wrapper.write_text(
+        'function Fail([string]$message) { throw "Site Ops installation: $message" }\n'
+        + _windows_functions("Require-PrivateDataRoot")
+        + "$ErrorActionPreference = 'Stop'\n"
+        + setup
+        + "Require-PrivateDataRoot $env:TEST_DATA_ROOT -NoCreate\n'ROOT_CHECKED'\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
+        cwd=tmp_path, env={**os.environ, "TEST_DATA_ROOT": str(root)},
+        capture_output=True, text=True, timeout=20,
+    )
+    if case == "open-root":
+        assert result.returncode != 0
+        assert "ROOT_DATA_ACL" in result.stderr
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "ROOT_CHECKED" in result.stdout
+    assert root.exists() is (case != "missing")
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="PowerShell preview runs on Windows.")

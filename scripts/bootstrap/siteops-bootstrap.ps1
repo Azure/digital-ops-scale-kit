@@ -336,7 +336,7 @@ function Native([string]$Name) {
     if ($null -eq $tool -or $tool.Source -notlike '*.exe') { return $null }
     return $tool.Source
 }
-function Require-PrivateDataRoot([string]$Path, [switch]$Managed) {
+function Require-PrivateDataRoot([string]$Path, [switch]$Managed, [switch]$NoCreate) {
     function Reject([string]$Code) {
         Fail "Configure a private Site Ops data root. $Code Use trusted, non-symlinked directories."
     }
@@ -406,6 +406,8 @@ function Require-PrivateDataRoot([string]$Path, [switch]$Managed) {
         Reject 'ROOT_DATA_TYPE'
     }
     if (-not $exists) {
+        # A check before consent admits the ancestors and leaves the root for installation to create.
+        if ($NoCreate) { return }
         try {
             New-Item -ItemType Directory -Path $Path -ErrorAction Stop | Out-Null
         } catch {
@@ -1021,6 +1023,9 @@ if ($DryRun) {
     Stage 'Preview only. No tools or content were downloaded.'
     return
 }
+$data = Join-Path $env:LOCALAPPDATA 'siteops'
+# Check the existing storage before consent, so a refused data root stops first.
+Require-PrivateDataRoot $data -NoCreate
 if (-not $Yes) {
     if ([Console]::IsInputRedirected) {
         Fail 'In automation, pass -Yes after reviewing the changes.'
@@ -1034,7 +1039,6 @@ if (-not $Yes) {
     if ($answer -cnotin @('y', 'Y')) { Fail 'Installation was not approved.' }
 }
 
-$data = Join-Path $env:LOCALAPPDATA 'siteops'
 Require-PrivateDataRoot $data
 $staging = Join-Path $data 'install-staging'
 Require-PrivateDataRoot $staging

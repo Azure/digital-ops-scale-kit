@@ -372,11 +372,13 @@ private to the current user, and its ancestors must not be untrusted or
 symlinked. Ancestors may be writable by your own user private group, as
 with the common `0002` login umask, but not by other users or shared groups.
 If your XDG data path is shared, select a private location that you own with
-trusted ancestors before installing. The script rejects an unsafe root
-before choosing a retained uv executable or reading cached assets.
-The Windows bootstrap checks the same boundary for its
+trusted ancestors before installing. The script checks the existing
+directories before it asks for consent, without creating any, and rejects
+an unsafe root before choosing a retained uv executable or reading cached
+assets. The Windows bootstrap checks the same boundary for its
 `LOCALAPPDATA\siteops` directory, including ancestor write access and
-reparse points, before using retained tools or downloads. It stages
+reparse points, before asking for consent and again before using retained
+tools or downloads. It stages
 downloads in `LOCALAPPDATA\siteops\install-staging`, never `%TEMP%`, and
 removes each run's directory when it exits. Both scripts use the first
 GitHub CLI on `PATH` only when the executable and every parent directory
