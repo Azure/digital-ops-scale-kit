@@ -306,7 +306,13 @@ az iot ops check --context "<kubeconfig-context>"
 For Secret Sync, a successful deployment does not prove that a secret
 reached the cluster. See the
 [Secret Sync reference](https://github.com/Azure/digital-ops-scale-kit/blob/main/docs/secret-sync.md)
-for functional checks. If a step failed, use the troubleshoot-siteops skill.
+for functional checks. Site Ops grants vault roles only to the Secret Sync
+managed identity. Tell the user that adding or viewing the vault's secrets
+in the operations experience or the Azure portal needs a Key Vault data role
+for their own account, and point them to
+[vault access](https://github.com/Azure/digital-ops-scale-kit/blob/main/docs/secret-sync.md#give-your-account-access-to-the-vault).
+Do not assign the role yourself. If a step failed, use the
+troubleshoot-siteops skill.
 
 If the install-siteops skill installed Site Ops in this conversation and
 deferred its saved PATH offer, make that offer now, as its step 5
