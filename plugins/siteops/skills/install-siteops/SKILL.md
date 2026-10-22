@@ -76,6 +76,9 @@ Tell the user what the installer does:
 - It checks `curl` and GitHub CLI, and verifies the release's signed engine.
 - It installs uv, managed Python and Site Ops under their user profile.
   When Site Ops is already installed, it replaces that installation.
+- On Windows, it adds uv's command directory to the user PATH, so new
+  terminals find `siteops`. It leaves the machine PATH and the order of
+  other entries unchanged.
 - It prints the command directory it used.
 
 Site Ops then needs an approved source. Enrolling the official content
@@ -159,16 +162,21 @@ Site Ops by its full path wherever a skill shows `siteops`, for example
 `& "<command directory>\siteops.exe" --version` in PowerShell.
 
 If the version differs from the `Installed Site Ops` line, another
-`siteops` comes first on PATH, such as a pip installation. Find it with
+`siteops` comes first on PATH, such as a pip installation. On Windows, the
+installer also names a command that new terminals would run first, in a
+line that starts with `Warning: new terminals run`. Find it with
 `Get-Command siteops -All` in PowerShell or `type -a siteops` in bash, tell
 the user and let them remove it.
 
-If `siteops` was not found, new terminals also need the directory on the
-saved PATH. Do not stop for this now. When the user's request is complete,
-offer to run `uv tool update-shell`, and run it only with their agreement.
-If `uv` is not on PATH, run the `uv` in the printed directory. Then tell
-the user that a new terminal, and Copilot started from one, will find
-`siteops`.
+On Windows, the installer saves the directory to the user PATH, so a new
+terminal, and Copilot started from one, will find `siteops`. If it printed
+`Your user PATH could not be updated.`, show the user the steps it printed
+after that line. If `siteops` was not found on Linux, new terminals also
+need the directory on the saved PATH. Do not stop for this now. When the
+user's request is complete, offer to run `uv tool update-shell`, and run it
+only with their agreement. If `uv` is not on PATH, run the `uv` in the
+printed directory. Then tell the user that a new terminal, and Copilot
+started from one, will find `siteops`.
 
 ## 6. Enroll and confirm
 

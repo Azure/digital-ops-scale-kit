@@ -35,10 +35,12 @@ authority. Both scripts disclose required tool changes and ask for consent.
 With an explicit source commit, print those changes and stop without downloading anything by adding
 `--dry-run` on Linux or `-DryRun` on Windows to the script invocation.
 Use `--yes` on Linux or `-Yes` on Windows only for an explicitly approved
-unattended installation. Use these routes with releases that contain the
-bootstrap and compatible workspace assets. Check the selected release's
-asset inventory before using these commands. Azure login and
-deployment are separate.
+unattended installation. On Windows, the bootstrap also adds uv's command
+directory to your user PATH, so new terminals find `siteops`. Add
+`-NoModifyPath` to keep your saved PATH unchanged. Use these routes with
+releases that contain the bootstrap and compatible workspace assets. Check
+the selected release's asset inventory before using these commands. Azure
+login and deployment are separate.
 
 | Route | Choose it when | Requirements |
 |---|---|---|
@@ -426,19 +428,33 @@ a workspace from an approved source and review a plan before deploying to
 an existing cluster connected to Azure Arc.
 
 The script verifies `siteops` inside its child shell and prints its
-`Command directory:` on success. If `siteops` is not on the parent shell's
-current PATH, add the printed directory for this session:
+`Command directory:` on success.
 
-```bash
-export PATH="<printed command directory>:$PATH"
-```
+On Windows, the bootstrap then adds that directory to your user PATH with
+`uv tool update-shell`, unless the directory is already there. It never
+changes the machine PATH or the order of other entries. Open a new terminal
+to use `siteops`, or add the directory to the current terminal:
 
 ```powershell
 $env:PATH = "<printed command directory>;" + $env:PATH
 ```
 
-For new terminals, run `uv tool update-shell`, then open a new terminal. If
-`uv` is not on `PATH`, run the `uv` in the printed directory.
+If another `siteops`, such as a pip installation, would run first in a new
+terminal, the bootstrap names it in a warning. Windows searches the machine
+PATH entries before the user entries, so a command in a machine entry runs
+first. Remove that command with the tool that installed it. With
+`-NoModifyPath`, or when the user PATH cannot be updated, the bootstrap
+prints the commands for this terminal and for new terminals instead.
+
+On Linux, if `siteops` is not on the parent shell's current PATH, add the
+printed directory for this session:
+
+```bash
+export PATH="<printed command directory>:$PATH"
+```
+
+For new Linux terminals, run `uv tool update-shell`, then open a new
+terminal. If `uv` is not on `PATH`, run the `uv` in the printed directory.
 
 The printed directory can differ when a native manager location was
 explicitly selected. Do not assume a fixed command directory.
@@ -609,10 +625,10 @@ use their declared source package version, and identified builds add a suffix,
 for example `1.0.0b1+build.12345.1.gabcdef123456`. The engine version and Scale
 Kit content version remain separate identities.
 
-If the command is not found, use `uv tool update-shell` to add uv's command
-directory to `PATH`, then open a new terminal. A successful installation
-message is not proof that `PATH` resolves to that command: check
-`siteops --version` after any installation change.
+If the command is not found, open a new terminal. On Linux, first use
+`uv tool update-shell` to add uv's command directory to `PATH`. A
+successful installation message is not proof that `PATH` resolves to that
+command: check `siteops --version` after any installation change.
 
 Before using published content, enroll its source once. Run the same
 command again to renew the 30 day enrollment:
@@ -697,7 +713,7 @@ environment detail. Keep them private and review them before sharing.
 | No matching distribution during a release wheel installation | The configured feed does not serve a required runtime wheel for this interpreter. Use the verified bundle, which carries them. |
 | `uv` is not found | Use the bootstrap, or provision the qualified uv through an approved channel. |
 | The installed build is not the one you selected | Use the intended release's bootstrap with `--replace` or `-Replace`, then check command ownership and version. |
-| `siteops` runs an unexpected program | Another command with that name is earlier in `PATH`. Resolve the ownership of that command before retrying. |
+| `siteops` runs an unexpected program | Another command with that name is earlier in `PATH`. On Windows, the bootstrap names it in a warning that starts with `Warning: new terminals run`. Resolve the ownership of that command before retrying. |
 | The Windows bootstrap refuses a retained uv executable or Python directory | Inspect the selected path, ACL and pinned bytes before retrying. It preserves another uv installation and will not overwrite an unrelated command. |
 | The tool has unrecognized Python startup files | Inspect the environment before using native uninstall. Rerun the approved bootstrap after removing the tool with its manager. |
 | A retained bundle fails validation | Preserve it for private inspection. Acquire the selected release again in an approved private location rather than editing the lock or wheels. |

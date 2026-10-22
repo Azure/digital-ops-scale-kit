@@ -595,6 +595,30 @@ def test_bootstrap_failures_are_distinguishable_from_progress():
     assert 'function Stage([string]$Message) { Write-Host "Site Ops installation: $Message" }' in powershell
 
 
+def test_windows_bootstrap_saves_the_command_directory_after_consent_and_verification():
+    powershell = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
+    lines = [line.strip() for line in powershell.splitlines()]
+    assert "[switch]$NoModifyPath" in lines
+    listed = lines.index(
+        "Stage \"Add: uv's command directory to your user PATH, so new terminals find siteops. "
+        "Pass -NoModifyPath to skip this.\""
+    )
+    assert listed < lines.index("if ($DryRun) {") < lines.index("if (-not $Yes) {")
+    call = "$pathState = if ($NoModifyPath) { 'kept' } else { Save-CommandDirectory $uv $commandDirectory }"
+    assert lines.count(call) == 1
+    assert lines.index("$observed = & $siteops --version 2>$null") < lines.index(call)
+    assert lines.index(call) < lines.index("$earlier = Find-EarlierSiteOps $commandDirectory")
+    # Only uv writes the saved PATH, and only the user's.
+    for write in (
+        "SetValue(", "Set-ItemProperty", "New-ItemProperty", "setx", ", 'Machine')",
+        "Environment]::SetEnvironmentVariable('Path",
+    ):
+        assert write not in powershell
+    assert not re.search(r"OpenSubKey\([^)]*,", powershell)
+    saver = re.search(r"(?ms)^function Save-CommandDirectory\([^\n]*\) \{.*?^\}", powershell).group()
+    assert "Invoke-Uv $Uv @('tool', 'update-shell')" in saver
+
+
 def test_windows_bootstrap_creates_retained_bundle_as_user_before_helper_extraction():
     powershell = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
     lines = [line.strip() for line in powershell.splitlines()]
@@ -1298,6 +1322,30 @@ def test_powershell_preview_names_the_enrollment(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Source demo will enroll Azure/digital-ops-scale-kit with an expiring policy" in result.stdout
     assert "approve" not in result.stdout
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="PowerShell preview runs on Windows.")
+@pytest.mark.parametrize("opt_out", [False, True])
+def test_powershell_preview_lists_the_user_path_change(tmp_path, opt_out):
+    if shutil.which("gh") is None:
+        pytest.skip("GitHub CLI is unavailable.")
+    result = subprocess.run(
+        [
+            "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+            str(SCRIPTS / "siteops-bootstrap.ps1"),
+            "-Release", "siteops/v1.0.0b1", "-SourceCommit", SOURCE_SHA, "-DryRun",
+            *(["-NoModifyPath"] if opt_out else []),
+        ],
+        env={**os.environ, "LOCALAPPDATA": str(tmp_path / "state")},
+        capture_output=True, text=True, timeout=20,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    added = "Add: uv's command directory to your user PATH, so new terminals find siteops."
+    kept = "Keep: your saved PATH unchanged."
+    assert (added in result.stdout) is not opt_out
+    assert (kept in result.stdout) is opt_out
+    assert "No tools or content were downloaded" in result.stdout
+    assert not (tmp_path / "state" / "siteops").exists()
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="The Linux preview runs on the Linux runner.")

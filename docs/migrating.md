@@ -38,6 +38,32 @@ siteops -w <workspace> plan <manifest> -l <selector>
 
 `plan` arrives with v1.0.0b7, so run it with the new engine.
 
+## To v1.0.0b8
+
+These changes affect how you install or run Site Ops after v1.0.0b7.
+
+| If you... | What to change |
+|---|---|
+| Install Site Ops on Windows with the PowerShell bootstrap | Review the [saved user PATH](#windows-user-path). |
+
+### Windows user PATH
+
+The PowerShell bootstrap adds uv's command directory, normally
+`%USERPROFILE%\.local\bin`, to your user PATH with `uv tool update-shell`,
+so new terminals find `siteops`. It lists this change with the others
+before asking for consent. It leaves the machine PATH and the order of
+other entries unchanged. You no longer need to run `uv tool update-shell`
+yourself.
+
+To keep your saved PATH unchanged, add `-NoModifyPath` to the bootstrap
+invocation. The bootstrap then prints the commands that add the directory
+for the current terminal and for new terminals.
+
+If another `siteops` would run first in a new terminal, such as an older
+pip installation, the bootstrap prints a line that starts with
+`Warning: new terminals run`. Remove that command with the tool that
+installed it.
+
 ## To v1.0.0b7
 
 These changes affect workspaces, scripts and pipelines that worked with

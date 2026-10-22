@@ -1488,3 +1488,144 @@ if ($env:TEST_OCCUPIED) { Require-PrivateDataRoot $cache }
         assert sorted(item.name for item in cache.iterdir()) == sorted(names)
         assert all((cache / name).read_text(encoding="ascii") == name for name in names)
         assert not any((staged / name).exists() for name in names)
+
+
+_PATH_STUBS = r"""
+function Stage([string]$message) { Write-Host "STAGE $message" }
+$script:userPath = $env:TEST_USER_PATH
+$script:uvCalls = 0
+function Read-SavedPath([string]$Scope) {
+    if ($Scope -ceq 'Machine') { return $env:TEST_MACHINE_PATH }
+    if ($env:TEST_USER_KIND -ceq 'binary') { return $null }
+    return $script:userPath
+}
+function Invoke-Uv([string]$Executable, [string[]]$Arguments) {
+    $script:uvCalls++
+    if ($Executable -cne $env:TEST_UV -or ($Arguments -join ' ') -cne 'tool update-shell') {
+        throw 'Unexpected uv call.'
+    }
+    if ($env:TEST_UV_RESULT -ceq 'fail') { throw 'Site Ops installation failed: uv' }
+    if ($env:TEST_UV_RESULT -ceq 'prepend') { $script:userPath = $env:TEST_DIRECTORY + ';' + $script:userPath }
+}
+"""
+
+
+@pytest.mark.parametrize(
+    ("case", "saved", "uv_result", "state", "calls"),
+    [
+        ("absent", "C:\\Tools;{other}", "prepend", "added", 1),
+        ("present", "C:\\Tools;{directory}", "fail", "present", 0),
+        ("present-variant", 'C:\\Tools;"{upper}\\"', "fail", "present", 0),
+        ("substring", "{directory}2", "unchanged", "failed", 1),
+        ("uv-fails", "C:\\Tools", "fail", "failed", 1),
+        ("binary", "", "prepend", "failed", 0),
+    ],
+)
+def test_native_command_directory_is_saved_once_through_uv(tmp_path, case, saved, uv_result, state, calls):
+    directory = tmp_path / "home" / ".local" / "bin"
+    wrapper = tmp_path / "save-path.ps1"
+    wrapper.write_text(
+        _functions("Test-SameDirectory", "Save-CommandDirectory")
+        + _PATH_STUBS
+        + "$state = Save-CommandDirectory $env:TEST_UV $env:TEST_DIRECTORY\n"
+        + "\"STATE=$state CALLS=$script:uvCalls\"\n"
+        + "\"USER=$script:userPath\"\n",
+        encoding="utf-8",
+    )
+    user_path = saved.format(directory=directory, upper=str(directory).upper(), other=tmp_path / "other")
+    result = _run(
+        wrapper, tmp_path, TEST_UV="C:\\uv\\uv.exe", TEST_DIRECTORY=directory,
+        TEST_USER_PATH=user_path, TEST_USER_KIND="binary" if case == "binary" else "string",
+        TEST_UV_RESULT=uv_result, TEST_MACHINE_PATH="",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"STATE={state} CALLS={calls}" in result.stdout
+    if state == "present":
+        assert f"USER={user_path}" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("case", "machine", "user", "files", "expected"),
+    [
+        ("machine-first", "{machine}", "{ours};{later}", {"machine": "siteops.exe"}, "machine"),
+        ("user-before", "", "{before};{ours}", {"before": "siteops.cmd"}, "before"),
+        ("ours-first", "", "{ours};{later}", {"later": "siteops.exe"}, None),
+        ("ours-in-machine", "{ours};{machine}", "{before}", {"machine": "siteops.exe", "before": "siteops.exe"}, None),
+        ("absent", "", "{later}", {"later": "siteops.exe"}, "later"),
+        ("relative", ".;{ours}", "", {".": "siteops.exe"}, None),
+        ("directory", "{before};{ours}", "", {"before": "siteops.exe/"}, None),
+    ],
+)
+def test_native_earlier_siteops_follows_new_terminal_order(tmp_path, case, machine, user, files, expected):
+    folders = {name: tmp_path / name for name in ("machine", "before", "ours", "later")}
+    folders["."] = tmp_path
+    for folder in folders.values():
+        folder.mkdir(exist_ok=True)
+    (folders["ours"] / "siteops.exe").write_bytes(b"selected")
+    for name, filename in files.items():
+        target = folders[name] / filename.rstrip("/")
+        if filename.endswith("/"):
+            target.mkdir()
+        else:
+            target.write_bytes(b"other")
+    wrapper = tmp_path / "earlier.ps1"
+    wrapper.write_text(
+        _functions("Test-SameDirectory", "Find-EarlierSiteOps")
+        + _PATH_STUBS
+        + "$found = Find-EarlierSiteOps $env:TEST_DIRECTORY\n"
+        + "\"FOUND=$found\"\n",
+        encoding="utf-8",
+    )
+    values = {key: str(value) for key, value in folders.items() if key != "."}
+    result = _run(
+        wrapper, tmp_path, TEST_DIRECTORY=folders["ours"], TEST_UV="unused",
+        TEST_MACHINE_PATH=machine.format(**values), TEST_USER_PATH=user.format(**values),
+        PATHEXT=".COM;.EXE;.BAT;.CMD",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    found = "" if expected is None else str(folders[expected] / files[expected])
+    assert f"FOUND={found}\n" in result.stdout
+
+
+def test_native_saved_path_reader_matches_the_windows_environment(tmp_path):
+    wrapper = tmp_path / "reader.ps1"
+    wrapper.write_text(
+        _functions("Read-SavedPath")
+        + """
+foreach ($scope in @('Machine', 'User')) {
+    $expected = [Environment]::GetEnvironmentVariable('Path', $scope)
+    if ($null -eq $expected) { $expected = '' }
+    if ((Read-SavedPath $scope) -cne $expected) { throw "The $scope reader differs." }
+}
+'READER_MATCHES'
+""",
+        encoding="utf-8",
+    )
+    result = _run(wrapper, tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "READER_MATCHES" in result.stdout
+
+
+def test_native_manual_path_steps_run_as_printed(tmp_path):
+    directory = tmp_path / "it's bin"
+    uv = tmp_path / "o'tool" / "uv.exe"
+    wrapper = tmp_path / "steps.ps1"
+    wrapper.write_text(
+        _functions("Write-PathSteps")
+        + _PATH_STUBS
+        + "Write-PathSteps $env:TEST_UV $env:TEST_DIRECTORY\n",
+        encoding="utf-8",
+    )
+    result = _run(wrapper, tmp_path, TEST_UV=uv, TEST_DIRECTORY=directory)
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = result.stdout.splitlines()
+    session = next(line for line in lines if "To use siteops in this terminal, run: " in line)
+    command = session.split("To use siteops in this terminal, run: ", 1)[1]
+    applied = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-Command", command + "; $env:Path.Split(';')[0]"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert applied.returncode == 0, applied.stderr
+    assert applied.stdout.strip() == str(directory)
+    saved = next(line for line in lines if "For new terminals" in line)
+    assert saved.endswith("& '" + str(uv).replace("'", "''") + "' tool update-shell")

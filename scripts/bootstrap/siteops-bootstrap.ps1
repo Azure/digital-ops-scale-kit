@@ -8,7 +8,8 @@ param(
     [string]$EnrollSource,
     [switch]$Replace,
     [switch]$Yes,
-    [switch]$DryRun
+    [switch]$DryRun,
+    [switch]$NoModifyPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -883,6 +884,67 @@ function Select-GitHubCli() {
     }
     return $path
 }
+# Returns the saved PATH text, '' when none is saved, or $null when the value is not a string.
+function Read-SavedPath([string]$Scope) {
+    $key = if ($Scope -ceq 'Machine') {
+        [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Control\Session Manager\Environment')
+    } else {
+        [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment')
+    }
+    if (-not $key) { return '' }
+    try { $value = $key.GetValue('Path', '') } finally { $key.Dispose() }
+    if ($value -isnot [string]) { return $null }
+    return $value
+}
+function Test-SameDirectory([string]$Entry, [string]$Directory) {
+    $candidate = $Entry.Trim().Trim('"')
+    if (-not $candidate -or -not [IO.Path]::IsPathRooted($candidate)) { return $false }
+    try { $candidate = [IO.Path]::GetFullPath($candidate) } catch { return $false }
+    return $candidate.TrimEnd('\') -ieq $Directory.TrimEnd('\')
+}
+function Save-CommandDirectory([string]$Uv, [string]$Directory) {
+    $saved = Read-SavedPath 'User'
+    if ($null -eq $saved) { return 'failed' }
+    foreach ($entry in $saved.Split(';')) {
+        if (Test-SameDirectory $entry $Directory) { return 'present' }
+    }
+    # uv prepends the directory that uv tool dir --bin reports, keeping other entries and their order.
+    try { $null = Invoke-Uv $Uv @('tool', 'update-shell') } catch { return 'failed' }
+    $saved = Read-SavedPath 'User'
+    if ($saved) {
+        foreach ($entry in $saved.Split(';')) {
+            if (Test-SameDirectory $entry $Directory) { return 'added' }
+        }
+    }
+    return 'failed'
+}
+# A new terminal searches the machine PATH entries before the user entries.
+function Find-EarlierSiteOps([string]$Directory) {
+    $extensions = @($env:PATHEXT -split ';' | Where-Object { $_ -cmatch '^\.[A-Za-z0-9]+$' })
+    if (-not $extensions) { $extensions = @('.COM', '.EXE', '.BAT', '.CMD') }
+    foreach ($scope in @('Machine', 'User')) {
+        $saved = Read-SavedPath $scope
+        if (-not $saved) { continue }
+        foreach ($entry in $saved.Split(';')) {
+            if (Test-SameDirectory $entry $Directory) { return $null }
+            $folder = $entry.Trim().Trim('"')
+            if (-not $folder -or -not [IO.Path]::IsPathRooted($folder)) { continue }
+            foreach ($extension in $extensions) {
+                try {
+                    $candidate = Join-Path $folder ('siteops' + $extension.ToLowerInvariant())
+                    if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+                } catch { }
+            }
+        }
+    }
+    return $null
+}
+function Write-PathSteps([string]$Uv, [string]$Directory) {
+    $folder = $Directory.Replace("'", "''")
+    $tool = $Uv.Replace("'", "''")
+    Stage "To use siteops in this terminal, run: `$env:Path = '$folder;' + `$env:Path"
+    Stage "For new terminals, add the directory to your user PATH, for example with: & '$tool' tool update-shell"
+}
 
 if ($ContentRelease) {
     if ($Release -or $ContentRelease -cnotmatch '^v[0-9][0-9A-Za-z._-]{0,100}$') {
@@ -939,6 +1001,11 @@ if (Get-Command 'uv.exe' -CommandType Application -ErrorAction SilentlyContinue)
     Stage 'Add: pinned native uv in protected tooling storage and expose it for maintenance.'
 }
 Stage 'Check: ordinary uv tool, command, and managed Python storage.'
+if ($NoModifyPath) {
+    Stage 'Keep: your saved PATH unchanged. The steps to add the command directory follow the installation.'
+} else {
+    Stage "Add: uv's command directory to your user PATH, so new terminals find siteops. Pass -NoModifyPath to skip this."
+}
 if ($Replace) { Stage 'The selected build will explicitly replace or repair an existing Site Ops installation.' }
 if (-not (Get-Command 'az.cmd', 'az.exe' -CommandType Application -ErrorAction SilentlyContinue)) {
     Stage 'Azure CLI was not found. Install it before deploying: https://aka.ms/installazurecli'
@@ -1175,7 +1242,24 @@ try {
     if ($versionExit -ne 0 -or $observed -cne "siteops $version") {
         Fail 'The exposed siteops command does not match the selected build.'
     }
-    Stage "Command directory: $commandDirectory. Add it to your current PATH or open a new shell."
+    Stage "Command directory: $commandDirectory."
+    $pathState = if ($NoModifyPath) { 'kept' } else { Save-CommandDirectory $uv $commandDirectory }
+    if ($pathState -ceq 'added') {
+        Stage 'Saved the command directory to your user PATH. Open a new terminal to use siteops.'
+    } elseif ($pathState -ceq 'present') {
+        Stage 'Your user PATH already includes the command directory.'
+    } else {
+        if ($pathState -ceq 'kept') {
+            Stage 'Your saved PATH is unchanged.'
+        } else {
+            Stage 'Your user PATH could not be updated.'
+        }
+        Write-PathSteps $uv $commandDirectory
+    }
+    $earlier = Find-EarlierSiteOps $commandDirectory
+    if ($earlier) {
+        Stage "Warning: new terminals run $earlier instead of this installation. Remove that command with the tool that installed it, for example pip uninstall siteops."
+    }
     Stage 'For native removal, run uv tool uninstall siteops.'
     if ($EnrollSource) {
         & $siteops source enroll $EnrollSource --source "github:$Repository"
