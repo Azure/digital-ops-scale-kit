@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from siteops import cache_filesystem, package_builder
+from siteops import artifacts, cache_filesystem, package_builder
 from siteops import workspace_cache as cache_module
 from siteops.artifact_verification import ArtifactVerification
 from siteops.artifacts import ArtifactError, hash_file
@@ -22,7 +22,7 @@ from siteops.cache_filesystem import (
     check_private_node,
     make_private_directory,
 )
-from siteops.cache_layout import CacheLayout
+from siteops.cache_layout import CacheLayout, write_new
 from siteops.compilation import TemplateCompilationSession
 from siteops.executor import DeploymentResult
 from siteops.orchestrator import Orchestrator
@@ -163,6 +163,62 @@ def test_interrupted_in_place_initialization_is_completed(tmp_path):
     WorkspaceCache(root)
     check_private_node(root / "cache.json", directory=False)
     check_private_node(root / "objects" / "sha256", directory=True)
+
+
+@pytest.mark.parametrize("replacement", ["identical", "different", "repeated"])
+def test_in_place_initializers_accept_an_identical_replaced_marker(tmp_path, monkeypatch, replacement):
+    root = _empty_operator_directory(tmp_path / "selected")
+    marker = root / "cache.json"
+    real = artifacts.require_node
+    replacements = []
+
+    # A second initializer that also found the directory empty renames its marker over the first
+    # while the first initializer reads it.
+    def second_initializer(path, *, directory):
+        info = real(path, directory=directory)
+        if path == marker and (replacement == "repeated" or not replacements):
+            content = marker.read_bytes()
+            if replacement == "different":
+                content = content.replace(b"WorkspaceCache", b"OtherCache")
+            staged = root / "staging" / f"cache-{len(replacements):032x}.json"
+            write_new(staged, content)
+            os.replace(staged, marker)
+            replacements.append(content)
+        return info
+
+    monkeypatch.setattr(artifacts, "require_node", second_initializer)
+    if replacement == "identical":
+        CacheLayout(root)
+        monkeypatch.undo()
+        assert len(replacements) == 1
+        check_private_node(marker, directory=False)
+        assert not list((root / "staging").iterdir())
+        CacheLayout(root, create=False)
+    elif replacement == "different":
+        with pytest.raises(CacheError, match="not a supported Site Ops cache"):
+            CacheLayout(root)
+    else:
+        with pytest.raises(ArtifactError, match="changed while it was opened"):
+            CacheLayout(root)
+        assert 1 < len(replacements) < 10
+
+
+def test_in_place_initializer_keeps_a_marker_placed_first(tmp_path, monkeypatch):
+    root = _empty_operator_directory(tmp_path / "selected")
+    real = write_new
+    first = []
+
+    def first_initializer_finishes(path, data):
+        real(path, data)
+        if path.parent.name == "staging" and not first:
+            real(root / "cache.json", data)
+            first.append((root / "cache.json").stat())
+
+    monkeypatch.setattr("siteops.cache_layout.write_new", first_initializer_finishes)
+    CacheLayout(root)
+    kept = (root / "cache.json").stat()
+    assert (kept.st_ino, kept.st_mtime_ns) == (first[0].st_ino, first[0].st_mtime_ns)
+    assert not list((root / "staging").iterdir())
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permissions contract")

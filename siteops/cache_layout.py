@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import shutil
+import time
 import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -28,6 +29,7 @@ _MARKER = b'{"apiVersion":"siteops/v1alpha1","kind":"WorkspaceCache"}\n'
 _DIRECTORIES = ("objects", "receipts", "staging", "locks")
 _NAMESPACES = {"proofs": "sha256", "metadata": "records"}
 _STAGED_MARKER = re.compile(r"cache-[0-9a-f]{32}\.json\Z")
+_MARKER_READS = 5
 
 
 def default_cache_root(environment: Mapping[str, str] | None = None) -> Path:
@@ -81,6 +83,20 @@ def cleanup_directory(path: Path) -> None:
         logger.warning("Cache staging cleanup could not be completed.")
 
 
+def _read_marker(marker: Path) -> bytes:
+    """Read the marker again when a concurrent initializer replaces it during the read."""
+    attempt = 1
+    while True:
+        try:
+            with open_regular_file(marker) as stream:
+                return stream.read(len(_MARKER) + 1)
+        except ArtifactError:
+            if attempt == _MARKER_READS:
+                raise
+        time.sleep(0.01 * attempt)
+        attempt += 1
+
+
 @contextmanager
 def cache_io() -> Iterator[None]:
     try:
@@ -113,9 +129,8 @@ class CacheLayout:
                 "The selected cache directory contains other files. Select a new or empty directory.",
             )
         check_private_node(marker, directory=False)
-        with open_regular_file(marker) as stream:
-            if stream.read(len(_MARKER) + 1) != _MARKER:
-                raise CacheError("The selected directory is not a supported Site Ops cache.")
+        if _read_marker(marker) != _MARKER:
+            raise CacheError("The selected directory is not a supported Site Ops cache.")
         names = {entry.name for entry in self.root.iterdir()}
         required = {"cache.json", *_DIRECTORIES}
         if not required <= names or names - required - _NAMESPACES.keys():
@@ -168,7 +183,10 @@ class CacheLayout:
         marker = self.root / "cache.json"
         write_new(staged, _MARKER)
         try:
-            # POSIX replaces an identical marker. Windows refuses when another initializer placed one.
+            # Keep a marker another initializer placed. POSIX can still replace one placed after
+            # this check, and readers accept that identical replacement. Windows refuses it.
+            if os.path.lexists(marker):
+                raise FileExistsError(marker)
             os.rename(staged, marker)
         except OSError:
             try:
