@@ -527,6 +527,30 @@ def cmd_cache(args: argparse.Namespace) -> int:
         return 1
 
 
+def _failed_browse_source(args: argparse.Namespace, error: ArtifactError) -> tuple[BrowseSource, str] | None:
+    """Describe a pinned package selection when inspection stops before its content opens."""
+    from siteops.github_attestation import VerificationError
+
+    current = Path.cwd()
+    try:
+        selected = args.project if args.project is not None else (
+            current if pin_exists(current) else None
+        )
+        if selected is None or args.workspace is not None:
+            return None
+        root = project_root(selected)
+        if not pin_exists(root):
+            return None
+        selection = read_pin(root).pin.selection
+    except (ArtifactError, OSError, ValueError):
+        return None
+    return BrowseSource(
+        "package", selection.source.reference, revision=selection.source.revision,
+        provider=selection.source.provider, project=str(root),
+        verification="failed" if isinstance(error, VerificationError) else "not-performed",
+    ), selection.entry.workspace
+
+
 def cmd_browse(args: argparse.Namespace) -> int:
     """Inspect content before any Site configuration or Orchestrator is loaded."""
     if is_redaction_enabled():
@@ -579,7 +603,12 @@ def cmd_browse(args: argparse.Namespace) -> int:
     except ArtifactError as error:
         from siteops.browse import BrowseDiagnostic
 
-        result = BrowseResult("", diagnostics=(BrowseDiagnostic(error.code, _error_text(error)),))
+        selected = None if args.source else _failed_browse_source(args, error)
+        result = BrowseResult(
+            selected[1] if selected else "",
+            diagnostics=(BrowseDiagnostic(error.code, _error_text(error)),),
+            source=selected[0] if selected else None,
+        )
     except ValueError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1

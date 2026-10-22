@@ -45,6 +45,7 @@ These changes affect how you install or run Site Ops after v1.0.0b7.
 | If you... | What to change |
 |---|---|
 | Install Site Ops on Windows with the PowerShell bootstrap | Review the [saved user PATH](#windows-user-path). |
+| Match artifact verification error text, or read `source` from failed `browse --output json` | Review [artifact verification messages](#artifact-verification-messages). |
 
 ### Windows user PATH
 
@@ -63,6 +64,22 @@ If another `siteops` would run first in a new terminal, such as an older
 pip installation, the bootstrap prints a line that starts with
 `Warning: new terminals run`. Remove that command with the tool that
 installed it.
+
+### Artifact verification messages
+
+A rejected package proof now names the check that failed, for example
+`The artifact proof names a runner class that the approved source does not allow.`
+These messages replace
+`The verified certificate does not satisfy publisher/source policy.`, and
+`The detached artifact proof did not pass verification.` remains only when
+the reason cannot be named. The error code stays `artifact.invalid`, so
+match the code rather than the text.
+[Troubleshooting](troubleshooting.md#the-artifact-proof-names--or-the-detached-proof-does-not-verify-this-artifact)
+lists each message.
+
+When `browse` fails for a pinned project, its JSON `source` names the pinned
+package, with `verification` set to `failed` when verification rejected it.
+It previously reported `local` and `not-performed`.
 
 ## To v1.0.0b7
 

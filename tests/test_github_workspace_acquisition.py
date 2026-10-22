@@ -269,7 +269,7 @@ def test_runner_policy_change_revalidates_pinned_proof_without_downloading(githu
     document = json.loads(github.policy.read_bytes())
     document["provider"]["runnerEnvironment"] = "self-hosted"
     github.policy.write_text(json.dumps(document), encoding="utf-8")
-    with pytest.raises(attestation.VerificationError, match="certificate"):
+    with pytest.raises(attestation.VerificationError, match="runner class"):
         with github.flow.lease(selected.resolved):
             pytest.fail("A cached receipt bypassed the current runner policy.")
     assert len(github.downloads) == 3
@@ -292,7 +292,7 @@ def test_expired_policy_rejects_pinned_use_without_network(github):
 def test_native_verification_failure_stops_publication(github, monkeypatch):
     github.code = 1
     monkeypatch.setattr("siteops.workspace_cache.extract_package", Mock(side_effect=AssertionError("Unverified parse.")))
-    with pytest.raises(attestation.VerificationError, match="did not pass"):
+    with pytest.raises(attestation.VerificationError, match="does not verify this artifact"):
         github.flow.acquire(github.client)
     assert not list((github.fixture.cache.root / "objects" / "sha256").iterdir())
     assert not list((github.fixture.cache.root / "staging").iterdir())
@@ -456,6 +456,35 @@ def test_public_project_browse_does_not_suggest_an_unverified_cache_path(project
     assert str(state.github.fixture.cache.root) not in output.out
     assert "Plan and deploy use a release from an approved source" not in " ".join(output.out.split())
     assert state.engines == []
+
+
+def test_project_browse_failure_reports_the_pinned_source(project_cli, monkeypatch, capsys):
+    state = project_cli
+    pin_project(state, monkeypatch, capsys)
+    document = json.loads(state.github.policy.read_bytes())
+    document["provider"]["runnerEnvironment"] = "self-hosted"
+    state.github.policy.write_text(json.dumps(document), encoding="utf-8")
+    arguments = ["--project", str(state.root), *state.trust, "browse", "storage"]
+    code, output = invoke(monkeypatch, capsys, [*arguments, "--output", "json"])
+    assert code == 1, output
+    result = json.loads(output.out)
+    assert result["source"] == {
+        "kind": "package", "reference": "github:example/content", "version": "a" * 40,
+        "provider": "github-release/v1", "workspace": "workspace", "indexStatus": None,
+        "verification": "failed", "project": str(state.root),
+    }
+    assert result["diagnostics"][0]["code"] == "artifact.invalid"
+    assert result["diagnostics"][0]["summary"] == attestation._PROOF_FAILURES["runner"]
+    code, output = invoke(monkeypatch, capsys, arguments)
+    assert code == 1
+    assert "Package verification failed, so its content was not inspected." in output.out
+    assert "Source: github:example/content" in output.out
+    assert "local workspace" not in output.out and "local content" not in output.out
+    code, output = invoke(monkeypatch, capsys, [
+        "--project", str(state.root), "-w", str(state.root / "missing"), "browse", "storage", "--output", "json",
+    ])
+    assert code == 1
+    assert json.loads(output.out)["source"]["kind"] == "local"
 
 
 def test_project_local_override_preserves_pin_and_operator_sites(project_cli, monkeypatch, capsys):
