@@ -45,13 +45,14 @@ run AIO, and deploying `aio-install` again can overwrite their settings.
 
 Continue only when the plan prints `Executable: yes`. Summarize the plan
 with one line for each Site (name, resource group, region, AIO release),
-then the plan's Operations line. End your reply with this question: "Deploy
-this plan to these Sites? Reply yes to deploy it." Then stop. Do not deploy
-in this turn.
+then the plan's Operations line. End your reply with this line, in plain
+text: "Reply deploy to run this plan." Do not ask through a question tool
+or form. Then end your turn. Do not deploy in this turn.
 
 ## 4. Deploy after confirmation
 
-Only after the user answers yes in a new message:
+When the user's next message agrees to this plan, such as `deploy` or
+`yes`:
 
 ```text
 siteops --project "<project>" deploy aio-install --source "<source>@<release>" -l name=<site-name>,name=<other-site-name> --yes

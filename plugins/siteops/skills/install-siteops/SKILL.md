@@ -19,8 +19,10 @@ administrator rights.
   user to the
   [installation guide](https://github.com/Azure/digital-ops-scale-kit/blob/main/docs/install-siteops.md).
 - Run the installer only after the user agrees in a new message in this
-  conversation. Tell them what it will change first (step 3), then end your
-  turn. If you cannot ask the user, stop there.
+  conversation. Tell them what it will change first (step 3), ask in plain
+  text and end your turn. Never ask through a question tool, form or menu,
+  because an answer given there arrives inside the same turn. If the user
+  cannot reply in a new message, stop there.
 - Run as the ordinary user. Never use `sudo` or an administrator shell.
 - Do not sign in to Azure or GitHub for the user, and do not change their
   saved PATH without asking.
@@ -64,7 +66,7 @@ the official tags. This needs Git but no sign in:
 git ls-remote --tags --refs https://github.com/Azure/digital-ops-scale-kit
 ```
 
-Choose the newest tag that starts with `v`. The question in step 3
+Choose the newest tag that starts with `v`. The user's reply in step 3
 confirms it. Its release page lists the same commands with the script's
 size and digest already filled in, for users whose policy requires that
 check.
@@ -94,17 +96,18 @@ siteops source show <source>
 Run `source show` for each source that `source list` prints. When one
 prints a `Valid until:` date that has not passed, no enrollment is needed.
 
-End your reply with this question and stop: "Install Site Ops <release>?
-Reply yes to continue." When Site Ops is not installed, or the check found
-no valid enrollment, ask "Install Site Ops <release> and enroll the official
-source if needed? Reply yes to continue." instead. The user can also run
-the commands below in their own terminal and answer the installer's
-prompts themselves.
+End your reply with this line, in plain text, and end your turn: "Reply
+install to install Site Ops <release>." When Site Ops is not installed, or
+the check found no valid enrollment, end with "Reply install to install
+Site Ops <release> and enroll the official source if needed." instead. Do
+not ask through a question tool or form. The user can also run the commands
+below in their own terminal and answer the installer's prompts themselves.
 
 ## 4. Install after the user agrees
 
-Run the commands from the user's home directory. Replace `<release>` with
-the confirmed tag. `--yes` or `-Yes` carries the user's agreement, because
+When the user's next message agrees, such as `install` or `yes`, run the
+commands from the user's home directory. Replace `<release>` with the
+confirmed tag. `--yes` or `-Yes` carries the user's agreement, because
 an agent shell cannot answer the installer's prompt. When Site Ops is
 already installed, add `--replace` or `-Replace` to the last command.
 
@@ -137,10 +140,11 @@ release that its release page links.
 
 The installer ends with `Installed Site Ops <version>`. Remember that
 version for step 5. If it reports "Another Site Ops selection is installed.
-Use --replace after review.", tell the user. With their agreement, run the
-same last command again with `--replace` or `-Replace`. With that option,
-the installer reinstalls Site Ops even when the release matches, which also
-repairs it.
+Use --replace after review.", tell the user, end your reply with "Reply
+replace to reinstall Site Ops <release>." in plain text and end your turn.
+When the user's next message agrees, run the same last command again with
+`--replace` or `-Replace`. With that option, the installer reinstalls Site
+Ops even when the release matches, which also repairs it.
 
 If the installer stops with any other error, show it and use the
 [installation problems guide](https://github.com/Azure/digital-ops-scale-kit/blob/main/docs/install-siteops.md#common-problems).

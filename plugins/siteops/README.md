@@ -23,12 +23,16 @@ example "Use deploy-aio to install AIO on plant-one."
 
 ## How Copilot keeps deployments safe
 
-- It prepares a plan with `siteops plan`, summarizes it and stops. It
-  deploys only after you reply yes in a new message, by running the same
-  command with `deploy` and `--yes`. Site Ops prepares the plan again at
-  that point, so a Site file or resource that changes after you see the
-  plan changes the deployment too. In autopilot or a single prompt run,
-  Copilot stops after the plan.
+- It prepares a plan with `siteops plan`, summarizes it and ends its turn
+  with "Reply deploy to run this plan." It never plans and deploys in the
+  same turn. Your next message, such as `deploy`, confirms the plan, and
+  Copilot then runs the same command with `deploy` and `--yes`. It asks in
+  plain text rather than with a question form, so one reply is enough.
+  Site Ops prepares the plan again at that point, so a Site file or
+  resource that changes after you see the plan changes the deployment too.
+  In autopilot or a single prompt run, Copilot stops after the plan.
+- Installing Site Ops works the same way: Copilot describes the change and
+  installs after you reply `install`.
 - Copilot CLI also asks before it runs each shell command. For a second
   check, approve each `siteops deploy` command when it is shown, rather than
   allowing all `siteops` commands for the session.

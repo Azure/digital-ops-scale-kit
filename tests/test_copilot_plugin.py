@@ -271,7 +271,30 @@ def test_each_deploy_repeats_a_plan_shown_and_confirmed_before_it(document):
         expected = [argument for argument in _without(command, "deploy") if argument != "--yes"]
         shown = [start for start, plan in commands if start < position and "plan" in plan and _without(plan, "plan") == expected]
         assert shown, f"{document.name} deploys without showing that plan first: {command}"
-        assert "Reply yes" in text[shown[-1]:position], f"{document.name} deploys before asking"
+        assert "Reply deploy to run this plan." in text[shown[-1]:position], f"{document.name} deploys before asking"
     if deploys:
         skill = PLUGIN / "skills" / document.relative_to(PLUGIN / "skills").parts[0] / "SKILL.md"
         assert "Never run `plan` and `deploy` in the same turn." in skill.read_text(encoding="utf-8")
+
+
+_CONSENT = {
+    "skills/deploy-aio/SKILL.md": ("Reply deploy to run this plan.",),
+    "skills/deploy-aio/references/fleet.md": ("Reply deploy to run this plan.",),
+    "skills/upgrade-aio/SKILL.md": ("Reply deploy to run this plan.",),
+    "skills/install-siteops/SKILL.md": (
+        "Reply install to install Site Ops <release>.", "Reply replace to reinstall Site Ops <release>.",
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_CONSENT))
+def test_consent_is_one_plain_text_reply_rather_than_a_question_form(name):
+    text = " ".join((PLUGIN / name).read_text(encoding="utf-8").split())
+    for reply in _CONSENT[name]:
+        assert reply in text
+    assert "question tool" in text
+    assert "Reply yes" not in text
+    if name == "skills/install-siteops/SKILL.md":
+        assert text.index(_CONSENT[name][0]) < text.index('--release <release> --yes')
+    readme = " ".join((PLUGIN / "README.md").read_text(encoding="utf-8").split())
+    assert "Reply deploy to run this plan." in readme and "one reply is enough" in readme
