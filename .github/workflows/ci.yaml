@@ -413,6 +413,71 @@ jobs:
               --basetemp="$env:SITEOPS_WINDOWS_TEST_TEMP-consumers"
           if ($LASTEXITCODE -ne 0) { throw 'Native Windows installation consumer tests failed.' }
 
+  pip-consumer:
+    name: Pip Consumer
+    if: github.event_name != 'workflow_dispatch' || inputs.run-mode == 'ci-only'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      # The consumer's files only. Site Ops itself comes from the Git URL below.
+      - name: Checkout consumer files
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            .github/actions
+            tests/fixtures/ado-consumer
+
+      - name: Install Site Ops from this commit's Git URL
+        uses: ./.github/actions/setup-siteops
+        with:
+          siteops-source: siteops @ git+https://github.com/${{ github.repository }}@${{ github.sha }}
+
+      - name: Check the installed source
+        shell: bash
+        env:
+          SOURCE_URL: https://github.com/${{ github.repository }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          python -I - <<'PY'
+          import json
+          import os
+          from importlib.metadata import distribution
+          from pathlib import Path
+
+          import siteops
+
+          installed = distribution("siteops")
+          origin = json.loads(installed.read_text("direct_url.json") or "{}")
+          vcs = origin.get("vcs_info", {})
+          checkout = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          if (
+              origin.get("url") != os.environ["SOURCE_URL"]
+              or vcs.get("vcs") != "git"
+              or vcs.get("commit_id") != os.environ["SOURCE_SHA"]
+              or origin.get("dir_info", {}).get("editable")
+              or checkout in Path(siteops.__file__).resolve().parents
+          ):
+              raise SystemExit("::error::Site Ops was not installed from this commit's Git URL.")
+          print("Site Ops", siteops.__version__, "installed from the Git URL at", vcs["commit_id"])
+          PY
+
+      - name: Validate and describe consumer content
+        shell: bash
+        run: |
+          set -euo pipefail
+          workspace=tests/fixtures/ado-consumer/workspace
+          manifest=manifests/smoke.yaml
+          site_file=tests/fixtures/ado-consumer/operator/site.yaml
+          siteops -w "$workspace" validate "$manifest" -l environment=smoke
+          siteops -w "$workspace" validate "$manifest" --site-file "$site_file"
+          siteops -w "$workspace" plan "$manifest" --describe -l environment=smoke
+          siteops -w "$workspace" plan "$manifest" --describe --site-file "$site_file"
+
   validate:
     name: Validate Manifests
     runs-on: ubuntu-latest
@@ -539,7 +604,7 @@ jobs:
 
   overview:
     name: Overview
-    needs: [lint, test, linux-bootstrap, windows-bootstrap, validate, release-runner, installer-check, release-preview, attestation-check]
+    needs: [lint, test, linux-bootstrap, windows-bootstrap, pip-consumer, validate, release-runner, installer-check, release-preview, attestation-check]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -554,6 +619,7 @@ jobs:
           TEST_RESULT: ${{ needs.test.result }}
           LINUX_RESULT: ${{ needs.linux-bootstrap.result }}
           WINDOWS_RESULT: ${{ needs.windows-bootstrap.result }}
+          PIP_RESULT: ${{ needs.pip-consumer.result }}
           VALIDATE_RESULT: ${{ needs.validate.result }}
           RUNNER_RESULT: ${{ needs.release-runner.result }}
           INSTALLER_RESULT: ${{ needs.installer-check.result }}
@@ -588,7 +654,8 @@ jobs:
               raise SystemExit("::error::The CI summary requires a supported mode and source commit.")
           title, extra, scope = mode
           platforms = (
-              (("Linux bootstrap (Ubuntu 26.04)", "LINUX_RESULT"), ("Windows bootstrap", "WINDOWS_RESULT"))
+              (("Linux bootstrap (Ubuntu 26.04)", "LINUX_RESULT"), ("Windows bootstrap", "WINDOWS_RESULT"),
+               ("Pip consumer", "PIP_RESULT"))
               if os.environ["CI_MODE"] == "ci-only" else ()
           )
           rows = (("Lint", "LINT_RESULT"), ("Unit tests", "TEST_RESULT"), *platforms,
