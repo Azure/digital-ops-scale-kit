@@ -1,5 +1,6 @@
 """Exercise the native installation guide's command and path contracts."""
 
+import hashlib
 import json
 import os
 import re
@@ -7,6 +8,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -549,3 +551,62 @@ def test_windows_guide_requires_copied_launcher_and_preserves_pipx_migration():
     assert "rejects file symlinks" in guide
     assert "`pipx uninstall siteops`" in guide
     assert "pipx install siteops" not in guide
+
+
+def _candidate_blocks():
+    guide = (GUIDE.parent / "releasing.md").read_text(encoding="utf-8")
+    section = guide.split("### Install a candidate in Cloud Shell or a Codespace\n", 1)[1].split("\n## ", 1)[0]
+    blocks = [textwrap.dedent(block) for block in re.findall(r"```bash\n(.*?)\n *```", section, re.DOTALL)]
+    return section, blocks
+
+
+@pytest.mark.parametrize("candidate", ["release", "preview"])
+def test_documented_candidate_preload_uses_the_bootstrap_selection_cache(tmp_path, candidate):
+    section, blocks = _candidate_blocks()
+    unpack, preload, install, _ = blocks
+    assert "Rechecking the retained release without downloading its assets." in " ".join(section.split())
+    values = {
+        "release": ("v1.0.0b8", "a" * 40, "Azure/digital-ops-scale-kit", "refs/heads/main", "release.yaml"),
+        "preview": ("siteops/v0.0.0-ci", "b" * 40, "example/fork", "refs/heads/feature", "ci.yaml"),
+    }[candidate]
+    settings = unpack.splitlines()[-1]
+    assert shlex.split(settings) == [
+        "repository=Azure/digital-ops-scale-kit", "ref=refs/heads/main", "caller=release.yaml",
+    ]
+    for name in ("siteops-install.zip", "siteops-install.zip.attestation.jsonl"):
+        (tmp_path / name).write_text(name, encoding="utf-8")
+    exports = dict(zip(("release", "commit", "repository", "ref", "caller"), values))
+    result = run_script(preload, tmp_path, {**exports, "HOME": bash_path(tmp_path)})
+    assert result.returncode == 0, result.stdout + result.stderr
+    selection = (exports["repository"], exports["release"], exports["commit"], exports["ref"], exports["caller"])
+    key = hashlib.sha256(("\0".join(selection) + "\0").encode()).hexdigest()
+    cache = tmp_path / "siteops-candidate" / "share" / "siteops" / "install-downloads" / key
+    assert sorted(path.name for path in cache.iterdir()) == [
+        "siteops-install.zip", "siteops-install.zip.attestation.jsonl",
+    ]
+    script = (GUIDE.parent.parent / "scripts" / "bootstrap" / "siteops-bootstrap.sh").read_text(encoding="utf-8")
+    assert 'data="${XDG_DATA_HOME:-$HOME/.local/share}/siteops"' in script
+    assert (
+        'selection_id="$(printf \'%s\\0\' "$repository" "$engine_release" "$engine_commit" "$engine_ref" "$engine_caller" |'
+        in script
+    )
+    assert 'cache="$admitted/$selection_id"' in script
+    command = shlex.split(install.replace("\\\n", " "))
+    assert command[:2] == ["bash", "siteops-bootstrap.sh"]
+    options = dict(zip(command[2::2], command[3::2]))
+    assert options == {
+        "--release": "$release", "--source-commit": "$commit", "--repository": "$repository",
+        "--source-ref": "$ref", "--caller": "$caller",
+    }
+    if sys.platform == "linux":
+        functions = "\n".join(
+            re.search(rf"(?ms)^{name}\(\) \{{.*?^\}}", script).group()
+            for name in ("detect_private_group", "writers_trusted", "trusted_parent", "admit_directory", "admit_file")
+        )
+        check = run_script(
+            'uid="$(id -u)"\n' + functions + '\ndetect_private_group\n'
+            'admit_directory "$CACHE" private existing\n'
+            'admit_file "$CACHE/siteops-install.zip" private\n',
+            tmp_path, {"CACHE": str(cache)},
+        )
+        assert check.returncode == 0, check.stdout + check.stderr

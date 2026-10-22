@@ -651,8 +651,9 @@ confirms the application wheel bytes in the ZIP and standalone wheel match.
 For a verified installation, consume only the ZIP and its proof by following
 [the installation guide](install-siteops.md).
 The generated online command is for the published release.
-For a candidate preview, use the Actions artifact above the notes and the
-installation guide's steps for manually downloaded files.
+For a candidate, use the Actions artifact above the notes as
+[Install a candidate in Cloud Shell or a Codespace](#install-a-candidate-in-cloud-shell-or-a-codespace)
+describes.
 
 The frozen asset inventory separates files to publish from assets that remain
 in an existing engine release. Every asset records its filename, byte size, and
@@ -773,8 +774,9 @@ publish rerun keeps the candidate from the original attempt.
 2. The **Release acceptance** run for this candidate succeeded, and its result
    lists every scenario as `passed` with cleanup `confirmed-absent`.
 3. Azure Cloud Shell and a Codespace for `Azure-Samples/explore-iot-operations`
-   each installed the candidate from its Actions download and proof, following
-   [the installation guide](install-siteops.md). Record OS and tool versions,
+   each installed the candidate from its Actions download and proof, as
+   [Install a candidate in Cloud Shell or a Codespace](#install-a-candidate-in-cloud-shell-or-a-codespace)
+   describes. Record OS and tool versions,
    the candidate identity, the installed command origin, selected inputs, plan,
    deployment, readiness and cleanup in private notes. These runs use staged
    candidate assets, not a public download.
@@ -782,6 +784,69 @@ publish rerun keeps the candidate from the original attempt.
 5. Immutable releases are enabled in the repository settings. The workflow
    token cannot read that setting, so this confirmation is the only check
    before publication.
+
+### Install a candidate in Cloud Shell or a Codespace
+
+A candidate has no release download location yet. The bootstrap instead
+reads the engine ZIP and its proof from its retained release cache, so place
+the candidate's files there and run the candidate's own bootstrap. It
+verifies the cached files exactly as it verifies a downloaded release.
+Install GitHub CLI 2.95 or newer first, as the
+[installation guide](install-siteops.md#before-you-start) requires.
+These steps apply to a candidate that builds an engine.
+
+1. Download the `release-payload-<run>-<attempt>` artifact from the release
+   run's summary. Upload it to Cloud Shell with **Upload**, or drag it into
+   the Codespace's Explorer.
+2. Unpack it, and set the tag and full source commit that the candidate
+   summary shows:
+
+   ```bash
+   mkdir candidate && unzip -q release-payload-*.zip -d candidate && cd candidate
+   release='<candidate-tag>'
+   commit='<candidate-source-commit>'
+   repository=Azure/digital-ops-scale-kit ref=refs/heads/main caller=release.yaml
+   ```
+
+   For a CI release preview, use its repository, its branch as `ref` and
+   `ci.yaml` as `caller`.
+3. Keep the trial apart from any existing installation, and place the engine
+   ZIP and its proof in the cache entry for this selection:
+
+   ```bash
+   umask 077
+   export XDG_DATA_HOME="$HOME/siteops-candidate/share"
+   key="$(printf '%s\0' "$repository" "$release" "$commit" "$ref" "$caller" | sha256sum | cut -d ' ' -f 1)"
+   cache="$XDG_DATA_HOME/siteops/install-downloads/$key"
+   mkdir -p "$cache"
+   cp siteops-install.zip siteops-install.zip.attestation.jsonl "$cache/"
+   ```
+
+4. Run the candidate's bootstrap with the same values:
+
+   ```bash
+   bash siteops-bootstrap.sh --release "$release" --source-commit "$commit" \
+     --repository "$repository" --source-ref "$ref" --caller "$caller"
+   ```
+
+   It prints `Rechecking the retained release without downloading its assets.`
+   before it checks the bundle's source, signer, caller and runner. uv,
+   managed Python and Site Ops are installed under `$HOME/siteops-candidate`.
+5. Add the printed command directory to `PATH` for this session, and check
+   that `siteops --version` reports the candidate's engine version.
+6. The candidate's content is not published yet, so `--source` cannot select
+   it. Clone the repository at the candidate commit and select its workspace
+   with `-w` for the plan and deployment:
+
+   ```bash
+   git clone --quiet "https://github.com/$repository" candidate-source
+   git -C candidate-source checkout --quiet "$commit"
+   siteops -w candidate-source/workspaces/iot-operations plan aio-install --input "cluster=<Arc-cluster-resource-ID>"
+   ```
+
+When the trial is complete, remove `$HOME/siteops-candidate` and the
+`candidate` and `candidate-source` directories. The installation in your
+usual data directory is unchanged.
 
 ## Approve publication
 
