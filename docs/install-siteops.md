@@ -634,9 +634,16 @@ use their declared source package version, and identified builds add a suffix,
 for example `1.0.0b1+build.12345.1.gabcdef123456`. The engine version and Scale
 Kit content version remain separate identities.
 
-If the command is not found, open a new terminal. On Linux, first use
-`uv tool update-shell` to add uv's command directory to `PATH`. A
-successful installation message is not proof that `PATH` resolves to that
+If the command is not found, the next step depends on how you installed:
+
+- After the Windows bootstrap, open a new terminal. If the bootstrap printed
+  manual steps instead, because you passed `-NoModifyPath` or it could not
+  update your user PATH, follow those steps.
+- After the Linux bootstrap, or a release wheel installation on Windows or
+  Linux, run `uv tool update-shell` to add uv's command directory to `PATH`,
+  then open a new terminal.
+
+A successful installation message is not proof that `PATH` resolves to that
 command: check `siteops --version` after any installation change.
 
 Before using published content, enroll its source once. Run the same
