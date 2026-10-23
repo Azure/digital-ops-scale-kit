@@ -1537,7 +1537,9 @@ function Invoke-Uv([string]$Executable, [string[]]$Arguments) {
         ("present", "ExpandString", "C:\\Tools;{directory}", "fail", "present", 0),
         ("present-variant", "String", 'C:\\Tools;"{upper}\\"', "fail", "present", 0),
         ("present-by-name", "ExpandString", "%TEST_HOME%\\.local\\bin", "fail", "present", 0),
-        ("substring", "ExpandString", "{directory}2", "unchanged", "failed", 1),
+        # uv 0.12.20 treats the directory as present when its text appears anywhere in the value.
+        ("substring", "ExpandString", "{directory}2", "unchanged", "unchanged", 1),
+        ("substring-plain-text", "String", "C:\\Tools;{directory}2", "unchanged", "unchanged", 1),
         ("uv-fails", "ExpandString", "C:\\Tools", "fail", "failed", 1),
         ("binary", "Binary", "", "prepend", "failed", 0),
         ("saved-as-plain-text", "ExpandString", "C:\\Tools", "plain", "failed", 1),
@@ -1567,7 +1569,7 @@ def test_native_command_directory_is_saved_once_through_uv(tmp_path, case, kind,
     if state == "added":
         expected = f"{directory};{user_path}" if user_path else str(directory)
         assert f"KIND=ExpandString\nUSER={expected}\n" in result.stdout
-    elif not calls:
+    elif state == "unchanged" or not calls:
         assert f"KIND={kind}\nUSER={user_path}\n" in result.stdout
 
 
@@ -1576,6 +1578,7 @@ def test_native_command_directory_is_saved_once_through_uv(tmp_path, case, kind,
     [
         ("literal", "Your user PATH is unchanged because it is saved as plain text that contains %", False),
         ("directory", "Your user PATH is unchanged because the command directory contains %", False),
+        ("unchanged", "Your user PATH is unchanged because uv found the directory text inside another entry", False),
         ("failed", "Your user PATH could not be updated.", True),
         ("kept", "Your saved PATH is unchanged.", True),
     ],

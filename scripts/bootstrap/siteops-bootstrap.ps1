@@ -933,7 +933,10 @@ function Save-CommandDirectory([string]$Uv, [string]$Directory) {
     # uv prepends the directory that uv tool dir --bin reports, keeping other entries and their order.
     try { $null = Invoke-Uv $Uv @('tool', 'update-shell') } catch { return 'failed' }
     $after = Read-RawUserPath
-    if ($null -eq $after -or $after.Kind -cne 'ExpandString') { return 'failed' }
+    if ($null -eq $after) { return 'failed' }
+    # uv reports success without saving when the directory text appears inside any entry, such as a longer path.
+    if ($after.Kind -ceq $before.Kind -and $after.Value -ceq $before.Value) { return 'unchanged' }
+    if ($after.Kind -cne 'ExpandString') { return 'failed' }
     $added = $after.Value
     if ($before.Value) {
         if (-not $added.EndsWith(';' + $before.Value, [StringComparison]::Ordinal)) { return 'failed' }
@@ -1286,10 +1289,12 @@ try {
             Stage 'Your user PATH is unchanged because it is saved as plain text that contains %, and saving it with uv would expand those names.'
         } elseif ($pathState -ceq 'directory') {
             Stage 'Your user PATH is unchanged because the command directory contains %, which a saved PATH can expand.'
+        } elseif ($pathState -ceq 'unchanged') {
+            Stage 'Your user PATH is unchanged because uv found the directory text inside another entry and saved nothing.'
         } else {
             Stage 'Your user PATH could not be updated.'
         }
-        Write-PathSteps $uv $commandDirectory -WithoutUv:($pathState -ceq 'literal' -or $pathState -ceq 'directory')
+        Write-PathSteps $uv $commandDirectory -WithoutUv:($pathState -cin @('literal', 'directory', 'unchanged'))
     }
     $earlier = Find-EarlierSiteOps $commandDirectory
     if ($earlier) {

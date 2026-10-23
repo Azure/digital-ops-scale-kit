@@ -452,7 +452,8 @@ uv saves the whole user PATH with expandable names, so the bootstrap leaves
 it unchanged and says why when the saved PATH is plain text that contains
 `%`, or when the command directory contains `%`. Saving either would turn
 `%NAME%` text into the value of that variable. Add the directory yourself in
-that case.
+that case. The bootstrap also says so when uv finds the directory text
+inside a longer entry and saves nothing.
 
 On Linux, if `siteops` is not on the parent shell's current PATH, add the
 printed directory for this session:
