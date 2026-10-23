@@ -8,7 +8,8 @@ param(
     [string]$EnrollSource,
     [switch]$Replace,
     [switch]$Yes,
-    [switch]$DryRun
+    [switch]$DryRun,
+    [switch]$NoModifyPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -335,7 +336,7 @@ function Native([string]$Name) {
     if ($null -eq $tool -or $tool.Source -notlike '*.exe') { return $null }
     return $tool.Source
 }
-function Require-PrivateDataRoot([string]$Path, [switch]$Managed) {
+function Require-PrivateDataRoot([string]$Path, [switch]$Managed, [switch]$NoCreate) {
     function Reject([string]$Code) {
         Fail "Configure a private Site Ops data root. $Code Use trusted, non-symlinked directories."
     }
@@ -405,6 +406,8 @@ function Require-PrivateDataRoot([string]$Path, [switch]$Managed) {
         Reject 'ROOT_DATA_TYPE'
     }
     if (-not $exists) {
+        # A check before consent admits the ancestors and leaves the root for installation to create.
+        if ($NoCreate) { return }
         try {
             New-Item -ItemType Directory -Path $Path -ErrorAction Stop | Out-Null
         } catch {
@@ -883,6 +886,103 @@ function Select-GitHubCli() {
     }
     return $path
 }
+# Returns the saved PATH text, '' when none is saved, or $null when the value is not a string.
+function Read-SavedPath([string]$Scope) {
+    $key = if ($Scope -ceq 'Machine') {
+        [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SYSTEM\CurrentControlSet\Control\Session Manager\Environment')
+    } else {
+        [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment')
+    }
+    if (-not $key) { return '' }
+    try { $value = $key.GetValue('Path', '') } finally { $key.Dispose() }
+    if ($value -isnot [string]) { return $null }
+    return $value
+}
+# Returns a saved PATH as its registry kind and unexpanded text, or $null when it is not text.
+function Read-RawPath($Key) {
+    $absent = @{ Kind = 'None'; Value = '' }
+    if (-not $Key) { return $absent }
+    try {
+        if (@($Key.GetValueNames()) -notcontains 'Path') { return $absent }
+        $kind = $Key.GetValueKind('Path').ToString()
+        $value = $Key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    } finally { $Key.Dispose() }
+    if (($kind -cne 'String' -and $kind -cne 'ExpandString') -or $value -isnot [string]) { return $null }
+    return @{ Kind = $kind; Value = $value }
+}
+function Read-RawUserPath() {
+    return Read-RawPath ([Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment'))
+}
+# A saved entry names the same directory everywhere only with a drive and root, or as a UNC share.
+function Test-QualifiedPath([string]$Path) {
+    return $Path -match '^[A-Za-z]:[\\/]' -or $Path -match '^[\\/]{2}[^\\/?.][^\\/]*[\\/][^\\/]+'
+}
+# With -Qualified, an entry relative to the current drive, such as \Users\x or C:Users\x, never matches.
+function Test-SameDirectory([string]$Entry, [string]$Directory, [switch]$Qualified) {
+    $candidate = $Entry.Trim().Trim('"')
+    if (-not $candidate -or -not [IO.Path]::IsPathRooted($candidate)) { return $false }
+    if ($Qualified -and -not (Test-QualifiedPath $candidate)) { return $false }
+    try { $candidate = [IO.Path]::GetFullPath($candidate) } catch { return $false }
+    return $candidate.TrimEnd('\') -ieq $Directory.TrimEnd('\')
+}
+function Save-CommandDirectory([string]$Uv, [string]$Directory) {
+    $saved = Read-SavedPath 'User'
+    if ($null -eq $saved) { return 'failed' }
+    foreach ($entry in $saved.Split(';')) {
+        if (Test-SameDirectory $entry $Directory -Qualified) { return 'present' }
+    }
+    # uv saves the whole value as REG_EXPAND_SZ, so any %NAME% saved as plain text would start to expand.
+    if ($Directory.Contains('%')) { return 'directory' }
+    $before = Read-RawUserPath
+    if ($null -eq $before) { return 'failed' }
+    if ($before.Kind -ceq 'String' -and $before.Value.Contains('%')) { return 'literal' }
+    # uv prepends the directory that uv tool dir --bin reports, keeping other entries and their order.
+    try { $null = Invoke-Uv $Uv @('tool', 'update-shell') } catch { return 'failed' }
+    $after = Read-RawUserPath
+    if ($null -eq $after) { return 'failed' }
+    # uv reports success without saving when the directory text appears inside any entry, such as a longer path.
+    if ($after.Kind -ceq $before.Kind -and $after.Value -ceq $before.Value) { return 'unchanged' }
+    if ($after.Kind -cne 'ExpandString') { return 'failed' }
+    $added = $after.Value
+    if ($before.Value) {
+        if (-not $added.EndsWith(';' + $before.Value, [StringComparison]::Ordinal)) { return 'failed' }
+        $added = $added.Substring(0, $added.Length - $before.Value.Length - 1)
+    }
+    if ($added.Contains(';') -or -not (Test-SameDirectory $added $Directory -Qualified)) { return 'failed' }
+    return 'added'
+}
+# A new terminal searches the machine PATH entries before the user entries.
+function Find-EarlierSiteOps([string]$Directory) {
+    $extensions = @($env:PATHEXT -split ';' | Where-Object { $_ -cmatch '^\.[A-Za-z0-9]+$' })
+    if (-not $extensions) { $extensions = @('.COM', '.EXE', '.BAT', '.CMD') }
+    foreach ($scope in @('Machine', 'User')) {
+        $saved = Read-SavedPath $scope
+        if (-not $saved) { continue }
+        foreach ($entry in $saved.Split(';')) {
+            if (Test-SameDirectory $entry $Directory) { return $null }
+            $folder = $entry.Trim().Trim('"')
+            if (-not $folder -or -not [IO.Path]::IsPathRooted($folder)) { continue }
+            foreach ($extension in $extensions) {
+                try {
+                    $candidate = Join-Path $folder ('siteops' + $extension.ToLowerInvariant())
+                    if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+                } catch { }
+            }
+        }
+    }
+    return $null
+}
+function Write-PathSteps([string]$Uv, [string]$Directory, [switch]$WithoutUv) {
+    # PowerShell also ends a single-quoted string at the typographic quotes U+2018 to U+201B.
+    $folder = [Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($Directory)
+    $tool = [Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($Uv)
+    Stage "To use siteops in this terminal, run: `$env:Path = '$folder;' + `$env:Path"
+    if ($WithoutUv) {
+        Stage 'For new terminals, add the directory to your user PATH yourself, for example in Edit environment variables for your account.'
+    } else {
+        Stage "For new terminals, add the directory to your user PATH, for example with: & '$tool' tool update-shell"
+    }
+}
 
 if ($ContentRelease) {
     if ($Release -or $ContentRelease -cnotmatch '^v[0-9][0-9A-Za-z._-]{0,100}$') {
@@ -939,6 +1039,11 @@ if (Get-Command 'uv.exe' -CommandType Application -ErrorAction SilentlyContinue)
     Stage 'Add: pinned native uv in protected tooling storage and expose it for maintenance.'
 }
 Stage 'Check: ordinary uv tool, command, and managed Python storage.'
+if ($NoModifyPath) {
+    Stage 'Keep: your saved PATH unchanged. The steps to add the command directory follow the installation.'
+} else {
+    Stage "Add: uv's command directory to your user PATH, so new terminals find siteops. Pass -NoModifyPath to skip this."
+}
 if ($Replace) { Stage 'The selected build will explicitly replace or repair an existing Site Ops installation.' }
 if (-not (Get-Command 'az.cmd', 'az.exe' -CommandType Application -ErrorAction SilentlyContinue)) {
     Stage 'Azure CLI was not found. Install it before deploying: https://aka.ms/installazurecli'
@@ -954,6 +1059,9 @@ if ($DryRun) {
     Stage 'Preview only. No tools or content were downloaded.'
     return
 }
+$data = Join-Path $env:LOCALAPPDATA 'siteops'
+# Check the existing storage before consent, so a refused data root stops first.
+Require-PrivateDataRoot $data -NoCreate
 if (-not $Yes) {
     if ([Console]::IsInputRedirected) {
         Fail 'In automation, pass -Yes after reviewing the changes.'
@@ -967,7 +1075,6 @@ if (-not $Yes) {
     if ($answer -cnotin @('y', 'Y')) { Fail 'Installation was not approved.' }
 }
 
-$data = Join-Path $env:LOCALAPPDATA 'siteops'
 Require-PrivateDataRoot $data
 $staging = Join-Path $data 'install-staging'
 Require-PrivateDataRoot $staging
@@ -1175,7 +1282,30 @@ try {
     if ($versionExit -ne 0 -or $observed -cne "siteops $version") {
         Fail 'The exposed siteops command does not match the selected build.'
     }
-    Stage "Command directory: $commandDirectory. Add it to your current PATH or open a new shell."
+    Stage "Command directory: $commandDirectory."
+    $pathState = if ($NoModifyPath) { 'kept' } else { Save-CommandDirectory $uv $commandDirectory }
+    if ($pathState -ceq 'added') {
+        Stage 'Saved the command directory to your user PATH. Open a new terminal to use siteops.'
+    } elseif ($pathState -ceq 'present') {
+        Stage 'Your user PATH already includes the command directory.'
+    } else {
+        if ($pathState -ceq 'kept') {
+            Stage 'Your saved PATH is unchanged.'
+        } elseif ($pathState -ceq 'literal') {
+            Stage 'Your user PATH is unchanged because it is saved as plain text that contains %, and saving it with uv would expand those names.'
+        } elseif ($pathState -ceq 'directory') {
+            Stage 'Your user PATH is unchanged because the command directory contains %, which a saved PATH can expand.'
+        } elseif ($pathState -ceq 'unchanged') {
+            Stage 'Your user PATH is unchanged because uv found the directory text inside another entry and saved nothing.'
+        } else {
+            Stage 'Your user PATH could not be updated.'
+        }
+        Write-PathSteps $uv $commandDirectory -WithoutUv:($pathState -cin @('literal', 'directory', 'unchanged'))
+    }
+    $earlier = Find-EarlierSiteOps $commandDirectory
+    if ($earlier) {
+        Stage "Warning: new terminals run $earlier instead of this installation. Remove that command with the tool that installed it, for example pip uninstall siteops."
+    }
     Stage 'For native removal, run uv tool uninstall siteops.'
     if ($EnrollSource) {
         & $siteops source enroll $EnrollSource --source "github:$Repository"

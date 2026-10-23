@@ -238,6 +238,37 @@ silently.
 other publisher under a new name, or run `siteops source remove NAME` first
 if you intend to replace it.
 
+### "The artifact proof names ..." or "The detached artifact proof did not pass verification"
+
+```
+Error: The artifact proof names a runner class that the approved source does not allow.
+```
+
+**Cause**: Site Ops checks the signed proof of every published package
+against the approved source before it uses the package. When the proof
+itself verifies for the approved repository, the message names the check
+that failed, without the observed value. The error code is
+`artifact.invalid`.
+
+| Message names | What failed |
+|---|---|
+| a source branch or tag | The package was built from another branch or tag than the policy allows. |
+| a source commit | The proof names another commit than the selected release records. |
+| a signing workflow or a calling workflow | Another workflow signed or called the build. |
+| a runner class | The package was built on another runner class than the policy allows. |
+| did not pass verification | Site Ops could not name the reason. The proof signature may not verify with the trusted root stored for the source, or the proof may come from another repository, signing repository or certificate issuer. |
+
+**Solution**: Confirm that you selected the intended release and publisher.
+`siteops source show NAME` prints the policy that the proof must satisfy. A
+custom policy that no longer matches how the publisher builds releases needs
+reviewed trust files, as
+[renew a custom policy](projects.md#use-a-custom-policy) describes. If the
+release and publisher are right and the message is
+`did not pass verification`, renew the enrollment with
+`siteops source enroll NAME`, which refreshes the trusted root, and retry.
+Browse reports the pinned source with verification `failed` in its JSON
+output.
+
 ## Azure CLI errors
 
 [Azure CLI and az login](install-siteops.md#azure-cli-and-az-login) lists what

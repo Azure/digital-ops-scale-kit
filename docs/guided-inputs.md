@@ -168,6 +168,12 @@ a different resource group. Omit it to create a new vault. A successful
 resource read establishes those reported settings at that moment, not
 cluster readiness, federation success or secret materialization.
 
+Enablement grants vault roles only to the Secret Sync managed identity. To
+add or view the vault's secrets yourself, for example in the operations
+experience, give your account a Key Vault data role as
+[vault access](secret-sync.md#give-your-account-access-to-the-vault)
+describes.
+
 ## Manual Site values without resource reads
 
 Omit `cluster` and provide `siteName`, `subscription`, `resourceGroup`,

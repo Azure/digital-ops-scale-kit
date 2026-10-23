@@ -73,6 +73,55 @@ attempt, or one found among its own created resources, and only when the
 deleted record names that case's group. A purge failure is recorded in the
 result without failing acceptance.
 
+#### Allow the vault purge with persistent groups
+
+Soft deleted vaults are records of the subscription, not of the group, so
+listing and purging them needs permissions at subscription scope. A group
+Owner role does not include them, and with persistent groups the result
+records the purge as `failed`. The vaults then stay soft deleted until their
+retention period ends.
+
+To let acceptance purge its vaults, give its identity a custom role at the
+subscription that has only these actions:
+
+```json
+{
+  "Name": "Site Ops acceptance vault purge",
+  "IsCustom": true,
+  "Description": "List and purge soft deleted Key Vaults after release acceptance.",
+  "Actions": [
+    "Microsoft.KeyVault/deletedVaults/read",
+    "Microsoft.KeyVault/locations/deletedVaults/read",
+    "Microsoft.KeyVault/locations/deletedVaults/purge/action",
+    "Microsoft.KeyVault/locations/operationResults/read"
+  ],
+  "NotActions": [],
+  "AssignableScopes": ["/subscriptions/<subscription-ID>"]
+}
+```
+
+Save the definition as `vault-purge-role.json`. Then create the role and
+assign it to the service principal of `AZURE_CLIENT_ID`:
+
+```bash
+az role definition create --role-definition @vault-purge-role.json
+az role assignment create --assignee-object-id "$(az ad sp show --id <app-client-id> --query id -o tsv)" --assignee-principal-type ServicePrincipal --role "Site Ops acceptance vault purge" --scope "/subscriptions/<subscription-ID>"
+```
+
+The role can purge any soft deleted vault in the subscription. Acceptance
+purges only a vault whose deleted record names its own group and that has no
+purge protection.
+
+Without the role, purge the vaults yourself after a run. List the soft
+deleted vaults, keep only those whose vault ID names an acceptance group and
+whose deletion date matches the run, then purge each one. Purging is
+permanent.
+
+```bash
+az keyvault list-deleted --subscription "<subscription-ID>" --resource-type vault --query "[].{name:name, location:properties.location, deleted:properties.deletionDate, vaultId:properties.vaultId}" --output table
+az keyvault purge --subscription "<subscription-ID>" --name "<vault-name>" --location "<location>"
+```
+
 #### Read the result and retry
 
 The final job uploads `release-acceptance-<run>-<attempt>-<admission digest>`

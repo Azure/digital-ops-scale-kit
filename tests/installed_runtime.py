@@ -14,10 +14,26 @@ from tests.native_bundle import write_wheel
 
 ROOT = Path(__file__).resolve().parent.parent
 RUNTIME_WHEELHOUSE = "SITEOPS_TEST_RUNTIME_WHEELHOUSE"
+# The engine source and runtime lock are fixed for a test session, so each is built or
+# downloaded once and every caller receives its own copy of those bytes.
+_SESSION_FILES: dict[str, dict[str, bytes]] = {}
+
+
+def _session_copy(kind: str, destination: Path) -> list[Path] | None:
+    files = _SESSION_FILES.get(kind)
+    if files is None:
+        return None
+    destination.mkdir()
+    for name, content in files.items():
+        (destination / name).write_bytes(content)
+    return sorted(destination / name for name in files)
 
 
 def build_engine_wheel(root: Path) -> Path:
     """Build the actual engine with the declared local backend and no package-index access."""
+    copied = _session_copy("engine", root / "wheels")
+    if copied is not None:
+        return copied[0]
     source = root / "source"
     source.mkdir()
     for name in ("pyproject.toml", "README.md", "LICENSE", "ThirdPartyNotices.txt"):
@@ -36,6 +52,7 @@ def build_engine_wheel(root: Path) -> Path:
     assert result.returncode == 0, result.stdout + result.stderr
     wheels = list((root / "wheels").glob("*.whl"))
     assert len(wheels) == 1
+    _SESSION_FILES["engine"] = {wheels[0].name: wheels[0].read_bytes()}
     return wheels[0]
 
 
@@ -76,6 +93,8 @@ def runtime_wheels(root: Path) -> Path:
         assert path.is_absolute() and path.is_dir(), f"{RUNTIME_WHEELHOUSE} must name an existing absolute directory."
         return path
     destination = root / "runtime-wheels"
+    if _session_copy("runtime", destination) is not None:
+        return destination
     destination.mkdir()
     allowed = {
         "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "PATH", "PATHEXT", "PROGRAMDATA",
@@ -97,6 +116,7 @@ def runtime_wheels(root: Path) -> Path:
     assert result.returncode == 0, (
         "Locked runtime wheels are unavailable. Supply SITEOPS_TEST_RUNTIME_WHEELHOUSE for offline execution."
     )
+    _SESSION_FILES["runtime"] = {path.name: path.read_bytes() for path in destination.iterdir()}
     return destination
 
 

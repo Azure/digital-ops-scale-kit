@@ -199,10 +199,10 @@ def test_controller_installs_authenticated_lock_then_uses_selected_engine(qualif
     if rejected:
         assert not report.exists()
         if rejected == "engine":
-            assert "certificate" in result.stderr and not (state / "application").exists()
+            assert "runner class" in result.stderr and not (state / "application").exists()
         else:
             assert (state / "application").is_dir()
-            assert "certificate" in (state / "probe.log").read_text(encoding="utf-8")
+            assert "runner class" in (state / "probe.log").read_text(encoding="utf-8")
         return
     data = json.loads(report.read_bytes())
     assert data["engineVersion"] == __version__

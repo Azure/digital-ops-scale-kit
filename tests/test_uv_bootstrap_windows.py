@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 import zipfile
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -1488,3 +1488,314 @@ if ($env:TEST_OCCUPIED) { Require-PrivateDataRoot $cache }
         assert sorted(item.name for item in cache.iterdir()) == sorted(names)
         assert all((cache / name).read_text(encoding="ascii") == name for name in names)
         assert not any((staged / name).exists() for name in names)
+
+
+# The stubs model the saved user PATH as its registry kind and raw text. The uv stub
+# writes the way uv 0.12.20 does: it prepends the raw text and always saves REG_EXPAND_SZ.
+_PATH_STUBS = r"""
+function Stage([string]$message) { Write-Host "STAGE $message" }
+$script:userPath = $env:TEST_USER_PATH
+$script:userKind = if ($env:TEST_USER_KIND) { $env:TEST_USER_KIND } else { 'ExpandString' }
+$script:uvCalls = 0
+function Read-SavedPath([string]$Scope) {
+    if ($Scope -ceq 'Machine') { return $env:TEST_MACHINE_PATH }
+    if ($script:userKind -ceq 'Binary') { return $null }
+    if ($script:userKind -ceq 'ExpandString') { return [Environment]::ExpandEnvironmentVariables($script:userPath) }
+    return $script:userPath
+}
+function Read-RawUserPath() {
+    if ($script:userKind -ceq 'Binary') { return $null }
+    return @{ Kind = $script:userKind; Value = $script:userPath }
+}
+function Invoke-Uv([string]$Executable, [string[]]$Arguments) {
+    $script:uvCalls++
+    if ($Executable -cne $env:TEST_UV -or ($Arguments -join ' ') -cne 'tool update-shell') {
+        throw 'Unexpected uv call.'
+    }
+    $tail = $script:userPath
+    switch -CaseSensitive ($env:TEST_UV_RESULT) {
+        'fail' { throw 'Site Ops installation failed: uv' }
+        'unchanged' { return }
+        'plain' { $script:userKind = 'String' }
+        'expand' { $script:userKind = 'ExpandString'; $tail = [Environment]::ExpandEnvironmentVariables($tail) }
+        default { $script:userKind = 'ExpandString' }
+    }
+    $script:userPath = if ($tail) { $env:TEST_DIRECTORY + ';' + $tail } else { $env:TEST_DIRECTORY }
+}
+"""
+
+
+@pytest.mark.parametrize(
+    ("case", "kind", "saved", "uv_result", "state", "calls"),
+    [
+        ("absent", "ExpandString", "C:\\Tools;{other}", "prepend", "added", 1),
+        ("plain-text", "String", "C:\\Tools;{other}", "prepend", "added", 1),
+        ("no-value", "None", "", "prepend", "added", 1),
+        ("expandable-names", "ExpandString", "%SystemRoot%\\Tools;C:\\Tools", "prepend", "added", 1),
+        ("literal-names", "String", "%SystemRoot%\\Tools;C:\\Tools", "prepend", "literal", 0),
+        ("named-directory", "ExpandString", "C:\\Tools", "prepend", "directory", 0),
+        ("present", "ExpandString", "C:\\Tools;{directory}", "fail", "present", 0),
+        ("present-variant", "String", 'C:\\Tools;"{upper}\\"', "fail", "present", 0),
+        ("present-by-name", "ExpandString", "%TEST_HOME%\\.local\\bin", "fail", "present", 0),
+        ("present-forward-slashes", "ExpandString", "C:\\Tools;{slashes}", "fail", "present", 0),
+        ("present-unc", "ExpandString", "C:\\Tools;{directory}", "fail", "present", 0),
+        # Entries relative to the current drive depend on where a terminal starts, so the absolute one is added.
+        ("root-relative", "ExpandString", "C:\\Tools;{root_relative}", "prepend", "added", 1),
+        ("drive-relative", "ExpandString", "C:\\Tools;{drive_relative}", "prepend", "added", 1),
+        # uv 0.12.20 treats the directory as present when its text appears anywhere in the value.
+        ("substring", "ExpandString", "{directory}2", "unchanged", "unchanged", 1),
+        ("substring-plain-text", "String", "C:\\Tools;{directory}2", "unchanged", "unchanged", 1),
+        ("uv-fails", "ExpandString", "C:\\Tools", "fail", "failed", 1),
+        ("binary", "Binary", "", "prepend", "failed", 0),
+        ("saved-as-plain-text", "ExpandString", "C:\\Tools", "plain", "failed", 1),
+        ("other-entries-changed", "ExpandString", "%SystemRoot%\\Tools;C:\\Tools", "expand", "failed", 1),
+    ],
+)
+def test_native_command_directory_is_saved_once_through_uv(tmp_path, case, kind, saved, uv_result, state, calls):
+    home = tmp_path / ("a%TEST_HOME%b" if case == "named-directory" else "home")
+    if case == "present-unc":
+        home = PureWindowsPath(r"\\server\share\home")
+    directory = home / ".local" / "bin"
+    wrapper = tmp_path / "save-path.ps1"
+    wrapper.write_text(
+        _functions("Test-QualifiedPath", "Test-SameDirectory", "Save-CommandDirectory")
+        + _PATH_STUBS
+        + "$state = Save-CommandDirectory $env:TEST_UV $env:TEST_DIRECTORY\n"
+        + "\"STATE=$state CALLS=$script:uvCalls\"\n"
+        + "\"KIND=$script:userKind\"\n"
+        + "\"USER=$script:userPath\"\n",
+        encoding="utf-8",
+    )
+    user_path = saved.format(
+        directory=directory, upper=str(directory).upper(), other=tmp_path / "other",
+        slashes=directory.as_posix(), root_relative=str(directory)[len(directory.drive):],
+        drive_relative=directory.drive + str(directory.relative_to(tmp_path)) if case == "drive-relative" else "",
+    )
+    result = _run(
+        wrapper, tmp_path, TEST_UV="C:\\uv\\uv.exe", TEST_DIRECTORY=directory, TEST_HOME=home,
+        TEST_USER_PATH=user_path, TEST_USER_KIND=kind, TEST_UV_RESULT=uv_result, TEST_MACHINE_PATH="",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"STATE={state} CALLS={calls}\n" in result.stdout
+    if state == "added":
+        expected = f"{directory};{user_path}" if user_path else str(directory)
+        assert f"KIND=ExpandString\nUSER={expected}\n" in result.stdout
+    elif state == "unchanged" or not calls:
+        assert f"KIND={kind}\nUSER={user_path}\n" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("state", "reason", "uv_step"),
+    [
+        ("literal", "Your user PATH is unchanged because it is saved as plain text that contains %", False),
+        ("directory", "Your user PATH is unchanged because the command directory contains %", False),
+        ("unchanged", "Your user PATH is unchanged because uv found the directory text inside another entry", False),
+        ("failed", "Your user PATH could not be updated.", True),
+        ("kept", "Your saved PATH is unchanged.", True),
+    ],
+)
+def test_native_unchanged_user_path_names_the_reason_and_safe_steps(tmp_path, state, reason, uv_step):
+    source = SCRIPT.read_text(encoding="utf-8")
+    block = re.search(
+        r"(?ms)^    \$pathState = if \(\$NoModifyPath\).*?(?=^    \$earlier = Find-EarlierSiteOps)", source,
+    )
+    assert block, "The production PATH report is missing."
+    wrapper = tmp_path / "report.ps1"
+    wrapper.write_text(
+        _functions("Write-PathSteps")
+        + _PATH_STUBS
+        + "function Save-CommandDirectory([string]$Uv, [string]$Directory) { return $env:TEST_STATE }\n"
+        + "$NoModifyPath = $env:TEST_STATE -ceq 'kept'\n"
+        + "$uv = $env:TEST_UV\n$commandDirectory = $env:TEST_DIRECTORY\n"
+        + block.group(),
+        encoding="utf-8",
+    )
+    result = _run(
+        wrapper, tmp_path, TEST_STATE=state, TEST_UV="C:\\uv\\uv.exe", TEST_DIRECTORY=tmp_path / "bin",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = [line.removeprefix("STAGE ") for line in result.stdout.splitlines()]
+    assert lines[0].startswith(reason)
+    assert lines[1].startswith("To use siteops in this terminal, run: ")
+    assert ("tool update-shell" in lines[2]) is uv_step
+    assert len(lines) == 3
+
+
+@pytest.mark.parametrize(
+    ("case", "machine", "user", "files", "expected"),
+    [
+        ("machine-first", "{machine}", "{ours};{later}", {"machine": "siteops.exe"}, "machine"),
+        ("user-before", "", "{before};{ours}", {"before": "siteops.cmd"}, "before"),
+        ("ours-first", "", "{ours};{later}", {"later": "siteops.exe"}, None),
+        ("ours-in-machine", "{ours};{machine}", "{before}", {"machine": "siteops.exe", "before": "siteops.exe"}, None),
+        ("absent", "", "{later}", {"later": "siteops.exe"}, "later"),
+        ("relative", ".;{ours}", "", {".": "siteops.exe"}, None),
+        ("directory", "{before};{ours}", "", {"before": "siteops.exe/"}, None),
+        # A new terminal on this drive runs this installation through the root-relative entry.
+        ("ours-root-relative", "", "{ours_root_relative};{later}", {"later": "siteops.exe"}, None),
+    ],
+)
+def test_native_earlier_siteops_follows_new_terminal_order(tmp_path, case, machine, user, files, expected):
+    folders = {name: tmp_path / name for name in ("machine", "before", "ours", "later")}
+    folders["."] = tmp_path
+    for folder in folders.values():
+        folder.mkdir(exist_ok=True)
+    (folders["ours"] / "siteops.exe").write_bytes(b"selected")
+    for name, filename in files.items():
+        target = folders[name] / filename.rstrip("/")
+        if filename.endswith("/"):
+            target.mkdir()
+        else:
+            target.write_bytes(b"other")
+    wrapper = tmp_path / "earlier.ps1"
+    wrapper.write_text(
+        _functions("Test-QualifiedPath", "Test-SameDirectory", "Find-EarlierSiteOps")
+        + _PATH_STUBS
+        + "$found = Find-EarlierSiteOps $env:TEST_DIRECTORY\n"
+        + "\"FOUND=$found\"\n",
+        encoding="utf-8",
+    )
+    values = {key: str(value) for key, value in folders.items() if key != "."}
+    values["ours_root_relative"] = values["ours"][len(folders["ours"].drive):]
+    result = _run(
+        wrapper, tmp_path, TEST_DIRECTORY=folders["ours"], TEST_UV="unused",
+        TEST_MACHINE_PATH=machine.format(**values), TEST_USER_PATH=user.format(**values),
+        PATHEXT=".COM;.EXE;.BAT;.CMD",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    found = "" if expected is None else str(folders[expected] / files[expected])
+    assert f"FOUND={found}\n" in result.stdout
+
+
+def test_native_saved_path_reader_matches_the_windows_environment(tmp_path):
+    wrapper = tmp_path / "reader.ps1"
+    wrapper.write_text(
+        _functions("Read-SavedPath")
+        + """
+foreach ($scope in @('Machine', 'User')) {
+    $expected = [Environment]::GetEnvironmentVariable('Path', $scope)
+    if ($null -eq $expected) { $expected = '' }
+    if ((Read-SavedPath $scope) -cne $expected) { throw "The $scope reader differs." }
+}
+'READER_MATCHES'
+""",
+        encoding="utf-8",
+    )
+    result = _run(wrapper, tmp_path)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "READER_MATCHES" in result.stdout
+
+
+def test_native_raw_user_path_reader_keeps_names_unexpanded(tmp_path):
+    import winreg
+
+    output = tmp_path / "raw.json"
+    wrapper = tmp_path / "raw-reader.ps1"
+    wrapper.write_text(
+        _functions("Read-RawPath", "Read-RawUserPath")
+        + "$raw = Read-RawUserPath\n"
+        + "$text = if ($null -eq $raw) { 'null' } else { $raw | ConvertTo-Json -Compress }\n"
+        + "[IO.File]::WriteAllText($env:TEST_OUTPUT, $text, (New-Object Text.UTF8Encoding $false))\n",
+        encoding="utf-8",
+    )
+    result = _run(wrapper, tmp_path, TEST_OUTPUT=output)
+    assert result.returncode == 0, result.stdout + result.stderr
+    kinds = {winreg.REG_SZ: "String", winreg.REG_EXPAND_SZ: "ExpandString"}
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+            value, kind = winreg.QueryValueEx(key, "Path")
+    except FileNotFoundError:
+        expected = {"Kind": "None", "Value": ""}
+    else:
+        expected = {"Kind": kinds[kind], "Value": value} if kind in kinds else None
+    assert json.loads(output.read_text(encoding="utf-8")) == expected
+
+
+@pytest.mark.parametrize(
+    ("names", "kind", "expected"),
+    [
+        ("Path", "ExpandString", "KIND=ExpandString VALUE=%TEST_NAME%\\Tools;C:\\Tools"),
+        ("PATH", "String", "KIND=String VALUE=%TEST_NAME%\\Tools;C:\\Tools"),
+        ("Other", "String", "KIND=None VALUE="),
+        ("Path", "MultiString", "NOT_TEXT"),
+    ],
+)
+def test_native_raw_path_reader_asks_for_unexpanded_names(tmp_path, names, kind, expected):
+    wrapper = tmp_path / "raw-path.ps1"
+    wrapper.write_text(
+        _functions("Read-RawPath")
+        + r"""
+$script:disposed = $false
+$key = New-Object PSObject
+$key | Add-Member ScriptMethod GetValueNames { , @($env:TEST_NAMES) }
+$key | Add-Member ScriptMethod GetValueKind { param($name) [Microsoft.Win32.RegistryValueKind]$env:TEST_KIND }
+$key | Add-Member ScriptMethod GetValue {
+    param($name, $default, $options)
+    $raw = '%TEST_NAME%\Tools;C:\Tools'
+    # A registry key expands REG_EXPAND_SZ names unless the caller asks for the raw text.
+    if ($options -ne [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) {
+        return [Environment]::ExpandEnvironmentVariables($raw)
+    }
+    return $raw
+}
+$key | Add-Member ScriptMethod Dispose { $script:disposed = $true }
+$raw = Read-RawPath $key
+if (-not $script:disposed) { throw 'The key stayed open.' }
+if ($null -eq $raw) { 'NOT_TEXT' } else { "KIND=$($raw.Kind) VALUE=$($raw.Value)" }
+""",
+        encoding="utf-8",
+    )
+    result = _run(wrapper, tmp_path, TEST_NAMES=names, TEST_KIND=kind, TEST_NAME="C:\\Expanded")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip() == expected
+
+
+_STEPS_CHECK = r"""
+Invoke-Expression $env:TEST_SESSION
+if ($env:Path.Split(';')[0] -cne $env:TEST_DIRECTORY) { throw 'The session command added another directory.' }
+$errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseInput($env:TEST_SAVED, [ref]$null, [ref]$errors)
+if ($errors) { throw 'The saved PATH command does not parse.' }
+$command = $ast.EndBlock.Statements[0].PipelineElements[0]
+$words = @($command.CommandElements | ForEach-Object { $_.Value })
+if ($command.InvocationOperator -ne 'Ampersand' -or ($words -join '|') -cne ($env:TEST_UV + '|tool|update-shell')) {
+    throw 'The saved PATH command runs something else.'
+}
+'STEPS_RUN'
+"""
+
+
+@pytest.mark.parametrize(("folder", "tool"), [
+    ("it's bin", "o'tool"),
+    # PowerShell also ends a single-quoted string at U+2018 to U+201B.
+    ("O\u2019Brien \u2018bin\u201b", "o\u201atool"),
+])
+def test_native_manual_path_steps_run_as_printed(tmp_path, folder, tool):
+    directory = tmp_path / folder
+    uv = tmp_path / tool / "uv.exe"
+    printed = tmp_path / "steps.txt"
+    wrapper = tmp_path / "steps.ps1"
+    wrapper.write_text(
+        _functions("Write-PathSteps")
+        + _PATH_STUBS
+        # Keep the printed text exact, whatever the console code page.
+        + "function Stage([string]$message) {\n"
+        + "    [IO.File]::AppendAllText($env:TEST_PRINTED, $message + \"`n\", (New-Object Text.UTF8Encoding $false))\n"
+        + "}\n"
+        + "Write-PathSteps $env:TEST_UV $env:TEST_DIRECTORY\n",
+        encoding="utf-8",
+    )
+    result = _run(wrapper, tmp_path, TEST_UV=uv, TEST_DIRECTORY=directory, TEST_PRINTED=printed)
+    assert result.returncode == 0, result.stdout + result.stderr
+    session, saved = printed.read_text(encoding="utf-8").splitlines()
+    session_prefix = "To use siteops in this terminal, run: "
+    saved_prefix = "For new terminals, add the directory to your user PATH, for example with: "
+    assert session.startswith(session_prefix) and saved.startswith(saved_prefix)
+    check = tmp_path / "check.ps1"
+    check.write_text(_STEPS_CHECK, encoding="utf-8")
+    applied = _run(
+        check, tmp_path, TEST_SESSION=session.removeprefix(session_prefix),
+        TEST_SAVED=saved.removeprefix(saved_prefix), TEST_UV=uv, TEST_DIRECTORY=directory,
+    )
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    assert "STEPS_RUN" in applied.stdout

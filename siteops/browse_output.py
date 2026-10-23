@@ -241,6 +241,8 @@ def render_browse_plain(result: BrowseResult) -> str:
     local = result.source is None or result.source.kind == "local"
     project = result.source.project if result.source is not None else None
     verified = result.source is not None and result.source.verification == "verified"
+    package = result.source is not None and result.source.kind == "package"
+    failed = result.source is not None and result.source.verification == "failed"
     heading = f"Source: local workspace {_text(result.workspace)}"
     if not local:
         heading = f"Source: {_text(result.source.reference)}"
@@ -262,6 +264,8 @@ def render_browse_plain(result: BrowseResult) -> str:
     lines = [
         heading,
         "Private inspection of a verified package." if verified
+        else "Package verification failed, so its content was not inspected." if failed
+        else "The pinned package could not be opened, so its content was not inspected." if package
         else "Private inspection of local content." if local
         else "Private inspection of published descriptions. Deployment verifies the package first.",
         "",

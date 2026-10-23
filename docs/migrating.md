@@ -38,6 +38,52 @@ siteops -w <workspace> plan <manifest> -l <selector>
 
 `plan` arrives with v1.0.0b7, so run it with the new engine.
 
+## To v1.0.0b8
+
+These changes affect how you install or run Site Ops after v1.0.0b7.
+
+| If you... | What to change |
+|---|---|
+| Install Site Ops on Windows with the PowerShell bootstrap | Review the [saved user PATH](#windows-user-path). |
+| Match artifact verification error text, or read `source` from failed `browse --output json` | Review [artifact verification messages](#artifact-verification-messages). |
+
+### Windows user PATH
+
+The PowerShell bootstrap adds uv's command directory, normally
+`%USERPROFILE%\.local\bin`, to your user PATH with `uv tool update-shell`,
+so new terminals find `siteops`. It lists this change with the others
+before asking for consent. It leaves the machine PATH and the order of
+other entries unchanged. You no longer need to run `uv tool update-shell`
+yourself.
+
+To keep your saved PATH unchanged, add `-NoModifyPath` to the bootstrap
+invocation. The bootstrap then prints the commands that add the directory
+for the current terminal and for new terminals. It also leaves the PATH
+unchanged, and says why, when the saved PATH is plain text that contains
+`%` or the command directory contains `%`.
+
+If another `siteops` would run first in a new terminal, such as an older
+pip installation, the bootstrap prints a line that starts with
+`Warning: new terminals run`. Remove that command with the tool that
+installed it.
+
+### Artifact verification messages
+
+A rejected package proof now names the check that failed when the proof
+itself verifies for the approved repository, for example
+`The artifact proof names a runner class that the approved source does not allow.`
+These messages replace
+`The verified certificate does not satisfy publisher/source policy.`, and
+`The detached artifact proof did not pass verification.` remains when the
+reason cannot be named. The error code stays `artifact.invalid`, so
+match the code rather than the text.
+[Troubleshooting](troubleshooting.md#the-artifact-proof-names--or-the-detached-artifact-proof-did-not-pass-verification)
+lists each message.
+
+When `browse` fails for a pinned project, its JSON `source` names the pinned
+package, with `verification` set to `failed` when verification rejected it.
+It previously reported `local` and `not-performed`.
+
 ## To v1.0.0b7
 
 These changes affect workspaces, scripts and pipelines that worked with
