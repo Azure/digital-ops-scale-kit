@@ -1733,26 +1733,52 @@ if ($null -eq $raw) { 'NOT_TEXT' } else { "KIND=$($raw.Kind) VALUE=$($raw.Value)
     assert result.stdout.strip() == expected
 
 
-def test_native_manual_path_steps_run_as_printed(tmp_path):
-    directory = tmp_path / "it's bin"
-    uv = tmp_path / "o'tool" / "uv.exe"
+_STEPS_CHECK = r"""
+Invoke-Expression $env:TEST_SESSION
+if ($env:Path.Split(';')[0] -cne $env:TEST_DIRECTORY) { throw 'The session command added another directory.' }
+$errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseInput($env:TEST_SAVED, [ref]$null, [ref]$errors)
+if ($errors) { throw 'The saved PATH command does not parse.' }
+$command = $ast.EndBlock.Statements[0].PipelineElements[0]
+$words = @($command.CommandElements | ForEach-Object { $_.Value })
+if ($command.InvocationOperator -ne 'Ampersand' -or ($words -join '|') -cne ($env:TEST_UV + '|tool|update-shell')) {
+    throw 'The saved PATH command runs something else.'
+}
+'STEPS_RUN'
+"""
+
+
+@pytest.mark.parametrize(("folder", "tool"), [
+    ("it's bin", "o'tool"),
+    # PowerShell also ends a single-quoted string at U+2018 to U+201B.
+    ("O\u2019Brien \u2018bin\u201b", "o\u201atool"),
+])
+def test_native_manual_path_steps_run_as_printed(tmp_path, folder, tool):
+    directory = tmp_path / folder
+    uv = tmp_path / tool / "uv.exe"
+    printed = tmp_path / "steps.txt"
     wrapper = tmp_path / "steps.ps1"
     wrapper.write_text(
         _functions("Write-PathSteps")
         + _PATH_STUBS
+        # Keep the printed text exact, whatever the console code page.
+        + "function Stage([string]$message) {\n"
+        + "    [IO.File]::AppendAllText($env:TEST_PRINTED, $message + \"`n\", (New-Object Text.UTF8Encoding $false))\n"
+        + "}\n"
         + "Write-PathSteps $env:TEST_UV $env:TEST_DIRECTORY\n",
         encoding="utf-8",
     )
-    result = _run(wrapper, tmp_path, TEST_UV=uv, TEST_DIRECTORY=directory)
+    result = _run(wrapper, tmp_path, TEST_UV=uv, TEST_DIRECTORY=directory, TEST_PRINTED=printed)
     assert result.returncode == 0, result.stdout + result.stderr
-    lines = result.stdout.splitlines()
-    session = next(line for line in lines if "To use siteops in this terminal, run: " in line)
-    command = session.split("To use siteops in this terminal, run: ", 1)[1]
-    applied = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-Command", command + "; $env:Path.Split(';')[0]"],
-        capture_output=True, text=True, timeout=30,
+    session, saved = printed.read_text(encoding="utf-8").splitlines()
+    session_prefix = "To use siteops in this terminal, run: "
+    saved_prefix = "For new terminals, add the directory to your user PATH, for example with: "
+    assert session.startswith(session_prefix) and saved.startswith(saved_prefix)
+    check = tmp_path / "check.ps1"
+    check.write_text(_STEPS_CHECK, encoding="utf-8")
+    applied = _run(
+        check, tmp_path, TEST_SESSION=session.removeprefix(session_prefix),
+        TEST_SAVED=saved.removeprefix(saved_prefix), TEST_UV=uv, TEST_DIRECTORY=directory,
     )
-    assert applied.returncode == 0, applied.stderr
-    assert applied.stdout.strip() == str(directory)
-    saved = next(line for line in lines if "For new terminals" in line)
-    assert saved.endswith("& '" + str(uv).replace("'", "''") + "' tool update-shell")
+    assert applied.returncode == 0, applied.stdout + applied.stderr
+    assert "STEPS_RUN" in applied.stdout

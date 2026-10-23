@@ -964,8 +964,9 @@ function Find-EarlierSiteOps([string]$Directory) {
     return $null
 }
 function Write-PathSteps([string]$Uv, [string]$Directory, [switch]$WithoutUv) {
-    $folder = $Directory.Replace("'", "''")
-    $tool = $Uv.Replace("'", "''")
+    # PowerShell also ends a single-quoted string at the typographic quotes U+2018 to U+201B.
+    $folder = [Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($Directory)
+    $tool = [Management.Automation.Language.CodeGeneration]::EscapeSingleQuotedStringContent($Uv)
     Stage "To use siteops in this terminal, run: `$env:Path = '$folder;' + `$env:Path"
     if ($WithoutUv) {
         Stage 'For new terminals, add the directory to your user PATH yourself, for example in Edit environment variables for your account.'
