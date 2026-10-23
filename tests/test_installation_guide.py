@@ -576,8 +576,25 @@ def test_documented_candidate_preload_uses_the_bootstrap_selection_cache(tmp_pat
     for name in ("siteops-install.zip", "siteops-install.zip.attestation.jsonl"):
         (tmp_path / name).write_text(name, encoding="utf-8")
     exports = dict(zip(("release", "commit", "repository", "ref", "caller"), values))
-    result = run_script(preload, tmp_path, {**exports, "HOME": bash_path(tmp_path)})
+    home = bash_path(tmp_path)
+    # Inherited uv and XDG locations must not move any part of the trial.
+    inherited = {
+        name: f"{home}/elsewhere/{name}"
+        for name in ("XDG_DATA_HOME", "XDG_BIN_HOME", "UV_TOOL_DIR", "UV_TOOL_BIN_DIR", "UV_PYTHON_INSTALL_DIR")
+    }
+    selected = ("XDG_DATA_HOME", "UV_TOOL_DIR", "UV_TOOL_BIN_DIR", "UV_PYTHON_INSTALL_DIR")
+    result = run_script(
+        preload + "\nprintf '%s\\n' " + " ".join(f'"${name}"' for name in selected),
+        tmp_path, {**exports, **inherited, "HOME": home},
+    )
     assert result.returncode == 0, result.stdout + result.stderr
+    trial = f"{home}/siteops-candidate"
+    locations = dict(zip(selected, result.stdout.splitlines()))
+    assert locations == {
+        "XDG_DATA_HOME": f"{trial}/share", "UV_TOOL_DIR": f"{trial}/uv/tools",
+        "UV_TOOL_BIN_DIR": f"{trial}/bin", "UV_PYTHON_INSTALL_DIR": f"{trial}/uv/python",
+    }
+    assert "`$HOME/siteops-candidate/bin`" in " ".join(section.split())
     selection = (exports["repository"], exports["release"], exports["commit"], exports["ref"], exports["caller"])
     key = hashlib.sha256(("\0".join(selection) + "\0").encode()).hexdigest()
     cache = tmp_path / "siteops-candidate" / "share" / "siteops" / "install-downloads" / key
@@ -591,6 +608,9 @@ def test_documented_candidate_preload_uses_the_bootstrap_selection_cache(tmp_pat
         in script
     )
     assert 'cache="$admitted/$selection_id"' in script
+    # The bootstrap keeps these uv locations and creates them privately when they are missing.
+    assert "UV_TOOL_DIR|UV_TOOL_BIN_DIR|UV_PYTHON_INSTALL_DIR|UV_PYTHON_INSTALL_MIRROR)" in script
+    assert 'admit_directory "${!name}" shared ||' in script
     command = shlex.split(install.replace("\\\n", " "))
     assert command[:2] == ["bash", "siteops-bootstrap.sh"]
     options = dict(zip(command[2::2], command[3::2]))
@@ -606,7 +626,12 @@ def test_documented_candidate_preload_uses_the_bootstrap_selection_cache(tmp_pat
         check = run_script(
             'uid="$(id -u)"\n' + functions + '\ndetect_private_group\n'
             'admit_directory "$CACHE" private existing\n'
-            'admit_file "$CACHE/siteops-install.zip" private\n',
-            tmp_path, {"CACHE": str(cache)},
+            'admit_file "$CACHE/siteops-install.zip" private\n'
+            'for name in UV_TOOL_DIR UV_TOOL_BIN_DIR UV_PYTHON_INSTALL_DIR; do\n'
+            '  admit_directory "${!name}" shared && [[ "$admitted" == "${!name}" && -d "$admitted" ]]\n'
+            'done\n',
+            tmp_path, {"CACHE": str(cache), **{name: locations[name] for name in selected[1:]}},
         )
         assert check.returncode == 0, check.stdout + check.stderr
+        for name in selected[1:]:
+            assert Path(locations[name]).stat().st_mode & 0o077 == 0

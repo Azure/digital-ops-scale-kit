@@ -817,16 +817,25 @@ These steps apply to a candidate that builds an engine.
    For a CI release preview, use its repository, its branch as `ref` and
    `ci.yaml` as `caller`.
 3. Keep the trial apart from any existing installation, and place the engine
-   ZIP and its proof in the cache entry for this selection:
+   ZIP and its proof in the cache entry for this selection. The exports
+   select the data, uv tool, command and managed Python directories, so
+   inherited uv and XDG settings cannot send the installation elsewhere:
 
    ```bash
    umask 077
-   export XDG_DATA_HOME="$HOME/siteops-candidate/share"
+   trial="$HOME/siteops-candidate"
+   export XDG_DATA_HOME="$trial/share"
+   export UV_TOOL_DIR="$trial/uv/tools"
+   export UV_TOOL_BIN_DIR="$trial/bin"
+   export UV_PYTHON_INSTALL_DIR="$trial/uv/python"
    key="$(printf '%s\0' "$repository" "$release" "$commit" "$ref" "$caller" | sha256sum | cut -d ' ' -f 1)"
    cache="$XDG_DATA_HOME/siteops/install-downloads/$key"
    mkdir -p "$cache"
    cp siteops-install.zip siteops-install.zip.attestation.jsonl "$cache/"
    ```
+
+   The bootstrap creates the uv directories privately when it needs them.
+   Run the next steps in the same terminal, so these settings apply.
 
 4. Run the candidate's bootstrap with the same values:
 
@@ -837,7 +846,8 @@ These steps apply to a candidate that builds an engine.
 
    It prints `Rechecking the retained release without downloading its assets.`
    before it checks the bundle's source, signer, caller and runner. uv,
-   managed Python and Site Ops are installed under `$HOME/siteops-candidate`.
+   managed Python and Site Ops are installed under `$HOME/siteops-candidate`,
+   and the command directory is `$HOME/siteops-candidate/bin`.
 5. Add the printed command directory to `PATH` for this session, and check
    that `siteops --version` reports the candidate's engine version.
 6. The candidate's content is not published yet, so `--source` cannot select
@@ -851,8 +861,9 @@ These steps apply to a candidate that builds an engine.
    ```
 
 When the trial is complete, remove `$HOME/siteops-candidate` and the
-`candidate` and `candidate-source` directories. The installation in your
-usual data directory is unchanged.
+`candidate` and `candidate-source` directories, then close the terminal so
+its exported settings and `PATH` change end. The installation in your usual
+data directory is unchanged.
 
 ## Approve publication
 
