@@ -898,6 +898,21 @@ function Read-SavedPath([string]$Scope) {
     if ($value -isnot [string]) { return $null }
     return $value
 }
+# Returns a saved PATH as its registry kind and unexpanded text, or $null when it is not text.
+function Read-RawPath($Key) {
+    $absent = @{ Kind = 'None'; Value = '' }
+    if (-not $Key) { return $absent }
+    try {
+        if (@($Key.GetValueNames()) -notcontains 'Path') { return $absent }
+        $kind = $Key.GetValueKind('Path').ToString()
+        $value = $Key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    } finally { $Key.Dispose() }
+    if (($kind -cne 'String' -and $kind -cne 'ExpandString') -or $value -isnot [string]) { return $null }
+    return @{ Kind = $kind; Value = $value }
+}
+function Read-RawUserPath() {
+    return Read-RawPath ([Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment'))
+}
 function Test-SameDirectory([string]$Entry, [string]$Directory) {
     $candidate = $Entry.Trim().Trim('"')
     if (-not $candidate -or -not [IO.Path]::IsPathRooted($candidate)) { return $false }
@@ -910,15 +925,22 @@ function Save-CommandDirectory([string]$Uv, [string]$Directory) {
     foreach ($entry in $saved.Split(';')) {
         if (Test-SameDirectory $entry $Directory) { return 'present' }
     }
+    # uv saves the whole value as REG_EXPAND_SZ, so any %NAME% saved as plain text would start to expand.
+    if ($Directory.Contains('%')) { return 'directory' }
+    $before = Read-RawUserPath
+    if ($null -eq $before) { return 'failed' }
+    if ($before.Kind -ceq 'String' -and $before.Value.Contains('%')) { return 'literal' }
     # uv prepends the directory that uv tool dir --bin reports, keeping other entries and their order.
     try { $null = Invoke-Uv $Uv @('tool', 'update-shell') } catch { return 'failed' }
-    $saved = Read-SavedPath 'User'
-    if ($saved) {
-        foreach ($entry in $saved.Split(';')) {
-            if (Test-SameDirectory $entry $Directory) { return 'added' }
-        }
+    $after = Read-RawUserPath
+    if ($null -eq $after -or $after.Kind -cne 'ExpandString') { return 'failed' }
+    $added = $after.Value
+    if ($before.Value) {
+        if (-not $added.EndsWith(';' + $before.Value, [StringComparison]::Ordinal)) { return 'failed' }
+        $added = $added.Substring(0, $added.Length - $before.Value.Length - 1)
     }
-    return 'failed'
+    if ($added.Contains(';') -or -not (Test-SameDirectory $added $Directory)) { return 'failed' }
+    return 'added'
 }
 # A new terminal searches the machine PATH entries before the user entries.
 function Find-EarlierSiteOps([string]$Directory) {
@@ -941,11 +963,15 @@ function Find-EarlierSiteOps([string]$Directory) {
     }
     return $null
 }
-function Write-PathSteps([string]$Uv, [string]$Directory) {
+function Write-PathSteps([string]$Uv, [string]$Directory, [switch]$WithoutUv) {
     $folder = $Directory.Replace("'", "''")
     $tool = $Uv.Replace("'", "''")
     Stage "To use siteops in this terminal, run: `$env:Path = '$folder;' + `$env:Path"
-    Stage "For new terminals, add the directory to your user PATH, for example with: & '$tool' tool update-shell"
+    if ($WithoutUv) {
+        Stage 'For new terminals, add the directory to your user PATH yourself, for example in Edit environment variables for your account.'
+    } else {
+        Stage "For new terminals, add the directory to your user PATH, for example with: & '$tool' tool update-shell"
+    }
 }
 
 if ($ContentRelease) {
@@ -1255,10 +1281,14 @@ try {
     } else {
         if ($pathState -ceq 'kept') {
             Stage 'Your saved PATH is unchanged.'
+        } elseif ($pathState -ceq 'literal') {
+            Stage 'Your user PATH is unchanged because it is saved as plain text that contains %, and saving it with uv would expand those names.'
+        } elseif ($pathState -ceq 'directory') {
+            Stage 'Your user PATH is unchanged because the command directory contains %, which a saved PATH can expand.'
         } else {
             Stage 'Your user PATH could not be updated.'
         }
-        Write-PathSteps $uv $commandDirectory
+        Write-PathSteps $uv $commandDirectory -WithoutUv:($pathState -ceq 'literal' -or $pathState -ceq 'directory')
     }
     $earlier = Find-EarlierSiteOps $commandDirectory
     if ($earlier) {

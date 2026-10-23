@@ -448,6 +448,12 @@ first. Remove that command with the tool that installed it. With
 `-NoModifyPath`, or when the user PATH cannot be updated, the bootstrap
 prints the commands for this terminal and for new terminals instead.
 
+uv saves the whole user PATH with expandable names, so the bootstrap leaves
+it unchanged and says why when the saved PATH is plain text that contains
+`%`, or when the command directory contains `%`. Saving either would turn
+`%NAME%` text into the value of that variable. Add the directory yourself in
+that case.
+
 On Linux, if `siteops` is not on the parent shell's current PATH, add the
 printed directory for this session:
 

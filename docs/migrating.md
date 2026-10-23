@@ -58,7 +58,9 @@ yourself.
 
 To keep your saved PATH unchanged, add `-NoModifyPath` to the bootstrap
 invocation. The bootstrap then prints the commands that add the directory
-for the current terminal and for new terminals.
+for the current terminal and for new terminals. It also leaves the PATH
+unchanged, and says why, when the saved PATH is plain text that contains
+`%` or the command directory contains `%`.
 
 If another `siteops` would run first in a new terminal, such as an older
 pip installation, the bootstrap prints a line that starts with

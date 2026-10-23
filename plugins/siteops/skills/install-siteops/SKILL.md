@@ -174,13 +174,16 @@ the user and let them remove it.
 
 On Windows, the installer saves the directory to the user PATH, so a new
 terminal, and Copilot started from one, will find `siteops`. If it printed
-`Your user PATH could not be updated.`, show the user the steps it printed
-after that line. If `siteops` was not found on Linux, new terminals also
-need the directory on the saved PATH. Do not stop for this now. When the
-user's request is complete, offer to run `uv tool update-shell`, and run it
-only with their agreement. If `uv` is not on PATH, run the `uv` in the
-printed directory. Then tell the user that a new terminal, and Copilot
-started from one, will find `siteops`.
+`Your user PATH could not be updated.` or a line that starts with
+`Your user PATH is unchanged because`, show the user that line and the
+steps it printed after it. After a line that starts with
+`Your user PATH is unchanged because`, do not run `uv tool update-shell`
+on Windows. If `siteops` was not found on Linux, new
+terminals also need the directory on the saved PATH. Do not stop for this
+now. When the user's request is complete, offer to run
+`uv tool update-shell`, and run it only with their agreement. If `uv` is
+not on PATH, run the `uv` in the printed directory. Then tell the user that
+a new terminal, and Copilot started from one, will find `siteops`.
 
 ## 6. Enroll and confirm
 
