@@ -54,10 +54,6 @@ class VerificationError(ArtifactError):
 
 # Each category describes the check that failed without echoing an observed value.
 _PROOF_FAILURES = {
-    "proof": (
-        "The detached proof does not verify this artifact under the approved trusted root. "
-        "Renew the source enrollment to refresh its trusted root, then retry."
-    ),
     "issuer": "The artifact proof names a certificate issuer other than GitHub Actions.",
     "repository": "The artifact proof names a source repository that the approved source does not allow.",
     "ref": "The artifact proof names a source branch or tag that the approved source does not allow.",
@@ -340,7 +336,10 @@ def _rejection(
 ) -> VerificationError:
     """Name why policy verification failed, from a run that checks only the proof and repository.
 
-    This run never admits an artifact. It only selects a closed failure category.
+    This run never admits an artifact. It only selects a closed failure category. gh keeps
+    its repository filters and its default GitHub Actions issuer here, so a failure of this
+    run cannot tell a bad proof from another repository, signer repository or issuer.
+    Only claims in a proof that passes this run are named.
     """
     try:
         code, output = _run([
@@ -350,7 +349,7 @@ def _rejection(
             "--repo", policy.repository, "--digest-alg", "sha256", "--format", "json",
         ])
         if code != 0:
-            return _rejected("proof")
+            return _rejected("unclassified")
         results = _json(output, MAX_RESULT_BYTES)
         expected = _expected_certificate(policy, source_commit)
         for result in results if isinstance(results, list) else ():

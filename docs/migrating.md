@@ -69,14 +69,15 @@ installed it.
 
 ### Artifact verification messages
 
-A rejected package proof now names the check that failed, for example
+A rejected package proof now names the check that failed when the proof
+itself verifies for the approved repository, for example
 `The artifact proof names a runner class that the approved source does not allow.`
 These messages replace
 `The verified certificate does not satisfy publisher/source policy.`, and
-`The detached artifact proof did not pass verification.` remains only when
-the reason cannot be named. The error code stays `artifact.invalid`, so
+`The detached artifact proof did not pass verification.` remains when the
+reason cannot be named. The error code stays `artifact.invalid`, so
 match the code rather than the text.
-[Troubleshooting](troubleshooting.md#the-artifact-proof-names--or-the-detached-proof-does-not-verify-this-artifact)
+[Troubleshooting](troubleshooting.md#the-artifact-proof-names--or-the-detached-artifact-proof-did-not-pass-verification)
 lists each message.
 
 When `browse` fails for a pinned project, its JSON `source` names the pinned

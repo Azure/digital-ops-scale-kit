@@ -292,7 +292,7 @@ def test_expired_policy_rejects_pinned_use_without_network(github):
 def test_native_verification_failure_stops_publication(github, monkeypatch):
     github.code = 1
     monkeypatch.setattr("siteops.workspace_cache.extract_package", Mock(side_effect=AssertionError("Unverified parse.")))
-    with pytest.raises(attestation.VerificationError, match="does not verify this artifact"):
+    with pytest.raises(attestation.VerificationError, match="did not pass verification"):
         github.flow.acquire(github.client)
     assert not list((github.fixture.cache.root / "objects" / "sha256").iterdir())
     assert not list((github.fixture.cache.root / "staging").iterdir())

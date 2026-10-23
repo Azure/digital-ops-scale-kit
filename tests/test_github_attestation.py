@@ -62,6 +62,32 @@ def _result(digest):
     }
 
 
+def _gh_filters_accept(argv, claims):
+    """Model the certificate filters of gh 2.95 attestation verify for the options Site Ops passes.
+
+    --repo also fixes the source repository and the signer repository prefix, and the issuer
+    defaults to GitHub Actions, so a run without the identity options still applies those.
+    """
+    def option(name):
+            return argv[argv.index(name) + 1] if name in argv else None
+
+    repository = f"https://github.com/{option('--repo')}"
+    checks = [
+            claims["issuer"] == (option("--cert-oidc-issuer") or verification._ISSUER),
+            claims["sourceRepositoryURI"] == repository,
+            claims["subjectAlternativeName"].startswith(repository + "/"),
+    ]
+    for name, field in (
+            ("--cert-identity", "subjectAlternativeName"), ("--source-ref", "sourceRepositoryRef"),
+            ("--source-digest", "sourceRepositoryDigest"), ("--signer-digest", "buildSignerDigest"),
+    ):
+            if option(name) is not None:
+                checks.append(claims[field] == option(name))
+    if "--deny-self-hosted-runners" in argv:
+            checks.append(claims["runnerEnvironment"] == "github-hosted")
+    return all(checks)
+
+
 @pytest.fixture
 def inputs(tmp_path, monkeypatch):
     artifact = tmp_path / "artifact.zip"
@@ -77,7 +103,7 @@ def inputs(tmp_path, monkeypatch):
     executable.write_bytes(b"test executable placeholder")
     state = {
         "results": [_result(digest)], "code": 0, "calls": [], "version": b"gh version 2.95.0 (test)\n",
-        "diagnostic": None,
+        "diagnostic": None, "claims": None, "signature": True,
     }
 
     def run(argv):
@@ -87,6 +113,12 @@ def inputs(tmp_path, monkeypatch):
         assert argv[1:3] == ["attestation", "verify"]
         assert Path(argv[argv.index("--bundle") + 1]).read_bytes() == proof.read_bytes()
         assert Path(argv[argv.index("--custom-trusted-root") + 1]).read_bytes() == roots.read_bytes()
+        if state["claims"] is not None:
+            if not (state["signature"] and _gh_filters_accept(argv, state["claims"])):
+                return 1, b"", b"PRIVATE_TOOL_DIAGNOSTIC"
+            result = copy.deepcopy(state["results"][0])
+            result["verificationResult"]["signature"]["certificate"] = dict(state["claims"])
+            return 0, json.dumps([result]).encode(), b""
         if "--cert-identity" not in argv and state["diagnostic"] is not None:
             code, output = state["diagnostic"]
             return code, output, b"PRIVATE_TOOL_DIAGNOSTIC"
@@ -242,14 +274,14 @@ def test_empty_or_unsupported_result_shape_is_not_success(inputs, results):
 
 def test_nonzero_exit_does_not_accept_success_shaped_output(inputs):
     inputs[-1]["code"] = 1
-    with pytest.raises(verification.VerificationError, match="does not verify this artifact") as failed:
+    with pytest.raises(verification.VerificationError, match="did not pass verification") as failed:
         _verify(inputs)
-    assert failed.value.reason == "proof"
+    assert failed.value.reason == "unclassified"
     assert "PRIVATE_TOOL_DIAGNOSTIC" not in str(failed.value)
 
 
 @pytest.mark.parametrize(("diagnostic", "reason"), [
-    ("rejected", "proof"),
+    ("rejected", "unclassified"),
     ("runner", "runner"),
     ("ref", "ref"),
     ("commit", "commit"),
@@ -291,6 +323,52 @@ def test_rejected_proof_names_a_closed_reason_without_admitting_the_artifact(inp
 def test_successful_policy_verification_runs_no_diagnostic(inputs):
     _verify(inputs)
     assert sum(argv[1:3] == ["attestation", "verify"] for argv in inputs[-1]["calls"]) == 1
+
+
+_OTHER = "https://github.com/PRIVATE-owner/PRIVATE-repo"
+
+
+@pytest.mark.parametrize(("case", "changes", "reason"), [
+    # gh still applies these filters in the diagnostic run, so the failure cannot be told apart.
+    ("bad-proof", {}, "unclassified"),
+    ("other-repository", {
+        "sourceRepositoryURI": _OTHER,
+        "subjectAlternativeName": f"{_OTHER}/.github/workflows/sign.yml@{SOURCE_REF}",
+        "buildConfigURI": f"{_OTHER}/.github/workflows/release.yml@{SOURCE_REF}",
+    }, "unclassified"),
+    ("other-issuer", {"issuer": "https://PRIVATE-issuer.example"}, "unclassified"),
+    ("signer-in-other-repository", {
+        "subjectAlternativeName": f"{_OTHER}/.github/workflows/sign.yml@{SOURCE_REF}",
+    }, "unclassified"),
+    # Claims that pass the diagnostic filters are observed and named.
+    ("ref", {
+        "sourceRepositoryRef": "refs/heads/PRIVATE_BRANCH",
+        "subjectAlternativeName": f"https://github.com/{REPOSITORY}/.github/workflows/sign.yml@refs/heads/PRIVATE_BRANCH",
+        "buildConfigURI": f"https://github.com/{REPOSITORY}/.github/workflows/release.yml@refs/heads/PRIVATE_BRANCH",
+    }, "ref"),
+    ("commit", {"sourceRepositoryDigest": "b" * 40, "buildSignerDigest": "b" * 40}, "commit"),
+    ("signer", {
+        "subjectAlternativeName": f"https://github.com/{REPOSITORY}/.github/workflows/PRIVATE.yml@{SOURCE_REF}",
+    }, "signer"),
+    ("runner", {"runnerEnvironment": "self-hosted"}, "runner"),
+])
+def test_diagnosis_names_only_claims_that_pass_the_retained_gh_filters(inputs, case, changes, reason):
+    state = inputs[-1]
+    claims = dict(state["results"][0]["verificationResult"]["signature"]["certificate"])
+    claims.update(changes)
+    state["claims"] = claims
+    state["signature"] = case != "bad-proof"
+    with pytest.raises(verification.VerificationError) as failed:
+        _verify(inputs)
+    assert failed.value.reason == reason
+    assert failed.value.code == "artifact.invalid"
+    assert str(failed.value) == verification._PROOF_FAILURES[reason]
+    assert "trusted root" not in str(failed.value)
+    assert "PRIVATE" not in str(failed.value)
+    # The strict run rejected the proof, and the diagnostic run supplied the reason.
+    strict, diagnostic = state["calls"][1:]
+    assert "--cert-identity" in strict
+    assert "--cert-identity" not in diagnostic
 
 
 @pytest.mark.parametrize("changed", ["artifact", "root", "expired-policy"])
@@ -382,7 +460,7 @@ def test_cleanup_warning_does_not_hide_the_primary_verification_failure(inputs, 
         return original(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "unlink", failed)
-    with pytest.raises(verification.VerificationError, match="does not verify this artifact"):
+    with pytest.raises(verification.VerificationError, match="did not pass verification"):
         _verify(inputs)
     assert "cleanup" in caplog.text
 
