@@ -168,7 +168,7 @@ az role assignment create --assignee "$(az ad signed-in-user show --query id --o
 
 Creating the assignment needs the same rights as Secret Sync enablement at the vault scope, such as Owner, User Access Administrator or Role Based Access Control Administrator. For a group or service principal, pass its object ID with `--assignee-object-id` and `--assignee-principal-type`. A new role assignment can take several minutes to take effect. Remove it when it is no longer needed with `az role assignment delete` and the same assignee, role and scope.
 
-Site Ops leaves your own data access to you, so a deployment never widens who can read the vault's secrets.
+Site Ops does not grant your own account a Key Vault data role, so you add this assignment yourself and only when you need it.
 
 ## Syncing secrets to the cluster
 
