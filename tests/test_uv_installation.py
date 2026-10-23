@@ -578,19 +578,22 @@ def test_packaged_native_install_and_replacement_use_the_verified_path(
             pytest.skip("Native Windows PowerShell is unavailable.")
         wrapper = tmp_path / "install.ps1"
         phase = helper_dir / "phase.txt"
-        # Run the helper's assembly load and first archive open as their own phases, so a
-        # timeout names the slow operation.
-        assert "    Add-Type -AssemblyName System.IO.Compression.FileSystem\n" in body
-        assert "    $zip = [IO.Compression.ZipFile]::OpenRead($Archive)\n" in body
+        # Record the helper's own assembly load and first archive open as phases, so a
+        # timeout names the slow operation without running either twice.
+        record = "    [IO.File]::WriteAllText($env:TEST_PHASE, '{}')\n"
+        instrumented = body
+        for line, before, after in (
+            ("    Add-Type -AssemblyName System.IO.Compression.FileSystem\n", "loading-compression", None),
+            ("    $zip = [IO.Compression.ZipFile]::OpenRead($Archive)\n", "opening-archive", "extracting-helper"),
+        ):
+            assert instrumented.count(line) == 1
+            instrumented = instrumented.replace(
+                line, record.format(before) + line + (record.format(after) if after else ""),
+            )
         wrapper.write_text(
             "$ErrorActionPreference = 'Stop'\n"
             "function Fail([string]$message) { throw $message }\n"
-            "$python = $env:TEST_PYTHON\n" + body
-            + "\n[IO.File]::WriteAllText($env:TEST_PHASE, 'loading-compression')\n"
-            + "Add-Type -AssemblyName System.IO.Compression.FileSystem\n"
-            + "[IO.File]::WriteAllText($env:TEST_PHASE, 'opening-archive')\n"
-            + "[IO.Compression.ZipFile]::OpenRead($env:TEST_ARCHIVE).Dispose()\n"
-            + "[IO.File]::WriteAllText($env:TEST_PHASE, 'extracting-helper')\n"
+            "$python = $env:TEST_PYTHON\n" + instrumented
             + "\n$installerHelper = Get-InstallerHelper $env:TEST_ARCHIVE $env:TEST_HELPER_DIR\n"
             + "\n[IO.File]::WriteAllText($env:TEST_PHASE, 'checking-payload')\n"
             + "\nCheck-Payload @(" + ",".join(
