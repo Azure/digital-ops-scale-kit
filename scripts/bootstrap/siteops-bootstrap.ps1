@@ -913,9 +913,15 @@ function Read-RawPath($Key) {
 function Read-RawUserPath() {
     return Read-RawPath ([Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment'))
 }
-function Test-SameDirectory([string]$Entry, [string]$Directory) {
+# A saved entry names the same directory everywhere only with a drive and root, or as a UNC share.
+function Test-QualifiedPath([string]$Path) {
+    return $Path -match '^[A-Za-z]:[\\/]' -or $Path -match '^[\\/]{2}[^\\/?.][^\\/]*[\\/][^\\/]+'
+}
+# With -Qualified, an entry relative to the current drive, such as \Users\x or C:Users\x, never matches.
+function Test-SameDirectory([string]$Entry, [string]$Directory, [switch]$Qualified) {
     $candidate = $Entry.Trim().Trim('"')
     if (-not $candidate -or -not [IO.Path]::IsPathRooted($candidate)) { return $false }
+    if ($Qualified -and -not (Test-QualifiedPath $candidate)) { return $false }
     try { $candidate = [IO.Path]::GetFullPath($candidate) } catch { return $false }
     return $candidate.TrimEnd('\') -ieq $Directory.TrimEnd('\')
 }
@@ -923,7 +929,7 @@ function Save-CommandDirectory([string]$Uv, [string]$Directory) {
     $saved = Read-SavedPath 'User'
     if ($null -eq $saved) { return 'failed' }
     foreach ($entry in $saved.Split(';')) {
-        if (Test-SameDirectory $entry $Directory) { return 'present' }
+        if (Test-SameDirectory $entry $Directory -Qualified) { return 'present' }
     }
     # uv saves the whole value as REG_EXPAND_SZ, so any %NAME% saved as plain text would start to expand.
     if ($Directory.Contains('%')) { return 'directory' }
@@ -942,7 +948,7 @@ function Save-CommandDirectory([string]$Uv, [string]$Directory) {
         if (-not $added.EndsWith(';' + $before.Value, [StringComparison]::Ordinal)) { return 'failed' }
         $added = $added.Substring(0, $added.Length - $before.Value.Length - 1)
     }
-    if ($added.Contains(';') -or -not (Test-SameDirectory $added $Directory)) { return 'failed' }
+    if ($added.Contains(';') -or -not (Test-SameDirectory $added $Directory -Qualified)) { return 'failed' }
     return 'added'
 }
 # A new terminal searches the machine PATH entries before the user entries.

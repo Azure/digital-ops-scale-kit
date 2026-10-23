@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 import zipfile
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -1537,6 +1537,11 @@ function Invoke-Uv([string]$Executable, [string[]]$Arguments) {
         ("present", "ExpandString", "C:\\Tools;{directory}", "fail", "present", 0),
         ("present-variant", "String", 'C:\\Tools;"{upper}\\"', "fail", "present", 0),
         ("present-by-name", "ExpandString", "%TEST_HOME%\\.local\\bin", "fail", "present", 0),
+        ("present-forward-slashes", "ExpandString", "C:\\Tools;{slashes}", "fail", "present", 0),
+        ("present-unc", "ExpandString", "C:\\Tools;{directory}", "fail", "present", 0),
+        # Entries relative to the current drive depend on where a terminal starts, so the absolute one is added.
+        ("root-relative", "ExpandString", "C:\\Tools;{root_relative}", "prepend", "added", 1),
+        ("drive-relative", "ExpandString", "C:\\Tools;{drive_relative}", "prepend", "added", 1),
         # uv 0.12.20 treats the directory as present when its text appears anywhere in the value.
         ("substring", "ExpandString", "{directory}2", "unchanged", "unchanged", 1),
         ("substring-plain-text", "String", "C:\\Tools;{directory}2", "unchanged", "unchanged", 1),
@@ -1548,10 +1553,12 @@ function Invoke-Uv([string]$Executable, [string[]]$Arguments) {
 )
 def test_native_command_directory_is_saved_once_through_uv(tmp_path, case, kind, saved, uv_result, state, calls):
     home = tmp_path / ("a%TEST_HOME%b" if case == "named-directory" else "home")
+    if case == "present-unc":
+        home = PureWindowsPath(r"\\server\share\home")
     directory = home / ".local" / "bin"
     wrapper = tmp_path / "save-path.ps1"
     wrapper.write_text(
-        _functions("Test-SameDirectory", "Save-CommandDirectory")
+        _functions("Test-QualifiedPath", "Test-SameDirectory", "Save-CommandDirectory")
         + _PATH_STUBS
         + "$state = Save-CommandDirectory $env:TEST_UV $env:TEST_DIRECTORY\n"
         + "\"STATE=$state CALLS=$script:uvCalls\"\n"
@@ -1559,7 +1566,11 @@ def test_native_command_directory_is_saved_once_through_uv(tmp_path, case, kind,
         + "\"USER=$script:userPath\"\n",
         encoding="utf-8",
     )
-    user_path = saved.format(directory=directory, upper=str(directory).upper(), other=tmp_path / "other")
+    user_path = saved.format(
+        directory=directory, upper=str(directory).upper(), other=tmp_path / "other",
+        slashes=directory.as_posix(), root_relative=str(directory)[len(directory.drive):],
+        drive_relative=directory.drive + str(directory.relative_to(tmp_path)) if case == "drive-relative" else "",
+    )
     result = _run(
         wrapper, tmp_path, TEST_UV="C:\\uv\\uv.exe", TEST_DIRECTORY=directory, TEST_HOME=home,
         TEST_USER_PATH=user_path, TEST_USER_KIND=kind, TEST_UV_RESULT=uv_result, TEST_MACHINE_PATH="",
@@ -1620,6 +1631,8 @@ def test_native_unchanged_user_path_names_the_reason_and_safe_steps(tmp_path, st
         ("absent", "", "{later}", {"later": "siteops.exe"}, "later"),
         ("relative", ".;{ours}", "", {".": "siteops.exe"}, None),
         ("directory", "{before};{ours}", "", {"before": "siteops.exe/"}, None),
+        # A new terminal on this drive runs this installation through the root-relative entry.
+        ("ours-root-relative", "", "{ours_root_relative};{later}", {"later": "siteops.exe"}, None),
     ],
 )
 def test_native_earlier_siteops_follows_new_terminal_order(tmp_path, case, machine, user, files, expected):
@@ -1636,13 +1649,14 @@ def test_native_earlier_siteops_follows_new_terminal_order(tmp_path, case, machi
             target.write_bytes(b"other")
     wrapper = tmp_path / "earlier.ps1"
     wrapper.write_text(
-        _functions("Test-SameDirectory", "Find-EarlierSiteOps")
+        _functions("Test-QualifiedPath", "Test-SameDirectory", "Find-EarlierSiteOps")
         + _PATH_STUBS
         + "$found = Find-EarlierSiteOps $env:TEST_DIRECTORY\n"
         + "\"FOUND=$found\"\n",
         encoding="utf-8",
     )
     values = {key: str(value) for key, value in folders.items() if key != "."}
+    values["ours_root_relative"] = values["ours"][len(folders["ours"].drive):]
     result = _run(
         wrapper, tmp_path, TEST_DIRECTORY=folders["ours"], TEST_UV="unused",
         TEST_MACHINE_PATH=machine.format(**values), TEST_USER_PATH=user.format(**values),
