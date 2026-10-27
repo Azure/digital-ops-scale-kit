@@ -195,7 +195,7 @@ def test_committed_locks_pin_real_runtime_and_build_hashes(builder):
     ]
     assert {(item.name, item.version, len(item.hashes)) for item in build} == {
         ("pip", "26.2.1", 1),
-        ("setuptools", "84.0.0", 1),
+        ("setuptools", "84.1.0", 1),
         ("packaging", "26.3", 1),
     }
     assert all(
