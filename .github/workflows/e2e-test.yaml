@@ -754,7 +754,7 @@ jobs:
           "$PYTHON" -B scripts/coordinate-release-fleet.py select --root "$RUNNER_TEMP/fleet"
           echo "FLEET_PYTHON=$PYTHON" >> "$GITHUB_ENV"
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: env.CANDIDATE_MODE == 'true'
         with:
           artifact-ids: ${{ steps.select.outputs.admission-id }}
@@ -764,7 +764,7 @@ jobs:
           path: ${{ runner.temp }}/fleet/admission
           merge-multiple: true
           digest-mismatch: error
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: env.CANDIDATE_MODE == 'true'
         with:
           artifact-ids: ${{ steps.select.outputs.plan-id }}
@@ -774,7 +774,7 @@ jobs:
           path: ${{ runner.temp }}/fleet/plan
           merge-multiple: true
           digest-mismatch: error
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: env.CANDIDATE_MODE == 'true'
         with:
           artifact-ids: ${{ steps.select.outputs.inventory-id }}
@@ -784,7 +784,7 @@ jobs:
           path: ${{ runner.temp }}/fleet/inventory
           merge-multiple: true
           digest-mismatch: error
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: env.CANDIDATE_MODE == 'true'
         with:
           artifact-ids: ${{ steps.select.outputs.engine-id }}
@@ -794,7 +794,7 @@ jobs:
           path: ${{ runner.temp }}/fleet/engine
           merge-multiple: true
           digest-mismatch: error
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: env.CANDIDATE_MODE == 'true'
         with:
           artifact-ids: ${{ steps.select.outputs.workspaces-id }}
@@ -1091,7 +1091,7 @@ jobs:
       - name: Retain Site ownership
         if: env.CANDIDATE_MODE == 'true'
         timeout-minutes: 5
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: site-ownership-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.secret-sync-mode }}
           path: ${{ runner.temp }}/fleet/ownership.json
@@ -2284,13 +2284,13 @@ jobs:
           )
           PY
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always() && needs.prep.outputs.published-mode != 'true'
         with:
           name: e2e-results-${{ matrix.aio-release }}-secretsync-${{ matrix.secret-sync-mode }}-opcua-${{ matrix.opcua-mode }}
           path: e2e-results-${{ matrix.aio-release }}-secretsync-${{ matrix.secret-sync-mode }}-opcua-${{ matrix.opcua-mode }}.xml
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always() && needs.prep.outputs.published-mode == 'true' && env.CANDIDATE_MODE != 'true'
         with:
           name: published-e2e-${{ matrix.aio-release }}-${{ matrix.secret-sync-mode }}-${{ needs.prep.outputs.published-journey }}
@@ -2347,7 +2347,7 @@ jobs:
           pytest $PYTEST_PATHS -v -m integration --tb=long \
             --junitxml="e2e-results-${AIO_RELEASE_FROM}-to-${AIO_RELEASE_TO}-secretsync-${SECRET_SYNC_MODE}-opcua-${E2E_OPCUA_MODE}.xml"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always() && needs.prep.outputs.upgrade-to != '' && needs.prep.outputs.upgrade-to != matrix.aio-release
         with:
           name: e2e-results-${{ matrix.aio-release }}-to-${{ needs.prep.outputs.upgrade-to }}-secretsync-${{ matrix.secret-sync-mode }}-opcua-${{ matrix.opcua-mode }}
@@ -2644,7 +2644,7 @@ jobs:
       - name: Retain the Site case outcome
         if: always() && env.CANDIDATE_MODE == 'true' && steps.select.outcome == 'success'
         timeout-minutes: 5
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: site-outcome-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.secret-sync-mode }}
           path: ${{ runner.temp }}/site-acceptance/outcome.json
@@ -2706,7 +2706,7 @@ jobs:
           mkdir "$RUNNER_TEMP/acceptance"
           "$PYTHON" -B scripts/coordinate-release-fleet.py select --root "$RUNNER_TEMP/acceptance" \
             --jobs-output "$RUNNER_TEMP/acceptance/producer-jobs.json"
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ steps.select.outputs.admission-id }}
           repository: ${{ github.repository }}
@@ -2715,7 +2715,7 @@ jobs:
           path: ${{ runner.temp }}/acceptance/admission
           merge-multiple: true
           digest-mismatch: error
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ steps.select.outputs.plan-id }}
           repository: ${{ github.repository }}
@@ -2735,7 +2735,7 @@ jobs:
           set -euo pipefail
           "$PYTHON" -B scripts/coordinate-release-fleet.py evidence --root "$RUNNER_TEMP/acceptance"
       # One artifact per download keeps each receipt in its own named directory.
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         id: download-disabled
         if: always() && steps.evidence.outputs.disabled-id != ''
         with:
@@ -2745,7 +2745,7 @@ jobs:
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/acceptance/evidence/disabled
           digest-mismatch: error
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         id: download-enabled
         if: always() && steps.evidence.outputs.enabled-id != ''
         with:
@@ -2755,7 +2755,7 @@ jobs:
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/acceptance/evidence/enabled
           digest-mismatch: error
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         id: download-existing
         if: always() && steps.evidence.outputs.existing-id != ''
         with:
@@ -2765,7 +2765,7 @@ jobs:
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/acceptance/evidence/existing
           digest-mismatch: error
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         id: download-fleet
         if: always() && steps.evidence.outputs.fleet-id != ''
         with:
@@ -2807,7 +2807,7 @@ jobs:
             echo "::error::Aggregation wrote no receipt, so this run records a failing result."
           fi
       # A failing receipt is retained too, so a newer failed run governs publication.
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always() && steps.bind.outcome == 'success'
         with:
           name: release-acceptance-${{ github.run_id }}-${{ github.run_attempt }}-${{ steps.bind.outputs.admission-sha }}
