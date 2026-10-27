@@ -395,7 +395,7 @@ jobs:
           fetch-depth: 0
 
       - name: Download the prepared release plan
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.prepare.outputs.artifact-id }}
           repository: ${{ github.repository }}
@@ -411,7 +411,7 @@ jobs:
           python-version: "3.11"
 
       - name: Download attested workspace subjects
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ needs.prepare.outputs.single-workspace-artifact }}
           pattern: workspace-attested-${{ github.run_id }}-${{ github.run_attempt }}-*
@@ -569,7 +569,7 @@ jobs:
           fetch-depth: 0
 
       - name: Download the prepared release plan
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.prepare.outputs.artifact-id }}
           repository: ${{ github.repository }}
@@ -581,7 +581,7 @@ jobs:
 
       - name: Download the completed engine build
         if: needs.prepare.outputs.bundle == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.distribution.outputs.staging-artifact-id }}
           repository: ${{ github.repository }}
@@ -708,7 +708,7 @@ jobs:
               raise SystemExit("::error::Release artifacts require the admitted Linux self-hosted runner.")
 
       - name: Download the exact engine reference
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.engine-input.outputs.reference-artifact-id }}
           repository: ${{ github.repository }}
@@ -825,7 +825,7 @@ jobs:
           python-version: ${{ matrix.python }}
 
       - name: Download selected engine inputs
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.engine-input.outputs.artifact-id }}
           repository: ${{ github.repository }}
@@ -836,7 +836,7 @@ jobs:
           digest-mismatch: error
 
       - name: Download frozen workspace assets
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.workspace-assets.outputs.artifact-id }}
           repository: ${{ github.repository }}
@@ -847,7 +847,7 @@ jobs:
           digest-mismatch: error
 
       - name: Download the candidate project declaration
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.prepare.outputs.artifact-id }}
           repository: ${{ github.repository }}
@@ -953,7 +953,7 @@ jobs:
       EXPECTED_PLAN_SHA: ${{ needs.prepare.outputs.plan-sha }}
     steps:
       - name: Download engine qualification identity
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.engine-input.outputs.artifact-id }}
           repository: ${{ github.repository }}
@@ -964,7 +964,7 @@ jobs:
           digest-mismatch: error
 
       - name: Download the prepared release plan
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.prepare.outputs.artifact-id }}
           repository: ${{ github.repository }}
@@ -975,7 +975,7 @@ jobs:
           digest-mismatch: error
 
       - name: Download every qualification cell
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ needs.engine-input.outputs.single-qualification-artifact }}
           pattern: workspace-qualification-${{ github.run_id }}-${{ github.run_attempt }}-*
@@ -1167,7 +1167,7 @@ jobs:
           ' >> "$GITHUB_OUTPUT"
 
       - name: Download the pinned declaration
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.prepare.outputs.artifact-id }}
           repository: ${{ github.repository }}
@@ -1179,7 +1179,7 @@ jobs:
 
       - name: Download the qualified release assets
         if: needs.prepare.outputs.bundle == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.distribution.outputs.staging-artifact-id }}
           repository: ${{ github.repository }}
@@ -1538,7 +1538,7 @@ jobs:
 
       - name: Download the qualified workspace publication inputs
         if: needs.prepare.outputs.workspaces == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.workspace-assets.outputs.artifact-id }}
           repository: ${{ github.repository }}
@@ -1550,7 +1550,7 @@ jobs:
 
       - name: Download the qualified engine selection
         if: needs.prepare.outputs.workspaces == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.engine-input.outputs.artifact-id }}
           repository: ${{ github.repository }}
@@ -1562,7 +1562,7 @@ jobs:
 
       - name: Download the signed engine reference
         if: needs.prepare.outputs.workspaces == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.engine-reference.outputs.artifact-id }}
           repository: ${{ github.repository }}
@@ -1750,7 +1750,7 @@ jobs:
           fi
 
       - name: Download the selected plan
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.prepare.outputs.artifact-id }}
           repository: ${{ github.repository }}
@@ -1761,7 +1761,7 @@ jobs:
           digest-mismatch: error
 
       - name: Download the selected inventory
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.review.outputs.assets-artifact-id }}
           repository: ${{ github.repository }}
@@ -1772,7 +1772,7 @@ jobs:
           digest-mismatch: error
 
       - name: Download the selected payload
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.review.outputs.payload-artifact-id }}
           repository: ${{ github.repository }}
