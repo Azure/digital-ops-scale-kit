@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Protocol, TypeVar
 
 from siteops import yamlio
-from siteops.diagnostics import ContentError, diagnostic_from_error
+from siteops.diagnostics import ContentError, diagnostic_from_error, warn
 from siteops.sanitize import is_redaction_enabled
 
 
@@ -1476,12 +1476,15 @@ class Manifest:
             )
         if "siteSelector" in spec:
             import logging as _logging
+            models_logger = _logging.getLogger("siteops.models")
             if is_redaction_enabled():
-                _logging.getLogger("siteops.models").warning(
-                    "Manifest siteSelector is deprecated. Use selector on the Manifest."
+                warn(
+                    models_logger, "deprecation.manifest-site-selector",
+                    "Manifest siteSelector is deprecated. Use selector on the Manifest.",
                 )
             else:
-                _logging.getLogger("siteops.models").warning(
+                warn(
+                    models_logger, "deprecation.manifest-site-selector",
                     "%s uses deprecated `siteSelector:`. Rename to `selector:`.", path,
                 )
             site_selector = spec.get("siteSelector")

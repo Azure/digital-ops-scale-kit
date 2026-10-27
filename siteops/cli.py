@@ -28,6 +28,7 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from types import FrameType
@@ -57,7 +58,9 @@ from siteops.composition import CompositionError, report_composition_error
 from siteops.diagnostics import (
     ContentDiagnostic,
     ValidationResult,
+    WarningRecorder,
     diagnostic_from_error,
+    recording_warnings,
     render_diagnostics,
 )
 from siteops.guided_inputs import (
@@ -139,6 +142,25 @@ def setup_logging(verbose: bool = False) -> None:
     )
     if not verbose:
         logging.getLogger("siteops.executor").setLevel(logging.WARNING)
+
+
+_COMMAND_WARNINGS: ContextVar[WarningRecorder | None] = ContextVar("siteops_command_warnings", default=None)
+
+
+@contextmanager
+def _recording_command_warnings() -> Iterator[None]:
+    """Record registered warnings for the JSON result of the running command."""
+    with recording_warnings() as recorder:
+        token = _COMMAND_WARNINGS.set(recorder)
+        try:
+            yield
+        finally:
+            _COMMAND_WARNINGS.reset(token)
+
+
+def _command_warnings() -> list[dict[str, Any]]:
+    recorder = _COMMAND_WARNINGS.get()
+    return recorder.documents() if recorder is not None else []
 
 
 def resolve_manifest_path(manifest: str | Path, workspace: Path) -> Path:
@@ -527,6 +549,30 @@ def cmd_cache(args: argparse.Namespace) -> int:
         return 1
 
 
+def _failed_browse_source(args: argparse.Namespace, error: ArtifactError) -> tuple[BrowseSource, str] | None:
+    """Describe a pinned package selection when inspection stops before its content opens."""
+    from siteops.github_attestation import VerificationError
+
+    current = Path.cwd()
+    try:
+        selected = args.project if args.project is not None else (
+            current if pin_exists(current) else None
+        )
+        if selected is None or args.workspace is not None:
+            return None
+        root = project_root(selected)
+        if not pin_exists(root):
+            return None
+        selection = read_pin(root).pin.selection
+    except (ArtifactError, OSError, ValueError):
+        return None
+    return BrowseSource(
+        "package", selection.source.reference, revision=selection.source.revision,
+        provider=selection.source.provider, project=str(root),
+        verification="failed" if isinstance(error, VerificationError) else "not-performed",
+    ), selection.entry.workspace
+
+
 def cmd_browse(args: argparse.Namespace) -> int:
     """Inspect content before any Site configuration or Orchestrator is loaded."""
     if is_redaction_enabled():
@@ -579,7 +625,12 @@ def cmd_browse(args: argparse.Namespace) -> int:
     except ArtifactError as error:
         from siteops.browse import BrowseDiagnostic
 
-        result = BrowseResult("", diagnostics=(BrowseDiagnostic(error.code, _error_text(error)),))
+        selected = None if args.source else _failed_browse_source(args, error)
+        result = BrowseResult(
+            selected[1] if selected else "",
+            diagnostics=(BrowseDiagnostic(error.code, _error_text(error)),),
+            source=selected[0] if selected else None,
+        )
     except ValueError as error:
         print(f"Error: {error}", file=sys.stderr)
         return 1
@@ -701,6 +752,7 @@ def _write_plan_result(
                 result,
                 projection,
                 engine_version=__version__,
+                warnings=_command_warnings(),
             )
         )
         return
@@ -720,7 +772,7 @@ class ExplicitSiteConflict(GuidedInputError):
 
 
 class ResourceReadError(GuidedInputError):
-    """Value-safe resource admission failure with a stable public code."""
+    """A resource admission failure with a stable public code and no private values."""
 
     def __init__(self, code: str, message: str):
         self.code = f"inputs.resource.{code}"
@@ -1462,7 +1514,7 @@ def _write_run_result(
 ) -> None:
     if json_output:
         print(
-            serialize_run_json(result, projection, engine_version=__version__),
+            serialize_run_json(result, projection, engine_version=__version__, warnings=_command_warnings()),
             end="",
         )
     else:
@@ -1529,7 +1581,9 @@ def cmd_validate(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
         site_options = {"sites": [explicit_site]} if explicit_site is not None else {}
         result = orchestrator.validate(manifest_path, selector=selector, manifest=manifest, **site_options)
     if json_output:
-        print(serialize_validation_json(result, projection, engine_version=__version__), end="")
+        print(serialize_validation_json(
+            result, projection, engine_version=__version__, warnings=_command_warnings(),
+        ), end="")
     else:
         print(render_plain_validation(result, redacted=is_redaction_enabled()),
               file=sys.stderr if result.exit_code else sys.stdout, end="")
@@ -2640,7 +2694,7 @@ def main() -> None:
             sys.exit(1)
     command_invoked = False
     try:
-        with open_command_context(**_context_options(args)) as context:
+        with _recording_command_warnings(), open_command_context(**_context_options(args)) as context:
             args.workspace = context.workspace
             binding = context.package.bind(args.manifest) if context.package is not None else None
             args.package_binding = binding

@@ -161,7 +161,7 @@ def run_bootstrap(
         ]
         if explicit:
             arguments += ["-SourceCommit", COMMIT]
-        arguments += ["-DryRun"] if dry_run else ["-Yes"]
+        arguments += ["-DryRun"] if dry_run else ["-Yes", "-NoModifyPath"]
         if piped:
             arguments = [
                 powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",

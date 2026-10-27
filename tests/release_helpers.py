@@ -1,8 +1,12 @@
 """Owned Git repositories and fixed release command paths for release tests."""
 
+import atexit
 import json
+import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -16,13 +20,15 @@ SOURCE_REF = "refs/heads/main"
 HEADLINE = "Release highlights"
 
 
-def _git(repository: Path, *arguments: str, input_bytes: bytes | None = None) -> str:
+def _git(
+    repository: Path, *arguments: str, input_bytes: bytes | None = None, environment: dict[str, str] | None = None,
+) -> str:
     input_arguments = (
         {"stdin": subprocess.DEVNULL} if input_bytes is None else {"input": input_bytes}
     )
     result = subprocess.run(
         ["git", "-C", str(repository), *arguments], capture_output=True,
-        timeout=30, check=False, **input_arguments,
+        timeout=30, check=False, env=environment, **input_arguments,
     )
     assert result.returncode == 0, result.stdout.decode(errors="replace") + result.stderr.decode(errors="replace")
     return result.stdout.decode().strip()
@@ -33,13 +39,39 @@ def repository(tmp_path: Path) -> Path:
     return create_repository(tmp_path / "repository")
 
 
+# Tests can redirect the temporary directory, so keep the location chosen at import.
+_TEMPORARY_ROOT = tempfile.gettempdir()
+_TEMPLATE: Path | None = None
+# The process needs only these to start Git. Every other setting comes from the template.
+_GIT_PROCESS = {"PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC", "TEMP", "TMP", "TMPDIR"}
+
+
+def _template() -> Path:
+    """Initialize one repository per session with the settings each test copies."""
+    global _TEMPLATE
+    if _TEMPLATE is None or not (_TEMPLATE / ".git").is_dir():
+        parent = Path(tempfile.mkdtemp(prefix="siteops-release-repository-", dir=_TEMPORARY_ROOT))
+        atexit.register(shutil.rmtree, parent, True)
+        template = parent / "repository"
+        template.mkdir()
+        # A fixed environment, so the first caller's Git settings never reach later repositories.
+        environment = {key: value for key, value in os.environ.items() if key.upper() in _GIT_PROCESS}
+        environment.update(
+            HOME=str(parent), XDG_CONFIG_HOME=str(parent / "config"), GIT_CONFIG_NOSYSTEM="1",
+            GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0",
+        )
+        _git(template, "init", "--quiet", environment=environment)
+        for key, value in (("user.name", "Release Intent Test"), ("user.email", "release-intent@example.invalid"),
+                           ("core.autocrlf", "false")):
+            _git(template, "config", key, value, environment=environment)
+        _TEMPLATE = template
+    return _TEMPLATE
+
+
 def create_repository(root: Path) -> Path:
     """Create a new test-owned repository with deterministic local Git settings."""
     root.mkdir()
-    _git(root, "init", "--quiet")
-    _git(root, "config", "user.name", "Release Intent Test")
-    _git(root, "config", "user.email", "release-intent@example.invalid")
-    _git(root, "config", "core.autocrlf", "false")
+    shutil.copytree(_template() / ".git", root / ".git")
     return root
 
 

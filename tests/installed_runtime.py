@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,10 +16,26 @@ from tests.native_bundle import write_wheel
 
 ROOT = Path(__file__).resolve().parent.parent
 RUNTIME_WHEELHOUSE = "SITEOPS_TEST_RUNTIME_WHEELHOUSE"
+# The engine source and runtime lock are fixed for a test session, so each is built or
+# downloaded once and every caller receives its own copy of those bytes.
+_SESSION_FILES: dict[str, dict[str, bytes]] = {}
+
+
+def _session_copy(kind: str, destination: Path) -> list[Path] | None:
+    files = _SESSION_FILES.get(kind)
+    if files is None:
+        return None
+    destination.mkdir()
+    for name, content in files.items():
+        (destination / name).write_bytes(content)
+    return sorted(destination / name for name in files)
 
 
 def build_engine_wheel(root: Path) -> Path:
     """Build the actual engine with the declared local backend and no package-index access."""
+    copied = _session_copy("engine", root / "wheels")
+    if copied is not None:
+        return copied[0]
     source = root / "source"
     source.mkdir()
     for name in ("pyproject.toml", "README.md", "LICENSE", "ThirdPartyNotices.txt"):
@@ -36,6 +54,7 @@ def build_engine_wheel(root: Path) -> Path:
     assert result.returncode == 0, result.stdout + result.stderr
     wheels = list((root / "wheels").glob("*.whl"))
     assert len(wheels) == 1
+    _SESSION_FILES["engine"] = {wheels[0].name: wheels[0].read_bytes()}
     return wheels[0]
 
 
@@ -76,6 +95,8 @@ def runtime_wheels(root: Path) -> Path:
         assert path.is_absolute() and path.is_dir(), f"{RUNTIME_WHEELHOUSE} must name an existing absolute directory."
         return path
     destination = root / "runtime-wheels"
+    if _session_copy("runtime", destination) is not None:
+        return destination
     destination.mkdir()
     allowed = {
         "SYSTEMROOT", "WINDIR", "SYSTEMDRIVE", "PATH", "PATHEXT", "PROGRAMDATA",
@@ -97,16 +118,25 @@ def runtime_wheels(root: Path) -> Path:
     assert result.returncode == 0, (
         "Locked runtime wheels are unavailable. Supply SITEOPS_TEST_RUNTIME_WHEELHOUSE for offline execution."
     )
+    _SESSION_FILES["runtime"] = {path.name: path.read_bytes() for path in destination.iterdir()}
     return destination
 
 
 @dataclass(frozen=True)
 class InstalledEngine:
+    """An engine installed for one caller.
+
+    `root`, `environment` and the tool copies belong to the caller. `application` is
+    shared by every caller installed from the same wheel in this session, so treat it as
+    read-only. The next install of that wheel fails when its files changed.
+    """
+
     root: Path
     python: Path
     command: Path
     environment: dict[str, str]
     runtime_wheelhouse: Path
+    application: Path
 
     def run(self, *arguments: str, expected: int = 0) -> subprocess.CompletedProcess[str]:
         result = subprocess.run(
@@ -117,12 +147,39 @@ class InstalledEngine:
         return result
 
 
-def install_engine(root: Path, wheel: Path) -> InstalledEngine:
-    environment = isolated_environment(root)
-    unrelated = root / "unrelated"
-    unrelated.mkdir()
-    wheels = runtime_wheels(root)
-    application = root / "application"
+# The installed application depends only on the engine wheel and the runtime lock, so each
+# wheel is installed once per session. Every caller still gets its own state, tools and checks.
+_SESSION_APPLICATIONS: dict[str, tuple[Path, tuple[tuple[str, int, str], ...]]] = {}
+
+
+def _interpreter(application: Path) -> Path:
+    return application / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+
+
+def _application_files(application: Path) -> tuple[tuple[str, int, str], ...]:
+    """Name, size and SHA-256 of each installed file. Running the engine may add bytecode caches."""
+    return tuple(sorted(
+        (path.relative_to(application).as_posix(), path.stat().st_size, hashlib.sha256(path.read_bytes()).hexdigest())
+        for path in application.rglob("*") if path.is_file() and "__pycache__" not in path.parts
+    ))
+
+
+def _shared_application(key: str, install: Callable[[], Path]) -> Path:
+    """Reuse an unchanged application, and reinstall one that is no longer complete."""
+    shared = _SESSION_APPLICATIONS.get(key)
+    if shared is not None and _interpreter(shared[0]).is_file():
+        application, files = shared
+        assert _application_files(application) == files, (
+            "A test changed the shared installed application. Treat InstalledEngine.application as read-only."
+        )
+        return application
+    application = install()
+    _SESSION_APPLICATIONS[key] = (application, _application_files(application))
+    return application
+
+
+def _install_application(application: Path, wheel: Path, wheels: Path, environment: dict[str, str],
+                         unrelated: Path) -> Path:
     created = subprocess.run(
         [sys.executable, "-m", "venv", "--without-pip", str(application)],
         cwd=unrelated, env=environment, capture_output=True, text=True, timeout=60,
@@ -136,7 +193,7 @@ def install_engine(root: Path, wheel: Path) -> InstalledEngine:
         "--find-links", str(wheels), "--requirement", str(ROOT / "scripts" / "siteops-runtime-requirements.txt"),
     ], cwd=unrelated, env=environment, capture_output=True, text=True, timeout=120)
     assert installed.returncode == 0, installed.stdout + installed.stderr
-    tools = root / "siteops_installed_tools-1.0-py3-none-any.whl"
+    tools = application.parent / "siteops_installed_tools-1.0-py3-none-any.whl"
     write_wheel(
         tools, name="siteops-installed-tools", version="1.0", module="siteops_installed_tools",
         entry_point="siteops-test-tool",
@@ -147,6 +204,20 @@ def install_engine(root: Path, wheel: Path) -> InstalledEngine:
         "--quiet", "--no-index", "--no-deps", str(wheel), str(tools),
     ], cwd=unrelated, env=environment, capture_output=True, text=True, timeout=120)
     assert installed.returncode == 0, installed.stdout + installed.stderr
+    return application
+
+
+def install_engine(root: Path, wheel: Path) -> InstalledEngine:
+    environment = isolated_environment(root)
+    unrelated = root / "unrelated"
+    unrelated.mkdir()
+    wheels = runtime_wheels(root)
+    application = _shared_application(
+        hashlib.sha256(wheel.read_bytes()).hexdigest(),
+        lambda: _install_application(root / "application", wheel, wheels, environment, unrelated),
+    )
+    binary = application / ("Scripts" if os.name == "nt" else "bin")
+    python = _interpreter(application)
     suffix = ".exe" if os.name == "nt" else ""
     for name in ("gh", "az"):
         shutil.copy2(binary / f"siteops-test-tool{suffix}", root / "tools" / f"{name}{suffix}")
@@ -160,4 +231,4 @@ def install_engine(root: Path, wheel: Path) -> InstalledEngine:
     identity = json.loads(imported.stdout)
     assert Path(identity["module"]).is_relative_to(application)
     assert str(ROOT) not in identity["path"]
-    return InstalledEngine(root, python, binary / f"siteops{suffix}", environment, wheels)
+    return InstalledEngine(root, python, binary / f"siteops{suffix}", environment, wheels, application)

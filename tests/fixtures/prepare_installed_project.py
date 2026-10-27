@@ -23,7 +23,8 @@ from siteops.workspace_source import (
 )
 
 root = Path(sys.argv[1]).resolve()
-assert Path(siteops.__file__).is_relative_to(root / "application")
+# The engine comes from the installed application this interpreter runs, not the checkout.
+assert Path(siteops.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
 source = root / ("controlled-build/source" if len(sys.argv) == 3 else "authored")
 source.parent.mkdir(parents=True, exist_ok=True)
 workspace = source / "workspace"

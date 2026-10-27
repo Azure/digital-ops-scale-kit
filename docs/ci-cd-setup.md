@@ -33,7 +33,7 @@ ADO deployment pipelines.
 
 | Workflow | Trigger | Purpose |
 |----------|---------|---------|
-| `ci.yaml` | Push, pull request, manual | Lint Python, run unit tests, run the Linux (Ubuntu 26.04) and Windows bootstrap tests, and validate Bicep templates and manifests. Manual run modes add the [release checks](releasing.md#choose-the-right-workflow). |
+| `ci.yaml` | Push, pull request, manual | Lint Python, run unit tests, run the Linux (Ubuntu 26.04) and Windows bootstrap tests, install Site Ops from the commit's Git URL with pip to validate and describe consumer content, and validate Bicep templates and manifests. Manual run modes add the [release checks](releasing.md#choose-the-right-workflow). |
 | `deploy.yaml` | Manual (`workflow_dispatch`) | Deploy infrastructure to Azure |
 | `_siteops-deploy.yaml` | Called by deploy.yaml | Reusable deployment logic |
 | `integration-test.yaml` | Manual (`workflow_dispatch`) | Run the integration pytest suite against an environment that was previously deployed via `deploy.yaml` |
@@ -437,6 +437,9 @@ registry. The helper reads only stdout JSON and imports no engine module.
 It checks field bounds, encodes logging and Markdown delimiters, and groups
 identical content records as `N occurrences`. Provider groups count logical
 operations instead. See [diagnostic codes](diagnostics.md).
+Registered warnings, such as a deprecated Manifest field, appear as warning
+annotations and summary lines without failing the task. See
+[warnings in results](run-output.md#read-warnings).
 
 Copied templates must include `scripts/render-siteops-output.py` from the same
 release, in the automation checkout. Use matching engine, setup, templates and

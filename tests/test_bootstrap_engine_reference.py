@@ -280,6 +280,8 @@ function Test-Verify {
     arguments = [
         shutil.which("powershell.exe"), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper),
         "-ContentRelease", "v1.0.0b7", "-SourceCommit", CONTENT_SHA, "-Repository", "example/publisher", "-Yes",
+        # The installation would otherwise save the test's command directory to the real user PATH.
+        "-NoModifyPath",
     ]
 
     def run(reject=""):
@@ -294,6 +296,7 @@ function Test-Verify {
         return
     assert first.returncode == 0, first.stdout + first.stderr
     assert f"Installed Site Ops {manifest.version}" in first.stdout
+    assert "Your saved PATH is unchanged." in first.stdout
     receipt = tmp_path / "tools" / "siteops" / "uv-receipt.toml"
     identity = receipt.stat().st_mtime_ns, receipt.read_bytes()
     assert log.read_text().splitlines().count("download") == 4

@@ -1,0 +1,1 @@
+{"apiVersion":"siteops/v1alpha1","key":{"identity":"v1.0.0","kind":"release","provider":"github-release/v1","scope":"github:example/content"},"kind":"SourceMetadataRecord","mutable":false,"observedAt":"2026-10-20T12:00:00Z","payload":{"base64":"eyJ0YWdfbmFtZSI6InYxLjAuMCJ9","sha256":"f86b5a41d95977aae7c57f674832155fb4ea336528ff4356ac53921f20e00be3","size":21}}

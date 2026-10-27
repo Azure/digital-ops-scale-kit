@@ -18,7 +18,7 @@ MISMATCH = (
     "Use matching engine, setup, templates and helpers."
 )
 _CODE = re.compile(r"[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*\Z", re.ASCII)
-_FIELDS = {"code", "severity", "summary", "guidance", "documentation", "subject", "schemaField"}
+_FIELDS = {"code", "severity", "summary", "guidance", "documentation", "subject", "schemaField", "occurrences"}
 _STATUSES = {"succeeded", "failed", "skipped", "not-run", "cancelled", "unknown"}
 _COMPOSITION_COUNTS = {
     "selectedSourceCount", "appliedResourceCount", "externalAssertionCount",
@@ -166,6 +166,8 @@ def _diagnostics(document):
             limit = 128 if field in {"subject", "schemaField"} else 2048
             if field in item and not _text(item[field], limit, multiline=field == "guidance"):
                 return None
+        if "occurrences" in item and (not _count(item["occurrences"]) or item["occurrences"] < 1):
+            return None
         if "documentation" in item:
             try:
                 url = urlsplit(item["documentation"])
@@ -247,9 +249,10 @@ def render(document, kind, code, platform):
         return logs, summary, True
     records, counts = {}, Counter()
     for diagnostic in diagnostics:
-        key = json.dumps(diagnostic, sort_keys=True)
-        records.setdefault(key, diagnostic)
-        counts[key] += 1
+        record = {key: value for key, value in diagnostic.items() if key != "occurrences"}
+        key = json.dumps(record, sort_keys=True)
+        records.setdefault(key, record)
+        counts[key] += diagnostic.get("occurrences", 1)
     for key, item in records.items():
         occurrence = f" ({counts[key]} occurrences)" if counts[key] > 1 else ""
         text = f"{item['code']}{occurrence}: {item['summary']}"

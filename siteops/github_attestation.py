@@ -25,8 +25,10 @@ from siteops.browse import BrowseError
 from siteops.cache_filesystem import check_trusted_executable
 from siteops.compilation import resolve_tool_from_path
 from siteops.content_metadata import require_mapping, validate_envelope
+from siteops.diagnostics import CLEANUP_INCOMPLETE, warn
 from siteops.github_source import UNTRUSTED_GH as _UNTRUSTED_VERIFIER
 from siteops.github_source import _run_gh
+from siteops.runtime import cleanup_location, describe_cleanup_error
 
 MAX_POLICY_BYTES = 256 * 1024
 MAX_EVIDENCE_BYTES = 2 * 1024 * 1024
@@ -42,7 +44,43 @@ logger = logging.getLogger(__name__)
 
 
 class VerificationError(ArtifactError):
-    """A value-safe failure before an artifact can receive a verification receipt."""
+    """A failure, without private values, before an artifact can receive a verification receipt.
+
+    `reason` names the closed category of a rejected proof, or is None for other failures.
+    """
+
+    def __init__(self, message: str, *, reason: str | None = None):
+        super().__init__(message)
+        self.reason = reason
+
+
+# Each category describes the check that failed without echoing an observed value.
+_PROOF_FAILURES = {
+    "issuer": "The artifact proof names a certificate issuer other than GitHub Actions.",
+    "repository": "The artifact proof names a source repository that the approved source does not allow.",
+    "ref": "The artifact proof names a source branch or tag that the approved source does not allow.",
+    "commit": "The artifact proof names a source commit other than the one the selected release records.",
+    "signer": "The artifact proof names a signing workflow that the approved source does not allow.",
+    "caller": "The artifact proof names a calling workflow that the approved source does not allow.",
+    "runner": "The artifact proof names a runner class that the approved source does not allow.",
+    "unclassified": "The detached artifact proof did not pass verification.",
+}
+# A branch or commit difference also changes the workflow identities, so it is named first.
+_CERTIFICATE_CHECKS = (
+    ("issuer", "issuer"),
+    ("sourceRepositoryURI", "repository"),
+    ("sourceRepositoryRef", "ref"),
+    ("sourceRepositoryDigest", "commit"),
+    ("buildSignerDigest", "commit"),
+    ("buildConfigDigest", "commit"),
+    ("subjectAlternativeName", "signer"),
+    ("buildConfigURI", "caller"),
+    ("runnerEnvironment", "runner"),
+)
+
+
+def _rejected(reason: str) -> VerificationError:
+    return VerificationError(_PROOF_FAILURES[reason], reason=reason)
 
 
 def _now() -> datetime:
@@ -221,13 +259,8 @@ def fetch_trusted_root() -> bytes:
     return stdout
 
 
-def _observations(
-    payload: bytes, policy: GitHubArtifactPolicy, digest: str, source_commit: str, evaluated_at: datetime,
-) -> bytes:
-    results = _json(payload, MAX_RESULT_BYTES)
-    if not isinstance(results, list) or not 1 <= len(results) <= 128:
-        raise VerificationError("The verifier returned no bounded successful evidence set.")
-    expected = {
+def _expected_certificate(policy: GitHubArtifactPolicy, source_commit: str) -> dict[str, str]:
+    return {
         "subjectAlternativeName": policy.workflow_identity(policy.signer_workflow),
         "issuer": _ISSUER,
         "sourceRepositoryURI": policy.repository_uri,
@@ -238,6 +271,22 @@ def _observations(
         "buildConfigURI": policy.workflow_identity(policy.builder_workflow),
         "buildConfigDigest": source_commit,
     }
+
+
+def _certificate_mismatch(certificate: dict[str, Any], expected: dict[str, str]) -> str | None:
+    for key, reason in _CERTIFICATE_CHECKS:
+        if certificate.get(key) != expected[key]:
+            return reason
+    return None
+
+
+def _observations(
+    payload: bytes, policy: GitHubArtifactPolicy, digest: str, source_commit: str, evaluated_at: datetime,
+) -> bytes:
+    results = _json(payload, MAX_RESULT_BYTES)
+    if not isinstance(results, list) or not 1 <= len(results) <= 128:
+        raise VerificationError("The verifier returned no bounded successful evidence set.")
+    expected = _expected_certificate(policy, source_commit)
     observations = []
     for result in results:
         verification = _record(_record(result).get("verificationResult"))
@@ -256,8 +305,9 @@ def _observations(
         if _record(subject.get("digest")).get("sha256") != digest:
             raise VerificationError("The verified subject does not match the expected artifact.")
         certificate = _record(_record(verification.get("signature")).get("certificate"))
-        if any(certificate.get(key) != value for key, value in expected.items()):
-            raise VerificationError("The verified certificate does not satisfy publisher/source policy.")
+        reason = _certificate_mismatch(certificate, expected)
+        if reason is not None:
+            raise _rejected(reason)
         timestamps = verification.get("verifiedTimestamps")
         if not isinstance(timestamps, list) or not 1 <= len(timestamps) <= 32:
             raise VerificationError("The verifier did not establish a bounded timestamp set.")
@@ -281,6 +331,38 @@ def _observations(
         "provider": "github-attestation/v1", "resultMediaType": _RESULT_MEDIA_TYPE,
         "matches": observations,
     }, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+
+
+def _rejection(
+    executable: str, artifact: Path, staging: Path, policy: GitHubArtifactPolicy, source_commit: str,
+) -> VerificationError:
+    """Name why policy verification failed, from a run that checks only the proof and repository.
+
+    This run never admits an artifact. It only selects a closed failure category. gh keeps
+    its repository filters and its default GitHub Actions issuer here, so a failure of this
+    run cannot tell a bad proof from another repository, signer repository or issuer.
+    Only claims in a proof that passes this run are named.
+    """
+    try:
+        code, output = _run([
+            executable, "attestation", "verify", str(artifact.resolve()),
+            "--hostname", "github.com", "--bundle", str(staging / "proof.jsonl"),
+            "--custom-trusted-root", str(staging / "trusted-root.jsonl"),
+            "--repo", policy.repository, "--digest-alg", "sha256", "--format", "json",
+        ])
+        if code != 0:
+            return _rejected("unclassified")
+        results = _json(output, MAX_RESULT_BYTES)
+        expected = _expected_certificate(policy, source_commit)
+        for result in results if isinstance(results, list) else ():
+            verification = _record(_record(result).get("verificationResult"))
+            certificate = _record(_record(verification.get("signature")).get("certificate"))
+            reason = _certificate_mismatch(certificate, expected)
+            if reason is not None:
+                return _rejected(reason)
+    except (VerificationError, OSError):
+        pass
+    return _rejected("unclassified")
 
 
 def verify_github_artifact(
@@ -352,26 +434,30 @@ def verify_github_artifact(
             "--digest-alg", "sha256", "--format", "json",
         ])
         if code != 0:
-            raise VerificationError("The detached artifact proof did not pass verification.")
+            raise _rejection(executable, artifact, root, policy, source_commit)
         if hash_file(artifact, limit=MAX_ARTIFACT_BYTES) != (size, digest):
             raise VerificationError("The artifact changed during verification.")
         evidence = _observations(output, policy, digest, source_commit, evaluated_at)
     except OSError:
         raise VerificationError("Verification input staging could not be completed.") from None
     finally:
-        cleanup_failed = False
+        cleanup_error: OSError | None = None
         for path in reversed(created):
             try:
                 path.unlink()
-            except OSError:
-                cleanup_failed = True
+            except OSError as failure:
+                cleanup_error = cleanup_error or failure
         if root is not None:
             try:
                 root.rmdir()
-            except OSError:
-                cleanup_failed = True
-        if cleanup_failed:
-            logger.warning("Verification staging cleanup could not be completed.")
+            except OSError as failure:
+                cleanup_error = cleanup_error or failure
+        if cleanup_error is not None and root is not None:
+            warn(
+                logger, CLEANUP_INCOMPLETE,
+                "Verification staging cleanup could not be completed. Location: %s. Reason: %s.",
+                cleanup_location(root), describe_cleanup_error(cleanup_error),
+            )
     if _now() >= policy.valid_until:
         raise VerificationError("The verification policy expired during evaluation.")
     if hashlib.sha256(_read(policy_file, MAX_POLICY_BYTES)).hexdigest() != policy.sha256:

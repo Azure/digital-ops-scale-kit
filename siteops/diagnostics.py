@@ -6,11 +6,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Iterable, NamedTuple
+from typing import Any, Iterable, Iterator, Mapping, NamedTuple
 
 _INDEX = "https://github.com/Azure/digital-ops-scale-kit/blob/main/docs/diagnostics.md"
 LOCAL_REPRODUCTION = (
@@ -254,6 +256,28 @@ for _code, _summary in _RESOURCE_SUMMARIES.items():
         ),
         content=True,
     ))
+# Warnings that the engine logs on stderr and also records for result documents.
+CLEANUP_INCOMPLETE = "warning.cleanup-incomplete"
+_WARNINGS = (
+    ("deprecation.manifest-site-selector", "manifest", "A Manifest uses the deprecated siteSelector field.",
+     "Rename siteSelector to selector on the Manifest. Both spellings select the same Sites.\n"
+     "Run `siteops -w <workspace> validate <manifest>` locally to see the Manifest file on stderr.", False),
+    ("warning.manifest-site-repeated", "manifest", "A Manifest lists the same Site more than once.",
+     "Remove the repeated Site name from sites. Site Ops deploys each Site once.\n"
+     "Run `siteops -w <workspace> validate <manifest>` locally to see the Manifest and Site names on stderr.",
+     False),
+    (CLEANUP_INCOMPLETE, None, "Site Ops could not remove some of its temporary or staging files.",
+     "When no Site Ops command is running, remove the leftovers. They are usually in the Site Ops temporary "
+     "directory, which is `SITEOPS_TEMP_DIR` or the system default, or in the cache's `staging` folder. A local "
+     "run names each leftover on stderr. If output redaction withheld a location, look in the folder the "
+     "command was writing to. Temporary deployment files can hold resolved parameter values. The command "
+     "outcome is unchanged.", False),
+)
+_definitions.extend(
+    _definition(code, summary, guidance, content=content) for code, _, summary, guidance, content in _WARNINGS
+)
+WARNING_CODES = frozenset(code for code, *_ in _WARNINGS)
+_WARNING_SUBJECTS = MappingProxyType({code: subject for code, subject, *_ in _WARNINGS})
 _base_definitions = MappingProxyType({entry.member.value: entry for entry in _definitions})
 _PUBLIC_NAMES = {
     "composition.invalid": ("plan.composition-invalid", "run.preparation-invalid"),
@@ -607,3 +631,71 @@ def render_diagnostics(documents: Iterable[dict[str, Any]], *, indent: str = "  
         if document.get("documentation"):
             lines.extend(terminal.wrap(document["documentation"], indent=indent + "  "))
     return lines
+
+
+_WARNING_ATTRIBUTE = "siteops_diagnostic"
+
+
+def warn(logger: logging.Logger, code: str, message: str, *args: Any) -> None:
+    """Log a private warning and tag it with its registered public code.
+
+    The message keeps its local detail on stderr. A result document publishes
+    only the registry text for `code`.
+    """
+    logger.warning(message, *args, extra={_WARNING_ATTRIBUTE: code}, stacklevel=2)
+
+
+class WarningRecorder(logging.Handler):
+    """Count registered warnings that the engine logs while one command runs."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.WARNING)
+        self._counts: Counter[str] = Counter()
+
+    def emit(self, record: logging.LogRecord) -> None:
+        code = getattr(record, _WARNING_ATTRIBUTE, None)
+        if type(code) is str and code in WARNING_CODES:
+            self._counts[code] += 1
+
+    def documents(self) -> list[dict[str, Any]]:
+        """Return one registry record per code, in the order first logged.
+
+        A record for a code logged more than once carries `occurrences`.
+        """
+        with self.lock:
+            counts = list(self._counts.items())
+        documents = []
+        for code, count in counts:
+            document: dict[str, Any] = public_document(
+                REGISTRY[code].member, "warning", subject=_WARNING_SUBJECTS[code],
+            )
+            if count > 1:
+                document["occurrences"] = count
+            documents.append(document)
+        return documents
+
+
+@contextmanager
+def recording_warnings() -> Iterator[WarningRecorder]:
+    """Record registered warnings from every engine logger until the block exits."""
+    recorder = WarningRecorder()
+    logger = logging.getLogger("siteops")
+    logger.addHandler(recorder)
+    try:
+        yield recorder
+    finally:
+        logger.removeHandler(recorder)
+
+
+def with_warnings(document: dict[str, Any], warnings: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    """Append warning records after a document's own diagnostics.
+
+    A `summary.diagnosticCount` keeps counting every serialized record.
+    """
+    records = [dict(record) for record in warnings]
+    if records:
+        document["diagnostics"] = [*document["diagnostics"], *records]
+        summary = document.get("summary")
+        if isinstance(summary, dict) and "diagnosticCount" in summary:
+            summary["diagnosticCount"] += len(records)
+    return document

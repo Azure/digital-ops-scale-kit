@@ -81,9 +81,10 @@ trusted_parent() {
 }
 # Walk an absolute path from the root without following links. Missing
 # directories are created privately unless the caller requires an existing
-# path. Private Site Ops data must be owned by this user and closed to others.
-# Native uv storage only excludes other writers. Sets admitted to the
-# lexically normalized path.
+# path. A check creates nothing and accepts a missing directory whose
+# admitted parent is writable. Private Site Ops data must be owned by this
+# user and closed to others. Native uv storage only excludes other writers.
+# Sets admitted to the lexically normalized path.
 admit_directory() {
   local path="$1" kind="$2" create="${3:-create}" current="" part owner group mode
   local -a parts
@@ -98,6 +99,10 @@ admit_directory() {
     esac
     current="$current/$part"
     if [[ ! -e "$current" && ! -L "$current" ]]; then
+      if [[ "$create" == check ]]; then
+        [[ -w "${current%/*}/" ]]
+        return
+      fi
       [[ "$create" == create ]] || return 1
       mkdir -m 0700 -- "$current" 2>/dev/null || true
     fi
@@ -565,6 +570,11 @@ if $dry_run; then
   stage "Preview only. No tools or content were downloaded."
   exit 0
 fi
+refuse_data_root() {
+  fail "Configure a private Site Ops data root under trusted, non-symlinked directories. Its parent directories must not be writable by other users or shared groups."
+}
+# Check the existing storage before consent, so a refused data root stops first.
+admit_directory "$data" private check || refuse_data_root
 if ! $approve; then
   [[ -t 0 ]] || fail "In automation, pass --yes after reviewing the changes."
   read -r -p "Install missing tools and the selected Site Ops build? [y/N] " answer
@@ -575,8 +585,7 @@ if [[ -n "$enroll_name" ]] && ! $approve; then
   [[ "$answer" == y || "$answer" == Y ]] || fail "Source enrollment was not approved."
 fi
 
-admit_directory "$data" private ||
-  fail "Configure a private Site Ops data root under trusted, non-symlinked directories. Its parent directories must not be writable by other users or shared groups."
+admit_directory "$data" private || refuse_data_root
 data="$admitted"
 
 # Staged files rely on umask 077. Inherited access rules can override it, so

@@ -4,6 +4,7 @@ import configparser
 import email
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import zipfile
@@ -14,6 +15,7 @@ import yaml
 from packaging.requirements import Requirement
 
 from siteops import __version__
+from tests import installed_runtime
 from tests.installed_runtime import build_engine_wheel, install_engine, isolated_environment
 
 try:
@@ -40,6 +42,40 @@ def test_build_backend_requires_spdx_metadata_support():
     )
     assert "65.5.0" not in backend.specifier
     assert "77.0.3" in backend.specifier
+
+
+def test_both_ci_lint_jobs_run_the_ruff_pinned_by_the_dev_extra():
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    ruff = [Requirement(value) for value in project["project"]["optional-dependencies"]["dev"]
+            if Requirement(value).name == "ruff"]
+    assert len(ruff) == 1 and str(ruff[0].specifier).startswith("==")
+    command = "ruff check siteops tests scripts"
+    github = yaml.safe_load((ROOT / ".github/workflows/ci.yaml").read_text(encoding="utf-8"))
+    steps = github["jobs"]["lint"]["steps"]
+    setup = [step for step in steps if step.get("uses") == "./.github/actions/setup-siteops"]
+    assert [step["with"] for step in setup] == [{"install-dev": "true"}]
+    assert [step["run"] for step in steps if "ruff" in step.get("run", "")] == [command]
+    ado = yaml.safe_load((ROOT / ".pipelines/ci.yaml").read_text(encoding="utf-8"))
+    steps = next(job for job in ado["jobs"] if job["job"] == "lint")["steps"]
+    setup = [step for step in steps if step.get("template") == "templates/setup-siteops.yaml"]
+    assert [step["parameters"] for step in setup] == [{"installDev": True}]
+    assert [step["script"] for step in steps if "ruff" in step.get("script", "")] == [command]
+    for setup in (".github/actions/setup-siteops/action.yaml", ".pipelines/templates/setup-siteops.yaml"):
+        text = (ROOT / setup).read_text(encoding="utf-8")
+        assert 'pip install -e ".[dev]"' in text and "ruff" not in text
+
+
+def test_both_ci_unit_jobs_run_one_selection_and_list_the_slowest_tests():
+    github = yaml.safe_load((ROOT / ".github/workflows/ci.yaml").read_text(encoding="utf-8"))
+    ado = yaml.safe_load((ROOT / ".pipelines/ci.yaml").read_text(encoding="utf-8"))
+    commands = [
+        shlex.split(next(step["run"] for step in github["jobs"]["test"]["steps"] if step.get("name") == "Run unit tests")),
+        shlex.split(next(step["script"] for job in ado["jobs"] if job["job"] == "test"
+                         for step in job["steps"] if step.get("displayName") == "Run unit tests")),
+    ]
+    assert commands[0] == commands[1]
+    assert commands[0][:5] == ["pytest", "tests/", "-m", "not integration", "-v"]
+    assert "--cov=siteops" in commands[0] and "--durations=25" in commands[0]
 
 
 def test_wheel_contains_the_engine_not_a_workspace(built_wheel):
@@ -363,7 +399,7 @@ def test_installed_worker_is_present_and_uses_its_fixed_protocol(installed_engin
     )
     assert location.returncode == 0, location.stderr
     worker = Path(location.stdout.strip())
-    assert worker.is_relative_to(app.root / "application")
+    assert worker.is_relative_to(app.application)
     result = subprocess.run(
         [str(app.python), "-I", "-S", str(worker)],
         cwd=app.root / "unrelated", env=app.environment,
@@ -383,3 +419,31 @@ def test_installed_command_environment_excludes_ambient_credentials(tmp_path, mo
     ))
     assert Path(environment["AZURE_CONFIG_DIR"]).is_relative_to(tmp_path)
     assert Path(environment["GH_CONFIG_DIR"]).is_relative_to(tmp_path)
+
+
+@pytest.mark.parametrize("change", ["engine = 2  # changed by a test\n", "engine = 2\n"])
+def test_shared_application_is_reused_only_while_unchanged_and_complete(tmp_path, monkeypatch, change):
+    monkeypatch.setattr(installed_runtime, "_SESSION_APPLICATIONS", {})
+    installs = []
+
+    def install():
+        application = tmp_path / f"application-{len(installs)}"
+        interpreter = installed_runtime._interpreter(application)
+        interpreter.parent.mkdir(parents=True)
+        interpreter.write_bytes(b"python")
+        (application / "engine.py").write_text("engine = 1\n", encoding="utf-8")
+        installs.append(application)
+        return application
+
+    first = installed_runtime._shared_application("wheel", install)
+    # A bytecode cache written while the engine runs is not a change.
+    (first / "__pycache__").mkdir()
+    (first / "__pycache__" / "engine.pyc").write_bytes(b"cache")
+    assert installed_runtime._shared_application("wheel", install) == first
+    assert len(installs) == 1
+    # A change of the same size counts too.
+    (first / "engine.py").write_text(change, encoding="utf-8")
+    with pytest.raises(AssertionError, match="Treat InstalledEngine.application as read-only"):
+        installed_runtime._shared_application("wheel", install)
+    installed_runtime._interpreter(first).unlink()
+    assert installed_runtime._shared_application("wheel", install) == installs[1] != first

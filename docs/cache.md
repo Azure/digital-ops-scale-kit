@@ -19,7 +19,8 @@ siteops cache list --output json
 
 Inspection makes no source requests and reports a storage inventory. Site Ops
 verifies integrity and publisher trust when it uses a package, including one
-listed as `stored`.
+listed as `stored`. [Saved data](saved-data.md) lists the format of each
+stored file and which releases read it.
 
 ## Run `cache list`
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import threading
 from collections import Counter
-from typing import Any, TextIO
+from typing import Any, Iterable, Mapping, TextIO
 
 from siteops import __version__, terminal
 from siteops.diagnostics import (
@@ -17,6 +17,7 @@ from siteops.diagnostics import (
     public_document,
     render_diagnostics,
     resolve_member,
+    with_warnings,
 )
 from siteops.planning import PlanProjection
 from siteops.results import (
@@ -42,9 +43,11 @@ _KIND = "DeploymentRun"
 
 def serialize_validation_json(
     result: ValidationResult, projection: PlanProjection, *, engine_version: str,
+    warnings: Iterable[Mapping[str, Any]] = (),
 ) -> str:
     """Serialize structural validation without executable preparation."""
-    return json.dumps(result.document(projection.value, engine_version), indent=2, sort_keys=True) + "\n"
+    document = with_warnings(result.document(projection.value, engine_version), warnings)
+    return json.dumps(document, indent=2, sort_keys=True) + "\n"
 
 
 def render_plain_validation(result: ValidationResult, *, redacted: bool) -> str:
@@ -244,6 +247,7 @@ def serialize_run_json(
     projection: PlanProjection,
     *,
     engine_version: str,
+    warnings: Iterable[Mapping[str, Any]] = (),
 ) -> str:
     """Serialize one explicit final-result projection."""
     if projection is PlanProjection.PUBLISHABLE:
@@ -252,7 +256,7 @@ def serialize_run_json(
         document = _local_private_document(result, engine_version)
     else:  # pragma: no cover - PlanProjection is closed
         raise ValueError(f"Unsupported run projection: {projection!r}")
-    return json.dumps(document, indent=2, sort_keys=True) + "\n"
+    return json.dumps(with_warnings(document, warnings), indent=2, sort_keys=True) + "\n"
 
 
 _NAME_COLUMN_LIMIT = 24

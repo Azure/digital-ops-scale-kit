@@ -1,0 +1,32 @@
+{
+  "apiVersion": "siteops/v1alpha1",
+  "content": {
+    "kit": {
+      "id": "example.consumer",
+      "version": "1.0.0"
+    },
+    "package": {
+      "name": "content.zip",
+      "sha256": "76a35cc866c5930c78c811cbc4901874e7e821eb2b549392efd9747246ad6910",
+      "size": 2879
+    },
+    "proof": {
+      "name": "content.zip.attestation.jsonl",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "size": 64
+    },
+    "workspace": "workspace"
+  },
+  "kind": "WorkspacePin",
+  "source": {
+    "descriptor": {
+      "name": "siteops-workspaces.json",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "size": 512
+    },
+    "provider": "github-release/v1",
+    "reference": "github:example/content",
+    "release": "v1.0.0",
+    "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+}

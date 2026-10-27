@@ -51,7 +51,9 @@ from siteops.compilation import (
     extract_template_parameters,
     validate_arm_template,
 )
+from siteops.diagnostics import CLEANUP_INCOMPLETE, warn
 from siteops.manifest_selection import is_explicit_manifest_path, select_manifest_path
+from siteops.runtime import cleanup_location, describe_cleanup_error
 from siteops.workspace_compatibility import require_engine_version, validate_engine_range
 
 PACKAGE_NAME = "siteops-package.json"
@@ -1224,16 +1226,18 @@ def extract_package(path: Path, expected_sha256: str, destination: Path) -> Pack
         raise ArtifactError("Package extraction requires a new writable staging directory.") from None
     finally:
         if not complete:
-            cleanup_failed = False
+            cleanup_error: OSError | None = None
             for target in reversed(created_files):
                 try:
                     target.unlink()
-                except OSError:
-                    cleanup_failed = True
+                except OSError as failure:
+                    cleanup_error = cleanup_error or failure
             for directory in reversed(created_directories):
                 try:
                     directory.rmdir()
-                except OSError:
-                    cleanup_failed = True
-            if cleanup_failed:
-                logger.warning("Incomplete package staging cleanup could not be completed.")
+                except OSError as failure:
+                    cleanup_error = cleanup_error or failure
+            if cleanup_error is not None:
+                warn(logger, CLEANUP_INCOMPLETE,
+                     "Incomplete package staging cleanup could not be completed. Location: %s. Reason: %s.",
+                     cleanup_location(destination), describe_cleanup_error(cleanup_error))

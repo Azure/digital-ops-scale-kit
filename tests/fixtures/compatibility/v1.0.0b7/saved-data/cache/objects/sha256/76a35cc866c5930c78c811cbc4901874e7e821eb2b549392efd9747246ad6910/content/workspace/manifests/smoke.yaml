@@ -1,0 +1,7 @@
+apiVersion: siteops/v1
+kind: Manifest
+name: consumer-smoke
+steps:
+  - name: validate-template-reference
+    template: templates/empty.template.json
+    scope: resourceGroup

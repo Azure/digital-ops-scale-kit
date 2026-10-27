@@ -27,7 +27,9 @@ from siteops.cache_filesystem import (
     check_private_node,
     make_private_directory,
 )
+from siteops.diagnostics import CLEANUP_INCOMPLETE, warn
 from siteops.process_capture import BoundedCapture
+from siteops.runtime import cleanup_location, describe_cleanup_error
 from siteops.workspace_source import ArtifactIdentity
 
 logger = logging.getLogger(__name__)
@@ -237,7 +239,16 @@ def download_https_asset(
             try:
                 check_private_node(operation, directory=True)
                 shutil.rmtree(operation)
-            except (OSError, ArtifactError):
-                logger.warning("Asset transfer staging cleanup could not be completed.")
+            except (OSError, ArtifactError) as error:
+                warn(
+                    logger, CLEANUP_INCOMPLETE,
+                    "Asset transfer staging cleanup could not be completed. Location: %s. Reason: %s.",
+                    cleanup_location(operation), describe_cleanup_error(error),
+                )
         else:
-            logger.warning("Asset transfer staging was retained because worker exit could not be confirmed.")
+            warn(
+                logger, CLEANUP_INCOMPLETE,
+                "Asset transfer staging was retained because worker exit could not be confirmed. "
+                "Location: %s.",
+                cleanup_location(operation),
+            )

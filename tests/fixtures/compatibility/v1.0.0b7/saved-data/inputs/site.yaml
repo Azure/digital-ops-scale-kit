@@ -1,0 +1,6 @@
+apiVersion: siteops/v1
+kind: Site
+name: saved-site
+subscription: 00000000-0000-0000-0000-000000000001
+resourceGroup: rg-saved
+location: eastus
