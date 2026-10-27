@@ -1,0 +1,7 @@
+apiVersion: siteops.inputs/v1
+kind: SiteInputValues
+values:
+  siteName: saved-site
+  subscription: 00000000-0000-0000-0000-000000000001
+  resourceGroup: rg-saved
+  location: eastus

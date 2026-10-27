@@ -16,6 +16,7 @@ from typing import ContextManager, Protocol
 
 from siteops.artifacts import ArtifactError, hash_file
 from siteops.cache_filesystem import CacheError
+from siteops.diagnostics import CLEANUP_INCOMPLETE, warn
 from siteops.github_workspace_acquisition import GitHubWorkspaceAcquirer
 from siteops.project import (
     ProjectError,
@@ -28,7 +29,7 @@ from siteops.project import (
 from siteops.results import ProgressCallback, ProgressEvent, ProgressEventKind, ProgressPhase
 from siteops.runtime import (
     RuntimePaths,
-    bounded_runtime_path,
+    cleanup_location,
     create_private_directory,
     describe_os_error,
 )
@@ -179,9 +180,10 @@ def _remove_temporary_configuration(path: Path) -> None:
     try:
         shutil.rmtree(path)
     except OSError as error:
-        logger.warning(
+        warn(
+            logger, CLEANUP_INCOMPLETE,
             "Temporary Site configuration %s could not be removed: %s",
-            bounded_runtime_path(path), describe_os_error(error),
+            cleanup_location(path), describe_os_error(error),
         )
 
 

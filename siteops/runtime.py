@@ -20,6 +20,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from siteops.artifacts import ArtifactError
+from siteops.sanitize import is_redaction_enabled
+
 # Explicit operator selection. Set to an absolute directory path.
 TEMP_DIR_ENV = "SITEOPS_TEMP_DIR"
 
@@ -51,6 +54,43 @@ def bounded_runtime_path(path: Path | str) -> str:
     if parent_name:
         return f"...{os.sep}{parent_name}{os.sep}{candidate.name}"
     return candidate.name
+
+
+def cleanup_location(
+    path: Path | str, *, parent_is_engine_owned: bool = False, name_is_chosen: bool = False,
+) -> str:
+    """Name a leftover that Site Ops created, for a cleanup warning.
+
+    Without output redaction this is the bounded form, the leftover's folder
+    and name. With redaction on, only the leftover's own name remains, because
+    a user can choose its folder, such as the one that holds a configured cache
+    or the temporary directory. Pass `parent_is_engine_owned` only when Site
+    Ops created that folder itself, such as the cache's `staging` folder or an
+    engine scratch directory, so the folder stays visible. Pass
+    `name_is_chosen` when the user chose the leftover's own name, which
+    redaction then withholds too.
+    """
+    candidate = Path(path)
+    if not is_redaction_enabled() or parent_is_engine_owned and not name_is_chosen:
+        return bounded_runtime_path(candidate)
+    if name_is_chosen:
+        return "withheld by output redaction"
+    return f"...{os.sep}{candidate.name}"
+
+
+def describe_cleanup_error(error: Exception) -> str:
+    """Say why a removal failed, without a path and without a final period.
+
+    A system failure gives its reason, such as `Access is denied`. A refused
+    private storage check gives its artifact message, which contains no private values.
+    """
+    if isinstance(error, OSError):
+        text = describe_os_error(error)
+    elif isinstance(error, ArtifactError):
+        text = str(error)
+    else:
+        text = error.__class__.__name__
+    return text.rstrip(".")
 
 
 def describe_os_error(error: OSError) -> str:

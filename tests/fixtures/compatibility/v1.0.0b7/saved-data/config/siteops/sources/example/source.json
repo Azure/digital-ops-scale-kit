@@ -1,0 +1,1 @@
+{"apiVersion": "siteops.source/v1", "kind": "ApprovedSource", "name": "example", "policySha256": "e003d1ddd59efdef9ddf6a0c7ca409ab9148b88dd3df2141dba31e86e71919d6", "provider": "github-release/v1", "reference": "github:example/content", "trustedRootSha256": "e1ddebd07c9a5f03d86bb24f54495c41a3e7754e848f953596a6ce5fbee148c5"}

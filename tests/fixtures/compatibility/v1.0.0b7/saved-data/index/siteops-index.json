@@ -1,0 +1,49 @@
+{
+  "apiVersion": "siteops/v1alpha1",
+  "entries": [
+    {
+      "guidance": {
+        "category": "example",
+        "coverage": "Illustrative storage deployment, not a complete provider constraint or permission schema.",
+        "documentation": [
+          "manifests/storage/README.md"
+        ],
+        "effects": [
+          "Creates or updates a storage account."
+        ],
+        "inputs": [
+          {
+            "description": "Globally unique storage account name.",
+            "field": "parameters.storageAccountName",
+            "requirement": "required",
+            "sensitivity": "non-sensitive",
+            "type": "string"
+          },
+          {
+            "description": "Azure location from the configured Site.",
+            "field": "location",
+            "requirement": "required",
+            "sensitivity": "non-sensitive",
+            "type": "string"
+          }
+        ],
+        "outcome": "A storage account in the selected Site's resource group.",
+        "prerequisites": [
+          "An existing resource group and permission to deploy its resources."
+        ],
+        "removal": [
+          "Delete the account deliberately after preserving required data."
+        ],
+        "supplied": [],
+        "tags": [
+          "storage"
+        ]
+      },
+      "name": "storage",
+      "path": "manifests/storage/manifest.yaml",
+      "role": "standalone"
+    }
+  ],
+  "kind": "ContentIndex",
+  "projection": "publishable"
+}

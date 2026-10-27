@@ -52,6 +52,13 @@ jobs:
         fetchDepth: 1
         persistCredentials: false
 
+      # Tests compare the frozen v1.0.0b7 fixtures with this protected upstream tag.
+      - script: |
+          set -euo pipefail
+          git fetch --quiet --no-tags --depth=1 https://github.com/Azure/digital-ops-scale-kit \
+            "+refs/tags/v1.0.0b7:refs/tags/v1.0.0b7"
+        displayName: Fetch the v1.0.0b7 compatibility baseline
+
       - template: templates/setup-siteops.yaml
         parameters:
           installDev: true
@@ -76,7 +83,10 @@ jobs:
           --cov-report=term-missing
           --cov-report=xml:coverage.xml
           --junitxml=test-results.xml
+          --durations=25
         displayName: Run unit tests
+        env:
+          SITEOPS_REQUIRE_COMPATIBILITY_TAG: "1"
 
       - task: PublishTestResults@2
         displayName: Publish test results

@@ -42,7 +42,7 @@ steps:
 | `name` | no | Manifest name. Defaults to the filename without its extension. |
 | `description` | no | Free text describing the manifest. |
 | `sites` | no | Site names or relative Site paths to target. When both `sites:` and `selector:` are set, `sites:` is used. |
-| `selector` | no | Label selector, such as `environment=dev`. `siteSelector` is a deprecated spelling that logs a warning. Declaring both spellings is an error. |
+| `selector` | no | Label selector, such as `environment=dev`. `siteSelector` is a deprecated spelling that logs a warning, reported in JSON results as [`deprecation.manifest-site-selector`](diagnostics.md#deprecationmanifest-site-selector). Declaring both spellings is an error. |
 | `parallel` | no | Concurrent Sites. See [Parallel execution](#parallel-execution). |
 | `parameters` | no | Parameter sources applied to every step. See [Manifest parameters](#manifest-parameters). |
 | `parameterCompositions` | no | Workspace contracts for composed parameter collections. |

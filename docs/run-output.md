@@ -268,6 +268,51 @@ identical public records as `N occurrences`, not `N operations`.
 `summary.diagnosticCount`, when present, still counts serialized records.
 Each private context remains attached to its own record.
 
+## Read warnings
+
+A warning reports something to correct that does not stop the command, such
+as a Manifest that still uses `siteSelector`. Warnings print on stderr while
+the command runs, with local detail such as the file path.
+
+With `--output json`, `validate`, `plan` and `deploy` also add each registered
+warning to the result's `diagnostics` array, after the result's own
+diagnostics:
+
+```json
+{
+  "code": "deprecation.manifest-site-selector",
+  "severity": "warning",
+  "summary": "A Manifest uses the deprecated siteSelector field.",
+  "guidance": "Rename siteSelector to selector on the Manifest. Both spellings select the same Sites.\nRun `siteops -w <workspace> validate <manifest>` locally to see the Manifest file on stderr.",
+  "documentation": "https://github.com/Azure/digital-ops-scale-kit/blob/main/docs/diagnostics.md#deprecationmanifest-site-selector",
+  "subject": "manifest",
+  "occurrences": 2
+}
+```
+
+- Codes that start with `deprecation.` name a spelling that still works and
+  has a replacement. Other warning codes start with `warning.`. The
+  [diagnostic index](diagnostics.md#warnings-and-deprecations) lists each one.
+- A warning reported more than once appears as one record. `occurrences`
+  counts the reports and is present only when there was more than one.
+- Records keep the order in which each warning was first reported.
+- `summary.diagnosticCount`, when present, includes warning records.
+- Summary, guidance and documentation come from the engine registry, so both
+  projections carry the same warning records without Site values or paths.
+- A result with warnings keeps its `status`, `exitCode` and process exit code.
+  A valid validation, a planned result and a successful run stay successful.
+
+Plain output keeps warnings on stderr only. The GitHub Actions and Azure
+Pipelines templates show warning records as warning annotations and summary
+lines with their occurrence count, and the task still succeeds.
+
+A warning reaches JSON only through a result document. When a command stops
+before it writes one, such as on a usage error, a refused projection or a
+failure to admit content, its warnings stay on stderr. A warning reported after
+the document is written, such as a cleanup failure as the command exits, also
+stays on stderr. Other commands, including `browse`, `sites` and `source`,
+report warnings on stderr only, even when they write JSON.
+
 ## Choose a projection
 
 Two projections are available, matching the plan surface:
@@ -353,7 +398,8 @@ scratch space.
 Site Ops attempts to remove parameter files when they are no longer needed
 and the remaining deployment scratch after workers finish. A removal failure
 is logged as a warning and may leave files behind, without replacing the
-deployment outcome.
+deployment outcome. JSON results record it as
+[`warning.cleanup-incomplete`](diagnostics.md#warningcleanup-incomplete).
 
 Set `SITEOPS_TEMP_DIR` to an absolute path to select a different parent, for
 example a runner local disk. An unset variable uses the platform default. A

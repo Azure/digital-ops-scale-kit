@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Mapping, TypeAlias
+from typing import Any, Iterable, Mapping, TypeAlias
 
 from siteops import __version__, terminal
 from siteops.compilation import (
@@ -29,6 +29,7 @@ from siteops.diagnostics import (
     public_entry,
     render_diagnostics,
     resolve_member,
+    with_warnings,
 )
 
 STEP_OUTPUT_PATTERN = re.compile(
@@ -1879,14 +1880,15 @@ def serialize_plan_json(
     projection: PlanProjection,
     *,
     engine_version: str,
+    warnings: Iterable[Mapping[str, Any]] = (),
 ) -> str:
     """Serialize one deterministic plan document."""
     return json.dumps(
-        serialize_plan(
+        with_warnings(serialize_plan(
             result,
             projection,
             engine_version=engine_version,
-        ),
+        ), warnings),
         indent=2,
         sort_keys=True,
     )

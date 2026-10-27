@@ -148,6 +148,26 @@ When an existing Key Vault is provided:
 - Role assignments are deployed from the Key Vault's resource group and scoped to the Key Vault itself (another resource group is supported)
 - The Key Vault must have RBAC authorization enabled (`enableRbacAuthorization: true`)
 
+## Give your account access to the vault
+
+Secret Sync enablement grants Key Vault roles only to its managed identity, which reads the secrets for the cluster. To add, view or select the vault's secrets yourself, for example in the [operations experience](https://iotoperations.azure.com) or the Azure portal, assign your own account a Key Vault data role at the vault scope. Adding secrets needs `Key Vault Secrets Officer`, as the [AIO secrets guidance](https://learn.microsoft.com/azure/iot-operations/secure-iot-ops/howto-manage-secrets#configure-azure-key-vault-permissions) describes. `Key Vault Secrets User` is enough to read secret values.
+
+Find the vault through the instance's default Secret Provider Class. Replace the instance resource ID and its subscription ID:
+
+```bash
+spc=$(az resource show --ids "<AIO-instance-resource-ID>" --query properties.defaultSecretProviderClassRef.resourceId --output tsv)
+vault=$(az resource show --ids "$spc" --query properties.keyvaultName --output tsv)
+vault_id=$(az keyvault show --name "$vault" --subscription "<subscription-ID>" --query id --output tsv)
+```
+
+Then assign the role to the account signed in to Azure CLI:
+
+```bash
+az role assignment create --assignee "$(az ad signed-in-user show --query id --output tsv)" --role "Key Vault Secrets Officer" --scope "$vault_id"
+```
+
+Creating the assignment needs the same rights as Secret Sync enablement at the vault scope, such as Owner, User Access Administrator or Role Based Access Control Administrator. For a group or service principal, pass its object ID with `--assignee-object-id` and `--assignee-principal-type`. A new role assignment can take several minutes to take effect. Remove it when it is no longer needed with `az role assignment delete` and the same assignee, role and scope.
+
 ## Syncing secrets to the cluster
 
 After enablement, use the `sync-secrets.bicep` step to configure one or more Key Vault secrets for synchronization to Kubernetes Secrets. The workspace sample composes that step and accepts secret values from a local overlay with the same name:
@@ -344,10 +364,6 @@ The enablement template creates Key Vaults with `enableRbacAuthorization: true`.
 
 ### The IoT Operations portal does not show the Key Vault's secrets
 
-Secret Sync enablement grants Key Vault roles to its managed identity, not to your account. To view or manage the vault's secrets yourself, for example in the IoT Operations portal, assign your account a Key Vault data role such as Key Vault Secrets Officer at the vault scope:
-
-```bash
-az role assignment create --assignee "$(az ad signed-in-user show --query id -o tsv)" --role "Key Vault Secrets Officer" --scope <Key-Vault-resource-ID>
-```
+Secret Sync enablement grants Key Vault roles to its managed identity, not to your account. The portal needs a Key Vault data role for your own account, such as Key Vault Secrets Officer at the vault scope. [Give your account access to the vault](#give-your-account-access-to-the-vault) shows how to find the vault and assign the role.
 
 A new role assignment can take several minutes to take effect.

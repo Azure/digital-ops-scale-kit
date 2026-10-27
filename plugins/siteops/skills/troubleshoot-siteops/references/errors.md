@@ -51,7 +51,8 @@ agreement.
 Cause: `deploy` cannot ask for confirmation in an agent shell, JSON output or
 CI. Nothing was read or deployed.
 
-Fix: Show the plan, get the user's confirmation, then run the same `deploy`
+Fix: Show the plan and end your turn with "Reply deploy to run this plan."
+in plain text. When the user's next message agrees, run the same `deploy`
 command with `--yes`.
 
 ### "Direct content requires explicit Site inputs or --project for configured Sites"

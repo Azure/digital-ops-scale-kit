@@ -31,7 +31,7 @@ def required_openssl() -> Path:
     """Use native OpenSSL for temporary TLS fixtures without another package dependency."""
     if sys.platform == "win32":
         git = required_bash().parent.parent
-        for directory in ("mingw64", "usr"):
+        for directory in ("ucrt64", "mingw64", "usr"):
             candidate = git / directory / "bin" / "openssl.exe"
             if candidate.is_file():
                 return candidate

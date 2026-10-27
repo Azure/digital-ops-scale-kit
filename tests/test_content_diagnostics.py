@@ -380,13 +380,15 @@ def test_validation_task_launchers_preserve_venv_interpreter(tmp_path, monkeypat
 @pytest.mark.parametrize("platform", ["ado-template", "ado-sweep", "github-sweep"])
 @pytest.mark.parametrize("case,code", [
     ("duplicate", "content.duplicate-key"), ("unknown", "content.unknown-field"), ("valid", None),
+    ("deprecated", None),
 ])
 def test_real_validation_task_bodies(tmp_path, platform, case, code):
     _scripts(tmp_path)
     root = workspace(tmp_path, case)
     (tmp_path / "state").mkdir()
     manifest = root / "manifests" / "smoke.yaml"
-    manifest.write_text(manifest.read_text() + "selector: environment=smoke\n")
+    field = "siteSelector" if case == "deprecated" else "selector"
+    manifest.write_text(manifest.read_text() + f"{field}: environment=smoke\n")
     summary = tmp_path / "summary.md"
     exports = {
         "PYTHONPATH": str(ROOT), "PYTHONDONTWRITEBYTECODE": "1", "SITEOPS_REDACT_OUTPUT": "1",
@@ -420,6 +422,9 @@ def test_real_validation_task_bodies(tmp_path, platform, case, code):
     output = result.stdout + result.stderr
     if code:
         assert code in output
+    warning = "##vso[task.logissue type=warning]" if platform.startswith("ado") else "::warning::"
+    deprecation = f"{warning}deprecation.manifest-site-selector:"
+    assert (deprecation in output) == (case == "deprecated")
     assert all(sentinel not in output for sentinel in SENTINELS)
     summary_file = summary if platform == "github-sweep" else tmp_path / "validation-summary.md"
     if summary_file.exists():
@@ -427,6 +432,7 @@ def test_real_validation_task_bodies(tmp_path, platform, case, code):
         assert all(sentinel not in text for sentinel in SENTINELS)
         if code:
             assert code in text
+        assert ("deprecation.manifest-site-selector" in text) == (case == "deprecated")
     assert not list((tmp_path / "state").iterdir())
 
 

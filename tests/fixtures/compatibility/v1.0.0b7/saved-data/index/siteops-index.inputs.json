@@ -1,0 +1,28 @@
+{
+  "apiVersion": "siteops/v1alpha1",
+  "candidates": [
+    "manifests/storage/manifest.yaml"
+  ],
+  "indexDigest": "44410307cd37fa9eb9b6d841091e9dd151a829899dac09c655a212487e3f074d",
+  "inputs": [
+    {
+      "digests": null,
+      "path": "content.yaml"
+    },
+    {
+      "digests": {
+        "sha256": "ae619549a65773c4aca178e8d0cd4ff20580f004a71cb3c30936c3a64dda25ec"
+      },
+      "path": "manifests/storage/entry.yaml"
+    },
+    {
+      "digests": {
+        "sha256": "da699dc105ae9927c8a15d074bf1851ce828a49a82e29e365eb6486ea37e7b77"
+      },
+      "path": "manifests/storage/manifest.yaml"
+    }
+  ],
+  "kind": "ContentIndexBindings",
+  "normalization": "utf8-lf",
+  "projection": "source-private"
+}

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from tests import release_helpers
 from tests.release_helpers import (
     HEADLINE,
     REPOSITORY,
@@ -687,3 +688,24 @@ def test_cli_refuses_to_overwrite_an_existing_output_directory(
     assert result.stderr.startswith("prepare-siteops-release: validation error:")
     assert sentinel.read_text(encoding="utf-8") == "keep\n"
     assert set(output.iterdir()) == {sentinel}
+
+
+def test_template_repository_ignores_the_first_callers_git_settings(tmp_path, monkeypatch):
+    leaked = tmp_path / "leaked"
+    (leaked / "templates" / "hooks").mkdir(parents=True)
+    (leaked / "templates" / "hooks" / "leaked").write_text("leaked\n", encoding="utf-8")
+    settings = leaked / "gitconfig"
+    settings.write_text(
+        f"[init]\n\tdefaultBranch = leaked\n\ttemplateDir = {(leaked / 'templates').as_posix()}\n"
+        "[user]\n\tname = Leaked\n", encoding="utf-8",
+    )
+    for name in ("HOME", "USERPROFILE", "XDG_CONFIG_HOME"):
+        monkeypatch.setenv(name, str(leaked))
+    (leaked / ".gitconfig").write_bytes(settings.read_bytes())
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(settings))
+    monkeypatch.setattr(release_helpers, "_TEMPLATE", None)
+    repository = release_helpers.create_repository(tmp_path / "repository")
+    assert not (repository / ".git" / "hooks" / "leaked").exists()
+    assert (repository / ".git" / "HEAD").read_text(encoding="utf-8") != "ref: refs/heads/leaked\n"
+    local = release_helpers._git(repository, "config", "--local", "--get", "user.name")
+    assert local == "Release Intent Test"

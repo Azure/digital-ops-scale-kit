@@ -1,0 +1,10 @@
+apiVersion: siteops/v1
+kind: Site
+name: example
+subscription: 00000000-0000-0000-0000-000000000000
+resourceGroup: example-group
+location: westus2
+labels:
+  environment: example
+parameters:
+  storageAccountName: examplestorage

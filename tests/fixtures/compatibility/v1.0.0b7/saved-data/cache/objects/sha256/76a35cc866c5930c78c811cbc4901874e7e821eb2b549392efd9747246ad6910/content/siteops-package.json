@@ -1,0 +1,74 @@
+{
+  "apiVersion": "siteops/v1alpha1",
+  "compatibility": {
+    "requiredFeatures": [
+      "compiled-templates/v1",
+      "manifest/v1"
+    ],
+    "siteops": ">=1.0.0b1,<2"
+  },
+  "files": [
+    {
+      "path": "workspace/manifests/smoke.yaml",
+      "sha256": "4efb2bf2bebf7e5443c353698820087ce5a43bb9c512ff5aeb7e25c28cb1163e",
+      "size": 173
+    },
+    {
+      "path": "workspace/sites/selected.yaml",
+      "sha256": "3af7cc95344b4e89771c0f4e53edc92d50c8ae05abec1b2d534d38b5114843fe",
+      "size": 193
+    },
+    {
+      "path": "workspace/templates/empty.template.json",
+      "sha256": "b540a8799e6357e1e418e86b7d322714e736880b4a1b202a55b46d0fd3847030",
+      "size": 149
+    }
+  ],
+  "kind": "WorkspacePackage",
+  "kit": {
+    "id": "example.consumer",
+    "version": "1.0.0"
+  },
+  "source": {
+    "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "templates": {
+    "artifactRoot": ".siteops/compiled/v1",
+    "entries": [
+      {
+        "artifact": {
+          "kind": "arm-json",
+          "path": "templates/empty.template.json",
+          "sha256": "b540a8799e6357e1e418e86b7d322714e736880b4a1b202a55b46d0fd3847030",
+          "size": 149
+        },
+        "producer": {
+          "compiler": null,
+          "configuration": null,
+          "dependencies": {
+            "coverage": "not-applicable",
+            "templateHashes": []
+          },
+          "driver": null,
+          "invocation": [
+            "read-arm-json"
+          ],
+          "mode": "native-arm-json"
+        },
+        "source": {
+          "kind": "arm-json",
+          "path": "templates/empty.template.json",
+          "sha256": "b540a8799e6357e1e418e86b7d322714e736880b4a1b202a55b46d0fd3847030",
+          "size": 149
+        }
+      }
+    ]
+  },
+  "workspace": {
+    "root": "workspace",
+    "tree": {
+      "algorithm": "sha256",
+      "digest": "c645b411f8a91dd5d99808c5315ea84c5a4ef8729715b3d3c1218fe607122d9c"
+    }
+  }
+}

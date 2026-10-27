@@ -19,8 +19,10 @@ administrator rights.
   user to the
   [installation guide](https://github.com/Azure/digital-ops-scale-kit/blob/main/docs/install-siteops.md).
 - Run the installer only after the user agrees in a new message in this
-  conversation. Tell them what it will change first (step 3), then end your
-  turn. If you cannot ask the user, stop there.
+  conversation. Tell them what it will change first (step 3), ask in plain
+  text and end your turn. Never ask through a question tool, form or menu,
+  because an answer given there arrives inside the same turn. If the user
+  cannot reply in a new message, stop there.
 - Run as the ordinary user. Never use `sudo` or an administrator shell.
 - Do not sign in to Azure or GitHub for the user, and do not change their
   saved PATH without asking.
@@ -64,7 +66,7 @@ the official tags. This needs Git but no sign in:
 git ls-remote --tags --refs https://github.com/Azure/digital-ops-scale-kit
 ```
 
-Choose the newest tag that starts with `v`. The question in step 3
+Choose the newest tag that starts with `v`. The user's reply in step 3
 confirms it. Its release page lists the same commands with the script's
 size and digest already filled in, for users whose policy requires that
 check.
@@ -76,6 +78,10 @@ Tell the user what the installer does:
 - It checks `curl` and GitHub CLI, and verifies the release's signed engine.
 - It installs uv, managed Python and Site Ops under their user profile.
   When Site Ops is already installed, it replaces that installation.
+- On Windows, a bootstrap that supports it adds uv's command directory to
+  the user PATH, so new terminals find `siteops`. It leaves the machine PATH
+  and the order of other entries unchanged. Older bootstraps leave the
+  saved PATH unchanged.
 - It prints the command directory it used.
 
 Site Ops then needs an approved source. Enrolling the official content
@@ -91,17 +97,18 @@ siteops source show <source>
 Run `source show` for each source that `source list` prints. When one
 prints a `Valid until:` date that has not passed, no enrollment is needed.
 
-End your reply with this question and stop: "Install Site Ops <release>?
-Reply yes to continue." When Site Ops is not installed, or the check found
-no valid enrollment, ask "Install Site Ops <release> and enroll the official
-source if needed? Reply yes to continue." instead. The user can also run
-the commands below in their own terminal and answer the installer's
-prompts themselves.
+End your reply with this line, in plain text, and end your turn: "Reply
+install to install Site Ops <release>." When Site Ops is not installed, or
+the check found no valid enrollment, end with "Reply install to install
+Site Ops <release> and enroll the official source if needed." instead. Do
+not ask through a question tool or form. The user can also run the commands
+below in their own terminal and answer the installer's prompts themselves.
 
 ## 4. Install after the user agrees
 
-Run the commands from the user's home directory. Replace `<release>` with
-the confirmed tag. `--yes` or `-Yes` carries the user's agreement, because
+When the user's next message agrees, such as `install` or `yes`, run the
+commands from the user's home directory. Replace `<release>` with the
+confirmed tag. `--yes` or `-Yes` carries the user's agreement, because
 an agent shell cannot answer the installer's prompt. When Site Ops is
 already installed, add `--replace` or `-Replace` to the last command.
 
@@ -132,12 +139,17 @@ If the download returns 404, the release has no bootstrap, for example
 because it contains only content. Stop and point the user to the engine
 release that its release page links.
 
+If the user does not want their saved PATH changed, add `-NoModifyPath` to
+the PowerShell command. Older bootstraps ignore it and never change the
+saved PATH.
+
 The installer ends with `Installed Site Ops <version>`. Remember that
 version for step 5. If it reports "Another Site Ops selection is installed.
-Use --replace after review.", tell the user. With their agreement, run the
-same last command again with `--replace` or `-Replace`. With that option,
-the installer reinstalls Site Ops even when the release matches, which also
-repairs it.
+Use --replace after review.", tell the user, end your reply with "Reply
+replace to reinstall Site Ops <release>." in plain text and end your turn.
+When the user's next message agrees, run the same last command again with
+`--replace` or `-Replace`. With that option, the installer reinstalls Site
+Ops even when the release matches, which also repairs it.
 
 If the installer stops with any other error, show it and use the
 [installation problems guide](https://github.com/Azure/digital-ops-scale-kit/blob/main/docs/install-siteops.md#common-problems).
@@ -159,16 +171,29 @@ Site Ops by its full path wherever a skill shows `siteops`, for example
 `& "<command directory>\siteops.exe" --version` in PowerShell.
 
 If the version differs from the `Installed Site Ops` line, another
-`siteops` comes first on PATH, such as a pip installation. Find it with
+`siteops` comes first on PATH, such as a pip installation. On Windows, the
+installer also names a command that new terminals would run first, in a
+line that starts with `Warning: new terminals run`. Find it with
 `Get-Command siteops -All` in PowerShell or `type -a siteops` in bash, tell
 the user and let them remove it.
 
-If `siteops` was not found, new terminals also need the directory on the
-saved PATH. Do not stop for this now. When the user's request is complete,
-offer to run `uv tool update-shell`, and run it only with their agreement.
-If `uv` is not on PATH, run the `uv` in the printed directory. Then tell
-the user that a new terminal, and Copilot started from one, will find
-`siteops`.
+Then follow the installer's PATH lines:
+
+- After `Saved the command directory to your user PATH.` or
+  `Your user PATH already includes the command directory.`, a new
+  terminal, and Copilot started from one, will find `siteops`.
+- After any other line that starts with `Your user PATH` or
+  `Your saved PATH`, show the user that line and the steps it printed
+  after it. After `Your saved PATH is unchanged.` or a line that starts
+  with `Your user PATH is unchanged because`, do not run
+  `uv tool update-shell`.
+- When the installer printed none of these lines, as older bootstraps and
+  the Linux bootstrap do, and `siteops` was not found, new terminals also
+  need the directory on the saved PATH. Do not stop for this now. When the
+  user's request is complete, offer to run `uv tool update-shell`, and run
+  it only with their agreement. If `uv` is not on PATH, run the `uv` in the
+  printed directory. Then tell the user that a new terminal, and Copilot
+  started from one, will find `siteops`.
 
 ## 6. Enroll and confirm
 

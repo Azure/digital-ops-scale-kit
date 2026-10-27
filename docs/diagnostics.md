@@ -105,6 +105,51 @@ This is the safe fallback for an expected content rejection without a more
 specific registered cause. It does not turn an unexpected programming error into
 a successful validation.
 
+## Warnings and deprecations
+
+A warning names something to correct that does not stop the command. Codes
+that start with `deprecation.` name a spelling that still works and has a
+replacement. Other warning codes start with `warning.`. A result with warnings
+keeps its status and exit code. See [warnings in results](run-output.md#read-warnings).
+
+## deprecation.manifest-site-selector
+
+Rename `siteSelector` to `selector` on the Manifest. Both spellings select the
+same Sites. A Manifest that declares both is rejected. Run `validate` locally
+to see the Manifest file in the command log on stderr.
+
+## warning.manifest-site-repeated
+
+Remove the repeated name from the Manifest's `sites` list. Site Ops deploys each
+Site once. Run `validate` locally to see the Manifest and Site names in the
+command log on stderr.
+
+## warning.cleanup-incomplete
+
+Site Ops could not remove some of its temporary or staging files. The command
+outcome is unchanged. The leftovers are usually in the Site Ops temporary
+directory, which is `SITEOPS_TEMP_DIR` or the system default as
+[temporary files](run-output.md#temporary-files) describes, or in the
+`staging` folder of the [Site Ops cache root](cache.md). A local run names
+each leftover on stderr by its folder and name, such as
+`.../staging/transfer-<id>`, without the rest of the path. When a removal
+failed, the reason follows, such as `Access is denied`. The GitHub
+Actions and Azure Pipelines templates keep stderr private, so their
+summaries show the guidance that names these folders instead.
+
+When output redaction is on, the log names a folder only when Site Ops
+created that folder itself, such as the cache's `staging` folder or an engine
+scratch directory. Other leftovers appear by their own names, such as
+`.../.siteops-cache-<id>` next to the configured cache directory or
+`.../siteops-run-<id>` in the temporary directory. The log withholds the
+location of a file that Site Ops was writing under a name you chose, such as
+a `siteops inputs` output file or an approved source. Look in the folder that
+the command was writing to. The reason stays in the log either way. For the
+folder that redaction withholds, run the same command locally with
+`SITEOPS_REDACT_OUTPUT=0` and keep that output private. Remove leftovers
+when no Site Ops command is running, because temporary deployment files can
+hold resolved parameter values.
+
 ## Existing preparation diagnostics
 
 Existing `plan.*`, `run.*`, `site.invalid`, `inputs.invalid`,

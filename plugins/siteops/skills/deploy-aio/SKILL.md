@@ -19,12 +19,13 @@ that plan.
 - Follow the steps in order and never skip the plan in step 6.
 - Never run `plan` and `deploy` in the same turn. After showing the plan,
   end your turn and wait for the user's reply.
-- The user confirms a deployment by answering yes to the question at the
-  end of step 6, in a new message after seeing that plan. A request made
-  before the plan was shown is not confirmation. If you cannot ask the user,
-  for example in autopilot, a single prompt run or when questions are
-  disabled, stop after the plan and say that deployment needs their
-  confirmation.
+- The user confirms a deployment by replying in a new message after
+  seeing the plan from step 6. Ask for that reply in plain text at the end
+  of your reply. Never ask through a question tool, form or menu, because
+  an answer given there arrives inside the planning turn. A request made
+  before the plan was shown is not confirmation. If the user cannot reply
+  in a new message, for example in autopilot or a single prompt run, stop
+  after the plan and say that deployment needs their reply.
 - Run `deploy` with exactly the manifest, source, release, Sites and inputs
   of the confirmed plan. Site Ops prepares the plan again when it deploys,
   so do not create or edit Site files in between. If anything changes,
@@ -139,10 +140,10 @@ the user.
 If the user named no source and has enrolled both the official publisher
 (`github:Azure/digital-ops-scale-kit`) and another source, prefer the
 official one when its newest release passes this check. Tell the user in
-one sentence which source and release you will use. The plan question in
-step 6 confirms them. If Site Ops reports that the installed engine is not
-compatible with the release, offer to install that release with the
-install-siteops skill.
+one sentence which source and release you will use. The user's reply to
+the plan in step 6 confirms them. If Site Ops reports that the installed
+engine is not compatible with the release, offer to install that release
+with the install-siteops skill.
 
 ## 4. Identify the target
 
@@ -265,17 +266,19 @@ AIO release: <the release to install, or unchanged>    Secret Sync: <enabled or 
 Operations: <the Operations line from the plan>
 ```
 
-End your reply with this question:
-"Deploy this plan? Reply yes to deploy it."
+End your reply with this line, in plain text:
+"Reply deploy to run this plan."
 
-Then stop. Do not deploy in this turn, even when the user's first request
-said to deploy.
+Do not ask through a question tool or form. Then end your turn. Do not
+deploy in this turn, even when the user's first request said to deploy.
 
 ## 7. Deploy after confirmation
 
-Only after the user answers yes in a new message, run the confirmed plan's
-command again with `deploy` in place of `plan`, keeping every `--input`
-option, and add `--yes`:
+When the user's next message agrees to this plan, such as `deploy` or
+`yes`, run the confirmed plan's command again with `deploy` in place of
+`plan`, keeping every `--input` option, and add `--yes`. If the message
+asks a question or requests a change instead, answer it, and show a new
+plan before any deployment:
 
 ```text
 siteops deploy aio-install --source "<source>@<release>" --input "cluster=<cluster-resource-ID>" --yes
@@ -306,7 +309,13 @@ az iot ops check --context "<kubeconfig-context>"
 For Secret Sync, a successful deployment does not prove that a secret
 reached the cluster. See the
 [Secret Sync reference](https://github.com/Azure/digital-ops-scale-kit/blob/main/docs/secret-sync.md)
-for functional checks. If a step failed, use the troubleshoot-siteops skill.
+for functional checks. Site Ops grants vault roles only to the Secret Sync
+managed identity. Tell the user that adding or viewing the vault's secrets
+in the operations experience or the Azure portal needs a Key Vault data role
+for their own account, and point them to
+[vault access](https://github.com/Azure/digital-ops-scale-kit/blob/main/docs/secret-sync.md#give-your-account-access-to-the-vault).
+Do not assign the role yourself. If a step failed, use the
+troubleshoot-siteops skill.
 
 If the install-siteops skill installed Site Ops in this conversation and
 deferred its saved PATH offer, make that offer now, as its step 5

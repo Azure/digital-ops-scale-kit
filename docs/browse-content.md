@@ -251,6 +251,10 @@ The `local-private` projection label describes the authorized output
 destination, not whether the content source is local or remote.
 `nameInventoryComplete` distinguishes complete name discovery from descriptive
 metadata quality. A null value means no name inventory was performed.
+The source `verification` is `verified` for a package that passed its
+verification, `failed` for a pinned package whose verification failed and
+`not-performed` otherwise. A failed inspection of a pinned project still
+names the pinned source.
 For one selected local or project manifest, `typedInputs` reports the contract
 `status` (`declared`, `none` or `unreadable`), the declared input `count`
 and the smallest set of `answers` that constructs one Site. Each answer has
