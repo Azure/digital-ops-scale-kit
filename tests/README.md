@@ -12,8 +12,8 @@ or misses the environment it is meant to exercise.
 | **E2E fixtures** | `tests/e2e/` | Rendered at runtime by the workflow | Not collected by pytest |
 
 ```bash
-pytest tests/ -m "not integration"     # the per-change lane, what CI runs
-pytest tests/workspace -q              # workspace contracts only
+pytest tests/ -m "not integration" -n auto   # the per-change lane, what CI runs
+pytest tests/workspace -q                    # workspace contracts only
 ```
 
 Delivery-script checks use native Bash on Linux and macOS, and Git Bash from
@@ -68,3 +68,17 @@ each has caught a real one since.
 changes what the next test resolves and the failure depends on execution order.
 `tests/workspace/test_catalog_gating.py` and `tests/integration/conftest.py`
 both do this.
+
+## Parallel runs
+
+`-n auto` starts one worker process per CPU, and each worker runs single
+tests as it becomes free. Each test therefore stands on its own: it may run
+before or after any other test, and in a different process.
+
+- A module whose module fixture builds, installs or compiles something is
+  listed in `SINGLE_WORKER_MODULES` in `tests/conftest.py`. Its tests stay
+  on one worker, so that fixture still runs once. Add a module there when you
+  give it such a fixture.
+- The engine wheel and the locked runtime wheels are built once before the
+  workers start testing, and every worker copies them
+  (`tests/installed_runtime.py`).

@@ -78,7 +78,7 @@ jobs:
       # Compiler acquisition and module restore may use the network. The
       # tests block Azure deployment and cluster commands.
       - script: >
-          pytest tests/ -m "not integration" -v
+          pytest tests/ -m "not integration" -v -n auto
           --cov=siteops
           --cov-report=term-missing
           --cov-report=xml:coverage.xml

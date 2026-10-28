@@ -198,7 +198,7 @@ jobs:
         # tests block Azure deployment and cluster commands.
         env:
           SITEOPS_REQUIRE_COMPATIBILITY_TAG: "1"
-        run: pytest tests/ -m "not integration" -v --cov=siteops --cov-report=term-missing --cov-report=xml:coverage.xml --junitxml=test-results.xml --durations=25
+        run: pytest tests/ -m "not integration" -v -n auto --cov=siteops --cov-report=term-missing --cov-report=xml:coverage.xml --junitxml=test-results.xml --durations=25
 
       - name: Test Summary
         if: always()
@@ -411,7 +411,7 @@ jobs:
         run: |
           # Tests named for Windows or PowerShell need the native runner.
           python -B -m pytest tests\test_bootstrap_scripts.py tests\test_uv_bootstrap_windows.py `
-              -k 'windows or powershell' -q `
+              -k 'windows or powershell' -q -n auto `
               --basetemp="$env:SITEOPS_WINDOWS_TEST_TEMP"
           if ($LASTEXITCODE -ne 0) { throw 'Native Windows bootstrap tests failed.' }
 
@@ -420,7 +420,7 @@ jobs:
         run: |
           python -B -m pytest tests\test_uv_installation.py tests\test_distribution_workflows.py `
               tests\test_release_workflow.py `
-              -k 'test_uv_installation or native_qualification or matrix_runtime_admission or native_verified_installation_step or native_online_installation_step or native_installation_steps or generated_powershell_bootstrap or required_native_consumer_fixtures or windows_qualification' -q `
+              -k 'test_uv_installation or native_qualification or matrix_runtime_admission or native_verified_installation_step or native_online_installation_step or native_installation_steps or generated_powershell_bootstrap or required_native_consumer_fixtures or windows_qualification' -q -n auto `
               --basetemp="$env:SITEOPS_WINDOWS_TEST_TEMP-consumers"
           if ($LASTEXITCODE -ne 0) { throw 'Native Windows installation consumer tests failed.' }
 
