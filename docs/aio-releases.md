@@ -77,8 +77,8 @@ parameters:
 
 Site values win over the release settings and template defaults. Values must
 be strings and are visible in Azure, not secret storage. See
-[configure the install Site](../workspaces/iot-operations/manifests/aio-install/README.md#configure-the-site)
-for all extension override maps and the saved Site route for guided users.
+[Arc extension settings](../workspaces/iot-operations/manifests/aio-install/README.md#arc-extension-settings)
+for all extension override maps and the typed inputs that set them.
 
 ## Pinning a Site to an AIO release
 
@@ -167,7 +167,7 @@ This applies to every resource area a Site selects through `properties.resourceS
 
 ### Supported upgrade paths
 
-Azure IoT Operations supports upgrade to any patch of the same minor version, or to the next minor version. Other transitions (downgrades, jumps across several minor versions, and moves between preview and GA) require uninstall and reinstall. See [Upgrade Azure IoT Operations](https://learn.microsoft.com/azure/iot-operations/deploy-iot-ops/howto-upgrade) for the authoritative rules.
+Azure IoT Operations supports upgrade to any patch of the same minor version, or to the next minor version. Move across several minor versions one minor version at a time, for example from a 1.2.x release through a 1.3.x release to a 1.4.x release. A downgrade, or a move between preview and GA in either direction, requires uninstall and reinstall. See [Upgrade Azure IoT Operations](https://learn.microsoft.com/azure/iot-operations/manage-iot-ops/howto-upgrade) for the authoritative rules, and the [upgrade operation guide](../workspaces/iot-operations/manifests/aio-upgrade/README.md#choose-a-supported-upgrade-path) for the minor version of each AIO release and the broker redundancy requirement.
 
 The optional E2E workflow can exercise selected upgrades between adjacent AIO releases,
 such as `2608` to `2609`. A passing dispatch establishes its selected

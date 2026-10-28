@@ -47,6 +47,9 @@ These changes affect how you install or run Site Ops after v1.0.0b7.
 | Install Site Ops on Windows with the PowerShell bootstrap | Review the [saved user PATH](#windows-user-path). |
 | Match artifact verification error text, or read `source` from failed `browse --output json` | Review [artifact verification messages](#artifact-verification-messages). |
 | Read `diagnostics` from `validate`, `plan` or `deploy` JSON, or render it in a pipeline | Review [warnings in JSON results](#warnings-in-json-results). |
+| Want Arc extension settings without a saved Site | Nothing changes for existing use. Review [typed extension settings](#typed-extension-settings). |
+| Upgrade an existing AIO instance that has no configured Site | Nothing changes for existing use. Review the [typed AIO upgrade](#typed-aio-upgrade). |
+| Run v1.0.0b8 content with an earlier Site Ops engine, or produce your own packages | Install the matching engine. Review the [typed map feature](#typed-map-feature). |
 
 ### Windows user PATH
 
@@ -109,6 +112,46 @@ If your automation treats every diagnostic record as a failure, check
 `severity` instead. Copy the updated `scripts/render-siteops-output.py` with
 your templates to show the occurrence count. The v1.0.0b7 renderer shows the
 same warnings as single records. See [warnings in results](run-output.md#read-warnings).
+
+### Typed extension settings
+
+This change is additive. `aio-install` accepts three optional typed inputs:
+`aioExtensionSettings`, `secretStoreExtensionSettings` and
+`certManagerExtensionSettings`. They write the existing Site parameters
+`aioConfigurationOverrides`, `secretStoreConfigurationOverrides` and
+`certManagerConfigurationOverrides`. Repeat `--input NAME=KEY=VALUE` once for
+each setting, or put the maps in the answer file. See
+[Arc extension settings](guided-inputs.md#set-arc-extension-settings).
+
+Existing Sites, overlays, `SITE_OVERRIDES`, parameter files and answer files
+work unchanged. Scalar `--input NAME=VALUE` answers keep their meaning,
+including values that contain `=`. Bundled AIO release files still set
+`certManagerConfigurationOverrides`, and Site keys still replace release
+keys one by one.
+
+### Typed AIO upgrade
+
+This change is additive. `aio-upgrade` accepts typed inputs for one existing
+instance: its resource ID, the required `aioRelease` and `enableCertManager`
+answers, the extension settings maps and optional labels. Runs with
+configured Sites and `--site-file` are unchanged. See
+[upgrade an existing instance](guided-inputs.md#upgrade-an-existing-instance).
+
+### Typed map feature
+
+The typed maps are additive for existing Sites and answers, and they need a
+Site Ops engine that supports the package feature `typed-input-maps/v1`. An
+earlier engine refuses a package that declares it, on every route, with
+`This package requires unsupported Site Ops features.` Install the Site Ops
+engine that the content release names. With a local checkout, typed routes on
+an earlier engine fail with `type must be string, boolean or azureResourceId`,
+while configured Sites and `--site-file` runs read no input contract.
+
+If you produce your own packages, add `typed-input-maps/v1` to
+`requiredFeatures`, or `--require-feature typed-input-maps/v1`, for a
+workspace whose input contract declares a `stringMap` input. The producer
+rejects such a workspace without it. See
+[workspace packages](workspace-packages.md#build-workspaces-declared-by-a-release).
 
 ## To v1.0.0b7
 
