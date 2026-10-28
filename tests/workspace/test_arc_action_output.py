@@ -49,6 +49,7 @@ def _run_bash(
         name: value for name, value in os.environ.items()
         if not name.startswith("AZURE_")
     }
+    # Git Bash starts the action's processes slowly on a busy host, so the limit only stops a hang.
     return subprocess.run(
         [
             str(_required_bash()),
@@ -62,7 +63,7 @@ def _run_bash(
         capture_output=True,
         text=True,
         check=False,
-        timeout=60,
+        timeout=120,
     )
 
 
