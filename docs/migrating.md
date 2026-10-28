@@ -52,6 +52,7 @@ These changes affect how you install or run Site Ops after v1.0.0b7.
 | Run v1.0.0b8 content with an earlier Site Ops engine, or produce your own packages | Install the matching engine. Review the [typed map feature](#typed-map-feature). |
 | Write the YAML key `=` twice in one mapping, quoted or bare | Keep one. Review [repeated equals keys](#repeated-equals-keys). |
 | Match the text of a missing typed input error | Review [missing input messages](#missing-input-messages). |
+| Match the text of a template error from `plan` or `deploy` | Review [template error messages](#template-error-messages). |
 
 ### Windows user PATH
 
@@ -175,6 +176,19 @@ Missing required input 'siteName'. Supply `--input siteName=<value>`.
 
 A boolean input shows `<true-or-false>` instead of `<value>`. The error code
 stays `inputs.invalid`, so match the code rather than the text.
+
+### Template error messages
+
+An error for a template that is unresolved, unsupported or malformed in a
+parameter value names the value's location and the supported syntax. It no
+longer repeats the value:
+
+```text
+Plan value at 'munich-dev.aio-instance.parameters.aioConfigurationOverrides.observability.metrics.exportIntervalSeconds' contains an unresolved or unsupported template. Write `{{ site.<field> }}` or `{{ steps.<step>.outputs.<name> }}` with one space inside each pair of braces, and name a field the Site sets. Remove `{{` from text that is not a template.
+```
+
+The error code stays `operation-preparation.invalid`, so match the code
+rather than the text.
 
 ## To v1.0.0b7
 

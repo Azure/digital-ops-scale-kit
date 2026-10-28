@@ -45,6 +45,12 @@ _SINGLE_BRACE_TEMPLATE_PATTERN = re.compile(
 _EXTRA_CLOSER_AFTER_TEMPLATE_PATTERN = re.compile(
     STEP_OUTPUT_PATTERN.pattern + r"\s*\}"
 )
+# Template errors name the location and never the value, which can carry settings.
+_TEMPLATE_REMEDY = (
+    "Write `{{ site.<field> }}` or `{{ steps.<step>.outputs.<name> }}` with "
+    "one space inside each pair of braces, and name a field the Site sets. "
+    "Remove `{{` from text that is not a template."
+)
 
 
 class PlanIntent(str, Enum):
@@ -451,8 +457,8 @@ def _classify_plan_string(
         or _EXTRA_CLOSER_AFTER_TEMPLATE_PATTERN.search(value)
     ):
         raise ValueError(
-            f"{_value_location(path)} contains a malformed template: "
-            f"{value!r}."
+            f"{_value_location(path)} contains a malformed template. "
+            f"{_TEMPLATE_REMEDY}"
         )
 
     stripped = value.strip()
@@ -491,14 +497,14 @@ def _classify_plan_string(
         if "{{" in remainder:
             raise ValueError(
                 f"{_value_location(path)} contains an unsupported or "
-                f"malformed template: {value!r}."
+                f"malformed template. {_TEMPLATE_REMEDY}"
             )
         return InterpolatedValue(tuple(parts))
 
     if "{{" in value:
         raise ValueError(
             f"{_value_location(path)} contains an unresolved or unsupported "
-            f"template: {value!r}."
+            f"template. {_TEMPLATE_REMEDY}"
         )
     return LiteralValue(value)
 

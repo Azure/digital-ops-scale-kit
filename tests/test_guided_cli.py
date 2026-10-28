@@ -421,6 +421,68 @@ def test_map_answers_preview_through_the_command_and_errors_withhold_keys_when_r
     assert "PRIVATE_KEY" not in error and "PRIVATE_VALUE" not in error
 
 
+def _settings_template_workspace(workspace: Path) -> Path:
+    """Deploy the map to a template that declares it, so planning classifies each entry."""
+    _map_workspace(workspace)
+    (workspace / "templates" / "settings.json").write_text(json.dumps({
+        "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+        "contentVersion": "1.0.0.0",
+        "parameters": {"settings": {"type": "object", "defaultValue": {}}},
+        "resources": [],
+    }), encoding="utf-8")
+    manifest = workspace / "manifests" / "test-manifest.yaml"
+    document = yaml.safe_load(manifest.read_text(encoding="utf-8"))
+    document["steps"] = [{"name": "apply", "template": "templates/settings.json", "scope": "subscription"}]
+    manifest.write_text(yaml.safe_dump(document), encoding="utf-8")
+    return workspace
+
+
+@pytest.mark.parametrize(("output", "redacted", "codes"), [
+    ("plain", False, None),
+    ("plain", True, None),
+    ("json", False, ["operation-preparation.invalid", "content.other"]),
+    ("json", True, ["plan.operation-preparation-failed", "content.other"]),
+])
+def test_map_template_errors_name_the_key_and_never_the_value(
+    guided_workspace, capsys, monkeypatch, deterministic_local_tools, output, redacted, codes,
+):
+    workspace = _settings_template_workspace(guided_workspace)
+    original = Orchestrator.build_plan
+    plans = []
+
+    def build_plan(self, *args, **kwargs):
+        plans.append(original(self, *args, **kwargs))
+        return plans[-1]
+
+    monkeypatch.setattr(Orchestrator, "build_plan", build_plan)
+    monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1" if redacted else "0")
+    base = [
+        "-w", str(workspace), "plan", _manifest(workspace), "--input", "siteName=one",
+        "--input", "subscription=00000000-0000-0000-0000-000000000001", "--input", "location=eastus",
+        "--output", output,
+    ]
+    assert _invoke([*base, "--input", "settings=plain.key=PRIVATE_VALUE {{ not_a_template }}"]) == 1
+    captured = capsys.readouterr()
+    text = captured.out + captured.err
+    assert "PRIVATE_VALUE" not in text and "not_a_template" not in text
+    if codes is not None:
+        assert [item["code"] for item in json.loads(captured.out)["diagnostics"]] == codes
+    elif not redacted:
+        assert (
+            "Plan value at 'one.apply.parameters.settings.plain.key' contains an unresolved or "
+            "unsupported template. Write `{{ site.<field> }}` or `{{ steps.<step>.outputs.<name> }}`"
+        ) in " ".join(text.split())
+
+    assert _invoke([*base, "--input", "settings=plain.key=PRIVATE_VALUE {{ site.name }}"]) == 0
+    captured = capsys.readouterr()
+    assert "PRIVATE_VALUE" not in captured.out + captured.err
+    operation = plans[-1].plan.targets[0].operations[0]
+    assert operation.disposition is PlanDisposition.EXECUTE
+    assert isinstance(operation.details, DeploymentOperation)
+    (entry,) = operation.details.parameters.entries
+    assert resolve_plan_value(entry.value, {}) == {"plain.key": "PRIVATE_VALUE one"}
+
+
 def test_resource_plan_reads_only_selected_role_before_planning(
     guided_workspace, tmp_path, capsys,
 ):
