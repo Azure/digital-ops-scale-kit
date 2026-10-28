@@ -1,6 +1,7 @@
 """Check the two platform entry scripts without contacting package or cloud services."""
 
 import ast
+import copy
 import hashlib
 import json
 import os
@@ -235,6 +236,24 @@ def test_bash_discovery_template_reads_only_verified_certificate_fields():
     assert '"%q"' in template and '"%q\\t%q' in template
 
 
+@pytest.fixture(scope="module")
+def powershell_run_per_input(tmp_path_factory):
+    """Run the PowerShell bootstrap once for each distinct input in this module.
+
+    The exact case of every field sends the same unchanged input, so those cases
+    share one run. Each case still receives its own copy of the result.
+    """
+    runs = {}
+
+    def run(replies, **options):
+        key = json.dumps([replies, options], sort_keys=True)
+        if key not in runs:
+            runs[key] = run_bootstrap(tmp_path_factory.mktemp("powershell-run"), "powershell", replies, **options)
+        return copy.deepcopy(runs[key])
+
+    return run
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Ordinal comparisons use native Windows PowerShell 5.1.")
 @pytest.mark.parametrize("mode", ["discovery", "pinned"])
 @pytest.mark.parametrize("suffix", ["", "\u0000", "\u00ad", "\u200b"], ids=["exact", "nul", "soft-hyphen", "zero-width"])
@@ -242,15 +261,15 @@ def test_bash_discovery_template_reads_only_verified_certificate_fields():
     "subjectAlternativeName", "issuer", "sourceRepositoryURI", "sourceRepositoryDigest",
     "sourceRepositoryRef", "buildSignerDigest", "buildConfigURI", "buildConfigDigest", "runnerEnvironment", "mediaType",
 ])
-def test_windows_verified_fields_require_ordinal_equality(tmp_path, mode, suffix, field):
+def test_windows_verified_fields_require_ordinal_equality(powershell_run_per_input, mode, suffix, field):
     item = observation()
     target = item["verificationResult"] if field == "mediaType" else item["verificationResult"]["signature"]["certificate"]
     target[field] += suffix
     # Preserve JSON escapes until the production ConvertFrom-Json decodes them.
     reply = {"raw": json.dumps([item]), "exit": 0}
     replies = [reply, {"observations": [observation()], "exit": 0}] if mode == "discovery" else [reply]
-    result, calls, _ = run_bootstrap(
-        tmp_path, "powershell", replies, explicit=mode == "pinned", dry_run=mode == "discovery",
+    result, calls, _ = powershell_run_per_input(
+        replies, explicit=mode == "pinned", dry_run=mode == "discovery",
     )
     assert (result.returncode == 0) is (suffix == ""), result.stdout + result.stderr
     assert len(calls) == (2 if mode == "discovery" and suffix == "" else 1)
@@ -267,7 +286,7 @@ def test_windows_verified_fields_require_ordinal_equality(tmp_path, mode, suffix
 @pytest.mark.skipif(sys.platform != "win32", reason="Engine reference comparisons use native Windows PowerShell 5.1.")
 @pytest.mark.parametrize("suffix", ["", "\u0000", "\u00ad", "\u200b"], ids=["exact", "nul", "soft-hyphen", "zero-width"])
 @pytest.mark.parametrize("field", ["apiVersion", "kind", "release", "revision", "bundle-name"])
-def test_windows_engine_reference_fields_require_ordinal_equality(tmp_path, suffix, field):
+def test_windows_engine_reference_fields_require_ordinal_equality(powershell_run_per_input, suffix, field):
     record = reference()
     if field == "bundle-name":
         record["engine"]["bundle"]["name"] += suffix
@@ -275,7 +294,7 @@ def test_windows_engine_reference_fields_require_ordinal_equality(tmp_path, suff
         record[field] += suffix
     replies = [{"observations": [observation(content=True)], "exit": 0},
                {"observations": [observation(engine=True)], "exit": 0}]
-    result, _, _ = run_bootstrap(tmp_path, "powershell", replies, content=True, explicit=True, record=record)
+    result, _, _ = powershell_run_per_input(replies, content=True, explicit=True, record=record)
     assert (result.returncode == 0) is (suffix == ""), result.stdout + result.stderr
     assert ("PINNED_FLOW_REACHED" in result.stdout) is (suffix == "")
 
