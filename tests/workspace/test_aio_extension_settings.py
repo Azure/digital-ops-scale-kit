@@ -366,8 +366,11 @@ def test_documented_upgrade_commands_resolve_through_the_cli(workspace, tmp_path
         if line.startswith("siteops ") and " aio-upgrade " in line and "<AIO-instance-resource-ID>" in line
     ]
     assert commands
-    for line in commands:
+    # The documented command leaves the cert-manager decision to the operator.
+    assert all('"enableCertManager=<true-or-false>"' in line for line in commands)
+    for line, answer in ((line, answer) for line in commands for answer in ("true", "false")):
         reader, calls = _reader()
+        line = line.replace("<true-or-false>", answer)
         with (
             patch("siteops.cli.open_command_context", side_effect=lambda **kwargs: nullcontext(
                 CommandContext(workspace, workspace),
@@ -382,8 +385,41 @@ def test_documented_upgrade_commands_resolve_through_the_cli(workspace, tmp_path
         assert [op.identity.step for op in plan.targets[0].operations][1:3] == [
             "resolve-extensions", "update-extensions",
         ]
+        update = next(op for op in plan.targets[0].operations if op.identity.step == "update-extensions")
+        enabled = {entry.key.value: entry.value for entry in update.details.parameters.entries
+                   if isinstance(entry.key, LiteralValue)}["enableCertManager"]
+        assert resolve_plan_value(enabled, {}) is (answer == "true")
         assert [resource for resource, _ in calls] == [INSTANCE_ID, LOCATION_ID, CLUSTER_ID]
         capsys.readouterr()
+
+
+def test_only_upgrade_is_documented_to_keep_existing_settings(workspace):
+    # Installation writes extension settings without reading the cluster's, while upgrade starts from them.
+    install_templates = [workspace / "templates" / "aio" / "enablement.bicep",
+                         *sorted((workspace / "templates" / "aio" / "modules").glob("instance-*.bicep"))]
+    for template in install_templates:
+        assert not re.search(r"KubernetesConfiguration/extensions@[^']*' existing", template.read_text(encoding="utf-8"))
+    upgrade = (workspace / "templates" / "aio" / "upgrade" / "update-extensions.bicep").read_text(encoding="utf-8")
+    assert "union(secretStore.configurationSettings, secretStoreConfigurationOverrides)" in upgrade
+    for document in ("docs/guided-inputs.md", "workspaces/iot-operations/manifests/aio-install/README.md"):
+        text = (_ROOT / document).read_text(encoding="utf-8")
+        prose = " ".join(text.split())
+        assert "removes a key that the cluster already has" not in prose
+        assert "never clears a setting the cluster already has" not in prose
+        assert "without reading the" in prose
+        assert "aio-upgrade/README.md#change-extension-settings" in text
+
+
+def test_upgrade_guide_maps_each_release_to_its_version_and_forbids_downgrades(workspace):
+    readme = (workspace / "manifests" / "aio-upgrade" / "README.md").read_text(encoding="utf-8")
+    for release in sorted((workspace / "parameters" / "aio-releases").glob("*.yaml")):
+        version = str(yaml.safe_load(release.read_text(encoding="utf-8"))["aioVersion"])
+        assert f"| {release.stem} | {version} | {'.'.join(version.split('.')[:2])} |" in readme
+    prose = " ".join(readme.split())
+    assert "--query properties.version" in readme
+    assert "Never select an AIO release older than the one the instance runs" in prose
+    assert "returns to the release value on upgrade unless you supply it again" in prose
+    assert "../aio-install/README.md#settings-scale-kit-derives" in readme
 
 
 def _answer_examples(document: str) -> list[dict]:
@@ -398,6 +434,9 @@ def test_documented_answer_files_with_settings_bind_to_their_contract(workspace,
     assert examples
     for number, example in enumerate(examples):
         manifest = "aio-upgrade" if "instance" in example["values"] else "aio-install"
+        if manifest == "aio-upgrade":
+            assert example["values"]["enableCertManager"] == "<true-or-false>"
+            example["values"]["enableCertManager"] = True
         values = {
             name: (INSTANCE_ID if name == "instance" else CLUSTER_ID.replace("rg-first", "rg-second"))
             if name in {"instance", "cluster"} else value

@@ -89,8 +89,15 @@ parameters:
 Replace the placeholders with settings supported by each extension.
 Inherited Sites and `sites.local` overlays merge these maps key by key, so a
 child Site adds or replaces keys but cannot remove one. An omitted or empty
-typed map sets nothing. Neither route removes a key that the cluster
-already has.
+typed map adds no settings.
+
+Installation writes each extension's settings from the template defaults,
+the AIO release and the Site, without reading the settings the cluster
+already has. Running installation again on an existing installation can
+therefore replace or drop settings that you changed since. To change the
+settings of an existing installation, run
+[aio-upgrade](../aio-upgrade/README.md#change-extension-settings) at its
+current AIO release, which keeps the existing settings and removes no key.
 
 ### Settings Scale Kit derives
 

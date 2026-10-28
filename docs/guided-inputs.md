@@ -217,11 +217,18 @@ holds at most 64 entries, with keys of 1 to 256 characters, values of at
 most 4,096 characters, and at most 64 KiB of keys and values together.
 Errors name the input and, unless output is redacted, the key, never the
 value. The settings appear in answer files, shell history, the Site preview
-and Azure, so never put secrets in them.
+and Azure, so never put secrets in them. The private Site preview shows `***`
+for values whose names look sensitive, such as the whole
+`secretStoreConfigurationOverrides` map and keys that contain `token`. A
+saved Site keeps the real values.
 
-An omitted map or `{}` sets nothing. It never clears a setting the cluster
-already has, and no typed answer removes a key. Typed answers build a new
-Site each time, so they never change a saved Site. `certManagerExtensionSettings`
+An omitted map or `{}` adds no settings. With `aio-upgrade`, the settings
+already on the cluster stay in place and no answer removes a key.
+Installation writes each extension's settings without reading the
+cluster's, so change the settings of an existing installation with
+[aio-upgrade](../workspaces/iot-operations/manifests/aio-upgrade/README.md#change-extension-settings)
+rather than by installing again. Typed answers build a new Site each time,
+so they never change a saved Site. `certManagerExtensionSettings`
 applies only while `enableCertManager` is true. Supplying it otherwise, even
 as `{}`, fails like any inactive input. The secret store settings apply
 whether or not Secret Sync is enabled. See
@@ -290,16 +297,18 @@ ID, the target AIO release and whether this upgrade includes the existing
 cert-manager Arc extension:
 
 ```text
-siteops deploy aio-upgrade --source "official@<release>" --input "instance=<AIO-instance-resource-ID>" --input aioRelease=2609 --input enableCertManager=true
+siteops deploy aio-upgrade --source "official@<release>" --input "instance=<AIO-instance-resource-ID>" --input aioRelease=2609 --input "enableCertManager=<true-or-false>"
 ```
 
 `aioRelease` and `enableCertManager` have no defaults. Answer
-`enableCertManager=false` when another owner manages cert-manager, and the
-upgrade neither reads nor updates that extension. Site Ops reads the
-instance, its custom location and that location's Arc cluster, as for
-Secret Sync enablement, but checks no OIDC or workload identity
-prerequisite. The extension settings inputs apply here too. Choose a
-supported transition from the instance's current release, as the
+`enableCertManager=true` when Scale Kit installed cert-manager and manages
+it, as an installation with the default `enableCertManager` does. Answer
+`false` when another owner manages cert-manager, and the upgrade neither
+reads nor updates that extension. Site Ops reads the instance, its custom
+location and that location's Arc cluster, as for Secret Sync enablement,
+but checks no OIDC or workload identity prerequisite. The extension
+settings inputs apply here too. Choose a supported transition from the
+version the instance runs, never an older release, as the
 [upgrade guide](../workspaces/iot-operations/manifests/aio-upgrade/README.md#choose-a-supported-upgrade-path)
 describes.
 

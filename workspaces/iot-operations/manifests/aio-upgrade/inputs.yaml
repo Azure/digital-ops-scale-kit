@@ -57,7 +57,7 @@ inputs:
       name: clusterName
   - name: aioRelease
     type: string
-    description: Target AIO release, such as 2609. Choose a supported transition from the instance's current release.
+    description: Target AIO release, such as 2609, never older than the instance runs. The aio-upgrade guide lists the AIO version of each release.
     sitePath: properties.aioRelease
   - name: enableCertManager
     type: boolean
