@@ -14,7 +14,8 @@
         "requiredFeatures": [
           "manifest/v1",
           "composition/v1",
-          "manifest-selection/v1"
+          "manifest-selection/v1",
+          "typed-input-maps/v1"
         ]
       },
       "include": [

@@ -9,7 +9,9 @@ separate plan command.
 |---|---|
 | Install AIO on an existing Arc cluster | [AIO installation](#install-aio-from-an-existing-cluster) |
 | Install AIO and enable Secret Sync together | [Combined installation](#install-aio-with-secret-sync) |
+| Set Arc extension configuration | [Arc extension settings](#set-arc-extension-settings) |
 | Enable Secret Sync without reinstalling AIO | [Enablement on an existing instance](#enable-secret-sync-on-an-existing-instance) |
+| Upgrade an existing instance | [Upgrade with typed inputs](#upgrade-an-existing-instance) |
 
 Install a compatible Site Ops build and select a release containing the
 complete AIO workspace and its typed input contract. The source and release
@@ -129,7 +131,9 @@ For a short command without secrets, supply the same named answers with repeated
 the input file. `--input-file` selects exactly one answer file. Repeating
 that option is an error, not a way to select several Sites. Strings and
 strict `true` or `false` booleans are parsed
-according to the selected contract. Do not put secrets in process arguments
+according to the selected contract. A map input takes one `NAME=KEY=VALUE`
+entry for each key, as [Arc extension settings](#set-arc-extension-settings)
+describes. Do not put secrets in process arguments
 or shell history. Input contracts that declare sensitive inputs are
 rejected. Duplicate and unknown answer names fail.
 
@@ -173,6 +177,60 @@ add or view the vault's secrets yourself, for example in the operations
 experience, give your account a Key Vault data role as
 [vault access](secret-sync.md#give-your-account-access-to-the-vault)
 describes.
+
+## Set Arc extension settings
+
+`aioExtensionSettings`, `secretStoreExtensionSettings` and
+`certManagerExtensionSettings` set the configuration of the AIO, secret
+store and cert-manager Arc extensions. Each is an optional map of string
+keys and string values. Inline, supply one entry for each key as
+`NAME=KEY=VALUE`:
+
+```text
+siteops deploy aio-install --source "official@<release>" --input "cluster=<Arc-cluster-resource-ID>" --input "aioExtensionSettings=observability.metrics.exportIntervalSeconds=60"
+```
+
+The input name ends at the first `=` and the key ends at the second, so the
+value can contain `=`. An empty value after the second `=` sets an empty
+string. Keys that contain `=` need the answer file, which holds the same
+maps. Quote keys and values there, because YAML reads an unquoted `on` as
+true and `1.10` as 1.1:
+
+```yaml
+apiVersion: siteops.inputs/v1
+kind: SiteInputValues
+values:
+  cluster: "<Arc-cluster-resource-ID>"
+  aioExtensionSettings:
+    "observability.metrics.exportIntervalSeconds": "60"
+```
+
+Inline entries replace answer file entries key by key, and other file
+entries remain. A key repeated inline fails, even with the same value.
+Values must be text. Numbers, booleans, null, lists and nested maps fail
+rather than being converted. Each map, from the file, inline or combined,
+holds at most 64 entries, with keys of 1 to 256 characters and no control
+characters, values of at most 4,096 characters, and at most 64 KiB of keys
+and values together.
+Errors name the input and, unless output is redacted, the key, never the
+value. The settings appear in answer files, shell history, the Site preview
+and Azure, so never put secrets in them.
+
+An omitted map or `{}` sets nothing. It never clears a setting the cluster
+already has, and no typed answer removes a key. Typed answers build a new
+Site each time, so they never change a saved Site. `certManagerExtensionSettings`
+applies only while `enableCertManager` is true. Supplying it otherwise, even
+as `{}`, fails like any inactive input. The secret store settings apply
+whether or not Secret Sync is enabled. See
+[Arc extension settings](../workspaces/iot-operations/manifests/aio-install/README.md#arc-extension-settings)
+for the Site parameters these inputs set and the settings the installation
+derives.
+
+These typed maps need a Site Ops engine that supports them. An older engine
+refuses a package that uses them with
+`This package requires unsupported Site Ops features.` Install the engine
+that the content release names. Configured Sites and complete Site files
+set the same maps under `parameters` without typed inputs.
 
 ## Manual Site values without resource reads
 
@@ -221,6 +279,30 @@ Secret Provider Class object list when no secrets are declared. Enablement
 still updates the default Secret Provider Class binding. It does not prove
 that a secret materialized in Kubernetes. See the [Secret Sync reference](secret-sync.md)
 for preservation, vault permissions and functional checks.
+
+## Upgrade an existing instance
+
+To upgrade one existing instance without a saved Site, supply its resource
+ID, the target AIO release and whether this upgrade includes the existing
+cert-manager Arc extension:
+
+```text
+siteops deploy aio-upgrade --source "official@<release>" --input "instance=<AIO-instance-resource-ID>" --input aioRelease=2609 --input enableCertManager=true
+```
+
+`aioRelease` and `enableCertManager` have no defaults. Answer
+`enableCertManager=false` when another owner manages cert-manager, and the
+upgrade neither reads nor updates that extension. Site Ops reads the
+instance, its custom location and that location's Arc cluster, as for
+Secret Sync enablement, but checks no OIDC or workload identity
+prerequisite. The extension settings inputs apply here too. Choose a
+supported transition from the instance's current release, as the
+[upgrade guide](../workspaces/iot-operations/manifests/aio-upgrade/README.md#choose-a-supported-upgrade-path)
+describes.
+
+If you saved the installation's Site, change `properties.aioRelease` in that
+file and upgrade with `--site-file` or `-l name=<site>` instead. Typed
+answers never change a saved Site.
 
 ## Check the result
 
@@ -306,8 +388,9 @@ Site must be complete and cannot inherit from packaged example Sites.
 Configured Sites can continue to use the existing inheritance and overlay
 rules.
 
-Settings outside the typed inputs belong in the saved Site, such as
-[AIO extension configuration overrides](../workspaces/iot-operations/manifests/aio-install/README.md#configure-the-site).
+Settings outside the typed inputs belong in the saved Site, such as a
+[trust bundle you manage](../workspaces/iot-operations/manifests/aio-install/README.md#settings-scale-kit-derives).
+Typed answers never change a saved Site, so edit the file itself.
 
 Use one resource group per AIO instance. A Site built from a cluster ID
 takes that cluster's resource group, so connect each Arc cluster in its own

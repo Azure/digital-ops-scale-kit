@@ -30,12 +30,51 @@ those defaults. Keep an existing explicit Site name when reusing configuration.
 IDs produced by earlier operations are supplied to their
 consuming steps, rather than entered by the operator.
 
-To set Arc extension configuration, add override maps under the Site's
-`parameters`. `aioConfigurationOverrides` applies to AIO,
-`certManagerConfigurationOverrides` to cert-manager, and
-`secretStoreConfigurationOverrides` to the secret store. Site values take
-precedence over release configuration and template defaults. Use strings for
-setting values. These settings are visible in Azure and are not for secrets:
+Optional `properties.deployOptions` settings include `enableEdgeSite`,
+`enableSecretSync` and `enableCertManager`. Secret Sync requires OIDC and
+workload identity on the existing cluster. Host bootstrap flags do not enable
+those features through this manifest. An Edge Site scoped to the subscription
+needs a Site at subscription level, not just a flag on a Site at resource
+group level.
+The guided resource ID route checks the reported identity prerequisites
+before writes when Secret Sync is enabled. Configured fleet Sites do not
+repeat that guided read, so confirm the prerequisites for each selected
+cluster before enabling Secret Sync across a fleet.
+
+### Arc extension settings
+
+Three maps of string keys and string values set Arc extension configuration.
+Each key replaces the release or template value of that key. These settings
+are visible in Azure, so never put secrets in them.
+
+| Typed input | Site parameter | Arc extension |
+|---|---|---|
+| `aioExtensionSettings` | `aioConfigurationOverrides` | AIO |
+| `secretStoreExtensionSettings` | `secretStoreConfigurationOverrides` | Secret store, with Secret Sync enabled or disabled |
+| `certManagerExtensionSettings` | `certManagerConfigurationOverrides` | cert-manager, when `enableCertManager` is true |
+
+On the guided route, add one `--input NAME=KEY=VALUE` to the deploy command
+for each setting, for example
+`--input "aioExtensionSettings=observability.metrics.exportIntervalSeconds=60"`.
+
+An answer file holds the same maps. Quote keys and values, because YAML
+reads an unquoted `on` as true and `1.10` as 1.1:
+
+```yaml
+apiVersion: siteops.inputs/v1
+kind: SiteInputValues
+values:
+  cluster: "<Arc-cluster-resource-ID>"
+  aioExtensionSettings:
+    "observability.metrics.exportIntervalSeconds": "60"
+```
+
+Inline entries replace answer file entries key by key. A key that contains
+`=` is supported only in the answer file. See
+[guided inputs](../../../../docs/guided-inputs.md#set-arc-extension-settings)
+for the complete grammar.
+
+For a configured Site, set the Site parameters directly:
 
 ```yaml
 parameters:
@@ -48,21 +87,60 @@ parameters:
 ```
 
 Replace the placeholders with settings supported by each extension.
-Typed inputs do not accept these maps. For the guided route,
-[save a Site](../../../../docs/guided-inputs.md#keep-a-site-for-later)
-with `siteops inputs ... --save-site` into the configured inventory, add the
-override maps to that file, then deploy with `-l name=<site>`.
+Inherited Sites and `sites.local` overlays merge these maps key by key, so a
+child Site adds or replaces keys but cannot remove one. An omitted or empty
+typed map sets nothing. Neither route removes a key that the cluster
+already has.
 
-Optional `properties.deployOptions` settings include `enableEdgeSite`,
-`enableSecretSync` and `enableCertManager`. Secret Sync requires OIDC and
-workload identity on the existing cluster. Host bootstrap flags do not enable
-those features through this manifest. An Edge Site scoped to the subscription
-needs a Site at subscription level, not just a flag on a Site at resource
-group level.
-The guided resource ID route checks the reported identity prerequisites
-before writes when Secret Sync is enabled. Configured fleet Sites do not
-repeat that guided read, so confirm the prerequisites for each selected
-cluster before enabling Secret Sync across a fleet.
+### Settings Scale Kit derives
+
+This installation derives some AIO extension settings from other Site
+values. A map key replaces any of them:
+
+| AIO extension settings | Derived from |
+|---|---|
+| `trustSource`, `trustBundleSettings.issuer.name`, `trustBundleSettings.issuer.kind`, `trustBundleSettings.configMap.name`, `trustBundleSettings.configMap.key` | `parameters.trustConfig` |
+| `dataFlows.values.wasmGraphController.mqttBroker.caCertConfigMapRef`, `dataFlows.values.wasmGraphController.mqttBroker.caCertFileName` | `parameters.trustConfig`, for AIO releases 2608 and 2609 |
+| `connectors.values.mqttBroker.address`, `connectors.values.mqttBroker.serviceAccountTokenAudience`, `dataFlows.values.tinyKube.mqttBroker.hostName`, `dataFlows.values.tinyKube.mqttBroker.port`, `dataFlows.values.tinyKube.mqttBroker.authentication.serviceAccountTokenAudience`, `schemaRegistry.values.mqttBroker.host`, `schemaRegistry.values.mqttBroker.serviceAccountTokenAudience` | The cluster namespace and the default broker listener |
+| `connectors.values.securityPki.applicationUri` | The cluster, for AIO 2603 and later |
+| `connectors.values.securityPki.subjectName` | The cluster, for AIO 2605 and later |
+| `observability.metrics.enabled`, `observability.metrics.openTelemetryCollectorAddress` | The instance template's observability defaults |
+
+The curated installation keeps the trust, WebAssembly graph trust and broker
+settings consistent with each other. Replacing those keys through a map is
+outside that recipe. Use the dedicated settings instead:
+
+- `parameters.trustConfig` for a trust bundle you manage
+- `parameters.brokerConfig` for broker sizing and logging
+- dataflow endpoints in [resource sets](../../resource-sets/README.md) for
+  MQTT destinations outside the cluster
+- your own manifests and templates for a materially different internal
+  topology
+
+For example, select an existing issuer and trust bundle:
+
+```yaml
+parameters:
+  trustConfig:
+    source: CustomerManaged
+    settings:
+      issuerName: "<existing-issuer-name>"
+      issuerKind: ClusterIssuer
+      configMapName: "<existing-trust-bundle-configmap>"
+      configMapKey: "<certificate-key>"
+```
+
+`trustConfig` is a Site parameter, not a typed input. To use it on the guided
+route, save the Site as the next paragraph describes. Replacing the OPC UA
+certificate and observability settings above is ordinary use, for example to
+match values that an OPC UA server already trusts or to send metrics to your
+own collector.
+
+To keep the guided answers for later, including settings and parameters
+outside the typed inputs,
+[save a Site](../../../../docs/guided-inputs.md#keep-a-site-for-later)
+with `siteops inputs ... --save-site` into the configured inventory, edit
+that file, then deploy with `-l name=<site>`.
 
 ## Review and deploy
 

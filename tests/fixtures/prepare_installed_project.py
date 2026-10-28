@@ -86,6 +86,7 @@ if len(sys.argv) == 3:
 inspection = build_package(
     source, archive, workspace="workspace", kit_id="example.storage", version="7",
     source_revision=revision, siteops_range=">=1.0.0b1,<2",
+    required_features=("manifest/v1", "typed-input-maps/v1") if len(sys.argv) == 3 else ("manifest/v1",),
     compilation_session_factory=compilation_session_factory,
 )
 proof, trusted = root / "proof.jsonl", root / "trusted-root.json"

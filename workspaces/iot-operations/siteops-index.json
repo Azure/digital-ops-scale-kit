@@ -173,6 +173,27 @@
             "type": "object"
           },
           {
+            "description": "AIO Arc extension settings as string keys and values, also set by the typed aioExtensionSettings input. Each key replaces the release or template value. The values are visible in Azure, so never include secrets.",
+            "field": "parameters.aioConfigurationOverrides",
+            "requirement": "optional",
+            "sensitivity": "non-sensitive",
+            "type": "mapping"
+          },
+          {
+            "description": "Secret store Arc extension settings as string keys and values, also set by the typed secretStoreExtensionSettings input. They apply with Secret Sync enabled or disabled. Never include secrets.",
+            "field": "parameters.secretStoreConfigurationOverrides",
+            "requirement": "optional",
+            "sensitivity": "non-sensitive",
+            "type": "mapping"
+          },
+          {
+            "description": "cert-manager Arc extension settings when enableCertManager is true, also set by the typed certManagerExtensionSettings input. Each key replaces the release or template value. Never include secrets.",
+            "field": "parameters.certManagerConfigurationOverrides",
+            "requirement": "conditional",
+            "sensitivity": "non-sensitive",
+            "type": "mapping"
+          },
+          {
             "description": "Review cert-manager, Edge Site and optional Secret Sync settings. The typed defaults leave Secret Sync disabled. Guided enablement requires an observed cluster reporting OIDC and workload identity before writes. Host flags do not add those features to an existing cluster.",
             "field": "properties.deployOptions",
             "requirement": "conditional",
@@ -257,19 +278,66 @@
     {
       "guidance": {
         "category": "core",
-        "coverage": "Operational synopsis. Follow the guide for AIO release selection, supported paths and workload observations after the upgrade.",
+        "coverage": "Operational synopsis. Follow the guide for AIO release selection, supported paths, typed inputs and workload observations after the upgrade.",
         "documentation": [
           "manifests/aio-upgrade/README.md"
         ],
         "effects": [
           "Updates extensions and the resources the AIO release requires while preserving supported existing configuration.",
+          "With enableCertManager false, leaves the cert-manager extension unread and unchanged.",
           "Does not perform general migrations of instance child resources.",
           "Avoid resource set deployments between changing the AIO release pin and completing the upgrade."
         ],
+        "inputs": [
+          {
+            "description": "The target AIO release. The typed aioRelease input has no default, so the upgrade never selects a target. Choose a supported transition from the instance's current release.",
+            "field": "properties.aioRelease",
+            "requirement": "required",
+            "sensitivity": "non-sensitive",
+            "type": "string"
+          },
+          {
+            "description": "Include the existing cert-manager Arc extension in this upgrade? True updates its version and settings. False leaves it to its separate owner, with no read or write. The typed input has no default.",
+            "field": "properties.deployOptions.enableCertManager",
+            "requirement": "required",
+            "sensitivity": "non-sensitive",
+            "type": "boolean"
+          },
+          {
+            "defaultBehavior": "The shared fallback derives the name from the Site name.",
+            "description": "The existing instance name. The typed instance input derives it from the resource ID.",
+            "field": "parameters.aioInstanceName",
+            "requirement": "optional",
+            "sensitivity": "non-sensitive",
+            "type": "string"
+          },
+          {
+            "description": "AIO Arc extension settings, also set by the typed aioExtensionSettings input. Each key replaces the existing or release value, and no key is removed. Never include secrets.",
+            "field": "parameters.aioConfigurationOverrides",
+            "requirement": "optional",
+            "sensitivity": "non-sensitive",
+            "type": "mapping"
+          },
+          {
+            "description": "Secret store Arc extension settings, also set by the typed secretStoreExtensionSettings input. Each key replaces the existing or release value. Never include secrets.",
+            "field": "parameters.secretStoreConfigurationOverrides",
+            "requirement": "optional",
+            "sensitivity": "non-sensitive",
+            "type": "mapping"
+          },
+          {
+            "description": "cert-manager Arc extension settings when enableCertManager is true, also set by the typed certManagerExtensionSettings input. Each key replaces the existing or release value. Never include secrets.",
+            "field": "parameters.certManagerConfigurationOverrides",
+            "requirement": "conditional",
+            "sensitivity": "non-sensitive",
+            "type": "mapping"
+          }
+        ],
         "outcome": "Upgrade the AIO extensions and the resources that the selected AIO release explicitly requires.",
         "prerequisites": [
-          "An existing AIO installation and a supported upgrade transition.",
-          "A configured Site with the intended AIO release and permission for the selected updates."
+          "An existing AIO installation and a supported upgrade transition, any patch of the same minor version or the next minor version.",
+          "A configured or saved Site with the intended AIO release, or the existing instance ID with typed answers, and permission for the selected updates.",
+          "A broker backend redundancy factor of 2 or more, the default, so the broker can upgrade."
         ],
         "removal": [
           "There is no general rollback. Review partial outcomes and recovery guidance before retrying."
