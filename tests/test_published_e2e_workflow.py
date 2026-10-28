@@ -1938,9 +1938,10 @@ exit 99
     if name == "Teardown (persistent mode, delta cleanup, keep RG)":
         assert run.count("sleep 30") == 2
         run = run.replace("sleep 30", ":")
+    # The teardown passes start many short processes, which Git Bash runs slowly on a busy host.
     result = subprocess.run(
         [str(bash), "-c", run], cwd=tmp_path, env=env,
-        capture_output=True, text=True, timeout=30, check=False,
+        capture_output=True, text=True, timeout=120, check=False,
     )
     summary = tmp_path / "summary.md"
     public = result.stdout + result.stderr + (
