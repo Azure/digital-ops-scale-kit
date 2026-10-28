@@ -14,7 +14,7 @@ import tempfile
 import zipfile
 import zlib
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 
@@ -43,7 +43,7 @@ from siteops.compilation import (
     VersionProvenance,
     resolve_tool_from_path,
 )
-from siteops.guided_inputs import GuidedInputError, declares_string_map
+from siteops.guided_inputs import GuidedInputError, contract_path, declares_string_map
 from siteops.models import DeploymentStep, Manifest, _parse_manifest_spec
 from siteops.runtime import RuntimePaths
 from siteops.workspace_compatibility import require_engine_version
@@ -149,6 +149,11 @@ def _record_bytes(relative: str, content: bytes) -> tuple[PayloadFile, int]:
 
 
 def _discover_template_sources(root: Path, workspace: str) -> tuple[str, ...]:
+    return _discover_workspace(root, workspace)[1]
+
+
+def _discover_workspace(root: Path, workspace: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return the workspace's manifests and their deployment template roots."""
     workspace_path = root if workspace == "." else checked_path(root, workspace, directory=True)
     try:
         reader = ContentReader(workspace_path)
@@ -158,6 +163,7 @@ def _discover_template_sources(root: Path, workspace: str) -> tuple[str, ...]:
                 "Workspace deployment entries could not be inspected for package compilation."
             )
         manifests = {entry.path for entry in entries}
+        discovered = set(manifests)
         sources: set[str] = set()
 
         def collect(manifest_path: str) -> set[str]:
@@ -198,7 +204,9 @@ def _discover_template_sources(root: Path, workspace: str) -> tuple[str, ...]:
             except (ValueError, yaml.YAMLError):
                 if document.get("kind") == "Manifest":
                     raise
-        return tuple(sorted(sources))
+            else:
+                discovered.add(manifest_path)
+        return tuple(sorted(discovered)), tuple(sorted(sources))
     except ArtifactError:
         raise
     except (BrowseError, OSError, ValueError):
@@ -208,20 +216,29 @@ def _discover_template_sources(root: Path, workspace: str) -> tuple[str, ...]:
 
 
 def _require_input_contract_features(
-    root: Path, workspace: str, paths: tuple[str, ...], required_features: tuple[str, ...],
+    root: Path,
+    workspace: str,
+    manifests: tuple[str, ...],
+    paths: tuple[str, ...],
+    required_features: tuple[str, ...],
 ) -> None:
-    """Require the package feature that each input contract type needs.
+    """Require the package feature that each manifest's input contract needs.
 
-    Contract sidecars are named `inputs.yaml` or `<manifest>.inputs.yaml`.
+    Only the sidecar that the contract loader selects for a manifest is read,
+    so other files named `inputs.yaml` are ordinary content.
     """
     if package.TYPED_INPUT_MAPS_FEATURE in required_features:
         return
     prefix = "" if workspace == "." else workspace + "/"
-    for relative in paths:
-        name = relative.rsplit("/", 1)[-1].casefold()
-        if not relative.startswith(prefix) or (
-            name != "inputs.yaml" and not name.endswith(".inputs.yaml")
-        ):
+    # Case-insensitive file systems can open a sidecar whose name differs only in case.
+    inventory = {path.casefold(): path for path in paths}
+    for manifest in manifests:
+        try:
+            sidecar = contract_path(PurePosixPath(manifest))
+        except GuidedInputError:
+            continue
+        relative = inventory.get((prefix + sidecar.as_posix()).casefold())
+        if relative is None:
             continue
         try:
             maps = declares_string_map(checked_path(root, relative))
@@ -517,7 +534,6 @@ def build_package(
     if output.exists() or output.is_symlink():
         raise ArtifactError("The package output already exists.")
     paths = _source_files(snapshot, workspace, companions)
-    _require_input_contract_features(snapshot, workspace, paths, required_features)
     records = []
     compression = {}
     total = 0
@@ -534,7 +550,8 @@ def build_package(
         workspace,
         directory=True,
     )
-    template_sources = _discover_template_sources(snapshot, workspace)
+    manifests, template_sources = _discover_workspace(snapshot, workspace)
+    _require_input_contract_features(snapshot, workspace, manifests, paths, required_features)
     requires_bicep = any(
         Path(source).suffix.casefold() == ".bicep"
         for source in template_sources

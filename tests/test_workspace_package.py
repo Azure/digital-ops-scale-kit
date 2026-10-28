@@ -207,7 +207,7 @@ def test_producer_target_is_checked_before_template_discovery(snapshot, tmp_path
     def unexpected(*args):
         pytest.fail("Invalid engine selection must fail before template discovery.")
 
-    monkeypatch.setattr(package_builder, "_discover_template_sources", unexpected)
+    monkeypatch.setattr(package_builder, "_discover_workspace", unexpected)
     output = tmp_path / "package.zip"
     with pytest.raises(ArtifactError, match="compatibility declaration|different Site Ops version"):
         _build(snapshot, output, engine_version=engine_version)
@@ -258,12 +258,26 @@ def test_producer_requires_the_map_feature_for_a_string_map_contract(snapshot, t
     ("manifests/storage/inputs.yaml", _MAP_CONTRACT.replace("stringMap", "string")),
     ("manifests/storage/inputs.yaml", "settings:\n  type: stringMap\n"),
     ("defaults.inputs.yml", _MAP_CONTRACT),
+    ("manifests/storage/other.inputs.yaml", _MAP_CONTRACT),
+    ("parameters/settings.inputs.yaml", _MAP_CONTRACT),
+    ("parameters/inputs.yaml", "kind: SiteInputContract\nkind: Parameters\n"),
 ])
 def test_producer_needs_no_map_feature_without_a_string_map_contract(snapshot, tmp_path, relative, contents):
+    (snapshot / "workspace" / relative).parent.mkdir(parents=True, exist_ok=True)
     (snapshot / "workspace" / relative).write_text(contents, encoding="utf-8")
     (snapshot / "docs" / "inputs.yaml").write_text(_MAP_CONTRACT, encoding="utf-8")
     built = _build(snapshot, tmp_path / "package.zip")
     assert package.TYPED_INPUT_MAPS_FEATURE not in built.metadata.required_features
+
+
+def test_producer_reads_no_parameter_file_that_is_not_a_manifest_sidecar(snapshot, tmp_path):
+    # Larger than the contract reader's limit, and accepted by the v1.0.0b7 producer.
+    parameters = snapshot / "workspace" / "parameters"
+    parameters.mkdir()
+    (parameters / "inputs.yaml").write_text(f"description: {'a' * 131100}\n", encoding="utf-8")
+    built = _build(snapshot, tmp_path / "package.zip")
+    assert built.metadata.required_features == (package.COMPILED_TEMPLATE_FEATURE, "manifest/v1")
+    assert "workspace/parameters/inputs.yaml" in {entry.path for entry in built.metadata.files}
 
 
 def test_producer_fails_closed_on_an_unreadable_contract_sidecar(snapshot, tmp_path):
