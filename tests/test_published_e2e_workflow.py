@@ -1062,9 +1062,10 @@ def test_published_setup_rejects_foreign_release_before_tool_acquisition(tmp_pat
         "EXPECTED_SOURCE_SHA": "a" * 40,
         "GH_TOKEN": "fixture",
     })
+    # Git Bash starts the step's processes slowly on a busy host, so the limit only stops a hang.
     result = subprocess.run(
         [str(_bash_executable()), str(script)],
-        env=environment, cwd=tmp_path, capture_output=True, text=True, timeout=30,
+        env=environment, cwd=tmp_path, capture_output=True, text=True, timeout=90,
     )
     assert result.returncode != 0
     assert "published release does not target the expected commit" in result.stderr
