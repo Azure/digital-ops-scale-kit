@@ -885,3 +885,47 @@ class TestAnInterruptedFleetStops:
         }
         assert OperationStatus.UNKNOWN in statuses
         assert OperationStatus.CANCELLED in statuses
+
+    def test_a_worker_interrupted_after_the_run_stops_is_still_recorded(self, tmp_workspace):
+        both_running = threading.Barrier(2)
+
+        def execute_target(
+            self_,
+            plan,
+            target,
+            *args,
+            **kwargs,
+        ):
+            state = kwargs["state"]
+            state.start()
+            assert state.begin(target.operations[0])
+            both_running.wait(timeout=30)
+            if target.name != "plant-00":
+                # Stop only after the run has handled the first interrupt and left its wait loop.
+                assert kwargs["stop_requested"].wait(timeout=30)
+            raise KeyboardInterrupt("operator stopped the rollout")
+
+        orchestrator = Orchestrator(tmp_workspace)
+        plan = _prepared_plan(self._sites(2), parallel_sites=2)
+
+        with patch.object(
+            Orchestrator,
+            "_execute_prepared_target",
+            execute_target,
+        ):
+            results, _, interrupted = orchestrator._run_prepared_targets(
+                plan,
+                list(plan.targets),
+                TIMESTAMP,
+                {},
+                PlanExecutionMode.APPLY,
+                progress=_ProgressOwner(None),
+            )
+
+        assert interrupted is True
+        assert [result.target for result in results] == ["plant-00", "plant-01"]
+        assert {
+            operation.status
+            for result in results
+            for operation in result.operations
+        } == {OperationStatus.UNKNOWN}
