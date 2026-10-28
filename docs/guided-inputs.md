@@ -207,11 +207,14 @@ values:
 
 Inline entries replace answer file entries key by key, and other file
 entries remain. A key repeated inline fails, even with the same value.
-Values must be text. Numbers, booleans, null, lists and nested maps fail
-rather than being converted. Each map, from the file, inline or combined,
-holds at most 64 entries, with keys of 1 to 256 characters and no control
-characters, values of at most 4,096 characters, and at most 64 KiB of keys
-and values together.
+Keys and values must be text. Numbers, booleans, null, lists and nested maps
+fail rather than being converted, so quote each key and value, and write a
+nested setting as one dotted key. Keys must also be printable: no control,
+format, surrogate, private use or unassigned characters, and no line or
+paragraph separators. Which characters are unassigned depends on the Unicode
+version of the engine's Python. Each map, from the file, inline or combined,
+holds at most 64 entries, with keys of 1 to 256 characters, values of at
+most 4,096 characters, and at most 64 KiB of keys and values together.
 Errors name the input and, unless output is redacted, the key, never the
 value. The settings appear in answer files, shell history, the Site preview
 and Azure, so never put secrets in them.

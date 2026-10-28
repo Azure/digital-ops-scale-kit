@@ -1715,40 +1715,51 @@ def test_string_map_writes_entries_and_an_omitted_or_empty_map_writes_nothing(tm
     }
 
 
-@pytest.mark.parametrize("value", [
-    "on", "1.10", "5", "true", "null", "[PRIVATE_SENTINEL]", "{PRIVATE_SENTINEL: x}",
+@pytest.mark.parametrize(("value", "problem"), [
+    *((value, "is not a string. Quote each value in YAML.") for value in (
+        "on", "1.10", "5", "true", "null", "[PRIVATE_SENTINEL]",
+    )),
+    ("{PRIVATE_SENTINEL: x}", "is a mapping. Write each setting as one dotted key with a quoted value."),
 ])
-def test_string_map_values_are_never_coerced(tmp_path, value):
+def test_string_map_values_are_never_coerced(tmp_path, value, problem):
     contract = _map_contract(tmp_path)
     answers = _map_answers(tmp_path, f'  settings:\n    "named.key": {value}\n')
     with pytest.raises(GuidedInputError) as rejected:
         contract.resolve(values_file=answers)
-    assert str(rejected.value) == (
-        "Input 'settings' has a value that is not a string. Quote each value in YAML."
-    )
-    assert rejected.value.private_message == (
-        "Input 'settings' key 'named.key' has a value that is not a string. Quote each value in YAML."
-    )
+    assert str(rejected.value) == f"Input 'settings' has a value that {problem}"
+    assert rejected.value.private_message == f"Input 'settings' key 'named.key' has a value that {problem}"
     quoted = _map_answers(tmp_path, '  settings:\n    "on": "on"\n    "v": "1.10"\n', name="quoted.yaml")
     assert contract.resolve(values_file=quoted).parameters["settings"] == {"on": "on", "v": "1.10"}
 
 
+_UNQUOTED_KEY = "Input 'settings' keys must be text. Quote each key in YAML."
+_UNPRINTABLE_KEY = "Input 'settings' keys must be printable text of 1 to 256 characters."
+
+
 @pytest.mark.parametrize(("entry", "message"), [
-    ('    5: "x"\n', "Input 'settings' must have string keys."),
-    ('    on: "x"\n', "Input 'settings' must have string keys."),
-    ('    "": "x"\n', "Input 'settings' keys must have 1 to 256 characters and no control characters."),
-    ('    "PRIVATE\\aKEY": "x"\n', "Input 'settings' keys must have 1 to 256 characters and no control characters."),
-    ('    "PRIVATE\\u202eKEY": "x"\n', "Input 'settings' keys must have 1 to 256 characters and no control characters."),
-    (f'    "{"k" * 257}": "x"\n', "Input 'settings' keys must have 1 to 256 characters and no control characters."),
+    ('    5: "x"\n', _UNQUOTED_KEY),
+    ('    on: "x"\n', _UNQUOTED_KEY),
+    ('    1.10: "x"\n', _UNQUOTED_KEY),
+    ('    "": "x"\n', _UNPRINTABLE_KEY),
+    (f'    "{"k" * 257}": "x"\n', _UNPRINTABLE_KEY),
+    *((f'    "PRIVATE\\u{code:04x}KEY": "x"\n', _UNPRINTABLE_KEY) for code in (
+        0x07, 0x7F, 0x202E, 0x200B, 0xE000, 0x0378, 0x2028, 0x2029,
+    )),
     ("", "Input 'settings' must be a mapping of string keys to string values."),
 ])
-def test_string_map_keys_are_bounded_text_and_never_named_when_invalid(tmp_path, entry, message):
+def test_string_map_keys_are_printable_text_and_never_named_when_invalid(tmp_path, entry, message):
     contract = _map_contract(tmp_path)
     text = f"  settings:\n{entry}" if entry else '  settings: "key=value"\n'
     with pytest.raises(GuidedInputError) as rejected:
         contract.resolve(values_file=_map_answers(tmp_path, text))
     assert str(rejected.value) == message
     assert rejected.value.private_message is None
+
+
+def test_string_map_keys_accept_printable_text_beyond_ascii(tmp_path):
+    keys = ["caf\u00e9.mode", "\u8a2d\u5b9a", "with space", "emoji.\U0001f600", "tab-free.key"]
+    answers = _map_answers(tmp_path, {"settings": {key: "v" for key in keys}})
+    assert sorted(_map_contract(tmp_path).resolve(values_file=answers).parameters["settings"]) == sorted(keys)
 
 
 def test_string_map_limits_count_code_points_and_utf8_bytes_in_each_file(tmp_path):
@@ -1764,7 +1775,7 @@ def test_string_map_limits_count_code_points_and_utf8_bytes_in_each_file(tmp_pat
         assert contract.resolve(values_file=path).parameters["settings"] == entries
     rejected = [
         ({f"k{index:02}": "v" for index in range(65)}, "exceeds its limit of 64 entries"),
-        ({"\u00e9" * 257: "v"}, "keys must have 1 to 256 characters"),
+        ({"\u00e9" * 257: "v"}, "keys must be printable text of 1 to 256 characters"),
         ({"key": "\u00e9" * 4097}, "has a value that is longer than 4,096 characters"),
         ({**accepted[2], "k00": "v" * 4094}, "exceeds its 64 KiB limit"),
         ({f"k{index:02}": "\u00e9" * 4096 for index in range(8)}, "exceeds its 64 KiB limit"),
@@ -1911,7 +1922,7 @@ def test_inline_map_entries_split_at_the_first_two_equals_signs(tmp_path, answer
     (["settings="], "Inline input 'settings' must use settings=KEY=VALUE for each entry.", None),
     (["settings=PRIVATE_SENTINEL"], "Inline input 'settings' must use settings=KEY=VALUE for each entry.", None),
     (["settings==PRIVATE_SENTINEL"],
-     "Inline input 'settings' keys must have 1 to 256 characters and no control characters.", None),
+     "Inline input 'settings' keys must be printable text of 1 to 256 characters.", None),
     (["settings=k=PRIVATE_SENTINEL", "settings=k=PRIVATE_SENTINEL"],
      "Inline input 'settings' repeats a key.", "Inline input 'settings' repeats key 'k'."),
     (["settings=k=one", "settings=k=PRIVATE_SENTINEL"],

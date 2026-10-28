@@ -188,14 +188,20 @@ def _typed_value(value: Any, kind: str, label: str, *, required: bool) -> None:
 
 
 def _map_key(key: Any, label: str) -> None:
-    """Check one stringMap key before any message can name it."""
+    """Check one stringMap key before any message can name it.
+
+    Printable keys exclude Unicode control, format, surrogate, private use and
+    unassigned characters, and line and paragraph separators.
+    """
     if not isinstance(key, str):
-        raise GuidedInputError(f"{label} must have string keys.")
+        raise GuidedInputError(f"{label} keys must be text. Quote each key in YAML.")
     if not 1 <= len(key) <= _MAP_KEY_LENGTH or any(
-        unicodedata.category(character).startswith("C") for character in key
+        unicodedata.category(character)[0] == "C"
+        or unicodedata.category(character) in ("Zl", "Zp")
+        for character in key
     ):
         raise GuidedInputError(
-            f"{label} keys must have 1 to {_MAP_KEY_LENGTH} characters and no control characters."
+            f"{label} keys must be printable text of 1 to {_MAP_KEY_LENGTH} characters."
         )
 
 
@@ -215,6 +221,10 @@ def _string_map(value: Any, label: str) -> None:
     size = 0
     for key, item in value.items():
         _map_key(key, label)
+        if isinstance(item, Mapping):
+            raise _map_entry_error(
+                label, key, "is a mapping. Write each setting as one dotted key with a quoted value.",
+            )
         if type(item) is not str:
             raise _map_entry_error(label, key, "is not a string. Quote each value in YAML.")
         if len(item) > _MAP_VALUE_LENGTH:

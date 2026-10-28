@@ -158,9 +158,12 @@ It declares no default, and `required: true` means at least one entry. Its
 path cannot overlap `siteDefaults` or another input, and it cannot control a
 condition. An omitted map or `{}` writes nothing. Operators supply one inline
 entry for each key as `--input NAME=KEY=VALUE`, and inline keys replace answer
-file keys one by one. Values are never converted from other YAML types. Each
-supplied map and the combined map hold at most 64 entries, keys of 1 to 256
-characters without control characters, values of at most 4,096 characters
+file keys one by one. Keys and values are never converted from other YAML
+types. Keys must be printable text, with no control, format, surrogate,
+private use or unassigned characters and no line or paragraph separators.
+Which characters are unassigned depends on the Unicode version of the
+engine's Python. Each supplied map and the combined map hold at most 64
+entries, keys of 1 to 256 characters, values of at most 4,096 characters
 and at most 64 KiB of UTF-8 keys and values. A package whose contract uses
 `stringMap` must declare the required feature `typed-input-maps/v1`, which
 the package producer enforces.
