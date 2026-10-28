@@ -418,9 +418,10 @@ jobs:
       - name: Windows installation consumers
         shell: powershell
         run: |
+          # These installation tests are disk bound and gain nothing from parallel workers.
           python -B -m pytest tests\test_uv_installation.py tests\test_distribution_workflows.py `
               tests\test_release_workflow.py `
-              -k 'test_uv_installation or native_qualification or matrix_runtime_admission or native_verified_installation_step or native_online_installation_step or native_installation_steps or generated_powershell_bootstrap or required_native_consumer_fixtures or windows_qualification' -q -n auto `
+              -k 'test_uv_installation or native_qualification or matrix_runtime_admission or native_verified_installation_step or native_online_installation_step or native_installation_steps or generated_powershell_bootstrap or required_native_consumer_fixtures or windows_qualification' -q `
               --basetemp="$env:SITEOPS_WINDOWS_TEST_TEMP-consumers"
           if ($LASTEXITCODE -ne 0) { throw 'Native Windows installation consumer tests failed.' }
 
