@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 from ctypes import wintypes
 from pathlib import Path
 
@@ -84,15 +85,17 @@ def run_windows_installer(
                 try:
                     with phase.open("rb") as stream:
                         observed = stream.read(64)
+                    seconds = str(max(0, int(time.time() - phase.stat().st_mtime)))
                 except FileNotFoundError:
-                    observed = b"not-started"
+                    observed, seconds = b"not-started", "unknown"
                 stages = {
-                    b"not-started", b"extracting-helper", b"checking-payload", b"complete",
+                    b"not-started", b"loading-compression", b"opening-archive",
+                    b"extracting-helper", b"checking-payload", b"complete",
                 }
                 stage = observed.decode("ascii") if observed in stages else "invalid-phase"
                 names = ",".join(_windows_child_names(job)) or "none"
                 pytest.fail(
-                    f"Windows installer timed out: phase={stage}, "
+                    f"Windows installer timed out: phase={stage}, phase_seconds={seconds}, "
                     f"launcher_exited={process.poll() is not None}, processes={names}",
                     pytrace=False,
                 )

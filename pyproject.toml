@@ -31,7 +31,7 @@ dev = [
     "setuptools>=77.0.3",
     "pytest>=7.0",
     "pytest-cov>=4.0",
-    "ruff==0.15.20",
+    "ruff==0.17.1",
 ]
 
 [project.scripts]
@@ -77,5 +77,5 @@ target-version = "py310"
 line-length = 100
 
 [tool.ruff.lint]
-# Default rule set (E4, E7, E9, F), plus isort and pycodestyle warnings.
-extend-select = ["I", "W"]
+# Ruff 0.16 enlarged its default rules. Keep the earlier defaults (E4, E7, E9, F), isort and W.
+select = ["E4", "E7", "E9", "F", "I", "W"]

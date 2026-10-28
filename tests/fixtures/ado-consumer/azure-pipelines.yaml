@@ -1,0 +1,55 @@
+# Azure Pipelines caller in another repository, for template qualification.
+# Copy tests/fixtures/ado-consumer to the root of a caller repository and
+# replace <reviewed-release> with the Scale Kit tag to qualify. See
+# docs/releasing.md for the service connections and environment it uses.
+trigger: none
+pr: none
+
+parameters:
+  - name: dryRun
+    displayName: Prepare the executable plan only
+    type: boolean
+    default: true
+
+resources:
+  repositories:
+    - repository: scalekit
+      type: github
+      name: Azure/digital-ops-scale-kit
+      endpoint: scalekit-github
+      ref: refs/tags/<reviewed-release>
+
+pool:
+  vmImage: ubuntu-24.04
+
+variables:
+  - name: SITE_OVERRIDES
+    value: ''
+
+stages:
+  - template: /.pipelines/templates/siteops-validate.yaml@scalekit
+    parameters:
+      templateRepository: scalekit
+      stageName: validate_selector
+      workspace: workspace
+      manifest: manifests/smoke.yaml
+      selector: environment=smoke
+
+  - template: /.pipelines/templates/siteops-validate.yaml@scalekit
+    parameters:
+      templateRepository: scalekit
+      stageName: validate_site_file
+      workspace: workspace
+      manifest: manifests/smoke.yaml
+      siteFile: operator/site.yaml
+
+  - template: /.pipelines/templates/siteops-deploy.yaml@scalekit
+    parameters:
+      templateRepository: scalekit
+      workspace: workspace
+      manifest: manifests/smoke.yaml
+      selector: environment=smoke
+      environment: siteops-qualification
+      serviceConnection: azure-siteops
+      keepAzSessionActive: true
+      dryRun: ${{ parameters.dryRun }}

@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import shutil
+import time
 import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -21,6 +22,8 @@ from siteops.cache_filesystem import (
     check_private_node,
     make_private_directory,
 )
+from siteops.diagnostics import CLEANUP_INCOMPLETE, warn
+from siteops.runtime import cleanup_location, describe_cleanup_error
 
 logger = logging.getLogger(__name__)
 CACHE_DIR_ENV = "SITEOPS_CACHE_DIR"
@@ -28,6 +31,7 @@ _MARKER = b'{"apiVersion":"siteops/v1alpha1","kind":"WorkspaceCache"}\n'
 _DIRECTORIES = ("objects", "receipts", "staging", "locks")
 _NAMESPACES = {"proofs": "sha256", "metadata": "records"}
 _STAGED_MARKER = re.compile(r"cache-[0-9a-f]{32}\.json\Z")
+_MARKER_READS = 5
 
 
 def default_cache_root(environment: Mapping[str, str] | None = None) -> Path:
@@ -53,7 +57,14 @@ def default_cache_root(environment: Mapping[str, str] | None = None) -> Path:
     return root.joinpath(*suffix)
 
 
-def write_new(path: Path, data: bytes) -> None:
+def write_new(
+    path: Path, data: bytes, *, name_is_chosen: bool = True, parent_is_engine_owned: bool = False,
+) -> None:
+    """Write a new private file, and remove it when the write does not complete.
+
+    A redacted cleanup warning withholds the file's location unless the caller
+    passes `name_is_chosen=False` for a name Site Ops generated.
+    """
     descriptor = os.open(
         path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600,
     )
@@ -68,17 +79,44 @@ def write_new(path: Path, data: bytes) -> None:
         if not complete:
             try:
                 path.unlink()
-            except OSError:
-                logger.warning("Cache file staging cleanup could not be completed.")
+            except OSError as error:
+                # Callers may name this file after an approved source or a `siteops inputs` output.
+                warn(
+                    logger, CLEANUP_INCOMPLETE,
+                    "Cache file staging cleanup could not be completed. Location: %s. Reason: %s.",
+                    cleanup_location(path, parent_is_engine_owned=parent_is_engine_owned, name_is_chosen=name_is_chosen),
+                    describe_cleanup_error(error),
+                )
 
 
-def cleanup_directory(path: Path) -> None:
-    """Remove only a directory created by this operation, never a published object."""
+def cleanup_directory(path: Path, *, parent_is_engine_owned: bool = False) -> None:
+    """Remove only a directory created by this operation, never a published object.
+
+    Pass `parent_is_engine_owned` when the directory is in the cache's own `staging` folder.
+    """
     try:
         check_private_node(path, directory=True)
         shutil.rmtree(path)
-    except (OSError, ArtifactError):
-        logger.warning("Cache staging cleanup could not be completed.")
+    except (OSError, ArtifactError) as error:
+        warn(
+            logger, CLEANUP_INCOMPLETE,
+            "Cache staging cleanup could not be completed. Location: %s. Reason: %s.",
+            cleanup_location(path, parent_is_engine_owned=parent_is_engine_owned), describe_cleanup_error(error),
+        )
+
+
+def _read_marker(marker: Path) -> bytes:
+    """Read the marker again when a concurrent initializer replaces it during the read."""
+    attempt = 1
+    while True:
+        try:
+            with open_regular_file(marker) as stream:
+                return stream.read(len(_MARKER) + 1)
+        except ArtifactError:
+            if attempt == _MARKER_READS:
+                raise
+        time.sleep(0.01 * attempt)
+        attempt += 1
 
 
 @contextmanager
@@ -113,9 +151,8 @@ class CacheLayout:
                 "The selected cache directory contains other files. Select a new or empty directory.",
             )
         check_private_node(marker, directory=False)
-        with open_regular_file(marker) as stream:
-            if stream.read(len(_MARKER) + 1) != _MARKER:
-                raise CacheError("The selected directory is not a supported Site Ops cache.")
+        if _read_marker(marker) != _MARKER:
+            raise CacheError("The selected directory is not a supported Site Ops cache.")
         names = {entry.name for entry in self.root.iterdir()}
         required = {"cache.json", *_DIRECTORIES}
         if not required <= names or names - required - _NAMESPACES.keys():
@@ -166,15 +203,22 @@ class CacheLayout:
             check_private_node(directory, directory=True)
         staged = self.root / "staging" / f"cache-{uuid.uuid4().hex}.json"
         marker = self.root / "cache.json"
-        write_new(staged, _MARKER)
+        write_new(staged, _MARKER, name_is_chosen=False, parent_is_engine_owned=True)
         try:
-            # POSIX replaces an identical marker. Windows refuses when another initializer placed one.
+            # Keep a marker another initializer placed. POSIX can still replace one placed after
+            # this check, and readers accept that identical replacement. Windows refuses it.
+            if os.path.lexists(marker):
+                raise FileExistsError(marker)
             os.rename(staged, marker)
         except OSError:
             try:
                 staged.unlink()
-            except OSError:
-                logger.warning("Cache file staging cleanup could not be completed.")
+            except OSError as error:
+                warn(
+                    logger, CLEANUP_INCOMPLETE,
+                    "Cache file staging cleanup could not be completed. Location: %s. Reason: %s.",
+                    cleanup_location(staged, parent_is_engine_owned=True), describe_cleanup_error(error),
+                )
             if not marker.exists():
                 raise
 
@@ -213,7 +257,7 @@ class CacheLayout:
         make_private_directory(candidate)
         published = False
         try:
-            write_new(candidate / "cache.json", _MARKER)
+            write_new(candidate / "cache.json", _MARKER, name_is_chosen=False, parent_is_engine_owned=True)
             for name in _DIRECTORIES:
                 make_private_directory(candidate / name)
             make_private_directory(candidate / "objects" / "sha256")
@@ -252,4 +296,4 @@ class CacheLayout:
             return target / _NAMESPACES[name]
         finally:
             if not published:
-                cleanup_directory(candidate)
+                cleanup_directory(candidate, parent_is_engine_owned=True)

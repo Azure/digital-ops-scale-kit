@@ -127,8 +127,8 @@ def test_diagnostic_requires_ci_and_admission_without_release_authority():
     assert all("if" not in job for job in (signer, verifier))
     pins = {
         "actions/attest": "1e69f48acb82d1966a394da916b4c1698aa569d6",
-        "actions/upload-artifact": "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
-        "actions/download-artifact": "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+        "actions/upload-artifact": "cf430e030ddbb5b0abf93d22962f4752f3646cd9",
+        "actions/download-artifact": "9000827ccba6bdab643e8b6fd33ac0654aef8333",
     }
     for job in (signer, verifier):
         assert job["timeout-minutes"] <= 10 and "environment" not in job

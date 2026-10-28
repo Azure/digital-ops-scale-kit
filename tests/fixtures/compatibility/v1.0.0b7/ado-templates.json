@@ -1,0 +1,44 @@
+{
+  "release": "v1.0.0b7",
+  "templates": {
+    "setup-siteops.yaml": [
+      {"name": "pythonVersion", "type": "string", "default": "3.11"},
+      {"name": "installDev", "type": "boolean", "default": false},
+      {"name": "siteopsSource", "type": "string", "default": ""},
+      {"name": "enableCache", "type": "boolean", "default": true},
+      {"name": "sourceDirectory", "type": "string", "default": "$(Build.SourcesDirectory)"},
+      {"name": "templateRepository", "type": "string", "default": "self"},
+      {"name": "release", "type": "string", "default": ""},
+      {"name": "sourceCommit", "type": "string", "default": ""},
+      {"name": "repository", "type": "string", "default": ""}
+    ],
+    "siteops-validate.yaml": [
+      {"name": "templateRepository", "type": "string", "default": "self"},
+      {"name": "workspace", "type": "string", "default": "workspaces/iot-operations"},
+      {"name": "manifest", "type": "string"},
+      {"name": "selector", "type": "string", "default": ""},
+      {"name": "siteFile", "type": "string", "default": ""},
+      {"name": "siteopsSource", "type": "string", "default": ""},
+      {"name": "release", "type": "string", "default": ""},
+      {"name": "sourceCommit", "type": "string", "default": ""},
+      {"name": "repository", "type": "string", "default": ""},
+      {"name": "stageName", "type": "string", "default": "validate"}
+    ],
+    "siteops-deploy.yaml": [
+      {"name": "serviceConnection", "type": "string"},
+      {"name": "keepAzSessionActive", "type": "boolean", "default": false},
+      {"name": "workspace", "type": "string", "default": "workspaces/iot-operations"},
+      {"name": "manifest", "type": "string"},
+      {"name": "environment", "type": "string", "default": ""},
+      {"name": "selector", "type": "string", "default": ""},
+      {"name": "siteFile", "type": "string", "default": ""},
+      {"name": "dryRun", "type": "boolean", "default": false},
+      {"name": "siteopsSource", "type": "string", "default": ""},
+      {"name": "release", "type": "string", "default": ""},
+      {"name": "sourceCommit", "type": "string", "default": ""},
+      {"name": "repository", "type": "string", "default": ""},
+      {"name": "stageName", "type": "string", "default": "deploy"},
+      {"name": "templateRepository", "type": "string", "default": "self"}
+    ]
+  }
+}

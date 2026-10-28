@@ -23,6 +23,8 @@ from siteops.artifact_verification import utc_text
 from siteops.artifacts import ArtifactError, load_artifact_json, open_regular_file
 from siteops.cache_filesystem import CacheError, cache_lock, check_private_node
 from siteops.cache_layout import CacheLayout, cache_io, write_new
+from siteops.diagnostics import CLEANUP_INCOMPLETE, warn
+from siteops.runtime import cleanup_location, describe_cleanup_error
 
 logger = logging.getLogger(__name__)
 MAX_METADATA_BYTES = 8 * 1024 * 1024
@@ -191,7 +193,7 @@ class SourceMetadataCache(CacheLayout):
         temporary = path.parent / f".record-{uuid.uuid4().hex}.tmp"
         created = False
         try:
-            write_new(temporary, raw)
+            write_new(temporary, raw, name_is_chosen=False, parent_is_engine_owned=True)
             created = True
             check_private_node(temporary, directory=False)
             temporary.replace(path)
@@ -200,8 +202,10 @@ class SourceMetadataCache(CacheLayout):
             if created:
                 try:
                     temporary.unlink()
-                except OSError:
-                    logger.warning("Source metadata staging cleanup could not be completed.")
+                except OSError as error:
+                    warn(logger, CLEANUP_INCOMPLETE,
+                         "Source metadata staging cleanup could not be completed. Location: %s. Reason: %s.",
+                         cleanup_location(temporary, parent_is_engine_owned=True), describe_cleanup_error(error))
 
     def get_or_fetch(
         self, key: MetadataKey, fetch: Callable[[], bytes], *,

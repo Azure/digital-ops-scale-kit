@@ -134,6 +134,8 @@ def bootstrap_commands(
         "For the official Azure/digital-ops-scale-kit publisher, the guided examples use `official`.",
         "The PowerShell execution policy setting applies only to the child process. "
         "An organization policy may require an approved managed installation instead.",
+        "The PowerShell bootstrap adds uv's command directory to your user PATH, so new terminals "
+        "find `siteops`. Add `-NoModifyPath` to keep your saved PATH unchanged.",
     ]
     return commands, details
 

@@ -1,4 +1,4 @@
-"""Keep the consolidated maintainer result complete, source-bound and value-safe."""
+"""Keep the consolidated maintainer result complete, bound to its source, free of private values."""
 
 import importlib.util
 import json
@@ -14,6 +14,10 @@ from tests.installed_runtime import isolated_environment
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = "a" * 40
 NAMES = ["ci", "deploy-dev-plan"]
+
+
+def qualification_variables():
+    return ["PREVIEW_RESULT", "SELECTOR_RESULT", "SITE_FILE_RESULT", "B7_SELECTOR_RESULT", "B7_SITE_FILE_RESULT"]
 
 
 @pytest.fixture
@@ -39,7 +43,9 @@ def preview_receipt(tmp_path):
     return path
 
 
-@pytest.mark.parametrize("job", ["preview", "validate_selector", "validate_site_file"])
+@pytest.mark.parametrize("job", [
+    "preview", "validate_selector", "validate_site_file", "validate_b7_selector", "validate_b7_site_file",
+])
 @pytest.mark.parametrize("result", ["Succeeded", "SucceededWithIssues", "Failed", "Skipped", "Canceled", ""])
 def test_every_required_job_must_succeed(qualification, preview_receipt, job, result):
     results = dict.fromkeys(qualification.CHECKS, "Succeeded")
@@ -146,7 +152,9 @@ def test_reporting_command_publishes_only_its_own_safe_result(
 def test_pipeline_collects_native_job_results_and_retains_failure_reporting():
     document = yaml.safe_load((ROOT / ".pipelines/validate-pipelines.yaml").read_text())
     stage = next(stage for stage in document["stages"] if stage.get("stage") == "qualification_report")
-    assert set(stage["dependsOn"]) == {"preview", "validate_selector", "validate_site_file"}
+    assert set(stage["dependsOn"]) == {
+        "preview", "validate_selector", "validate_site_file", "validate_b7_selector", "validate_b7_site_file",
+    }
     assert stage["condition"] == "always()"
     job = stage["jobs"][0]
     assert job["condition"] == "always()"
@@ -155,6 +163,8 @@ def test_pipeline_collects_native_job_results_and_retains_failure_reporting():
         "PREVIEW_RESULT": "$[ stageDependencies.preview.preview.result ]",
         "SELECTOR_RESULT": "$[ stageDependencies.validate_selector.siteops_validate.result ]",
         "SITE_FILE_RESULT": "$[ stageDependencies.validate_site_file.siteops_validate.result ]",
+        "B7_SELECTOR_RESULT": "$[ stageDependencies.validate_b7_selector.siteops_validate.result ]",
+        "B7_SITE_FILE_RESULT": "$[ stageDependencies.validate_b7_site_file.siteops_validate.result ]",
     }
     steps = job["steps"]
     download = next(step for step in steps if step.get("task") == "DownloadPipelineArtifact@2")
@@ -166,6 +176,8 @@ def test_pipeline_collects_native_job_results_and_retains_failure_reporting():
     assert "python3 -I -S -B scripts/summarize-ado-qualification.py" in summarize["script"]
     assert summarize["env"]["BUILD_SOURCEVERSION"] == "$(Build.SourceVersion)"
     assert summarize["env"]["REPORT_PREPARATION_RESULT"] == "$(Agent.JobStatus)"
+    for variable in qualification_variables():
+        assert summarize["env"][variable] == f"$({variable})"
     assert "SYSTEM_ACCESSTOKEN" not in summarize["env"]
     publish = next(step for step in steps if step.get("task") == "PublishPipelineArtifact@1")
     assert publish["condition"] == "and(always(), eq(variables['ADO_QUALIFICATION_REPORT_READY'], 'true'))"
@@ -181,6 +193,7 @@ def test_native_reporter_needs_no_installed_engine_or_third_party_packages(
         **isolated_environment(tmp_path / "state"),
         "BUILD_SOURCEVERSION": SOURCE, "PREVIEW_RESULT": "Succeeded",
         "SELECTOR_RESULT": result, "SITE_FILE_RESULT": "Succeeded",
+        "B7_SELECTOR_RESULT": "Succeeded", "B7_SITE_FILE_RESULT": "Succeeded",
         "REPORT_PREPARATION_RESULT": "Succeeded",
     }
     process = subprocess.run([

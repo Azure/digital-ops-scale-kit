@@ -1,5 +1,6 @@
 """Check the two platform entry scripts without contacting package or cloud services."""
 
+import ast
 import hashlib
 import json
 import os
@@ -10,6 +11,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from tests.bootstrap_discovery_helpers import (
     COMMIT,
@@ -558,7 +560,7 @@ def test_bootstraps_run_github_cli_without_telemetry():
 def test_bash_bootstrap_admits_private_data_root_before_retained_tool_use():
     bash = (SCRIPTS / "siteops-bootstrap.sh").read_text(encoding="utf-8")
     for invocation in ("\n  prepare_runtime\n", "\nprepare_runtime\n"):
-        assert bash.index('admit_directory "$data" private') < bash.index(invocation)
+        assert bash.index('\nadmit_directory "$data" private || refuse_data_root\n') < bash.index(invocation)
     runtime = re.search(r"(?ms)^prepare_runtime\(\) \{.*?^\}", bash).group()
     assert "\n  select_uv\n" in runtime
 
@@ -566,7 +568,7 @@ def test_bash_bootstrap_admits_private_data_root_before_retained_tool_use():
 def test_windows_bootstrap_admits_private_data_root_before_retained_tool_use():
     powershell = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
     assert "function Require-PrivateDataRoot(" in powershell
-    assert powershell.index("Require-PrivateDataRoot $data") < powershell.index(
+    assert powershell.index("\nRequire-PrivateDataRoot $data\n") < powershell.index(
         "$uv = Select-Uv $data $download $curl",
     )
 
@@ -584,6 +586,26 @@ def test_windows_bootstrap_owns_new_data_root_before_private_acl_and_admission()
     assert "Reject 'ROOT_DATA_OWNER'" in create
 
 
+def test_bootstraps_check_the_existing_data_root_between_preview_and_consent():
+    bash = (SCRIPTS / "siteops-bootstrap.sh").read_text(encoding="utf-8").splitlines()
+    check = bash.index('admit_directory "$data" private check || refuse_data_root')
+    assert bash.index("if $dry_run; then") < check < bash.index("if ! $approve; then")
+    assert check < bash.index('admit_directory "$data" private || refuse_data_root')
+    walk = re.search(
+        r"(?ms)^admit_directory\(\) \{.*?^\}", (SCRIPTS / "siteops-bootstrap.sh").read_text(encoding="utf-8"),
+    ).group()
+    missing = walk.split('if [[ "$create" == check ]]; then', 1)[1].split("fi", 1)[0]
+    assert "mkdir" not in missing and '[[ -w "${current%/*}/" ]]' in missing
+    powershell = [line.strip() for line in (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8").splitlines()]
+    check = powershell.index("Require-PrivateDataRoot $data -NoCreate")
+    assert powershell.index("if ($DryRun) {") < check < powershell.index("if (-not $Yes) {")
+    assert check < powershell.index("Require-PrivateDataRoot $data")
+    root = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8").split(
+        "function Require-PrivateDataRoot(", 1,
+    )[1].split("\nfunction ", 1)[0]
+    assert root.index("if ($NoCreate) { return }") < root.index("New-Item -ItemType Directory -Path $Path")
+
+
 def test_bootstrap_failures_are_distinguishable_from_progress():
     bash = {line.strip() for line in (SCRIPTS / "siteops-bootstrap.sh").read_text(encoding="utf-8").splitlines()}
     assert "fail() { printf 'Site Ops installation failed: %s\\n' \"$1\" >&2; exit 1; }" in bash
@@ -593,6 +615,31 @@ def test_bootstrap_failures_are_distinguishable_from_progress():
     }
     assert 'function Fail([string]$Message) { throw "Site Ops installation failed: $Message" }' in powershell
     assert 'function Stage([string]$Message) { Write-Host "Site Ops installation: $Message" }' in powershell
+
+
+def test_windows_bootstrap_saves_the_command_directory_after_consent_and_verification():
+    powershell = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
+    lines = [line.strip() for line in powershell.splitlines()]
+    assert "[switch]$NoModifyPath" in lines
+    listed = lines.index(
+        "Stage \"Add: uv's command directory to your user PATH, so new terminals find siteops. "
+        "Pass -NoModifyPath to skip this.\""
+    )
+    assert listed < lines.index("if ($DryRun) {") < lines.index("if (-not $Yes) {")
+    call = "try { Save-CommandDirectory $uv $commandDirectory } catch { 'unchecked' }"
+    inspection = "try { $earlier = Find-EarlierSiteOps $commandDirectory } catch {"
+    assert lines.count(call) == 1
+    assert lines.index("$observed = & $siteops --version 2>$null") < lines.index(call)
+    assert lines.index(call) < lines.index(inspection)
+    # Only uv writes the saved PATH, and only the user's.
+    for write in (
+        "SetValue(", "Set-ItemProperty", "New-ItemProperty", "setx", ", 'Machine')",
+        "Environment]::SetEnvironmentVariable('Path",
+    ):
+        assert write not in powershell
+    assert not re.search(r"OpenSubKey\([^)]*,", powershell)
+    saver = re.search(r"(?ms)^function Save-CommandDirectory\([^\n]*\) \{.*?^\}", powershell).group()
+    assert "Invoke-Uv $Uv @('tool', 'update-shell')" in saver
 
 
 def test_windows_bootstrap_creates_retained_bundle_as_user_before_helper_extraction():
@@ -625,6 +672,86 @@ def test_windows_bootstrap_checks_managed_executables_before_running_them():
     assert powershell.index("Require-PrivateExecutablePath $expectedCommand $commandDirectory") < (
         powershell.index("& $siteops --version")
     )
+
+
+def test_windows_bootstrap_compares_names_ordinally():
+    powershell = (SCRIPTS / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
+    # Culture comparisons ignore characters such as U+00AD, which still name another file.
+    assert not re.search(r"-i(?:eq|ne)\b", powershell, re.IGNORECASE)
+
+
+def _collected(*arguments: str) -> set[str]:
+    command = [sys.executable, "-m", "pytest", "--collect-only", "-q", "-o", "addopts="]
+    result = subprocess.run(
+        [*command, "-p", "no:cacheprovider", *arguments],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return {line.strip() for line in result.stdout.splitlines() if "::" in line}
+
+
+def test_windows_lane_selects_every_native_windows_test():
+    workflow = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / "ci.yaml").read_text(encoding="utf-8")
+    )
+    run = next(
+        step["run"]
+        for step in workflow["jobs"]["windows-bootstrap"]["steps"]
+        if step.get("name") == "Windows bootstrap tests"
+    )
+    paths = [f"tests/{name}" for name in re.findall(r"tests\\(test_\w+\.py)", run)]
+    assert paths == ["tests/test_bootstrap_scripts.py", "tests/test_uv_bootstrap_windows.py"]
+    selected = _collected(*paths, "-k", re.search(r"-k '([^']+)'", run).group(1))
+    # A test that names win32 needs the Windows lane, and so does the PowerShell side of discovery_shell.
+    source = Path(__file__).read_text(encoding="utf-8")
+    native, shells = set(), set()
+    for node in ast.parse(source).body:
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        text = "\n".join(
+            ast.get_source_segment(source, part) for part in (*node.decorator_list, node)
+        )
+        arguments = [argument.arg for argument in node.args.args]
+        if node.name.startswith("test_") and "win32" in text:
+            native.add(node.name)
+        elif node.name.startswith("test_") and "discovery_shell" in arguments:
+            shells.add(node.name)
+        elif "win32" in text:
+            assert node.name == "discovery_shell", f"{node.name} needs a rule in this check."
+    required = {
+        item
+        for item in _collected(*paths)
+        if item.startswith(paths[1])
+        or item.split("::")[1].split("[")[0] in native
+        or (item.split("::")[1].split("[")[0] in shells and "powershell" in item)
+    }
+    assert len(required) > 100
+    assert sorted(required - selected) == []
+
+
+def test_powershell_bootstrap_runs_in_tests_keep_the_user_path():
+    # A test that runs the PowerShell bootstrap past consent would otherwise let uv save to the real user PATH.
+    checked = []
+    for path in sorted((ROOT / "tests").glob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            constants = {
+                part.value
+                for part in ast.walk(node)
+                if isinstance(part, ast.Constant) and isinstance(part.value, str)
+            }
+            if "-Yes" in constants and constants & {"-File", "-Command"}:
+                checked.append(f"{path.name}::{node.name}")
+                text = ast.get_source_segment(source, node)
+                kept = "-NoModifyPath" in constants or "function Save-CommandDirectory" in text
+                assert kept, checked[-1]
+    journey = "test_windows_content_install_uses_native_uv_and_rechecks_both_retained_proofs"
+    assert f"test_bootstrap_engine_reference.py::{journey}" in checked
 
 
 def _windows_functions(*names: str) -> str:
@@ -1245,8 +1372,10 @@ def test_bootstrap_preview_keeps_source_names_private_in_redacted_output():
         assert "SITEOPS_REDACT_OUTPUT" in script
         assert "An explicitly selected source will be enrolled after installation." in script
         assert "with an approved source. Authenticate to Azure separately." in script
-    if sys.platform != "win32":
-        return
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="PowerShell preview runs on Windows.")
+def test_powershell_preview_keeps_source_names_private_in_redacted_output():
     script = SCRIPTS / "siteops-bootstrap.ps1"
     result = subprocess.run(
         [
@@ -1281,10 +1410,15 @@ def test_bootstrap_messages_use_enrollment_and_product_terms():
             assert retired not in script, (path.name, retired)
 
 
+def _require_native(available: bool, reason: str) -> None:
+    # The Windows lane provides every native prerequisite, so only a local run may skip.
+    if not available:
+        (pytest.fail if os.environ.get("CI") else pytest.skip)(reason)
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="PowerShell preview runs on Windows.")
 def test_powershell_preview_names_the_enrollment(tmp_path):
-    if shutil.which("gh") is None:
-        pytest.skip("GitHub CLI is unavailable.")
+    _require_native(shutil.which("gh") is not None, "GitHub CLI is unavailable.")
     result = subprocess.run(
         [
             "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
@@ -1298,6 +1432,29 @@ def test_powershell_preview_names_the_enrollment(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Source demo will enroll Azure/digital-ops-scale-kit with an expiring policy" in result.stdout
     assert "approve" not in result.stdout
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="PowerShell preview runs on Windows.")
+@pytest.mark.parametrize("opt_out", [False, True])
+def test_powershell_preview_lists_the_user_path_change(tmp_path, opt_out):
+    _require_native(shutil.which("gh") is not None, "GitHub CLI is unavailable.")
+    result = subprocess.run(
+        [
+            "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+            str(SCRIPTS / "siteops-bootstrap.ps1"),
+            "-Release", "siteops/v1.0.0b1", "-SourceCommit", SOURCE_SHA, "-DryRun",
+            *(["-NoModifyPath"] if opt_out else []),
+        ],
+        env={**os.environ, "LOCALAPPDATA": str(tmp_path / "state")},
+        capture_output=True, text=True, timeout=20,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    added = "Add: uv's command directory to your user PATH, so new terminals find siteops."
+    kept = "Keep: your saved PATH unchanged."
+    assert (added in result.stdout) is not opt_out
+    assert (kept in result.stdout) is opt_out
+    assert "No tools or content were downloaded" in result.stdout
+    assert not (tmp_path / "state" / "siteops").exists()
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="The Linux preview runs on the Linux runner.")
@@ -1327,6 +1484,131 @@ def test_bash_preview_and_unattended_refusal_do_not_acquire_tools(tmp_path):
     assert not (tmp_path / "state").exists()
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Real POSIX ownership and a terminal prompt need Linux.")
+@pytest.mark.parametrize("case", ["missing", "existing", "shared-parent", "open-root"])
+def test_bash_checks_the_data_root_before_asking_for_consent(tmp_path, case):
+    import pty
+
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    gh = tools / "gh"
+    gh.write_text("#!/usr/bin/env bash\necho 'gh version 2.95.0 (fixture)'\n", encoding="utf-8")
+    for path, mode in ((tmp_path, 0o700), (tools, 0o755), (gh, 0o755)):
+        path.chmod(mode)
+    parent = tmp_path / "data"
+    parent.mkdir(mode=0o700)
+    root = parent / "siteops"
+    if case == "shared-parent":
+        parent.chmod(0o777)
+    elif case in ("existing", "open-root"):
+        root.mkdir(mode=0o700)
+        root.chmod(0o755 if case == "open-root" else 0o700)
+    primary, terminal = pty.openpty()
+    try:
+        os.write(primary, b"n\n")
+        result = subprocess.run(
+            [
+                "bash", str(SCRIPTS / "siteops-bootstrap.sh"),
+                "--release", "siteops/v1.0.0b1", "--source-commit", SOURCE_SHA,
+            ],
+            stdin=terminal, capture_output=True, text=True, timeout=20,
+            env={
+                **os.environ, "HOME": str(tmp_path), "XDG_DATA_HOME": str(parent),
+                "PATH": f"{tools}{os.pathsep}{os.environ['PATH']}",
+            },
+        )
+    finally:
+        os.close(primary)
+        os.close(terminal)
+    assert result.returncode != 0
+    prompt = "Install missing tools and the selected Site Ops build?"
+    if case in ("missing", "existing"):
+        assert prompt in result.stderr, result.stdout + result.stderr
+        assert "Installation was not approved." in result.stderr
+    else:
+        assert "Configure a private Site Ops data root" in result.stderr, result.stdout + result.stderr
+        assert prompt not in result.stderr
+    assert root.exists() is (case != "missing" and case != "shared-parent")
+    assert not (root / "install-staging").exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows ACL admission needs Windows.")
+@pytest.mark.parametrize("shared", [False, True])
+def test_powershell_checks_the_data_root_before_asking_for_consent(tmp_path, shared):
+    _require_native(shutil.which("gh") is not None, "GitHub CLI is unavailable.")
+    local = tmp_path / "local"
+    local.mkdir()
+    users = "*S-1-5-32-545"
+    if shared:
+        grant = subprocess.run(
+            ["icacls.exe", str(local), "/grant", f"{users}:(OI)(CI)M"],
+            capture_output=True, text=True, timeout=20,
+        )
+        _require_native(
+            not grant.returncode, "The local test user cannot change the fixture directory ACL."
+        )
+    try:
+        result = subprocess.run(
+            [
+                "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                str(SCRIPTS / "siteops-bootstrap.ps1"),
+                "-Release", "siteops/v1.0.0b1", "-SourceCommit", SOURCE_SHA,
+            ],
+            env={**os.environ, "LOCALAPPDATA": str(local)},
+            input="", capture_output=True, text=True, timeout=30,
+        )
+    finally:
+        if shared:
+            subprocess.run(
+                ["icacls.exe", str(local), "/remove:g", users],
+                capture_output=True, text=True, check=True, timeout=20,
+            )
+    assert result.returncode != 0
+    output = "".join((result.stdout + result.stderr).split())
+    if shared:
+        assert "ConfigureaprivateSiteOpsdataroot.ROOT_ANCESTOR_ACL" in output, result.stderr
+        assert "pass-Yes" not in output
+    else:
+        assert "Inautomation,pass-Yesafterreviewingthechanges." in output, result.stderr
+    assert not (local / "siteops").exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows ACL admission needs Windows.")
+@pytest.mark.parametrize("case", ["missing", "existing", "open-root"])
+def test_windows_data_root_check_creates_nothing(tmp_path, case):
+    root = tmp_path / "local" / "siteops"
+    root.parent.mkdir()
+    setup = ""
+    if case != "missing":
+        setup = "Require-PrivateDataRoot $env:TEST_DATA_ROOT\n"
+    if case == "open-root":
+        setup += (
+            "& icacls.exe $env:TEST_DATA_ROOT /grant '*S-1-5-32-545:(OI)(CI)M' | Out-Null\n"
+            "if ($LASTEXITCODE -ne 0) { throw 'Fixture ACL setup failed.' }\n"
+        )
+    wrapper = tmp_path / "check-root.ps1"
+    wrapper.write_text(
+        'function Fail([string]$message) { throw "Site Ops installation: $message" }\n'
+        + _windows_functions("Require-PrivateDataRoot")
+        + "$ErrorActionPreference = 'Stop'\n"
+        + setup
+        + "Require-PrivateDataRoot $env:TEST_DATA_ROOT -NoCreate\n'ROOT_CHECKED'\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
+        cwd=tmp_path, env={**os.environ, "TEST_DATA_ROOT": str(root)},
+        capture_output=True, text=True, timeout=20,
+    )
+    if case == "open-root":
+        assert result.returncode != 0
+        assert "ROOT_DATA_ACL" in result.stderr
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "ROOT_CHECKED" in result.stdout
+    assert root.exists() is (case != "missing")
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="PowerShell preview runs on Windows.")
 def test_powershell_preview_and_invalid_identity_do_not_acquire_tools(tmp_path):
     script = SCRIPTS / "siteops-bootstrap.ps1"
@@ -1345,7 +1627,7 @@ def test_powershell_preview_and_invalid_identity_do_not_acquire_tools(tmp_path):
     assert "Uses the installed GitHub CLI" in preview.stdout
     assert "No tools or content were downloaded" in preview.stdout
     denied = subprocess.run(
-        [*arguments[:-1], "bad", "-Yes"], input="", text=True,
+        [*arguments[:-1], "bad", "-Yes", "-NoModifyPath"], input="", text=True,
         capture_output=True, env=env, timeout=20,
     )
     assert denied.returncode != 0

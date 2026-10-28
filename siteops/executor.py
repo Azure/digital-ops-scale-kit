@@ -32,12 +32,20 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from siteops import __version__
-from siteops.diagnostics import OTHER_FAILURE, ProviderFailure, arm_failure, provider_document
+from siteops.diagnostics import (
+    CLEANUP_INCOMPLETE,
+    OTHER_FAILURE,
+    ProviderFailure,
+    arm_failure,
+    provider_document,
+    warn,
+)
 from siteops.process_args import prepare_process_args
 from siteops.runtime import (
     RuntimePathError,
     RuntimePaths,
     bounded_runtime_path,
+    cleanup_location,
     create_private_directory,
     create_private_file,
     describe_os_error,
@@ -1173,9 +1181,10 @@ class AzCliExecutor:
         except FileNotFoundError:
             return
         except OSError as error:
-            logger.warning(
+            warn(
+                logger, CLEANUP_INCOMPLETE,
                 "Failed to remove engine scratch directory %s: %s",
-                bounded_runtime_path(scratch),
+                cleanup_location(scratch),
                 describe_os_error(error),
             )
 
@@ -1654,9 +1663,10 @@ class AzCliExecutor:
         try:
             path.unlink(missing_ok=True)
         except OSError as error:
-            logger.warning(
+            warn(
+                logger, CLEANUP_INCOMPLETE,
                 "Failed to remove engine scratch file %s: %s",
-                bounded_runtime_path(path),
+                cleanup_location(path, parent_is_engine_owned=True),
                 describe_os_error(error),
             )
 

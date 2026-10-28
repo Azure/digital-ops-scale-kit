@@ -491,7 +491,7 @@ def test_windows_bootstrap_ci_requires_native_symlink_rejection_checks():
     assert "test_bootstrap_scripts.py" in test
     assert "test_uv_bootstrap_windows.py" in test
     assert "windows-pipx-launcher.py" not in test
-    assert "windows_bootstrap" in test
+    assert "-k 'windows or powershell'" in test
     assert "--basetemp" in test
     assert "azure/login" not in str(job)
 

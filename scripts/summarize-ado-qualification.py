@@ -14,6 +14,8 @@ CHECKS = {
     "preview": "PREVIEW_RESULT",
     "validate_selector": "SELECTOR_RESULT",
     "validate_site_file": "SITE_FILE_RESULT",
+    "validate_b7_selector": "B7_SELECTOR_RESULT",
+    "validate_b7_site_file": "B7_SITE_FILE_RESULT",
 }
 RESULTS = {"Succeeded", "SucceededWithIssues", "Failed", "Canceled", "Skipped"}
 MAX_RECEIPT = 1024 * 1024

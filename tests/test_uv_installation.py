@@ -578,11 +578,22 @@ def test_packaged_native_install_and_replacement_use_the_verified_path(
             pytest.skip("Native Windows PowerShell is unavailable.")
         wrapper = tmp_path / "install.ps1"
         phase = helper_dir / "phase.txt"
+        # Record the helper's own assembly load and first archive open as phases, so a
+        # timeout names the slow operation without running either twice.
+        record = "    [IO.File]::WriteAllText($env:TEST_PHASE, '{}')\n"
+        instrumented = body
+        for line, before, after in (
+            ("    Add-Type -AssemblyName System.IO.Compression.FileSystem\n", "loading-compression", None),
+            ("    $zip = [IO.Compression.ZipFile]::OpenRead($Archive)\n", "opening-archive", "extracting-helper"),
+        ):
+            assert instrumented.count(line) == 1
+            instrumented = instrumented.replace(
+                line, record.format(before) + line + (record.format(after) if after else ""),
+            )
         wrapper.write_text(
             "$ErrorActionPreference = 'Stop'\n"
             "function Fail([string]$message) { throw $message }\n"
-            "$python = $env:TEST_PYTHON\n" + body
-            + "\n[IO.File]::WriteAllText($env:TEST_PHASE, 'extracting-helper')\n"
+            "$python = $env:TEST_PYTHON\n" + instrumented
             + "\n$installerHelper = Get-InstallerHelper $env:TEST_ARCHIVE $env:TEST_HELPER_DIR\n"
             + "\n[IO.File]::WriteAllText($env:TEST_PHASE, 'checking-payload')\n"
             + "\nCheck-Payload @(" + ",".join(
@@ -609,12 +620,15 @@ def test_packaged_native_install_and_replacement_use_the_verified_path(
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Native Windows process supervision.")
-@pytest.mark.parametrize("private_phase", [False, True])
+@pytest.mark.parametrize(
+    "recorded", ["loading-compression", "opening-archive", "checking-payload", "private-identity-marker"],
+)
 def test_windows_installer_timeout_reports_only_fixed_phases_and_owned_processes(
-    tmp_path, private_phase,
+    tmp_path, recorded,
 ):
+    private_phase = recorded == "private-identity-marker"
     phase = tmp_path / "phase.txt"
-    phase.write_bytes(b"private-identity-marker" if private_phase else b"checking-payload")
+    phase.write_bytes(recorded.encode("ascii"))
     child = "import time; time.sleep(60)"
     script = (
         "import subprocess,sys,time; "
@@ -628,7 +642,8 @@ def test_windows_installer_timeout_reports_only_fixed_phases_and_owned_processes
             cwd=tmp_path, phase=phase, timeout=3,
         )
     message = str(caught.value)
-    assert ("phase=invalid-phase" if private_phase else "phase=checking-payload") in message
+    assert ("phase=invalid-phase" if private_phase else f"phase={recorded},") in message
+    assert re.search(r"phase_seconds=[0-9]+,", message)
     assert "processes=python.exe,python.exe" in message
     assert "private-identity-marker" not in message
     assert str(tmp_path) not in message

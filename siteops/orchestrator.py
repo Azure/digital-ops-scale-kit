@@ -55,6 +55,7 @@ from siteops.diagnostics import (
     SiteLoadFailure,
     ValidationResult,
     diagnostic_from_error,
+    warn,
 )
 from siteops.executor import (
     AZURE_CLI_INSTALL_URL,
@@ -3315,7 +3316,10 @@ class Orchestrator:
                     f"Create those Site YAML files under `sites/`, or fix the Site names listed in the manifest."
                 )
             if duplicates:
-                logger.warning(
+                warn(
+                    logger, "warning.manifest-site-repeated",
+                    "A Manifest names the same Site more than once. Deploying it once."
+                    if is_redaction_enabled() else
                     f"Manifest '{manifest.name}' names the same Site more than once "
                     f"({', '.join(duplicates)}). Deploying it once."
                 )

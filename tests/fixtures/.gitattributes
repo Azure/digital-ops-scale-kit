@@ -1,2 +1,3 @@
 bootstrap-harness.sh text eol=lf
 bootstrap-ubuntu24-os-release text eol=lf
+compatibility/** -text

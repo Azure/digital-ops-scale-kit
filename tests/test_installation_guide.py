@@ -1,5 +1,6 @@
 """Exercise the native installation guide's command and path contracts."""
 
+import hashlib
 import json
 import os
 import re
@@ -7,6 +8,8 @@ import shlex
 import shutil
 import subprocess
 import sys
+import textwrap
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -549,3 +552,541 @@ def test_windows_guide_requires_copied_launcher_and_preserves_pipx_migration():
     assert "rejects file symlinks" in guide
     assert "`pipx uninstall siteops`" in guide
     assert "pipx install siteops" not in guide
+
+
+def _candidate_blocks():
+    guide = (GUIDE.parent / "releasing.md").read_text(encoding="utf-8")
+    section = guide.split("### Install a candidate in Cloud Shell or a Codespace\n", 1)[1].split("\n## ", 1)[0]
+    blocks = [textwrap.dedent(block) for block in re.findall(r"```bash\n(.*?)\n *```", section, re.DOTALL)]
+    return section, blocks
+
+
+CANDIDATES = {
+    "release": ("v1.0.0b8", "a" * 40, "Azure/digital-ops-scale-kit", "refs/heads/main", "release.yaml"),
+    "preview": ("siteops/v0.0.0-ci", "b" * 40, "example/fork", "refs/heads/feature", "ci.yaml"),
+}
+CANDIDATE_SCRIPT = GUIDE.parent.parent / "scripts" / "install-release-candidate.sh"
+CANDIDATE_LOCATIONS = ("XDG_DATA_HOME", "UV_TOOL_DIR", "UV_TOOL_BIN_DIR", "UV_PYTHON_INSTALL_DIR")
+_LINUX_ONLY = pytest.mark.skipif(sys.platform != "linux", reason="The candidate script admits POSIX storage on Linux.")
+
+
+def _inherited_locations(home):
+    """Inherited uv and XDG locations that must not move any part of the trial."""
+    return {
+        name: f"{home}/elsewhere/{name}"
+        for name in ("XDG_DATA_HOME", "XDG_BIN_HOME", "UV_TOOL_DIR", "UV_TOOL_BIN_DIR", "UV_PYTHON_INSTALL_DIR")
+    }
+
+
+def _trial_locations(home):
+    trial = f"{home}/siteops-candidate"
+    return {
+        "XDG_DATA_HOME": f"{trial}/share", "UV_TOOL_DIR": f"{trial}/uv/tools",
+        "UV_TOOL_BIN_DIR": f"{trial}/bin", "UV_PYTHON_INSTALL_DIR": f"{trial}/uv/python",
+    }
+
+
+def _candidate_cache(root, values):
+    release, commit, repository, ref, caller = values
+    key = hashlib.sha256(("\0".join((repository, release, commit, ref, caller)) + "\0").encode()).hexdigest()
+    return root / "siteops-candidate" / "share" / "siteops" / "install-downloads" / key
+
+
+def _assert_bootstrap_admits(tmp_path, cache, locations):
+    """Run the bootstrap's own admission checks on the prepared trial."""
+    if sys.platform != "linux":
+        return
+    script = (GUIDE.parent.parent / "scripts" / "bootstrap" / "siteops-bootstrap.sh").read_text(encoding="utf-8")
+    functions = "\n".join(
+        re.search(rf"(?ms)^{name}\(\) \{{.*?^\}}", script).group()
+        for name in ("detect_private_group", "writers_trusted", "trusted_parent", "admit_directory", "admit_file")
+    )
+    check = run_script(
+        'uid="$(id -u)"\n' + functions + '\ndetect_private_group\n'
+        'admit_directory "$CACHE" private existing\n'
+        'admit_file "$CACHE/siteops-install.zip" private\n'
+        'for name in UV_TOOL_DIR UV_TOOL_BIN_DIR UV_PYTHON_INSTALL_DIR; do\n'
+        '  admit_directory "${!name}" shared && [[ "$admitted" == "${!name}" && -d "$admitted" ]]\n'
+        'done\n',
+        tmp_path, {"CACHE": str(cache), **{name: locations[name] for name in CANDIDATE_LOCATIONS[1:]}},
+    )
+    assert check.returncode == 0, check.stdout + check.stderr
+    for name in CANDIDATE_LOCATIONS[1:]:
+        assert Path(locations[name]).stat().st_mode & 0o077 == 0
+
+
+def test_documented_candidate_route_runs_only_the_installation_script():
+    section, blocks = _candidate_blocks()
+    unpack, clone, helper, plan = blocks
+    prose = " ".join(section.split())
+    assert "Rechecking the retained release without downloading its assets." in prose
+    assert "`siteops-bootstrap.sh` is the file at the candidate commit in `candidate-source`" in prose
+    assert "`$HOME/siteops-candidate/bin`" in prose
+    # The script is the one route, so no step writes to the trial or its cache directly.
+    assert "\n#### " not in section
+    assert not [token for block in blocks for token in ("mkdir -p", "cp ", "umask", "export ") if token in block]
+    first, *_, settings = unpack.splitlines()
+    assert first == "mkdir candidate && unzip -q release-payload-*.zip -d candidate"
+    assert shlex.split(settings) == [
+        "repository=Azure/digital-ops-scale-kit", "ref=refs/heads/main", "caller=release.yaml",
+    ]
+    # The clone is next to the payload, and its checkout runs only after a successful clone.
+    assert shlex.split(clone) == [
+        "git", "clone", "--quiet", "https://github.com/$repository", "candidate-source", "&&",
+        "git", "-C", "candidate-source", "checkout", "--quiet", "$commit",
+    ]
+    command = shlex.split(helper.replace("\\\n", " "))
+    assert command[:2] == ["bash", "candidate-source/scripts/install-release-candidate.sh"]
+    assert dict(zip(command[2::2], command[3::2])) == {
+        "--payload": "candidate", "--release": "$release", "--source-commit": "$commit",
+        "--repository": "$repository", "--source-ref": "$ref", "--caller": "$caller",
+    }
+    assert plan.startswith("siteops -w candidate-source/workspaces/iot-operations plan ")
+
+
+def _documented_candidate_steps(tmp_path, commit):
+    """Run the documented unpack, clone and install steps against a local copy of the repository."""
+    _, blocks = _candidate_blocks()
+    unpack, clone, helper, _ = blocks
+    unpack = unpack.replace("'<candidate-tag>'", CANDIDATES["release"][0]).replace(
+        "'<candidate-source-commit>'", commit,
+    )
+    (tmp_path / "bin").mkdir(exist_ok=True)
+    write_executable(
+        tmp_path / "bin" / "unzip",
+        '#!/usr/bin/env bash\n[[ "$1" == -q && "$3" == -d ]] || exit 2\nexec "$TEST_PYTHON" -m zipfile -e "$2" "$4"\n',
+    )
+    home = tmp_path / "home"
+    home.mkdir(mode=0o700, exist_ok=True)
+    return run_script("\n".join((unpack, clone, helper)), tmp_path, {
+        **_inherited_locations(bash_path(home)), "HOME": bash_path(home), "TEST_PYTHON": sys.executable,
+        "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": f"url.{bash_path(tmp_path / 'remote')}/.insteadOf",
+        "GIT_CONFIG_VALUE_0": "https://github.com/",
+    })
+
+
+@_LINUX_ONLY
+@pytest.mark.parametrize("case", ["installed", "unknown-commit", "unknown-repository"])
+def test_documented_candidate_steps_clone_next_to_the_payload(tmp_path, case):
+    _, commit = _candidate_source(tmp_path / "remote" / "Azure", "digital-ops-scale-kit")
+    if case == "unknown-repository":
+        shutil.rmtree(tmp_path / "remote" / "Azure" / "digital-ops-scale-kit")
+    payload = {
+        "siteops-install.zip": b"engine bundle bytes",
+        "siteops-install.zip.attestation.jsonl": b'{"proof":true}\n',
+        "siteops-bootstrap.sh": _RECORDING_BOOTSTRAP.encode("utf-8"),
+    }
+    with zipfile.ZipFile(tmp_path / "release-payload-1-1.zip", "w") as archive:
+        for name, data in payload.items():
+            archive.writestr(name, data)
+    result = _documented_candidate_steps(tmp_path, "c" * 40 if case == "unknown-commit" else commit)
+    home = tmp_path / "home"
+    if case != "installed":
+        assert result.returncode != 0, result.stdout + result.stderr
+        assert not (home / "bootstrap-call").exists()
+        return
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (tmp_path / "candidate-source" / ".git").is_dir()
+    assert sorted(path.name for path in (tmp_path / "candidate").iterdir()) == sorted(payload)
+    assert (home / "bootstrap-call").read_text(encoding="utf-8").startswith(f"--release\n{CANDIDATES['release'][0]}\n")
+    cache = _candidate_cache(home, (CANDIDATES["release"][0], commit, *CANDIDATES["release"][2:]))
+    assert sorted(path.name for path in cache.iterdir()) == ["siteops-install.zip", "siteops-install.zip.attestation.jsonl"]
+
+
+_RECORDING_BOOTSTRAP = """#!/usr/bin/env bash
+set -euo pipefail
+{ printf '%s\\n' "$@"; printf 'env %s\\n' "$XDG_DATA_HOME" "$UV_TOOL_DIR" "$UV_TOOL_BIN_DIR" "$UV_PYTHON_INSTALL_DIR"
+  printf 'umask %s\\n' "$(umask)"; } > "$HOME/bootstrap-call"
+exit "${BOOTSTRAP_EXIT:-0}"
+"""
+
+
+def _candidate_payload(tmp_path, bootstrap=_RECORDING_BOOTSTRAP):
+    payload = tmp_path / "candidate"
+    payload.mkdir()
+    (payload / "siteops-install.zip").write_bytes(b"engine bundle bytes")
+    (payload / "siteops-install.zip.attestation.jsonl").write_bytes(b'{"proof":true}\n')
+    write_executable(payload / "siteops-bootstrap.sh", bootstrap)
+    return payload
+
+
+_CANDIDATE_GIT = [
+    "git",
+    "-c",
+    "core.autocrlf=false",
+    "-c",
+    "user.name=Candidate",
+    "-c",
+    "user.email=candidate@example.test",
+]
+
+
+def _candidate_source(tmp_path, name="candidate-source"):
+    """Commit the helper and the recording bootstrap, as the candidate clone holds them."""
+    source = tmp_path / name
+    (source / "scripts" / "bootstrap").mkdir(parents=True)
+    shutil.copyfile(CANDIDATE_SCRIPT, source / "scripts" / CANDIDATE_SCRIPT.name)
+    write_executable(source / "scripts" / "bootstrap" / "siteops-bootstrap.sh", _RECORDING_BOOTSTRAP)
+    git = _CANDIDATE_GIT
+    for command in (["init", "--quiet"], ["add", "--all"], ["commit", "--quiet", "--message", "Candidate"]):
+        subprocess.run([*git, *command], cwd=source, check=True, capture_output=True)
+    commit = subprocess.run(
+        [*git, "rev-parse", "HEAD"], cwd=source, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    return source / "scripts" / CANDIDATE_SCRIPT.name, commit
+
+
+def _run_candidate_script(tmp_path, *arguments, home=None, script=CANDIDATE_SCRIPT, **exports):
+    home = bash_path(home or tmp_path, preserve_symlinks=True)
+    command = " ".join(shlex.quote(value) for value in ("bash", bash_path(script), *arguments))
+    return run_script(command, tmp_path, {**_inherited_locations(home), "HOME": home, **exports})
+
+
+def _private_directories(root, path):
+    """Create each missing directory below root with only owner access."""
+    current = root
+    for part in path.relative_to(root).parts:
+        current = current / part
+        if not current.exists():
+            current.mkdir(mode=0o700)
+            current.chmod(0o700)
+    return path
+
+
+@_LINUX_ONLY
+@pytest.mark.parametrize("candidate,home_mode", [("release", None), ("preview", None), ("release", 0o755)])
+def test_candidate_script_preloads_the_selection_and_runs_the_payload_bootstrap(tmp_path, candidate, home_mode):
+    payload = _candidate_payload(tmp_path)
+    script, commit = _candidate_source(tmp_path)
+    release, _, repository, ref, caller = CANDIDATES[candidate]
+    values = (release, commit, repository, ref, caller)
+    arguments = ["--payload", "candidate", "--release", release, "--source-commit", commit]
+    if candidate == "preview":
+        arguments += ["--repository", repository, "--source-ref", ref, "--caller", caller]
+    home = tmp_path
+    if home_mode is not None:
+        # An ordinary home that other users can read but not change.
+        home = tmp_path / "home"
+        home.mkdir()
+        home.chmod(home_mode)
+    result = _run_candidate_script(tmp_path, *arguments, home=home, script=script)
+    assert result.returncode == 0, result.stdout + result.stderr
+    cache = _candidate_cache(home, values)
+    assert f"Candidate files are in {bash_path(cache)}." in result.stdout
+    assert {path.name: path.read_bytes() for path in cache.iterdir()} == {
+        name: (payload / name).read_bytes() for name in ("siteops-install.zip", "siteops-install.zip.attestation.jsonl")
+    }
+    for path in (home / "siteops-candidate", *cache.parents[:3], cache, *cache.iterdir()):
+        assert path.stat().st_mode & 0o077 == 0, path
+    locations = _trial_locations(bash_path(home))
+    call = (home / "bootstrap-call").read_text(encoding="utf-8").splitlines()
+    assert call == [
+        "--release", release, "--source-commit", commit, "--repository", repository,
+        "--source-ref", ref, "--caller", caller,
+        *(f"env {locations[name]}" for name in CANDIDATE_LOCATIONS), "umask 0077",
+    ]
+    (home / "bootstrap-call").unlink()
+    repeated = _run_candidate_script(
+        tmp_path, *arguments, "--replace", home=home, script=script, BOOTSTRAP_EXIT="9",
+    )
+    assert repeated.returncode == 9, repeated.stdout + repeated.stderr
+    assert (home / "bootstrap-call").read_text(encoding="utf-8").splitlines()[:11] == [*call[:10], "--replace"]
+    _assert_bootstrap_admits(tmp_path, cache, locations)
+
+
+@pytest.mark.parametrize("fault,message", [
+    ("missing-proof", "The payload has no regular file siteops-install.zip.attestation.jsonl."),
+    ("linked-bundle", "The payload has no regular file siteops-install.zip."),
+    ("short-commit", "--source-commit must be a full lowercase commit SHA."),
+    ("spaced-release", "Release, repository, source ref and caller must be text without spaces."),
+    ("unknown-option", "Unknown option: --skip-verification"),
+    ("missing-value", "--caller requires a value."),
+    ("not-linux", "Run the candidate installation on Linux, like the bootstrap it starts."),
+    ("other-cached", "already holds a different siteops-install.zip."),
+    ("linked-cached", "already holds a different siteops-install.zip."),
+    ("unknown-commit", "The clone that holds this script has no commit"),
+    ("changed-bootstrap", "The payload's siteops-bootstrap.sh differs from scripts/bootstrap/siteops-bootstrap.sh at"),
+])
+def test_candidate_script_refuses_before_running_the_bootstrap(tmp_path, fault, message):
+    payload = _candidate_payload(tmp_path)
+    values = CANDIDATES["release"]
+    release, commit = values[:2]
+    script = CANDIDATE_SCRIPT
+    if fault in {"linked-bundle", "other-cached", "linked-cached", "unknown-commit", "changed-bootstrap"}:
+        if sys.platform != "linux":
+            pytest.skip("Symbolic links, commit checks and private storage admission need the Linux lane.")
+        script, commit = _candidate_source(tmp_path)
+        values = (release, commit, *values[2:])
+    arguments = ["--payload", "candidate", "--release", release, "--source-commit", commit]
+    cache = _candidate_cache(tmp_path, values)
+    if fault == "missing-proof":
+        (payload / "siteops-install.zip.attestation.jsonl").unlink()
+    elif fault == "linked-bundle":
+        (payload / "siteops-install.zip").rename(tmp_path / "bundle.zip")
+        (payload / "siteops-install.zip").symlink_to(tmp_path / "bundle.zip")
+    elif fault == "short-commit":
+        arguments[-1] = commit[:12]
+    elif fault == "spaced-release":
+        arguments[3] = "v1.0.0b8 --replace"
+    elif fault == "unknown-option":
+        arguments.append("--skip-verification")
+    elif fault == "missing-value":
+        arguments.append("--caller")
+    elif fault == "not-linux":
+        (tmp_path / "bin").mkdir()
+        write_executable(tmp_path / "bin" / "uname", "#!/usr/bin/env bash\necho Darwin\n")
+    elif fault == "other-cached":
+        _private_directories(tmp_path, cache)
+        (cache / "siteops-install.zip").write_bytes(b"another candidate")
+    elif fault == "linked-cached":
+        _private_directories(tmp_path, cache)
+        (tmp_path / "elsewhere.zip").write_bytes((payload / "siteops-install.zip").read_bytes())
+        (cache / "siteops-install.zip").symlink_to(tmp_path / "elsewhere.zip")
+    elif fault == "unknown-commit":
+        arguments[-1] = "c" * 40
+    else:
+        # A payload bootstrap that would skip its checks runs nowhere.
+        write_executable(payload / "siteops-bootstrap.sh", _RECORDING_BOOTSTRAP.replace("set -euo", "set -uo"))
+    result = _run_candidate_script(tmp_path, *arguments, script=script)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert message in result.stderr
+    assert not (tmp_path / "bootstrap-call").exists()
+    if fault == "other-cached":
+        assert (cache / "siteops-install.zip").read_bytes() == b"another candidate"
+    if fault in {"other-cached", "linked-cached"}:
+        assert not (cache / "siteops-install.zip.attestation.jsonl").exists()
+    else:
+        assert not (tmp_path / "siteops-candidate").exists()
+
+
+@_LINUX_ONLY
+@pytest.mark.parametrize("fault", ["linked-trial", "linked-share", "linked-home", "shared-home", "open-trial"])
+def test_candidate_script_refuses_redirected_or_shared_storage_before_writing(tmp_path, fault):
+    payload = _candidate_payload(tmp_path)
+    script, commit = _candidate_source(tmp_path)
+    release = CANDIDATES["release"][0]
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir(mode=0o700)
+    home = tmp_path / "home"
+    if fault == "linked-home":
+        # The home itself is reached through a link, as the trial would be.
+        home.symlink_to(elsewhere, target_is_directory=True)
+    else:
+        home.mkdir(mode=0o700)
+    trial = home / "siteops-candidate"
+    if fault == "linked-trial":
+        trial.symlink_to(elsewhere, target_is_directory=True)
+    elif fault == "linked-share":
+        trial.mkdir(mode=0o700)
+        (trial / "share").symlink_to(elsewhere, target_is_directory=True)
+    elif fault == "shared-home":
+        home.chmod(0o777)
+    elif fault == "open-trial":
+        trial.mkdir()
+        trial.chmod(0o755)
+    result = _run_candidate_script(
+        tmp_path, "--payload", "candidate", "--release", release, "--source-commit", commit, home=home, script=script,
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "Choose a HOME whose directories are not symbolic links" in result.stderr
+    assert not (tmp_path / "bootstrap-call").exists() and not (home / "bootstrap-call").exists()
+    assert list(elsewhere.iterdir()) == []
+    if fault in {"shared-home", "open-trial"}:
+        assert not (trial / "share").exists()
+    assert payload.is_dir()
+
+
+@_LINUX_ONLY
+def test_candidate_script_leaves_no_partial_file_in_the_cache(tmp_path):
+    _candidate_payload(tmp_path)
+    script, commit = _candidate_source(tmp_path)
+    release = CANDIDATES["release"][0]
+    arguments = ["--payload", "candidate", "--release", release, "--source-commit", commit]
+    (tmp_path / "bin").mkdir()
+    # A copy that stops partway, as an interrupted transfer would.
+    write_executable(tmp_path / "bin" / "cp", '#!/usr/bin/env bash\nprintf partial > "${@: -1}"\nexit 1\n')
+    interrupted = _run_candidate_script(tmp_path, *arguments, script=script)
+    assert interrupted.returncode == 1, interrupted.stdout + interrupted.stderr
+    cache = _candidate_cache(tmp_path, (release, commit, *CANDIDATES["release"][2:]))
+    assert list(cache.iterdir()) == []
+    assert sorted(path.name for path in (tmp_path / "siteops-candidate").iterdir()) == ["share"]
+    shutil.rmtree(tmp_path / "bin")
+    result = _run_candidate_script(tmp_path, *arguments, script=script)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert sorted(path.name for path in cache.iterdir()) == [
+        "siteops-install.zip", "siteops-install.zip.attestation.jsonl",
+    ]
+
+
+# A POSIX default ACL that gives new entries owner rwx, group r-x and other rwx regardless of umask.
+_OPEN_DEFAULT_ACL = (2).to_bytes(4, "little") + b"".join(
+    tag.to_bytes(2, "little") + permissions.to_bytes(2, "little") + (0xFFFFFFFF).to_bytes(4, "little")
+    for tag, permissions in ((0x01, 7), (0x04, 5), (0x20, 7))
+)
+
+
+def _candidate_trial(tmp_path):
+    _candidate_payload(tmp_path)
+    script, commit = _candidate_source(tmp_path)
+    release = CANDIDATES["release"][0]
+    cache = _candidate_cache(tmp_path, (release, commit, *CANDIDATES["release"][2:]))
+    arguments = ["--payload", "candidate", "--release", release, "--source-commit", commit]
+    return script, arguments, _private_directories(tmp_path, cache)
+
+
+@_LINUX_ONLY
+def test_candidate_script_removes_its_privacy_probe_so_a_repaired_cache_installs(tmp_path):
+    script, arguments, cache = _candidate_trial(tmp_path)
+    try:
+        os.setxattr(cache, "system.posix_acl_default", _OPEN_DEFAULT_ACL)
+    except OSError as error:
+        pytest.skip(f"The test filesystem has no POSIX default ACLs: {error}")
+    refused = _run_candidate_script(tmp_path, *arguments, script=script)
+    assert refused.returncode == 1, refused.stdout + refused.stderr
+    assert "do not stay private. Remove inherited access rules from it, then retry." in refused.stderr
+    assert list(cache.iterdir()) == []
+    assert not (tmp_path / "bootstrap-call").exists()
+    os.removexattr(cache, "system.posix_acl_default")
+    result = _run_candidate_script(tmp_path, *arguments, script=script)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert sorted(path.name for path in cache.iterdir()) == [
+        "siteops-install.zip", "siteops-install.zip.attestation.jsonl",
+    ]
+
+
+@_LINUX_ONLY
+@pytest.mark.parametrize("taken", ["earlier-probe-names", "linked-probe-name"])
+def test_candidate_script_privacy_probe_leaves_existing_entries_untouched(tmp_path, taken):
+    script, arguments, cache = _candidate_trial(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o700)
+    sentinel = outside / "operator-data"
+    sentinel.write_bytes(b"operator data must survive\n")
+    exports = {}
+    if taken == "earlier-probe-names":
+        os.link(sentinel, cache / "probe-file")
+        (cache / "probe-directory").mkdir()
+    else:
+        # The probe name chosen for this run is already a link to a directory outside the trial.
+        probe = cache / ".private-probe.taken"
+        probe.symlink_to(outside, target_is_directory=True)
+        (tmp_path / "bin").mkdir()
+        write_executable(
+            tmp_path / "bin" / "mktemp",
+            '#!/usr/bin/env bash\nif [[ "$1" == -u ]]; then printf \'%s\\n\' "$TEST_PROBE"; exit 0; fi\n'
+            'PATH="${PATH#*:}" exec mktemp "$@"\n',
+        )
+        exports["TEST_PROBE"] = bash_path(probe, preserve_symlinks=True)
+    result = _run_candidate_script(tmp_path, *arguments, script=script, **exports)
+    assert sentinel.read_bytes() == b"operator data must survive\n"
+    assert sorted(path.name for path in outside.iterdir()) == ["operator-data"]
+    if taken == "earlier-probe-names":
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (cache / "probe-file").samefile(sentinel) and (cache / "probe-directory").is_dir()
+    else:
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert "do not stay private." in result.stderr
+        assert probe.is_symlink() and not (tmp_path / "bootstrap-call").exists()
+
+
+@_LINUX_ONLY
+def test_candidate_script_runs_the_commit_bootstrap_after_the_payload_changes(tmp_path):
+    script, arguments, _ = _candidate_trial(tmp_path)
+    (tmp_path / "bin").mkdir()
+    # The payload's bootstrap is replaced after the comparison, while the engine files are copied.
+    write_executable(
+        tmp_path / "bin" / "cp",
+        "#!/usr/bin/env bash\n"
+        'printf \'#!/usr/bin/env bash\\n: > "$HOME/replaced-bootstrap-ran"\\n\' > candidate/siteops-bootstrap.sh\n'
+        'PATH="${PATH#*:}" exec cp "$@"\n',
+    )
+    result = _run_candidate_script(tmp_path, *arguments, script=script, BOOTSTRAP_EXIT="7")
+    assert result.returncode == 7, result.stdout + result.stderr
+    assert "replaced-bootstrap-ran" in (tmp_path / "candidate" / "siteops-bootstrap.sh").read_text(encoding="utf-8")
+    assert not (tmp_path / "replaced-bootstrap-ran").exists()
+    assert (tmp_path / "bootstrap-call").read_text(encoding="utf-8").startswith("--release\n")
+    assert not list((tmp_path / "siteops-candidate").glob(".bootstrap-*"))
+
+
+_REPLACEMENT_BOOTSTRAP = '#!/usr/bin/env bash\n: > "$HOME/replacement-ran"\n'
+
+
+@_LINUX_ONLY
+@pytest.mark.parametrize(
+    "case", ["replaced-payload", "original-payload", "git-dir", "object-directory"]
+)
+def test_candidate_script_reads_the_commit_bootstrap_only_from_its_clone(tmp_path, case):
+    payload = _candidate_payload(tmp_path)
+    script, commit = _candidate_source(tmp_path)
+    source = script.parents[1]
+    exports = {}
+    if case in {"replaced-payload", "original-payload"}:
+        # A replacement ref in the clone substitutes another commit and bootstrap for the requested commit.
+        write_executable(
+            source / "scripts" / "bootstrap" / "siteops-bootstrap.sh", _REPLACEMENT_BOOTSTRAP
+        )
+        for command in (
+            ["commit", "--quiet", "--all", "--message", "Replacement"],
+            ["replace", commit, "HEAD"],
+        ):
+            subprocess.run([*_CANDIDATE_GIT, *command], cwd=source, check=True, capture_output=True)
+        if case == "replaced-payload":
+            write_executable(payload / "siteops-bootstrap.sh", _REPLACEMENT_BOOTSTRAP)
+    else:
+        # The caller's environment selects an empty repository or object store.
+        other = tmp_path / "other.git"
+        subprocess.run(
+            ["git", "init", "--quiet", "--bare", str(other)], check=True, capture_output=True
+        )
+        if case == "git-dir":
+            exports["GIT_DIR"] = bash_path(other)
+        else:
+            exports["GIT_OBJECT_DIRECTORY"] = bash_path(other / "objects")
+    result = _run_candidate_script(
+        tmp_path,
+        "--payload",
+        "candidate",
+        "--release",
+        CANDIDATES["release"][0],
+        "--source-commit",
+        commit,
+        script=script,
+        **exports,
+    )
+    assert not (tmp_path / "replacement-ran").exists()
+    if case == "replaced-payload":
+        assert result.returncode == 1, result.stdout + result.stderr
+        assert (
+            "The payload's siteops-bootstrap.sh differs from scripts/bootstrap/siteops-bootstrap.sh"
+            in result.stderr
+        )
+        assert not (tmp_path / "siteops-candidate").exists()
+        assert not (tmp_path / "bootstrap-call").exists()
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (tmp_path / "bootstrap-call").read_text(encoding="utf-8").startswith("--release\n")
+
+
+def test_candidate_script_admits_storage_with_the_bootstrap_functions():
+    helper = CANDIDATE_SCRIPT.read_text(encoding="utf-8")
+    bootstrap = (GUIDE.parent.parent / "scripts" / "bootstrap" / "siteops-bootstrap.sh").read_text(encoding="utf-8")
+    names = ("detect_private_group", "writers_trusted", "trusted_parent", "admit_directory", "admit_file")
+    for name in names:
+        pattern = rf"(?ms)^{name}\(\) \{{.*?^\}}"
+        assert re.search(pattern, helper).group() == re.search(pattern, bootstrap).group(), name
+    first_write = min(helper.index(marker) for marker in ('mktemp "$trial', "cp -- ", "cache_keeps_private \"$cache\""))
+    assert helper.index('admit_directory "$trial/share/siteops/install-downloads/$key" private') < first_write
+    assert helper.index('cmp -s - "$payload/siteops-bootstrap.sh"') < helper.index('admit_directory "$HOME')
+    assert "mkdir -p" not in helper
+    # The script fills the cache entry that the bootstrap selects from the same values.
+    assert 'key="$(printf \'%s\\0\' "$repository" "$release" "$commit" "$ref" "$caller" | sha256sum' in helper
+    assert 'export XDG_DATA_HOME="$trial/share"' in helper
+    assert 'data="${XDG_DATA_HOME:-$HOME/.local/share}/siteops"' in bootstrap
+    assert (
+        'selection_id="$(printf \'%s\\0\' "$repository" "$engine_release" "$engine_commit" "$engine_ref" "$engine_caller" |'
+        in bootstrap
+    )
+    assert 'cache="$admitted/$selection_id"' in bootstrap
+    # The bootstrap keeps these uv locations and creates them privately when they are missing.
+    assert "UV_TOOL_DIR|UV_TOOL_BIN_DIR|UV_PYTHON_INSTALL_DIR|UV_PYTHON_INSTALL_MIRROR)" in bootstrap
+    assert 'admit_directory "${!name}" shared ||' in bootstrap

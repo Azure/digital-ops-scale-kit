@@ -3,6 +3,7 @@
 import json
 import re
 import shlex
+import subprocess
 import sys
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import pytest
 import yaml
 
 from siteops import cli
+from tests.test_consumer_compatibility import RELEASE_COMMIT, _tagged_commit
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "plugins" / "siteops"
@@ -160,6 +162,46 @@ def test_install_commands_use_options_the_bootstrap_scripts_accept():
         assert re.search(rf"\[(?:string|switch)\]\${option[1:]}\b", powershell), option
 
 
+# The lines the PowerShell bootstrap prints about the saved PATH after it installs.
+_PATH_LINES = re.compile(
+    r"Stage ['\"]((?:Saved the command directory|Your (?:user|saved) PATH)[^'\"]*)['\"]"
+)
+
+
+def test_install_skill_follows_the_path_lines_of_current_and_older_bootstraps():
+    skill = (PLUGIN / "skills" / "install-siteops" / "SKILL.md").read_text(encoding="utf-8")
+    skill = " ".join(skill.split())
+    current = (ROOT / "scripts" / "bootstrap" / "siteops-bootstrap.ps1").read_text(encoding="utf-8")
+    lines = _PATH_LINES.findall(current)
+    for named in (
+        "Saved the command directory to your user PATH.",
+        "Your user PATH already includes the command directory.",
+        "Your saved PATH is unchanged.",
+        "Your user PATH is unchanged because",
+    ):
+        assert f"`{named}`" in skill, named
+        assert any(line.startswith(named) for line in lines), named
+    assert "[switch]$NoModifyPath" in current
+    assert "add `-NoModifyPath` to the PowerShell command" in skill
+    _tagged_commit()
+    released = f"{RELEASE_COMMIT}:scripts/bootstrap/siteops-bootstrap.ps1"
+    older = subprocess.run(
+        ["git", "-C", str(ROOT), "show", released],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    ).stdout
+    # The released bootstrap prints none of these lines, never saves the PATH and ignores an
+    # option it does not declare.
+    assert "Command directory:" in older and not _PATH_LINES.findall(older)
+    for absent in ("update-shell", "NoModifyPath", "CmdletBinding"):
+        assert absent not in older, absent
+    fallback = skill.split("When the installer printed none of these lines", 1)[1]
+    fallback = fallback.split("## 6.", 1)[0]
+    assert "offer to run `uv tool update-shell`, and run it only with their agreement" in fallback
+
+
 def test_upgrade_skill_maps_each_aio_release_to_its_minor_version():
     skill = " ".join((PLUGIN / "skills" / "upgrade-aio" / "SKILL.md").read_text(encoding="utf-8").split())
     minors = {}
@@ -271,7 +313,30 @@ def test_each_deploy_repeats_a_plan_shown_and_confirmed_before_it(document):
         expected = [argument for argument in _without(command, "deploy") if argument != "--yes"]
         shown = [start for start, plan in commands if start < position and "plan" in plan and _without(plan, "plan") == expected]
         assert shown, f"{document.name} deploys without showing that plan first: {command}"
-        assert "Reply yes" in text[shown[-1]:position], f"{document.name} deploys before asking"
+        assert "Reply deploy to run this plan." in text[shown[-1]:position], f"{document.name} deploys before asking"
     if deploys:
         skill = PLUGIN / "skills" / document.relative_to(PLUGIN / "skills").parts[0] / "SKILL.md"
         assert "Never run `plan` and `deploy` in the same turn." in skill.read_text(encoding="utf-8")
+
+
+_CONSENT = {
+    "skills/deploy-aio/SKILL.md": ("Reply deploy to run this plan.",),
+    "skills/deploy-aio/references/fleet.md": ("Reply deploy to run this plan.",),
+    "skills/upgrade-aio/SKILL.md": ("Reply deploy to run this plan.",),
+    "skills/install-siteops/SKILL.md": (
+        "Reply install to install Site Ops <release>.", "Reply replace to reinstall Site Ops <release>.",
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_CONSENT))
+def test_consent_is_one_plain_text_reply_rather_than_a_question_form(name):
+    text = " ".join((PLUGIN / name).read_text(encoding="utf-8").split())
+    for reply in _CONSENT[name]:
+        assert reply in text
+    assert "question tool" in text
+    assert "Reply yes" not in text
+    if name == "skills/install-siteops/SKILL.md":
+        assert text.index(_CONSENT[name][0]) < text.index('--release <release> --yes')
+    readme = " ".join((PLUGIN / "README.md").read_text(encoding="utf-8").split())
+    assert "Reply deploy to run this plan." in readme and "one reply is enough" in readme

@@ -30,6 +30,8 @@ from siteops.cache_layout import cache_io as _cache_io
 from siteops.cache_layout import cleanup_directory as _cleanup_created_directory
 from siteops.cache_layout import default_cache_root as default_cache_root
 from siteops.cache_layout import write_new as _write_new
+from siteops.diagnostics import CLEANUP_INCOMPLETE, warn
+from siteops.runtime import cleanup_location, describe_cleanup_error
 from siteops.workspace_package import (
     MAX_ARCHIVE_BYTES,
     MAX_NODES,
@@ -159,7 +161,7 @@ class WorkspaceCache(CacheLayout):
                     published = True
                 finally:
                     if not published:
-                        _cleanup_created_directory(candidate)
+                        _cleanup_created_directory(candidate, parent_is_engine_owned=True)
 
     @contextmanager
     def lease_proof(self, expected: ArtifactIdentity) -> Iterator[Path]:
@@ -241,7 +243,7 @@ class WorkspaceCache(CacheLayout):
         candidate = directory / f".{uuid.uuid4().hex}.tmp"
         created = False
         try:
-            _write_new(candidate, raw)
+            _write_new(candidate, raw, name_is_chosen=False, parent_is_engine_owned=True)
             created = True
             target = directory / f"{key}.json"
             try:
@@ -256,8 +258,10 @@ class WorkspaceCache(CacheLayout):
             if created:
                 try:
                     candidate.unlink()
-                except OSError:
-                    logger.warning("Cache receipt staging cleanup could not be completed.")
+                except OSError as error:
+                    warn(logger, CLEANUP_INCOMPLETE,
+                         "Cache receipt staging cleanup could not be completed. Location: %s. Reason: %s.",
+                         cleanup_location(candidate, parent_is_engine_owned=True), describe_cleanup_error(error))
 
     def _read_object(
         self, root: Path, digest: str, source_revision: str, verify: ArtifactVerifier,
@@ -321,7 +325,7 @@ class WorkspaceCache(CacheLayout):
                 return inspection
             finally:
                 if not published:
-                    _cleanup_created_directory(candidate)
+                    _cleanup_created_directory(candidate, parent_is_engine_owned=True)
 
     @contextmanager
     def lease(

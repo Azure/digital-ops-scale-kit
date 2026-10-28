@@ -25,6 +25,7 @@ deployment.
 | Use typed answers or a complete Site file | [Guided inputs](guided-inputs.md) |
 | Use configured Sites with packaged or local content | [Operator projects](projects.md) |
 | Inspect storage or remove a cached entry safely | [Cache maintenance](cache.md) |
+| See which files Site Ops saves and which releases read them | [Saved data](saved-data.md) |
 | Diagnose a failed command or provider operation | [Troubleshooting](troubleshooting.md) |
 | Fix an installation problem | [Installation problems](install-siteops.md#common-problems) |
 

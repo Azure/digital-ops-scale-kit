@@ -1,0 +1,19 @@
+apiVersion: siteops.inputs/v1
+kind: SiteInputContract
+inputs:
+  - name: siteName
+    type: string
+    description: Site identity.
+    sitePath: name
+  - name: subscription
+    type: string
+    description: Subscription identity.
+    sitePath: subscription
+  - name: resourceGroup
+    type: string
+    description: Resource group.
+    sitePath: resourceGroup
+  - name: location
+    type: string
+    description: Deployment region.
+    sitePath: location
