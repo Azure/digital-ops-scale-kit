@@ -51,6 +51,7 @@ These changes affect how you install or run Site Ops after v1.0.0b7.
 | Upgrade an existing AIO instance that has no configured Site | Nothing changes for existing use. Review the [typed AIO upgrade](#typed-aio-upgrade). |
 | Run v1.0.0b8 content with an earlier Site Ops engine, or produce your own packages | Install the matching engine. Review the [typed map feature](#typed-map-feature). |
 | Write the YAML key `=` twice in one mapping, quoted or bare | Keep one. Review [repeated equals keys](#repeated-equals-keys). |
+| Match the text of a missing typed input error | Review [missing input messages](#missing-input-messages). |
 
 ### Windows user PATH
 
@@ -162,6 +163,18 @@ other repeated keys, with
 `found a duplicate key '='. YAML keeps the last one, so the first is discarded. Merge them or rename one.`
 Earlier releases kept only the last value. Keep the entry you intend and
 remove the other.
+
+### Missing input messages
+
+A missing required typed input now ends with the `--input` form that
+supplies it, for example:
+
+```text
+Missing required input 'siteName'. Supply `--input siteName=<value>`.
+```
+
+A boolean input shows `<true-or-false>` instead of `<value>`. The error code
+stays `inputs.invalid`, so match the code rather than the text.
 
 ## To v1.0.0b7
 
