@@ -75,6 +75,7 @@ def run_script(
     preamble.extend(f"export {name}={shlex.quote(value)}" for name, value in exports.items())
     script_path = tmp_path / "workflow-step.sh"
     write_executable(script_path, "\n".join((*preamble, script)))
+    # Git Bash starts a step's processes slowly on a busy host, so the limit only stops a hang.
     return subprocess.run(
         [
             str(required_bash()),
@@ -87,5 +88,5 @@ def run_script(
         capture_output=True,
         text=True,
         check=False,
-        timeout=120,
+        timeout=300,
     )
