@@ -50,6 +50,7 @@ These changes affect how you install or run Site Ops after v1.0.0b7.
 | Want Arc extension settings without a saved Site | Nothing changes for existing use. Review [typed extension settings](#typed-extension-settings). |
 | Upgrade an existing AIO instance that has no configured Site | Nothing changes for existing use. Review the [typed AIO upgrade](#typed-aio-upgrade). |
 | Run v1.0.0b8 content with an earlier Site Ops engine, or produce your own packages | Install the matching engine. Review the [typed map feature](#typed-map-feature). |
+| Write the YAML key `=` twice in one mapping, quoted or bare | Keep one. Review [repeated equals keys](#repeated-equals-keys). |
 
 ### Windows user PATH
 
@@ -152,6 +153,15 @@ If you produce your own packages, add `typed-input-maps/v1` to
 workspace whose input contract declares a `stringMap` input. The producer
 rejects such a workspace without it. See
 [workspace packages](workspace-packages.md#build-workspaces-declared-by-a-release).
+
+### Repeated equals keys
+
+YAML reads a bare `=` key and a quoted `"="` key as the same key. Site Ops
+now rejects a mapping that repeats it in any spelling, as it already rejects
+other repeated keys, with
+`found a duplicate key '='. YAML keeps the last one, so the first is discarded. Merge them or rename one.`
+Earlier releases kept only the last value. Keep the entry you intend and
+remove the other.
 
 ## To v1.0.0b7
 

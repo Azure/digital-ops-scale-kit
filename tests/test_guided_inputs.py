@@ -1948,3 +1948,11 @@ def test_answer_file_maps_keep_merge_keys_and_reject_literal_duplicates(tmp_path
     duplicate = _map_answers(tmp_path, '  settings:\n    "a": "1"\n    "a": "2"\n', name="duplicate.yaml")
     with pytest.raises(GuidedInputError, match="duplicate"):
         contract.resolve(values_file=duplicate)
+    for number, keys in enumerate((("=", "="), ("=", '"="'), ('"="', "="))):
+        repeated = _map_answers(
+            tmp_path, f'  settings:\n    {keys[0]}: "first"\n    {keys[1]}: "second"\n', name=f"equals-{number}.yaml",
+        )
+        with pytest.raises(GuidedInputError, match="duplicate"):
+            contract.resolve(values_file=repeated)
+    single = _map_answers(tmp_path, '  settings:\n    =: "bare"\n    x=y: "pair"\n', name="equals.yaml")
+    assert contract.resolve(values_file=single).parameters["settings"] == {"=": "bare", "x=y": "pair"}
