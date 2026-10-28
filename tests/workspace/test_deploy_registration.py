@@ -146,10 +146,12 @@ if [[ "$command_name" == "deploy" ]]; then
       op_count=0
       site_count=0
       if [[ "$outcome" == "$counter_status" ]]; then op_count="$operation_total"; site_count="$site_total"; fi
-      operation_counts+="$(printf '"%s":%s,' "$outcome" "$op_count")"
-      site_counts+="$(printf '"%s":%s,' "$outcome" "$site_count")"
+      printf -v entry '"%s":%s,' "$outcome" "$op_count"
+      operation_counts+="$entry"
+      printf -v entry '"%s":%s,' "$outcome" "$site_count"
+      site_counts+="$entry"
     done
-    summary_json=$(printf '"summary":{"interrupted":%s,"operations":{"total":%s,"counts":{%s}},"sites":{"total":%s,"counts":{%s}}},' "$interrupted" "$operation_total" "${operation_counts%,}" "$site_total" "${site_counts%,}")
+    printf -v summary_json '"summary":{"interrupted":%s,"operations":{"total":%s,"counts":{%s}},"sites":{"total":%s,"counts":{%s}}},' "$interrupted" "$operation_total" "${operation_counts%,}" "$site_total" "${site_counts%,}"
   fi
   printf '{"apiVersion":"%s","kind":"%s","engine":{"name":"siteops","version":"old"},"projection":"%s","status":"%s","exitCode":%s,%s"diagnostics":[]}\n' "$api_version" "$kind" "$projection" "$status" "$document_exit" "$summary_json"
   exit "$run_exit"
