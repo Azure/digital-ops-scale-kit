@@ -236,38 +236,34 @@ def test_wait_connected_omits_private_status_errors_and_arguments(
     expected_message,
     private,
 ):
-    bin_dir = _fake_bin(tmp_path)
-    _write_executable(
-        bin_dir / "sleep",
-        "#!/usr/bin/env bash\n"
-        "printf '%s\\n' \"$*\" >> \"$FAKE_SLEEP_LOG\"\n",
-    )
-    _write_executable(
-        bin_dir / "az",
-        """#!/usr/bin/env bash
-printf 'query\\n' >> "$FAKE_AZ_LOG"
-case "$FAKE_AZ_MODE" in
-  connected)
-    printf 'Connected\n'
-    exit 0
-    ;;
-  pending)
-    printf '%s\n' "Pending-$PRIVATE_SENTINEL"
-    printf '%s\n' "$PRIVATE_SENTINEL" >&2
-    exit 0
-    ;;
-  failed)
-    printf '%s\n' "$PRIVATE_SENTINEL"
-    printf '%s\n' "$PRIVATE_SENTINEL" >&2
-    exit 42
-    ;;
-esac
-""",
-    )
+    _fake_bin(tmp_path)
+    # Shell functions stand in for the polled commands, so no attempt starts another program.
+    stand_ins = """sleep() { printf '%s\\n' "$*" >> "$FAKE_SLEEP_LOG"; }
+az() {
+  printf 'query\\n' >> "$FAKE_AZ_LOG"
+  case "$FAKE_AZ_MODE" in
+    connected)
+      printf 'Connected\\n'
+      return 0
+      ;;
+    pending)
+      printf '%s\\n' "Pending-$PRIVATE_SENTINEL"
+      printf '%s\\n' "$PRIVATE_SENTINEL" >&2
+      return 0
+      ;;
+    failed)
+      printf '%s\\n' "$PRIVATE_SENTINEL"
+      printf '%s\\n' "$PRIVATE_SENTINEL" >&2
+      return 42
+      ;;
+  esac
+}
+"""
 
     # Use the LF source text a Linux Git checkout provides, without changing its logic.
     script = (
-        f"set -- {shlex.quote(PRIVATE_SENTINEL)} {shlex.quote(PRIVATE_SENTINEL)}\n"
+        stand_ins
+        + f"set -- {shlex.quote(PRIVATE_SENTINEL)} {shlex.quote(PRIVATE_SENTINEL)}\n"
         + WAIT_SCRIPT.read_text(encoding="utf-8")
     )
     result = _run_bash(
