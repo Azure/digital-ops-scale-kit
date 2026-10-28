@@ -244,8 +244,9 @@ cp -- "$TEST_PUBLISHED/${url##*/}" "$output"
         return records
 
     before = snapshot()
+    # Git Bash starts the bootstrap's processes slowly on a busy host, so the limit only stops a hang.
     result = subprocess.run(
-        arguments, cwd=tmp_path, env=env, input=source if piped else "", text=True, capture_output=True, timeout=60,
+        arguments, cwd=tmp_path, env=env, input=source if piped else "", text=True, capture_output=True, timeout=180,
     )
     calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()] if log.exists() else []
     after = snapshot()
