@@ -9,11 +9,41 @@ import yaml
 
 from tests import installed_runtime
 
+# A parallel run (`pytest -n`) keeps each of these modules on one worker. Their module
+# fixtures build, install or compile something, so each still runs once.
+SINGLE_WORKER_MODULES = frozenset({
+    "tests/test_ado_consumer_smoke.py",
+    "tests/test_distribution_builder.py",
+    "tests/test_distribution_workflows.py",
+    "tests/test_fleet_plan_probe.py",
+    "tests/test_installed_workspace_probe.py",
+    "tests/test_packaging.py",
+    "tests/test_workspace_qualification.py",
+    "tests/test_workspace_release_assembly.py",
+    "tests/test_workspace_signing.py",
+    "tests/workspace/test_aio_release_behavior_contracts.py",
+    "tests/workspace/test_opc_ua_sample_contracts.py",
+})
 _PREBUILT_INPUT = "siteops_prebuilt"
 
 
 def _prebuilt_root(config: pytest.Config) -> Path:
     return config._tmp_path_factory.getbasetemp() / "siteops-prebuilt"
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_xdist_make_scheduler(config, log):
+    """Hand out single tests, except that each listed module goes to one worker as a unit."""
+    if config.getvalue("dist") != "load":
+        return None
+    from xdist.scheduler import LoadScopeScheduling
+
+    class ModuleGroupScheduling(LoadScopeScheduling):
+        def _split_scope(self, nodeid: str) -> str:
+            module = nodeid.split("::", 1)[0]
+            return module if module in SINGLE_WORKER_MODULES else nodeid
+
+    return ModuleGroupScheduling(config, log)
 
 
 @pytest.hookimpl(optionalhook=True)

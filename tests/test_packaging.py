@@ -489,3 +489,49 @@ def test_parallel_controller_leaves_out_wheels_it_cannot_provide(tmp_path, monke
     # Each worker then attempts the download itself and reports it where a test needs it.
     assert not (tmp_path / "prebuilt" / "runtime").exists()
 
+
+def test_parallel_runs_keep_each_listed_module_on_one_worker():
+    pytest.importorskip("xdist")
+    from tests import conftest
+
+    assert all((ROOT / module).is_file() for module in conftest.SINGLE_WORKER_MODULES)
+    grouped, single = "tests/test_packaging.py", "tests/test_cli.py"
+    assert grouped in conftest.SINGLE_WORKER_MODULES and single not in conftest.SINGLE_WORKER_MODULES
+
+    class Config:
+        option = type("Option", (), {"loadscopereorder": True})
+
+        def getvalue(self, name):
+            return {"dist": "load", "tx": ["popen", "popen"]}[name]
+
+    class Node:
+        shutting_down = False
+
+        def __init__(self, name):
+            self.gateway = type("Gateway", (), {"id": name})
+            self.sent = []
+
+        def send_runtest_some(self, indices):
+            self.sent.extend(indices)
+
+        def shutdown(self):
+            self.shutting_down = True
+
+    scheduler = conftest.pytest_xdist_make_scheduler(config=Config(), log=None)
+    collection = [f"{module}::test_{number}" for module in (grouped, single) for number in range(3)]
+    nodes = [Node("gw0"), Node("gw1")]
+    for node in nodes:
+        scheduler.add_node(node)
+        scheduler.add_node_collection(node, collection)
+    scheduler.schedule()
+    done = set()
+    while not scheduler.tests_finished:
+        node, index = next((node, index) for node in nodes for index in node.sent if (node, index) not in done)
+        done.add((node, index))
+        scheduler.mark_test_complete(node, index)
+    workers = {
+        module: {node.gateway.id for node in nodes for index in node.sent if collection[index].startswith(module)}
+        for module in (grouped, single)
+    }
+    assert sorted(index for node in nodes for index in node.sent) == list(range(6))
+    assert len(workers[grouped]) == 1 and len(workers[single]) == 2
