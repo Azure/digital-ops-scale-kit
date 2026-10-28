@@ -389,7 +389,9 @@ def test_input_help_names_the_map_entry_form(capsys, command):
         with pytest.raises(SystemExit) as stopped:
             main()
     assert stopped.value.code == 0
-    assert "NAME=KEY=VALUE for one entry of a map input" in " ".join(capsys.readouterr().out.split())
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "NAME=KEY=VALUE for one map entry" in help_text
+    assert "map entries merge with it key by key" in help_text
 
 
 def test_map_answers_preview_through_the_command_and_errors_withhold_keys_when_redacted(

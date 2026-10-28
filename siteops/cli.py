@@ -2133,8 +2133,9 @@ _PARALLEL_HELP = (
 )
 
 _INPUT_HELP = (
-    "Typed answer that is not secret, as NAME=VALUE, or NAME=KEY=VALUE for one "
-    "entry of a map input (repeatable, overrides --input-file)"
+    "Typed answer that is not secret, as NAME=VALUE or NAME=KEY=VALUE for one "
+    "map entry (repeatable, overrides --input-file, map entries merge with it "
+    "key by key)"
 )
 
 _ROOT_EPILOG = """
