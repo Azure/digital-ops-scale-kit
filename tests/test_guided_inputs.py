@@ -1005,7 +1005,7 @@ def test_missing_optional_controller_is_not_treated_as_false(tmp_path):
             ),
         ],
     )
-    with pytest.raises(ValueError, match="enable"):
+    with pytest.raises(ValueError, match=r"^Input 'enable' is missing\. It controls conditional input 'choice'\.$"):
         load_contract(manifest).resolve()
     assert load_contract(manifest).resolve(inline=["enable=false"]).properties == {
         "enable": False,
@@ -1243,19 +1243,24 @@ def test_multiple_dependents_can_share_an_unconditional_controller(tmp_path):
     }
 
 
-def test_missing_controller_is_reported_in_separate_sentences(tmp_path):
+def test_missing_required_controller_is_reported_in_input_order_before_its_dependents(tmp_path):
     manifest, _ = _manifest_and_contract(
         tmp_path,
         fields=[
-            _field("subscription", "subscription", default="sub"),
+            _field("subscription", "subscription"),
             _field("location", "location", default="eastus"),
             _field("enable", "properties.enable", type="boolean"),
             _field("first", "properties.first", when={"input": "enable", "equals": True}),
         ],
     )
-    with pytest.raises(ValueError) as rejected:
-        load_contract(manifest).resolve()
-    assert str(rejected.value) == "Input 'enable' is missing. It controls conditional input 'first'."
+    contract = load_contract(manifest)
+    with pytest.raises(GuidedInputError) as rejected:
+        contract.resolve()
+    assert str(rejected.value) == "Missing required input 'subscription'. Supply `--input subscription=<value>`."
+    for answers in (["subscription=sub"], ["subscription=sub", "first=supplied"]):
+        with pytest.raises(GuidedInputError) as rejected:
+            contract.resolve(inline=answers)
+        assert str(rejected.value) == "Missing required input 'enable'. Supply `--input enable=<true-or-false>`."
 
 
 def test_missing_required_name_is_safe_guided_error(tmp_path):
@@ -1271,7 +1276,7 @@ def test_missing_required_name_is_safe_guided_error(tmp_path):
     )
     with pytest.raises(GuidedInputError) as rejected:
         load_contract(manifest).resolve()
-    assert str(rejected.value) == "Missing required input 'siteName'."
+    assert str(rejected.value) == "Missing required input 'siteName'. Supply `--input siteName=<value>`."
     assert isinstance(rejected.value, ValueError)
 
 
@@ -1335,7 +1340,7 @@ def test_example_fails_on_first_missing_required_input_before_site_parsing(tmp_p
         pytest.fail("An incomplete example must fail before constructing a Site or plan.")
 
     monkeypatch.setattr(Site, "from_data", unexpected_site)
-    with pytest.raises(ValueError, match=r"^Missing required input 'siteName'\.$"):
+    with pytest.raises(ValueError, match=r"^Missing required input 'siteName'\. Supply `--input siteName=<value>`\.$"):
         contract.resolve(values_file=answers)
 
 

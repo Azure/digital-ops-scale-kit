@@ -815,7 +815,10 @@ class InputContract:
                 f"Missing required input '{name}'. Supply at least one entry, such as "
                 f"`--input {name}=<KEY>=<VALUE>`."
             )
-        return GuidedInputError(f"Missing required input '{name}'.")
+        placeholder = "<true-or-false>" if field.type == "boolean" else "<value>"
+        return GuidedInputError(
+            f"Missing required input '{name}'. Supply `--input {name}={placeholder}`."
+        )
 
     def bind(
         self, values_file: Path | None = None, inline: list[str] | None = None,
@@ -922,6 +925,9 @@ class InputContract:
             if field.when is not None:
                 controller = active_values.get(field.when.input, _MISSING)
                 if controller is _MISSING:
+                    if fields[field.when.input].required:
+                        # The missing required controller is reported below, in input order.
+                        continue
                     raise GuidedInputError(
                         f"Input '{field.when.input}' is missing. It controls conditional "
                         f"input '{field.name}'."
@@ -1215,15 +1221,15 @@ class InputContract:
                     field.when is None
                     or values.get(field.when.input) == field.when.equals
                 ):
-                    raise GuidedInputError(f"Missing required input '{field.name}'.")
+                    raise self._missing_input(field.name, values)
                 continue
             if field.site_path is None:
                 raise GuidedInputError("A mapped input needs a Site field.")
             field.validate(values[field.name], f"Input '{field.name}'")
             if field.type == "stringMap":
                 if field.required and not values[field.name]:
-                    raise GuidedInputError(f"Missing required input '{field.name}'.")
-                # An empty map writes nothing, so it never clears a value set elsewhere.
+                    raise self._missing_input(field.name, values)
+                # An empty map writes nothing to the Site.
                 if values[field.name]:
                     _assign(data, field.site_path, dict(values[field.name]))
                 continue

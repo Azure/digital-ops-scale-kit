@@ -200,7 +200,7 @@ def test_typed_install_settings_match_a_site_and_keep_bundled_cert_manager_value
     )
 
 
-def test_upgrade_contract_requires_the_release_and_the_cert_manager_answer(workspace):
+def test_upgrade_contract_requires_the_release_and_the_cert_manager_answer(workspace, tmp_path):
     contract = load_contract(workspace / "manifests" / "aio-upgrade" / "manifest.yaml")
     assert contract.example()["values"] == {"instance": None, "aioRelease": None, "enableCertManager": None}
     rows = {row["name"]: row for row in contract.describe()["inputs"]}
@@ -210,11 +210,22 @@ def test_upgrade_contract_requires_the_release_and_the_cert_manager_answer(works
         "Include the existing cert-manager Arc extension in this upgrade?"
     )
     assert all(not field.resource.requires for field in contract.fields if field.resource is not None)
+    example = tmp_path / "example.yaml"
+    example.write_text(yaml.safe_dump(contract.example()), encoding="utf-8")
+    with pytest.raises(GuidedInputError) as missing:
+        contract.bind(values_file=example)
+    assert str(missing.value) == (
+        "Missing required input 'instance'. Supply `--input instance=<AIO-instance-resource-ID>`."
+    )
     instance = f"instance={INSTANCE_ID}"
-    with pytest.raises(GuidedInputError, match="Input 'enableCertManager' is missing"):
+    with pytest.raises(GuidedInputError) as missing:
         contract.bind(inline=[instance, "aioRelease=2609"])
-    with pytest.raises(GuidedInputError, match=r"^Missing required input 'aioRelease'\.$"):
+    assert str(missing.value) == (
+        "Missing required input 'enableCertManager'. Supply `--input enableCertManager=<true-or-false>`."
+    )
+    with pytest.raises(GuidedInputError) as missing:
         contract.bind(inline=[instance, "enableCertManager=true"])
+    assert str(missing.value) == "Missing required input 'aioRelease'. Supply `--input aioRelease=<value>`."
     with pytest.raises(GuidedInputError, match="'certManagerExtensionSettings' was supplied while its condition is inactive"):
         contract.bind(inline=[instance, "aioRelease=2609", "enableCertManager=false", "certManagerExtensionSettings=k=v"])
     excluded = contract.build_site(
