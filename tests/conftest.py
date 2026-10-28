@@ -2,9 +2,37 @@
 
 import json
 import subprocess
+from pathlib import Path
 
 import pytest
 import yaml
+
+from tests import installed_runtime
+
+_PREBUILT_INPUT = "siteops_prebuilt"
+
+
+def _prebuilt_root(config: pytest.Config) -> Path:
+    return config._tmp_path_factory.getbasetemp() / "siteops-prebuilt"
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_configure_node(node):
+    node.workerinput[_PREBUILT_INPUT] = str(_prebuilt_root(node.config))
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_sessionstart(session):
+    # The workers start during the yield and collect while the controller builds.
+    outcome = yield
+    if outcome.excinfo is None and session.config.pluginmanager.has_plugin("dsession"):
+        installed_runtime.prebuild(_prebuilt_root(session.config))
+
+
+def pytest_configure(config):
+    prebuilt = getattr(config, "workerinput", {}).get(_PREBUILT_INPUT)
+    if prebuilt:
+        installed_runtime.use_prebuilt(Path(prebuilt))
 
 
 class _VersionOnlyToolRunner:

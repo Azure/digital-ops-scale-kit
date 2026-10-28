@@ -19,10 +19,14 @@ RUNTIME_WHEELHOUSE = "SITEOPS_TEST_RUNTIME_WHEELHOUSE"
 # The engine source and runtime lock are fixed for a test session, so each is built or
 # downloaded once and every caller receives its own copy of those bytes.
 _SESSION_FILES: dict[str, dict[str, bytes]] = {}
+# A parallel run builds them once in the controller, and each worker reads them from here.
+_PREBUILT: Path | None = None
 
 
 def _session_copy(kind: str, destination: Path) -> list[Path] | None:
     files = _SESSION_FILES.get(kind)
+    if files is None and _PREBUILT is not None and (_PREBUILT / kind).is_dir():
+        files = _SESSION_FILES[kind] = {path.name: path.read_bytes() for path in (_PREBUILT / kind).iterdir()}
     if files is None:
         return None
     destination.mkdir()
@@ -120,6 +124,32 @@ def runtime_wheels(root: Path) -> Path:
     )
     _SESSION_FILES["runtime"] = {path.name: path.read_bytes() for path in destination.iterdir()}
     return destination
+
+
+def prebuild(root: Path) -> None:
+    """Build the engine wheel and fetch the runtime wheels into `root` for parallel workers.
+
+    A file set that cannot be provisioned here is left out. Each worker then repeats the
+    attempt and reports the failure in the test that needs it, as a serial run does.
+    """
+    root.mkdir()
+    for kind, provision in (("engine", build_engine_wheel), ("runtime", runtime_wheels)):
+        state = root / f"{kind}-state"
+        state.mkdir()
+        try:
+            provision(state)
+        except Exception:
+            continue
+        if kind in _SESSION_FILES:
+            (root / kind).mkdir()
+            for name, content in _SESSION_FILES[kind].items():
+                (root / kind / name).write_bytes(content)
+
+
+def use_prebuilt(root: Path) -> None:
+    """Take the controller's files from `root` on first use instead of building them again."""
+    global _PREBUILT
+    _PREBUILT = root
 
 
 @dataclass(frozen=True)

@@ -448,3 +448,44 @@ def test_shared_application_is_reused_only_while_unchanged_and_complete(tmp_path
         installed_runtime._shared_application("wheel", install)
     installed_runtime._interpreter(first).unlink()
     assert installed_runtime._shared_application("wheel", install) == installs[1] != first
+
+
+def test_parallel_workers_copy_the_controller_wheels_without_building_them(tmp_path, monkeypatch):
+    prebuilt = tmp_path / "prebuilt"
+    for kind, name in (("engine", "siteops-1.0-py3-none-any.whl"), ("runtime", "pyyaml-6.0-py3-none-any.whl")):
+        (prebuilt / kind).mkdir(parents=True)
+        (prebuilt / kind / name).write_bytes(kind.encode())
+    monkeypatch.setattr(installed_runtime, "_SESSION_FILES", {})
+    monkeypatch.setattr(installed_runtime, "_PREBUILT", None)
+    monkeypatch.delenv(installed_runtime.RUNTIME_WHEELHOUSE, raising=False)
+    # Any build or download would fail.
+    monkeypatch.setattr(installed_runtime, "subprocess", None)
+    installed_runtime.use_prebuilt(prebuilt)
+    for caller in ("first", "second"):
+        (tmp_path / caller).mkdir()
+        wheel = build_engine_wheel(tmp_path / caller)
+        assert wheel == tmp_path / caller / "wheels" / "siteops-1.0-py3-none-any.whl"
+        assert wheel.read_bytes() == b"engine"
+        runtime = installed_runtime.runtime_wheels(tmp_path / caller)
+        assert runtime.parent == tmp_path / caller
+        assert [path.read_bytes() for path in runtime.iterdir()] == [b"runtime"]
+
+
+def test_parallel_controller_leaves_out_wheels_it_cannot_provide(tmp_path, monkeypatch):
+    def pip(argv, **_):
+        if "download" in argv:
+            return subprocess.CompletedProcess(argv, 1, b"", b"")
+        wheels = Path(argv[argv.index("--wheel-dir") + 1])
+        wheels.mkdir()
+        (wheels / "siteops-1.0-py3-none-any.whl").write_bytes(b"engine")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(installed_runtime, "_SESSION_FILES", {})
+    monkeypatch.setattr(installed_runtime, "_PREBUILT", None)
+    monkeypatch.delenv(installed_runtime.RUNTIME_WHEELHOUSE, raising=False)
+    monkeypatch.setattr(installed_runtime, "subprocess", type("Pip", (), {"run": staticmethod(pip)}))
+    installed_runtime.prebuild(tmp_path / "prebuilt")
+    assert [path.read_bytes() for path in (tmp_path / "prebuilt" / "engine").iterdir()] == [b"engine"]
+    # Each worker then attempts the download itself and reports it where a test needs it.
+    assert not (tmp_path / "prebuilt" / "runtime").exists()
+
