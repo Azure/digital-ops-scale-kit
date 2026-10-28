@@ -197,6 +197,39 @@ inputs:
     ) in plain
 
 
+def test_typed_route_suggests_only_a_required_map_with_a_generic_entry(tmp_path, monkeypatch):
+    contract = """\
+apiVersion: siteops.inputs/v1
+kind: SiteInputContract
+inputs:
+  - name: subscription
+    type: string
+    description: Subscription.
+    sitePath: subscription
+  - name: labels
+    type: stringMap
+    description: Required settings.
+    sitePath: parameters.labels
+  - name: extra
+    type: stringMap
+    required: false
+    description: Optional settings.
+    sitePath: parameters.extra
+"""
+    _entry(tmp_path).with_name("inputs.yaml").write_text(contract, encoding="utf-8")
+    monkeypatch.setattr(browse_output, "_command_shell", lambda: "POSIX shell")
+    result = inspect_content(tmp_path, "example")
+    plain = render_browse_plain(result)
+    assert (
+        "  siteops plan example --input 'subscription=<subscription>' "
+        "--input 'labels=<KEY>=<VALUE>'\n"
+    ) in plain
+    assert "extra=" not in plain
+    assert result.document()["entries"][0]["typedInputs"]["answers"][1] == {
+        "name": "labels", "type": "stringMap", "resourceType": None,
+    }
+
+
 @pytest.mark.parametrize(("contents", "status"), [
     ("apiVersion: siteops.inputs/v1\nkind: SiteInputContract\ninputs: [PRIVATE_SENTINEL]\n", "unreadable"),
     ("customLocationName: '{{ steps.resolve.outputs.name }}'\n", "none"),

@@ -8,6 +8,7 @@ from __future__ import annotations
 import copy
 import difflib
 import re
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -31,6 +32,12 @@ if TYPE_CHECKING:
 _VERSION = "siteops.inputs/v1"
 _MAX_YAML_BYTES = 128 * 1024
 _MAX_INPUTS = 64
+_TYPES = ("string", "boolean", "azureResourceId", "stringMap")
+# Limits for each supplied stringMap source and for the combined map, in code points and UTF-8 bytes.
+_MAP_ENTRIES = 64
+_MAP_KEY_LENGTH = 256
+_MAP_VALUE_LENGTH = 4096
+_MAP_BYTES = 64 * 1024
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z", re.ASCII)
 _ROOT_FIELDS = {"name", "subscription", "resourceGroup", "location"}
 _MAPPING_FIELDS = {"labels", "parameters", "properties"}
@@ -180,6 +187,46 @@ def _typed_value(value: Any, kind: str, label: str, *, required: bool) -> None:
         raise GuidedInputError(f"{label} must be one nonempty ARM resource ID.")
 
 
+def _map_key(key: Any, label: str) -> None:
+    """Check one stringMap key before any message can name it."""
+    if not isinstance(key, str):
+        raise GuidedInputError(f"{label} must have string keys.")
+    if not 1 <= len(key) <= _MAP_KEY_LENGTH or any(
+        unicodedata.category(character).startswith("C") for character in key
+    ):
+        raise GuidedInputError(
+            f"{label} keys must have 1 to {_MAP_KEY_LENGTH} characters and no control characters."
+        )
+
+
+def _map_entry_error(label: str, key: str, problem: str) -> GuidedInputError:
+    """Name the input publicly and its checked key only in private detail, never the value."""
+    error = GuidedInputError(f"{label} has a value that {problem}")
+    error.private_message = f"{label} key '{key}' has a value that {problem}"
+    return error
+
+
+def _string_map(value: Any, label: str) -> None:
+    """Check one supplied stringMap source, or the combined map, against its limits."""
+    if not isinstance(value, Mapping):
+        raise GuidedInputError(f"{label} must be a mapping of string keys to string values.")
+    if len(value) > _MAP_ENTRIES:
+        raise GuidedInputError(f"{label} exceeds its limit of {_MAP_ENTRIES} entries.")
+    size = 0
+    for key, item in value.items():
+        _map_key(key, label)
+        if type(item) is not str:
+            raise _map_entry_error(label, key, "is not a string. Quote each value in YAML.")
+        if len(item) > _MAP_VALUE_LENGTH:
+            raise _map_entry_error(label, key, "is longer than 4,096 characters.")
+        try:
+            size += len(key.encode("utf-8")) + len(item.encode("utf-8"))
+        except UnicodeEncodeError:
+            raise _map_entry_error(label, key, "is not valid Unicode text.") from None
+    if size > _MAP_BYTES:
+        raise GuidedInputError(f"{label} exceeds its 64 KiB limit for keys and values.")
+
+
 def _site_path(value: Any) -> tuple[str, ...]:
     if not isinstance(value, str):
         raise GuidedInputError("Input sitePath must be a dotted Site field.")
@@ -254,7 +301,14 @@ class InputField:
         return self.default is not _MISSING
 
     def validate(self, value: Any, label: str) -> None:
-        """Check the declared scalar type and closed string constraints."""
+        """Check the declared type and closed constraints.
+
+        A stringMap is checked for each supplied source and for the combined map.
+        Its `required` rule applies only to the combined map.
+        """
+        if self.type == "stringMap":
+            _string_map(value, label)
+            return
         _typed_value(value, self.type, label, required=self.required)
         if self.type != "string":
             return
@@ -280,8 +334,8 @@ def _condition(
     if not isinstance(controller, str) or controller not in earlier:
         raise GuidedInputError(f"{label} must reference an earlier declared input.")
     field = earlier[controller]
-    if field.when is not None or field.resource is not None:
-        raise GuidedInputError(f"{label} cannot reference a conditional or resource input.")
+    if field.when is not None or field.resource is not None or field.type == "stringMap":
+        raise GuidedInputError(f"{label} cannot reference a conditional, resource or map input.")
     _typed_value(row["equals"], field.type, f"{label} equals", required=False)
     return InputCondition(controller, row["equals"])
 
@@ -404,8 +458,10 @@ def _parse_fields(value: Any) -> tuple[InputField, ...]:
         if name in by_name:
             raise GuidedInputError(f"Contract inputs contain a duplicate name: {name}.")
         kind = row["type"]
-        if kind not in ("string", "boolean", "azureResourceId"):
-            raise GuidedInputError(f"{label} type must be string, boolean or azureResourceId.")
+        if kind not in _TYPES:
+            raise GuidedInputError(
+                f"{label} type must be string, boolean, azureResourceId or stringMap."
+            )
         description = row["description"]
         if not isinstance(description, str) or not description.strip():
             raise GuidedInputError(f"{label} description must be nonempty text.")
@@ -421,6 +477,10 @@ def _parse_fields(value: Any) -> tuple[InputField, ...]:
             raise GuidedInputError(f"{label} requires sitePath or derived input fields.")
         if resource_role and path is not None and path[0] not in {"parameters", "properties"}:
             raise GuidedInputError(f"{label} resource ID sitePath must be a parameter or property.")
+        if kind == "stringMap" and path[0] not in {"parameters", "properties"}:
+            raise GuidedInputError(f"{label} stringMap sitePath must be a parameter or property.")
+        if kind == "stringMap" and "default" in row:
+            raise GuidedInputError(f"{label} stringMap cannot declare a default.")
         if path is not None and any(
             field.site_path is not None and (
                 path[: len(field.site_path)] == field.site_path
@@ -517,10 +577,20 @@ def _validate_default_writers(
             continue
         current: Any = defaults
         for part in field.site_path:
-            if not isinstance(current, dict) or part not in current:
+            if not isinstance(current, dict):
+                if field.type == "stringMap":
+                    raise GuidedInputError(
+                        f"Input '{field.name}' sitePath overlaps a siteDefaults value."
+                    )
+                break
+            if part not in current:
                 break
             current = current[part]
         else:
+            if field.type == "stringMap":
+                raise GuidedInputError(
+                    f"Input '{field.name}' sitePath overlaps a siteDefaults value."
+                )
             if isinstance(current, dict):
                 raise GuidedInputError(
                     f"Input '{field.name}' sitePath would replace a siteDefaults mapping."
@@ -544,9 +614,13 @@ class BoundResource:
 
 @dataclass(frozen=True)
 class BoundInputs:
-    """Resolved local answers and their origins, before any provider read."""
+    """Resolved local answers and their origins, before any provider read.
 
-    active_values: Mapping[str, str | bool] = dataclass_field(repr=False)
+    A stringMap answer is a read-only mapping. Its origin is `input file`,
+    `inline`, or `input file and inline` when both supply entries.
+    """
+
+    active_values: Mapping[str, Any] = dataclass_field(repr=False)
     sources: Mapping[str, str]
     resources: tuple[BoundResource, ...] = dataclass_field(default=(), repr=False)
 
@@ -736,23 +810,46 @@ class InputContract:
                 f"Missing required input '{name}'. Supply it, or supply "
                 f"{self._resource_answer(route)} to derive it."
             )
+        if field.type == "stringMap":
+            return GuidedInputError(
+                f"Missing required input '{name}'. Supply at least one entry, such as "
+                f"`--input {name}=<KEY>=<VALUE>`."
+            )
         return GuidedInputError(f"Missing required input '{name}'.")
 
     def bind(
         self, values_file: Path | None = None, inline: list[str] | None = None,
     ) -> BoundInputs:
-        """Validate and merge local answers without constructing a Site."""
+        """Validate and merge local answers without constructing a Site.
+
+        A stringMap input repeats inline once per key as `NAME=KEY=VALUE`, and
+        each inline key replaces the same key from the input file.
+        """
         fields = {field.name: field for field in self.fields}
-        inline_values: dict[str, str | bool] = {}
+        inline_values: dict[str, Any] = {}
         for answer in inline or []:
             if not isinstance(answer, str) or "=" not in answer:
                 raise GuidedInputError("Inline inputs must use NAME=VALUE format.")
             name, value = answer.split("=", 1)
             if name not in fields:
                 raise _unknown_input(name, list(fields), "Inline inputs")
+            field = fields[name]
+            if field.type == "stringMap":
+                if "=" not in value:
+                    raise GuidedInputError(
+                        f"Inline input '{name}' must use {name}=KEY=VALUE for each entry."
+                    )
+                key, item = value.split("=", 1)
+                entries = inline_values.setdefault(name, {})
+                _map_key(key, f"Inline input '{name}'")
+                if key in entries:
+                    error = GuidedInputError(f"Inline input '{name}' repeats a key.")
+                    error.private_message = f"Inline input '{name}' repeats key '{key}'."
+                    raise error
+                entries[key] = item
+                continue
             if name in inline_values:
                 raise GuidedInputError(f"Duplicate inline input '{name}'.")
-            field = fields[name]
             if field.resource is not None and field.resource.from_resource is not None:
                 raise GuidedInputError(
                     f"Input '{name}' is derived from '{self._source_input(field).name}' "
@@ -770,6 +867,9 @@ class InputContract:
                 else:
                     _typed_value(value, "string", f"Input '{name}'", required=field.required)
                 inline_values[name] = value
+        for name, entries in inline_values.items():
+            if fields[name].type == "stringMap":
+                fields[name].validate(entries, f"Inline input '{name}'")
 
         file_values: dict[str, Any] = {}
         if values_file is not None:
@@ -805,7 +905,17 @@ class InputContract:
         }
         effective.update(file_values)
         effective.update(inline_values)
-        active_values: dict[str, str | bool] = {}
+        map_sources: dict[str, str] = {}
+        for name, entries in inline_values.items():
+            from_file = file_values.get(name)
+            if fields[name].type != "stringMap" or not isinstance(from_file, Mapping) or not from_file:
+                continue
+            combined = {**from_file, **entries}
+            fields[name].validate(combined, f"Combined input '{name}'")
+            effective[name] = combined
+            if any(key not in entries for key in from_file):
+                map_sources[name] = "input file and inline"
+        active_values: dict[str, Any] = {}
         sources: dict[str, str] = {}
         missing_required: list[str] = []
         for field in self.fields:
@@ -823,12 +933,16 @@ class InputContract:
                         )
                     continue
             value = effective.get(field.name, _MISSING)
-            if value is _MISSING or value is None:
+            if value is _MISSING or value is None or (
+                field.type == "stringMap" and field.required and not value
+            ):
                 if field.required:
                     missing_required.append(field.name)
                 continue
+            if field.type == "stringMap":
+                value = MappingProxyType(dict(value))
             active_values[field.name] = value
-            sources[field.name] = (
+            sources[field.name] = map_sources.get(field.name) or (
                 "inline" if field.name in inline_values
                 else "input file" if field.name in file_values else "default"
             )
@@ -1106,6 +1220,13 @@ class InputContract:
             if field.site_path is None:
                 raise GuidedInputError("A mapped input needs a Site field.")
             field.validate(values[field.name], f"Input '{field.name}'")
+            if field.type == "stringMap":
+                if field.required and not values[field.name]:
+                    raise GuidedInputError(f"Missing required input '{field.name}'.")
+                # An empty map writes nothing, so it never clears a value set elsewhere.
+                if values[field.name]:
+                    _assign(data, field.site_path, dict(values[field.name]))
+                continue
             _assign(data, field.site_path, values[field.name])
         return Site.from_data(data, source="guided inputs", default_name="guided-site")
 
@@ -1149,7 +1270,7 @@ class InputContract:
         return self.build_site(self.bind(values_file=values_file, inline=inline))
 
 
-def _assign(data: dict[str, Any], path: tuple[str, ...], value: str | bool) -> None:
+def _assign(data: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
     current = data
     for part in path[:-1]:
         child = current.setdefault(part, {})
@@ -1159,6 +1280,30 @@ def _assign(data: dict[str, Any], path: tuple[str, ...], value: str | bool) -> N
             )
         current = child
     current[path[-1]] = value
+
+
+def _is_contract(document: dict[str, Any]) -> bool:
+    """Treat a sibling as a contract by its kind or its input API namespace."""
+    version = document.get("apiVersion")
+    return document.get("kind") == "SiteInputContract" or (
+        isinstance(version, str) and version.startswith("siteops.inputs/")
+    )
+
+
+def declares_string_map(path: Path) -> bool:
+    """Report whether a file read as an input contract declares a stringMap input.
+
+    Package producers use this to require the matching package feature. YAML
+    that is not a contract declares none, and unreadable YAML raises
+    GuidedInputError rather than counting as none.
+    """
+    document = _read_yaml(path, label="Input contract")
+    if not isinstance(document, dict) or not _is_contract(document):
+        return False
+    inputs = document.get("inputs")
+    return isinstance(inputs, list) and any(
+        isinstance(row, dict) and row.get("type") == "stringMap" for row in inputs
+    )
 
 
 def load_contract(
@@ -1179,10 +1324,7 @@ def load_contract(
     document = _mapping(_read_yaml(verified, label="Input contract"), "Input contract")
     if binding is not None:
         binding.require_workspace_file(path)
-    version = document.get("apiVersion")
-    if document.get("kind") != "SiteInputContract" and not (
-        isinstance(version, str) and version.startswith("siteops.inputs/")
-    ):
+    if not _is_contract(document):
         return None
     _shape(
         document,

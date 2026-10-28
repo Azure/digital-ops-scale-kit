@@ -43,6 +43,7 @@ from siteops.compilation import (
     VersionProvenance,
     resolve_tool_from_path,
 )
+from siteops.guided_inputs import GuidedInputError, declares_string_map
 from siteops.models import DeploymentStep, Manifest, _parse_manifest_spec
 from siteops.runtime import RuntimePaths
 from siteops.workspace_compatibility import require_engine_version
@@ -204,6 +205,35 @@ def _discover_template_sources(root: Path, workspace: str) -> tuple[str, ...]:
         raise ArtifactError(
             "Workspace deployment entries or template paths are invalid."
         ) from None
+
+
+def _require_input_contract_features(
+    root: Path, workspace: str, paths: tuple[str, ...], required_features: tuple[str, ...],
+) -> None:
+    """Require the package feature that each input contract type needs.
+
+    Contract sidecars are named `inputs.yaml` or `<manifest>.inputs.yaml`.
+    """
+    if package.TYPED_INPUT_MAPS_FEATURE in required_features:
+        return
+    prefix = "" if workspace == "." else workspace + "/"
+    for relative in paths:
+        name = relative.rsplit("/", 1)[-1].casefold()
+        if not relative.startswith(prefix) or (
+            name != "inputs.yaml" and not name.endswith(".inputs.yaml")
+        ):
+            continue
+        try:
+            maps = declares_string_map(checked_path(root, relative))
+        except (GuidedInputError, OSError):
+            raise ArtifactError(
+                f"Input contract '{relative}' could not be read to check its required features."
+            ) from None
+        if maps:
+            raise ArtifactError(
+                f"Input contract '{relative}' declares a stringMap input, which requires "
+                f"the package feature {package.TYPED_INPUT_MAPS_FEATURE}."
+            )
 
 
 def workspace_bicep_sources(root: Path, workspace: str) -> tuple[str, ...]:
@@ -487,6 +517,7 @@ def build_package(
     if output.exists() or output.is_symlink():
         raise ArtifactError("The package output already exists.")
     paths = _source_files(snapshot, workspace, companions)
+    _require_input_contract_features(snapshot, workspace, paths, required_features)
     records = []
     compression = {}
     total = 0

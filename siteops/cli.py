@@ -1179,6 +1179,16 @@ def cmd_inputs(args: argparse.Namespace, orchestrator: Orchestrator) -> int:
                             indent="    ",
                         ):
                             print(line)
+                    if field["type"] == "stringMap":
+                        name = _content_text(field["name"])
+                        for line in _wrap(
+                            f"Site field: {_content_text(field['sitePath'])}. Keys and values "
+                            "are text, and an omitted or empty map sets nothing. Never include secrets.",
+                            indent="    ",
+                        ):
+                            print(line)
+                        print(f'    In an answer file:\n      {name}:\n        "<KEY>": "<VALUE>"')
+                        print(f'    Inline, once for each key: --input "{name}=<KEY>=<VALUE>"')
                     if "resource" in field:
                         if field.get("fromResource"):
                             link = field["fromResource"]
@@ -2122,6 +2132,11 @@ _PARALLEL_HELP = (
     "no limit. Overrides the manifest's `parallel` setting."
 )
 
+_INPUT_HELP = (
+    "Typed answer that is not secret, as NAME=VALUE, or NAME=KEY=VALUE for one "
+    "entry of a map input (repeatable, overrides --input-file)"
+)
+
 _ROOT_EPILOG = """
 Global options such as -w, --project and --approved-source go before the command.
 
@@ -2332,7 +2347,7 @@ def main() -> None:
     )
     p_inputs.add_argument(
         "--input", dest="input_values", action="append", metavar="NAME=VALUE",
-        help="Typed answer that is not secret (repeatable, overrides --input-file)",
+        help=_INPUT_HELP,
     )
     p_inputs.add_argument(
         "--save-site", type=Path, action=_SingleValueOption, metavar="FILE",
@@ -2499,7 +2514,7 @@ def main() -> None:
         )
         command.add_argument(
             "--input", dest="input_values", action="append", metavar="NAME=VALUE",
-            help="Typed answer that is not secret (repeatable, overrides --input-file)",
+            help=_INPUT_HELP,
         )
         command.add_argument(
             "--offline-content", dest="offline", action="store_true",

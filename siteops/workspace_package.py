@@ -74,11 +74,13 @@ MAX_METADATA_BYTES = 4 * 1024 * 1024
 MAX_CENTRAL_BYTES = 8 * 1024 * 1024
 MAX_COMPRESSION_RATIO = 200
 COMPILED_TEMPLATE_FEATURE = "compiled-templates/v1"
+TYPED_INPUT_MAPS_FEATURE = "typed-input-maps/v1"
 SUPPORTED_FEATURES = frozenset({
     "manifest/v1",
     "composition/v1",
     "manifest-selection/v1",
     COMPILED_TEMPLATE_FEATURE,
+    TYPED_INPUT_MAPS_FEATURE,
 })
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 logger = logging.getLogger(__name__)

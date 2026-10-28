@@ -356,6 +356,69 @@ def test_inputs_preview_redacts_site_in_automation(
     assert "00000000-0000-0000-0000-000000000001" not in output.out + output.err
 
 
+def _map_workspace(workspace: Path) -> Path:
+    path = contract_path(workspace / "manifests" / "test-manifest.yaml")
+    contract = yaml.safe_load(path.read_text(encoding="utf-8"))
+    contract["inputs"].append({
+        "name": "settings", "type": "stringMap", "required": False,
+        "description": "Extension settings.", "sitePath": "parameters.settings",
+    })
+    path.write_text(yaml.safe_dump(contract), encoding="utf-8")
+    return workspace
+
+
+def test_inputs_shows_a_map_destination_example_and_inline_form(guided_workspace, capsys):
+    workspace = _map_workspace(guided_workspace)
+    assert _invoke(["-w", str(workspace), "inputs", _manifest(workspace)]) == 0
+    output = capsys.readouterr().out
+    assert "settings (stringMap, optional): Extension settings.\n" in output
+    normalized = " ".join(output.split())
+    assert (
+        "Site field: parameters.settings. Keys and values are text, and an omitted or empty "
+        "map sets nothing. Never include secrets."
+    ) in normalized
+    assert '    In an answer file:\n      settings:\n        "<KEY>": "<VALUE>"\n' in output
+    assert '    Inline, once for each key: --input "settings=<KEY>=<VALUE>"\n' in output
+    assert "siteName (string, required): Site identity.\n" in output
+    assert "In an answer file" not in output.split("settings (stringMap")[0]
+
+
+@pytest.mark.parametrize("command", ["inputs", "plan", "deploy", "validate"])
+def test_input_help_names_the_map_entry_form(capsys, command):
+    with patch.object(sys, "argv", ["siteops", command, "--help"]):
+        with pytest.raises(SystemExit) as stopped:
+            main()
+    assert stopped.value.code == 0
+    assert "NAME=KEY=VALUE for one entry of a map input" in " ".join(capsys.readouterr().out.split())
+
+
+def test_map_answers_preview_through_the_command_and_errors_withhold_keys_when_redacted(
+    guided_workspace, tmp_path, capsys, monkeypatch,
+):
+    workspace = _map_workspace(guided_workspace)
+    answers = _input_file(tmp_path / "answers.yaml")
+    document = yaml.safe_load(answers.read_text(encoding="utf-8"))
+    document["values"]["settings"] = {"from.file": "1", "replaced": "file"}
+    answers.write_text(yaml.safe_dump(document), encoding="utf-8")
+    base = ["-w", str(workspace), "inputs", _manifest(workspace), "--input-file", str(answers)]
+    assert _invoke([
+        *base, "--input", "settings=replaced=inline", "--input", "settings=added=a=b", "--output", "json",
+    ]) == 0
+    site = json.loads(capsys.readouterr().out)["resolution"]["site"]
+    assert site["parameters"]["settings"] == {"from.file": "1", "replaced": "inline", "added": "a=b"}
+    repeated = [*base, "--input", "settings=PRIVATE_KEY=PRIVATE_VALUE", "--input", "settings=PRIVATE_KEY=PRIVATE_VALUE"]
+    monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "0")
+    assert _invoke(repeated) == 1
+    error = capsys.readouterr().err
+    assert "Inline input 'settings' repeats key 'PRIVATE_KEY'." in error
+    assert "PRIVATE_VALUE" not in error
+    monkeypatch.setenv("SITEOPS_REDACT_OUTPUT", "1")
+    assert _invoke(repeated) == 1
+    error = capsys.readouterr().err
+    assert "Inline input 'settings' repeats a key." in error
+    assert "PRIVATE_KEY" not in error and "PRIVATE_VALUE" not in error
+
+
 def test_resource_plan_reads_only_selected_role_before_planning(
     guided_workspace, tmp_path, capsys,
 ):

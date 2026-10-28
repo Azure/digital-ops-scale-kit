@@ -85,6 +85,8 @@ def _placeholder(answer: TypedAnswer) -> str:
         return f"<{label}-resource-ID>"
     if answer.type == "boolean":
         return "<true-or-false>"
+    if answer.type == "stringMap":
+        return "<KEY>=<VALUE>"
     return f"<{answer.name}>"
 
 
