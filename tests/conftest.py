@@ -14,7 +14,6 @@ from tests import installed_runtime
 SINGLE_WORKER_MODULES = frozenset({
     "tests/test_ado_consumer_smoke.py",
     "tests/test_distribution_builder.py",
-    "tests/test_distribution_workflows.py",
     "tests/test_fleet_plan_probe.py",
     "tests/test_installed_workspace_probe.py",
     "tests/test_packaging.py",
