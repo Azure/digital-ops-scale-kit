@@ -4,13 +4,13 @@ import json
 from pathlib import Path
 
 import pytest
-import yaml
 
 from tests.shell_helpers import bash_path, run_script, write_executable
+from tests.yaml_documents import cached_safe_load
 
 ROOT = Path(__file__).resolve().parents[1]
-CLUSTER = yaml.safe_load((ROOT / ".github/actions/create-k3s-cluster/action.yaml").read_text())
-WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/e2e-test.yaml").read_text())
+CLUSTER = cached_safe_load((ROOT / ".github/actions/create-k3s-cluster/action.yaml").read_text())
+WORKFLOW = cached_safe_load((ROOT / ".github/workflows/e2e-test.yaml").read_text())
 
 
 @pytest.mark.parametrize("private", [False, True])
@@ -103,7 +103,7 @@ def test_fleet_request_distinguishes_new_acceptance_and_original_run_cleanup(
 
 def test_cleanup_dispatch_inputs_bind_the_original_run_and_attempt():
     inputs = WORKFLOW.get("on", WORKFLOW.get(True))["workflow_dispatch"]["inputs"]
-    reconcile = yaml.safe_load((ROOT / ".github/workflows/_fleet-reconcile.yaml").read_text())
+    reconcile = cached_safe_load((ROOT / ".github/workflows/_fleet-reconcile.yaml").read_text())
     required = reconcile.get("on", reconcile.get(True))["workflow_call"]["inputs"]
     for name in ("original-run", "original-attempt"):
         assert inputs[name]["type"] == required[name]["type"] == "string"

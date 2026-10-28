@@ -17,6 +17,7 @@ from packaging.requirements import Requirement
 from siteops import __version__
 from tests import installed_runtime
 from tests.installed_runtime import build_engine_wheel, install_engine, isolated_environment
+from tests.yaml_documents import cached_safe_load
 
 try:
     import tomllib
@@ -50,12 +51,12 @@ def test_both_ci_lint_jobs_run_the_ruff_pinned_by_the_dev_extra():
             if Requirement(value).name == "ruff"]
     assert len(ruff) == 1 and str(ruff[0].specifier).startswith("==")
     command = "ruff check siteops tests scripts"
-    github = yaml.safe_load((ROOT / ".github/workflows/ci.yaml").read_text(encoding="utf-8"))
+    github = cached_safe_load((ROOT / ".github/workflows/ci.yaml").read_text(encoding="utf-8"))
     steps = github["jobs"]["lint"]["steps"]
     setup = [step for step in steps if step.get("uses") == "./.github/actions/setup-siteops"]
     assert [step["with"] for step in setup] == [{"install-dev": "true"}]
     assert [step["run"] for step in steps if "ruff" in step.get("run", "")] == [command]
-    ado = yaml.safe_load((ROOT / ".pipelines/ci.yaml").read_text(encoding="utf-8"))
+    ado = cached_safe_load((ROOT / ".pipelines/ci.yaml").read_text(encoding="utf-8"))
     steps = next(job for job in ado["jobs"] if job["job"] == "lint")["steps"]
     setup = [step for step in steps if step.get("template") == "templates/setup-siteops.yaml"]
     assert [step["parameters"] for step in setup] == [{"installDev": True}]
@@ -66,8 +67,8 @@ def test_both_ci_lint_jobs_run_the_ruff_pinned_by_the_dev_extra():
 
 
 def test_both_ci_unit_jobs_run_one_selection_and_list_the_slowest_tests():
-    github = yaml.safe_load((ROOT / ".github/workflows/ci.yaml").read_text(encoding="utf-8"))
-    ado = yaml.safe_load((ROOT / ".pipelines/ci.yaml").read_text(encoding="utf-8"))
+    github = cached_safe_load((ROOT / ".github/workflows/ci.yaml").read_text(encoding="utf-8"))
+    ado = cached_safe_load((ROOT / ".pipelines/ci.yaml").read_text(encoding="utf-8"))
     commands = [
         shlex.split(next(step["run"] for step in github["jobs"]["test"]["steps"] if step.get("name") == "Run unit tests")),
         shlex.split(next(step["script"] for job in ado["jobs"] if job["job"] == "test"

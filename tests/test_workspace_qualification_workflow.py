@@ -5,12 +5,12 @@ import json
 import sys
 
 import pytest
-import yaml
 
 from tests.release_helpers import ROOT
 from tests.shell_helpers import run_script, write_executable
+from tests.yaml_documents import cached_safe_load
 
-WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/_release-candidate.yaml").read_text())
+WORKFLOW = cached_safe_load((ROOT / ".github/workflows/_release-candidate.yaml").read_text())
 
 
 def test_engine_selection_and_qualification_hold_only_read_permissions():

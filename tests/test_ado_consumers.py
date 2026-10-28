@@ -14,6 +14,7 @@ import yaml
 from tests.ado_helpers import TEMPLATES, nodes, step
 from tests.installed_runtime import isolated_environment
 from tests.shell_helpers import bash_path, run_script, write_executable
+from tests.yaml_documents import cached_safe_load
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = "a" * 40
@@ -165,7 +166,7 @@ exit 0
 
 
 def test_consumer_stages_share_exact_runtime_metadata_and_no_validation_azure_authority():
-    context = yaml.safe_load((TEMPLATES / "siteops-context.yaml").read_text())["variables"]
+    context = cached_safe_load((TEMPLATES / "siteops-context.yaml").read_text())["variables"]
     fields = context["${{ else }}"]
     for field, suffix in (
         ("REF", "ref"), ("VERSION", "version"), ("REPOSITORY", "name"), ("PROVIDER", "type"),
@@ -174,7 +175,7 @@ def test_consumer_stages_share_exact_runtime_metadata_and_no_validation_azure_au
             "${{ format('$[ resources.repositories[''{0}'']." + suffix + " ]', parameters.templateRepository) }}"
         )
     for filename in ("siteops-deploy.yaml", "siteops-validate.yaml"):
-        document = yaml.safe_load((TEMPLATES / filename).read_text())
+        document = cached_safe_load((TEMPLATES / filename).read_text())
         assert document["stages"][0]["variables"][0]["template"] == "siteops-context.yaml"
         all_nodes = list(nodes(TEMPLATES / filename))
         setup = next(node for node in all_nodes if node.get("template") == "setup-siteops.yaml")
@@ -189,10 +190,10 @@ def test_custom_pipeline_examples_use_each_platforms_supported_selection():
     guide = (ROOT / "docs/ci-cd-setup.md").read_text(encoding="utf-8")
     custom = guide.split("### Custom deployment workflow", 1)[1].split("### Setup templates", 1)[0]
     github, ado = [yaml.safe_load(body) for body in re.findall(r"```yaml\n(.*?)```", custom, re.DOTALL)]
-    flow = yaml.safe_load((ROOT / ".github/workflows/_siteops-deploy.yaml").read_text())
+    flow = cached_safe_load((ROOT / ".github/workflows/_siteops-deploy.yaml").read_text())
     supported = set(flow.get("on", flow.get(True))["workflow_call"]["inputs"])
     assert set(github["jobs"]["deploy"]["with"]) <= supported
-    template = yaml.safe_load((TEMPLATES / "siteops-deploy.yaml").read_text())
+    template = cached_safe_load((TEMPLATES / "siteops-deploy.yaml").read_text())
     arguments = ado["stages"][0]["parameters"]
     assert set(arguments) <= {parameter["name"] for parameter in template["parameters"]}
     assert arguments["release"] == "<reviewed-release>"
@@ -206,7 +207,7 @@ def test_contributor_pipelines_request_development_installation_explicitly():
         setups = [node for node in nodes(ROOT / ".pipelines" / name)
                   if node.get("template") == "templates/setup-siteops.yaml"]
         assert setups and all(node.get("parameters", {}).get("installDev") is True for node in setups)
-    preparation = yaml.safe_load((ROOT / ".pipelines/deploy.yaml").read_text())["stages"][0]
+    preparation = cached_safe_load((ROOT / ".pipelines/deploy.yaml").read_text())["stages"][0]
     assert not any(node.get("template") == "templates/setup-siteops.yaml"
                    for node in preparation["jobs"][0]["steps"])
 
@@ -231,7 +232,7 @@ _HELPER_GUIDANCE = "Set templateRepository to the repository resource that holds
 
 
 def test_template_helpers_are_checked_before_inputs(tmp_path):
-    steps = yaml.safe_load((TEMPLATES / "siteops-inputs.yaml").read_text(encoding="utf-8"))["steps"]
+    steps = cached_safe_load((TEMPLATES / "siteops-inputs.yaml").read_text(encoding="utf-8"))["steps"]
     assert steps[0]["displayName"] == "Check template helpers"
     tooling = tmp_path / "tooling"
     (tooling / "scripts").mkdir(parents=True)
@@ -257,7 +258,7 @@ def test_site_overrides_need_their_helpers_only_when_set(tmp_path, overrides, ex
 
 
 def _github_validate_inputs():
-    flow = yaml.safe_load((ROOT / ".github/workflows/_siteops-deploy.yaml").read_text(encoding="utf-8"))
+    flow = cached_safe_load((ROOT / ".github/workflows/_siteops-deploy.yaml").read_text(encoding="utf-8"))
     steps = [entry for job in flow["jobs"].values() for entry in job.get("steps", [])]
     return next(entry["run"] for entry in steps if entry.get("name") == "Validate inputs")
 

@@ -11,7 +11,6 @@ import sys
 from pathlib import Path
 
 import pytest
-import yaml
 
 from tests.bootstrap_discovery_helpers import (
     COMMIT,
@@ -23,6 +22,7 @@ from tests.bootstrap_discovery_helpers import (
 )
 from tests.shell_helpers import bash_path, required_bash
 from tests.verification_helpers import verified_observation
+from tests.yaml_documents import cached_safe_load
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts" / "bootstrap"
@@ -694,7 +694,7 @@ def _collected(*arguments: str) -> set[str]:
 
 
 def test_windows_lane_selects_every_native_windows_test():
-    workflow = yaml.safe_load(
+    workflow = cached_safe_load(
         (ROOT / ".github" / "workflows" / "ci.yaml").read_text(encoding="utf-8")
     )
     run = next(

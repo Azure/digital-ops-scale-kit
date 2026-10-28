@@ -16,6 +16,7 @@ from tests.ado_helpers import TEMPLATES
 from tests.ado_helpers import step as _step
 from tests.native_uv_consumers import _required, _unavailable
 from tests.shell_helpers import bash_path, run_script, write_executable
+from tests.yaml_documents import cached_safe_load
 
 ROOT = Path(__file__).resolve().parents[1]
 SETUP = ROOT / ".pipelines" / "templates" / "setup-siteops.yaml"
@@ -160,7 +161,7 @@ def test_environment_settings_pair_each_environment_with_its_own_resources(path)
 
 
 def test_deploy_stage_takes_its_service_connection_from_the_environment_settings():
-    document = yaml.safe_load((ROOT / ".pipelines" / "deploy.yaml").read_text(encoding="utf-8"))
+    document = cached_safe_load((ROOT / ".pipelines" / "deploy.yaml").read_text(encoding="utf-8"))
     stage = next(row for row in document["stages"] if row.get("template") == "templates/siteops-deploy.yaml")
     assert stage["parameters"]["serviceConnection"] == "${{ variables.siteopsServiceConnection }}"
     assert stage["parameters"]["environment"] == "${{ parameters.environment }}"
@@ -203,7 +204,7 @@ def test_queue_time_parameters_cannot_select_an_engine_source():
         assert "siteopsSource" not in names, path.name
     assert "siteopsSource" not in _deploy_stage()
     assert {"release", "sourceCommit"} <= {
-        row["name"] for row in yaml.safe_load((ROOT / ".pipelines" / "deploy.yaml").read_text())["parameters"]
+        row["name"] for row in cached_safe_load((ROOT / ".pipelines" / "deploy.yaml").read_text())["parameters"]
     }
     for path in (DEPLOY, SETUP):
         names = {row["name"] for row in yaml.safe_load(path.read_text(encoding="utf-8"))["parameters"]}
@@ -301,13 +302,13 @@ def test_integration_masking_accepts_an_empty_string_value(tmp_path):
 
 @pytest.mark.parametrize("event", ["push", "pull_request"])
 def test_github_ci_runs_for_ado_definition_changes(event):
-    data = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yaml").read_text())
+    data = cached_safe_load((ROOT / ".github" / "workflows" / "ci.yaml").read_text())
     triggers = data.get("on", data.get(True))
     assert ".pipelines/**" in triggers[event]["paths"]
 
 
 def test_ado_unit_lane_requires_the_shared_native_linux_fixtures():
-    data = yaml.safe_load(CI.read_text())
+    data = cached_safe_load(CI.read_text())
     job = next(job for job in data["jobs"] if job["job"] == "test")
     assert job["pool"]["vmImage"] == "ubuntu-24.04"
     steps = job["steps"]
@@ -509,14 +510,14 @@ def test_optional_overrides_default_precedes_the_selected_secret_group(path):
 
 
 def test_reusable_template_separates_the_callers_workspace_from_pinned_tooling(tmp_path):
-    data = yaml.safe_load(DEPLOY.read_text())
+    data = cached_safe_load(DEPLOY.read_text())
     defaults = {parameter["name"]: parameter.get("default") for parameter in data["parameters"]}
     assert defaults["templateRepository"] == "self"
     stage = data["stages"][0]
     assert stage["variables"] == [{
         "template": "siteops-context.yaml", "parameters": {"templateRepository": "${{ parameters.templateRepository }}"},
     }]
-    variables = yaml.safe_load((TEMPLATES / "siteops-context.yaml").read_text())["variables"]
+    variables = cached_safe_load((TEMPLATES / "siteops-context.yaml").read_text())["variables"]
     assert variables["${{ if eq(parameters.templateRepository, 'self') }}"] == {
         "SITEOPS_TEMPLATE_ROOT": "$(Build.SourcesDirectory)",
         "SITEOPS_WORKSPACE_ROOT": "$(Build.SourcesDirectory)",
@@ -525,7 +526,7 @@ def test_reusable_template_separates_the_callers_workspace_from_pinned_tooling(t
     assert variables["${{ else }}"]["SITEOPS_WORKSPACE_ROOT"] == "$(Pipeline.Workspace)/s/siteops-inputs"
     steps = stage["jobs"][0]["strategy"]["runOnce"]["deploy"]["steps"]
     assert steps[0]["template"] == "siteops-checkout.yaml"
-    checkouts = yaml.safe_load((TEMPLATES / "siteops-checkout.yaml").read_text())["steps"]
+    checkouts = cached_safe_load((TEMPLATES / "siteops-checkout.yaml").read_text())["steps"]
     assert checkouts[0]["checkout"] == "self"
     assert checkouts[0]["${{ if ne(parameters.templateRepository, 'self') }}"]["path"] == "s/siteops-inputs"
     checkout = checkouts[1]["${{ if ne(parameters.templateRepository, 'self') }}"][0]
@@ -569,7 +570,7 @@ def test_reusable_template_separates_the_callers_workspace_from_pinned_tooling(t
 def test_setup_retains_local_and_external_consumer_installation_routes(tmp_path, spec):
     step = _step(SETUP, "Install Site Ops")
     assert step["workingDirectory"] == "${{ parameters.sourceDirectory }}"
-    data = yaml.safe_load(SETUP.read_text())
+    data = cached_safe_load(SETUP.read_text())
     defaults = {parameter["name"]: parameter.get("default") for parameter in data["parameters"]}
     assert defaults["sourceDirectory"] == "$(Build.SourcesDirectory)"
     assert defaults["siteopsSource"] == ""
@@ -649,7 +650,7 @@ _CONSUMER_TEMPLATE_PARAMETERS = {
 
 @pytest.mark.parametrize("name", sorted(_CONSUMER_TEMPLATE_PARAMETERS))
 def test_consumer_template_parameters_stay_compatible(name):
-    rows = yaml.safe_load((TEMPLATES / name).read_text(encoding="utf-8"))["parameters"]
+    rows = cached_safe_load((TEMPLATES / name).read_text(encoding="utf-8"))["parameters"]
     actual = {row["name"]: (row.get("type", "string"), row.get("default", _REQUIRED)) for row in rows}
     expected = _CONSUMER_TEMPLATE_PARAMETERS[name]
     assert {key: actual.get(key) for key in expected} == expected

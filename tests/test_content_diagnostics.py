@@ -17,7 +17,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-import yaml
 
 from siteops import __version__, cli, yamlio
 from siteops.cli import cmd_deploy, cmd_plan, cmd_validate
@@ -49,6 +48,7 @@ from siteops.reporting import serialize_run_json
 from siteops.results import preparation_failure_result
 from tests.ado_helpers import step
 from tests.shell_helpers import bash_path, run_script, write_executable
+from tests.yaml_documents import cached_safe_load
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests" / "fixtures" / "ado-consumer" / "workspace"
@@ -407,12 +407,12 @@ def test_real_validation_task_bodies(tmp_path, platform, case, code):
         shutil.move(destination / "manifests" / "smoke.yaml", entry / "manifest.yaml")
         (destination / "samples").mkdir()
         if platform == "ado-sweep":
-            flow = yaml.safe_load((ROOT / ".pipelines" / "ci.yaml").read_text(encoding="utf-8"))
+            flow = cached_safe_load((ROOT / ".pipelines" / "ci.yaml").read_text(encoding="utf-8"))
             body = next(s["script"] for job in flow["jobs"] for s in job.get("steps", [])
                         if s.get("displayName") == "Validate manifest structure")
             body = body.replace("$(Build.ArtifactStagingDirectory)", bash_path(tmp_path))
         else:
-            flow = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yaml").read_text(encoding="utf-8"))
+            flow = cached_safe_load((ROOT / ".github" / "workflows" / "ci.yaml").read_text(encoding="utf-8"))
             body = next(s["run"] for s in flow["jobs"]["validate"]["steps"]
                         if s.get("name") == "Validate manifest structure")
             exports.update(WORKSPACE_DIR="workspaces/iot-operations",
@@ -443,7 +443,7 @@ def test_validation_python_isolation_is_only_on_the_adapter(platform):
     elif platform == "ado-sweep":
         task = step(ROOT / ".pipelines" / "ci.yaml", "Validate manifest structure")
     else:
-        flow = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yaml").read_text(encoding="utf-8"))
+        flow = cached_safe_load((ROOT / ".github" / "workflows" / "ci.yaml").read_text(encoding="utf-8"))
         task = next(s for s in flow["jobs"]["validate"]["steps"] if s.get("name") == "Validate manifest structure")
     assert "PYTHONSAFEPATH" not in task.get("env", {})
     assert "python3 -I -S -B" in task.get("run", task.get("script", ""))

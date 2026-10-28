@@ -9,7 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import yaml
+
+from tests.yaml_documents import cached_safe_load
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -76,7 +77,7 @@ def test_active_pod_rule_rejects_invalid_shapes(observation):
 def test_site_step_and_fleet_observer_call_the_shared_rule(monkeypatch):
     site, fleet = helper("observe-site-readiness"), helper("observe-fleet-host")
     assert site.active_pod_readiness is fleet.active_pod_readiness is active_pod_readiness
-    workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "e2e-test.yaml").read_text())
+    workflow = cached_safe_load((ROOT / ".github" / "workflows" / "e2e-test.yaml").read_text())
     step = next(step for step in workflow["jobs"]["e2e"]["steps"]
                 if step.get("name") == "Observe bounded AIO readiness")
     assert "python scripts/observe-site-readiness.py" in step["run"]

@@ -7,7 +7,6 @@ import sys
 from pathlib import Path
 
 import pytest
-import yaml
 
 from siteops.diagnostics import ProviderFailure
 from siteops.orchestrator import Orchestrator
@@ -16,17 +15,18 @@ from siteops.reporting import serialize_run_json
 from siteops.results import OperationStatus
 from tests.shell_helpers import bash_path, run_script, write_executable
 from tests.test_provider_diagnostics import _operation, _run
+from tests.yaml_documents import cached_safe_load
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def _body(platform):
     if platform == "github":
-        data = yaml.safe_load((ROOT / ".github" / "workflows" / "_siteops-deploy.yaml").read_text())
+        data = cached_safe_load((ROOT / ".github" / "workflows" / "_siteops-deploy.yaml").read_text())
         steps = data["jobs"]["deploy"]["steps"]
         return next(s["run"] for s in steps if s.get("name") == "Prepare executable deployment plan"), \
             next(s["run"] for s in steps if s.get("name") == "Deploy")
-    data = yaml.safe_load((ROOT / ".pipelines" / "templates" / "siteops-deploy.yaml").read_text())
+    data = cached_safe_load((ROOT / ".pipelines" / "templates" / "siteops-deploy.yaml").read_text())
 
     def find(value):
         if isinstance(value, dict):

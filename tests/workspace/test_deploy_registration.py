@@ -30,6 +30,7 @@ from tests.shell_helpers import (
     write_executable as _write_executable,
 )
 from tests.workspace.test_manifest_validation import _all_manifest_files
+from tests.yaml_documents import cached_safe_load
 
 REPO_ROOT = Path(__file__).parent.parent.parent
 GITHUB_DEPLOY = REPO_ROOT / ".github" / "workflows" / "deploy.yaml"
@@ -45,10 +46,10 @@ _RESOURCE_SET_SAMPLES = (
 
 
 def _ado_deployment_steps() -> tuple[dict, list[dict]]:
-    data = yaml.safe_load(REUSABLE_ADO_DEPLOY.read_text(encoding="utf-8"))
+    data = cached_safe_load(REUSABLE_ADO_DEPLOY.read_text(encoding="utf-8"))
     stage = data["stages"][0]
     assert stage["variables"][0]["template"] == "siteops-context.yaml"
-    stage["variables"] = yaml.safe_load(
+    stage["variables"] = cached_safe_load(
         (REUSABLE_ADO_DEPLOY.parent / "siteops-context.yaml").read_text(encoding="utf-8"),
     )["variables"]
     steps = stage["jobs"][0]["strategy"]["runOnce"]["deploy"]["steps"]
@@ -169,7 +170,7 @@ exit 98
 
 def _delivery_plan_case(platform: str, *, run_step: bool = False) -> tuple[str, str]:
     if platform == "github":
-        data = yaml.safe_load(
+        data = cached_safe_load(
             REUSABLE_GITHUB_DEPLOY.read_text(encoding="utf-8")
         )
         step = next(
@@ -290,14 +291,14 @@ def _github_manifest_options() -> list[str]:
 
     `on` parses as the boolean True, since YAML 1.1 treats it as a keyword.
     """
-    data = yaml.safe_load(GITHUB_DEPLOY.read_text(encoding="utf-8"))
+    data = cached_safe_load(GITHUB_DEPLOY.read_text(encoding="utf-8"))
     trigger = data.get("on", data.get(True))
     return list(trigger["workflow_dispatch"]["inputs"]["manifest"]["options"])
 
 
 def _ado_manifest_options() -> list[str]:
     """Read the manifest value list from the Azure Pipelines deploy definition."""
-    data = yaml.safe_load(ADO_DEPLOY.read_text(encoding="utf-8"))
+    data = cached_safe_load(ADO_DEPLOY.read_text(encoding="utf-8"))
     for parameter in data["parameters"]:
         if parameter.get("name") == "manifest":
             return list(parameter["values"])
@@ -461,7 +462,7 @@ class TestDeployDropdownRegistration:
         )
 
     def test_github_authenticates_and_refreshes_before_planning(self):
-        data = yaml.safe_load(
+        data = cached_safe_load(
             REUSABLE_GITHUB_DEPLOY.read_text(encoding="utf-8")
         )
         steps = data["jobs"]["deploy"]["steps"]
@@ -473,7 +474,7 @@ class TestDeployDropdownRegistration:
         ) < names.index("Prepare executable deployment plan")
 
     def test_github_dry_run_skips_deploy_after_planning(self):
-        data = yaml.safe_load(
+        data = cached_safe_load(
             REUSABLE_GITHUB_DEPLOY.read_text(encoding="utf-8")
         )
         deploy = next(

@@ -24,6 +24,7 @@ from tests.native_bundle import NETWORK_BLOCK, publish_assets
 from tests.native_bundle import bundle_factory as bundle_factory
 from tests.native_uv_consumers import linux_archives
 from tests.shell_helpers import run_script
+from tests.yaml_documents import cached_safe_load
 
 ROOT = Path(__file__).parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "e2e-test.yaml"
@@ -40,7 +41,7 @@ def _action() -> str:
 
 
 def _step_run(name: str) -> str:
-    workflow = yaml.safe_load(_workflow())
+    workflow = cached_safe_load(_workflow())
     return next(
         item["run"]
         for item in workflow["jobs"]["e2e"]["steps"]
@@ -49,7 +50,7 @@ def _step_run(name: str) -> str:
 
 
 def _parse_inputs(**changes: str) -> subprocess.CompletedProcess[str]:
-    workflow = yaml.safe_load(_workflow())
+    workflow = cached_safe_load(_workflow())
     step = next(
         item
         for item in workflow["jobs"]["prep"]["steps"]
@@ -245,7 +246,7 @@ def _e2e_results(request="success", prep="success", fleet="success", groups="suc
                  {"prep", "site-groups"}, id="standalone-candidate-needs-site-groups"),
 ])
 def test_e2e_jobs_gate_work_on_scenarios_and_required_admissions(inputs, needs, cancelled, expected):
-    workflow = yaml.safe_load(_workflow())
+    workflow = cached_safe_load(_workflow())
     declared = {
         "fleet-request": [],
         "prep": "fleet-request",
@@ -268,7 +269,7 @@ def test_e2e_jobs_gate_work_on_scenarios_and_required_admissions(inputs, needs, 
 
 
 def _e2e_step(selector):
-    steps = yaml.safe_load(_workflow())["jobs"]["e2e"]["steps"]
+    steps = cached_safe_load(_workflow())["jobs"]["e2e"]["steps"]
     if selector.startswith("download:"):
         path = "${{ runner.temp }}/fleet/" + selector.removeprefix("download:")
         return next(step for step in steps if step.get("with", {}).get("path") == path)
@@ -282,7 +283,7 @@ def _e2e_step(selector):
     pytest.param({"candidate": "selected", "published-release": "v1.0.0"}, False, id="both-transports"),
 ])
 def test_prep_validates_templates_only_without_a_candidate_or_published_release(selected, expected):
-    workflow = yaml.safe_load(_workflow())
+    workflow = cached_safe_load(_workflow())
     step = next(step for step in workflow["jobs"]["prep"]["steps"] if step.get("name") == "Validate Bicep templates")
     assert truthy(evaluate(step["if"], {"inputs": dispatch_inputs(workflow, selected)})) is expected
 
@@ -319,7 +320,7 @@ def test_candidate_setup_and_site_preparation_run_only_for_candidate_mode(select
     pytest.param("false", "", False, id="missing-published-output"),
 ])
 def test_public_release_setup_and_enrollment_exclude_candidate_cases(candidate, published, expected):
-    steps = yaml.safe_load(_workflow())["jobs"]["e2e"]["steps"]
+    steps = cached_safe_load(_workflow())["jobs"]["e2e"]["steps"]
     guarded = [
         step for step in steps
         if any(token in json.dumps(step) for token in ("setup-published-siteops", "source enroll", "project pin"))
@@ -388,7 +389,7 @@ def test_existing_vault_setup_is_reserved_for_the_candidate_existing_case(select
 def test_published_receipts_survive_failure_but_never_replace_candidate_receipts(
     published, candidate, cancelled, prior_result, expected,
 ):
-    steps = yaml.safe_load(_workflow())["jobs"]["e2e"]["steps"]
+    steps = cached_safe_load(_workflow())["jobs"]["e2e"]["steps"]
     step = next(step for step in steps if step.get("with", {}).get("name", "").startswith("published-e2e-"))
     contexts = {
         "env": {"CANDIDATE_MODE": candidate},
@@ -409,7 +410,7 @@ def test_published_receipts_survive_failure_but_never_replace_candidate_receipts
 def test_ephemeral_teardown_cleans_ordinary_runs_without_deleting_candidate_groups(
     persistent, candidate, skip, cancelled, expected,
 ):
-    workflow = yaml.safe_load(_workflow())
+    workflow = cached_safe_load(_workflow())
     contexts = {
         "env": {"PERSISTENT_RG": persistent, "CANDIDATE_MODE": candidate},
         "inputs": dispatch_inputs(workflow, skip_teardown=skip),
@@ -421,7 +422,7 @@ def test_ephemeral_teardown_cleans_ordinary_runs_without_deleting_candidate_grou
 
 
 def test_windows_capability_probe_is_opt_in_without_azure_authority():
-    workflow = yaml.safe_load(_workflow())
+    workflow = cached_safe_load(_workflow())
     inputs = workflow.get("on", workflow.get(True))["workflow_dispatch"]["inputs"]
     assert inputs["scenario"]["type"] == "choice"
     assert inputs["scenario"]["default"] == "aio"
@@ -454,7 +455,7 @@ def test_windows_capability_probe_is_opt_in_without_azure_authority():
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows PowerShell parser is needed.")
 def test_windows_capability_probe_parses_in_native_powershell(tmp_path):
-    workflow = yaml.safe_load(_workflow())
+    workflow = cached_safe_load(_workflow())
     probe = workflow["jobs"]["windows-installer-preflight"]["steps"][0]["run"]
     script = tmp_path / "windows-installer-preflight.ps1"
     script.write_text(probe, encoding="utf-8")
@@ -473,7 +474,7 @@ def test_windows_capability_probe_parses_in_native_powershell(tmp_path):
 
 
 def test_windows_bootstrap_ci_requires_native_symlink_rejection_checks():
-    workflow = yaml.safe_load(CI.read_text(encoding="utf-8"))
+    workflow = cached_safe_load(CI.read_text(encoding="utf-8"))
     job = workflow["jobs"]["windows-bootstrap"]
     assert job["runs-on"] == "windows-2025"
     assert job["permissions"] == {"contents": "read"}
@@ -508,7 +509,7 @@ def test_windows_bootstrap_ci_requires_native_symlink_rejection_checks():
 def test_windows_automated_launcher_steps_parse_in_native_powershell(
     tmp_path, workflow, job, step_name,
 ):
-    steps = yaml.safe_load(workflow.read_text(encoding="utf-8"))["jobs"][job]["steps"]
+    steps = cached_safe_load(workflow.read_text(encoding="utf-8"))["jobs"][job]["steps"]
     script = tmp_path / "check-step.ps1"
     script.write_text(
         next(step["run"] for step in steps if step.get("name") == step_name),
@@ -529,7 +530,7 @@ def test_windows_automated_launcher_steps_parse_in_native_powershell(
 
 
 def test_operator_target_inputs_are_masked_before_step_headers():
-    jobs = yaml.safe_load(_workflow())["jobs"]
+    jobs = cached_safe_load(_workflow())["jobs"]
     prep = next(
         step for step in jobs["prep"]["steps"]
         if step.get("name") == "Parse inputs"
@@ -732,7 +733,7 @@ def test_published_guided_journey_accepts_bounded_enabled_and_disabled_modes():
 
 
 def test_guided_published_run_requires_persistent_snapshot_before_observation():
-    workflow = yaml.safe_load(_workflow())
+    workflow = cached_safe_load(_workflow())
     job = workflow["jobs"]["e2e"]
     assert job["needs"] == ["prep", "site-groups"]
     assert job["env"]["PERSISTENT_RG"] == "${{ needs.prep.outputs.persistent }}"
@@ -900,7 +901,7 @@ def test_default_aio_release_is_consistent_across_site_guided_and_acceptance_rou
     base = yaml.safe_load((workspace / "sites" / "base-site.yaml").read_text(encoding="utf-8"))
     guided = yaml.safe_load((workspace / "manifests" / "aio-install" / "inputs.yaml").read_text(encoding="utf-8"))
     secretsync = yaml.safe_load((workspace / "manifests" / "secretsync" / "inputs.yaml").read_text(encoding="utf-8"))
-    workflow = yaml.safe_load(_workflow())
+    workflow = cached_safe_load(_workflow())
     defaults = workflow[True]["workflow_dispatch"]["inputs"]
     selected = [
         base["properties"]["aioRelease"],
@@ -932,7 +933,7 @@ def test_source_e2e_can_cover_both_opcua_modes_with_secretsync_and_upgrade():
     assert json.loads(outputs["versions"]) == ["2608", "2609"]
     assert outputs["upgrade_to"] == "2609"
     assert json.loads(outputs["secret_sync_modes"]) == ["enabled"]
-    workflow = yaml.safe_load(_workflow())
+    workflow = cached_safe_load(_workflow())
     assert workflow["jobs"]["e2e"]["strategy"]["matrix"]["opcua-mode"] == (
         "${{ fromJSON(needs.prep.outputs.opcua-modes) }}"
     )
@@ -1043,7 +1044,7 @@ def test_published_setup_rejects_foreign_release_before_tool_acquisition(tmp_pat
     )
     gh.chmod(gh.stat().st_mode | stat.S_IXUSR)
     curl.chmod(curl.stat().st_mode | stat.S_IXUSR)
-    action = yaml.safe_load(_action())["runs"]["steps"][-1]["run"]
+    action = cached_safe_load(_action())["runs"]["steps"][-1]["run"]
     script = tmp_path / "published.sh"
     script.write_text(action, encoding="utf-8", newline="\n")
     environment = {
@@ -1197,7 +1198,7 @@ fi
         tool.chmod(tool.stat().st_mode | stat.S_IXUSR)
     script = tmp_path / "published.sh"
     script.write_text(
-        yaml.safe_load(_action())["runs"]["steps"][-1]["run"],
+        cached_safe_load(_action())["runs"]["steps"][-1]["run"],
         encoding="utf-8", newline="\n",
     )
     checkout = tmp_path / "source-checkout"
@@ -1373,7 +1374,7 @@ def test_guided_published_plan_waits_for_arc_and_keeps_private_data_local():
 
 
 def test_guided_disabled_cell_checks_manual_inline_and_configured_site_without_reads():
-    workflow = yaml.safe_load(_workflow())
+    workflow = cached_safe_load(_workflow())
     steps = workflow["jobs"]["e2e"]["steps"]
     control = next(
         item for item in steps
@@ -1802,7 +1803,7 @@ def test_default_source_e2e_remains_separate():
     (".pipelines/templates/siteops-deploy.yaml", "$MANIFEST"),
 ])
 def test_deployment_wrappers_approve_only_the_run_not_the_plan(path, manifest):
-    workflow = yaml.safe_load((ROOT / path).read_text(encoding="utf-8"))
+    workflow = cached_safe_load((ROOT / path).read_text(encoding="utf-8"))
     text = (ROOT / path).read_text(encoding="utf-8")
     assert workflow and f'plan "{manifest}"' in text
     plan, deploy = text.split(f'deploy "{manifest}"', 1)
@@ -1949,7 +1950,7 @@ exit 99
 
 
 def test_published_target_ids_are_masked_before_snapshot_and_arc():
-    steps = yaml.safe_load(_workflow())["jobs"]["e2e"]["steps"]
+    steps = cached_safe_load(_workflow())["jobs"]["e2e"]["steps"]
     names = [step.get("name") for step in steps]
     assert names.index("Mask operator target inputs") < names.index("Compute names")
     assert names.index("Compute names") < names.index(
@@ -1968,8 +1969,8 @@ def test_published_target_ids_are_masked_before_snapshot_and_arc():
 
 
 def test_published_arc_connection_keeps_provider_errors_private():
-    workflow = yaml.safe_load(_workflow())
-    action = yaml.safe_load(
+    workflow = cached_safe_load(_workflow())
+    action = cached_safe_load(
         (
             ROOT / ".github" / "actions" / "connect-arc" / "action.yaml"
         ).read_text(encoding="utf-8")
@@ -2449,7 +2450,7 @@ def test_candidate_cases_use_masked_owned_names_and_a_distinct_existing_suffix(t
 
 
 def test_candidate_steps_never_read_enroll_or_pin_a_public_release():
-    job = yaml.safe_load(_workflow())["jobs"]["e2e"]
+    job = cached_safe_load(_workflow())["jobs"]["e2e"]
     steps = job["steps"]
     engine = next(step for step in steps if step.get("id") == "candidate-engine")
     for value in ("scripts/qualify-workspace-engine.py", "--project-workspace workspaces/iot-operations",
@@ -2638,7 +2639,7 @@ def test_candidate_deployment_receipt_names_prepublication_transport(tmp_path):
 
 
 def _select_site_groups(site="", fleet=""):
-    workflow = yaml.safe_load(_workflow())
+    workflow = cached_safe_load(_workflow())
     job = workflow["jobs"]["site-groups"]
     with tempfile.TemporaryDirectory() as directory:
         output = Path(directory) / "output"
@@ -2653,7 +2654,7 @@ def _select_site_groups(site="", fleet=""):
 
 
 def test_site_group_selection_reads_only_environment_secrets_and_publishes_no_names():
-    job = yaml.safe_load(_workflow())["jobs"]["site-groups"]
+    job = cached_safe_load(_workflow())["jobs"]["site-groups"]
     assert job["environment"] == "${{ inputs.environment }}"
     assert job["permissions"] == {}
     assert set(job["outputs"]) == {"groups", "rg-key", "max-parallel"}
@@ -2688,7 +2689,7 @@ def test_site_groups_select_parallel_ephemeral_or_serialized_persistent_cases(si
 
 
 def test_site_cases_schedule_from_site_groups_and_keep_ordinary_dispatches_unchanged():
-    job = yaml.safe_load(_workflow())["jobs"]["e2e"]
+    job = cached_safe_load(_workflow())["jobs"]["e2e"]
     assert job["strategy"]["max-parallel"] == (
         "${{ fromJSON(needs.site-groups.outputs.max-parallel || needs.prep.outputs.max-parallel) }}")
     group = job["concurrency"]["group"]

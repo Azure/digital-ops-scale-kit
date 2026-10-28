@@ -8,7 +8,6 @@ import sys
 from pathlib import Path
 
 import pytest
-import yaml
 
 from tests.shell_helpers import (
     bash_path as _bash_path,
@@ -19,6 +18,7 @@ from tests.shell_helpers import (
 from tests.shell_helpers import (
     write_executable as _write_executable,
 )
+from tests.yaml_documents import cached_safe_load
 
 REPO_ROOT = Path(__file__).parent.parent.parent
 ACTION = REPO_ROOT / ".github" / "actions" / "connect-arc" / "action.yaml"
@@ -86,7 +86,7 @@ def _fake_bin(tmp_path: Path) -> Path:
 
 
 def _action_step(name: str) -> dict:
-    data = yaml.safe_load(ACTION.read_text(encoding="utf-8"))
+    data = cached_safe_load(ACTION.read_text(encoding="utf-8"))
     return next(step for step in data["runs"]["steps"] if step.get("name") == name)
 
 
