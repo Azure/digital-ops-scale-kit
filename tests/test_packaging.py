@@ -493,6 +493,20 @@ def test_parallel_controller_leaves_out_wheels_it_cannot_provide(tmp_path, monke
     assert not (tmp_path / "prebuilt" / "runtime").exists()
 
 
+def test_parallel_runs_prebuild_only_for_selections_that_use_the_installed_runtime():
+    from tests.conftest import selects_installed_runtime
+
+    def selection(*args):
+        config = type("Config", (), {"args": list(args), "invocation_params": type("Params", (), {"dir": ROOT})})
+        return selects_installed_runtime(config)
+
+    assert selection("tests")
+    assert selection("tests/test_yamlio.py", "tests/test_packaging.py::test_wheel_contains_the_engine_not_a_workspace")
+    assert selection(str(ROOT / "tests" / "test_uv_installation.py"))
+    assert not selection("tests/test_yamlio.py", "tests/workspace")
+    assert not selection("tests/test_bootstrap_scripts.py", "tests/test_uv_bootstrap_windows.py")
+
+
 def test_parallel_runs_keep_each_listed_module_on_one_worker():
     pytest.importorskip("xdist")
     from tests import conftest

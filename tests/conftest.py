@@ -30,6 +30,22 @@ def _prebuilt_root(config: pytest.Config) -> Path:
     return config._tmp_path_factory.getbasetemp() / "siteops-prebuilt"
 
 
+def selects_installed_runtime(config: pytest.Config) -> bool:
+    """Tell whether the selected paths hold a test module that uses `installed_runtime`.
+
+    `-k` and `-m` are not considered, so a filtered selection may still build files it does not use.
+    """
+    consumers = [
+        module for module in Path(__file__).parent.rglob("test_*.py")
+        if "installed_runtime" in module.read_text(encoding="utf-8")
+    ]
+    for argument in config.args:
+        path = (config.invocation_params.dir / argument.split("::", 1)[0]).resolve()
+        if not path.exists() or any(module.is_relative_to(path) for module in consumers):
+            return True
+    return False
+
+
 def module_group_scheduler(config, log, modules):
     """Return the scheduler for `--dist load`, or None to leave the choice to xdist.
 
@@ -80,8 +96,9 @@ def pytest_configure_node(node):
 def pytest_sessionstart(session):
     # The workers start during the yield and collect while the controller builds.
     outcome = yield
-    if outcome.excinfo is None and session.config.pluginmanager.has_plugin("dsession"):
-        installed_runtime.prebuild(_prebuilt_root(session.config))
+    config = session.config
+    if outcome.excinfo is None and config.pluginmanager.has_plugin("dsession") and selects_installed_runtime(config):
+        installed_runtime.prebuild(_prebuilt_root(config))
 
 
 def pytest_configure(config):
