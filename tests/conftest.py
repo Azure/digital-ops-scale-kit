@@ -34,8 +34,10 @@ def module_group_scheduler(config, log, modules):
     """Return the scheduler for `--dist load`, or None to leave the choice to xdist.
 
     It hands out single tests, except that each module in `modules` goes to one worker as a unit.
+    It tracks work by test ID, so `--keep-duplicates` runs use the stock scheduler, which runs
+    every repeated test.
     """
-    if config.getvalue("dist") != "load":
+    if config.getvalue("dist") != "load" or config.option.keepduplicates:
         return None
     from xdist.scheduler import LoadScopeScheduling
 

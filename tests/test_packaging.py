@@ -502,7 +502,7 @@ def test_parallel_runs_keep_each_listed_module_on_one_worker():
     assert grouped in conftest.SINGLE_WORKER_MODULES and single not in conftest.SINGLE_WORKER_MODULES
 
     class Config:
-        option = type("Option", (), {"loadscopereorder": True})
+        option = type("Option", (), {"keepduplicates": False, "loadscopereorder": True})
 
         def getvalue(self, name):
             return {"dist": "load", "tx": ["popen", "popen"]}[name]
@@ -576,3 +576,17 @@ def test_parallel_runs_report_a_crashed_worker_and_run_the_rest(scheduled_suite)
     result = scheduled_suite.runpytest_subprocess("-n", "2", "-p", "no:cacheprovider", timeout=120)
     result.assert_outcomes(passed=27, failed=1)
     result.stdout.fnmatch_lines(["*crashed while running*test_single.py::test_single?9?*"])
+
+
+def test_parallel_runs_run_every_repeated_test(scheduled_suite):
+    scheduled_suite.makepyfile(test_single=(
+        "import pytest\n\n"
+        "@pytest.mark.parametrize('n', range(2))\n"
+        "def test_single(n):\n"
+        "    pass\n"
+    ))
+    result = scheduled_suite.runpytest_subprocess(
+        "-n", "2", "-p", "no:cacheprovider", "--keep-duplicates",
+        "test_grouped.py", "test_single.py", "test_grouped.py", "test_single.py", timeout=120,
+    )
+    result.assert_outcomes(passed=12)
