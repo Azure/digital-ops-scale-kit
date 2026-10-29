@@ -26,6 +26,7 @@ except ModuleNotFoundError:  # Python 3.10, supplied by pytest's dependencies.
 
 
 ROOT = Path(__file__).resolve().parent.parent
+pytest_plugins = ("pytester",)
 
 
 @pytest.fixture(scope="module")
@@ -535,3 +536,41 @@ def test_parallel_runs_keep_each_listed_module_on_one_worker():
     }
     assert sorted(index for node in nodes for index in node.sent) == list(range(6))
     assert len(workers[grouped]) == 1 and len(workers[single]) == 2
+
+
+@pytest.fixture
+def scheduled_suite(pytester, monkeypatch):
+    """A small suite whose parallel runs use this repository's scheduler with one grouped module."""
+    pytest.importorskip("xdist")
+    monkeypatch.setenv("PYTHONPATH", str(ROOT))
+    pytester.makeini("[pytest]\n")
+    pytester.makeconftest(
+        "import pytest\n"
+        "from tests.conftest import module_group_scheduler\n\n"
+        "@pytest.hookimpl(optionalhook=True)\n"
+        "def pytest_xdist_make_scheduler(config, log):\n"
+        "    return module_group_scheduler(config, log, frozenset({'test_grouped.py'}))\n"
+    )
+    pytester.makepyfile(test_grouped=(
+        "import pytest\n\n"
+        "@pytest.mark.parametrize('n', range(4))\n"
+        "def test_grouped(n):\n"
+        "    pass\n"
+    ))
+    return pytester
+
+
+def test_parallel_runs_report_a_crashed_worker_and_run_the_rest(scheduled_suite):
+    scheduled_suite.makepyfile(test_single=(
+        "import os\n"
+        "import time\n"
+        "import pytest\n\n"
+        "@pytest.mark.parametrize('n', range(24))\n"
+        "def test_single(n):\n"
+        "    time.sleep(0.05)\n"
+        "    if n == 9:\n"
+        "        os._exit(3)\n"
+    ))
+    result = scheduled_suite.runpytest_subprocess("-n", "2", "-p", "no:cacheprovider", timeout=120)
+    result.assert_outcomes(passed=27, failed=1)
+    result.stdout.fnmatch_lines(["*crashed while running*test_single.py::test_single?9?*"])

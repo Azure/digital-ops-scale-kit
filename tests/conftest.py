@@ -30,9 +30,11 @@ def _prebuilt_root(config: pytest.Config) -> Path:
     return config._tmp_path_factory.getbasetemp() / "siteops-prebuilt"
 
 
-@pytest.hookimpl(optionalhook=True)
-def pytest_xdist_make_scheduler(config, log):
-    """Hand out single tests, except that each listed module goes to one worker as a unit."""
+def module_group_scheduler(config, log, modules):
+    """Return the scheduler for `--dist load`, or None to leave the choice to xdist.
+
+    It hands out single tests, except that each module in `modules` goes to one worker as a unit.
+    """
     if config.getvalue("dist") != "load":
         return None
     from xdist.scheduler import LoadScopeScheduling
@@ -40,9 +42,31 @@ def pytest_xdist_make_scheduler(config, log):
     class ModuleGroupScheduling(LoadScopeScheduling):
         def _split_scope(self, nodeid: str) -> str:
             module = nodeid.split("::", 1)[0]
-            return module if module in SINGLE_WORKER_MODULES else nodeid
+            return module if module in modules else nodeid
+
+        def remove_node(self, node):
+            # As with `--dist load`, the test a crashed worker was running is reported and not
+            # run again. Its finished tests stay finished, and its unstarted tests go to the front.
+            workload = self.assigned_work.pop(node)
+            pending = [(scope, unit) for scope, unit in workload.items() if not all(unit.values())]
+            if not pending:
+                return None
+            crashitem = next(nodeid for nodeid, done in pending[0][1].items() if not done)
+            pending[0][1][crashitem] = True
+            for scope, unit in reversed(pending):
+                if not all(unit.values()):
+                    self.workqueue[scope] = unit
+                    self.workqueue.move_to_end(scope, last=False)
+            for other in list(self.assigned_work):
+                self._reschedule(other)
+            return crashitem
 
     return ModuleGroupScheduling(config, log)
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_xdist_make_scheduler(config, log):
+    return module_group_scheduler(config, log, SINGLE_WORKER_MODULES)
 
 
 @pytest.hookimpl(optionalhook=True)
