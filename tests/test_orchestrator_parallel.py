@@ -25,6 +25,7 @@ from siteops.compilation import (
     TemplateKind,
     VersionProvenance,
 )
+from siteops.executor import DeploymentResult, UnconfirmedCompletion
 from siteops.models import DeploymentStep, Manifest, Site
 from siteops.orchestrator import (
     Orchestrator,
@@ -830,40 +831,29 @@ class TestAnInterruptedFleetStops:
 
     def test_the_sites_not_yet_started_are_not_deployed(self, tmp_workspace):
         started: list[str] = []
-        gate = threading.Event()
+        stop_requested = threading.Event()
+        # The operator asks to stop while the first two sites deploy and the other six wait in the
+        # queue, as the CLI's interrupt handler does.
+        both_deploying = threading.Barrier(2, action=stop_requested.set)
 
-        def execute_target(
-            self_,
-            plan,
-            target,
-            *args,
-            **kwargs,
-        ):
-            state = kwargs["state"]
-            state.start()
-            assert state.begin(target.operations[0])
+        def deploy(self_, plan, target, operation, *args):
             started.append(target.name)
-            if len(started) == 2:
-                gate.set()
-            # Hold the two running workers so the rest stay queued, which is
-            # the state the interrupt has to stop.
-            gate.wait(timeout=5)
-            if len(started) <= 2:
-                raise KeyboardInterrupt("operator stopped the rollout")
-            return _TargetExecution(
-                site=_prepared_ok_result(target),
-                outputs={},
+            both_deploying.wait(timeout=30)
+            # A provider that sees the stop request stops observing and reports the outcome as unknown.
+            return DeploymentResult(
+                False,
+                operation.identity.step,
+                target.name,
+                f"deploy-{target.name}",
+                error="Stopped observing the deployment. Azure was not cancelled.",
+                unconfirmed=UnconfirmedCompletion.STOPPED_OBSERVING,
             )
 
         orchestrator = Orchestrator(tmp_workspace)
         sites = self._sites(8)
         plan = _prepared_plan(sites, parallel_sites=2)
 
-        with patch.object(
-            Orchestrator,
-            "_execute_prepared_target",
-            execute_target,
-        ):
+        with patch.object(Orchestrator, "_execute_prepared_operation", deploy):
             results, _, interrupted = orchestrator._run_prepared_targets(
                 plan,
                 list(plan.targets),
@@ -871,20 +861,18 @@ class TestAnInterruptedFleetStops:
                 {},
                 PlanExecutionMode.APPLY,
                 progress=_ProgressOwner(None),
+                stop_requested=stop_requested,
             )
 
         assert interrupted is True
-        assert len(started) < len(sites), (
-            f"every site deployed despite the interrupt: {started}"
+        assert sorted(started) == ["plant-00", "plant-01"], (
+            f"queued sites deployed after the stop request: {started}"
         )
-        assert len(results) == len(sites)
-        statuses = {
-            operation.status
+        assert [result.target for result in results] == [site.name for site in sites]
+        assert [
+            {operation.status for operation in result.operations}
             for result in results
-            for operation in result.operations
-        }
-        assert OperationStatus.UNKNOWN in statuses
-        assert OperationStatus.CANCELLED in statuses
+        ] == [{OperationStatus.UNKNOWN}] * 2 + [{OperationStatus.CANCELLED}] * 6
 
     def test_a_worker_interrupted_after_the_run_stops_is_still_recorded(self, tmp_workspace):
         both_running = threading.Barrier(2)
