@@ -409,9 +409,12 @@ jobs:
 
       - name: Windows bootstrap tests
         shell: powershell
+        # Unlike -B, this setting reaches the parallel workers and keeps bytecode out of the checkout.
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
         run: |
           # Tests named for Windows or PowerShell need the native runner.
-          python -B -m pytest tests\test_bootstrap_scripts.py tests\test_uv_bootstrap_windows.py `
+          python -m pytest tests\test_bootstrap_scripts.py tests\test_uv_bootstrap_windows.py `
               -k 'windows or powershell' -q -n auto `
               --basetemp="$env:SITEOPS_WINDOWS_TEST_TEMP"
           if ($LASTEXITCODE -ne 0) { throw 'Native Windows bootstrap tests failed.' }
