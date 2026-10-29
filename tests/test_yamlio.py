@@ -41,6 +41,20 @@ class TestDuplicateKeys:
         loaded = yamlio.load("dataflows:\n  - name: a\n  - name: b\n")
         assert [entry["name"] for entry in loaded["dataflows"]] == ["a", "b"]
 
+    @pytest.mark.parametrize("document", [
+        "=: first\n=: second\n",
+        '=: first\n"=": second\n',
+        '"=": first\n=: second\n',
+    ])
+    def test_a_repeated_equals_key_is_rejected(self, document):
+        """YAML tags a bare `=` key as a value key, then loads it as the string "=".
+
+        The bare and quoted spellings are therefore the same key, in either order.
+        """
+        assert yaml.safe_load(document) == {"=": "second"}
+        with pytest.raises(yamlio.DuplicateKeyError, match="duplicate key '='"):
+            yamlio.load(document)
+
     def test_the_error_is_a_yaml_error(self):
         """A caller that already tolerates a parse error keeps its behavior.
 
@@ -63,6 +77,10 @@ class TestOrdinaryDocuments:
     def test_malformed_yaml_still_raises(self):
         with pytest.raises(yaml.YAMLError):
             yamlio.load("a:\n  b: 1\n    c: 2\n")
+
+    def test_an_equals_key_and_keys_containing_equals_load(self):
+        assert yamlio.load("=: bare\nx=y: pair\n") == {"=": "bare", "x=y": "pair"}
+        assert yamlio.load('"=": quoted\n') == {"=": "quoted"}
 
     def test_a_merge_key_still_resolves(self):
         """`<<` appears once per mapping, so the guard must not break inheritance."""

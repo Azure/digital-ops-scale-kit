@@ -47,6 +47,12 @@ These changes affect how you install or run Site Ops after v1.0.0b7.
 | Install Site Ops on Windows with the PowerShell bootstrap | Review the [saved user PATH](#windows-user-path). |
 | Match artifact verification error text, or read `source` from failed `browse --output json` | Review [artifact verification messages](#artifact-verification-messages). |
 | Read `diagnostics` from `validate`, `plan` or `deploy` JSON, or render it in a pipeline | Review [warnings in JSON results](#warnings-in-json-results). |
+| Want Arc extension settings without a saved Site | Nothing changes for existing use. Review [typed extension settings](#typed-extension-settings). |
+| Upgrade an existing AIO instance that has no configured Site | Nothing changes for existing use. Review the [typed AIO upgrade](#typed-aio-upgrade). |
+| Run v1.0.0b8 content with an earlier Site Ops engine, or produce your own packages | Install the matching engine. Review the [typed map feature](#typed-map-feature). |
+| Write the YAML key `=` twice in one mapping, quoted or bare | Keep one. Review [repeated equals keys](#repeated-equals-keys). |
+| Match the text of a missing typed input error | Review [missing input messages](#missing-input-messages). |
+| Match the text of a template error from `plan` or `deploy` | Review [template error messages](#template-error-messages). |
 
 ### Windows user PATH
 
@@ -109,6 +115,80 @@ If your automation treats every diagnostic record as a failure, check
 `severity` instead. Copy the updated `scripts/render-siteops-output.py` with
 your templates to show the occurrence count. The v1.0.0b7 renderer shows the
 same warnings as single records. See [warnings in results](run-output.md#read-warnings).
+
+### Typed extension settings
+
+This change is additive. `aio-install` accepts three optional typed inputs:
+`aioExtensionSettings`, `secretStoreExtensionSettings` and
+`certManagerExtensionSettings`. They write the existing Site parameters
+`aioConfigurationOverrides`, `secretStoreConfigurationOverrides` and
+`certManagerConfigurationOverrides`. Repeat `--input NAME=KEY=VALUE` once for
+each setting, or put the maps in the answer file. See
+[Arc extension settings](guided-inputs.md#set-arc-extension-settings).
+
+Existing Sites, overlays, `SITE_OVERRIDES`, parameter files and answer files
+work unchanged. Scalar `--input NAME=VALUE` answers keep their meaning,
+including values that contain `=`. Bundled AIO release files still set
+`certManagerConfigurationOverrides`, and Site keys still replace release
+keys one by one.
+
+### Typed AIO upgrade
+
+This change is additive. `aio-upgrade` accepts typed inputs for one existing
+instance: its resource ID, the required `aioRelease` and `enableCertManager`
+answers, the extension settings maps and optional labels. Runs with
+configured Sites and `--site-file` are unchanged. See
+[upgrade an existing instance](guided-inputs.md#upgrade-an-existing-instance).
+
+### Typed map feature
+
+The typed maps are additive for existing Sites and answers, and they need a
+Site Ops engine that supports the package feature `typed-input-maps/v1`. An
+earlier engine refuses a package that declares it, on every route, with
+`This package requires unsupported Site Ops features.` Install the Site Ops
+engine that the content release names. With a local checkout, typed routes on
+an earlier engine fail with `type must be string, boolean or azureResourceId`,
+while configured Sites and `--site-file` runs read no input contract.
+
+If you produce your own packages, add `typed-input-maps/v1` to
+`requiredFeatures`, or `--require-feature typed-input-maps/v1`, for a
+workspace whose input contract declares a `stringMap` input. The producer
+rejects such a workspace without it. See
+[workspace packages](workspace-packages.md#build-workspaces-declared-by-a-release).
+
+### Repeated equals keys
+
+YAML reads a bare `=` key and a quoted `"="` key as the same key. Site Ops
+now rejects a mapping that repeats it in any spelling, as it already rejects
+other repeated keys, with
+`found a duplicate key '='. YAML keeps the last one, so the first is discarded. Merge them or rename one.`
+Earlier releases kept only the last value. Keep the entry you intend and
+remove the other.
+
+### Missing input messages
+
+A missing required typed input now ends with the `--input` form that
+supplies it, for example:
+
+```text
+Missing required input 'siteName'. Supply `--input siteName=<value>`.
+```
+
+A boolean input shows `<true-or-false>` instead of `<value>`. The error code
+stays `inputs.invalid`, so match the code rather than the text.
+
+### Template error messages
+
+An error for a template that is unresolved, unsupported or malformed in a
+parameter value names the value's location and the supported syntax. It no
+longer repeats the value:
+
+```text
+Plan value at 'munich-dev.aio-instance.parameters.aioConfigurationOverrides.observability.metrics.exportIntervalSeconds' contains an unresolved or unsupported template. Write `{{ site.<field> }}` or `{{ steps.<step>.outputs.<name> }}` with one space inside each pair of braces, and name a field the Site sets. Remove `{{` from text that is not a template.
+```
+
+The error code stays `operation-preparation.invalid`, so match the code
+rather than the text.
 
 ## To v1.0.0b7
 

@@ -1005,7 +1005,7 @@ def test_missing_optional_controller_is_not_treated_as_false(tmp_path):
             ),
         ],
     )
-    with pytest.raises(ValueError, match="enable"):
+    with pytest.raises(ValueError, match=r"^Input 'enable' is missing\. It controls conditional input 'choice'\.$"):
         load_contract(manifest).resolve()
     assert load_contract(manifest).resolve(inline=["enable=false"]).properties == {
         "enable": False,
@@ -1243,19 +1243,24 @@ def test_multiple_dependents_can_share_an_unconditional_controller(tmp_path):
     }
 
 
-def test_missing_controller_is_reported_in_separate_sentences(tmp_path):
+def test_missing_required_controller_is_reported_in_input_order_before_its_dependents(tmp_path):
     manifest, _ = _manifest_and_contract(
         tmp_path,
         fields=[
-            _field("subscription", "subscription", default="sub"),
+            _field("subscription", "subscription"),
             _field("location", "location", default="eastus"),
             _field("enable", "properties.enable", type="boolean"),
             _field("first", "properties.first", when={"input": "enable", "equals": True}),
         ],
     )
-    with pytest.raises(ValueError) as rejected:
-        load_contract(manifest).resolve()
-    assert str(rejected.value) == "Input 'enable' is missing. It controls conditional input 'first'."
+    contract = load_contract(manifest)
+    with pytest.raises(GuidedInputError) as rejected:
+        contract.resolve()
+    assert str(rejected.value) == "Missing required input 'subscription'. Supply `--input subscription=<value>`."
+    for answers in (["subscription=sub"], ["subscription=sub", "first=supplied"]):
+        with pytest.raises(GuidedInputError) as rejected:
+            contract.resolve(inline=answers)
+        assert str(rejected.value) == "Missing required input 'enable'. Supply `--input enable=<true-or-false>`."
 
 
 def test_missing_required_name_is_safe_guided_error(tmp_path):
@@ -1271,7 +1276,7 @@ def test_missing_required_name_is_safe_guided_error(tmp_path):
     )
     with pytest.raises(GuidedInputError) as rejected:
         load_contract(manifest).resolve()
-    assert str(rejected.value) == "Missing required input 'siteName'."
+    assert str(rejected.value) == "Missing required input 'siteName'. Supply `--input siteName=<value>`."
     assert isinstance(rejected.value, ValueError)
 
 
@@ -1335,7 +1340,7 @@ def test_example_fails_on_first_missing_required_input_before_site_parsing(tmp_p
         pytest.fail("An incomplete example must fail before constructing a Site or plan.")
 
     monkeypatch.setattr(Site, "from_data", unexpected_site)
-    with pytest.raises(ValueError, match=r"^Missing required input 'siteName'\.$"):
+    with pytest.raises(ValueError, match=r"^Missing required input 'siteName'\. Supply `--input siteName=<value>`\.$"):
         contract.resolve(values_file=answers)
 
 
@@ -1655,3 +1660,315 @@ def test_exclusive_yaml_writer_does_not_overwrite_or_create_parents(tmp_path):
     with pytest.raises(ValueError, match="mapping"):
         write_yaml_exclusive(tmp_path / "invalid.yaml", [])
     assert not (tmp_path / "invalid.yaml").exists()
+
+
+def _map_field(name="settings", site_path="parameters.settings", **extra):
+    return {
+        "name": name,
+        "type": "stringMap",
+        "description": f"Enter {name}",
+        "sitePath": site_path,
+        "required": False,
+        **extra,
+    }
+
+
+def _map_contract(tmp_path, *fields, defaults=None, **options):
+    manifest, _ = _manifest_and_contract(
+        tmp_path,
+        defaults=defaults if defaults is not None else {},
+        fields=[
+            _field("subscription", "subscription", default="sub"),
+            _field("location", "location", default="eastus"),
+            *fields,
+            _map_field(**options),
+        ],
+    )
+    return load_contract(manifest)
+
+
+def _map_answers(tmp_path, values, name="answers.yaml"):
+    path = tmp_path / name
+    if isinstance(values, str):
+        path.write_text(
+            f"apiVersion: {VERSION}\nkind: SiteInputValues\nvalues:\n{values}", encoding="utf-8",
+        )
+    else:
+        path.write_text(yaml.safe_dump(
+            {"apiVersion": VERSION, "kind": "SiteInputValues", "values": values},
+            allow_unicode=True,
+        ), encoding="utf-8")
+    return path
+
+
+def test_string_map_writes_entries_and_an_omitted_or_empty_map_writes_nothing(tmp_path):
+    contract = _map_contract(tmp_path, defaults={"parameters": {"kept": "default"}})
+    assert contract.resolve().parameters == {"kept": "default"}
+    empty = _map_answers(tmp_path, "  settings: {}\n")
+    assert contract.resolve(values_file=empty).parameters == {"kept": "default"}
+    assert contract.bind(values_file=empty).sources["settings"] == "input file"
+    supplied = _map_answers(
+        tmp_path, '  settings:\n    "metrics.interval": "60"\n    "flag": ""\n', name="supplied.yaml",
+    )
+    assert contract.resolve(values_file=supplied).parameters == {
+        "kept": "default", "settings": {"metrics.interval": "60", "flag": ""},
+    }
+
+
+@pytest.mark.parametrize(("value", "problem"), [
+    *((value, "is not a string. Quote each value in YAML.") for value in (
+        "on", "1.10", "5", "true", "null", "[PRIVATE_SENTINEL]",
+    )),
+    ("{PRIVATE_SENTINEL: x}", "is a mapping. Write each setting as one dotted key with a quoted value."),
+])
+def test_string_map_values_are_never_coerced(tmp_path, value, problem):
+    contract = _map_contract(tmp_path)
+    answers = _map_answers(tmp_path, f'  settings:\n    "named.key": {value}\n')
+    with pytest.raises(GuidedInputError) as rejected:
+        contract.resolve(values_file=answers)
+    assert str(rejected.value) == f"Input 'settings' has a value that {problem}"
+    assert rejected.value.private_message == f"Input 'settings' key 'named.key' has a value that {problem}"
+    quoted = _map_answers(tmp_path, '  settings:\n    "on": "on"\n    "v": "1.10"\n', name="quoted.yaml")
+    assert contract.resolve(values_file=quoted).parameters["settings"] == {"on": "on", "v": "1.10"}
+
+
+_UNQUOTED_KEY = "Input 'settings' keys must be text. Quote each key in YAML."
+_UNPRINTABLE_KEY = "Input 'settings' keys must be printable text of 1 to 256 characters."
+
+
+@pytest.mark.parametrize(("entry", "message"), [
+    ('    5: "x"\n', _UNQUOTED_KEY),
+    ('    on: "x"\n', _UNQUOTED_KEY),
+    ('    1.10: "x"\n', _UNQUOTED_KEY),
+    ('    "": "x"\n', _UNPRINTABLE_KEY),
+    (f'    "{"k" * 257}": "x"\n', _UNPRINTABLE_KEY),
+    *((f'    "PRIVATE\\u{code:04x}KEY": "x"\n', _UNPRINTABLE_KEY) for code in (
+        0x07, 0x7F, 0x202E, 0x200B, 0xE000, 0x0378, 0x2028, 0x2029,
+    )),
+    ("", "Input 'settings' must be a mapping of string keys to string values."),
+])
+def test_string_map_keys_are_printable_text_and_never_named_when_invalid(tmp_path, entry, message):
+    contract = _map_contract(tmp_path)
+    text = f"  settings:\n{entry}" if entry else '  settings: "key=value"\n'
+    with pytest.raises(GuidedInputError) as rejected:
+        contract.resolve(values_file=_map_answers(tmp_path, text))
+    assert str(rejected.value) == message
+    assert rejected.value.private_message is None
+
+
+def test_string_map_keys_accept_printable_text_beyond_ascii(tmp_path):
+    keys = ["caf\u00e9.mode", "\u8a2d\u5b9a", "with space", "emoji.\U0001f600", "tab-free.key"]
+    answers = _map_answers(tmp_path, {"settings": {key: "v" for key in keys}})
+    assert sorted(_map_contract(tmp_path).resolve(values_file=answers).parameters["settings"]) == sorted(keys)
+
+
+def test_string_map_limits_count_code_points_and_utf8_bytes_in_each_file(tmp_path):
+    contract = _map_contract(tmp_path)
+    accepted = [
+        {f"k{index:02}": "v" for index in range(64)},
+        {"\u00e9" * 256: "\u00e9" * 4096},
+        {f"k{index:02}": "v" * 4093 for index in range(16)},
+    ]
+    assert sum(len(key) + len(value) for key, value in accepted[2].items()) == 64 * 1024
+    for number, entries in enumerate(accepted):
+        path = _map_answers(tmp_path, {"settings": entries}, name=f"accepted-{number}.yaml")
+        assert contract.resolve(values_file=path).parameters["settings"] == entries
+    rejected = [
+        ({f"k{index:02}": "v" for index in range(65)}, "exceeds its limit of 64 entries"),
+        ({"\u00e9" * 257: "v"}, "keys must be printable text of 1 to 256 characters"),
+        ({"key": "\u00e9" * 4097}, "has a value that is longer than 4,096 characters"),
+        ({**accepted[2], "k00": "v" * 4094}, "exceeds its 64 KiB limit"),
+        ({f"k{index:02}": "\u00e9" * 4096 for index in range(8)}, "exceeds its 64 KiB limit"),
+    ]
+    for number, (entries, message) in enumerate(rejected):
+        path = _map_answers(tmp_path, {"settings": entries}, name=f"rejected-{number}.yaml")
+        with pytest.raises(GuidedInputError, match=message) as failed:
+            contract.resolve(values_file=path)
+        assert str(failed.value).startswith("Input 'settings' ")
+        assert "\u00e9" * 8 not in f"{failed.value} {failed.value.private_message}"
+
+
+def test_string_map_limits_apply_to_inline_entries_and_the_combined_map(tmp_path):
+    contract = _map_contract(tmp_path)
+    file_entries = {f"f{index:02}": "v" for index in range(40)}
+    answers = _map_answers(tmp_path, {"settings": file_entries})
+    inline = [f"settings=i{index:02}=v" for index in range(24)]
+    assert len(contract.resolve(values_file=answers, inline=inline).parameters["settings"]) == 64
+    replaced = _map_answers(tmp_path, {"settings": {f"k{index:02}": "v" for index in range(64)}}, name="full.yaml")
+    assert len(contract.resolve(values_file=replaced, inline=["settings=k00=new"]).parameters["settings"]) == 64
+    with pytest.raises(GuidedInputError, match="^Combined input 'settings' exceeds its limit of 64 entries"):
+        contract.resolve(values_file=answers, inline=[*inline, "settings=i24=v"])
+    with pytest.raises(GuidedInputError, match="^Inline input 'settings' exceeds its limit of 64 entries"):
+        contract.resolve(inline=[f"settings=i{index:02}=v" for index in range(65)])
+    large_file = _map_answers(
+        tmp_path, {"settings": {f"f{index:02}": "v" * 4093 for index in range(9)}}, name="large.yaml",
+    )
+    large_inline = [f"settings=i{index:02}={'v' * 4093}" for index in range(8)]
+    assert len(contract.resolve(inline=large_inline).parameters["settings"]) == 8
+    with pytest.raises(GuidedInputError, match="^Combined input 'settings' exceeds its 64 KiB limit"):
+        contract.resolve(values_file=large_file, inline=large_inline)
+    with pytest.raises(GuidedInputError) as failed:
+        contract.resolve(inline=[f"settings=named={'v' * 4097}"])
+    assert str(failed.value) == "Inline input 'settings' has a value that is longer than 4,096 characters."
+    assert failed.value.private_message == (
+        "Inline input 'settings' key 'named' has a value that is longer than 4,096 characters."
+    )
+
+
+@pytest.mark.parametrize(("change", "message"), [
+    ({"sitePath": "name"}, "stringMap sitePath must be a parameter or property"),
+    ({"sitePath": "labels.extra"}, "stringMap sitePath must be a parameter or property"),
+    ({"sitePath": "location"}, "stringMap sitePath must be a parameter or property"),
+    ({"default": {}}, "stringMap cannot declare a default"),
+    ({"default": {"key": "value"}}, "stringMap cannot declare a default"),
+    ({"sensitive": True}, "sensitive"),
+    ({"format": "nonEmpty"}, "format"),
+    ({"maxLength": 8}, "maxLength"),
+])
+def test_string_map_declarations_fail_at_contract_load(tmp_path, change, message):
+    manifest, _ = _manifest_and_contract(tmp_path, fields=[
+        _field("subscription", "subscription", default="sub"),
+        _map_field(**change),
+    ])
+    with pytest.raises(GuidedInputError, match=message):
+        load_contract(manifest)
+
+
+@pytest.mark.parametrize(("defaults", "site_path"), [
+    ({"parameters": {"settings": {"key": "value"}}}, "parameters.settings"),
+    ({"parameters": {"settings": {}}}, "parameters.settings"),
+    ({"parameters": {"settings": "scalar"}}, "parameters.settings"),
+    ({"properties": {"group": "scalar"}}, "properties.group.settings"),
+    ({"properties": {"group": {"settings": {"nested": "value"}}}}, "properties.group.settings"),
+])
+def test_string_map_cannot_overlap_site_defaults(tmp_path, defaults, site_path):
+    with pytest.raises(GuidedInputError, match="overlaps a siteDefaults value"):
+        _map_contract(tmp_path, defaults=defaults, site_path=site_path)
+
+
+def test_string_map_beside_site_defaults_and_other_writers(tmp_path):
+    contract = _map_contract(
+        tmp_path / "beside", defaults={"properties": {"group": {"other": "kept"}}},
+        site_path="properties.group.settings",
+    )
+    assert contract.resolve(inline=["settings=k=v"]).properties == {
+        "group": {"other": "kept", "settings": {"k": "v"}},
+    }
+    with pytest.raises(GuidedInputError, match="overlaps another input"):
+        _map_contract(tmp_path / "writer", _field("child", "parameters.settings.child", required=False))
+    with pytest.raises(GuidedInputError, match="cannot reference a conditional, resource or map input"):
+        _manifest_and_contract(tmp_path / "controller", fields=[
+            _field("subscription", "subscription", default="sub"),
+            _map_field(),
+            _field("mode", "properties.mode", when={"input": "settings", "equals": "on"}),
+        ])
+        load_contract(tmp_path / "controller" / "manifests" / "storage" / "manifest.yaml")
+
+
+def test_required_string_map_needs_at_least_one_entry(tmp_path):
+    contract = _map_contract(tmp_path, required=True)
+    assert contract.example()["values"] == {"settings": None}
+    row = next(row for row in contract.describe()["inputs"] if row["name"] == "settings")
+    assert (row["type"], row["status"], row["sitePath"]) == ("stringMap", "required", "parameters.settings")
+    placeholder = tmp_path / "example.yaml"
+    write_yaml_exclusive(placeholder, contract.example())
+    for answers in (None, placeholder, _map_answers(tmp_path, "  settings: {}\n")):
+        with pytest.raises(GuidedInputError) as missing:
+            contract.resolve(values_file=answers)
+        assert str(missing.value) == (
+            "Missing required input 'settings'. Supply at least one entry, such as "
+            "`--input settings=<KEY>=<VALUE>`."
+        )
+        assert contract.resolve(values_file=answers, inline=["settings=k="]).parameters == {
+            "settings": {"k": ""},
+        }
+
+
+def test_optional_string_map_is_left_out_of_the_example(tmp_path):
+    contract = _map_contract(tmp_path)
+    assert contract.example()["values"] == {}
+    row = next(row for row in contract.describe()["inputs"] if row["name"] == "settings")
+    assert (row["type"], row["status"], row["required"]) == ("stringMap", "optional", False)
+    assert "default" not in row
+
+
+def test_inactive_string_map_rejects_explicit_answers_including_an_empty_map(tmp_path):
+    contract = _map_contract(
+        tmp_path,
+        _field("enabled", "properties.enabled", type="boolean", default=False),
+        when={"input": "enabled", "equals": True},
+    )
+    assert "settings" not in contract.resolve().parameters
+    for number, text in enumerate(("  settings: {}\n", '  settings:\n    "k": "v"\n')):
+        with pytest.raises(GuidedInputError, match="Input 'settings' was supplied while its condition is inactive."):
+            contract.resolve(values_file=_map_answers(tmp_path, text, name=f"inactive-{number}.yaml"))
+    with pytest.raises(GuidedInputError, match="Input 'settings' was supplied while its condition is inactive."):
+        contract.resolve(inline=["settings=k=v"])
+    assert contract.resolve(inline=["enabled=true"]).parameters == {}
+    assert contract.resolve(inline=["enabled=true", "settings=k=v"]).parameters == {"settings": {"k": "v"}}
+
+
+@pytest.mark.parametrize(("answers", "expected"), [
+    (["settings=a.b=c"], {"a.b": "c"}),
+    (["settings=a=b=c"], {"a": "b=c"}),
+    (["settings=empty="], {"empty": ""}),
+    (["settings=one=1", "settings=two=2"], {"one": "1", "two": "2"}),
+])
+def test_inline_map_entries_split_at_the_first_two_equals_signs(tmp_path, answers, expected):
+    assert _map_contract(tmp_path).resolve(inline=answers).parameters["settings"] == expected
+
+
+@pytest.mark.parametrize(("answers", "message", "private"), [
+    (["settings="], "Inline input 'settings' must use settings=KEY=VALUE for each entry.", None),
+    (["settings=PRIVATE_SENTINEL"], "Inline input 'settings' must use settings=KEY=VALUE for each entry.", None),
+    (["settings==PRIVATE_SENTINEL"],
+     "Inline input 'settings' keys must be printable text of 1 to 256 characters.", None),
+    (["settings=k=PRIVATE_SENTINEL", "settings=k=PRIVATE_SENTINEL"],
+     "Inline input 'settings' repeats a key.", "Inline input 'settings' repeats key 'k'."),
+    (["settings=k=one", "settings=k=PRIVATE_SENTINEL"],
+     "Inline input 'settings' repeats a key.", "Inline input 'settings' repeats key 'k'."),
+])
+def test_inline_map_grammar_fails_without_naming_values(tmp_path, answers, message, private):
+    with pytest.raises(GuidedInputError) as rejected:
+        _map_contract(tmp_path).resolve(inline=answers)
+    assert str(rejected.value) == message
+    assert rejected.value.private_message == private
+
+
+def test_scalar_inline_answers_keep_their_grammar_beside_a_map(tmp_path):
+    contract = _map_contract(tmp_path, _field("mode", "properties.mode", required=False))
+    assert contract.resolve(inline=["mode=a=b", "settings=k=v"]).properties == {"mode": "a=b"}
+    with pytest.raises(GuidedInputError, match="Duplicate inline input 'mode'."):
+        contract.resolve(inline=["mode=a", "mode=a"])
+
+
+def test_inline_map_keys_replace_file_keys_one_by_one_with_combined_provenance(tmp_path):
+    contract = _map_contract(tmp_path)
+    answers = _map_answers(tmp_path, '  settings:\n    "a": "file"\n    "b": "file"\n')
+    bound = contract.bind(values_file=answers, inline=["settings=b=inline", "settings=c=inline"])
+    assert dict(bound.active_values["settings"]) == {"a": "file", "b": "inline", "c": "inline"}
+    assert bound.sources["settings"] == "input file and inline"
+    assert contract.build_site(bound).parameters["settings"] == {"a": "file", "b": "inline", "c": "inline"}
+    with pytest.raises(TypeError):
+        bound.active_values["settings"]["d"] = "changed"
+    assert contract.bind(values_file=answers).sources["settings"] == "input file"
+    assert contract.bind(inline=["settings=a=x"]).sources["settings"] == "inline"
+    replaced = contract.bind(values_file=answers, inline=["settings=a=x", "settings=b=y"])
+    assert replaced.sources["settings"] == "inline"
+
+
+def test_answer_file_maps_keep_merge_keys_and_reject_literal_duplicates(tmp_path):
+    contract = _map_contract(tmp_path)
+    merged = _map_answers(tmp_path, '  settings:\n    <<: {"a": "1", "b": "2"}\n    "b": "3"\n')
+    assert contract.resolve(values_file=merged).parameters["settings"] == {"a": "1", "b": "3"}
+    duplicate = _map_answers(tmp_path, '  settings:\n    "a": "1"\n    "a": "2"\n', name="duplicate.yaml")
+    with pytest.raises(GuidedInputError, match="duplicate"):
+        contract.resolve(values_file=duplicate)
+    for number, keys in enumerate((("=", "="), ("=", '"="'), ('"="', "="))):
+        repeated = _map_answers(
+            tmp_path, f'  settings:\n    {keys[0]}: "first"\n    {keys[1]}: "second"\n', name=f"equals-{number}.yaml",
+        )
+        with pytest.raises(GuidedInputError, match="duplicate"):
+            contract.resolve(values_file=repeated)
+    single = _map_answers(tmp_path, '  settings:\n    =: "bare"\n    x=y: "pair"\n', name="equals.yaml")
+    assert contract.resolve(values_file=single).parameters["settings"] == {"=": "bare", "x=y": "pair"}

@@ -125,8 +125,8 @@ inputs:
 ```
 
 `siteDefaults` may hold only `labels`, `properties`, and `parameters`.
-Each ordinary `inputs` row declares one semantic name, a `string` or
-`boolean` type, description, and a destination under `name`,
+Each ordinary `inputs` row declares one semantic name, a `string`,
+`boolean` or `stringMap` type, description, and a destination under `name`,
 `subscription`, `resourceGroup`, `location`, `labels`, `parameters`, or
 `properties`.
 An input without a default is required unless `required: false` is
@@ -142,6 +142,31 @@ String inputs may declare `format: nonEmpty` or `format: dnsLabel`.
 The DNS label format accepts lowercase letters, digits and interior hyphens,
 with at most 63 characters. `maxLength` supplies a further string limit.
 These constraints apply to defaults, file values and inline overrides.
+
+A `stringMap` input writes a mapping of string keys to string values under
+`parameters` or `properties`:
+
+```yaml
+- name: settings
+  type: stringMap
+  required: false
+  description: Extension configuration settings.
+  sitePath: parameters.settingsOverrides
+```
+
+It declares no default, and `required: true` means at least one entry. Its
+path cannot overlap `siteDefaults` or another input, and it cannot control a
+condition. An omitted map or `{}` writes nothing. Operators supply one inline
+entry for each key as `--input NAME=KEY=VALUE`, and inline keys replace answer
+file keys one by one. Keys and values are never converted from other YAML
+types. Keys must be printable text, with no control, format, surrogate,
+private use or unassigned characters and no line or paragraph separators.
+Which characters are unassigned depends on the Unicode version of the
+engine's Python. Each supplied map and the combined map hold at most 64
+entries, keys of 1 to 256 characters, values of at most 4,096 characters
+and at most 64 KiB of UTF-8 keys and values. A package whose contract uses
+`stringMap` must declare the required feature `typed-input-maps/v1`, which
+the package producer enforces.
 
 A named `azureResourceId` input can instead derive values for existing
 semantic inputs. This is an optional read, not a source of Azure

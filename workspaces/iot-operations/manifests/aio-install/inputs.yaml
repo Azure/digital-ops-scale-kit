@@ -94,3 +94,19 @@ inputs:
     description: AIO broker memory profile. Review cluster capacity before selecting another profile.
     sitePath: parameters.brokerConfig.memoryProfile
     default: Medium
+  - name: aioExtensionSettings
+    type: stringMap
+    required: false
+    description: AIO Arc extension configuration settings. Each key replaces the release or template value.
+    sitePath: parameters.aioConfigurationOverrides
+  - name: secretStoreExtensionSettings
+    type: stringMap
+    required: false
+    description: Secret store Arc extension configuration settings, with Secret Sync enabled or disabled. Each key replaces the release or template value.
+    sitePath: parameters.secretStoreConfigurationOverrides
+  - name: certManagerExtensionSettings
+    type: stringMap
+    required: false
+    when: {input: enableCertManager, equals: true}
+    description: cert-manager Arc extension configuration settings when this installation manages cert-manager. Each key replaces the release or template value.
+    sitePath: parameters.certManagerConfigurationOverrides

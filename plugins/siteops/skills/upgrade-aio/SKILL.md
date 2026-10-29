@@ -87,11 +87,13 @@ Site that describes this installation.
 ## 3. Choose the target AIO release
 
 Azure IoT Operations supports an upgrade to any patch of the same minor
-version, or to the next minor version. Other moves need an uninstall and
+version, or to the next minor version. To cross several minor versions,
+upgrade one minor version at a time, each with its own plan and deploy. A
+downgrade, or a move between preview and GA, needs an uninstall and
 reinstall. AIO releases 2512 and 2602 are 1.2, 2603 to 2606 are 1.3, and
 2607 to 2609 are 1.4. Confirm the current and target AIO releases with the
 user. If the move is not clearly supported, stop and point the user to
-[Upgrade Azure IoT Operations](https://learn.microsoft.com/azure/iot-operations/deploy-iot-ops/howto-upgrade).
+[Upgrade Azure IoT Operations](https://learn.microsoft.com/azure/iot-operations/manage-iot-ops/howto-upgrade).
 
 With the user's agreement, set the target in each Site file:
 

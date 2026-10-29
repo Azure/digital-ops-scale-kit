@@ -218,6 +218,20 @@ def test_upgrade_skill_maps_each_aio_release_to_its_minor_version():
         assert expected in skill
 
 
+@pytest.mark.parametrize("document", [
+    "plugins/siteops/skills/upgrade-aio/SKILL.md",
+    "docs/aio-releases.md",
+    "workspaces/iot-operations/manifests/aio-upgrade/README.md",
+])
+def test_upgrade_guidance_steps_through_minor_versions_and_links_the_current_page(document):
+    text = " ".join((ROOT / document).read_text(encoding="utf-8").split())
+    assert "https://learn.microsoft.com/azure/iot-operations/manage-iot-ops/howto-upgrade" in text
+    assert "deploy-iot-ops/howto-upgrade" not in text
+    assert "one minor version at a time" in text
+    assert "Other moves need an uninstall" not in text
+    assert "jumps across several minor versions" not in text
+
+
 def test_deploy_skill_states_the_workspace_defaults():
     workspace = ROOT / "workspaces" / "iot-operations"
     skill = (PLUGIN / "skills" / "deploy-aio" / "SKILL.md").read_text(encoding="utf-8")

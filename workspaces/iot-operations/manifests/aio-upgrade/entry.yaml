@@ -5,13 +5,53 @@ category: core
 tags: [aio, upgrade]
 documentation: [README.md]
 outcome: Upgrade the AIO extensions and the resources that the selected AIO release explicitly requires.
+inputs:
+  - field: properties.aioRelease
+    type: string
+    requirement: required
+    sensitivity: non-sensitive
+    description: The target AIO release. The typed aioRelease input has no default, so the upgrade never selects a target. Choose a supported transition from the instance's current release.
+    source: sites/base-site.yaml
+  - field: properties.deployOptions.enableCertManager
+    type: boolean
+    requirement: required
+    sensitivity: non-sensitive
+    description: Include the existing cert-manager Arc extension in this upgrade? True updates its version and settings. False leaves it to its separate owner, with no read or write. The typed input has no default.
+    source: templates/aio/upgrade/update-extensions.bicep
+  - field: parameters.aioInstanceName
+    type: string
+    requirement: optional
+    sensitivity: non-sensitive
+    description: The existing instance name. The typed instance input derives it from the resource ID.
+    defaultBehavior: The shared fallback derives the name from the Site name.
+    source: parameters/common/common.yaml
+  - field: parameters.aioConfigurationOverrides
+    type: mapping
+    requirement: optional
+    sensitivity: non-sensitive
+    description: AIO Arc extension settings, also set by the typed aioExtensionSettings input. Each key replaces the existing or release value, and no key is removed. Never include secrets.
+    source: templates/aio/upgrade/update-extensions.bicep
+  - field: parameters.secretStoreConfigurationOverrides
+    type: mapping
+    requirement: optional
+    sensitivity: non-sensitive
+    description: Secret store Arc extension settings, also set by the typed secretStoreExtensionSettings input. Each key replaces the existing or release value. Never include secrets.
+    source: templates/aio/upgrade/update-extensions.bicep
+  - field: parameters.certManagerConfigurationOverrides
+    type: mapping
+    requirement: conditional
+    sensitivity: non-sensitive
+    description: cert-manager Arc extension settings when enableCertManager is true, also set by the typed certManagerExtensionSettings input. Each key replaces the existing or release value. Never include secrets.
+    source: templates/aio/upgrade/update-extensions.bicep
 prerequisites:
-  - An existing AIO installation and a supported upgrade transition.
-  - A configured Site with the intended AIO release and permission for the selected updates.
+  - An existing AIO installation and a supported upgrade transition, any patch of the same minor version or the next minor version.
+  - A configured or saved Site with the intended AIO release, or the existing instance ID with typed answers, and permission for the selected updates.
+  - A broker backend redundancy factor of 2 or more, the default, so the broker can upgrade.
 effects:
   - Updates extensions and the resources the AIO release requires while preserving supported existing configuration.
+  - With enableCertManager false, leaves the cert-manager extension unread and unchanged.
   - Does not perform general migrations of instance child resources.
   - Avoid resource set deployments between changing the AIO release pin and completing the upgrade.
 removal:
   - There is no general rollback. Review partial outcomes and recovery guidance before retrying.
-coverage: Operational synopsis. Follow the guide for AIO release selection, supported paths and workload observations after the upgrade.
+coverage: Operational synopsis. Follow the guide for AIO release selection, supported paths, typed inputs and workload observations after the upgrade.

@@ -207,11 +207,96 @@ def test_producer_target_is_checked_before_template_discovery(snapshot, tmp_path
     def unexpected(*args):
         pytest.fail("Invalid engine selection must fail before template discovery.")
 
-    monkeypatch.setattr(package_builder, "_discover_template_sources", unexpected)
+    monkeypatch.setattr(package_builder, "_discover_workspace", unexpected)
     output = tmp_path / "package.zip"
     with pytest.raises(ArtifactError, match="compatibility declaration|different Site Ops version"):
         _build(snapshot, output, engine_version=engine_version)
     assert not output.exists()
+
+
+_MAP_CONTRACT = """\
+apiVersion: siteops.inputs/v1
+kind: SiteInputContract
+inputs:
+  - name: settings
+    type: stringMap
+    required: false
+    description: Settings.
+    sitePath: parameters.settings
+"""
+# The required features a v1.0.0b7 engine supports.
+_B7_FEATURES = frozenset({
+    "manifest/v1", "composition/v1", "manifest-selection/v1", package.COMPILED_TEMPLATE_FEATURE,
+})
+
+
+@pytest.mark.parametrize("relative", [
+    "manifests/storage/inputs.yaml", "manifests/flat.inputs.yaml", "manifests/other/Inputs.YAML",
+])
+def test_producer_requires_the_map_feature_for_a_string_map_contract(snapshot, tmp_path, relative):
+    contract = snapshot / "workspace" / relative
+    contract.parent.mkdir(parents=True, exist_ok=True)
+    manifest = snapshot / "workspace" / "manifests" / "storage" / "manifest.yaml"
+    if relative.startswith("manifests/other/"):
+        shutil.copyfile(manifest, contract.with_name("manifest.yaml"))
+    elif relative == "manifests/flat.inputs.yaml":
+        shutil.copyfile(manifest, contract.with_name("flat.yaml"))
+    contract.write_text(_MAP_CONTRACT, encoding="utf-8")
+    output = tmp_path / "package.zip"
+    with pytest.raises(ArtifactError) as rejected:
+        _build(snapshot, output)
+    assert str(rejected.value) == (
+        f"Input contract 'workspace/{relative}' declares a stringMap input, which requires "
+        "the package feature typed-input-maps/v1."
+    )
+    assert not output.exists()
+    built = _build(snapshot, output, required_features=("manifest/v1", package.TYPED_INPUT_MAPS_FEATURE))
+    assert package.TYPED_INPUT_MAPS_FEATURE in built.metadata.required_features
+
+
+@pytest.mark.parametrize(("relative", "contents"), [
+    ("manifests/storage/inputs.yaml", _MAP_CONTRACT.replace("stringMap", "string")),
+    ("manifests/storage/inputs.yaml", "settings:\n  type: stringMap\n"),
+    ("defaults.inputs.yml", _MAP_CONTRACT),
+    ("manifests/storage/other.inputs.yaml", _MAP_CONTRACT),
+    ("parameters/settings.inputs.yaml", _MAP_CONTRACT),
+    ("parameters/inputs.yaml", "kind: SiteInputContract\nkind: Parameters\n"),
+])
+def test_producer_needs_no_map_feature_without_a_string_map_contract(snapshot, tmp_path, relative, contents):
+    (snapshot / "workspace" / relative).parent.mkdir(parents=True, exist_ok=True)
+    (snapshot / "workspace" / relative).write_text(contents, encoding="utf-8")
+    (snapshot / "docs" / "inputs.yaml").write_text(_MAP_CONTRACT, encoding="utf-8")
+    built = _build(snapshot, tmp_path / "package.zip")
+    assert package.TYPED_INPUT_MAPS_FEATURE not in built.metadata.required_features
+
+
+def test_producer_reads_no_parameter_file_that_is_not_a_manifest_sidecar(snapshot, tmp_path):
+    # Larger than the contract reader's limit, and accepted by the v1.0.0b7 producer.
+    parameters = snapshot / "workspace" / "parameters"
+    parameters.mkdir()
+    (parameters / "inputs.yaml").write_text(f"description: {'a' * 131100}\n", encoding="utf-8")
+    built = _build(snapshot, tmp_path / "package.zip")
+    assert built.metadata.required_features == (package.COMPILED_TEMPLATE_FEATURE, "manifest/v1")
+    assert "workspace/parameters/inputs.yaml" in {entry.path for entry in built.metadata.files}
+
+
+def test_producer_fails_closed_on_an_unreadable_contract_sidecar(snapshot, tmp_path):
+    (snapshot / "workspace" / "manifests" / "storage" / "inputs.yaml").write_text(
+        "kind: SiteInputContract\nkind: SiteInputContract\n", encoding="utf-8",
+    )
+    with pytest.raises(ArtifactError, match="^Input contract 'workspace/manifests/storage/inputs.yaml' could not be read"):
+        _build(snapshot, tmp_path / "package.zip")
+
+
+def test_engine_without_the_map_feature_refuses_the_package(snapshot, tmp_path, monkeypatch):
+    (snapshot / "workspace" / "manifests" / "storage" / "inputs.yaml").write_text(_MAP_CONTRACT, encoding="utf-8")
+    output = tmp_path / "package.zip"
+    built = _build(snapshot, output, required_features=("manifest/v1", package.TYPED_INPUT_MAPS_FEATURE))
+    assert package.extract_package(output, built.sha256, tmp_path / "current") == built
+    monkeypatch.setitem(package.check_compatibility.__kwdefaults__, "features", _B7_FEATURES)
+    with pytest.raises(ArtifactError, match=r"^This package requires unsupported Site Ops features\.$"):
+        package.extract_package(output, built.sha256, tmp_path / "older")
+    assert not (tmp_path / "older").exists()
 
 
 def test_materialized_binding_resolves_manifest_name_and_revalidates_inventory(
@@ -576,6 +661,7 @@ def test_real_aio_entries_produce_mapped_template_roots(tmp_path):
         version="preview-1",
         source_revision="fixture",
         siteops_range=">=1.0.0b1,<2",
+        required_features=("manifest/v1", package.TYPED_INPUT_MAPS_FEATURE),
         compilation_session_factory=_controlled_factory(
             control_root,
             snapshot,

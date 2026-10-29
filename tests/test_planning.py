@@ -568,6 +568,39 @@ def test_classifier_rejects_unavailable_or_malformed_templates(value):
         classify_plan_value(value, {})
 
 
+@pytest.mark.parametrize(
+    ("value", "problem"),
+    [
+        ("PRIVATE_VALUE { site.name }}", "a malformed template"),
+        (
+            "{{ steps.resolve.outputs.value }} PRIVATE_VALUE {{ other }}",
+            "an unsupported or malformed template",
+        ),
+        ("PRIVATE_VALUE {{ other }}", "an unresolved or unsupported template"),
+    ],
+)
+def test_classifier_template_errors_name_the_location_and_never_the_value(
+    value,
+    problem,
+):
+    available = {"resolve": OperationIdentity(target="munich", step="resolve")}
+
+    with pytest.raises(ValueError) as rejected:
+        classify_plan_value(
+            {"settings": {"key": value}},
+            available,
+            "munich.deploy.parameters",
+        )
+
+    assert str(rejected.value) == (
+        "Plan value at 'munich.deploy.parameters.settings.key' contains "
+        f"{problem}. Write `{{{{ site.<field> }}}}` or "
+        "`{{ steps.<step>.outputs.<name> }}` with one space inside each "
+        "pair of braces, and name a field the Site sets. Remove `{{` from "
+        "text that is not a template."
+    )
+
+
 def test_classifier_rejects_later_step_reference():
     prior = OperationIdentity(target="munich", step="prior")
 

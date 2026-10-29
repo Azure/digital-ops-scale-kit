@@ -34,12 +34,16 @@ def _construct_mapping(loader: _StrictLoader, node: yaml.MappingNode, deep: bool
 
     seen: set = set()
     for key_node, _ in node.value:
-        # Both are rewritten by the parent constructor after this pre-pass:
-        # `<<` is flattened into the mapping and `=` becomes a string. Neither
-        # is a key to compare here, and constructing them now would fail.
-        if key_node.tag in ("tag:yaml.org,2002:merge", "tag:yaml.org,2002:value"):
+        # The parent constructor flattens `<<` into the mapping after this
+        # pre-pass, so it is not a key to compare. It also turns a bare `=`,
+        # tagged as a YAML value key, into the string "=", so compare it as
+        # that string rather than constructing it, which would fail.
+        if key_node.tag == "tag:yaml.org,2002:merge":
             continue
-        key = loader.construct_object(key_node, deep=deep)
+        if key_node.tag == "tag:yaml.org,2002:value":
+            key = key_node.value
+        else:
+            key = loader.construct_object(key_node, deep=deep)
         if not isinstance(key, collections.abc.Hashable):
             # The predicate the standard constructor uses, so the two cannot
             # disagree. It reports the unhashable key with its own message.

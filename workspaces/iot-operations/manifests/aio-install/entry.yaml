@@ -57,6 +57,24 @@ inputs:
     requirement: optional
     description: Broker settings have inherited or template defaults. The typed route starts with the Medium memory profile. Review capacity and trust requirements.
     source: templates/aio/instance.bicep
+  - field: parameters.aioConfigurationOverrides
+    type: mapping
+    requirement: optional
+    sensitivity: non-sensitive
+    description: AIO Arc extension settings as string keys and values, also set by the typed aioExtensionSettings input. Each key replaces the release or template value. The values are visible in Azure, so never include secrets.
+    source: templates/aio/instance.bicep
+  - field: parameters.secretStoreConfigurationOverrides
+    type: mapping
+    requirement: optional
+    sensitivity: non-sensitive
+    description: Secret store Arc extension settings as string keys and values, also set by the typed secretStoreExtensionSettings input. They apply with Secret Sync enabled or disabled. Never include secrets.
+    source: templates/aio/enablement.bicep
+  - field: parameters.certManagerConfigurationOverrides
+    type: mapping
+    requirement: conditional
+    sensitivity: non-sensitive
+    description: cert-manager Arc extension settings when enableCertManager is true, also set by the typed certManagerExtensionSettings input. Each key replaces the release or template value. Never include secrets.
+    source: templates/aio/enablement.bicep
   - field: properties.deployOptions
     type: mapping
     requirement: conditional
