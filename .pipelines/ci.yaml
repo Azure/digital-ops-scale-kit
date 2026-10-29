@@ -45,6 +45,7 @@ jobs:
 
   - job: test
     displayName: Unit Tests
+    timeoutInMinutes: 30
     pool:
       vmImage: ubuntu-24.04
     steps:

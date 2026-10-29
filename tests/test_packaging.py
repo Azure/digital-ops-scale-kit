@@ -77,6 +77,8 @@ def test_both_ci_unit_jobs_run_one_selection_and_list_the_slowest_tests():
     ]
     assert commands[0] == commands[1]
     assert commands[0][:5] == ["pytest", "tests/", "-m", "not integration", "-v"]
+    ado_test = next(job for job in ado["jobs"] if job["job"] == "test")
+    assert github["jobs"]["test"]["timeout-minutes"] == ado_test["timeoutInMinutes"] <= 30
     assert "--cov=siteops" in commands[0] and "--durations=25" in commands[0]
 
 
