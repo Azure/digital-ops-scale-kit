@@ -422,7 +422,7 @@ jobs:
       - name: Windows installation consumers
         shell: powershell
         run: |
-          # These installation tests are disk bound and gain nothing from parallel workers.
+          # These tests are disk bound, so they run in one process.
           python -B -m pytest tests\test_uv_installation.py tests\test_distribution_workflows.py `
               tests\test_release_workflow.py `
               -k 'test_uv_installation or native_qualification or matrix_runtime_admission or native_verified_installation_step or native_online_installation_step or native_installation_steps or generated_powershell_bootstrap or required_native_consumer_fixtures or windows_qualification' -q `

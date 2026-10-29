@@ -238,7 +238,7 @@ def test_bash_discovery_template_reads_only_verified_certificate_fields():
 
 @pytest.fixture(scope="module")
 def powershell_run_per_input(tmp_path_factory):
-    """Run the PowerShell bootstrap once for each distinct input in this module.
+    """Run the PowerShell bootstrap once for each distinct input in this module and test process.
 
     The exact case of every field sends the same unchanged input, so those cases
     share one run. Each case still receives its own copy of the result.

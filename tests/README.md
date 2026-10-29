@@ -79,6 +79,8 @@ before or after any other test, and in a different process.
   listed in `SINGLE_WORKER_MODULES` in `tests/conftest.py`. Its tests stay
   on one worker, so that fixture still runs once. Add a module there when you
   give it such a fixture.
+- Session fixtures, and module fixtures in modules not listed there, run once
+  in each worker.
 - When the selected paths include a module that uses
   `tests/installed_runtime.py`, the engine wheel and the locked runtime wheels
   are built once before the workers start testing, and every worker copies

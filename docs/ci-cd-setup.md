@@ -685,7 +685,7 @@ stages:
 | Input | Default | Description |
 |-------|---------|-------------|
 | `python-version` | `3.11` | Python version to install |
-| `install-dev` | `false` | Include dev dependencies (pytest, pytest-cov) |
+| `install-dev` | `false` | Include dev dependencies (pytest, pytest-cov, pytest-xdist) |
 | `siteops-source` | (empty) | pip installation specification, such as `git+https://github.com/<owner>/digital-ops-scale-kit@<tag>`. Empty installs the checkout in editable mode. pip installs the named source directly and does not verify a signed release. |
 
 ```yaml

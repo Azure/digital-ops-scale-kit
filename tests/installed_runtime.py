@@ -16,8 +16,8 @@ from tests.native_bundle import write_wheel
 
 ROOT = Path(__file__).resolve().parent.parent
 RUNTIME_WHEELHOUSE = "SITEOPS_TEST_RUNTIME_WHEELHOUSE"
-# The engine source and runtime lock are fixed for a test session, so each is built or
-# downloaded once and every caller receives its own copy of those bytes.
+# The engine source and runtime lock are fixed for a test session, so each test process builds
+# or downloads them once and every caller receives its own copy of those bytes.
 _SESSION_FILES: dict[str, dict[str, bytes]] = {}
 # A parallel run builds them once in the controller, and each worker reads them from here.
 _PREBUILT: Path | None = None
@@ -157,7 +157,7 @@ class InstalledEngine:
     """An engine installed for one caller.
 
     `root`, `environment` and the tool copies belong to the caller. `application` is
-    shared by every caller installed from the same wheel in this session, so treat it as
+    shared by every caller installed from the same wheel in this process, so treat it as
     read-only. The next install of that wheel fails when its files changed.
     """
 
@@ -178,7 +178,7 @@ class InstalledEngine:
 
 
 # The installed application depends only on the engine wheel and the runtime lock, so each
-# wheel is installed once per session. Every caller still gets its own state, tools and checks.
+# wheel is installed once per test process. Every caller still gets its own state, tools and checks.
 _SESSION_APPLICATIONS: dict[str, tuple[Path, tuple[tuple[str, int, str], ...]]] = {}
 
 
