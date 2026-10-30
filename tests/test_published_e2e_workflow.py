@@ -1942,7 +1942,7 @@ exit 99
     # The teardown passes start many short processes, which Git Bash runs slowly on a busy host.
     result = subprocess.run(
         [str(bash), "-c", run], cwd=tmp_path, env=env,
-        capture_output=True, text=True, timeout=300, check=False,
+        capture_output=True, text=True, timeout=600, check=False,
     )
     summary = tmp_path / "summary.md"
     public = result.stdout + result.stderr + (
