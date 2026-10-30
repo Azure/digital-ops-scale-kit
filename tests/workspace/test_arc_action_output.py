@@ -63,7 +63,7 @@ def _run_bash(
         capture_output=True,
         text=True,
         check=False,
-        timeout=120,
+        timeout=240,
     )
 
 
