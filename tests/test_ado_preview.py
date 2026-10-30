@@ -16,6 +16,8 @@ from urllib.response import addinfourl
 import pytest
 import yaml
 
+from tests.yaml_documents import cached_safe_load
+
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = "a" * 40
 REF = "refs/heads/validation"
@@ -653,7 +655,7 @@ def test_preview_structure_limits_accept_the_boundary_and_reject_the_next_node(p
 
 
 def test_validation_pipeline_is_manual_and_has_no_deployment_identity():
-    source = yaml.safe_load((ROOT / ".pipelines" / "validate-pipelines.yaml").read_text())
+    source = cached_safe_load((ROOT / ".pipelines" / "validate-pipelines.yaml").read_text())
     assert source["trigger"] == source["pr"] == "none"
     assert "parameters" not in source
     stage = next(stage for stage in source["stages"] if stage.get("stage") == "preview")
@@ -672,7 +674,7 @@ def test_validation_pipeline_is_manual_and_has_no_deployment_identity():
 
 
 def _preview_steps():
-    source = yaml.safe_load((ROOT / ".pipelines" / "validate-pipelines.yaml").read_text())
+    source = cached_safe_load((ROOT / ".pipelines" / "validate-pipelines.yaml").read_text())
     stage = next(stage for stage in source["stages"] if stage.get("stage") == "preview")
     return stage["jobs"][0]["steps"]
 
@@ -732,7 +734,7 @@ def test_preview_third_party_imports_are_covered_by_the_runtime_lock():
 
 
 def test_full_preview_matrix_is_retained(preview):
-    integration = yaml.safe_load((ROOT / preview.PIPELINES["integration"]).read_text())
+    integration = cached_safe_load((ROOT / preview.PIPELINES["integration"]).read_text())
     phases = next(parameter["values"] for parameter in integration["parameters"]
                   if parameter["name"] == "manifest")
     expected = {"ci", "deploy-custom-selector", "deploy-wif-session", "deploy-site-file",

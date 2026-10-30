@@ -111,6 +111,23 @@ def test_built_engine_preserves_verified_wheel_and_declared_targets(bundle_facto
     assert (materialized / manifest.application_wheel).read_bytes() == (directory / wheel).read_bytes()
 
 
+def test_built_engine_uses_name_order_whatever_the_directory_lists_first(bundle_factory, tmp_path):
+    bundle, manifest = bundle_factory()
+    directory, wheel = assets(bundle, manifest, tmp_path)
+
+    class ReverseListing(type(directory)):
+        def iterdir(self):
+            return iter(sorted(super().iterdir(), reverse=True))
+
+    verifier = Verifier()
+    selected = prepare(ReverseListing(directory), wheel, tmp_path, verifier)
+    assert [row[0] for row in verifier.calls] == [
+        engine.ARCHIVE_NAME, wheel, "siteops-bootstrap.ps1", "siteops-bootstrap.sh",
+    ]
+    names = [asset.name for asset in selected.native.assets]
+    assert names == sorted(names)
+
+
 @pytest.mark.parametrize("bootstrap", [False, True])
 def test_referenced_engine_uses_its_own_commit_without_building(bundle_factory, tmp_path, bootstrap):
     bundle, manifest = bundle_factory(version="1.2.3", source_sha="a" * 40)

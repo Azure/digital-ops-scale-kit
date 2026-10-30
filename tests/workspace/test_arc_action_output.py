@@ -8,7 +8,6 @@ import sys
 from pathlib import Path
 
 import pytest
-import yaml
 
 from tests.shell_helpers import (
     bash_path as _bash_path,
@@ -19,6 +18,7 @@ from tests.shell_helpers import (
 from tests.shell_helpers import (
     write_executable as _write_executable,
 )
+from tests.yaml_documents import cached_safe_load
 
 REPO_ROOT = Path(__file__).parent.parent.parent
 ACTION = REPO_ROOT / ".github" / "actions" / "connect-arc" / "action.yaml"
@@ -49,6 +49,7 @@ def _run_bash(
         name: value for name, value in os.environ.items()
         if not name.startswith("AZURE_")
     }
+    # Git Bash starts the action's processes slowly on a busy host, so the limit only stops a hang.
     return subprocess.run(
         [
             str(_required_bash()),
@@ -62,7 +63,7 @@ def _run_bash(
         capture_output=True,
         text=True,
         check=False,
-        timeout=60,
+        timeout=240,
     )
 
 
@@ -86,7 +87,7 @@ def _fake_bin(tmp_path: Path) -> Path:
 
 
 def _action_step(name: str) -> dict:
-    data = yaml.safe_load(ACTION.read_text(encoding="utf-8"))
+    data = cached_safe_load(ACTION.read_text(encoding="utf-8"))
     return next(step for step in data["runs"]["steps"] if step.get("name") == name)
 
 
@@ -236,38 +237,34 @@ def test_wait_connected_omits_private_status_errors_and_arguments(
     expected_message,
     private,
 ):
-    bin_dir = _fake_bin(tmp_path)
-    _write_executable(
-        bin_dir / "sleep",
-        "#!/usr/bin/env bash\n"
-        "printf '%s\\n' \"$*\" >> \"$FAKE_SLEEP_LOG\"\n",
-    )
-    _write_executable(
-        bin_dir / "az",
-        """#!/usr/bin/env bash
-printf 'query\\n' >> "$FAKE_AZ_LOG"
-case "$FAKE_AZ_MODE" in
-  connected)
-    printf 'Connected\n'
-    exit 0
-    ;;
-  pending)
-    printf '%s\n' "Pending-$PRIVATE_SENTINEL"
-    printf '%s\n' "$PRIVATE_SENTINEL" >&2
-    exit 0
-    ;;
-  failed)
-    printf '%s\n' "$PRIVATE_SENTINEL"
-    printf '%s\n' "$PRIVATE_SENTINEL" >&2
-    exit 42
-    ;;
-esac
-""",
-    )
+    _fake_bin(tmp_path)
+    # Shell functions stand in for the polled commands, so no attempt starts another program.
+    stand_ins = """sleep() { printf '%s\\n' "$*" >> "$FAKE_SLEEP_LOG"; }
+az() {
+  printf 'query\\n' >> "$FAKE_AZ_LOG"
+  case "$FAKE_AZ_MODE" in
+    connected)
+      printf 'Connected\\n'
+      return 0
+      ;;
+    pending)
+      printf '%s\\n' "Pending-$PRIVATE_SENTINEL"
+      printf '%s\\n' "$PRIVATE_SENTINEL" >&2
+      return 0
+      ;;
+    failed)
+      printf '%s\\n' "$PRIVATE_SENTINEL"
+      printf '%s\\n' "$PRIVATE_SENTINEL" >&2
+      return 42
+      ;;
+  esac
+}
+"""
 
     # Use the LF source text a Linux Git checkout provides, without changing its logic.
     script = (
-        f"set -- {shlex.quote(PRIVATE_SENTINEL)} {shlex.quote(PRIVATE_SENTINEL)}\n"
+        stand_ins
+        + f"set -- {shlex.quote(PRIVATE_SENTINEL)} {shlex.quote(PRIVATE_SENTINEL)}\n"
         + WAIT_SCRIPT.read_text(encoding="utf-8")
     )
     result = _run_bash(

@@ -6,12 +6,12 @@ import json
 from pathlib import Path
 
 import pytest
-import yaml
 
 from siteops.artifacts import ArtifactError
 from tests.release_helpers import ROOT, SCRIPTS
+from tests.yaml_documents import cached_safe_load
 
-WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/_release-candidate.yaml").read_text())
+WORKFLOW = cached_safe_load((ROOT / ".github/workflows/_release-candidate.yaml").read_text())
 STEP = next(
     row for row in WORKFLOW["jobs"]["workspace-qualify"]["steps"]
     if row.get("name") == "Select private qualification state"

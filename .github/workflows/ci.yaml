@@ -155,6 +155,7 @@ jobs:
   test:
     name: Unit Tests
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
 
     permissions:
       contents: read
@@ -198,7 +199,7 @@ jobs:
         # tests block Azure deployment and cluster commands.
         env:
           SITEOPS_REQUIRE_COMPATIBILITY_TAG: "1"
-        run: pytest tests/ -m "not integration" -v --cov=siteops --cov-report=term-missing --cov-report=xml:coverage.xml --junitxml=test-results.xml --durations=25
+        run: pytest tests/ -m "not integration" -v -n auto --cov=siteops --cov-report=term-missing --cov-report=xml:coverage.xml --junitxml=test-results.xml --durations=25
 
       - name: Test Summary
         if: always()
@@ -408,16 +409,20 @@ jobs:
 
       - name: Windows bootstrap tests
         shell: powershell
+        # Unlike -B, this setting reaches the parallel workers and keeps bytecode out of the checkout.
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
         run: |
           # Tests named for Windows or PowerShell need the native runner.
-          python -B -m pytest tests\test_bootstrap_scripts.py tests\test_uv_bootstrap_windows.py `
-              -k 'windows or powershell' -q `
+          python -m pytest tests\test_bootstrap_scripts.py tests\test_uv_bootstrap_windows.py `
+              -k 'windows or powershell' -q -n auto `
               --basetemp="$env:SITEOPS_WINDOWS_TEST_TEMP"
           if ($LASTEXITCODE -ne 0) { throw 'Native Windows bootstrap tests failed.' }
 
       - name: Windows installation consumers
         shell: powershell
         run: |
+          # These tests are disk bound, so they run in one process.
           python -B -m pytest tests\test_uv_installation.py tests\test_distribution_workflows.py `
               tests\test_release_workflow.py `
               -k 'test_uv_installation or native_qualification or matrix_runtime_admission or native_verified_installation_step or native_online_installation_step or native_installation_steps or generated_powershell_bootstrap or required_native_consumer_fixtures or windows_qualification' -q `

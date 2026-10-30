@@ -45,6 +45,7 @@ from tests.acceptance_helpers import (  # noqa: E402
 )
 from tests.actions_expressions import evaluate, truthy  # noqa: E402
 from tests.shell_helpers import bash_path, run_script  # noqa: E402
+from tests.yaml_documents import cached_safe_load  # noqa: E402
 
 WORKFLOWS = ROOT / ".github" / "workflows"
 NEEDS = {key: {"result": "success"} for key in ("fleet-request", "fleet", "prep", "site-groups", "e2e")}
@@ -289,10 +290,10 @@ def test_installer_contract_names_every_required_cell():
 
 
 def test_candidate_distribution_matrix_is_the_production_source():
-    workflow = yaml.safe_load((WORKFLOWS / "_siteops-distribution.yaml").read_text(encoding="utf-8"))
+    workflow = cached_safe_load((WORKFLOWS / "_siteops-distribution.yaml").read_text(encoding="utf-8"))
     names = installer_cells(workflow)
     assert set(INSTALLER_CELLS[:10]) <= set(names)
-    step = next(step for step in yaml.safe_load((WORKFLOWS / "e2e-test.yaml").read_text(encoding="utf-8"))[
+    step = next(step for step in cached_safe_load((WORKFLOWS / "e2e-test.yaml").read_text(encoding="utf-8"))[
         "jobs"]["acceptance"]["steps"] if step.get("name") == "Require every scenario for this candidate")
     assert "--workflow .github/workflows/_siteops-distribution.yaml" in step["run"]
 
@@ -470,7 +471,7 @@ def test_aggregate_entrypoint_writes_nothing_for_another_source(tmp_path, select
 
 
 def test_acceptance_run_is_bound_named_and_always_aggregated():
-    workflow = yaml.safe_load((WORKFLOWS / "e2e-test.yaml").read_text(encoding="utf-8"))
+    workflow = cached_safe_load((WORKFLOWS / "e2e-test.yaml").read_text(encoding="utf-8"))
     assert workflow["run-name"] == (
         "${{ inputs.scenario == 'release-acceptance' && 'Release acceptance' || 'E2E Tests' }}"
     )
@@ -512,7 +513,7 @@ def test_acceptance_run_is_bound_named_and_always_aggregated():
     pytest.param("failure", True, False, id="cancelled-without-selection"),
 ])
 def test_acceptance_selects_evidence_only_after_candidate_selection(selected, cancelled, expected):
-    job = yaml.safe_load((WORKFLOWS / "e2e-test.yaml").read_text())["jobs"]["acceptance"]
+    job = cached_safe_load((WORKFLOWS / "e2e-test.yaml").read_text())["jobs"]["acceptance"]
     step = next(step for step in job["steps"] if step.get("id") == "evidence")
     contexts = {"steps": {"select": {"outcome": selected}}, "needs": {"previous": {"result": "failure"}}}
     assert truthy(evaluate(step["if"], contexts, cancelled=cancelled)) is expected
@@ -532,7 +533,7 @@ def test_acceptance_selects_evidence_only_after_candidate_selection(selected, ca
     pytest.param("", True, False, id="cancelled-without-artifact"),
 ])
 def test_acceptance_downloads_only_the_selected_scenario_artifact(slot, artifact_id, cancelled, expected):
-    job = yaml.safe_load((WORKFLOWS / "e2e-test.yaml").read_text())["jobs"]["acceptance"]
+    job = cached_safe_load((WORKFLOWS / "e2e-test.yaml").read_text())["jobs"]["acceptance"]
     step = next(step for step in job["steps"] if step.get("id") == f"download-{slot}")
     outputs = {f"{key}-id": "other-artifact" for key in SLOT_SCENARIOS if key != slot}
     if artifact_id is not None:
@@ -553,7 +554,7 @@ def test_acceptance_downloads_only_the_selected_scenario_artifact(slot, artifact
     pytest.param("failure", "success", True, False, id="cancelled-without-binding"),
 ])
 def test_acceptance_aggregates_and_retains_every_bound_candidate(bound, selected, cancelled, expected):
-    job = yaml.safe_load((WORKFLOWS / "e2e-test.yaml").read_text())["jobs"]["acceptance"]
+    job = cached_safe_load((WORKFLOWS / "e2e-test.yaml").read_text())["jobs"]["acceptance"]
     aggregate_step = next(step for step in job["steps"] if step.get("name") == "Require every scenario for this candidate")
     fallback = next(step for step in job["steps"] if step.get("name") == "Keep a failing result when aggregation wrote none")
     contexts = {
@@ -565,7 +566,7 @@ def test_acceptance_aggregates_and_retains_every_bound_candidate(bound, selected
 
 
 def _bind(tmp_path, candidate, **environment):
-    step = yaml.safe_load((WORKFLOWS / "e2e-test.yaml").read_text())["jobs"]["acceptance"]["steps"][0]
+    step = cached_safe_load((WORKFLOWS / "e2e-test.yaml").read_text())["jobs"]["acceptance"]["steps"][0]
     output = tmp_path / "outputs"
     result = subprocess.run(
         [sys.executable, "-c", step["run"]], cwd=tmp_path, capture_output=True, text=True, timeout=60, check=False,
@@ -614,7 +615,7 @@ def test_acceptance_records_no_result_for_a_candidate_that_names_another_source(
 
 @pytest.mark.parametrize("written", [None, "", '{"kind": "ReleaseAcceptance", "status": "passed"}'])
 def test_acceptance_keeps_a_failing_result_only_when_aggregation_wrote_none(tmp_path, written):
-    step = next(step for step in yaml.safe_load((WORKFLOWS / "e2e-test.yaml").read_text())["jobs"]["acceptance"]["steps"]
+    step = next(step for step in cached_safe_load((WORKFLOWS / "e2e-test.yaml").read_text())["jobs"]["acceptance"]["steps"]
                 if step.get("name") == "Keep a failing result when aggregation wrote none")
     runner = tmp_path / "runner"
     receipt = runner / "acceptance" / "release-acceptance.json"
@@ -634,8 +635,8 @@ def test_acceptance_keeps_a_failing_result_only_when_aggregation_wrote_none(tmp_
 
 @pytest.mark.parametrize("slot", SLOT_SCENARIOS)
 def test_workflow_site_names_match_receipt_and_ownership_matchers(slot):
-    caller = yaml.safe_load((WORKFLOWS / "e2e-test.yaml").read_text(encoding="utf-8"))
-    reconcile = yaml.safe_load((WORKFLOWS / "_fleet-reconcile.yaml").read_text(encoding="utf-8"))
+    caller = cached_safe_load((WORKFLOWS / "e2e-test.yaml").read_text(encoding="utf-8"))
+    reconcile = cached_safe_load((WORKFLOWS / "_fleet-reconcile.yaml").read_text(encoding="utf-8"))
     name = evaluate(caller["jobs"]["e2e"]["name"], {
         "needs": {"prep": {"outputs": {"candidate-mode": "true"}}},
         "matrix": {"secret-sync-mode": slot},
@@ -655,7 +656,7 @@ def test_workflow_site_names_match_receipt_and_ownership_matchers(slot):
 @pytest.mark.parametrize("slot", SLOT_SCENARIOS)
 @pytest.mark.parametrize("release", ["2607", "2608"])
 def test_ordinary_e2e_job_names_keep_the_release_and_internal_mode(slot, release):
-    job = yaml.safe_load((WORKFLOWS / "e2e-test.yaml").read_text(encoding="utf-8"))["jobs"]["e2e"]
+    job = cached_safe_load((WORKFLOWS / "e2e-test.yaml").read_text(encoding="utf-8"))["jobs"]["e2e"]
     assert evaluate(job["name"], {
         "needs": {"prep": {"outputs": {"candidate-mode": "false"}}},
         "matrix": {"secret-sync-mode": slot, "aio-release": release},
@@ -663,14 +664,14 @@ def test_ordinary_e2e_job_names_keep_the_release_and_internal_mode(slot, release
 
 
 def test_fleet_reconciliation_job_name_is_unchanged():
-    job = yaml.safe_load((WORKFLOWS / "_fleet-reconcile.yaml").read_text(encoding="utf-8"))["jobs"]["reconcile"]
+    job = cached_safe_load((WORKFLOWS / "_fleet-reconcile.yaml").read_text(encoding="utf-8"))["jobs"]["reconcile"]
     assert evaluate(job["name"], {
         "inputs": {"kind": "fleet"}, "matrix": {"slot": "fleet"},
     }) == "Reconcile original fleet"
 
 
 def test_site_cases_do_not_cancel_each_other_and_always_clean_up_before_the_receipt():
-    job = yaml.safe_load((WORKFLOWS / "e2e-test.yaml").read_text(encoding="utf-8"))["jobs"]["e2e"]
+    job = cached_safe_load((WORKFLOWS / "e2e-test.yaml").read_text(encoding="utf-8"))["jobs"]["e2e"]
     assert job["strategy"]["fail-fast"] is False
     assert job["name"].startswith("${{ needs.prep.outputs.candidate-mode == 'true' && format('Site case ({0})'")
     names = [step.get("name") or step.get("uses") for step in job["steps"]]
@@ -704,7 +705,7 @@ def test_site_cases_do_not_cancel_each_other_and_always_clean_up_before_the_rece
     pytest.param("false", "success", True, False, id="no-site-cleanup-for-ordinary-cancellation"),
 ])
 def test_site_cleanup_requires_candidate_ownership_even_after_cancellation(candidate, preflight, cancelled, expected):
-    job = yaml.safe_load((WORKFLOWS / "e2e-test.yaml").read_text())["jobs"]["e2e"]
+    job = cached_safe_load((WORKFLOWS / "e2e-test.yaml").read_text())["jobs"]["e2e"]
     step = next(step for step in job["steps"] if step.get("id") == "site-cleanup")
     contexts = {
         "env": {"CANDIDATE_MODE": candidate},
@@ -724,7 +725,7 @@ def test_site_cleanup_requires_candidate_ownership_even_after_cancellation(candi
     pytest.param("false", "success", True, False, id="no-site-receipt-for-ordinary-cancellation"),
 ])
 def test_site_outcomes_are_recorded_and_retained_only_for_selected_candidates(candidate, selected, cancelled, expected):
-    job = yaml.safe_load((WORKFLOWS / "e2e-test.yaml").read_text())["jobs"]["e2e"]
+    job = cached_safe_load((WORKFLOWS / "e2e-test.yaml").read_text())["jobs"]["e2e"]
     contexts = {
         "env": {"CANDIDATE_MODE": candidate},
         "steps": {"select": {"outcome": selected}},
@@ -737,7 +738,7 @@ def test_site_outcomes_are_recorded_and_retained_only_for_selected_candidates(ca
 
 @pytest.mark.parametrize(("selected", "expected"), [("2", 0), ("1", 1), ("", 1)])
 def test_fleet_jobs_refuse_a_partial_rerun_before_any_work(tmp_path, selected, expected):
-    workflow = yaml.safe_load((WORKFLOWS / "_fleet-acceptance.yaml").read_text(encoding="utf-8"))
+    workflow = cached_safe_load((WORKFLOWS / "_fleet-acceptance.yaml").read_text(encoding="utf-8"))
     jobs = workflow["jobs"]
     assert jobs["select"]["outputs"]["attempt"] == "${{ github.run_attempt }}"
     for name in ("prepare", "hosts", "controller", "cleanup"):
@@ -755,7 +756,7 @@ def test_fleet_jobs_refuse_a_partial_rerun_before_any_work(tmp_path, selected, e
 def test_pull_request_and_push_workflows_cannot_reach_azure_authority():
     def reachable(name, seen):
         seen.add(name)
-        document = yaml.safe_load((WORKFLOWS / name).read_text(encoding="utf-8"))
+        document = cached_safe_load((WORKFLOWS / name).read_text(encoding="utf-8"))
         for job in document["jobs"].values():
             uses = job.get("uses", "")
             if uses.startswith("./.github/workflows/") and uses.rsplit("/", 1)[1] not in seen:
@@ -769,7 +770,7 @@ def test_pull_request_and_push_workflows_cannot_reach_azure_authority():
             for name in reachable(path.name, set()):
                 text = (WORKFLOWS / name).read_text(encoding="utf-8")
                 assert "azure/login" not in text and "secrets.AZURE_" not in text, (path.name, name)
-    e2e = yaml.safe_load((WORKFLOWS / "e2e-test.yaml").read_text(encoding="utf-8"))
+    e2e = cached_safe_load((WORKFLOWS / "e2e-test.yaml").read_text(encoding="utf-8"))
     assert set(e2e.get("on", e2e.get(True))) == {"workflow_dispatch"}
 
 

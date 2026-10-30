@@ -7,7 +7,7 @@ inputs:
     required: false
     default: "3.11"
   install-dev:
-    description: "Include dev dependencies (pytest, pytest-cov)"
+    description: "Include dev dependencies (pytest, pytest-cov, pytest-xdist)"
     required: false
     default: "false"
   siteops-source:
