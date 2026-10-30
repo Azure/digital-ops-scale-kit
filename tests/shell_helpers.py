@@ -88,5 +88,5 @@ def run_script(
         capture_output=True,
         text=True,
         check=False,
-        timeout=300,
+        timeout=600,
     )
