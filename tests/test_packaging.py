@@ -592,15 +592,18 @@ def test_parallel_runs_report_a_crashed_worker_and_run_the_rest(scheduled_suite)
     result.stdout.fnmatch_lines(["*crashed while running*test_single.py::test_single?9?*"])
 
 
-def test_parallel_runs_run_every_repeated_test(scheduled_suite):
+# pytest 9 collects a repeated path once unless --keep-duplicates asks for every occurrence.
+@pytest.mark.parametrize(("options", "passed"), [((), 6), (("--keep-duplicates",), 12)])
+def test_parallel_runs_match_serial_runs_for_repeated_paths(scheduled_suite, options, passed):
     scheduled_suite.makepyfile(test_single=(
         "import pytest\n\n"
         "@pytest.mark.parametrize('n', range(2))\n"
         "def test_single(n):\n"
         "    pass\n"
     ))
-    result = scheduled_suite.runpytest_subprocess(
-        "-n", "2", "-p", "no:cacheprovider", "--keep-duplicates",
-        "test_grouped.py", "test_single.py", "test_grouped.py", "test_single.py", timeout=120,
-    )
-    result.assert_outcomes(passed=12)
+    for workers in ((), ("-n", "2")):
+        result = scheduled_suite.runpytest_subprocess(
+            *workers, "-p", "no:cacheprovider", *options,
+            "test_grouped.py", "test_single.py", "test_grouped.py", "test_single.py", timeout=120,
+        )
+        result.assert_outcomes(passed=passed)
