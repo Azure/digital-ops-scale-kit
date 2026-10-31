@@ -58,12 +58,14 @@ def write_executable(path: Path, content: str) -> None:
 
 def run_script(
     script: str, tmp_path: Path, exports: dict[str, str],
-    *, shell_options: tuple[str, ...] = ("-e", "-o", "pipefail"),
+    *, shell_options: tuple[str, ...] = ("-e", "-o", "pipefail"), functions: str = "",
 ) -> subprocess.CompletedProcess[str]:
     """Run one workflow step's shell with exported inputs and no profile state.
 
     A `bin` directory under `tmp_path` is placed first on `PATH`, so a test can
     hand the step recording or failing stand-ins for the tools it calls.
+    `functions` is shell code that runs before the step. Stand-ins defined there
+    as shell functions answer within the step's shell and start no process.
     The default options match GitHub Actions. Pass an empty tuple for Azure
     Pipelines, whose script must establish its own error handling.
     The step runs from `tmp_path` and returns its completed process unchecked.
@@ -73,6 +75,8 @@ def run_script(
     if bin_dir.is_dir():
         preamble.append(f'export PATH={shlex.quote(bash_path(bin_dir))}:"$PATH"')
     preamble.extend(f"export {name}={shlex.quote(value)}" for name, value in exports.items())
+    if functions:
+        preamble.append(functions)
     script_path = tmp_path / "workflow-step.sh"
     write_executable(script_path, "\n".join((*preamble, script)))
     # Git Bash starts a step's processes slowly on a busy host, so the limit only stops a hang.

@@ -36,21 +36,21 @@ printf '%s\\n' 'echo PRIVATE_INSTALL_OUT' 'echo PRIVATE_INSTALL_ERR >&2' 'exit "
 
 @pytest.mark.parametrize("api_ready", [False, True])
 def test_private_host_readiness_does_not_publish_journal_or_node_values(tmp_path, api_ready):
-    binary = tmp_path / "bin"
-    binary.mkdir()
     (tmp_path / "k3s-private").mkdir()
-    write_executable(binary / "kubectl", """#!/usr/bin/env bash
-if [[ "$*" == 'get --raw=/readyz' ]]; then exit "$API_RESULT"; fi
-echo PRIVATE_NODE_NAME
-""")
-    write_executable(binary / "sudo", "#!/usr/bin/env bash\necho PRIVATE_JOURNAL_VALUE\n")
-    write_executable(binary / "sleep", "#!/usr/bin/env bash\nexit 0\n")
+    # The polling loop calls these up to 30 times, so they answer within the step's shell.
+    functions = """kubectl() {
+  if [[ "$*" == 'get --raw=/readyz' ]]; then return "$API_RESULT"; fi
+  echo PRIVATE_NODE_NAME
+}
+sudo() { echo PRIVATE_JOURNAL_VALUE; }
+sleep() { return 0; }
+"""
     script = next(step["run"] for step in CLUSTER["runs"]["steps"]
                   if step.get("name") == "Wait for k3s API + node Ready")
     result = run_script(script, tmp_path, {
         "PRIVATE_DIAGNOSTICS": "true", "RUNNER_TEMP": bash_path(tmp_path),
         "API_RESULT": "0" if api_ready else "1",
-    })
+    }, functions=functions)
     assert result.returncode == (0 if api_ready else 1)
     assert "PRIVATE_" not in result.stdout + result.stderr
     retained = tmp_path / "k3s-private" / ("nodes.out" if api_ready else "journal.out")
