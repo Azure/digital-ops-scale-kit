@@ -69,6 +69,25 @@ prepare_runtime() {
     return overrides
 
 
+# The download and the runtime reader answer as exported shell functions, so the bootstrap's
+# Bash starts no extra shell for them. gh stays a program because the bootstrap resolves its path.
+_BASH_DOUBLES = r'''curl() {
+  [[ "$TEST_FORBID_DOWNLOAD" != 1 ]] || return 99
+  local output="" url=""
+  while (($#)); do
+    if [[ "$1" == -o ]]; then output="$2"; shift 2
+    elif (($# == 1)); then url="$1"; shift
+    else shift; fi
+  done
+  [[ -n "$output" && "$url" == https://github.com/example/publisher/releases/download/* ]] || return 99
+  printf '%s\n' "$url" >> "$TEST_DOWNLOAD_LOG"
+  cp -- "$TEST_PUBLISHED/${url##*/}" "$output"
+}
+fixture_python() { "$TEST_PYTHON" "$@" | tr -d '\r'; }
+export -f curl fixture_python
+'''
+
+
 def _powershell_overrides():
     return r'''
 function Native([string]$Name) {
@@ -187,30 +206,18 @@ def run_bootstrap(
             bin_dir / "gh",
             '#!/usr/bin/env bash\nexec "$TEST_PYTHON" -I -S -B "$TEST_GH_DOUBLE" "$@"\n',
         )
-        reader = bin_dir / "fixture-python"
-        write_executable(reader, '#!/usr/bin/env bash\nset -o pipefail\n"$TEST_PYTHON" "$@" | tr -d \'\\r\'\n')
-        write_executable(bin_dir / "curl", r'''#!/usr/bin/env bash
-[[ "$TEST_FORBID_DOWNLOAD" != 1 ]] || exit 99
-output=""
-while (($#)); do
-  if [[ "$1" == -o ]]; then output="$2"; shift 2
-  elif (($# == 1)); then url="$1"; shift
-  else shift; fi
-done
-[[ -n "$output" && "$url" == https://github.com/example/publisher/releases/download/* ]] || exit 99
-printf '%s\n' "$url" >> "$TEST_DOWNLOAD_LOG"
-cp -- "$TEST_PUBLISHED/${url##*/}" "$output"
-''')
+        # The curl function answers downloads. This program only runs if that function is missing.
+        write_executable(bin_dir / "curl", "#!/usr/bin/env bash\nexit 99\n")
         env.update({
             "TEST_PYTHON": bash_path(Path(sys.executable)), "TEST_GH_DOUBLE": bash_path(gh_double),
-            "TEST_READER_PYTHON": bash_path(reader),
+            "TEST_READER_PYTHON": "fixture_python",
             "TEST_PUBLISHED": bash_path(published), "TEST_RESPONSES": bash_path(reply_path),
             "TEST_GH_LOG": bash_path(log), "HOME": bash_path(tmp_path),
             "TEST_DOWNLOAD_LOG": bash_path(download_log),
             "XDG_DATA_HOME": bash_path(tmp_path / "state"),
         })
         # Set PATH inside Bash so Windows path separators cannot select an ambient downloader.
-        preamble = f'export PATH="{bash_path(bin_dir)}:$PATH"\n'
+        preamble = f'export PATH="{bash_path(bin_dir)}:$PATH"\n' + _BASH_DOUBLES
         launcher = tmp_path / "launch.sh"
         invocation = 'exec bash -s -- "$@"\n' if piped else f'exec bash "{bash_path(wrapper)}" "$@"\n'
         launcher.write_text(preamble + invocation, encoding="utf-8", newline="\n")
