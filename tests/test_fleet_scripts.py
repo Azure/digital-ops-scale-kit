@@ -39,11 +39,12 @@ def test_private_host_readiness_does_not_publish_journal_or_node_values(tmp_path
     (tmp_path / "k3s-private").mkdir()
     # The polling loop calls these up to 30 times, so they answer within the step's shell.
     functions = """kubectl() {
+  printf 'kubectl %s\\n' "$*" >> "$RUNNER_TEMP/calls.log"
   if [[ "$*" == 'get --raw=/readyz' ]]; then return "$API_RESULT"; fi
   echo PRIVATE_NODE_NAME
 }
 sudo() { echo PRIVATE_JOURNAL_VALUE; }
-sleep() { return 0; }
+sleep() { printf 'sleep %s\\n' "$*" >> "$RUNNER_TEMP/calls.log"; }
 """
     script = next(step["run"] for step in CLUSTER["runs"]["steps"]
                   if step.get("name") == "Wait for k3s API + node Ready")
@@ -55,6 +56,11 @@ sleep() { return 0; }
     assert "PRIVATE_" not in result.stdout + result.stderr
     retained = tmp_path / "k3s-private" / ("nodes.out" if api_ready else "journal.out")
     assert "PRIVATE_" in retained.read_text()
+    probe = "kubectl get --raw=/readyz"
+    expected = [probe, "kubectl wait --for=condition=Ready node --all --timeout=300s"] if api_ready else (
+        [probe, "sleep 10"] * 29 + [probe]
+    )
+    assert (tmp_path / "calls.log").read_text().splitlines() == expected
 
 
 @pytest.mark.parametrize("field,value", [
