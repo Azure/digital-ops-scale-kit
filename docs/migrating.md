@@ -45,7 +45,7 @@ These changes affect how you install or run Site Ops after v1.0.0b7.
 | If you... | What to change |
 |---|---|
 | Install Site Ops on Windows with the PowerShell bootstrap | Review the [saved user PATH](#windows-user-path). |
-| Install Site Ops with the bootstrap or the release wheel command | Nothing changes for existing installations. Review the [Python runtime](#python-runtime) if the host cannot download CPython 3.14.7. |
+| Install Site Ops with the bootstrap or the [release wheel](install-siteops.md#install-the-release-wheel) | Nothing changes for existing installations. Review the [Python runtime](#python-runtime) if the host cannot download CPython 3.14.7. |
 | Match artifact verification error text, or read `source` from failed `browse --output json` | Review [artifact verification messages](#artifact-verification-messages). |
 | Read `diagnostics` from `validate`, `plan` or `deploy` JSON, or render it in a pipeline | Review [warnings in JSON results](#warnings-in-json-results). |
 | Want Arc extension settings without a saved Site | Nothing changes for existing use. Review [typed extension settings](#typed-extension-settings). |
