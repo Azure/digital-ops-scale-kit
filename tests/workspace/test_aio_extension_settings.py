@@ -164,7 +164,7 @@ def test_install_example_stays_minimal_and_settings_follow_their_extensions(work
     assert not set(MAPS.values()) & set(defaults.parameters)
 
 
-@pytest.mark.parametrize("release", ["2607", "2608", "2609"])
+@pytest.mark.parametrize("release", ["2607", "2608", "2609", "2610"])
 def test_typed_install_settings_match_a_site_and_keep_bundled_cert_manager_values(
     workspace, tmp_path, monkeypatch, release,
 ):
@@ -237,7 +237,7 @@ def test_upgrade_contract_requires_the_release_and_the_cert_manager_answer(works
     )
 
 
-@pytest.mark.parametrize("release", ["2607", "2608", "2609"])
+@pytest.mark.parametrize("release", ["2607", "2608", "2609", "2610"])
 def test_typed_upgrade_applies_settings_over_release_values_at_the_actual_instance(
     workspace, tmp_path, monkeypatch, release,
 ):

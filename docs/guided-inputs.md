@@ -346,7 +346,7 @@ deleting the existing cluster or resources owned by others.
 `aioRelease` is a typed answer mapped to the selected Site's
 `properties.aioRelease`. The packaged IoT Operations workspace supplies
 the [supported AIO release configurations](aio-releases.md#available-aio-releases),
-including `2608`. `2609` is the default.
+including `2608` and `2610`. `2609` is the default.
 To use different AIO releases without saving Site files, prepare and
 deploy each existing Arc cluster in a separate invocation:
 

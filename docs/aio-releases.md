@@ -44,7 +44,7 @@ secretStoreTrain: stable
 
 The `aioApiVersion` and `adrApiVersion` values route CREATE and UPDATE operations through their matching versioned modules (for example `templates/aio/modules/instance-2026-07-01.bicep` and `templates/deps/modules/adr-ns-2026-04-01.bicep`). Configuration override objects specific to an AIO release are forwarded automatically to templates that declare them. Bicep cannot parameterize API version strings, so the dispatchers use `@allowed` + conditional modules. See [Adding a new AIO release](#adding-a-new-aio-release) below.
 
-The AIO release 2608 and 2609 configurations also deploy the OPC UA connector template
+The AIO release 2608, 2609 and 2610 configurations also deploy the OPC UA connector template
 and supply the MQTT trust settings required by the WebAssembly graph
 controller. Install and upgrade use the same typed connector template module.
 Settings under `aioReleaseConfiguration.extension` belong to the AIO Arc
@@ -59,6 +59,10 @@ AIO release needs.
 AIO releases where it is not yet a default of the API generation.
 `extension.wasmGraphControllerMqttTrust` enables the derived MQTT trust settings
 required by the WebAssembly graph controller.
+The 2610 configuration also uses `extension.configurationOverrides` to select
+the OPC UA connector chart and images, and to keep the connector's Edge
+Registry preview feature off. Its connector template also lists the
+`Microsoft.OpcUa.WoT` inbound endpoint type.
 
 The connector template is deployed only when its version is configured and
 the instance's effective OPC UA feature mode is not `Disabled`.
@@ -110,6 +114,7 @@ Every file in `workspaces/iot-operations/parameters/aio-releases/` is a shipped 
 | `2607` | `2026-07-01` | `2026-04-01` | OPC connector template affected by [Microsoft known issue 1330](https://learn.microsoft.com/azure/iot-operations/troubleshoot/known-issues#opc-connector-template-missing) |
 | `2608` | `2026-07-01` | `2026-04-01` | Selectable by an explicit pin |
 | `2609` | `2026-07-01` | `2026-04-01` | Default in `base-site.yaml`. Pins from AIO CLI v2.10.0 |
+| `2610` | `2026-10-01` | `2026-04-01` | Selectable by an explicit pin. Pins from AIO CLI v2.11.0 |
 
 Source of truth for every pinned version number is the YAML itself. Check it against the [IoT Operations release matrix](https://github.com/Azure/azure-iot-ops-cli-extension/wiki/IoT-Operations-versions) before shipping a new one.
 
@@ -138,7 +143,8 @@ siteops deploy aio-install --source "official@<release>" --input "cluster=<Arc-c
 
 Use a Scale Kit source release that includes `2609.yaml`.
 To select 2608, set `properties.aioRelease: "2608"` on the Site or pass
-`--input aioRelease=2608` to guided installation.
+`--input aioRelease=2608` to guided installation. Select 2610, AIO 1.5.41,
+the same way.
 For an existing AIO installation, pin the Site to 2609 and follow the
 [upgrade operation guide](../workspaces/iot-operations/manifests/aio-upgrade/README.md)
 instead of running installation again.
@@ -148,7 +154,7 @@ instead of running installation again.
 Follow the [upgrade operation guide](../workspaces/iot-operations/manifests/aio-upgrade/README.md)
 to prepare and deploy an AIO release change in place. The operation updates
 extensions and the resources that the AIO release requires rather than reapplying the
-greenfield instance configuration. Upgrades to 2608 or 2609 deploy the OPC UA
+greenfield instance configuration. Upgrades to 2608, 2609 or 2610 deploy the OPC UA
 connector template when OPC UA is enabled.
 
 ### Catalog families and upgrade order
@@ -165,7 +171,7 @@ This applies to every resource area a Site selects through `properties.resourceS
 
 ### Supported upgrade paths
 
-Azure IoT Operations supports upgrade to any patch of the same minor version, or to the next minor version. Move across several minor versions one minor version at a time, for example from a 1.2.x release through a 1.3.x release to a 1.4.x release. A downgrade, or a move between preview and GA in either direction, requires uninstall and reinstall. See [Upgrade Azure IoT Operations](https://learn.microsoft.com/azure/iot-operations/manage-iot-ops/howto-upgrade) for the authoritative rules, and the [upgrade operation guide](../workspaces/iot-operations/manifests/aio-upgrade/README.md#choose-a-supported-upgrade-path) for the minor version of each AIO release and the broker redundancy requirement.
+Azure IoT Operations supports upgrade to any patch of the same minor version, or to the next minor version. Move across several minor versions one minor version at a time, for example from a 1.3.x release through a 1.4.x release to a 1.5.x release. A downgrade, or a move between preview and GA in either direction, requires uninstall and reinstall. See [Upgrade Azure IoT Operations](https://learn.microsoft.com/azure/iot-operations/manage-iot-ops/howto-upgrade) for the authoritative rules, and the [upgrade operation guide](../workspaces/iot-operations/manifests/aio-upgrade/README.md#choose-a-supported-upgrade-path) for the minor version of each AIO release and the broker redundancy requirement.
 
 The optional E2E workflow can exercise selected upgrades between adjacent AIO releases,
 such as `2608` to `2609`. A passing dispatch establishes its selected

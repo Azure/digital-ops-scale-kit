@@ -1,0 +1,32 @@
+# AIO release 2610: version configuration
+# Source: https://github.com/Azure/azure-iot-ops-cli-extension/wiki/IoT-Operations-versions#2610
+# API version, OPC UA connector version and connector settings:
+# azext_edge/edge/providers/orchestration/template.py
+# at https://github.com/Azure/azure-iot-ops-cli-extension/tree/v2.11.0
+
+aioVersion: "1.5.41"
+aioTrain: stable
+aioApiVersion: "2026-10-01"
+adrApiVersion: "2026-04-01"
+aioReleaseConfiguration:
+  extension:
+    wasmGraphControllerMqttTrust: true
+    configurationOverrides:
+      "connectors.image.registry": "mcr.microsoft.com"
+      "connectors.image.repository": "azureiotoperations/aio-connectors/helmchart/microsoft-aio-connectors"
+      "connectors.image.tag": "1.5.19"
+      "connectors.values.image.registry": "mcr.microsoft.com"
+      "connectors.values.opcUaConnector.environment[0].name": "opcuabroker_FeatureManagement__EdgeRegistryPreview"
+      "connectors.values.opcUaConnector.environment[0].value": "false"
+      "connectors.values.opcUaConnector.environment[1].name": "aioconnectors_FeatureManagement__EdgeRegistryPreview"
+      "connectors.values.opcUaConnector.environment[1].value": "false"
+  resources:
+    opcUaConnector:
+      version: "1.5.19"
+certManagerVersion: "1.2.1"
+certManagerTrain: stable
+certManagerConfigurationOverrides:
+  trust-manager.secretTargets.enabled: "false"
+  trust-manager.secretTargets.authorizedSecretsAll: "false"
+secretStoreVersion: "1.6.0"
+secretStoreTrain: stable

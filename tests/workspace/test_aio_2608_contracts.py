@@ -1,4 +1,4 @@
-"""Workspace contracts for the AIO 2608 and 2609 releases."""
+"""Workspace contracts for the AIO releases from 2608, which deploy the OPC UA connector template."""
 
 from pathlib import Path
 
@@ -114,6 +114,25 @@ def test_upgrade_manifest_separates_extensions_from_release_resources(workspace)
 
     resolve_aio = _read(workspace, "templates/aio/resolve-aio.bicep")
     assert "output aioInstanceName" not in resolve_aio
+
+
+def test_release_settings_name_one_connector_version(workspace):
+    """A release that sets the connectors chart tag runs its connector template at that version.
+
+    Both values come from one connector release, so a refresh that moves one and
+    not the other would install mismatched connector components.
+    """
+    checked = 0
+    for path in sorted((workspace / "parameters" / "aio-releases").glob("*.yaml")):
+        configuration = yaml.safe_load(path.read_text(encoding="utf-8"))["aioReleaseConfiguration"]
+        overrides = configuration.get("extension", {}).get("configurationOverrides", {})
+        if "connectors.image.tag" not in overrides:
+            continue
+        assert overrides["connectors.image.tag"] == configuration["resources"]["opcUaConnector"]["version"], (
+            f"{path.name}: connectors.image.tag differs from the OPC UA connector version."
+        )
+        checked += 1
+    assert checked, "No release sets connectors.image.tag, so nothing was compared."
 
 
 def test_release_specific_settings_reach_the_selected_create_module(workspace):
@@ -252,7 +271,7 @@ def test_2608_wasm_mqtt_trust_flows_through_install_and_upgrade(workspace):
     assert "wasmGraphControllerMqttTrust" in update_extensions
 
 
-@pytest.mark.parametrize("release_name", ["2608", "2609"])
+@pytest.mark.parametrize("release_name", ["2608", "2609", "2610"])
 def test_cert_manager_defaults_match_the_release(workspace, release_name):
     release = _release(workspace, release_name)
 

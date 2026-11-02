@@ -527,6 +527,8 @@ class TestAioExtensionInvariants:
                 allowed_additions |= AIO_SECURITY_PKI_SUBJECT_NAME_ADDITIONS
             if extension_configuration.get("wasmGraphControllerMqttTrust"):
                 allowed_additions |= AIO_2608_RELEASE_ADDITIONS
+            release_overrides = extension_configuration.get("configurationOverrides", {})
+            allowed_additions |= set(release_overrides)
             _assert_config_preserved_with_additions(
                 name=name,
                 component="AIO",
@@ -546,10 +548,15 @@ class TestAioExtensionInvariants:
                 assert AIO_2608_RELEASE_ADDITIONS <= set(
                     post["configurationSettings"]
                 )
+            for key, value in release_overrides.items():
+                assert post["configurationSettings"].get(key) == value, (
+                    f"Site '{name}': release setting {key!r} is "
+                    f"{post['configurationSettings'].get(key)!r} after upgrade, expected {value!r}"
+                )
 
     def test_aio_release_train_preserved(self, aio_upgrade_result):
         """releaseTrain change is allowed only when the release config bumps
-        the train. Shipped release configs (2603 through 2609) all use `stable`,
+        the train. Shipped release configs (2603 through 2610) all use `stable`,
         so a mismatch here means the RP defaulted the train unexpectedly OR
         the release config was bumped (intentional, update the test).
         """
@@ -758,7 +765,7 @@ class TestCertManagerExtensionInvariants:
                     key: "false"
                     for key in CERT_MANAGER_TRUST_MANAGER_OVERRIDES
                 }
-                if aio_api_version == "2026-07-01"
+                if aio_api_version != "2026-03-01"
                 else {}
             )
             _assert_config_preserved_with_overrides(

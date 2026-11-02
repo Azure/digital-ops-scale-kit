@@ -29,6 +29,7 @@ Each AIO release in this workspace installs one AIO version:
 | 2607 | 1.4.41 | 1.4 |
 | 2608 | 1.4.73 | 1.4 |
 | 2609 | 1.4.112 | 1.4 |
+| 2610 | 1.5.41 | 1.5 |
 
 Before you choose a target, find the version the instance runs. The
 instance's Overview page in the Azure portal shows it, and so does
@@ -119,7 +120,7 @@ values:
 Replace each placeholder, then supply the file with `--input-file` instead
 of the inline answers. A setting you made at installation for a key that the
 AIO release also sets, such as the cert-manager settings of releases 2607 to
-2609, returns to the release value on upgrade unless you supply it again.
+2610, returns to the release value on upgrade unless you supply it again.
 [Settings Scale Kit derives](../aio-install/README.md#settings-scale-kit-derives)
 lists the AIO settings that the installation computes. Deploy shows
 the read resource IDs and the plan, then asks for confirmation. Add `--yes`

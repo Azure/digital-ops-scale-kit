@@ -107,7 +107,7 @@ values. A map key replaces any of them:
 | AIO extension settings | Derived from |
 |---|---|
 | `trustSource`, `trustBundleSettings.issuer.name`, `trustBundleSettings.issuer.kind`, `trustBundleSettings.configMap.name`, `trustBundleSettings.configMap.key` | `parameters.trustConfig` |
-| `dataFlows.values.wasmGraphController.mqttBroker.caCertConfigMapRef`, `dataFlows.values.wasmGraphController.mqttBroker.caCertFileName` | `parameters.trustConfig`, for AIO releases 2608 and 2609 |
+| `dataFlows.values.wasmGraphController.mqttBroker.caCertConfigMapRef`, `dataFlows.values.wasmGraphController.mqttBroker.caCertFileName` | `parameters.trustConfig`, for AIO releases 2608 to 2610 |
 | `connectors.values.mqttBroker.address`, `connectors.values.mqttBroker.serviceAccountTokenAudience`, `dataFlows.values.tinyKube.mqttBroker.hostName`, `dataFlows.values.tinyKube.mqttBroker.port`, `dataFlows.values.tinyKube.mqttBroker.authentication.serviceAccountTokenAudience`, `schemaRegistry.values.mqttBroker.host`, `schemaRegistry.values.mqttBroker.serviceAccountTokenAudience` | The cluster namespace and the default broker listener |
 | `connectors.values.securityPki.applicationUri` | The cluster, for AIO 2603 and later |
 | `connectors.values.securityPki.subjectName` | The cluster, for AIO 2605 and later |

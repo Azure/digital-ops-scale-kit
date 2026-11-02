@@ -268,7 +268,7 @@ def test_security_pki_defaults_follow_released_aio_behavior(workspace):
     for release in ("2605", "2606"):
         extension = _release(workspace, release)["aioReleaseConfiguration"]["extension"]
         assert extension["securityPkiSubjectName"] is True
-    for release in ("2607", "2608", "2609"):
+    for release in ("2607", "2608", "2609", "2610"):
         extension = (
             _release(workspace, release)["aioReleaseConfiguration"].get("extension", {})
         )
