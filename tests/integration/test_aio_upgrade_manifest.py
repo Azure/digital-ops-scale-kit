@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 
 import pytest
+import yaml
 
 from siteops.models import Manifest
 from siteops.results import OperationStatus, RunStatus, SiteStatus
@@ -113,10 +114,11 @@ class TestAioUpgradeDeployment:
             assert sum(
                 operation.status is OperationStatus.SUCCEEDED
                 for operation in site.operations
-            ) == 4
+            ) == 5
 
     def test_all_phases_run(self, aio_upgrade_result):
         expected = (
+            "check-upgrade-path",
             "resolve-aio",
             "resolve-extensions",
             "update-extensions",
@@ -433,6 +435,71 @@ class TestAioUpgradeTargetVersion:
                 f"Site '{name}': upgrading {release_from} to {release_to} left the "
                 f"AIO version at {resolved!r}. The instance was re-PUT at the "
                 f"version it already carried."
+            )
+
+
+def _release_version(release: str) -> str:
+    path = WORKSPACE_PATH / "parameters" / "aio-releases" / f"{release}.yaml"
+    return str(yaml.safe_load(path.read_text(encoding="utf-8"))["aioVersion"])
+
+
+class TestAioUpgradePathCheck:
+    """The first step reads the installed AIO version and lets the selected move through."""
+
+    def test_check_passes_the_selected_path(self, aio_upgrade_result):
+        release_from = os.environ.get("AIO_RELEASE_FROM", "").strip()
+        release_to = os.environ.get("AIO_RELEASE_TO", "").strip()
+        expected = "supported" if release_from and release_to and release_from != release_to else "unchanged"
+        for name in site_names(aio_upgrade_result):
+            check = assert_step_succeeded(aio_upgrade_result, name, "check-upgrade-path")
+            resolved = assert_output_exists(find_step(aio_upgrade_result, name, "resolve-extensions"), "aio")
+            assert assert_output_exists(check, "installedVersion") == resolved["version"], (
+                f"Site '{name}': the path check read a different AIO version than resolve-extensions."
+            )
+            assert assert_output_exists(check, "status") == expected
+            assert assert_output_exists(check, "warnings") == [], (
+                f"Site '{name}': the path check reported that it did not check the path."
+            )
+
+
+class TestAioUpgradeDowngradeRefused:
+    """After an upgrade, selecting the source release again stops at the path check.
+
+    Runs only in a cross-release upgrade phase. The rerun at the target then
+    finds the instance unchanged, which shows the refusal wrote nothing.
+    """
+
+    def test_downgrade_stops_before_any_change(self, aio_upgrade_downgrade_result, record_property):
+        release_from = os.environ["AIO_RELEASE_FROM"].strip()
+        release_to = os.environ["AIO_RELEASE_TO"].strip()
+        refusal = (
+            f"AIO release {release_from} ({_release_version(release_from)}) is older than the "
+            f"installed AIO {_release_version(release_to)}."
+        )
+        assert aio_upgrade_downgrade_result.status is RunStatus.FAILED
+        for site in site_results(aio_upgrade_downgrade_result):
+            assert site.status is SiteStatus.FAILED
+            check, *later = site.operations
+            assert check.identity.step == "check-upgrade-path"
+            assert check.status is OperationStatus.FAILED
+            assert later and all(operation.status is OperationStatus.NOT_RUN for operation in later), (
+                f"Site '{site.target}': operations after the refused path check ran."
+            )
+            category = check.failure.category if check.failure is not None else "none"
+            found = refusal in (check.reason.local_message() if check.reason is not None else "")
+            record_property("downgrade_failure_category", category)
+            record_property("downgrade_refusal_message_found", found)
+            assert found, (
+                f"Site '{site.target}': the refused deployment did not carry the downgrade message."
+            )
+
+    def test_rerun_at_the_target_finds_the_upgrade_unchanged(self, aio_upgrade_rerun_result):
+        release_to = os.environ["AIO_RELEASE_TO"].strip()
+        for name in site_names(aio_upgrade_rerun_result):
+            check = assert_step_succeeded(aio_upgrade_rerun_result, name, "check-upgrade-path")
+            assert assert_output_exists(check, "status") == "unchanged"
+            assert assert_output_exists(check, "installedVersion") == _release_version(release_to), (
+                f"Site '{name}': the AIO extension moved during the refused downgrade."
             )
 
 

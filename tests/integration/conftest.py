@@ -89,6 +89,8 @@ _UPGRADE_PHASE_ALLOWED_CLASSES = frozenset({
     "TestAioUpgradeSelfConsistency",
     "TestAioUpgradeIdempotency",
     "TestAioUpgradeTargetVersion",
+    "TestAioUpgradePathCheck",
+    "TestAioUpgradeDowngradeRefused",
     "TestAioExtensionInvariants",
     "TestOpcUaConnectorTemplateUpgrade",
     "TestSecretStoreExtensionInvariants",
@@ -561,6 +563,54 @@ def aio_upgrade_result(
         sites=sites,
     )
     return _assert_deployed(result, "aio-upgrade")
+
+
+def _forward_upgrade() -> tuple[str, str] | None:
+    """Return the (from, to) releases of an upgrade-phase run that changed release."""
+    release_from = os.environ.get("AIO_RELEASE_FROM", "").strip()
+    release_to = os.environ.get("AIO_RELEASE_TO", "").strip()
+    if not _is_upgrade_phase() or not release_from or not release_to or release_from == release_to:
+        return None
+    return release_from, release_to
+
+
+@pytest.fixture(scope="session")
+def aio_upgrade_downgrade_result(
+    orchestrator: Orchestrator,
+    selector: str | None,
+    aio_upgrade_result: RunResult,
+) -> RunResult:
+    """Select the source release again after the upgrade, which the path check refuses.
+
+    The Sites are restored afterwards, because the orchestrator returns the
+    same `Site` objects to every fixture in the session.
+    """
+    releases = _forward_upgrade()
+    if releases is None:
+        pytest.skip("Not a cross-release upgrade, so no older release is installed to select again.")
+    manifest_path = WORKSPACE_PATH / "manifests" / "aio-upgrade" / "manifest.yaml"
+    manifest, sites = _resolve_or_fail(orchestrator, manifest_path, selector)
+    original = {id(site): site.properties.get("aioRelease") for site in sites}
+    for site in sites:
+        site.properties["aioRelease"] = releases[0]
+    try:
+        return orchestrator.deploy(manifest_path=manifest_path, manifest=manifest, sites=sites)
+    finally:
+        for site in sites:
+            site.properties["aioRelease"] = original[id(site)]
+
+
+@pytest.fixture(scope="session")
+def aio_upgrade_rerun_result(
+    orchestrator: Orchestrator,
+    selector: str | None,
+    aio_upgrade_downgrade_result: RunResult,
+) -> RunResult:
+    """Run aio-upgrade again at the target release after the refused downgrade."""
+    manifest_path = WORKSPACE_PATH / "manifests" / "aio-upgrade" / "manifest.yaml"
+    manifest, sites = _resolve_or_fail(orchestrator, manifest_path, selector)
+    result = orchestrator.deploy(manifest_path=manifest_path, manifest=manifest, sites=sites)
+    return _assert_deployed(result, "aio-upgrade rerun")
 
 
 # Test override keys injected by aio_upgrade_with_overrides_result. Exposed at

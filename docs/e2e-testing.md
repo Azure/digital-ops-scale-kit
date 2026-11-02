@@ -671,6 +671,8 @@ pytest tests/integration/ -v -m integration
 - **Narrows test collection** to `_UPGRADE_PHASE_ALLOWED_CLASSES` in `tests/integration/conftest.py`. Classes whose assertions require outputs from the install phase are listed in `_UPGRADE_PHASE_INSTALL_ONLY_CLASSES` instead. A workspace test requires every class in the upgrade module to appear in exactly one collection.
 - **Bypasses the `aio_install_result` fixture** so `aio-install` is not deployed again at the new AIO release on top of the existing instance.
 
+When `AIO_RELEASE_FROM` and `AIO_RELEASE_TO` differ, as the workflow sets them, the upgrade tests also select the source release again after the upgrade. They require the `check-upgrade-path` step to refuse that downgrade before any later step runs, then rerun `aio-upgrade` at the target and require the path check to find the installed AIO version unchanged.
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
