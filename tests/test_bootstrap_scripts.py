@@ -29,6 +29,9 @@ from tests.yaml_documents import cached_safe_load
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts" / "bootstrap"
 SOURCE_SHA = "c" * 40
+# Windows PowerShell can take many seconds to start on a busy runner. Two minutes
+# stays well inside the job timeout, so a probe that hangs still fails.
+POWERSHELL_TIMEOUT_SECONDS = 120
 
 
 @pytest.fixture(params=["bash", "powershell"])
@@ -411,7 +414,7 @@ def test_windows_local_discovery_uses_real_acl_and_reparse_admission(tmp_path, c
             sid = subprocess.run(
                 ["powershell.exe", "-NoProfile", "-Command",
                  "[Security.Principal.WindowsIdentity]::GetCurrent().User.Value"],
-                capture_output=True, text=True, check=True, timeout=20,
+                capture_output=True, text=True, check=True, timeout=POWERSHELL_TIMEOUT_SECONDS,
             ).stdout.strip()
             changed = subprocess.run(
                 ["icacls.exe", str(asset), "/setowner", "*S-1-5-32-545"],
@@ -836,7 +839,7 @@ def _windows_tool_probe(
         ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
         cwd=wrapper.parent,
         env=env,
-        capture_output=True, text=True, timeout=20,
+        capture_output=True, text=True, timeout=POWERSHELL_TIMEOUT_SECONDS,
     )
 
 
@@ -1045,7 +1048,7 @@ def test_windows_bootstrap_rejects_reparse_command_directory_ancestor(tmp_path):
                 "New-Item -ItemType Junction -Path $env:TEST_ALIAS -Target $env:TEST_TARGET | Out-Null",
             ],
             env={**os.environ, "TEST_ALIAS": str(alias), "TEST_TARGET": str(target_directory.parent)},
-            capture_output=True, text=True, timeout=20,
+            capture_output=True, text=True, timeout=POWERSHELL_TIMEOUT_SECONDS,
         )
         if junction.returncode:
             pytest.skip("Creating a test reparse point is unavailable on this host.")
@@ -1107,7 +1110,7 @@ def test_windows_bootstrap_rejects_linked_executable_ancestor(tmp_path):
                 "New-Item -ItemType Junction -Path $env:TEST_ALIAS -Target $env:TEST_TARGET | Out-Null",
             ],
             env={**os.environ, "TEST_ALIAS": str(alias), "TEST_TARGET": str(external)},
-            capture_output=True, text=True, timeout=20,
+            capture_output=True, text=True, timeout=POWERSHELL_TIMEOUT_SECONDS,
         )
         if junction.returncode:
             pytest.skip("Creating a test reparse point is unavailable on this host.")
@@ -1156,7 +1159,7 @@ def test_windows_bootstrap_rejects_shared_root_without_changing_it(tmp_path):
     valid = subprocess.run(
         ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
         cwd=tmp_path, env={**os.environ, "TEST_DATA_ROOT": str(safe / "siteops")},
-        capture_output=True, text=True, timeout=20,
+        capture_output=True, text=True, timeout=POWERSHELL_TIMEOUT_SECONDS,
     )
     assert valid.returncode == 0, valid.stdout + valid.stderr
     assert "PRIVATE_ROOT_ACCEPTED" in valid.stdout
@@ -1164,7 +1167,7 @@ def test_windows_bootstrap_rejects_shared_root_without_changing_it(tmp_path):
     repeated = subprocess.run(
         ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
         cwd=tmp_path, env={**os.environ, "TEST_DATA_ROOT": str(safe / "siteops")},
-        capture_output=True, text=True, timeout=20,
+        capture_output=True, text=True, timeout=POWERSHELL_TIMEOUT_SECONDS,
     )
     assert repeated.returncode == 0, repeated.stdout + repeated.stderr
 
@@ -1181,7 +1184,7 @@ def test_windows_bootstrap_rejects_shared_root_without_changing_it(tmp_path):
         rejected = subprocess.run(
             ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
             cwd=tmp_path, env={**os.environ, "TEST_DATA_ROOT": str(shared / "siteops")},
-            capture_output=True, text=True, timeout=20,
+            capture_output=True, text=True, timeout=POWERSHELL_TIMEOUT_SECONDS,
         )
         assert rejected.returncode != 0
         assert "private Site Ops data root" in rejected.stderr
@@ -1210,14 +1213,14 @@ def test_windows_bootstrap_rejects_symlinked_data_ancestor(tmp_path):
                 "New-Item -ItemType Junction -Path $env:TEST_ALIAS -Target $env:TEST_TARGET | Out-Null",
             ],
             env={**os.environ, "TEST_ALIAS": str(alias), "TEST_TARGET": str(private)},
-            capture_output=True, text=True, timeout=20,
+            capture_output=True, text=True, timeout=POWERSHELL_TIMEOUT_SECONDS,
         )
         if junction.returncode:
             pytest.skip("Creating a test reparse point is unavailable on this host.")
     rejected = subprocess.run(
         ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
         cwd=tmp_path, env={**os.environ, "TEST_DATA_ROOT": str(alias / "siteops")},
-        capture_output=True, text=True, timeout=20,
+        capture_output=True, text=True, timeout=POWERSHELL_TIMEOUT_SECONDS,
     )
     assert rejected.returncode != 0
     assert "private Site Ops data root" in rejected.stderr
@@ -1267,7 +1270,7 @@ def test_windows_bootstrap_root_filesystem_errors_are_bounded(tmp_path, case, ca
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
         cwd=tmp_path, env={**os.environ, "TEST_DATA_ROOT": str(target)},
-        capture_output=True, text=True, timeout=20,
+        capture_output=True, text=True, timeout=POWERSHELL_TIMEOUT_SECONDS,
     )
     assert result.returncode != 0
     assert category in result.stderr
@@ -1349,7 +1352,7 @@ $SourceCommit = '""" + SOURCE_SHA + "'\n" + block
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
         env={**os.environ, "TEST_EVIDENCE": str(evidence)},
-        cwd=tmp_path, capture_output=True, text=True, timeout=20,
+        cwd=tmp_path, capture_output=True, text=True, timeout=POWERSHELL_TIMEOUT_SECONDS,
     )
     assert (result.returncode == 0) is accepted, result.stdout + result.stderr
     assert ("CERTIFICATE_ACCEPTED" in result.stdout) is accepted
@@ -1368,7 +1371,7 @@ def test_windows_retained_release_key_binds_exact_selection(tmp_path):
     )
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-Command", statement],
-        cwd=tmp_path, capture_output=True, text=True, timeout=20,
+        cwd=tmp_path, capture_output=True, text=True, timeout=POWERSHELL_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, result.stderr
     selected = (
@@ -1426,7 +1429,7 @@ def test_powershell_preview_keeps_source_names_private_in_redacted_output():
             "-EnrollSource", "private-name", "-DryRun",
         ],
         env={**os.environ, "SITEOPS_REDACT_OUTPUT": "1"},
-        capture_output=True, text=True, timeout=20,
+        capture_output=True, text=True, timeout=POWERSHELL_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "private-name" not in result.stdout + result.stderr
@@ -1469,7 +1472,7 @@ def test_powershell_preview_names_the_enrollment(tmp_path):
             "-EnrollSource", "demo", "-DryRun",
         ],
         env={**os.environ, "SITEOPS_REDACT_OUTPUT": "0", "LOCALAPPDATA": str(tmp_path / "state")},
-        capture_output=True, text=True, timeout=20,
+        capture_output=True, text=True, timeout=POWERSHELL_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Source demo will enroll Azure/digital-ops-scale-kit with an expiring policy" in result.stdout
@@ -1488,7 +1491,7 @@ def test_powershell_preview_lists_the_user_path_change(tmp_path, opt_out):
             *(["-NoModifyPath"] if opt_out else []),
         ],
         env={**os.environ, "LOCALAPPDATA": str(tmp_path / "state")},
-        capture_output=True, text=True, timeout=20,
+        capture_output=True, text=True, timeout=POWERSHELL_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     added = "Add: uv's command directory to your user PATH, so new terminals find siteops."
@@ -1597,7 +1600,7 @@ def test_powershell_checks_the_data_root_before_asking_for_consent(tmp_path, sha
                 "-Release", "siteops/v1.0.0b1", "-SourceCommit", SOURCE_SHA,
             ],
             env={**os.environ, "LOCALAPPDATA": str(local)},
-            input="", capture_output=True, text=True, timeout=30,
+            input="", capture_output=True, text=True, timeout=POWERSHELL_TIMEOUT_SECONDS,
         )
     finally:
         if shared:
@@ -1640,7 +1643,7 @@ def test_windows_data_root_check_creates_nothing(tmp_path, case):
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
         cwd=tmp_path, env={**os.environ, "TEST_DATA_ROOT": str(root)},
-        capture_output=True, text=True, timeout=20,
+        capture_output=True, text=True, timeout=POWERSHELL_TIMEOUT_SECONDS,
     )
     if case == "open-root":
         assert result.returncode != 0
@@ -1663,14 +1666,14 @@ def test_powershell_preview_and_invalid_identity_do_not_acquire_tools(tmp_path):
     ]
     env = {**os.environ, "LOCALAPPDATA": str(tmp_path / "state")}
     preview = subprocess.run(
-        [*arguments, "-DryRun"], input="", text=True, capture_output=True, env=env, timeout=20,
+        [*arguments, "-DryRun"], input="", text=True, capture_output=True, env=env, timeout=POWERSHELL_TIMEOUT_SECONDS,
     )
     assert preview.returncode == 0, preview.stdout + preview.stderr
     assert "Uses the installed GitHub CLI" in preview.stdout
     assert "No tools or content were downloaded" in preview.stdout
     denied = subprocess.run(
         [*arguments[:-1], "bad", "-Yes", "-NoModifyPath"], input="", text=True,
-        capture_output=True, env=env, timeout=20,
+        capture_output=True, env=env, timeout=POWERSHELL_TIMEOUT_SECONDS,
     )
     assert denied.returncode != 0
     assert "Select an exact release" in denied.stderr
@@ -1688,7 +1691,7 @@ def test_powershell_preview_requires_github_cli_without_installing_it(tmp_path):
             "-Release", "siteops/v1.0.0b1", "-SourceCommit", SOURCE_SHA, "-DryRun",
         ],
         env={**os.environ, "PATH": str(system), "LOCALAPPDATA": str(tmp_path / "state")},
-        input="", text=True, capture_output=True, timeout=20,
+        input="", text=True, capture_output=True, timeout=POWERSHELL_TIMEOUT_SECONDS,
     )
     assert result.returncode != 0
     # Windows PowerShell wraps long errors at its console width.
