@@ -46,8 +46,8 @@ so choose a supported transition from the instance's current release.
 
 The MQTT broker upgrades through rolling updates, which need a backend
 redundancy factor of 2 or more. Microsoft does not support broker upgrades
-with a factor of 1. Scale Kit installs with 2 by default, so keep
-`parameters.brokerConfig.backendRedundancyFactor` at 2 or more.
+with a factor of 1. Scale Kit installs with 2 by default and accepts 2 to 5
+for `parameters.brokerConfig.backendRedundancyFactor`.
 
 Scale Kit's live tests have exercised selected adjacent upgrades: 2604 to
 2605, 2606 to 2607 and 2608 to 2609. These tests support the content in

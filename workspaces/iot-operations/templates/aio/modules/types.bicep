@@ -33,9 +33,9 @@ type BrokerConfig = {
   @description('Number of AIO Broker frontend workers. The default is 2.')
   frontendWorkers: int?
 
-  @minValue(1)
+  @minValue(2)
   @maxValue(5)
-  @description('The AIO Broker backend redundancy factor. The default is 2.')
+  @description('The AIO Broker backend redundancy factor, from 2 to 5. Broker upgrades need 2 or more. The default is 2.')
   backendRedundancyFactor: int?
 
   @minValue(1)
