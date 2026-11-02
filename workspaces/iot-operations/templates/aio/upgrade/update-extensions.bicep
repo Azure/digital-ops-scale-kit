@@ -73,6 +73,7 @@ param aioTrain string = ''
 @allowed([
   '2026-03-01'
   '2026-07-01'
+  '2026-10-01'
 ])
 param aioApiVersion string
 
@@ -111,7 +112,8 @@ var effectiveAioVersion = !empty(aioVersion) ? aioVersion : aio.version
 var effectiveAioTrain = !empty(aioTrain) ? aioTrain : aio.releaseTrain
 var releaseExtensionConfiguration = aioReleaseConfiguration.?extension ?? {}
 var releaseAioConfigurationOverrides = releaseExtensionConfiguration.?configurationOverrides ?? {}
-var configureSecurityPkiSubjectName = aioApiVersion == '2026-07-01' || bool(releaseExtensionConfiguration.?securityPkiSubjectName ?? false)
+// The subject name is part of every generation from 2026-07-01. On 2026-03-01 a release opts in.
+var configureSecurityPkiSubjectName = aioApiVersion != '2026-03-01' || bool(releaseExtensionConfiguration.?securityPkiSubjectName ?? false)
 var configureWasmGraphControllerMqttTrust = bool(releaseExtensionConfiguration.?wasmGraphControllerMqttTrust ?? false)
 
 var aioTrustSource = contains(aio.configurationSettings, 'trustSource')

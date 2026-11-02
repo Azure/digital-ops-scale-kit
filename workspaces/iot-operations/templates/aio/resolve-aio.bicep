@@ -38,6 +38,7 @@ param aioInstanceName string
 @allowed([
   '2026-03-01'
   '2026-07-01'
+  '2026-10-01'
 ])
 param aioApiVersion string
 
@@ -70,6 +71,13 @@ module resolve_2026_07 './modules/resolve-instance-2026-07-01.bicep' = if (aioAp
   }
 }
 
+module resolve_2026_10 './modules/resolve-instance-2026-10-01.bicep' = if (aioApiVersion == '2026-10-01') {
+  name: 'resolve-instance-2026-10-${uniqueString(aioInstanceName)}'
+  params: {
+    aioInstanceName: aioInstanceName
+  }
+}
+
 // Select outputs from the active module. The @allowed constraint guarantees
 // exactly one module deploys. Convention: newest API version is the
 // else-branch, and every older version is an explicit positive equality check.
@@ -86,18 +94,31 @@ var activeInstance = aioApiVersion == '2026-03-01'
       instanceDescription: resolve_2026!.outputs.instanceDescription
       defaultSecretProviderClassResourceId: resolve_2026!.outputs.defaultSecretProviderClassResourceId
     }
-  : {
-      customLocationResourceId: resolve_2026_07!.outputs.customLocationResourceId
-      instanceLocation: resolve_2026_07!.outputs.instanceLocation
-      instanceTags: resolve_2026_07!.outputs.instanceTags
-      identityType: resolve_2026_07!.outputs.identityType
-      userAssignedIdentities: resolve_2026_07!.outputs.userAssignedIdentities
-      schemaRegistryResourceId: resolve_2026_07!.outputs.schemaRegistryResourceId
-      adrNamespaceResourceId: resolve_2026_07!.outputs.adrNamespaceResourceId
-      features: resolve_2026_07!.outputs.features
-      instanceDescription: resolve_2026_07!.outputs.instanceDescription
-      defaultSecretProviderClassResourceId: resolve_2026_07!.outputs.defaultSecretProviderClassResourceId
-    }
+  : aioApiVersion == '2026-07-01'
+    ? {
+        customLocationResourceId: resolve_2026_07!.outputs.customLocationResourceId
+        instanceLocation: resolve_2026_07!.outputs.instanceLocation
+        instanceTags: resolve_2026_07!.outputs.instanceTags
+        identityType: resolve_2026_07!.outputs.identityType
+        userAssignedIdentities: resolve_2026_07!.outputs.userAssignedIdentities
+        schemaRegistryResourceId: resolve_2026_07!.outputs.schemaRegistryResourceId
+        adrNamespaceResourceId: resolve_2026_07!.outputs.adrNamespaceResourceId
+        features: resolve_2026_07!.outputs.features
+        instanceDescription: resolve_2026_07!.outputs.instanceDescription
+        defaultSecretProviderClassResourceId: resolve_2026_07!.outputs.defaultSecretProviderClassResourceId
+      }
+    : {
+        customLocationResourceId: resolve_2026_10!.outputs.customLocationResourceId
+        instanceLocation: resolve_2026_10!.outputs.instanceLocation
+        instanceTags: resolve_2026_10!.outputs.instanceTags
+        identityType: resolve_2026_10!.outputs.identityType
+        userAssignedIdentities: resolve_2026_10!.outputs.userAssignedIdentities
+        schemaRegistryResourceId: resolve_2026_10!.outputs.schemaRegistryResourceId
+        adrNamespaceResourceId: resolve_2026_10!.outputs.adrNamespaceResourceId
+        features: resolve_2026_10!.outputs.features
+        instanceDescription: resolve_2026_10!.outputs.instanceDescription
+        defaultSecretProviderClassResourceId: resolve_2026_10!.outputs.defaultSecretProviderClassResourceId
+      }
 
 // =====================================================================================
 // Chained Resolution: version-stable

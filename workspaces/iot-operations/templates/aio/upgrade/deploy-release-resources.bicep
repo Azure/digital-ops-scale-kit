@@ -20,6 +20,7 @@ param customLocationId string
 @allowed([
   '2026-03-01'
   '2026-07-01'
+  '2026-10-01'
 ])
 param aioApiVersion string
 
@@ -41,6 +42,16 @@ module releaseResources_2026_03 './modules/deploy-release-resources-2026-03-01.b
 
 module releaseResources_2026_07 './modules/deploy-release-resources-2026-07-01.bicep' = if (aioApiVersion == '2026-07-01') {
   name: 'deploy-release-resources-2026-07-${uniqueString(aioInstanceName)}'
+  params: {
+    aioInstanceName: aioInstanceName
+    aioReleaseConfiguration: aioReleaseConfiguration
+    customLocationId: customLocationId
+    features: features
+  }
+}
+
+module releaseResources_2026_10 './modules/deploy-release-resources-2026-10-01.bicep' = if (aioApiVersion == '2026-10-01') {
+  name: 'deploy-release-resources-2026-10-${uniqueString(aioInstanceName)}'
   params: {
     aioInstanceName: aioInstanceName
     aioReleaseConfiguration: aioReleaseConfiguration

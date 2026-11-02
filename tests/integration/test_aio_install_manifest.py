@@ -215,7 +215,7 @@ class TestAioInstallVersioning:
             expected = {
                 SECURITY_PKI_APPLICATION_URI: True,
                 SECURITY_PKI_SUBJECT_NAME: (
-                    aio_api_version == "2026-07-01"
+                    aio_api_version != "2026-03-01"
                     or extension.get("securityPkiSubjectName") is True
                 ),
             }

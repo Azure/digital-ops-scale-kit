@@ -439,8 +439,10 @@ class TestFamilyDeclarationContract:
             pytest.skip(f"'{spec.family}' has one generation module, so it has no sibling to compare.")
 
         def _normalized(version: str, path: Path) -> list[str]:
+            # A generation whose types Bicep has not published yet suppresses BCP081
+            # on each resource. The suppression is not a difference in the template.
             text = path.read_text(encoding="utf-8").replace(version, "<version>")
-            return text.splitlines()
+            return [line for line in text.splitlines() if not line.startswith("#disable-next-line BCP081")]
 
         base_version, base_path = present[0]
         base = _normalized(base_version, base_path)
@@ -881,7 +883,16 @@ class TestDeclarationCompiles:
         spans: list[tuple[int, int, str]] = []
         counter = 0
 
-        for api_version in harness.supported_api_versions(workspace, spec):
+        supported = harness.supported_api_versions(workspace, spec)
+        for api_version in supported:
+            # Bicep cannot check an untyped generation. Its module body equals its
+            # typed seed's, so the seed's render covers these declarations.
+            if api_version in harness.UNTYPED_API_VERSIONS:
+                assert harness.UNTYPED_API_VERSIONS[api_version] in supported, (
+                    f"{api_version} has no types and its typed seed is no longer "
+                    f"supported, so nothing checks '{spec.family}' declarations there."
+                )
+                continue
             for path in harness.declaration_files(workspace, spec):
                 data = harness.load_yaml(path)
                 for kind in spec.kinds:

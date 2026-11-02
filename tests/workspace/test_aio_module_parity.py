@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.workspace.catalog_harness import UNTYPED_API_VERSIONS
+
 WORKSPACE_PATH = (
     Path(__file__).parent.parent.parent
     / "workspaces"
@@ -100,3 +102,46 @@ class TestAdrNamespaceModuleParity:
 
     def test_adr_ns_modules_share_surface(self):
         _assert_surface_parity(_paired_modules(DEPS_MODULES_DIR, "adr-ns"))
+
+
+# Bicep has published no types for an untyped generation yet, so its modules
+# suppress BCP081 and Bicep cannot check their resource bodies. The typed seed is
+# checked, and the 2026-10-01 schema accepts every property the seed sets, so
+# keeping the bodies equal carries that check over until the types ship.
+_WOT_ENDPOINT_TYPE = "      {\n        endpointType: 'Microsoft.OpcUa.WoT'\n      }\n"
+
+
+def _body(path: Path, version: str) -> str:
+    """The module after its header comment, with BCP081 suppressions removed."""
+    lines = path.read_text(encoding="utf-8").replace(version, "<version>").splitlines()
+    start = next(index for index, line in enumerate(lines) if line.strip() and not line.startswith("//"))
+    return "".join(
+        f"{line}\n" for line in lines[start:] if not line.startswith("#disable-next-line BCP081")
+    )
+
+
+@pytest.mark.parametrize(("untyped", "seed"), sorted(UNTYPED_API_VERSIONS.items()))
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "templates/aio/modules/instance-{}.bicep",
+        "templates/aio/modules/resolve-instance-{}.bicep",
+        "templates/aio/modules/update-instance-{}.bicep",
+        "templates/aio/modules/opcua-connector-template-{}.bicep",
+        "templates/aio/upgrade/modules/deploy-release-resources-{}.bicep",
+        "templates/aio/dataflows/modules/dataflows-{}.bicep",
+    ],
+)
+def test_untyped_generation_sets_what_its_typed_seed_sets(relative_path, untyped, seed):
+    untyped_path = WORKSPACE_PATH / relative_path.format(untyped)
+    seed_path = WORKSPACE_PATH / relative_path.format(seed)
+    body = _body(untyped_path, untyped)
+    if "opcua-connector-template" in relative_path and untyped == "2026-10-01":
+        # The 2026-10-01 connector template also lists the WoT endpoint type.
+        assert _WOT_ENDPOINT_TYPE in body
+        body = body.replace(_WOT_ENDPOINT_TYPE, "")
+    assert body == _body(seed_path, seed), (
+        f"{untyped_path.name} differs from {seed_path.name} beyond its API version. "
+        f"Bicep cannot check {untyped} resource bodies yet, so confirm the "
+        f"difference against the {untyped} schema and update this test."
+    )

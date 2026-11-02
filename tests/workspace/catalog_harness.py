@@ -50,6 +50,12 @@ _RESOURCE_SET_EXPRESSION = re.compile(
     r"\{\{\s*site\.properties\.resourceSets\.(?P<key>[\w-]+)\s*\}\}"
 )
 
+# API generations that no Bicep release has types for yet, each mapped to the typed
+# generation its modules were seeded from. Their modules suppress BCP081, and their
+# resource bodies are kept equal to the seed's, which Bicep does check. Remove an
+# entry, and its suppressions, once a Bicep release carries the types.
+UNTYPED_API_VERSIONS: dict[str, str] = {"2026-10-01": "2026-07-01"}
+
 # A declaration may carry a site variable anywhere, including in a name. A name
 # rule applies to the resolved value, so a name is checked with each variable
 # replaced by a representative site name. Site names follow the same shape, so a

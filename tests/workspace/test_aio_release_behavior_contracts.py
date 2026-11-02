@@ -120,9 +120,10 @@ def connector_arm(request, workspace):
     pytest.param(None, False, False, id="no-version"),
     pytest.param({"opcua": {"mode": "Stable", "settings": {}}}, False, False, id="stable-no-version"),
 ])
-def test_opcua_template_respects_effective_feature_mode(connector_arm, features, configured, expected):
+@pytest.mark.parametrize("api_version", ["2026-07-01", "2026-10-01"])
+def test_opcua_template_respects_effective_feature_mode(connector_arm, api_version, features, configured, expected):
     parameters = {
-        "aioApiVersion": "2026-07-01",
+        "aioApiVersion": api_version,
         "aioReleaseConfiguration": {"resources": {"opcUaConnector": {"version": "1.4.14"}}}
         if configured else {},
     }
@@ -136,9 +137,12 @@ def test_opcua_template_respects_effective_feature_mode(connector_arm, features,
             if any(resource["type"] == "Microsoft.IoTOperations/instances/akriConnectorTemplates"
                    for resource in _resources(nested)):
                 connectors.append((module, template, child))
-    assert len(connectors) == 1, "Expected one typed OPC UA connector deployment"
-    module, template, connector = connectors[0]
-    assert _arm_value(module["condition"], connector_arm, parameters) is True
+    active = [
+        candidate for candidate in connectors
+        if _arm_value(candidate[0]["condition"], connector_arm, parameters) is True
+    ]
+    assert len(active) == 1, f"Expected one typed OPC UA connector deployment at {api_version}"
+    module, template, connector = active[0]
     forwarded = module["properties"]["parameters"]
     child_parameters = {
         name: _arm_value(forwarded[name]["value"], connector_arm, parameters)
@@ -236,10 +240,6 @@ def test_security_pki_defaults_follow_released_aio_behavior(workspace):
         workspace,
         "templates/aio/modules/instance-2026-03-01.bicep",
     )
-    create_2026_07 = _read(
-        workspace,
-        "templates/aio/modules/instance-2026-07-01.bicep",
-    )
     update_extensions = _read(
         workspace,
         "templates/aio/upgrade/update-extensions.bicep",
@@ -249,7 +249,7 @@ def test_security_pki_defaults_follow_released_aio_behavior(workspace):
     subject_name = "connectors.values.securityPki.subjectName"
 
     # The application URI starts with the 2026-03-01 generation. Subject name
-    # starts in releases 2605 and 2606, then becomes a 2026-07-01 baseline.
+    # starts in releases 2605 and 2606, then becomes a baseline from 2026-07-01.
     assert application_uri in create_2026_03
     assert subject_name in create_2026_03
     assert (
@@ -257,8 +257,10 @@ def test_security_pki_defaults_follow_released_aio_behavior(workspace):
         "bool(releaseExtensionConfiguration.?securityPkiSubjectName ?? false)"
         in create_2026_03
     )
-    assert application_uri in create_2026_07
-    assert subject_name in create_2026_07
+    for generation in ("2026-07-01", "2026-10-01"):
+        create = _read(workspace, f"templates/aio/modules/instance-{generation}.bicep")
+        assert application_uri in create
+        assert subject_name in create
     assert "deriveAioExtensionSuffix(clusterResourceId)" in create_2026_03
 
     for release in ("2603", "2604"):
@@ -278,7 +280,7 @@ def test_security_pki_defaults_follow_released_aio_behavior(workspace):
         in update_extensions
     )
     assert (
-        "var configureSecurityPkiSubjectName = aioApiVersion == '2026-07-01' "
+        "var configureSecurityPkiSubjectName = aioApiVersion != '2026-03-01' "
         "|| bool(releaseExtensionConfiguration.?securityPkiSubjectName ?? false)"
         in update_extensions
     )

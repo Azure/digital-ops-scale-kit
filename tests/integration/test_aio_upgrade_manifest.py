@@ -521,7 +521,7 @@ class TestAioExtensionInvariants:
             allowed_additions: set[str] = set(AIO_2026_03_API_ADDITIONS)
             extension_configuration = release_configuration.get("extension", {})
             if (
-                aio_api_version == "2026-07-01"
+                aio_api_version != "2026-03-01"
                 or extension_configuration.get("securityPkiSubjectName")
             ):
                 allowed_additions |= AIO_SECURITY_PKI_SUBJECT_NAME_ADDITIONS
@@ -536,7 +536,7 @@ class TestAioExtensionInvariants:
             )
             assert AIO_2026_03_API_ADDITIONS <= set(post["configurationSettings"])
             if (
-                aio_api_version == "2026-07-01"
+                aio_api_version != "2026-03-01"
                 or extension_configuration.get("securityPkiSubjectName")
             ):
                 assert AIO_SECURITY_PKI_SUBJECT_NAME_ADDITIONS <= set(
