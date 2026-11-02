@@ -25,7 +25,7 @@ The enablement template (`enable-secretsync.bicep`) creates:
 
 ## How it works
 
-Secret Sync enablement uses a pipeline of two steps, named `resolve-aio` and `secretsync`:
+Secret Sync enablement uses a pipeline of three steps, named `resolve-aio`, `check-secretsync-prerequisites` and `secretsync`:
 
 ```
 resolve-aio                          secretsync
@@ -39,7 +39,7 @@ resolve-aio                          secretsync
 └──────────────────────────┘         └──────────────────────────────────┘
 ```
 
-`resolve-aio.bicep` only reads resources and outputs everything downstream needs. The `secretsync` step deploys `enable-secretsync.bicep`, which receives those values via [output chaining](parameter-resolution.md#output-chaining) and provisions the Secret Sync resources. Later steps read its outputs as `{{ steps.secretsync.outputs.<name> }}`. The split keeps `enable-secretsync.bicep` portable across naming conventions.
+`resolve-aio.bicep` only reads resources and outputs everything downstream needs. Between the two, `check-secretsync-prerequisites` reads the cluster and stops before any Secret Sync write when its OIDC issuer or workload identity is not enabled, or when the selected issuer URL is empty or not HTTPS. The `secretsync` step deploys `enable-secretsync.bicep`, which receives those values via [output chaining](parameter-resolution.md#output-chaining) and provisions the Secret Sync resources. Later steps read its outputs as `{{ steps.secretsync.outputs.<name> }}`. The split keeps `enable-secretsync.bicep` portable across naming conventions.
 
 ### Output chaining
 
@@ -117,7 +117,7 @@ Use the standalone manifest to enable Secret Sync on instances that are already 
 siteops -w workspaces/iot-operations deploy manifests/secretsync/manifest.yaml -l "name=my-site"
 ```
 
-The standalone `secretsync` manifest runs the same `resolve-aio` and `secretsync` steps without the full AIO installation pipeline. It has no `enableSecretSync` gate.
+The standalone `secretsync` manifest runs the same `resolve-aio`, `check-secretsync-prerequisites` and `secretsync` steps without the full AIO installation pipeline. It has no `enableSecretSync` gate.
 
 ### CI/CD
 
@@ -353,6 +353,24 @@ For CI, set it in `SITE_OVERRIDES`:
 ### DeploymentOutputEvaluationFailed
 
 If `resolve-aio` fails with an error about a property not existing on the instance resource, this is an ARM limitation with `existing` resource references. Properties accessed via safe navigation (`instance.?tags ?? {}`) handle this correctly. If you see this error on a new API version, check that the resolve template uses `?.` for optional properties.
+
+### Secret Sync needs the OIDC issuer or workload identity
+
+`check-secretsync-prerequisites` stops before any Secret Sync write when the Arc cluster's `oidcIssuerProfile.enabled` or `securityProfile.workloadIdentity.enabled` is not true, or when the selected issuer URL is empty or does not start with `https://`. Its message names the missing prerequisite. Prepare the cluster as [the AIO guide](https://learn.microsoft.com/azure/iot-operations/secure-iot-ops/howto-enable-secure-settings) describes, then run Secret Sync again.
+
+### Secrets stop syncing after a cluster change
+
+Workload identity federation needs three issuers to match exactly, including any trailing slash: the Arc cluster's issuer in Azure, the issuer in the Secret Sync federated identity credential, and the issuer in the cluster's service account tokens. Compare them:
+
+```bash
+az connectedk8s show --name <cluster> --resource-group <resource-group> --query oidcIssuerProfile.issuerUrl --output tsv
+az identity federated-credential show --identity-name <identity> --resource-group <resource-group> --name <credential> --query issuer --output tsv
+```
+
+The `secretsync` step outputs the identity's resource ID as `managedIdentityResourceId` and the credential name as `federatedCredentialName`. The token issuer is the API server's `service-account-issuer` setting.
+
+- When the cluster's issuer in Azure and the token issuer match, and only the credential differs, run the standalone [`secretsync`](../workspaces/iot-operations/manifests/secretsync/README.md) manifest again. It writes the same credential with the cluster's current issuer.
+- When the cluster's issuer in Azure and the token issuer differ, fix the cluster preparation so the API server issues tokens with the issuer that Azure reports, then run `secretsync` again. Rerunning alone writes the same issuer again.
 
 ### Role assignment conflicts
 

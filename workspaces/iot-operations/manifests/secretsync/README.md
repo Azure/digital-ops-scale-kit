@@ -32,7 +32,9 @@ for answer files and the route with an existing vault.
 ## Prerequisites and configuration
 
 The existing connected cluster must already have OIDC issuer and workload
-identity enabled. For the route with configured Sites, confirm its subscription, resource group,
+identity enabled. On every route, the `check-secretsync-prerequisites` step
+reads both and the issuer URL, and stops before any Secret Sync write when
+one is missing. For the route with configured Sites, confirm its subscription, resource group,
 `properties.aioRelease` and instance name. Use
 `parameters.aioInstanceName` for an instance that does not follow the
 convention derived from the Site.

@@ -2333,19 +2333,23 @@ def test_existing_instance_secret_sync_uses_actual_identity_without_install(tmp_
     if verb == "plan":
         document = json.loads(output)
         operations = document["plan"]["targets"][0]["operations"]
-        assert [operation["identity"]["step"] for operation in operations] == ["resolve-aio", "secretsync"]
+        assert [operation["identity"]["step"] for operation in operations] == [
+            "resolve-aio", "check-secretsync-prerequisites", "secretsync",
+        ]
         execute.assert_not_called()
     else:
         result = execute.call_args.args[0]
         assert result.executable
         assert [operation.identity.step for operation in result.plan.targets[0].operations] == [
-            "resolve-aio", "secretsync",
+            "resolve-aio", "check-secretsync-prerequisites", "secretsync",
         ]
         for operation in result.plan.targets[0].operations:
             parameters = {
                 entry.key.value: entry.value for entry in operation.details.parameters.entries
                 if isinstance(entry.key, LiteralValue)
             }
+            if operation.identity.step == "check-secretsync-prerequisites":
+                continue
             assert resolve_plan_value(parameters["aioInstanceName"], {}) == "external-instance"
             assert resolve_plan_value(parameters["aioApiVersion"], {}) == "2026-07-01"
             if operation.identity.step == "secretsync":
@@ -2466,7 +2470,7 @@ def test_documented_existing_secret_sync_commands_use_one_instance_input(
         if verb == "deploy":
             plan = execute.call_args.args[0].plan
             assert [operation.identity.step for operation in plan.targets[0].operations] == [
-                "resolve-aio", "secretsync",
+                "resolve-aio", "check-secretsync-prerequisites", "secretsync",
             ]
         else:
             execute.assert_not_called()

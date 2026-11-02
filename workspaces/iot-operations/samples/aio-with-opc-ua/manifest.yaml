@@ -16,9 +16,10 @@ description: |
     6. aio-instance
     7. schema-registry-role
     8. resolve-aio
-    9. secretsync               (gated by enableSecretSync)
-   10. opc-ua-solution
-   11. opc-plc-simulator
+    9. check-secretsync-prerequisites (gated by enableSecretSync)
+   10. secretsync               (gated by enableSecretSync)
+   11. opc-ua-solution
+   12. opc-plc-simulator
 
 # Default selector. Override at the CLI with `-l <key>=<value>`.
 selector: "environment=dev"

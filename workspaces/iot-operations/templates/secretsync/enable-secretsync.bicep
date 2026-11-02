@@ -50,7 +50,8 @@ param customLocationNamespace string
 @description('Name of the Arc-connected cluster.')
 param connectedClusterName string
 
-@description('OIDC issuer URL for workload identity federation.')
+@description('OIDC issuer URL for workload identity federation. The federated identity credential uses it exactly as given.')
+@minLength(1)
 param oidcIssuerUrl string
 
 // =====================================================================================

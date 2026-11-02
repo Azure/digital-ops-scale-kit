@@ -1,5 +1,7 @@
 """Integration tests for the secretsync.yaml manifest."""
 
+import json
+
 import pytest
 
 from siteops.results import RunStatus, SiteStatus
@@ -12,6 +14,7 @@ from tests.integration.helpers.assertions import (
     site_names,
     site_results,
 )
+from tests.integration.helpers.azure import run_az
 from tests.integration.helpers.kube import KubectlError, kubectl_json
 
 pytestmark = [pytest.mark.integration]
@@ -29,7 +32,7 @@ class TestSecretSyncDeployment:
                 f"Site '{site.target}' did not succeed: "
                 f"{site.failure_reason()}"
             )
-            assert len(site.operations) == 2
+            assert len(site.operations) == 3
 
 
 class TestSecretSyncResolveAio:
@@ -59,6 +62,35 @@ class TestSecretSyncResolveAio:
             assert_output_starts_with(step, "schemaRegistryResourceId", "/subscriptions/")
             assert_output_exists(step, "identityType")
 
+
+class TestSecretSyncIssuer:
+    """The guard passes the issuer through, and the credential federates with it exactly."""
+
+    def test_guard_passes_the_resolved_issuer(self, secretsync_result):
+        for name in site_names(secretsync_result):
+            resolved = assert_output_exists(find_step(secretsync_result, name, "resolve-aio"), "oidcIssuerUrl")
+            guard = assert_step_succeeded(secretsync_result, name, "check-secretsync-prerequisites")
+            assert assert_output_exists(guard, "oidcIssuerUrl") == resolved, (
+                f"Site '{name}': the prerequisite guard changed the issuer."
+            )
+
+    def test_credential_issuer_matches_the_cluster_exactly(self, secretsync_result):
+        for name in site_names(secretsync_result):
+            resolved = assert_output_exists(find_step(secretsync_result, name, "resolve-aio"), "oidcIssuerUrl")
+            step = find_step(secretsync_result, name, "secretsync")
+            identity = assert_output_exists(step, "managedIdentityResourceId")
+            credential = assert_output_exists(step, "federatedCredentialName")
+            parts = identity.split("/")
+            proc = run_az([
+                "az", "identity", "federated-credential", "show", "--subscription", parts[2],
+                "--resource-group", parts[4], "--identity-name", parts[-1], "--name", credential,
+                "--output", "json",
+            ])
+            issuer = json.loads(proc.stdout).get("issuer")
+            assert issuer == resolved, (
+                f"Site '{name}': the federated credential's issuer differs from the cluster's issuer."
+            )
+            assert issuer.startswith("https://"), f"Site '{name}': the credential's issuer is not HTTPS."
 
 class TestSecretSyncEnablement:
     """Validate secretsync step outputs across all sites."""

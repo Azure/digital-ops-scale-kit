@@ -59,6 +59,7 @@ _AIO_INSTALL_TEMPLATES = {
     "aio-instance": Path("templates/aio/instance.bicep"),
     "schema-registry-role": Path("templates/deps/schema-registry-role.bicep"),
     "resolve-aio": Path("templates/aio/resolve-aio.bicep"),
+    "check-secretsync-prerequisites": Path("templates/secretsync/check-prerequisites.bicep"),
     "secretsync": Path("templates/secretsync/enable-secretsync.bicep"),
 }
 
@@ -388,7 +389,7 @@ def test_aio_cluster_only_executable_plan(workspace, orchestrator, monkeypatch, 
     })
     expected = {
         step: path for step, path in _AIO_INSTALL_TEMPLATES.items()
-        if enable_secretsync or step not in {"resolve-aio", "secretsync"}
+        if enable_secretsync or step not in {"resolve-aio", "check-secretsync-prerequisites", "secretsync"}
     }
     builds = _guard_local_compilation(
         monkeypatch, tmp_path, {(workspace / path).resolve() for path in expected.values()},
@@ -438,6 +439,7 @@ def test_existing_secret_sync_executable_plan_retains_instance_state(
     })
     paths = {
         workspace / "templates" / "aio" / "resolve-aio.bicep",
+        workspace / "templates" / "secretsync" / "check-prerequisites.bicep",
         workspace / "templates" / "secretsync" / "enable-secretsync.bicep",
     }
     builds = _guard_local_compilation(monkeypatch, tmp_path, {path.resolve() for path in paths})
@@ -446,13 +448,20 @@ def test_existing_secret_sync_executable_plan_retains_instance_state(
     assert result.executable
     assert len(result.plan.targets) == 1
     operations = result.plan.targets[0].operations
-    assert [operation.identity.step for operation in operations] == ["resolve-aio", "secretsync"]
-    assert len(builds) == 2
+    assert [operation.identity.step for operation in operations] == [
+        "resolve-aio", "check-secretsync-prerequisites", "secretsync",
+    ]
+    assert len(builds) == 3
     for operation in operations:
         values = {
             entry.key.value: entry.value for entry in operation.details.parameters.entries
             if isinstance(entry.key, LiteralValue)
         }
+        if operation.identity.step == "check-secretsync-prerequisites":
+            assert {values[name].reference.source.step for name in ("connectedClusterName", "oidcIssuerUrl")} == {
+                "resolve-aio",
+            }
+            continue
         assert resolve_plan_value(values["aioInstanceName"], {}) == "existing-aio"
         assert resolve_plan_value(values["aioApiVersion"], {}) == "2026-07-01"
         assert not {"aioVersion", "certManagerVersion", "secretStoreVersion"}.intersection(values)
