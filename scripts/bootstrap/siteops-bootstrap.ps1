@@ -478,7 +478,24 @@ function Ensure-UvStorage([string]$Path) {
     foreach ($directory in $missing) { Require-PrivateDataRoot $directory -Managed }
     Require-PrivateDataRoot $Path -Managed
 }
-function Invoke-Uv([string]$Executable, [string[]]$Arguments) {
+# uv's report can name the runtime source, so it only selects one of these messages.
+function Get-RuntimeFailure([string[]]$Report, [string]$Version) {
+    $remedy = "Allow uv's runtime source, set an approved HTTPS UV_PYTHON_INSTALL_MIRROR, or prepare the runtime with uv python install $Version --no-bin --no-registry, then retry."
+    $mismatch = "Hash mismatch for ``cpython-$Version-windows-x86_64-none``"
+    foreach ($line in $Report) {
+        if ($line -and $line.Contains($mismatch)) {
+            return "The downloaded CPython $Version archive did not match its expected digest and was not used. Check the runtime source, mirror or proxy that served it, including UV_PYTHON_INSTALL_MIRROR if it is set."
+        }
+    }
+    foreach ($line in $Report) {
+        if ($line -and $line.Contains('Failed to download ')) {
+            return "CPython $Version could not be downloaded. Its runtime source, mirror or proxy could not be reached or refused the request. $remedy"
+        }
+    }
+    return "CPython $Version could not be provisioned through uv. $remedy"
+}
+# -Runtime names the CPython version that a python install provisions, so its failure names a cause.
+function Invoke-Uv([string]$Executable, [string[]]$Arguments, [string]$Runtime) {
     if ($env:UV_INSECURE_HOST -or $env:UV_PYTHON_DOWNLOADS_JSON_URL -or
         ($env:UV_INSECURE_NO_ZIP_VALIDATION -and
          $env:UV_INSECURE_NO_ZIP_VALIDATION -notin @('0', 'false'))) {
@@ -510,9 +527,17 @@ function Invoke-Uv([string]$Executable, [string[]]$Arguments) {
         $ErrorActionPreference = 'Continue'
         $global:LASTEXITCODE = 1
         $lines = [Collections.Generic.List[string]]::new()
+        $report = [Collections.Generic.List[string]]::new()
         $bytes = 0
-        & $Executable @Arguments --no-config --system-certs --no-progress 2>$null |
+        $reported = 0
+        & $Executable @Arguments --no-config --system-certs --no-progress 2>&1 |
             ForEach-Object {
+                if ($_ -is [Management.Automation.ErrorRecord]) {
+                    $text = [string]$_
+                    $reported += [Text.Encoding]::UTF8.GetByteCount($text) + 1
+                    if ($Runtime -and $reported -le 65536) { $report.Add($text) }
+                    return
+                }
                 $bytes += [Text.Encoding]::UTF8.GetByteCount($_) + 1
                 if ($bytes -gt 1048576) { Fail 'The uv observation exceeds its byte limit.' }
                 $lines.Add($_)
@@ -527,7 +552,10 @@ function Invoke-Uv([string]$Executable, [string[]]$Arguments) {
             [Environment]::SetEnvironmentVariable('UV_CACHE_DIR', $null)
         }
     }
-    if ($code -ne 0) { Fail 'The selected uv operation failed. Inspect the approved tool and runtime source.' }
+    if ($code -ne 0) {
+        if ($Runtime) { Fail (Get-RuntimeFailure $report $Runtime) }
+        Fail 'The selected uv operation failed. Inspect the approved tool and runtime source.'
+    }
     return ($lines -join "`n")
 }
 function Require-PrivateExecutablePath([string]$Path, [string]$PrivateRoot, [switch]$Optional) {
@@ -807,6 +835,9 @@ function Get-ManagedPythonCandidates([string]$Directory) {
     }
 }
 function Select-ManagedPython([string]$Uv, [string]$Directory, [string]$Tools) {
+    # An existing Site Ops tool keeps its bound runtime. A new installation uses the pinned
+    # runtime, and uv provisions it when it is absent.
+    $pinned = '3.14.7'
     $siteopsHome = Join-Path $Tools 'siteops'
     $existingVersion = ''
     $existingHome = ''
@@ -837,21 +868,18 @@ function Select-ManagedPython([string]$Uv, [string]$Directory, [string]$Tools) {
             Fail 'The existing Site Ops runtime is not an available uv-managed Python. Inspect it or run uv tool uninstall siteops after review, then retry.'
         } else { $selected = $selected[0] }
     }
-    if (-not $selected -and $records.Count) {
-        $selected = $records | Sort-Object `
-            @{ Expression = { if ($_.Version -ceq '3.11.16') { 0 } else { 1 } } }, `
-            @{ Expression = { [version]$_.Version }; Descending = $true } |
-            Select-Object -First 1
+    if (-not $selected) {
+        $selected = $records | Where-Object { $_.Version -ceq $pinned } | Select-Object -First 1
     }
     if (-not $selected) {
-        $concrete = Join-Path $Directory 'cpython-3.11.16-windows-x86_64-none'
+        $concrete = Join-Path $Directory "cpython-$pinned-windows-x86_64-none"
         if (Test-Path -LiteralPath $concrete) {
             Fail 'The uv-managed Python installation is incomplete. Inspect it before repair.'
         }
-        Stage 'Provisioning uv-managed CPython 3.11.16 without command aliases or registry changes.'
-        $null = Invoke-Uv $Uv @('python', 'install', '3.11.16', '--no-bin', '--no-registry')
+        Stage "Provisioning uv-managed CPython $pinned without command aliases or registry changes."
+        $null = Invoke-Uv $Uv @('python', 'install', $pinned, '--no-bin', '--no-registry') -Runtime $pinned
         $matches = @(Get-ManagedPythonCandidates $Directory | Where-Object {
-            $_.Version -ceq '3.11.16' -and
+            $_.Version -ceq $pinned -and
             [string]::Equals($_.Python, (Join-Path $concrete 'python.exe'), [StringComparison]::OrdinalIgnoreCase)
         })
         if ($matches.Count -ne 1) { Fail 'The selected uv-managed Python is unavailable.' }
@@ -1101,6 +1129,7 @@ if ($SourceCommit) {
     Stage "Release: $Release from $Repository. The source commit will be discovered."
 }
 Stage 'Uses the installed GitHub CLI, checksum-pinned uv 0.12.20, and uv-managed Python.'
+Stage 'A new installation uses CPython 3.14.7. An existing Site Ops installation keeps its runtime.'
 Stage 'Existing uv and Python installations are not upgraded. No account is signed in.'
 if (Get-Command 'uv.exe' -CommandType Application -ErrorAction SilentlyContinue) {
     Stage 'Check: the existing uv executable. Preserve it if another version is installed.'

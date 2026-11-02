@@ -71,6 +71,7 @@ jobs:
           echo "##vso[task.setvariable variable=SITEOPS_TEST_UV]$fixtures/native/uv"
           echo "##vso[task.setvariable variable=SITEOPS_TEST_UV_ARCHIVE]$fixtures/uv.tar.gz"
           echo "##vso[task.setvariable variable=SITEOPS_TEST_UV_PYTHON_ARCHIVE]$fixtures/cpython.tar.gz"
+          echo "##vso[task.setvariable variable=SITEOPS_TEST_UV_PREVIOUS_PYTHON_ARCHIVE]$fixtures/cpython-previous.tar.gz"
           echo "##vso[task.setvariable variable=SITEOPS_REQUIRE_LINUX_UV]1"
         displayName: Prepare native Linux uv fixtures
 

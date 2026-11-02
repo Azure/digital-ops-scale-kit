@@ -20,6 +20,8 @@ from release_acceptance import (  # noqa: E402
     SLOT_SCENARIOS,
 )
 
+from tests.native_uv_consumers import MANAGED_PYTHON_MINOR  # noqa: E402
+
 SOURCE = {"repository": "example/content", "commit": "a" * 40, "ref": "refs/heads/main"}
 RUN = 900
 PRODUCER = {"run": 42, "attempt": 3, "caller": ".github/workflows/release.yaml", "preview": False}
@@ -143,8 +145,8 @@ def installer_workflow(*, account_key=True, cells=True) -> dict:
     if account_key:
         matrix["account"] = ["runner"]
     if cells:
-        matrix["include"] = [{"os": "ubuntu-26.04", "python": "3.11"},
-                             {"os": "windows-2025", "python": "3.11", "account": "standard"}]
+        matrix["include"] = [{"os": "ubuntu-26.04", "python": MANAGED_PYTHON_MINOR},
+                             {"os": "windows-2025", "python": MANAGED_PYTHON_MINOR, "account": "standard"}]
     return {"jobs": {"qualify": {"strategy": {"matrix": matrix}}}}
 
 

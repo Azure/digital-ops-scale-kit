@@ -58,8 +58,8 @@ INSTALLER_JOBS = ("Build bundle", "Attest bundle", "Assemble release")
 INSTALLER_CELLS = (
     *(f"Qualify bundle ({system}, Python {python})"
       for system in ("ubuntu-24.04", "windows-2025") for python in ("3.10", "3.11", "3.12", "3.13", "3.14")),
-    "Qualify bundle (ubuntu-26.04, Python 3.11)",
-    "Qualify bundle (windows-2025, Python 3.11, standard user)",
+    "Qualify bundle (ubuntu-26.04, Python 3.14)",
+    "Qualify bundle (windows-2025, Python 3.14, standard user)",
 )
 SEVERITY = ("wrong-candidate", "ambiguous", "missing", "cancelled", "skipped", "failed", "passed")
 ENGINE_VERSION = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:[A-Za-z0-9.+-]{0,96})")

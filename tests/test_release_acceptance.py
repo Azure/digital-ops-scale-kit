@@ -44,6 +44,7 @@ from tests.acceptance_helpers import (  # noqa: E402
     write_candidate,
 )
 from tests.actions_expressions import evaluate, truthy  # noqa: E402
+from tests.native_uv_consumers import MANAGED_PYTHON_MINOR  # noqa: E402
 from tests.shell_helpers import bash_path, run_script  # noqa: E402
 from tests.yaml_documents import cached_safe_load  # noqa: E402
 
@@ -281,7 +282,7 @@ def test_installer_contract_names_every_required_cell():
     assert installer_cells(installer_workflow()) == list(INSTALLER_CELLS)
     # Without a base account key, the standard user entry merges into the existing cell.
     merged = installer_cells(installer_workflow(account_key=False))
-    assert "Qualify bundle (windows-2025, Python 3.11)" not in merged
+    assert f"Qualify bundle (windows-2025, Python {MANAGED_PYTHON_MINOR})" not in merged
     assert installer_row(producer_jobs(), installer_workflow(account_key=False))["status"] == "missing"
     assert installer_row(producer_jobs(), installer_workflow(cells=False))["status"] == "missing"
     with pytest.raises(ValueError):
@@ -300,8 +301,8 @@ def test_candidate_distribution_matrix_is_the_production_source():
 
 @pytest.mark.parametrize(("cell", "conclusion", "expected"), [
     (None, None, "passed"),
-    ("Qualify bundle (windows-2025, Python 3.11, standard user)", "failure", "failed"),
-    ("Qualify bundle (ubuntu-26.04, Python 3.11)", "skipped", "skipped"),
+    (f"Qualify bundle (windows-2025, Python {MANAGED_PYTHON_MINOR}, standard user)", "failure", "failed"),
+    (f"Qualify bundle (ubuntu-26.04, Python {MANAGED_PYTHON_MINOR})", "skipped", "skipped"),
     ("Attest bundle", "cancelled", "cancelled"),
     ("Qualify bundle (ubuntu-24.04, Python 3.14)", "missing", "missing"),
     ("Build bundle", "duplicate", "ambiguous"),

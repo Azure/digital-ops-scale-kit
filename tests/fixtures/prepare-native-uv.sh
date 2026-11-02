@@ -14,12 +14,18 @@ curl --fail --silent --show-error --location --proto '=https' --proto-redir '=ht
   --output "$fixtures/uv.tar.gz" \
   https://github.com/astral-sh/uv/releases/download/0.12.20/uv-x86_64-unknown-linux-gnu.tar.gz
 curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
-  --tlsv1.2 --max-redirs 3 --max-time 180 --max-filesize 30778566 \
+  --tlsv1.2 --max-redirs 3 --max-time 180 --max-filesize 36237838 \
   --output "$fixtures/cpython.tar.gz" \
+  https://github.com/astral-sh/python-build-standalone/releases/download/20260924/cpython-3.14.7%2B20260924-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz
+# The runtime that v1.0.0b7 bootstraps installed, for existing installation coverage.
+curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+  --tlsv1.2 --max-redirs 3 --max-time 180 --max-filesize 30778566 \
+  --output "$fixtures/cpython-previous.tar.gz" \
   https://github.com/astral-sh/python-build-standalone/releases/download/20260924/cpython-3.11.16%2B20260924-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz
 printf '%s  %s\n' \
   6590717592ace991ff83a63fef799e3ad9d33ecc8f96c5d6bdd732496e79337f "$fixtures/uv.tar.gz" \
-  68c6739376b65258dee5058ccf6777232fe38d31a578965ae8bda327ec7da3a8 "$fixtures/cpython.tar.gz" |
+  bd0d0568ccded07bbf1c87727230dc5dd0187e706a87da23c4de78388a229b78 "$fixtures/cpython.tar.gz" \
+  68c6739376b65258dee5058ccf6777232fe38d31a578965ae8bda327ec7da3a8 "$fixtures/cpython-previous.tar.gz" |
   sha256sum --check --status
 mkdir -m 700 "$fixtures/native"
 tar -xzf "$fixtures/uv.tar.gz" -C "$fixtures/native" --strip-components=1 \

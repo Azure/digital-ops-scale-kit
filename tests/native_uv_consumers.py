@@ -19,8 +19,15 @@ UV_DIGESTS = {
     "win32": "a0d2742d49564a32488753b02e76276e7b5ef1b1ea8cf30bcbf06ee28f60cd73",
     "linux": "b8299463da6fa7da3b94464444d252d0afca8ac6c96cb229f1baf4012f365246",
 }
-LINUX_PYTHON_SHA256 = "68c6739376b65258dee5058ccf6777232fe38d31a578965ae8bda327ec7da3a8"
-LINUX_PYTHON_SIZE = 30778566
+# The managed CPython the bootstrap scripts pin, and its minor version.
+MANAGED_PYTHON = "3.14.7"
+MANAGED_PYTHON_MINOR = MANAGED_PYTHON.rpartition(".")[0]
+# The runtime that v1.0.0b7 bootstraps provisioned, which existing installations keep.
+PREVIOUS_PYTHON = "3.11.16"
+LINUX_PYTHON_SHA256 = "bd0d0568ccded07bbf1c87727230dc5dd0187e706a87da23c4de78388a229b78"
+LINUX_PYTHON_SIZE = 36237838
+LINUX_PREVIOUS_PYTHON_SHA256 = "68c6739376b65258dee5058ccf6777232fe38d31a578965ae8bda327ec7da3a8"
+LINUX_PREVIOUS_PYTHON_SIZE = 30778566
 LINUX_UV_ARCHIVE_SHA256 = "6590717592ace991ff83a63fef799e3ad9d33ecc8f96c5d6bdd732496e79337f"
 LINUX_UV_ARCHIVE_SIZE = 19827214
 
@@ -160,29 +167,30 @@ def linux_archives() -> tuple[Path, Path]:
 
 def managed_python(destination: Path) -> Path:
     suffix = "windows-x86_64-none" if os.name == "nt" else "linux-x86_64-gnu"
-    concrete = f"cpython-3.11.16-{suffix}"
+    concrete = f"cpython-{MANAGED_PYTHON}-{suffix}"
     copied = destination / "python" / concrete
     local = os.environ.get("SITEOPS_TEST_PYTHON_ROOT") if not _required() else None
     if os.name == "nt":
         selected = os.environ.get("SITEOPS_TEST_UV_PYTHON_DIR")
         source = Path(selected) / concrete if selected else Path(local) if local else None
         if source is None or source.name != concrete or not (source / "python.exe").is_file():
-            _unavailable("SITEOPS_TEST_UV_PYTHON_DIR must contain managed CPython 3.11.16.")
+            _unavailable(f"SITEOPS_TEST_UV_PYTHON_DIR must contain managed CPython {MANAGED_PYTHON}.")
         shutil.copytree(source, copied, symlinks=True)
         executable = copied / "python.exe"
     else:
+        relative = f"bin/python{MANAGED_PYTHON_MINOR}"
         selected = os.environ.get("SITEOPS_TEST_UV_PYTHON_ARCHIVE")
         archive = Path(selected) if selected else None
         if archive is None and local:
             source = Path(local)
-            if source.name != concrete or not (source / "bin/python3.11").is_file():
-                _unavailable("SITEOPS_TEST_PYTHON_ROOT must contain managed CPython 3.11.16.")
+            if source.name != concrete or not (source / relative).is_file():
+                _unavailable(f"SITEOPS_TEST_PYTHON_ROOT must contain managed CPython {MANAGED_PYTHON}.")
             shutil.copytree(source, copied, symlinks=True)
         else:
             if (archive is None or not archive.is_file()
                     or archive.stat().st_size != LINUX_PYTHON_SIZE
                     or hashlib.sha256(archive.read_bytes()).hexdigest() != LINUX_PYTHON_SHA256):
-                _unavailable("SITEOPS_TEST_UV_PYTHON_ARCHIVE differs from pinned CPython 3.11.16.")
+                _unavailable(f"SITEOPS_TEST_UV_PYTHON_ARCHIVE differs from pinned CPython {MANAGED_PYTHON}.")
             staging = destination / "managed-python-stage"
             staging.mkdir()
             try:
@@ -199,7 +207,7 @@ def managed_python(destination: Path) -> Path:
                 staging.rmdir()
             except (OSError, tarfile.TarError):
                 pytest.fail("The pinned managed Python archive could not be extracted.")
-        executable = copied / "bin/python3.11"
+        executable = copied / relative
     if not executable.is_file():
         pytest.fail("The copied managed Python executable is missing.")
     identity = subprocess.run(
@@ -208,6 +216,7 @@ def managed_python(destination: Path) -> Path:
          "sys.maxsize > 2**32, sys._base_executable)"],
         capture_output=True, text=True, timeout=20,
     )
-    if identity.returncode or identity.stdout.strip() != f"cpython 3 11 16 True {executable}":
+    expected = f"cpython {MANAGED_PYTHON.replace('.', ' ')} True {executable}"
+    if identity.returncode or identity.stdout.strip() != expected:
         pytest.fail("The copied managed Python does not have the qualified runtime identity.")
     return executable

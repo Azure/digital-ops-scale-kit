@@ -18,6 +18,7 @@ import pytest
 import yaml
 
 from tests.actions_expressions import job_runs
+from tests.native_uv_consumers import MANAGED_PYTHON, MANAGED_PYTHON_MINOR
 from tests.release_helpers import CLI, _commit, _write_record, _write_source_version
 from tests.release_helpers import repository as repository
 from tests.shell_helpers import bash_path, write_executable
@@ -72,7 +73,7 @@ def qualification_matrix(state="passed", **cells):
     """Return the summary rows the distribution workflow emits, with optional (python, column) overrides."""
     rows = []
     for version in ("3.10", "3.11", "3.12", "3.13", "3.14"):
-        limited = "n/a" if version != "3.11" else state
+        limited = "n/a" if version != MANAGED_PYTHON_MINOR else state
         row = {"python": version, "linux": state, "ubuntu-26.04": limited, "windows": state,
                "windows-standard-user": limited}
         row.update(cells.get(version, {}))
@@ -1374,7 +1375,8 @@ def test_dry_run_summary_stops_at_preview_without_approval_instructions(candidat
         "| Python | Ubuntu 24.04 | Ubuntu 26.04 | Windows | Windows standard user |"
     ) == 1
     assert "| 3.10 | passed | n/a | passed | n/a |" in summary
-    assert "| 3.11 | passed | passed | passed | passed |" in summary
+    assert f"| {MANAGED_PYTHON_MINOR} | passed | passed | passed | passed |" in summary
+    assert "| 3.11 | passed | n/a | passed | n/a |" in summary
     assert "Download the attested release assets" in summary
     assert WHEEL in summary
 
@@ -1422,7 +1424,7 @@ def test_install_notes_bind_downloads_and_commands_to_the_selected_release(candi
     )
     block = _installation_block(notes)
     assert block.startswith(f'uv tool install "{base}{WHEEL}"')
-    assert "--python 3.11.16" in block
+    assert f"--python {MANAGED_PYTHON}" in block
     assert "--managed-python" in block
     assert "--no-build" in block
     assert "--no-config" not in block and "--default-index" not in block
@@ -1469,7 +1471,7 @@ def test_install_notes_bind_downloads_and_commands_to_the_selected_release(candi
         assert identity in details
     guide = (ROOT / "docs" / "install-siteops.md").read_text(encoding="utf-8")
     for argument in (
-        "--python 3.11.16", "--managed-python", "--no-build",
+        f"--python {MANAGED_PYTHON}", "--managed-python", "--no-build",
     ):
         assert argument in block and argument in guide
     assert "packagefeedproxy.microsoft.io" not in guide
@@ -1512,7 +1514,7 @@ pipx() { echo 'Unexpected legacy manager invocation.' >&2; return 98; }
     assert arguments.read_text().splitlines() == [
         "tool", "install",
         downloads_url("v1.0.0b8").removesuffix(ARCHIVE) + WHEEL,
-        "--python", "3.11.16", "--managed-python", "--no-build", "--system-certs",
+        "--python", MANAGED_PYTHON, "--managed-python", "--no-build", "--system-certs",
     ]
 
 
@@ -2212,11 +2214,12 @@ def test_invalid_rendering_inputs_leave_existing_summary_unchanged(candidate, ru
 
 
 @pytest.mark.parametrize(("cells", "valid"), [
-    ({"3.11": {"windows-standard-user": "failed", "ubuntu-26.04": "not-run"}}, True),
+    ({MANAGED_PYTHON_MINOR: {"windows-standard-user": "failed", "ubuntu-26.04": "not-run"}}, True),
     ({"3.12": {"ubuntu-26.04": "passed"}}, False),
     ({"3.10": {"windows-standard-user": "unknown"}}, False),
-    ({"3.11": {"windows-standard-user": "n/a"}}, False),
-    ({"3.11": {"ubuntu-26.04": "n/a"}}, False),
+    ({MANAGED_PYTHON_MINOR: {"windows-standard-user": "n/a"}}, False),
+    ({MANAGED_PYTHON_MINOR: {"ubuntu-26.04": "n/a"}}, False),
+    ({"3.11": {"ubuntu-26.04": "passed"}}, False),
     ({"3.13": {"linux": "n/a"}}, False),
 ])
 def test_summary_renders_extra_installer_cells_only_for_their_python(candidate, renderer, cells, valid):
@@ -2226,8 +2229,8 @@ def test_summary_renders_extra_installer_cells_only_for_their_python(candidate, 
             renderer.render_summary(candidate["plan"], "## Changes\n", values)
         return
     summary = renderer.render_summary(candidate["plan"], "## Changes\n", values)
-    assert "| 3.11 | passed | not-run | passed | failed |" in summary
-    assert "| 3.14 | passed | n/a | passed | n/a |" in summary
+    assert f"| {MANAGED_PYTHON_MINOR} | passed | not-run | passed | failed |" in summary
+    assert "| 3.11 | passed | n/a | passed | n/a |" in summary
 
 
 @pytest.mark.parametrize("bundle", [False, True])

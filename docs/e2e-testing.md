@@ -483,7 +483,7 @@ The workflow:
 3. Verifies the exact `_siteops-distribution.yaml` signer, `release.yaml`
    caller, source/signer/caller commit, GitHub OIDC issuer, `main` ref and
    `self-hosted` runner class with stock GitHub CLI.
-4. Acquires pinned native uv and a separate managed CPython 3.11.16 runtime.
+4. Acquires pinned native uv and a separate managed CPython 3.14.7 runtime.
    Controller Python performs verification and preparation only. The
    authenticated bundle helper admits the complete payload, installs without
    an index or source build, and checks the installed bytes. Command and

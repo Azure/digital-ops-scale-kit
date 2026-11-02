@@ -213,10 +213,32 @@ admit_runtime_tree() {
       fail "The uv-managed Python links outside its concrete installation."
   done < <(find "$concrete" -type l -print0)
 }
-# Enumerate concrete keys natively. uv discovery runs every listed interpreter.
+# uv's report can name the runtime source, so it only selects one of these messages.
+provision_runtime() {
+  local version="$1" report="$staging/python-install" line download=false
+  local remedy="Allow uv's runtime source, set an approved HTTPS UV_PYTHON_INSTALL_MIRROR, or prepare the runtime with uv python install $version --no-bin --no-registry, then retry."
+  run_uv python install "$version" --no-bin --no-registry 2>&1 > /dev/null |
+    { head -c 65536 > "$report"; cat > /dev/null; } && return 0
+  if [[ -f "$report" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      case "$line" in
+        *"Hash mismatch for \`cpython-$version-linux-x86_64-gnu\`"*)
+          fail "The downloaded CPython $version archive did not match its expected digest and was not used. Check the runtime source, mirror or proxy that served it, including UV_PYTHON_INSTALL_MIRROR if it is set." ;;
+        *"Failed to download "*) download=true ;;
+      esac
+    done < "$report"
+  fi
+  if $download; then
+    fail "CPython $version could not be downloaded. Its runtime source, mirror or proxy could not be reached or refused the request. $remedy"
+  fi
+  fail "CPython $version could not be provisioned through uv. $remedy"
+}
+# Select a concrete key without uv discovery, which runs every listed interpreter.
+# An existing Site Ops tool keeps its bound runtime. A new installation uses the
+# pinned runtime, and uv provisions it when it is absent.
 select_runtime() {
-  local selected="" existing="" home="" line candidate minor patch identity
-  local best_minor=-1 best_patch=-1
+  local selected="" existing="" home="" line minor identity
+  local pinned=3.14.7
   local key='^cpython-(3\.(1[0-4])\.(0|[1-9][0-9]{0,2}))-linux-x86_64-gnu$'
   if [[ -e "$tools/siteops" || -L "$tools/siteops" ]]; then
     admit_file "$tools/siteops/pyvenv.cfg" && (( $(stat -c %s -- "$admitted") <= 65536 )) ||
@@ -236,26 +258,11 @@ select_runtime() {
     fi
   fi
   if [[ -z "$selected" ]]; then
-    for candidate in "$pydir"/cpython-3.*-linux-x86_64-gnu; do
-      [[ "${candidate##*/}" =~ $key ]] || continue
-      if [[ "${BASH_REMATCH[1]}" == 3.11.16 ]]; then
-        selected=3.11.16
-        break
-      fi
-      minor="${BASH_REMATCH[2]}"
-      patch="${BASH_REMATCH[3]}"
-      if (( minor > best_minor || (minor == best_minor && patch > best_patch) )); then
-        best_minor="$minor"
-        best_patch="$patch"
-        selected="${BASH_REMATCH[1]}"
-      fi
-    done
-  fi
-  if [[ -z "$selected" ]]; then
-    stage "Provisioning uv-managed CPython 3.11.16 without command aliases."
-    run_uv python install 3.11.16 --no-bin --no-registry > /dev/null 2>&1 ||
-      fail "The uv-managed Python could not be provisioned. Check the approved runtime source."
-    selected=3.11.16
+    selected="$pinned"
+    if [[ ! -e "$pydir/cpython-$pinned-linux-x86_64-gnu" && ! -L "$pydir/cpython-$pinned-linux-x86_64-gnu" ]]; then
+      stage "Provisioning uv-managed CPython $pinned without command aliases."
+      provision_runtime "$pinned"
+    fi
   fi
   minor="${selected%.*}"
   admit_runtime_tree "$pydir/cpython-$selected-linux-x86_64-gnu" "$minor"
@@ -544,6 +551,7 @@ else
   stage "Release: $release from $repository. The source commit will be discovered."
 fi
 stage "Uses the installed GitHub CLI, checksum-pinned uv 0.12.20, and uv-managed Python."
+stage "A new installation uses CPython 3.14.7. An existing Site Ops installation keeps its runtime."
 stage "No administrator rights or OS packages are used. No account is signed in."
 stage "Existing uv and Python installations are not upgraded."
 stage "Managed Python downloads use uv's HTTPS runtime source or an approved HTTPS mirror."

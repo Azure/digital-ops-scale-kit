@@ -216,9 +216,10 @@ Direct engine installation commands remain supported.
 
 The default preview's final summary shows one matrix of Python versions and
 platforms, plus a link to the attested release assets. Ubuntu 26.04 and the
-Windows standard user run only with Python 3.11, so other rows show `n/a` in
-those columns. The installer check fails unless every declared cell passes
-exactly once. Individual job logs remain available for diagnosis.
+Windows standard user run only with Python 3.14, the minor version of the
+runtime the bootstrap provisions, so other rows show `n/a` in those columns.
+The installer check fails unless every declared cell passes exactly once.
+Individual job logs remain available for diagnosis.
 
 This path needs no `siteops-release` environment. Its jobs have no permission
 to write repository contents, request no publishing approval, and
@@ -238,7 +239,7 @@ configured environment and explicit approval.
 
 ### Read the Windows standard user check
 
-The **Qualify bundle (windows-2025, Python 3.11, standard user)** job creates
+The **Qualify bundle (windows-2025, Python 3.14, standard user)** job creates
 a temporary local account in the Users group. It stages the verified bootstrap
 and bundle in a folder that account can only read and execute, then runs the
 signed bootstrap unchanged as that account. The account acquires its own uv

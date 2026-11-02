@@ -45,6 +45,7 @@ These changes affect how you install or run Site Ops after v1.0.0b7.
 | If you... | What to change |
 |---|---|
 | Install Site Ops on Windows with the PowerShell bootstrap | Review the [saved user PATH](#windows-user-path). |
+| Install Site Ops with the bootstrap or the [release wheel](install-siteops.md#install-the-release-wheel) | Nothing changes for existing installations. Review the [Python runtime](#python-runtime) if the host cannot download CPython 3.14.7. |
 | Match artifact verification error text, or read `source` from failed `browse --output json` | Review [artifact verification messages](#artifact-verification-messages). |
 | Read `diagnostics` from `validate`, `plan` or `deploy` JSON, or render it in a pipeline | Review [warnings in JSON results](#warnings-in-json-results). |
 | Want Arc extension settings without a saved Site | Nothing changes for existing use. Review [typed extension settings](#typed-extension-settings). |
@@ -75,6 +76,23 @@ pip installation or a `siteops.ps1` script, the bootstrap prints a line that
 starts with `Warning: new terminals run`. Remove that command with the tool
 that installed it. A saved PATH that cannot be read never stops the
 installation.
+
+### Python runtime
+
+Existing installations need no change. Rerunning the bootstrap, with or
+without `--replace` or `-Replace`, keeps the CPython an installation
+already uses.
+
+New installations, and the wheel command in the release notes, use CPython
+3.14.7. uv downloads it when it does not already manage it.
+
+On a host that cannot download CPython 3.14.7, allow uv's runtime source,
+set an approved HTTPS `UV_PYTHON_INSTALL_MIRROR`, or run
+`uv python install 3.14.7 --no-bin --no-registry` beforehand. Otherwise the
+bootstrap stops with `CPython 3.14.7 could not be downloaded.`
+
+To move a bootstrap installation to CPython 3.14.7, run
+`uv tool uninstall siteops`, then the new release's bootstrap command.
 
 ### Artifact verification messages
 

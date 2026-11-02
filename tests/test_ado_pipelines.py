@@ -320,6 +320,7 @@ def test_ado_unit_lane_requires_the_shared_native_linux_fixtures():
         ("SITEOPS_TEST_UV", "$fixtures/native/uv"),
         ("SITEOPS_TEST_UV_ARCHIVE", "$fixtures/uv.tar.gz"),
         ("SITEOPS_TEST_UV_PYTHON_ARCHIVE", "$fixtures/cpython.tar.gz"),
+        ("SITEOPS_TEST_UV_PREVIOUS_PYTHON_ARCHIVE", "$fixtures/cpython-previous.tar.gz"),
         ("SITEOPS_REQUIRE_LINUX_UV", "1"),
     ):
         assert f"variable={name}]{suffix}" in script
@@ -376,8 +377,8 @@ exit "$EXTRACT_EXIT"
     assert result.returncode == expected, result.stdout + result.stderr
     assert (tmp_path / "calls").read_text().splitlines() == (
         ["download"] if download else
-        ["download", "download", "digest"] if digest else
-        ["download", "download", "digest", "extract"]
+        ["download", "download", "download", "digest"] if digest else
+        ["download", "download", "download", "digest", "extract"]
     )
 
 

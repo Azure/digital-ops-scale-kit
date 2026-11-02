@@ -347,7 +347,7 @@ def render_notes(
     )
     command = (
         f'uv tool install "{downloads}{wheel}" '
-        '--python 3.11.16 --managed-python --no-build --system-certs'
+        '--python 3.14.7 --managed-python --no-build --system-certs'
     )
     bootstrap: list[str] = []
     bootstrap_details: list[str] = []
@@ -555,8 +555,8 @@ def render_summary(plan: dict[str, Any], notes: str, values: Mapping[str, str]) 
         ])
         allowed = {"passed", "failed", "cancelled", "skipped", "not-run", "unknown"}
         for row in matrix:
-            # Ubuntu 26.04 and the Windows standard user run only with Python 3.11.
-            limited = set() if row["python"] == "3.11" else {"ubuntu-26.04", "windows-standard-user"}
+            # Ubuntu 26.04 and the Windows standard user run only with the bootstrap's Python 3.14.
+            limited = set() if row["python"] == "3.14" else {"ubuntu-26.04", "windows-standard-user"}
             if any(row[column] not in ({"n/a"} if column in limited else allowed) for column in columns):
                 raise RenderingError("Invalid qualification summary.")
             lines.append("| " + " | ".join([row["python"], *(row[column] for column in columns)]) + " |")
