@@ -215,7 +215,7 @@ This policy applies to samples. The platform fundamentals (the top level of `tem
    - `test_version_config_aio_api_versions_have_modules`: every selectable version has its own module file.
    - `test_all_sites_aio_releases_have_config_files`: no Site references a missing YAML file.
    - `TestUpdateInstanceDispatch`: every param of the `update-instance` dispatcher is forwarded by every caller.
-6. **Decide the default for new Sites.** If the new AIO release should be the workspace default, update `aioRelease:` in `sites/base-site.yaml`. Sites that don't override `properties.aioRelease` will then pick it up on the next deploy. If Sites should select the new AIO release explicitly, leave the base alone and pin specific Sites individually.
+6. **Decide the default for new Sites.** If the new AIO release should be the workspace default, update `aioRelease:` in `sites/base-site.yaml` and move the "Default in `base-site.yaml`" note in the table above, which a workspace test compares. Sites that don't override `properties.aioRelease` will then pick it up on the next deploy. If Sites should select the new AIO release explicitly, leave the base alone and pin specific Sites individually.
 7. **Test live**: dispatch the E2E workflow including the new release in `aio-releases`:
    ```
    gh workflow run e2e-test.yaml -f aio-releases=<existing>,<new>

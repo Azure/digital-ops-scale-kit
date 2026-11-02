@@ -999,17 +999,26 @@ class TestReleaseConfigs:
                 f"{release_file.name}: configuration override keys must be strings"
             )
 
-    def test_base_site_defaults_to_latest_supported_release(self, workspace):
-        """The base site should select the highest release moniker that ships."""
+    def test_base_site_default_is_the_documented_default(self, workspace):
+        """The base site selects the release that docs/aio-releases.md marks as default.
+
+        A new release can ship for explicit selection before it becomes the
+        default, as "Adding a new AIO release" in that page describes, so the
+        default is a decision rather than always the newest release. The table
+        and the base site must still agree on it.
+        """
         base_path = workspace / "sites" / "base-site.yaml"
         with open(base_path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
 
-        default_release = data["properties"]["aioRelease"]
-        latest_release = max(
-            (f.stem for f in self._get_release_files(workspace)), key=int
+        releases_doc = workspace.parent.parent / "docs" / "aio-releases.md"
+        marked = re.findall(
+            r"^\| `(\d+)` \|[^\n]*Default in `base-site\.yaml`",
+            releases_doc.read_text(encoding="utf-8"),
+            re.MULTILINE,
         )
-        assert default_release == latest_release
+        assert marked == [data["properties"]["aioRelease"]]
+        assert (workspace / "parameters" / "aio-releases" / f"{marked[0]}.yaml").is_file()
 
     def test_all_sites_aio_releases_have_config_files(self, workspace):
         """Every committed site resolves an aioRelease to an existing config file.
