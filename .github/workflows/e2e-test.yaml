@@ -306,6 +306,7 @@ jobs:
       published-release: ${{ steps.v.outputs.published_release }}
       published-source-sha: ${{ steps.v.outputs.published_source_sha }}
       published-journey: ${{ steps.v.outputs.published_journey }}
+      secret-sync-steps: ${{ steps.v.outputs.secret_sync_steps }}
       candidate-mode: ${{ steps.v.outputs.candidate_mode }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -608,6 +609,25 @@ jobs:
           print(f"published_journey={'guided' if candidate_mode else published_journey}")
           print(f"candidate_mode={'true' if candidate_mode else 'false'}")
           print(f"published_release={published_release}")
+          # Secret Sync steps that the selected content gates. This checkout and
+          # releases after v1.0.0b7 add the prerequisite guard. Published
+          # releases up to v1.0.0b7 predate it. An unrecognized tag gets the
+          # guarded set, so a missing guard fails.
+          def release_key(tag):
+              match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)(?:(a|b|rc)(\d+))?(?:\.dev(\d+))?", tag)
+              if match is None:
+                  return None
+              major, minor, patch, label, number, dev = match.groups()
+              stage = {"a": 0, "b": 1, "rc": 2}.get(label, -1 if dev else 3)
+              return (int(major), int(minor), int(patch), stage, int(number or 0), 0 if dev else 1, int(dev or 0))
+
+          published_key = release_key(published_release) if published_release else None
+          secret_sync_steps = (
+              ["resolve-aio", "secretsync"]
+              if published_key is not None and published_key <= release_key("v1.0.0b7")
+              else ["resolve-aio", "check-secretsync-prerequisites", "secretsync"]
+          )
+          print(f"secret_sync_steps={json.dumps(secret_sync_steps, separators=(',', ':'))}")
           print(f"published_source_sha={published_source_sha}")
           print(f"pytest_paths={pytest_paths}")
           print(
@@ -698,6 +718,7 @@ jobs:
     env:
       PERSISTENT_RG: ${{ needs.prep.outputs.persistent }}
       PUBLISHED_JOURNEY: ${{ needs.prep.outputs.published-journey }}
+      E2E_SECRET_SYNC_STEPS: ${{ needs.prep.outputs.secret-sync-steps }}
       CANDIDATE_MODE: ${{ needs.prep.outputs.candidate-mode }}
       E2E_OPCUA_MODE: ${{ matrix.opcua-mode }}
       DEBUG_USER_OID: ${{ secrets.DEBUG_USER_OID }}
@@ -1250,11 +1271,14 @@ jobs:
           python - "$RUNNER_TEMP/published-plan-output.txt" \
             "$SITEOPS_E2E_ENGINE_VERSION" <<'PY'
           import json
+          import os
           import sys
           from pathlib import Path
 
-          # Secret Sync steps come from the selected content and follow the
-          # Site's choice, which is disabled here. The other steps are fixed.
+          # E2E_SECRET_SYNC_STEPS is the Secret Sync step set that the selected
+          # content must gate, decided in prep from the content source. Those
+          # steps are skipped here. The other seven steps are fixed, and a
+          # reported condition never replaces their dispositions.
           GATE = "{{ site.properties.deployOptions.enableSecretSync }}"
           FIXED = {
               "global-edge-site": "skip", "edge-site": "skip",
@@ -1263,16 +1287,17 @@ jobs:
               "schema-registry-role": "execute",
           }
           try:
+              contract = json.loads(os.environ["E2E_SECRET_SYNC_STEPS"])
               result = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
               summary = result["summary"]
               plan = result["plan"]
               names = [step["name"] for step in plan["steps"]]
-              gated = {step["name"] for step in plan["steps"] if step.get("condition") == GATE}
+              gated = sorted(step["name"] for step in plan["steps"] if step.get("condition") == GATE)
               (target,) = plan["targets"]
               actual = {item["identity"]["step"]: item["disposition"] for item in target["operations"]}
           except (OSError, ValueError, KeyError, TypeError):
               raise SystemExit("The published package plan is incomplete.") from None
-          expected = {**FIXED, **dict.fromkeys(gated, "skip")}
+          expected = {**dict.fromkeys(contract, "skip"), **FIXED}
           if (
               result.get("apiVersion") != "siteops/v1alpha1"
               or result.get("kind") != "DeploymentPlan"
@@ -1282,7 +1307,8 @@ jobs:
               or result.get("executable") is not False
               or result.get("engine", {}).get("version") != sys.argv[2]
               or summary.get("targetCount") != 1
-              or not {"resolve-aio", "secretsync"} <= gated
+              or set(contract) & set(FIXED)
+              or gated != sorted(contract)
               or sorted(names) != sorted(expected)
               or len(target["operations"]) != len(names)
               or summary.get("operationCount") != len(names)
@@ -1493,19 +1519,22 @@ jobs:
           enabled = os.environ["E2E_ENABLE_SECRET_SYNC"] == "true"
           plan = raw.get("plan") or {}
           targets = plan.get("targets", [])
-          # The selected content's flattened steps are the inventory. Secret
-          # Sync steps follow the Site's choice, and the other steps are fixed.
+          # E2E_SECRET_SYNC_STEPS, decided in prep from the content source, names
+          # the steps the content must gate on Secret Sync. They follow the
+          # Site's choice. The other seven steps are fixed, and a reported
+          # condition never replaces their dispositions.
           gate = "{{ site.properties.deployOptions.enableSecretSync }}"
-          steps = plan.get("steps", [])
-          names = [step.get("name") for step in steps]
-          gated = {step.get("name") for step in steps if step.get("condition") == gate}
-          expected_steps = {
+          fixed = {
               "global-edge-site": "skip", "edge-site": "skip",
               "schema-registry": "execute", "adr-ns": "execute",
               "aio-enablement": "execute", "aio-instance": "execute",
               "schema-registry-role": "execute",
-              **dict.fromkeys(gated, "execute" if enabled else "skip"),
           }
+          contract = json.loads(os.environ["E2E_SECRET_SYNC_STEPS"])
+          steps = plan.get("steps", [])
+          names = [step.get("name") for step in steps]
+          gated = sorted(str(step.get("name")) for step in steps if step.get("condition") == gate)
+          expected_steps = {**dict.fromkeys(contract, "execute" if enabled else "skip"), **fixed}
           actual = (
               {item["identity"]["step"]: item["disposition"]
                for item in targets[0]["operations"]}
@@ -1518,8 +1547,9 @@ jobs:
               or plan.get("manifest", {}).get("targetSelection") != "explicit-site"
               or plan.get("submission", {}).get("mode") != "arm-json"
               or plan.get("submission", {}).get("compilationBinding") != "package-artifact"
-              or not {"resolve-aio", "secretsync"} <= gated
-              or sorted(names) != sorted(expected_steps)
+              or set(contract) & set(fixed)
+              or gated != sorted(contract)
+              or sorted(map(str, names)) != sorted(expected_steps)
               or len(targets) != 1
               or len(targets[0]["operations"]) != len(names)
               or actual != expected_steps
@@ -2075,6 +2105,7 @@ jobs:
           from pathlib import Path
 
           try:
+              contract = json.loads(os.environ["E2E_SECRET_SYNC_STEPS"])
               raw = json.loads((Path(os.environ["RUNNER_TEMP"]) / "existing-plan.json").read_text(encoding="utf-8"))
               plan = raw["plan"]
               targets = plan["targets"]
@@ -2082,14 +2113,15 @@ jobs:
               actual = {item["identity"]["step"]: item["disposition"] for item in targets[0]["operations"]}
           except (OSError, ValueError, KeyError, TypeError, IndexError):
               raise SystemExit("The existing instance plan is invalid.") from None
-          # The selected content's flattened Secret Sync steps all run on an existing instance.
+          # Secret Sync on an existing instance runs exactly the step set that
+          # prep decided for the selected content, in order.
           if (
               raw.get("status") != "planned" or raw.get("executable") is not True
               or raw.get("engine", {}).get("version") != os.environ["SITEOPS_E2E_ENGINE_VERSION"]
-              or len(targets) != 1 or len(targets[0]["operations"]) != len(names)
-              or len(set(names)) != len(names) or not {"resolve-aio", "secretsync"} <= set(names)
+              or len(targets) != 1 or len(targets[0]["operations"]) != len(contract)
+              or names != contract
               or plan.get("submission") != {"mode": "arm-json", "compilationBinding": "package-artifact"}
-              or actual != dict.fromkeys(names, "execute")
+              or actual != dict.fromkeys(contract, "execute")
           ):
               raise SystemExit("The existing instance plan has unexpected operations.")
           PY
@@ -2107,11 +2139,10 @@ jobs:
           from pathlib import Path
 
           try:
-              root = Path(os.environ["RUNNER_TEMP"])
-              result = json.loads((root / "existing-deploy.json").read_text(encoding="utf-8"))
+              result = json.loads((Path(os.environ["RUNNER_TEMP"]) / "existing-deploy.json").read_text(encoding="utf-8"))
               sites = result["summary"]["sites"]
               operations = result["summary"]["operations"]
-              planned = len(json.loads((root / "existing-plan.json").read_text(encoding="utf-8"))["plan"]["steps"])
+              planned = len(json.loads(os.environ["E2E_SECRET_SYNC_STEPS"]))
           except (OSError, ValueError, KeyError, TypeError):
               raise SystemExit("The existing instance deployment result is invalid.") from None
           if (

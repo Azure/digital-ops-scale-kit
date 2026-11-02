@@ -1446,27 +1446,68 @@ def _content(request, b7_workspace):
     return (ROOT / "workspaces" / "iot-operations") if request == "current" else b7_workspace
 
 
+def _contract(content):
+    """The Secret Sync step set that prep decides from the content source, not from the plan."""
+    inputs = (
+        {"INPUT_CANDIDATE_SET": "true"} if content == "current" else {
+            "INPUT_SECRET_SYNC_MODES": "disabled", "INPUT_TESTS": "aio-install", "INPUT_RG": "rg-example",
+            "INPUT_PUBLISHED_RELEASE": "v1.0.0b7", "INPUT_PUBLISHED_SOURCE_SHA": "a" * 40,
+        }
+    )
+    result = _parse_inputs(**inputs)
+    assert result.returncode == 0, result.stderr
+    return {"E2E_SECRET_SYNC_STEPS": _outputs(result)["secret_sync_steps"]}
+
+
+_GATE = "{{ site.properties.deployOptions.enableSecretSync }}"
+
+
+def _mutated(document, change):
+    """Plans that a broken content or engine could report, with every count kept consistent."""
+    changed = json.loads(json.dumps(document))
+    plan = changed["plan"]
+    operations = plan["targets"][0]["operations"]
+    if change == "fixed-steps-gated":
+        for step in plan["steps"]:
+            if step["name"] in {"schema-registry-role", "aio-instance"}:
+                step["condition"] = _GATE
+        for item in operations:
+            if item["identity"]["step"] in {"schema-registry-role", "aio-instance"}:
+                item["disposition"] = "skip"
+    else:
+        plan["steps"] = [step for step in plan["steps"] if step["name"] != "check-secretsync-prerequisites"]
+        plan["targets"][0]["operations"] = [
+            item for item in operations if item["identity"]["step"] != "check-secretsync-prerequisites"
+        ]
+        changed["summary"]["operationCount"] = len(plan["targets"][0]["operations"])
+    return changed
+
+
 @pytest.mark.parametrize(("content", "steps"), [("current", 10), ("b7", 9)])
 def test_configured_published_plan_follows_the_selected_content(tmp_path, b7_workspace, content, steps):
     blocks = _embedded_python(_step_run("Render and plan the published-package operator Site"))
     assert len(blocks) == 1
+    contract = _contract(content)
     document = _real_plan(tmp_path, _content(content, b7_workspace), "aio-install", enabled=False)
     assert len(document["plan"]["steps"]) == steps
     plan = tmp_path / "plan.json"
     plan.write_text(json.dumps(document), encoding="utf-8")
-    assert _check(blocks[0], tmp_path, (str(plan), "test-build")).returncode == 0
+    assert _check(blocks[0], tmp_path, (str(plan), "test-build"), **contract).returncode == 0
     plan.write_text("safe progress\n" + json.dumps(document), encoding="utf-8")
-    assert _check(blocks[0], tmp_path, (str(plan), "test-build")).returncode != 0
-    for change in ("intent", "operation", "count"):
+    assert _check(blocks[0], tmp_path, (str(plan), "test-build"), **contract).returncode != 0
+    changes = ["intent", "operation", "count", "fixed-steps-gated"] + (["guard-removed"] if content == "current" else [])
+    for change in changes:
         changed = json.loads(json.dumps(document))
         if change == "intent":
             changed["intent"] = "executable"
         elif change == "operation":
             changed["plan"]["targets"][0]["operations"].pop()
-        else:
+        elif change == "count":
             changed["summary"]["operationCount"] = steps - 1
+        else:
+            changed = _mutated(document, change)
         plan.write_text(json.dumps(changed), encoding="utf-8")
-        assert _check(blocks[0], tmp_path, (str(plan), "test-build")).returncode != 0, change
+        assert _check(blocks[0], tmp_path, (str(plan), "test-build"), **contract).returncode != 0, change
 
 
 @pytest.mark.parametrize("content", ["current", "b7"])
@@ -1475,21 +1516,25 @@ def test_guided_plan_check_follows_the_selected_content(tmp_path, b7_workspace, 
     block = _embedded_python(_step_run("Prepare guided AIO answers and plan"))[-1]
     document = _real_plan(tmp_path, _content(content, b7_workspace), "aio-install", enabled=enabled, executable=True)
     path = tmp_path / "published-guided-plan.json"
-    flag = {"E2E_ENABLE_SECRET_SYNC": "true" if enabled else "false"}
+    environment = {"E2E_ENABLE_SECRET_SYNC": "true" if enabled else "false", **_contract(content)}
     path.write_text(json.dumps(document), encoding="utf-8")
-    selected = _check(block, tmp_path, **flag)
+    selected = _check(block, tmp_path, **environment)
     assert selected.returncode == 0, selected.stderr
     operations = document["plan"]["targets"][0]["operations"]
-    for change in ("gated-disposition", "missing-operation"):
+    changes = ["gated-disposition", "missing-operation", "fixed-steps-gated"]
+    changes += ["guard-removed"] if content == "current" else []
+    for change in changes:
         changed = json.loads(json.dumps(document))
         if change == "gated-disposition":
             secretsync = next(item for item in changed["plan"]["targets"][0]["operations"]
                               if item["identity"]["step"] == "secretsync")
             secretsync["disposition"] = "skip" if enabled else "execute"
-        else:
+        elif change == "missing-operation":
             changed["plan"]["targets"][0]["operations"] = operations[:-1]
+        else:
+            changed = _mutated(document, change)
         path.write_text(json.dumps(changed), encoding="utf-8")
-        rejected = _check(block, tmp_path, **flag)
+        rejected = _check(block, tmp_path, **environment)
         assert rejected.returncode != 0, change
         assert "unexpected operations" in rejected.stderr
 
@@ -1499,10 +1544,11 @@ def test_existing_instance_checks_follow_the_selected_content(tmp_path, b7_works
     blocks = _embedded_python(_step_run("Enable Secret Sync on the existing instance"))
     plan_check = next(block for block in blocks if "existing instance plan has unexpected" in block)
     result_check = next(block for block in blocks if "existing-deploy.json" in block)
+    contract = _contract(content)
     document = _real_plan(tmp_path, _content(content, b7_workspace), "secretsync", enabled=True, executable=True)
     assert len(document["plan"]["steps"]) == steps
     (tmp_path / "existing-plan.json").write_text(json.dumps(document), encoding="utf-8")
-    assert _check(plan_check, tmp_path).returncode == 0
+    assert _check(plan_check, tmp_path, **contract).returncode == 0
 
     def run(total):
         (tmp_path / "existing-deploy.json").write_text(json.dumps({
@@ -1511,14 +1557,41 @@ def test_existing_instance_checks_follow_the_selected_content(tmp_path, b7_works
             "summary": {"sites": {"total": 1, "counts": {"succeeded": 1}},
                         "operations": {"total": total, "counts": {"succeeded": total}}},
         }), encoding="utf-8")
-        return _check(result_check, tmp_path).returncode
+        return _check(result_check, tmp_path, **contract).returncode
 
     assert run(steps) == 0
     assert run(steps + 1) != 0 and run(steps - 1) != 0
+    if content == "current":
+        (tmp_path / "existing-plan.json").write_text(json.dumps(_mutated(document, "guard-removed")), encoding="utf-8")
+        assert _check(plan_check, tmp_path, **contract).returncode != 0
     document["plan"]["targets"][0]["operations"][-1]["disposition"] = "skip"
     (tmp_path / "existing-plan.json").write_text(json.dumps(document), encoding="utf-8")
-    assert _check(plan_check, tmp_path).returncode != 0
+    assert _check(plan_check, tmp_path, **contract).returncode != 0
 
+
+@pytest.mark.parametrize(("inputs", "guarded"), [
+    ({}, True),
+    ({"INPUT_CANDIDATE_SET": "true"}, True),
+    ({"INPUT_PUBLISHED_RELEASE": "v1.0.0b7"}, False),
+    ({"INPUT_PUBLISHED_RELEASE": "v1.0.0b6"}, False),
+    ({"INPUT_PUBLISHED_RELEASE": "v0.0.4.dev20260919"}, False),
+    ({"INPUT_PUBLISHED_RELEASE": "v1.0.0b8.dev1"}, True),
+    ({"INPUT_PUBLISHED_RELEASE": "v1.0.0b8"}, True),
+    ({"INPUT_PUBLISHED_RELEASE": "v1.0.0"}, True),
+    ({"INPUT_PUBLISHED_RELEASE": "unrecognized-tag"}, True),
+])
+def test_prep_decides_the_secret_sync_steps_from_the_content_source(inputs, guarded):
+    if "INPUT_PUBLISHED_RELEASE" in inputs:
+        inputs = {**inputs, "INPUT_SECRET_SYNC_MODES": "disabled", "INPUT_TESTS": "aio-install",
+                  "INPUT_RG": "rg-example", "INPUT_PUBLISHED_SOURCE_SHA": "a" * 40}
+    result = _parse_inputs(**inputs)
+    assert result.returncode == 0, result.stderr
+    expected = (["resolve-aio", "check-secretsync-prerequisites", "secretsync"] if guarded
+                else ["resolve-aio", "secretsync"])
+    assert json.loads(_outputs(result)["secret_sync_steps"]) == expected
+    workflow = cached_safe_load(_workflow())
+    assert workflow["jobs"]["prep"]["outputs"]["secret-sync-steps"] == "${{ steps.v.outputs.secret_sync_steps }}"
+    assert workflow["jobs"]["e2e"]["env"]["E2E_SECRET_SYNC_STEPS"] == "${{ needs.prep.outputs.secret-sync-steps }}"
 
 def test_guided_published_plan_waits_for_arc_and_keeps_private_data_local():
     workflow = _workflow()
@@ -2651,6 +2724,7 @@ def test_candidate_guided_preparation_uses_fresh_policy_and_refuses_unready_secr
         "E2E_SUBSCRIPTION": "00000000-0000-0000-0000-000000000001", "E2E_RESOURCE_GROUP": "rg-private-marker",
         "E2E_CLUSTER_NAME": "arc-private-marker", "E2E_AIO_RELEASE": "2608",
         "E2E_ENABLE_SECRET_SYNC": "false", "E2E_SECRET_SYNC_MODE": mode,
+        "E2E_SECRET_SYNC_STEPS": json.dumps(["resolve-aio", "secretsync"]),
     })
     assert result.returncode == 0, result.stdout + result.stderr
     recorded = calls(tmp_path)
@@ -2742,6 +2816,7 @@ def test_existing_case_enables_secret_sync_with_the_precreated_vault(tmp_path, f
         "SITEOPS_E2E_ENGINE_VERSION": "1.0.0b7", "FLEET_PYTHON": "fleet-python",
         "AZURE_SUBSCRIPTION_ID": "00000000-0000-0000-0000-000000000001", "E2E_RESOURCE_GROUP": "rg-private-marker",
         "FLEET_VAULT_NAME": "kv-private-marker", "E2E_SITE_NAME": "site-private-marker",
+        "E2E_SECRET_SYNC_STEPS": json.dumps(["resolve-aio", "secretsync"]),
     })
     assert "private-marker" not in result.stdout + result.stderr
     answers = json.loads((tmp_path / "existing-answers.json").read_text(encoding="utf-8"))["values"]
