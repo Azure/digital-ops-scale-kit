@@ -115,7 +115,7 @@ az role assignment create \
   --condition-version "2.0"
 ```
 
-The condition follows Microsoft's [example that constrains roles and principal types](https://learn.microsoft.com/azure/role-based-access-control/delegate-role-assignments-examples#example-constrain-roles-and-principal-types). When Secret Sync uses an existing Key Vault in another resource group, grant the same constrained role on that vault or its resource group too.
+The condition follows Microsoft's [example that constrains roles and principal types](https://learn.microsoft.com/azure/role-based-access-control/delegate-role-assignments-examples#example-constrain-roles-and-principal-types). When Secret Sync uses an existing Key Vault in another resource group, the deployment creates its role assignments through a deployment in that resource group. Grant Contributor and the same constrained role on that resource group too, or assign the two Key Vault roles yourself and set `skipRoleAssignments: true`.
 
 #### Kubernetes RBAC for Arc proxy operations
 

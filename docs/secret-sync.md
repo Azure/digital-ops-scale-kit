@@ -21,7 +21,7 @@ The enablement template (`enable-secretsync.bicep`) creates:
 
 - Existing Azure IoT Operations instance
 - Connected cluster with **OIDC issuer** and **workload identity** enabled
-- Contributor on the deployment resource group, plus permission to create role assignments at the Key Vault scope, such as Role Based Access Control Administrator with the condition in [CI/CD setup](ci-cd-setup.md#3-assign-azure-roles). Set `skipRoleAssignments: true` only when the Secret Sync managed identity already has the required Key Vault roles.
+- Contributor on the deployment resource group, plus permission to create role assignments at the Key Vault scope, such as Role Based Access Control Administrator with the condition in [CI/CD setup](ci-cd-setup.md#3-assign-azure-roles). A vault in another resource group also needs Contributor on that resource group, because the role assignments deploy there. Set `skipRoleAssignments: true` only when the Secret Sync managed identity already has the required Key Vault roles.
 
 ## How it works
 
