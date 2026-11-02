@@ -5,11 +5,11 @@ resource customLocation 'Microsoft.ExtendedLocation/customLocations@2021-08-31-p
   name: customLocationName
 }
 
-resource adrNamespace 'Microsoft.DeviceRegistry/namespaces@2025-10-01' existing = {
+resource adrNamespace 'Microsoft.DeviceRegistry/namespaces@2026-04-01' existing = {
   name: adrNamespaceName
 }
 
-resource externalDevice 'Microsoft.DeviceRegistry/namespaces/devices@2025-10-01' = {
+resource externalDevice 'Microsoft.DeviceRegistry/namespaces/devices@2026-04-01' = {
   name: 'external-opc-ua'
   parent: adrNamespace
   location: resourceGroup().location

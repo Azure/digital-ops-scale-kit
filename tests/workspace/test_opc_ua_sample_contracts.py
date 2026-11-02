@@ -105,7 +105,7 @@ def test_contract_reads_properties_rather_than_any_enabled_key(tmp_path):
     """
     decoy = tmp_path / "decoy.bicep"
     decoy.write_text(
-        "resource device 'Microsoft.DeviceRegistry/namespaces/devices@2025-10-01' = {\n"
+        "resource device 'Microsoft.DeviceRegistry/namespaces/devices@2026-04-01' = {\n"
         "  name: 'ns/dev'\n"
         "  tags: {\n"
         "    enabled: 'true'\n"
@@ -116,7 +116,7 @@ def test_contract_reads_properties_rather_than_any_enabled_key(tmp_path):
         "}\n"
         "\n"
         "/*\n"
-        "resource commentedOut 'Microsoft.DeviceRegistry/namespaces/assets@2025-10-01' = {\n"
+        "resource commentedOut 'Microsoft.DeviceRegistry/namespaces/assets@2026-04-01' = {\n"
         "  name: 'ns/asset'\n"
         "  properties: {\n"
         "    enabled: true\n"

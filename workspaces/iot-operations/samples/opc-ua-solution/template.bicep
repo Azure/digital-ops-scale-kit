@@ -92,7 +92,7 @@ resource defaultDataflowProfile 'Microsoft.IoTOperations/instances/dataflowProfi
   parent: aioInstance
 }
 
-resource namespace 'Microsoft.DeviceRegistry/namespaces@2025-10-01' existing = {
+resource namespace 'Microsoft.DeviceRegistry/namespaces@2026-04-01' existing = {
   name: adrNamespaceName
 }
 
@@ -104,7 +104,7 @@ var assetName = 'oven'
 var opcUaEndpointName = 'opc-ua-connector-0'
 var deviceName = 'opc-ua-connector'
 
-resource device 'Microsoft.DeviceRegistry/namespaces/devices@2025-10-01' = {
+resource device 'Microsoft.DeviceRegistry/namespaces/devices@2026-04-01' = {
   name: deviceName
   parent: namespace
   location: clusterLocation
@@ -132,7 +132,7 @@ resource device 'Microsoft.DeviceRegistry/namespaces/devices@2025-10-01' = {
   }
 }
 
-resource asset 'Microsoft.DeviceRegistry/namespaces/assets@2025-10-01' = {
+resource asset 'Microsoft.DeviceRegistry/namespaces/assets@2026-04-01' = {
   name: assetName
   parent: namespace
   location: clusterLocation
