@@ -1226,7 +1226,9 @@ jobs:
             --output-dir "$SITEOPS_E2E_PROJECT/sites"
           site="$SITEOPS_E2E_PROJECT/sites/$E2E_SITE_NAME.yaml"
           site_before="$(sha256sum "$site" | cut -d ' ' -f 1)"
-          if ! siteops \
+          # The private plan lists the selected content's flattened steps, which
+          # the check below uses as the expected inventory. It stays on the runner.
+          if ! SITEOPS_REDACT_OUTPUT=0 siteops \
             --project "$SITEOPS_E2E_PROJECT" \
             --trust-policy "$SITEOPS_E2E_POLICY" \
             --trusted-root "$SITEOPS_E2E_TRUSTED_ROOT" \
@@ -1234,11 +1236,10 @@ jobs:
             --describe \
             --offline-content \
             -l "name=$E2E_SITE_NAME" \
-            --output json \
+            --output json --projection local-private \
             > "$RUNNER_TEMP/published-plan-output.txt" \
             2> "$RUNNER_TEMP/published-plan.err"; then
             echo "::error::The published package cannot describe the selected AIO install."
-            cat "$RUNNER_TEMP/published-plan.err"
             exit 1
           fi
           site_after="$(sha256sum "$site" | cut -d ' ' -f 1)"
@@ -1252,19 +1253,40 @@ jobs:
           import sys
           from pathlib import Path
 
-          raw = Path(sys.argv[1]).read_text(encoding="utf-8")
-          result = json.loads(raw)
-          summary = result.get("summary", {})
+          # Secret Sync steps come from the selected content and follow the
+          # Site's choice, which is disabled here. The other steps are fixed.
+          GATE = "{{ site.properties.deployOptions.enableSecretSync }}"
+          FIXED = {
+              "global-edge-site": "skip", "edge-site": "skip",
+              "schema-registry": "execute", "adr-ns": "execute",
+              "aio-enablement": "execute", "aio-instance": "execute",
+              "schema-registry-role": "execute",
+          }
+          try:
+              result = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+              summary = result["summary"]
+              plan = result["plan"]
+              names = [step["name"] for step in plan["steps"]]
+              gated = {step["name"] for step in plan["steps"] if step.get("condition") == GATE}
+              (target,) = plan["targets"]
+              actual = {item["identity"]["step"]: item["disposition"] for item in target["operations"]}
+          except (OSError, ValueError, KeyError, TypeError):
+              raise SystemExit("The published package plan is incomplete.") from None
+          expected = {**FIXED, **dict.fromkeys(gated, "skip")}
           if (
               result.get("apiVersion") != "siteops/v1alpha1"
               or result.get("kind") != "DeploymentPlan"
-              or result.get("projection") != "publishable"
+              or result.get("projection") != "local-private"
               or result.get("status") != "planned"
               or result.get("intent") != "describe"
               or result.get("executable") is not False
               or result.get("engine", {}).get("version") != sys.argv[2]
               or summary.get("targetCount") != 1
-              or summary.get("operationCount") != 9
+              or not {"resolve-aio", "secretsync"} <= gated
+              or sorted(names) != sorted(expected)
+              or len(target["operations"]) != len(names)
+              or summary.get("operationCount") != len(names)
+              or actual != expected
           ):
               raise SystemExit("The published package plan is incomplete.")
           PY
@@ -1471,13 +1493,18 @@ jobs:
           enabled = os.environ["E2E_ENABLE_SECRET_SYNC"] == "true"
           plan = raw.get("plan") or {}
           targets = plan.get("targets", [])
+          # The selected content's flattened steps are the inventory. Secret
+          # Sync steps follow the Site's choice, and the other steps are fixed.
+          gate = "{{ site.properties.deployOptions.enableSecretSync }}"
+          steps = plan.get("steps", [])
+          names = [step.get("name") for step in steps]
+          gated = {step.get("name") for step in steps if step.get("condition") == gate}
           expected_steps = {
               "global-edge-site": "skip", "edge-site": "skip",
               "schema-registry": "execute", "adr-ns": "execute",
               "aio-enablement": "execute", "aio-instance": "execute",
               "schema-registry-role": "execute",
-              "resolve-aio": "execute" if enabled else "skip",
-              "secretsync": "execute" if enabled else "skip",
+              **dict.fromkeys(gated, "execute" if enabled else "skip"),
           }
           actual = (
               {item["identity"]["step"]: item["disposition"]
@@ -1491,6 +1518,10 @@ jobs:
               or plan.get("manifest", {}).get("targetSelection") != "explicit-site"
               or plan.get("submission", {}).get("mode") != "arm-json"
               or plan.get("submission", {}).get("compilationBinding") != "package-artifact"
+              or not {"resolve-aio", "secretsync"} <= gated
+              or sorted(names) != sorted(expected_steps)
+              or len(targets) != 1
+              or len(targets[0]["operations"]) != len(names)
               or actual != expected_steps
           ):
               raise SystemExit("Guided installed AIO plan has unexpected operations.")
@@ -1640,7 +1671,7 @@ jobs:
               ):
                   raise ValueError("Plan shape differs.")
               operations = targets[0]["operations"]
-              if len(operations) != 9 or raw["summary"]["operationCount"] != len(operations):
+              if len(operations) != len(plan["steps"]) or raw["summary"]["operationCount"] != len(operations):
                   raise ValueError("Operation count differs.")
               target = targets[0]
               identity = tuple(
@@ -2047,15 +2078,18 @@ jobs:
               raw = json.loads((Path(os.environ["RUNNER_TEMP"]) / "existing-plan.json").read_text(encoding="utf-8"))
               plan = raw["plan"]
               targets = plan["targets"]
+              names = [step["name"] for step in plan["steps"]]
               actual = {item["identity"]["step"]: item["disposition"] for item in targets[0]["operations"]}
           except (OSError, ValueError, KeyError, TypeError, IndexError):
               raise SystemExit("The existing instance plan is invalid.") from None
+          # The selected content's flattened Secret Sync steps all run on an existing instance.
           if (
               raw.get("status") != "planned" or raw.get("executable") is not True
               or raw.get("engine", {}).get("version") != os.environ["SITEOPS_E2E_ENGINE_VERSION"]
-              or len(targets) != 1 or len(targets[0]["operations"]) != 2
+              or len(targets) != 1 or len(targets[0]["operations"]) != len(names)
+              or len(set(names)) != len(names) or not {"resolve-aio", "secretsync"} <= set(names)
               or plan.get("submission") != {"mode": "arm-json", "compilationBinding": "package-artifact"}
-              or actual != {"resolve-aio": "execute", "secretsync": "execute"}
+              or actual != dict.fromkeys(names, "execute")
           ):
               raise SystemExit("The existing instance plan has unexpected operations.")
           PY
@@ -2073,9 +2107,11 @@ jobs:
           from pathlib import Path
 
           try:
-              result = json.loads((Path(os.environ["RUNNER_TEMP"]) / "existing-deploy.json").read_text(encoding="utf-8"))
+              root = Path(os.environ["RUNNER_TEMP"])
+              result = json.loads((root / "existing-deploy.json").read_text(encoding="utf-8"))
               sites = result["summary"]["sites"]
               operations = result["summary"]["operations"]
+              planned = len(json.loads((root / "existing-plan.json").read_text(encoding="utf-8"))["plan"]["steps"])
           except (OSError, ValueError, KeyError, TypeError):
               raise SystemExit("The existing instance deployment result is invalid.") from None
           if (
@@ -2084,7 +2120,7 @@ jobs:
               or type(result.get("exitCode")) is not int or result["exitCode"] != 0
               or result.get("engine", {}).get("version") != os.environ["SITEOPS_E2E_ENGINE_VERSION"]
               or sites.get("total") != 1 or sites.get("counts", {}).get("succeeded") != 1
-              or operations.get("total") != 2 or operations.get("counts", {}).get("succeeded") != 2
+              or operations.get("total") != planned or operations.get("counts", {}).get("succeeded") != planned
           ):
               raise SystemExit("The existing instance deployment did not succeed.")
           PY

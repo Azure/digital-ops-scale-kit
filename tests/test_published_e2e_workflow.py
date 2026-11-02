@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -11,12 +12,15 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 from pathlib import Path
 
 import pytest
 import yaml
 
+from siteops.orchestrator import Orchestrator
+from siteops.planning import PlanIntent, PlanProjection, serialize_plan_json
 from siteops.reporting import _KIND as DEPLOYMENT_KIND
 from tests.acceptance_helpers import calls, double_environment, install_doubles
 from tests.actions_expressions import dispatch_inputs, evaluate, job_runs, truthy
@@ -1383,31 +1387,137 @@ def test_published_workspace_uses_project_pin_and_separate_sites():
     assert "raw.find" not in plan_step
 
 
-def test_configured_published_plan_requires_one_describe_document(tmp_path):
+_PLAN_SITE = {
+    "apiVersion": "siteops/v1", "kind": "Site", "name": "plant",
+    "subscription": "00000000-0000-0000-0000-000000000001", "resourceGroup": "rg-plant", "location": "eastus",
+    "labels": {"environment": "e2e", "country": "US", "city": "E2E"},
+    "parameters": {"clusterName": "plant-arc"},
+}
+
+
+@pytest.fixture(scope="module")
+def b7_workspace(tmp_path_factory):
+    """The v1.0.0b7 workspace, whose aio-install has no Secret Sync guard step."""
+    from tests.test_consumer_compatibility import _tagged_commit
+
+    archive = subprocess.run(
+        ["git", "-C", str(ROOT), "archive", "--format=tar", _tagged_commit(), "workspaces/iot-operations"],
+        capture_output=True, check=True, timeout=120,
+    ).stdout
+    root = tmp_path_factory.mktemp("b7")
+    with tarfile.open(fileobj=io.BytesIO(archive)) as bundle:
+        bundle.extractall(root, filter="data")
+    return root / "workspaces" / "iot-operations"
+
+
+def _real_plan(tmp_path, workspace, manifest, *, enabled, executable=False):
+    """Plan the selected content's Manifest with the engine and serialize it as the CLI does."""
+    project = tmp_path / f"project-{manifest}-{enabled}"
+    (project / "sites").mkdir(parents=True)
+    site = {**_PLAN_SITE, "properties": {"aioRelease": "2609", "deployOptions": {
+        "enableGlobalSite": False, "enableEdgeSite": False, "enableSecretSync": enabled,
+        "enableCertManager": True,
+    }}}
+    (project / "sites" / "plant.yaml").write_text(yaml.safe_dump(site), encoding="utf-8")
+    result = Orchestrator(workspace, site_config_root=project).build_plan(
+        workspace / "manifests" / manifest / "manifest.yaml", selector="name=plant", intent=PlanIntent.DESCRIBE,
+    )
+    document = json.loads(serialize_plan_json(result, PlanProjection.LOCAL_PRIVATE, engine_version="test-build"))
+    assert document["status"] == "planned", document.get("diagnostics")
+    if executable:
+        # Only the fields that executable intent adds. Steps and dispositions stay as planned.
+        document["executable"] = True
+        document["plan"]["manifest"]["targetSelection"] = "explicit-site"
+        document["plan"]["submission"] = {"mode": "arm-json", "compilationBinding": "package-artifact"}
+    return document
+
+
+def _check(block, tmp_path, argv=(), **environment):
+    environment = {"RUNNER_TEMP": str(tmp_path), "SITEOPS_E2E_ENGINE_VERSION": "test-build", **environment}
+    if os.name == "nt":
+        environment["SystemRoot"] = os.environ["SystemRoot"]
+    return subprocess.run(
+        [sys.executable, "-c", block, *argv], env=environment,
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+
+
+def _content(request, b7_workspace):
+    return (ROOT / "workspaces" / "iot-operations") if request == "current" else b7_workspace
+
+
+@pytest.mark.parametrize(("content", "steps"), [("current", 10), ("b7", 9)])
+def test_configured_published_plan_follows_the_selected_content(tmp_path, b7_workspace, content, steps):
     blocks = _embedded_python(_step_run("Render and plan the published-package operator Site"))
     assert len(blocks) == 1
+    document = _real_plan(tmp_path, _content(content, b7_workspace), "aio-install", enabled=False)
+    assert len(document["plan"]["steps"]) == steps
     plan = tmp_path / "plan.json"
-    document = {
-        "apiVersion": "siteops/v1alpha1", "kind": "DeploymentPlan",
-        "projection": "publishable", "status": "planned",
-        "intent": "describe", "executable": False,
-        "engine": {"version": "1.0.0b1"},
-        "summary": {"targetCount": 1, "operationCount": 9},
-    }
-
-    def check():
-        return subprocess.run(
-            [sys.executable, "-c", blocks[0], str(plan), "1.0.0b1"],
-            capture_output=True, text=True, check=False,
-        )
-
     plan.write_text(json.dumps(document), encoding="utf-8")
-    assert check().returncode == 0
+    assert _check(blocks[0], tmp_path, (str(plan), "test-build")).returncode == 0
     plan.write_text("safe progress\n" + json.dumps(document), encoding="utf-8")
-    assert check().returncode != 0
-    document["intent"] = "executable"
-    plan.write_text(json.dumps(document), encoding="utf-8")
-    assert check().returncode != 0
+    assert _check(blocks[0], tmp_path, (str(plan), "test-build")).returncode != 0
+    for change in ("intent", "operation", "count"):
+        changed = json.loads(json.dumps(document))
+        if change == "intent":
+            changed["intent"] = "executable"
+        elif change == "operation":
+            changed["plan"]["targets"][0]["operations"].pop()
+        else:
+            changed["summary"]["operationCount"] = steps - 1
+        plan.write_text(json.dumps(changed), encoding="utf-8")
+        assert _check(blocks[0], tmp_path, (str(plan), "test-build")).returncode != 0, change
+
+
+@pytest.mark.parametrize("content", ["current", "b7"])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_guided_plan_check_follows_the_selected_content(tmp_path, b7_workspace, content, enabled):
+    block = _embedded_python(_step_run("Prepare guided AIO answers and plan"))[-1]
+    document = _real_plan(tmp_path, _content(content, b7_workspace), "aio-install", enabled=enabled, executable=True)
+    path = tmp_path / "published-guided-plan.json"
+    flag = {"E2E_ENABLE_SECRET_SYNC": "true" if enabled else "false"}
+    path.write_text(json.dumps(document), encoding="utf-8")
+    selected = _check(block, tmp_path, **flag)
+    assert selected.returncode == 0, selected.stderr
+    operations = document["plan"]["targets"][0]["operations"]
+    for change in ("gated-disposition", "missing-operation"):
+        changed = json.loads(json.dumps(document))
+        if change == "gated-disposition":
+            secretsync = next(item for item in changed["plan"]["targets"][0]["operations"]
+                              if item["identity"]["step"] == "secretsync")
+            secretsync["disposition"] = "skip" if enabled else "execute"
+        else:
+            changed["plan"]["targets"][0]["operations"] = operations[:-1]
+        path.write_text(json.dumps(changed), encoding="utf-8")
+        rejected = _check(block, tmp_path, **flag)
+        assert rejected.returncode != 0, change
+        assert "unexpected operations" in rejected.stderr
+
+
+@pytest.mark.parametrize(("content", "steps"), [("current", 3), ("b7", 2)])
+def test_existing_instance_checks_follow_the_selected_content(tmp_path, b7_workspace, content, steps):
+    blocks = _embedded_python(_step_run("Enable Secret Sync on the existing instance"))
+    plan_check = next(block for block in blocks if "existing instance plan has unexpected" in block)
+    result_check = next(block for block in blocks if "existing-deploy.json" in block)
+    document = _real_plan(tmp_path, _content(content, b7_workspace), "secretsync", enabled=True, executable=True)
+    assert len(document["plan"]["steps"]) == steps
+    (tmp_path / "existing-plan.json").write_text(json.dumps(document), encoding="utf-8")
+    assert _check(plan_check, tmp_path).returncode == 0
+
+    def run(total):
+        (tmp_path / "existing-deploy.json").write_text(json.dumps({
+            "apiVersion": "siteops/v1alpha1", "kind": "DeploymentRun", "projection": "publishable",
+            "status": "succeeded", "exitCode": 0, "engine": {"version": "test-build"},
+            "summary": {"sites": {"total": 1, "counts": {"succeeded": 1}},
+                        "operations": {"total": total, "counts": {"succeeded": total}}},
+        }), encoding="utf-8")
+        return _check(result_check, tmp_path).returncode
+
+    assert run(steps) == 0
+    assert run(steps + 1) != 0 and run(steps - 1) != 0
+    document["plan"]["targets"][0]["operations"][-1]["disposition"] = "skip"
+    (tmp_path / "existing-plan.json").write_text(json.dumps(document), encoding="utf-8")
+    assert _check(plan_check, tmp_path).returncode != 0
 
 
 def test_guided_published_plan_waits_for_arc_and_keeps_private_data_local():
@@ -1559,6 +1669,7 @@ def test_guided_disabled_plan_comparison_rejects_wrong_target_and_operations(tmp
                     {"targetSelection": "explicit-site", "cliSelector": None}
                 ),
                 "submission": {"mode": "arm-json", "compilationBinding": "package-artifact"},
+                "steps": [{"name": step} for step in steps],
                 "targets": [{
                     "name": site,
                     "kind": "resource-group",
@@ -2409,56 +2520,6 @@ def test_guided_answers_use_a_private_file_with_no_implicit_site(tmp_path, enabl
         assert (tmp_path / "published-answers.json").stat().st_mode & 0o777 == 0o600
 
 
-@pytest.mark.parametrize("enabled", [False, True])
-def test_guided_private_plan_assertion_requires_expected_operations(
-    tmp_path, enabled,
-):
-    block = _embedded_python(_step_run("Prepare guided AIO answers and plan"))[-1]
-    expected_steps = {
-        "global-edge-site": "skip", "edge-site": "skip",
-        "schema-registry": "execute", "adr-ns": "execute",
-        "aio-enablement": "execute", "aio-instance": "execute",
-        "schema-registry-role": "execute",
-        "resolve-aio": "execute" if enabled else "skip",
-        "secretsync": "execute" if enabled else "skip",
-    }
-    plan = {
-        "status": "planned", "executable": True,
-        "engine": {"version": "test-build"},
-        "plan": {
-            "manifest": {"targetSelection": "explicit-site"},
-            "submission": {"mode": "arm-json", "compilationBinding": "package-artifact"},
-            "targets": [{"operations": [
-                {"identity": {"step": name}, "disposition": disposition}
-                for name, disposition in expected_steps.items()
-            ]}],
-        },
-    }
-    path = tmp_path / "published-guided-plan.json"
-    path.write_text(json.dumps(plan), encoding="utf-8")
-    environment = {
-        "RUNNER_TEMP": str(tmp_path), "SITEOPS_E2E_ENGINE_VERSION": "test-build",
-        "E2E_ENABLE_SECRET_SYNC": "true" if enabled else "false",
-    }
-    if os.name == "nt":
-        environment["SystemRoot"] = os.environ["SystemRoot"]
-    selected = subprocess.run(
-        [sys.executable, "-c", block],
-        env=environment, capture_output=True, text=True, timeout=15, check=False,
-    )
-    assert selected.returncode == 0, selected.stderr
-    plan["plan"]["targets"][0]["operations"][-1]["disposition"] = (
-        "skip" if enabled else "execute"
-    )
-    path.write_text(json.dumps(plan), encoding="utf-8")
-    rejected = subprocess.run(
-        [sys.executable, "-c", block],
-        env=environment, capture_output=True, text=True, timeout=15, check=False,
-    )
-    assert rejected.returncode != 0
-    assert "unexpected operations" in rejected.stderr
-
-
 def _outputs(result):
     return dict(line.split("=", 1) for line in result.stdout.splitlines())
 
@@ -2573,9 +2634,12 @@ def test_candidate_guided_preparation_uses_fresh_policy_and_refuses_unready_secr
     steps = {"global-edge-site": "skip", "edge-site": "skip", "schema-registry": "execute", "adr-ns": "execute",
              "aio-enablement": "execute", "aio-instance": "execute", "schema-registry-role": "execute",
              "resolve-aio": "skip", "secretsync": "skip"}
+    gate = "{{ site.properties.deployOptions.enableSecretSync }}"
     plan = {"status": "planned", "executable": True, "engine": {"version": "1.0.0b7"}, "plan": {
         "manifest": {"targetSelection": "explicit-site"},
         "submission": {"mode": "arm-json", "compilationBinding": "package-artifact"},
+        "steps": [{"name": step, "condition": gate if step in {"resolve-aio", "secretsync"} else None}
+                  for step in steps],
         "targets": [{"operations": [{"identity": {"step": step}, "disposition": value}
                                     for step, value in steps.items()]}]}}
     install_doubles(tmp_path, _guided_rules(policy, plan=plan))
@@ -2653,6 +2717,7 @@ def test_existing_case_enables_secret_sync_with_the_precreated_vault(tmp_path, f
         operations.append({"identity": {"step": "aio-instance"}, "disposition": "execute"})
     plan = {"status": "planned", "executable": True, "engine": {"version": "1.0.0b7"},
             "plan": {"submission": {"mode": "arm-json", "compilationBinding": "package-artifact"},
+                     "steps": [{"name": "resolve-aio"}, {"name": "secretsync"}],
                      "targets": [{"operations": operations}]}}
     run = {"apiVersion": "siteops/v1alpha1", "kind": "DeploymentRun", "projection": "publishable",
            "status": "failed" if fault == "deploy-failed" else "succeeded", "exitCode": 0,
