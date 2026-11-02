@@ -178,13 +178,13 @@ rejects such a workspace without it. See
 ### Schema registry role
 
 `aio-install` now gives the AIO extension Azure Device Registry Administrator
-on the schema registry instead of Contributor, the role that
-`az iot ops create` assigns. If a condition limits which roles your
-deployment identity can assign, allow this role
+on the schema registry instead of Contributor. If a condition limits
+which roles your deployment identity can assign, allow this role
 (`12675fd7-7f59-493f-9201-f7944860a2f1`).
 
-Existing instances keep their Contributor assignment. After your next
-`aio-install` run, you can remove it with `az role assignment delete`.
+An existing instance keeps its Contributor assignment. Your next
+`aio-install` run adds the new role, after which you can remove Contributor
+with `az role assignment delete`.
 
 ### Repeated equals keys
 

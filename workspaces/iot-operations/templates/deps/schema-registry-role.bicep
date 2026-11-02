@@ -1,9 +1,8 @@
 // schema-registry-role.bicep
 // -------------------------------------------------------------------------------------
 // Grants the AIO extension's system assigned MI Azure Device Registry Administrator
-// on an existing Schema Registry, the role `az iot ops create` assigns. The role
-// grants Microsoft.DeviceRegistry/* only. Run after both schema-registry and the AIO
-// instance exist.
+// on an existing Schema Registry. The role grants Microsoft.DeviceRegistry/* only.
+// Run after both schema-registry and the AIO instance exist.
 //
 // Inputs:  schemaRegistryName, aioExtensionPrincipalId.
 // Outputs: none (role assignment is idempotent on the same triple of scope/principal/role).
