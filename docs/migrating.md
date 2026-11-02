@@ -198,6 +198,8 @@ AIO releases start at 2603, so a Site that pins `aioRelease` 2512 or 2602
 fails preparation with `which does not exist`. Pin a supported release, and
 to upgrade an existing AIO 1.2 instance, pin a 1.3 release such as 2606 and
 run [`aio-upgrade`](../workspaces/iot-operations/manifests/aio-upgrade/README.md).
+If a Site sets `aioApiVersion` or `adrApiVersion` to `2025-10-01`, remove that
+setting so the AIO release selects the API version.
 
 ### Broker redundancy
 
