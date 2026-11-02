@@ -94,9 +94,14 @@ uv 0.12.20 executable. Acquire the native tool through an approved channel.
 The tests use local fixture wheels and isolated tool, runtime and cache
 directories rather than changing the user's installation.
 Platform bootstrap tests also require `SITEOPS_TEST_UV_ARCHIVE` for the
-matching platform. Windows uses `SITEOPS_TEST_UV_PYTHON_DIR` for an admitted
-managed Python fixture. Linux uses `SITEOPS_TEST_UV_PYTHON_ARCHIVE` and
-OpenSSL to serve that runtime from a local HTTPS mirror. CI requires these
+matching platform. They also need two managed CPython runtimes: the one the
+bootstraps pin, and the one the v1.0.0b7 bootstrap installed, which existing
+installations keep. Windows uses `SITEOPS_TEST_UV_PYTHON_DIR` for an
+admitted managed Python directory holding both. Linux uses
+`SITEOPS_TEST_UV_PYTHON_ARCHIVE` and `SITEOPS_TEST_UV_PREVIOUS_PYTHON_ARCHIVE`,
+with OpenSSL to serve those runtimes from a local HTTPS mirror.
+`tests/fixtures/prepare-native-uv.sh` downloads the Linux archives, and the
+Windows CI job installs both runtimes with the pinned uv. CI requires these
 fixtures rather than silently skipping the native installation cases.
 
 Installed engine command coverage builds the real wheel, installs it into an

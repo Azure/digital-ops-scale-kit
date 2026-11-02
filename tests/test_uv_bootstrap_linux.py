@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -15,15 +17,20 @@ import pytest
 from tests import native_bundle
 from tests.native_bundle import bundle_factory as bundle_factory
 from tests.native_bundle import publish_assets
-from tests.native_uv_consumers import _unavailable
+from tests.native_uv_consumers import (
+    LINUX_PREVIOUS_PYTHON_SHA256,
+    LINUX_PYTHON_SHA256,
+    LINUX_UV_ARCHIVE_SHA256,
+    MANAGED_PYTHON,
+    PREVIOUS_PYTHON,
+    _unavailable,
+)
 from tests.shell_helpers import bash_path, required_bash
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "bootstrap" / "siteops-bootstrap.sh"
 HARNESS = ROOT / "tests" / "fixtures" / "bootstrap-harness.sh"
 HELPER = ROOT / "scripts" / "siteops_distribution.py"
-UV_ARCHIVE_SHA256 = "6590717592ace991ff83a63fef799e3ad9d33ecc8f96c5d6bdd732496e79337f"
-PYTHON_ARCHIVE_SHA256 = "68c6739376b65258dee5058ccf6777232fe38d31a578965ae8bda327ec7da3a8"
 linux_only = pytest.mark.skipif(
     sys.platform != "linux",
     reason="Requires native Linux ownership and executables.",
@@ -60,8 +67,8 @@ def native_inputs() -> dict[str, Path]:
     """Return the pinned uv archive and the exact managed CPython archive."""
     selected = {}
     for name, digest in (
-        ("SITEOPS_TEST_UV_ARCHIVE", UV_ARCHIVE_SHA256),
-        ("SITEOPS_TEST_UV_PYTHON_ARCHIVE", PYTHON_ARCHIVE_SHA256),
+        ("SITEOPS_TEST_UV_ARCHIVE", LINUX_UV_ARCHIVE_SHA256),
+        ("SITEOPS_TEST_UV_PYTHON_ARCHIVE", LINUX_PYTHON_SHA256),
     ):
         value = os.environ.get(name)
         path = Path(value) if value else None
@@ -73,7 +80,25 @@ def native_inputs() -> dict[str, Path]:
     for tool in ("openssl", "python3", "tar"):
         if shutil.which(tool) is None:
             _unavailable(f"The Linux bootstrap harness needs {tool}.")
+    # uv verifies a downloaded runtime against the digest built into the pinned uv.
+    embedded = _embedded_python_digest(selected["SITEOPS_TEST_UV_ARCHIVE"])
+    if embedded != LINUX_PYTHON_SHA256:
+        pytest.fail(
+            f"The pinned uv expects CPython {MANAGED_PYTHON} digest {embedded}, not the fixture "
+            "digest. Update the runtime fixture pins with the uv pin.",
+        )
     return selected
+
+
+def _embedded_python_digest(uv_archive: Path) -> str | None:
+    """Read the pinned runtime's entry from the download list built into uv."""
+    with tarfile.open(uv_archive, "r:gz") as archive:
+        executable = archive.extractfile("uv-x86_64-unknown-linux-gnu/uv").read()
+    key = f'"cpython-{MANAGED_PYTHON}-linux-x86_64-gnu":'.encode("ascii")
+    if executable.count(key) != 1:
+        return None
+    entry = re.compile(rb"\{(?:[^{}]|\{[^{}]*\})*\}").match(executable, executable.index(key) + len(key))
+    return json.loads(entry.group()).get("sha256") if entry else None
 
 
 @pytest.fixture
@@ -97,7 +122,7 @@ def published(bundle_factory, tmp_path, monkeypatch) -> tuple[Path, Path, Path]:
     return archives[0], archives[1], archive
 
 
-def _harness(tmp_path, scenario, script, published, native_inputs):
+def _harness(tmp_path, scenario, script, published, native_inputs, **extra):
     result = subprocess.run(
         [str(required_bash()), bash_path(HARNESS), bash_path(script), bash_path(HELPER)],
         cwd=tmp_path,
@@ -113,6 +138,7 @@ def _harness(tmp_path, scenario, script, published, native_inputs):
             "TEST_REFERENCED_ARCHIVE": str(published[2]),
             "TEST_UV_ARCHIVE": str(native_inputs["SITEOPS_TEST_UV_ARCHIVE"]),
             "TEST_PYTHON_ARCHIVE": str(native_inputs["SITEOPS_TEST_UV_PYTHON_ARCHIVE"]),
+            **extra,
         },
         capture_output=True,
         text=True,
@@ -135,6 +161,170 @@ def test_linux_bootstrap_installs_through_native_uv_and_the_shipped_helper(
     scenario,
 ):
     _harness(tmp_path, scenario, SCRIPT, published, native_inputs)
+
+
+@pytest.fixture(scope="module")
+def previous_archive() -> Path:
+    """Return the CPython archive that v1.0.0b7 bootstraps installed."""
+    value = os.environ.get("SITEOPS_TEST_UV_PREVIOUS_PYTHON_ARCHIVE")
+    path = Path(value) if value else None
+    if (path is None or not path.is_file()
+            or hashlib.sha256(path.read_bytes()).hexdigest() != LINUX_PREVIOUS_PYTHON_SHA256):
+        _unavailable("SITEOPS_TEST_UV_PREVIOUS_PYTHON_ARCHIVE must name the previous pinned Linux archive.")
+    return path
+
+
+@linux_only
+def test_linux_existing_installation_keeps_its_runtime_beside_the_pinned_one(
+    tmp_path,
+    published,
+    native_inputs,
+    previous_archive,
+):
+    _harness(
+        tmp_path, "previous", SCRIPT, published, native_inputs,
+        TEST_PREVIOUS_PYTHON_ARCHIVE=str(previous_archive),
+    )
+
+
+@linux_only
+def test_linux_bootstrap_names_why_a_mirrored_runtime_was_refused(
+    tmp_path,
+    published,
+    native_inputs,
+):
+    _harness(tmp_path, "digest", SCRIPT, published, native_inputs)
+
+
+def _fake_runtime(parent: Path, version: str, root: Path) -> None:
+    """Write a concrete runtime whose interpreter records its use and reports its identity."""
+    minor = version.rpartition(".")[0]
+    concrete = parent / f"cpython-{version}-linux-x86_64-gnu"
+    (concrete / "bin").mkdir(parents=True)
+    for directory in (parent, concrete, concrete / "bin"):
+        directory.chmod(0o755)
+    executable = concrete / "bin" / f"python{minor}"
+    executable.write_text(
+        "#!/usr/bin/env bash\n"
+        f': > "{root}/ran-{version}"\n'
+        f"printf 'cpython {version.replace('.', ' ')} True %s\\n' \"$0\"\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+
+
+def _select_runtime(tmp_path: Path, run_uv: str) -> subprocess.CompletedProcess[str]:
+    """Run the production runtime selection with a uv double and the fixture storage."""
+    text = SCRIPT.read_text(encoding="utf-8")
+    functions = []
+    for name in ("writers_trusted", "trusted_parent", "admit_directory", "admit_file",
+                 "admit_runtime_tree", "provision_runtime", "select_runtime"):
+        found = re.search(rf"(?ms)^{name}\(\) \{{.*?^\}}", text)
+        assert found, f"The production {name} function is missing."
+        functions.append(found.group(0))
+    script = tmp_path / "select.sh"
+    script.write_text(
+        'set -euo pipefail\numask 077\nuid="$(id -u)"\nprivate_gid=""\n'
+        + "\n".join(functions)
+        + r"""
+fail() { printf 'FAIL: %s\n' "$1"; exit 1; }
+stage() { printf 'STAGE: %s\n' "$1"; }
+"""
+        + run_uv
+        + r"""
+tools="$TEST_ROOT/tools"
+pydir="$TEST_ROOT/python"
+staging="$TEST_ROOT/staging"
+mkdir -p "$pydir"
+mkdir -m 0700 "$staging"
+select_runtime
+printf 'SELECTED %s\n' "$python"
+""",
+        encoding="utf-8",
+    )
+    return subprocess.run(
+        ["bash", str(script)], cwd=tmp_path, env={**os.environ, "TEST_ROOT": str(tmp_path)},
+        capture_output=True, text=True, timeout=30,
+    )
+
+
+@linux_only
+@pytest.mark.parametrize(("present", "bound", "expected"), [
+    pytest.param(("3.10.20", PREVIOUS_PYTHON), None, MANAGED_PYTHON, id="new-beside-older"),
+    pytest.param((PREVIOUS_PYTHON, MANAGED_PYTHON), None, MANAGED_PYTHON, id="new-beside-pinned"),
+    pytest.param((PREVIOUS_PYTHON, MANAGED_PYTHON), PREVIOUS_PYTHON, PREVIOUS_PYTHON, id="bound-previous"),
+    pytest.param(("3.10.20",), "3.10.20", "3.10.20", id="bound-end-of-life"),
+])
+def test_linux_new_installation_uses_only_the_pinned_runtime(tmp_path, present, bound, expected):
+    tmp_path.chmod(0o700)
+    pydir = tmp_path / "python"
+    tools = tmp_path / "tools"
+    source = tmp_path / "source"
+    for version in present:
+        _fake_runtime(pydir, version, tmp_path)
+    _fake_runtime(source, MANAGED_PYTHON, tmp_path)
+    tools.mkdir(mode=0o700)
+    if bound:
+        tool = tools / "siteops"
+        tool.mkdir(mode=0o700)
+        configuration = tool / "pyvenv.cfg"
+        configuration.write_text(
+            f"home = {pydir}/cpython-{bound}-linux-x86_64-gnu/bin\nversion_info = {bound}\n",
+            encoding="utf-8",
+        )
+        configuration.chmod(0o600)
+    # The download source holds only the pinned runtime.
+    result = _select_runtime(tmp_path, r"""
+run_uv() {
+  printf '%s\n' "$*" >> "$TEST_ROOT/uv.log"
+  cp -R -- "$TEST_ROOT/source/cpython-$3-linux-x86_64-gnu" "$pydir/"
+}
+""")
+    assert result.returncode == 0, result.stdout + result.stderr
+    minor = expected.rpartition(".")[0]
+    assert f"SELECTED {pydir}/cpython-{expected}-linux-x86_64-gnu/bin/python{minor}" in result.stdout
+    provisioned = MANAGED_PYTHON not in present and not bound
+    log = tmp_path / "uv.log"
+    assert log.exists() is provisioned
+    if provisioned:
+        assert log.read_text(encoding="utf-8") == f"python install {MANAGED_PYTHON} --no-bin --no-registry\n"
+    assert {path.name for path in tmp_path.glob("ran-*")} == {f"ran-{expected}"}
+
+
+@linux_only
+@pytest.mark.parametrize(("report", "code"), [
+    pytest.param(
+        f"Downloading cpython-{MANAGED_PYTHON}-linux-x86_64-gnu (download) (24.1MiB)\n"
+        f"error: Failed to install cpython-{MANAGED_PYTHON}-linux-x86_64-gnu\n"
+        "  cause: Failed to extract archive: private-source-detail.tar.gz\n"
+        "  cause: No space left on device (os error 28)",
+        2,
+        id="extraction",
+    ),
+    pytest.param("", 124, id="silent-timeout"),
+    # Only a bounded part of uv's report is read.
+    pytest.param(
+        "x" * 70000 + "\n  cause: Failed to download https://private-source-detail.invalid/cpython.tar.gz\n",
+        1,
+        id="beyond-bound",
+    ),
+])
+def test_linux_other_runtime_provisioning_failures_keep_the_runtime_remedies(tmp_path, report, code):
+    tmp_path.chmod(0o700)
+    (tmp_path / "tools").mkdir(mode=0o700)
+    # An older managed runtime must not replace the refused download.
+    _fake_runtime(tmp_path / "python", PREVIOUS_PYTHON, tmp_path)
+    (tmp_path / "report").write_text(report, encoding="utf-8")
+    result = _select_runtime(tmp_path, f'run_uv() {{ cat -- "$TEST_ROOT/report" >&2; return {code}; }}\n')
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == (
+        f"FAIL: CPython {MANAGED_PYTHON} could not be provisioned through uv. Allow uv's runtime source, "
+        "set an approved HTTPS UV_PYTHON_INSTALL_MIRROR, or prepare the runtime with "
+        f"uv python install {MANAGED_PYTHON} --no-bin --no-registry, then retry."
+    )
+    assert "private-source-detail" not in result.stdout + result.stderr
+    assert "SELECTED" not in result.stdout
+    assert not list(tmp_path.glob("ran-*"))
 
 
 def _guard(tmp_path: Path, body: str, *, private_group: bool) -> subprocess.CompletedProcess[str]:

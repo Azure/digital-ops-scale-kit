@@ -33,7 +33,12 @@ from tests.native_bundle import (
 from tests.native_bundle import (
     bundle_factory as bundle_factory,
 )
-from tests.native_uv_consumers import managed_python, native_uv
+from tests.native_uv_consumers import (
+    MANAGED_PYTHON,
+    MANAGED_PYTHON_MINOR,
+    managed_python,
+    native_uv,
+)
 from tests.shell_helpers import (
     bash_path as _bash_path,
 )
@@ -67,8 +72,8 @@ SIGNER_WORKFLOW = ".github/workflows/_siteops-distribution.yaml"
 QUALIFIED_PLATFORMS = ("ubuntu-24.04", "windows-2025")
 QUALIFIED_PYTHONS = ("3.10", "3.11", "3.12", "3.13", "3.14")
 EXTRA_CELLS = (
-    "Qualify bundle (ubuntu-26.04, Python 3.11)",
-    "Qualify bundle (windows-2025, Python 3.11, standard user)",
+    f"Qualify bundle (ubuntu-26.04, Python {MANAGED_PYTHON_MINOR})",
+    f"Qualify bundle (windows-2025, Python {MANAGED_PYTHON_MINOR}, standard user)",
 )
 STANDARD_USER_STEP = "Install as a standard user with the signed PowerShell bootstrap"
 WHEEL_NAME = "siteops-1.0.0b1+build.42.1.gcccccccccccc-py3-none-any.whl"
@@ -422,8 +427,8 @@ def test_qualification_runs_on_hosted_windows_and_linux_without_write_access():
         "python": list(QUALIFIED_PYTHONS),
         "account": ["runner"],
         "include": [
-            {"os": "ubuntu-26.04", "python": "3.11"},
-            {"os": "windows-2025", "python": "3.11", "account": "standard"},
+            {"os": "ubuntu-26.04", "python": MANAGED_PYTHON_MINOR},
+            {"os": "windows-2025", "python": MANAGED_PYTHON_MINOR, "account": "standard"},
         ],
     }
     assert qualify["strategy"]["fail-fast"] is False
@@ -487,11 +492,11 @@ def test_qualification_matrix_adds_ubuntu_26_04_and_standard_user_cells():
     names = [_cell_name(cell) for cell in _matrix_cells(matrix)]
     assert sorted(names) == sorted(_all_cell_names())
     assert len(set(names)) == len(names)
-    # Without the base account key, the standard user entry would replace the Windows 3.11 cell.
+    # Without the base account key, the standard user entry would replace the Windows cell it shares.
     merged = [_cell_name(cell) for cell in _matrix_cells({
         key: value for key, value in matrix.items() if key != "account"
     })]
-    assert "Qualify bundle (windows-2025, Python 3.11)" not in merged
+    assert f"Qualify bundle (windows-2025, Python {MANAGED_PYTHON_MINOR})" not in merged
     assert len(merged) == len(names) - 1
 
 
@@ -508,9 +513,10 @@ def test_each_qualification_cell_runs_only_its_installation_path(cell):
     ]
     runner = ["Install the external qualification tooling"]
     after = ["Install Site Ops from the verified lock", "Install Site Ops from the standalone wheel"]
+    bootstrap = cell["python"] == MANAGED_PYTHON_MINOR
     expected = {
-        "ubuntu": shared + runner + ["Install with the signed Bash bootstrap"] + after,
-        "windows": shared + runner + ["Install with the signed PowerShell bootstrap"] + after,
+        "ubuntu": shared + runner + ["Install with the signed Bash bootstrap"] * bootstrap + after,
+        "windows": shared + runner + ["Install with the signed PowerShell bootstrap"] * bootstrap + after,
         "standard": shared + [STANDARD_USER_STEP],
     }
     kind = "standard" if cell.get("account") == "standard" else cell["os"].split("-")[0]
@@ -522,16 +528,24 @@ def test_each_qualification_cell_runs_only_its_installation_path(cell):
     assert steps == expected[kind]
 
 
-@pytest.mark.parametrize(("runner", "account", "expected"), [
-    pytest.param("Linux", "runner", {"bash", "tooling", "lock", "wheel"}, id="linux-runner"),
-    pytest.param("Windows", "runner", {"powershell", "tooling", "lock", "wheel"}, id="windows-runner"),
-    pytest.param("Windows", "standard", {"standard"}, id="windows-standard-user"),
-    pytest.param("Linux", None, {"bash", "tooling", "lock", "wheel"}, id="linux-missing-account"),
-    pytest.param("Windows", None, {"powershell", "tooling", "lock", "wheel"}, id="windows-missing-account"),
-    pytest.param("macOS", "runner", {"tooling", "lock", "wheel"}, id="other-runner-has-no-bootstrap"),
-    pytest.param("macOS", "standard", set(), id="standard-user-requires-windows"),
+@pytest.mark.parametrize(("runner", "account", "python", "expected"), [
+    pytest.param("Linux", "runner", MANAGED_PYTHON_MINOR, {"bash", "tooling", "lock", "wheel"}, id="linux-runner"),
+    pytest.param("Linux", "runner", "3.13", {"tooling", "lock", "wheel"}, id="linux-other-python"),
+    pytest.param(
+        "Windows", "runner", MANAGED_PYTHON_MINOR, {"powershell", "tooling", "lock", "wheel"}, id="windows-runner",
+    ),
+    pytest.param("Windows", "runner", "3.10", {"tooling", "lock", "wheel"}, id="windows-other-python"),
+    pytest.param("Windows", "standard", MANAGED_PYTHON_MINOR, {"standard"}, id="windows-standard-user"),
+    pytest.param("Linux", None, MANAGED_PYTHON_MINOR, {"bash", "tooling", "lock", "wheel"}, id="linux-missing-account"),
+    pytest.param(
+        "Windows", None, MANAGED_PYTHON_MINOR, {"powershell", "tooling", "lock", "wheel"},
+        id="windows-missing-account",
+    ),
+    pytest.param("Linux", "runner", None, {"tooling", "lock", "wheel"}, id="linux-missing-python"),
+    pytest.param("macOS", "runner", MANAGED_PYTHON_MINOR, {"tooling", "lock", "wheel"}, id="other-runner-has-no-bootstrap"),
+    pytest.param("macOS", "standard", MANAGED_PYTHON_MINOR, set(), id="standard-user-requires-windows"),
 ])
-def test_qualification_installation_guards_use_runner_os_and_account(runner, account, expected):
+def test_qualification_installation_guards_use_runner_os_account_and_python(runner, account, python, expected):
     names = {
         "bash": "Install with the signed Bash bootstrap",
         "powershell": "Install with the signed PowerShell bootstrap",
@@ -540,7 +554,8 @@ def test_qualification_installation_guards_use_runner_os_and_account(runner, acc
         "lock": "Install Site Ops from the verified lock",
         "wheel": "Install Site Ops from the standalone wheel",
     }
-    contexts = {"runner": {"os": runner}, "matrix": {} if account is None else {"account": account}}
+    matrix = {key: value for key, value in (("account", account), ("python", python)) if value is not None}
+    contexts = {"runner": {"os": runner}, "matrix": matrix}
     for key, name in names.items():
         assert truthy(evaluate(_step(REUSABLE["jobs"]["qualify"], name)["if"], contexts)) is (key in expected), name
 
@@ -721,9 +736,8 @@ fi
     return result, log, download
 
 
-@pytest.mark.parametrize("python", QUALIFIED_PYTHONS)
-def test_linux_runner_cells_select_discovery_only_for_python_311(tmp_path, python):
-    result, log, download = _run_linux_bootstrap_cell(tmp_path, python)
+def test_linux_bootstrap_cell_previews_then_installs_the_pinned_source(tmp_path):
+    result, log, download = _run_linux_bootstrap_cell(tmp_path, MANAGED_PYTHON_MINOR)
     assert result.returncode == 0, result.stdout + result.stderr
     pinned = ["--release", "siteops/v0.0.0-ci", "--source-commit", "c" * 40,
         "--repository", "example/publisher", "--source-ref", "refs/heads/feature",
@@ -732,16 +746,14 @@ def test_linux_runner_cells_select_discovery_only_for_python_311(tmp_path, pytho
         "--release", "siteops/v0.0.0-ci", "--repository", "example/publisher",
         "--source-ref", "refs/heads/feature", "--caller", "ci.yaml", "--dry-run",
     ]
-    assert _invocations(log) == ([preview, pinned] if python == "3.11" else [pinned])
-    assert (tmp_path / "bootstrap-source" / BOOTSTRAP_SH).exists() is (python == "3.11")
-    if python == "3.11":
-        for name in (BOOTSTRAP_SH, ARCHIVE_NAME, ARCHIVE_NAME + ATTESTATION_SUFFIX):
-            assert (tmp_path / "bootstrap-source" / name).read_bytes() == (download / name).read_bytes()
+    assert _invocations(log) == [preview, pinned]
+    for name in (BOOTSTRAP_SH, ARCHIVE_NAME, ARCHIVE_NAME + ATTESTATION_SUFFIX):
+        assert (tmp_path / "bootstrap-source" / name).read_bytes() == (download / name).read_bytes()
 
 
 @pytest.mark.parametrize("fault", ["fail", "missing", "wrong", "write", "duplicate"])
 def test_linux_preview_must_pin_the_source_without_creating_data(tmp_path, fault):
-    result, log, _ = _run_linux_bootstrap_cell(tmp_path, "3.11", fault)
+    result, log, _ = _run_linux_bootstrap_cell(tmp_path, MANAGED_PYTHON_MINOR, fault)
     assert result.returncode != 0
     assert len(_invocations(log)) == 1
     expected = "did not verify the preview" if fault == "fail" else (
@@ -751,8 +763,7 @@ def test_linux_preview_must_pin_the_source_without_creating_data(tmp_path, fault
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Runner invocation uses native PowerShell 5.1.")
-@pytest.mark.parametrize("python", QUALIFIED_PYTHONS)
-def test_windows_runner_cells_select_discovery_only_for_python_311(tmp_path, python):
+def test_windows_bootstrap_cell_previews_then_installs_the_pinned_source(tmp_path):
     child = (
         '[IO.File]::AppendAllText($env:TEST_ARGUMENTS, '
         '((ConvertTo-Json -InputObject $PSBoundParameters -Compress) + "`n"))\n'
@@ -763,13 +774,13 @@ def test_windows_runner_cells_select_discovery_only_for_python_311(tmp_path, pyt
         (tmp_path / name).write_bytes(b"staged signed asset")
     result = _run_windows_bootstrap_qualifier(
         tmp_path, child,
-        {"MATRIX_PYTHON": python, "TEST_ARGUMENTS": str(log),
+        {"MATRIX_PYTHON": MANAGED_PYTHON_MINOR, "TEST_ARGUMENTS": str(log),
          "ARCHIVE_NAME": ARCHIVE_NAME, "ATTESTATION_SUFFIX": ATTESTATION_SUFFIX},
         success_marker=True, stage_source=True,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     calls = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
-    assert len(calls) == (2 if python == "3.11" else 1)
+    assert len(calls) == 2
     arguments = calls[-1]
     assert arguments["SourceCommit"] == "c" * 40
     assert arguments["Release"] == "siteops/v0.0.0-ci"
@@ -778,18 +789,15 @@ def test_windows_runner_cells_select_discovery_only_for_python_311(tmp_path, pyt
     assert arguments["Caller"] == "ci.yaml"
     assert arguments["Yes"]["IsPresent"]
     assert "DryRun" not in arguments
-    if python == "3.11":
-        preview = calls[0]
-        assert preview["DryRun"]["IsPresent"]
-        assert "SourceCommit" not in preview and "Yes" not in preview
-        assert {key: value for key, value in preview.items() if key != "DryRun"} == {
-            key: value for key, value in arguments.items() if key not in {"SourceCommit", "Yes"}
-        }
-    assert (tmp_path / "bootstrap-source").exists() is (python == "3.11")
-    if python == "3.11":
-        assert (tmp_path / "bootstrap-source" / "bootstrap.ps1").read_bytes() == (tmp_path / "bootstrap.ps1").read_bytes()
-        for name in (ARCHIVE_NAME, ARCHIVE_NAME + ATTESTATION_SUFFIX):
-            assert (tmp_path / "bootstrap-source" / name).read_bytes() == (tmp_path / name).read_bytes()
+    preview = calls[0]
+    assert preview["DryRun"]["IsPresent"]
+    assert "SourceCommit" not in preview and "Yes" not in preview
+    assert {key: value for key, value in preview.items() if key != "DryRun"} == {
+        key: value for key, value in arguments.items() if key not in {"SourceCommit", "Yes"}
+    }
+    assert (tmp_path / "bootstrap-source" / "bootstrap.ps1").read_bytes() == (tmp_path / "bootstrap.ps1").read_bytes()
+    for name in (ARCHIVE_NAME, ARCHIVE_NAME + ATTESTATION_SUFFIX):
+        assert (tmp_path / "bootstrap-source" / name).read_bytes() == (tmp_path / name).read_bytes()
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Preview qualification runs native PowerShell 5.1.")
@@ -813,7 +821,7 @@ exit 0
 '''
     result = _run_windows_bootstrap_qualifier(
         tmp_path, child,
-        {"MATRIX_PYTHON": "3.11", "TEST_ARGUMENTS": str(log), "TEST_PREVIEW_FAULT": fault,
+        {"MATRIX_PYTHON": MANAGED_PYTHON_MINOR, "TEST_ARGUMENTS": str(log), "TEST_PREVIEW_FAULT": fault,
          "ARCHIVE_NAME": ARCHIVE_NAME, "ATTESTATION_SUFFIX": ATTESTATION_SUFFIX},
         stage_source=True,
     )
@@ -832,8 +840,8 @@ def test_standard_user_cell_keeps_the_explicit_commit_route():
     assert "sourceArguments" not in source and "MATRIX_PYTHON" not in source
     matrix = REUSABLE["jobs"]["qualify"]["strategy"]["matrix"]
     assert matrix["python"] == list(QUALIFIED_PYTHONS)
-    assert {"os": "ubuntu-26.04", "python": "3.11"} in matrix["include"]
-    assert {"os": "windows-2025", "python": "3.11", "account": "standard"} in matrix["include"]
+    assert {"os": "ubuntu-26.04", "python": MANAGED_PYTHON_MINOR} in matrix["include"]
+    assert {"os": "windows-2025", "python": MANAGED_PYTHON_MINOR, "account": "standard"} in matrix["include"]
 
 
 def test_every_qualification_consumer_checks_the_matrix_app_runtime():
@@ -1260,14 +1268,14 @@ function Start-Process {
     $staging = Join-Path $local 'siteops\install-staging'
     New-Item -ItemType Directory -Path $results, $staging -Force | Out-Null
     $log = "Site Ops installation: Rechecking the retained release without downloading its assets.`n" +
-        "Site Ops installation: Provisioning uv-managed CPython 3.11.16 without command aliases or registry changes.`n"
+        "Site Ops installation: Provisioning uv-managed CPython $env:TEST_RUNTIME without command aliases or registry changes.`n"
     $result = [ordered]@{ user = 'S-1-5-32-545'; administrator = $false; version = "siteops $env:PACKAGE_VERSION" }
     $exit = 0
     switch ($env:TEST_SCENARIO) {
         'bootstrap-failure' { $log = "Site Ops installation failed: $env:TEST_MESSAGE PRIVATE_PATH"; $exit = 1 }
         'administrator' { $result.administrator = $true }
         'cache-not-used' { $log = $log.Replace('Rechecking the retained release without downloading', 'Downloading') }
-        'runtime' { $log = $log.Replace('CPython 3.11.16', 'CPython 3.12.4') }
+        'runtime' { $log = $log.Replace("CPython $env:TEST_RUNTIME", 'CPython 3.11.16') }
         'leftover' { New-Item -ItemType File -Path (Join-Path $staging 'PRIVATE_PATH') | Out-Null }
         'version' { $result.version = 'siteops 0.0.0' }
         'missing-result' { $result = $null }
@@ -1374,7 +1382,8 @@ def _run_standard_user_step(tmp_path: Path, scenario: str, **extra: str):
             "SOURCE_SHA": "c" * 40, "SOURCE_REPOSITORY": "example/publisher", "SOURCE_REF": "refs/heads/main",
             "BUILDER_IDENTITY": "https://github.com/example/publisher/.github/workflows/release.yaml@refs/heads/main",
             "PACKAGE_VERSION": "1.0.0b1+build.42.1.gcccccccccccc", "ARCHIVE_NAME": ARCHIVE_NAME,
-            "ATTESTATION_SUFFIX": ATTESTATION_SUFFIX, "BOOTSTRAP_PS1": BOOTSTRAP_PS1, **extra,
+            "ATTESTATION_SUFFIX": ATTESTATION_SUFFIX, "BOOTSTRAP_PS1": BOOTSTRAP_PS1,
+            "TEST_RUNTIME": MANAGED_PYTHON, **extra,
         },
     )
     recorded = json.loads(record.read_text(encoding="utf-8-sig")) if record.exists() else {"calls": [], "start": None}
@@ -1606,9 +1615,16 @@ def test_standard_user_classification_matches_the_bootstrap_messages():
         'Configure a private Site Ops data root. $Code', 'Choose a private Windows tool location. $Code',
         'The GitHub CLI executable must be owned by an administrator',
         'GitHub CLI 2.95 or newer is required', 'Rechecking the retained release without downloading',
-        "Provisioning uv-managed CPython 3.11.",
+        "Provisioning uv-managed CPython $pinned without command aliases",
     ):
         assert fragment.replace("$Code", "") in bootstrap, fragment
+    assert f"$pinned = '{MANAGED_PYTHON}'" in bootstrap
+    # The runtime check accepts the message the bootstrap prints for its own pin.
+    runtime = re.search(r"\$privateLog -cnotmatch '([^']+)'\) \{ Stop-StandardUser 'RUNTIME' \}", step)
+    assert runtime and re.search(
+        runtime[1], f"Provisioning uv-managed CPython {MANAGED_PYTHON} without command aliases",
+    )
+    assert not re.search(runtime[1], "Provisioning uv-managed CPython 3.11.16 without command aliases")
     for code in re.findall(r"Reject '((?:ROOT|TOOL)_[A-Z_]+)'", bootstrap):
         assert f"'{code}'" in step, code
     # The staged names are the workflow's own asset names.
@@ -1830,7 +1846,7 @@ def test_matrix_runtime_admission_uses_the_actual_managed_interpreter(native_run
         ],
         input=runtime, capture_output=True, text=True, timeout=40,
     )
-    if minor == "3.11":
+    if minor == MANAGED_PYTHON_MINOR:
         assert result.returncode == 0, result.stderr
         assert Path(result.stdout.strip()) == native_runtime
     else:
@@ -1886,7 +1902,7 @@ cp -R "$TEST_MANAGED_RUNTIME" "$TEST_NATIVE_ROOT/python/"
     environment = {
         "RUNNER_TEMP": _bash_path(temp),
         "RUNNER_OS": "Windows",
-        "MATRIX_PYTHON": "3.11",
+        "MATRIX_PYTHON": MANAGED_PYTHON_MINOR,
         "PYTHON": str(Path(sys.executable)),
         "GITHUB_ENV": _bash_path(tmp_path / "github-env"),
         "GITHUB_RUN_ID": "42",
@@ -1954,7 +1970,7 @@ cp -R "$TEST_MANAGED_RUNTIME" "$TEST_NATIVE_ROOT/python/"
             capture_output=True, text=True, timeout=20,
         )
         assert observed.returncode == 0
-        assert observed.stdout.strip() == f"3 11 {app_python}"
+        assert observed.stdout.strip() == f"{MANAGED_PYTHON_MINOR.replace('.', ' ')} {app_python}"
 
 
 def test_the_bundle_keeps_native_installation_separate_from_bootstrap_scripts():
@@ -2152,7 +2168,7 @@ def _expected_matrix(state: str, **cells) -> list[dict[str, str]]:
     """Return the qualification matrix the summary encodes, with optional per-cell overrides."""
     rows = []
     for python in QUALIFIED_PYTHONS:
-        extra = state if python == "3.11" else "n/a"
+        extra = state if python == MANAGED_PYTHON_MINOR else "n/a"
         row = {"python": python, "linux": state, "ubuntu-26.04": extra, "windows": state,
                "windows-standard-user": extra}
         row.update(cells.get(python, {}))
@@ -2253,7 +2269,7 @@ def test_distribution_summary_reports_the_complete_success_matrix(tmp_path):
     )
     assert "| Python | Ubuntu 24.04 | Ubuntu 26.04 | Windows | Windows standard user |" in summary
     for python in QUALIFIED_PYTHONS:
-        extra = "passed" if python == "3.11" else "n/a"
+        extra = "passed" if python == MANAGED_PYTHON_MINOR else "n/a"
         assert f"| {python} | passed | {extra} | passed | {extra} |" in summary
     for value in (
         "Source SHA",
@@ -2313,7 +2329,7 @@ def test_distribution_summary_reports_nonpassing_cells_honestly(tmp_path, case, 
     assert "One or more qualification cells did not pass." in summary
 
 
-@pytest.mark.parametrize("cell", [*EXTRA_CELLS, "Qualify bundle (windows-2025, Python 3.11)"])
+@pytest.mark.parametrize("cell", [*EXTRA_CELLS, f"Qualify bundle (windows-2025, Python {MANAGED_PYTHON_MINOR})"])
 @pytest.mark.parametrize(("case", "status"), [("missing", "not-run"), ("failure", "failed")])
 def test_distribution_summary_requires_every_declared_cell(tmp_path, cell, case, status):
     jobs = _qualification_jobs()
@@ -2329,7 +2345,7 @@ def test_distribution_summary_requires_every_declared_cell(tmp_path, cell, case,
     column = {
         EXTRA_CELLS[0]: "ubuntu-26.04", EXTRA_CELLS[1]: "windows-standard-user",
     }.get(cell, "windows")
-    assert json.loads(encoded) == _expected_matrix("passed", **{"3.11": {column: status}})
+    assert json.loads(encoded) == _expected_matrix("passed", **{MANAGED_PYTHON_MINOR: {column: status}})
     assert "One or more qualification cells did not pass." in summary_path.read_text(encoding="utf-8")
 
 
@@ -2842,7 +2858,7 @@ def _native_exports(temp: Path, version: str, app_python: Path, uv: Path) -> dic
         "SOURCE_REPOSITORY": "example/publisher",
         "SOURCE_SHA": "a" * 40,
         "SOURCE_REF": "refs/heads/main",
-        "MATRIX_PYTHON": "3.11",
+        "MATRIX_PYTHON": MANAGED_PYTHON_MINOR,
         "PACKAGE_VERSION": version,
         "PYTHONPATH": str(REPO_ROOT),
         "PYTHONDONTWRITEBYTECODE": "1",
@@ -2874,7 +2890,7 @@ def _prepared_runner_area(
     concrete = app_python.parent if os.name == "nt" else app_python.parent.parent
     copied = owned / "python" / concrete.name
     shutil.copytree(concrete, copied, symlinks=True)
-    app_python = copied / ("python.exe" if os.name == "nt" else "bin/python3.11")
+    app_python = copied / ("python.exe" if os.name == "nt" else f"bin/python{MANAGED_PYTHON_MINOR}")
     tooling = owned / "tooling"
     tooling.mkdir()
     selected = native_uv()

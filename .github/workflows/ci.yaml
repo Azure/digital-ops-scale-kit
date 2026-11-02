@@ -189,6 +189,7 @@ jobs:
             echo "SITEOPS_TEST_UV=$fixtures/native/uv"
             echo "SITEOPS_TEST_UV_ARCHIVE=$fixtures/uv.tar.gz"
             echo "SITEOPS_TEST_UV_PYTHON_ARCHIVE=$fixtures/cpython.tar.gz"
+            echo "SITEOPS_TEST_UV_PREVIOUS_PYTHON_ARCHIVE=$fixtures/cpython-previous.tar.gz"
             echo "SITEOPS_REQUIRE_LINUX_UV=1"
           } >> "$GITHUB_ENV"
 
@@ -284,6 +285,7 @@ jobs:
             echo "SITEOPS_TEST_UV=$fixtures/native/uv"
             echo "SITEOPS_TEST_UV_ARCHIVE=$fixtures/uv.tar.gz"
             echo "SITEOPS_TEST_UV_PYTHON_ARCHIVE=$fixtures/cpython.tar.gz"
+            echo "SITEOPS_TEST_UV_PREVIOUS_PYTHON_ARCHIVE=$fixtures/cpython-previous.tar.gz"
             echo "SITEOPS_REQUIRE_LINUX_UV=1"
           } >> "$GITHUB_ENV"
 
@@ -390,13 +392,14 @@ jobs:
           $previousPreference = $ErrorActionPreference
           try {
               $ErrorActionPreference = 'Continue'
-              & $uv python install 3.11.16 --no-bin --no-registry --no-config --system-certs --no-progress `
+              & $uv python install 3.14.7 3.11.16 --no-bin --no-registry --no-config --system-certs --no-progress `
                   > (Join-Path $fixtures 'runtime.log') 2>&1
               $runtimeExit = $LASTEXITCODE
           } finally { $ErrorActionPreference = $previousPreference }
-          if ($runtimeExit -ne 0 -or -not (Test-Path -LiteralPath (
-              Join-Path $env:UV_PYTHON_INSTALL_DIR 'cpython-3.11.16-windows-x86_64-none\python.exe'
-          ) -PathType Leaf)) { throw 'The qualified uv-managed runtime fixture is unavailable.' }
+          # The second runtime is the one v1.0.0b7 bootstraps installed, for existing installation coverage.
+          if ($runtimeExit -ne 0 -or @('3.14.7', '3.11.16' | Where-Object { -not (Test-Path -LiteralPath (
+              Join-Path $env:UV_PYTHON_INSTALL_DIR "cpython-$_-windows-x86_64-none\python.exe"
+          ) -PathType Leaf) }).Count) { throw 'The qualified uv-managed runtime fixture is unavailable.' }
           $settings = @(
               "SITEOPS_TEST_UV=$uv",
               "SITEOPS_TEST_UV_ARCHIVE=$archive",

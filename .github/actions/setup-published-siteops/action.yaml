@@ -238,11 +238,11 @@ runs:
           exit 1
         fi
         chmod 700 "$STATE/uv"
-        UV_PYTHON_DOWNLOADS=automatic "$STATE/uv" python install 3.11.16 \
+        UV_PYTHON_DOWNLOADS=automatic "$STATE/uv" python install 3.14.7 \
           --no-bin --no-registry --no-config --no-progress --system-certs \
           > "$STATE/python-install.log" 2>&1 ||
           { echo "::error::The published E2E managed Python could not be provisioned."; exit 1; }
-        app_python="$STATE/python/cpython-3.11.16-linux-x86_64-gnu/bin/python3.11"
+        app_python="$STATE/python/cpython-3.14.7-linux-x86_64-gnu/bin/python3.14"
         python -I -S -B - "$STATE" "$app_python" <<'PY'
         import os
         import stat
@@ -251,7 +251,7 @@ runs:
         from pathlib import Path
 
         state, executable = map(Path, sys.argv[1:])
-        concrete = state / "python/cpython-3.11.16-linux-x86_64-gnu"
+        concrete = state / "python/cpython-3.14.7-linux-x86_64-gnu"
         if (state.is_symlink() or state.stat().st_uid != os.getuid()
                 or state.stat().st_mode & 0o077 or not concrete.is_dir()
                 or concrete.is_symlink()):
@@ -275,7 +275,7 @@ runs:
              "sys.maxsize > 2**32, sys._base_executable)"],
             capture_output=True, text=True, timeout=20, check=True,
         )
-        if identity.stdout.strip() != f"cpython 3 11 16 True {executable}":
+        if identity.stdout.strip() != f"cpython 3 14 7 True {executable}":
             raise SystemExit("The published E2E managed runtime has another identity.")
         PY
         python -I -S -B - "$STATE/download/siteops-install.zip" "$STATE/helper" <<'PY'

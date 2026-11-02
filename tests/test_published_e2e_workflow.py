@@ -22,7 +22,7 @@ from tests.acceptance_helpers import calls, double_environment, install_doubles
 from tests.actions_expressions import dispatch_inputs, evaluate, job_runs, truthy
 from tests.native_bundle import NETWORK_BLOCK, publish_assets
 from tests.native_bundle import bundle_factory as bundle_factory
-from tests.native_uv_consumers import linux_archives
+from tests.native_uv_consumers import MANAGED_PYTHON, linux_archives
 from tests.shell_helpers import run_script
 from tests.yaml_documents import cached_safe_load
 
@@ -1002,7 +1002,7 @@ def test_published_setup_uses_a_pinned_uv_and_fresh_packaged_helper():
     )
     assert parsed.returncode == 0, parsed.stderr
     assert "6590717592ace991ff83a63fef799e3ad9d33ecc8f96c5d6bdd732496e79337f" in action
-    assert '"$STATE/uv" python install 3.11.16' in action
+    assert f'"$STATE/uv" python install {MANAGED_PYTHON}' in action
     assert "UV_TOOL_DIR" in action and "UV_TOOL_BIN_DIR" in action
     assert '"$app_python" -I -S -B "$STATE/helper/siteops-install.py" install' in action
     assert "siteops-install.zip" in action
@@ -1187,7 +1187,7 @@ done
 [[ "$output" == "$STATE/uv.tar.gz" ]] || exit 97
 cp "$TEST_UV_ARCHIVE" "$output"
 tar -xzf "$TEST_PYTHON_ARCHIVE" -C "$STATE/python"
-mv "$STATE/python/python" "$STATE/python/cpython-3.11.16-linux-x86_64-gnu"
+mv "$STATE/python/python" "$STATE/python/cpython-$TEST_MANAGED_PYTHON-linux-x86_64-gnu"
 if [[ "${TEST_FOREIGN_COMMAND:-0}" == 1 ]]; then
   printf '#!/usr/bin/env bash\\nprintf "FOREIGN_EXECUTED" >> "$TEST_ESCAPE"\\nexit 99\\n' > "$STATE/bin/siteops"
   chmod 700 "$STATE/bin/siteops"
@@ -1229,6 +1229,7 @@ fi
         "TEST_PROOF": str(proof),
         "TEST_UV_ARCHIVE": str(uv_archive),
         "TEST_PYTHON_ARCHIVE": str(python_archive),
+        "TEST_MANAGED_PYTHON": MANAGED_PYTHON,
         "TEST_ESCAPE": str(tmp_path / "foreign-executed"),
         "TEST_FOREIGN_COMMAND": "1" if foreign_command else "0",
     })
@@ -1254,7 +1255,7 @@ fi
             "version": manifest.version,
             "wheel": manifest.application_wheel,
         }
-        assert "version_info = 3.11.16" in (
+        assert f"version_info = {MANAGED_PYTHON}" in (
             state / "tools/siteops/pyvenv.cfg"
         ).read_text(encoding="utf-8")
         assert (tmp_path / "github-path").read_text(encoding="utf-8") == str(state / "bin") + "\n"

@@ -25,6 +25,10 @@ die() { printf 'Bootstrap harness: %s\n' "$1" >&2; exit 1; }
 real_python="$(command -v python3)"
 uv_url=https://github.com/astral-sh/uv/releases/download/0.12.20/uv-x86_64-unknown-linux-gnu.tar.gz
 uv_sha=b8299463da6fa7da3b94464444d252d0afca8ac6c96cb229f1baf4012f365246
+python_version=3.14.7
+python_minor="${python_version%.*}"
+# The v1.0.0b7 bootstrap pinned this runtime, so its installations are bound to it.
+previous_version=3.11.16
 first=(--release siteops/v1.0.0b1 --source-commit "$(printf 'a%.0s' {1..40})" --yes)
 second=(--release siteops/v1.0.0b2 --source-commit "$(printf 'b%.0s' {1..40})" --yes)
 first_version=1.0.0b1+build.1.1.gaaaaaaaaaaaa
@@ -143,7 +147,7 @@ printf 'subjectAltName=IP:127.0.0.1\nbasicConstraints=CA:FALSE\nextendedKeyUsage
 openssl x509 -req -in "$tls/server.csr" -CA "$tls/ca.pem" -CAkey "$tls/ca.key" \
   -CAcreateserial -days 1 -extfile "$tls/extensions" -out "$tls/server.pem" > /dev/null 2>&1
 cp -- "$TEST_PYTHON_ARCHIVE" \
-  "$root/mirror/20260924/cpython-3.11.16+20260924-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+  "$root/mirror/20260924/cpython-$python_version+20260924-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
 "$real_python" -I - "$tls" "$root/mirror" "$logs/mirror" <<'PY' &
 import functools
 import http.server
@@ -263,7 +267,7 @@ installed_version() {
 seed_runtime() {
   env -i HOME="$HOME" PATH="$system" SSL_CERT_FILE="$tls/ca.pem" \
     UV_PYTHON_INSTALL_MIRROR="$mirror_url" UV_PYTHON_INSTALL_DIR="$1" \
-    UV_CACHE_DIR="$root/seed-cache" "$root/seed/uv" python install 3.11.16 --no-bin \
+    UV_CACHE_DIR="$root/seed-cache" "$root/seed/uv" python install "$python_version" --no-bin \
     --no-registry --no-config --no-progress > "$logs/seed.out" 2>&1 ||
     { cat "$logs/seed.out" >&2; die "The existing runtime fixture could not be prepared."; }
 }
@@ -300,9 +304,9 @@ scenario_journey() {
     die "Native uv did not expose siteops."
   [[ "$(sha256sum < "$bin/uv" | cut -d ' ' -f 1)" == "$uv_sha" ]] ||
     die "The pinned uv was not exposed for maintenance."
-  [[ ! -e "$bin/python3.11" && ! -e "$bin/python3" && ! -e "$bin/python" ]] ||
+  [[ ! -e "$bin/python$python_minor" && ! -e "$bin/python3" && ! -e "$bin/python" ]] ||
     die "Managed Python command aliases were exposed."
-  grep -qxF "home = $pydir/cpython-3.11.16-linux-x86_64-gnu/bin" "$tools/siteops/pyvenv.cfg" ||
+  grep -qxF "home = $pydir/cpython-$python_version-linux-x86_64-gnu/bin" "$tools/siteops/pyvenv.cfg" ||
     die "Site Ops is not bound to the concrete managed runtime."
   [[ "$(installed_version "$bin")" == "siteops $first_version" ]] ||
     die "The installed command reports another build."
@@ -356,9 +360,9 @@ PY
   [[ "$(sha256sum < "$tools/siteops/uv-receipt.toml")" == "$receipt" ]] ||
     die "An altered retained payload changed the native tool."
   cp -- "$root/license" "$second_bundle/LICENSE"
-  printf 'import os\n' > "$tools/siteops/lib/python3.11/site-packages/extra.pth"
+  printf 'import os\n' > "$tools/siteops/lib/python$python_minor/site-packages/extra.pth"
   refuses startup "unrecognized Python startup files" "${second[@]}" --replace
-  rm -- "$tools/siteops/lib/python3.11/site-packages/extra.pth"
+  rm -- "$tools/siteops/lib/python$python_minor/site-packages/extra.pth"
   succeeds repaired "${second[@]}"
 
   env -i HOME="$HOME" PATH="$system" "$bin/uv" tool uninstall siteops --no-config \
@@ -435,7 +439,7 @@ scenario_storage() {
   extra=(UV_TOOL_BIN_DIR=relative/bin)
   refuses relative-bin "Select uv tool, command, and Python directories" "${first[@]}"
   no_uv_download "Rejected uv storage"
-  [[ ! -e "$data/tools" && ! -s "$logs/mirror" && ! -e "$root/real-python/cpython-3.11.16-linux-x86_64-gnu" ]] ||
+  [[ ! -e "$data/tools" && ! -s "$logs/mirror" && ! -e "$root/real-python/cpython-$python_version-linux-x86_64-gnu" ]] ||
     die "Rejected uv storage ran or provisioned tools."
 
   base="$root/uv-state"
@@ -446,7 +450,7 @@ scenario_storage() {
   succeeds explicit "${first[@]}"
   [[ -L "$base/bin/siteops" && "$(readlink "$base/bin/siteops")" == "$base/tools/siteops/bin/siteops" ]] ||
     die "Explicit uv tool storage was not used."
-  grep -qxF "home = $base/python/cpython-3.11.16-linux-x86_64-gnu/bin" "$base/tools/siteops/pyvenv.cfg" ||
+  grep -qxF "home = $base/python/cpython-$python_version-linux-x86_64-gnu/bin" "$base/tools/siteops/pyvenv.cfg" ||
     die "The explicit managed runtime directory was not used."
   [[ ! -e "$tools" && ! -e "$pydir" && -x "$base/bin/uv" ]] ||
     die "Explicit uv storage leaked into default locations."
@@ -551,7 +555,7 @@ scenario_tools() {
     die "An unrelated maintenance uv was executed or replaced."
 }
 scenario_runtime() {
-  local concrete mirrored
+  local concrete mirrored mislabeled
   fresh_home runtime-existing
   seed_runtime "$pydir"
   mirrored="$(count "$logs/mirror")"
@@ -564,28 +568,28 @@ scenario_runtime() {
     die "A rejected runtime changed the tool configuration."
   cp "$logs/original-pyvenv.cfg" "$tools/siteops/pyvenv.cfg"
   mkdir -p "$root/open-runtime"
-  planted "$root/open-runtime/bin/python3.11" "$root/bound-ran"
+  planted "$root/open-runtime/bin/python$python_minor" "$root/bound-ran"
   chmod 0777 "$root/open-runtime"
-  ln -sfn "$root/open-runtime/bin/python3.11" "$tools/siteops/bin/python"
+  ln -sfn "$root/open-runtime/bin/python$python_minor" "$tools/siteops/bin/python"
   sed -i "s#^home = .*#home = $root/open-runtime/bin#" "$tools/siteops/pyvenv.cfg"
   refuses bound-replace "The current Site Ops tool uses an unsafe runtime." "${first[@]}" --replace
   refuses bound-install "Inspect it or run uv tool uninstall siteops after review" "${first[@]}"
   [[ ! -e "$root/bound-ran" ]] || die "An unadmitted tool runtime was executed."
 
   fresh_home runtime-unsafe
-  concrete="$pydir/cpython-3.11.16-linux-x86_64-gnu"
-  planted "$concrete/bin/python3.11" "$root/runtime-ran"
+  concrete="$pydir/cpython-$python_version-linux-x86_64-gnu"
+  planted "$concrete/bin/python$python_minor" "$root/runtime-ran"
   mkdir -p "$concrete/lib"
   chmod 0777 "$concrete/lib"
   refuses unsafe-runtime "The uv-managed Python has files other users can change." "${first[@]}"
   rm -rf -- "$concrete"
-  planted "$concrete/bin/python3.11" "$root/runtime-ran"
+  planted "$concrete/bin/python$python_minor" "$root/runtime-ran"
   mkdir -m 0777 "$root/open-libraries"
   ln -s "$root/open-libraries" "$concrete/lib"
   refuses linked-library "The uv-managed Python links outside its concrete installation." "${first[@]}"
   [[ ! -e "$root/runtime-ran" ]] || die "A runtime with unadmitted library links was executed."
   rm -rf -- "$concrete"
-  planted "$root/elsewhere/bin/python3.11" "$root/runtime-ran"
+  planted "$root/elsewhere/bin/python$python_minor" "$root/runtime-ran"
   ln -s "$root/elsewhere" "$concrete"
   refuses linked-runtime "The uv-managed Python must use trusted, non-symlinked directories." "${first[@]}"
   rm -- "$concrete"
@@ -593,11 +597,125 @@ scenario_runtime() {
   refuses incomplete-runtime "The uv-managed Python installation is incomplete." "${first[@]}"
   rm -rf -- "$concrete"
   [[ ! -e "$root/runtime-ran" ]] || die "An unadmitted managed runtime was executed."
-  mirrored="$(count "$logs/mirror")"
+  # An existing binding to a concrete key that misstates its runtime is refused.
   seed_runtime "$root/mislabeled"
-  mv -- "$root/mislabeled/cpython-3.11.16-linux-x86_64-gnu" "$pydir/cpython-3.11.15-linux-x86_64-gnu"
+  mislabeled="$python_minor.$(( ${python_version##*.} - 1 ))"
+  mv -- "$root/mislabeled/cpython-$python_version-linux-x86_64-gnu" "$pydir/cpython-$mislabeled-linux-x86_64-gnu"
+  mkdir -p -m 0700 "$tools/siteops"
+  printf 'home = %s\nversion_info = %s\n' "$pydir/cpython-$mislabeled-linux-x86_64-gnu/bin" "$mislabeled" \
+    > "$tools/siteops/pyvenv.cfg"
+  mirrored="$(count "$logs/mirror")"
   refuses mislabeled-runtime "differs from the installed runtime." "${first[@]}"
-  [[ ! -e "$tools/siteops" ]] || die "A mislabeled runtime installed Site Ops."
+  [[ ! -e "$tools/siteops/uv-receipt.toml" && ! -e "$bin/siteops" && "$(count "$logs/mirror")" == "$mirrored" ]] ||
+    die "A mislabeled runtime installed Site Ops."
+}
+binding() {
+  grep -qxF "home = $pydir/cpython-$1-linux-x86_64-gnu/bin" "$tools/siteops/pyvenv.cfg" &&
+    grep -qxF "version_info = $1" "$tools/siteops/pyvenv.cfg"
+}
+uninstall() {
+  env -i HOME="$HOME" PATH="$system" "$bin/uv" tool uninstall siteops --no-config \
+    > "$logs/$1.out" 2>&1 || die "Stock uv could not remove Site Ops."
+}
+scenario_previous() {
+  local configuration
+  [[ -f "${TEST_PREVIOUS_PYTHON_ARCHIVE:-}" ]] || die "The previous runtime archive is required."
+  cp -- "$TEST_PREVIOUS_PYTHON_ARCHIVE" \
+    "$root/mirror/20260924/cpython-$previous_version+20260924-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+  # The emulated v1.0.0b7 bootstrap differs only by its pin, as the released one does.
+  sed "s/^  local pinned=$python_version\$/  local pinned=$previous_version/" "$bootstrap" \
+    > "$root/previous-bootstrap.sh"
+  grep -qxF "  local pinned=$previous_version" "$root/previous-bootstrap.sh" ||
+    die "The previous bootstrap could not be emulated."
+  fresh_home previous
+  bootstrap="$root/previous-bootstrap.sh" succeeds previous-install "${first[@]}"
+  [[ "$(count "$logs/mirror")" == 1 ]] && binding "$previous_version" ||
+    die "The previous bootstrap did not install on its own runtime."
+
+  # A new installation provisions the pinned runtime rather than reuse an older one.
+  uninstall previous-uninstall
+  succeeds new-beside-previous "${first[@]}"
+  [[ "$(count "$logs/mirror")" == 2 ]] && binding "$python_version" ||
+    die "A new installation did not provision and select the pinned runtime."
+  [[ -x "$pydir/cpython-$previous_version-linux-x86_64-gnu/bin/python${previous_version%.*}" ]] ||
+    die "A new installation changed the previous runtime."
+
+  # An existing installation keeps its runtime while the pinned one is present.
+  uninstall new-uninstall
+  bootstrap="$root/previous-bootstrap.sh" succeeds previous-again "${first[@]}"
+  binding "$previous_version" || die "The previous bootstrap did not reuse its own runtime."
+  configuration="$(sha256sum < "$tools/siteops/pyvenv.cfg")"
+  succeeds previous-repeat "${first[@]}"
+  [[ "$(sha256sum < "$tools/siteops/pyvenv.cfg")" == "$configuration" ]] ||
+    die "Repeat installation changed the existing runtime binding."
+  succeeds previous-replace "${second[@]}" --replace
+  [[ "$(installed_version "$bin")" == "siteops $second_version" ]] && binding "$previous_version" ||
+    die "Replacement did not keep the existing runtime."
+  [[ "$(count "$logs/mirror")" == 2 ]] || die "An existing installation provisioned another runtime."
+
+  # Once that installation is removed, the next one uses the pinned runtime without a download.
+  uninstall previous-final-uninstall
+  succeeds new-after-previous "${first[@]}"
+  [[ "$(count "$logs/mirror")" == 2 ]] && binding "$python_version" ||
+    die "A new installation beside the previous runtime did not use the pinned one."
+}
+# A refused runtime download names its cause. The pinned uv carries the runtime's digest, so
+# a mirror cannot substitute other bytes.
+scenario_digest() {
+  local archive="$root/mirror/20260924/cpython-$python_version+20260924-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+  fresh_home digest
+  "$real_python" -I - "$TEST_PYTHON_ARCHIVE" "$archive" "python/bin/python$python_minor" \
+    "$root/tampered-ran" "$python_version" <<'PY' || die "The tampered runtime archive could not be prepared."
+import io
+import shlex
+import sys
+import tarfile
+
+source, target, interpreter, marker, version = sys.argv[1:]
+identity = " ".join(version.split("."))
+# Keep the layout and name, and swap in an interpreter that records any execution.
+trap = f"#!/bin/sh\n: > {shlex.quote(marker)}\nprintf 'cpython {identity} True %s\\n' \"$0\"\n".encode()
+replaced = 0
+with tarfile.open(source, "r:gz") as original, tarfile.open(target, "w:gz", compresslevel=1) as tampered:
+    for member in original:
+        if member.name == interpreter and member.isfile():
+            member.size = len(trap)
+            tampered.addfile(member, io.BytesIO(trap))
+            replaced += 1
+        else:
+            tampered.addfile(member, original.extractfile(member) if member.isfile() else None)
+if replaced != 1:
+    raise SystemExit(1)
+PY
+  # Neither an older managed runtime nor Python on PATH may replace the refused download.
+  planted "$pydir/cpython-$previous_version-linux-x86_64-gnu/bin/python${previous_version%.*}" "$root/fallback-ran"
+  # A mirror that refuses connections stops installation with the download remedies.
+  extra=(UV_PYTHON_INSTALL_MIRROR=https://127.0.0.1:9)
+  refuses unreachable-runtime "Site Ops installation failed: CPython $python_version could not be downloaded. Its runtime source, mirror or proxy could not be reached or refused the request. Allow uv's runtime source, set an approved HTTPS UV_PYTHON_INSTALL_MIRROR, or prepare the runtime with uv python install $python_version --no-bin --no-registry, then retry." \
+    "${first[@]}"
+  extra=()
+  [[ ! -s "$logs/mirror" ]] || die "The unreachable mirror case reached the local mirror."
+  refuses tampered-runtime "Site Ops installation failed: The downloaded CPython $python_version archive did not match its expected digest and was not used. Check the runtime source, mirror or proxy that served it, including UV_PYTHON_INSTALL_MIRROR if it is set." \
+    "${first[@]}"
+  # uv's report is classified, never printed, because it can name the source and its digests.
+  ! grep -qE '127\.0\.0\.1|[0-9a-f]{64}|cause:|error:' "$logs/unreachable-runtime.out" "$logs/tampered-runtime.out" ||
+    die "Runtime source details were printed."
+  [[ "$(count "$logs/mirror")" == 1 ]] || die "The mirror did not serve the tampered runtime once."
+  [[ ! -e "$root/tampered-ran" && ! -e "$root/fallback-ran" && ! -s "$logs/rejected" ]] ||
+    die "A refused runtime or a fallback Python was executed."
+  [[ ! -e "$pydir/cpython-$python_version-linux-x86_64-gnu" &&
+     -z "$(find "$pydir" -name "python$python_minor" -print -quit)" ]] ||
+    die "The tampered runtime was kept."
+  [[ ! -e "$tools/siteops" && ! -e "$bin/siteops" && ! -L "$bin/siteops" && ! -s "$logs/siteops" &&
+     -z "$(find "$data/bundles" -mindepth 1 -print -quit 2>/dev/null)" ]] ||
+    die "A tampered runtime installed or ran Site Ops."
+  cp -- "$TEST_PYTHON_ARCHIVE" "$archive"
+  succeeds pinned-runtime "${first[@]}"
+  [[ "$(count "$logs/mirror")" == 2 ]] && binding "$python_version" &&
+    [[ "$(installed_version "$bin")" == "siteops $first_version" ]] ||
+    die "The pinned runtime archive did not install Site Ops after the tampered one."
+  [[ ! -e "$root/tampered-ran" && ! -e "$root/fallback-ran" ]] ||
+    die "The valid installation executed a refused or fallback runtime."
 }
 scenario_prerequisites() {
   local runs
@@ -689,7 +807,7 @@ PY
 }
 
 case "$scenario" in
-  journey|root|storage|policy|tools|runtime|prerequisites|content) "scenario_$scenario" ;;
+  journey|root|storage|policy|tools|runtime|prerequisites|content|previous|digest) "scenario_$scenario" ;;
   *) die "Unknown scenario $scenario." ;;
 esac
 [[ ! -s "$logs/rejected" ]] || { cat "$logs/rejected" >&2; die "An unexpected tool call was made."; }
