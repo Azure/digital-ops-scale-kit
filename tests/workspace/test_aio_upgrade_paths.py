@@ -95,19 +95,21 @@ def templates(tmp_path_factory) -> Path:
     for relative in (UPGRADE, Path("templates") / "common"):
         shutil.copytree(WORKSPACE_PATH / relative, root / relative)
     probe = (
-        "import { upgradeDecision, upgradePaths } from 'templates/aio/upgrade/upgrade-path.bicep'\n"
+        "import { targetDecision, upgradeDecision, upgradePaths } from 'templates/aio/upgrade/upgrade-path.bicep'\n"
         "param cases array\n"
         "param paths object = {}\n"
+        "param raw bool = false\n"
         "var table = empty(paths) ? upgradePaths : paths\n"
-        "output decisions array = map(cases, case => upgradeDecision("
-        "case[0], case[1], case[2], case[3], table))\n"
+        "output decisions array = map(cases, case => raw ? targetDecision(case[0], case[1], case[2], case[3], table) "
+        ": upgradeDecision(case[0], case[1], case[2], case[3], table))\n"
     )
     (root / "probe.bicep").write_text(probe, encoding="utf-8")
     return root
 
 
-def _decide(templates: Path, name: str, cases: list[tuple[str, str, str, str]], paths: dict | None = None) -> list[dict]:
-    parameters = {"cases": [list(case) for case in cases]}
+def _decide(templates: Path, name: str, cases: list[tuple[str, str, str, str]], paths: dict | None = None,
+            *, raw: bool = False) -> list[dict]:
+    parameters = {"cases": [list(case) for case in cases], "raw": raw}
     if paths is not None:
         parameters["paths"] = paths
     return _snapshot_document(templates, name, "probe.bicep", parameters)["outputs"]["decisions"]
@@ -297,12 +299,14 @@ class TestWriter:
         pytest.param("1.5.41", {"aioVersion": "1.5.41", "aioTrain": "stable"}, id="rerun"),
         pytest.param("1.5.41", {}, id="preserve-installed"),
         pytest.param("1.5.41", {"aioVersion": "1.5.50", "aioTrain": "stable"}, id="unlisted-override"),
+        pytest.param("1.5.41", {"aioVersion": "", "aioTrain": ""}, id="empty-overrides"),
+        pytest.param("1.4.112", {"aioVersion": "1.5.41", "aioTrain": ""}, id="empty-train"),
     ])
     def test_an_allowed_target_writes_every_extension(self, templates, installed, target):
-        name = f"writer-{installed}-{target.get('aioVersion', 'kept')}"
+        name = f"writer-{installed}-{target.get('aioVersion', 'kept') or 'empty'}-{target.get('aioTrain', 'kept') or 'empty'}"
         document = _snapshot_document(templates, name, self.TEMPLATE, _writer(installed, **target))
         versions = {resource["name"]: resource["properties"]["version"] for resource in document["predictedResources"]}
-        assert versions == {"azure-iot-operations-abcde": target.get("aioVersion", installed),
+        assert versions == {"azure-iot-operations-abcde": target.get("aioVersion") or installed,
                             "azure-secret-store": "1.6.0", "cert-manager": "1.2.1"}
 
     def test_a_refused_target_writes_nothing(self, templates):
@@ -312,3 +316,56 @@ class TestWriter:
         assert result.returncode != 0
         assert "AIO release 2609 (1.4.112) is older than the installed AIO 1.5.41." in result.stderr
         assert not (templates / "writer-downgrade.snapshot.json").exists()
+
+def test_the_early_check_and_the_writer_keep_an_empty_target(templates, workspace):
+    cases = {
+        ("1.5.41", "stable", "", ""): "unchanged",
+        ("1.5.41", "stable", "", "stable"): "unchanged",
+        ("1.5.41", "stable", "1.5.41", ""): "unchanged",
+        ("1.4.112", "stable", "1.5.41", ""): "supported",
+        ("1.5.41", "stable", "1.4.112", ""): "refused",
+    }
+    decisions = _decide(templates, "empty-targets", list(cases), raw=True)
+    assert [decision["status"] for decision in decisions] == list(cases.values())
+    check = (workspace / UPGRADE / "check-upgrade-path.bicep").read_text(encoding="utf-8")
+    writer = (workspace / UPGRADE / "update-extensions.bicep").read_text(encoding="utf-8")
+    assert "targetDecision(installedVersion, installedTrain, aioVersion, aioTrain, upgradePaths)" in check
+    assert "targetDecision(aio.version, aio.releaseTrain, aioVersion, aioTrain, upgradePaths)" in writer
+    assert "effectiveAioVersion = preserved(aioVersion, aio.version)" in writer
+    assert "effectiveAioTrain = preserved(aioTrain, aio.releaseTrain)" in writer
+
+
+def test_a_step_parameter_file_cannot_move_the_writer_past_the_check(templates, workspace, tmp_path, monkeypatch):
+    """The early check sees the Site's release, while a step file can give the writer another target."""
+    from siteops.models import Manifest
+    from siteops.orchestrator import Orchestrator
+    from siteops.planning import PlanIntent, PlanStatus, resolve_plan_value
+    from tests.workspace.test_aio_extension_settings import _parameters, _session
+
+    project = tmp_path / "project"
+    (project / "sites").mkdir(parents=True)
+    (project / "sites" / "plant.yaml").write_text(yaml.safe_dump({
+        "apiVersion": "siteops/v1", "kind": "Site", "name": "plant",
+        "subscription": "00000000-0000-0000-0000-000000000001", "resourceGroup": "rg-plant", "location": "eastus",
+        "properties": {"aioRelease": "2610", "deployOptions": {"enableCertManager": True}},
+        "parameters": {"clusterName": "plant-arc"},
+    }), encoding="utf-8")
+    override = tmp_path / "writer-target.yaml"
+    override.write_text(yaml.safe_dump({"aioVersion": "1.4.112", "aioTrain": "stable"}), encoding="utf-8")
+    path = workspace / "manifests" / "aio-upgrade" / "manifest.yaml"
+    manifest = Manifest.from_file(path, workspace_root=workspace)
+    next(step for step in manifest.steps if step.name == "update-extensions").parameters.append(str(override))
+    monkeypatch.setattr("siteops.orchestrator.TemplateCompilationSession", lambda: _session(tmp_path))
+    built = Orchestrator(workspace, site_config_root=project).build_plan(
+        path, selector="name=plant", intent=PlanIntent.EXECUTABLE, manifest=manifest,
+    )
+    assert built.status is PlanStatus.PLANNED, built.diagnostics
+    plan = built.plan
+    early = _parameters(plan, "check-upgrade-path")
+    writer = _parameters(plan, "update-extensions")
+    assert resolve_plan_value(early["aioVersion"], {}) == "1.5.41"
+    target = {key: resolve_plan_value(writer[key], {}) for key in ("aioVersion", "aioTrain", "aioApiVersion")}
+    assert target == {"aioVersion": "1.4.112", "aioTrain": "stable", "aioApiVersion": "2026-10-01"}
+    result = _snapshot(templates, "writer-step-file", TestWriter.TEMPLATE, _writer("1.5.41", **target))
+    assert result.returncode != 0
+    assert "AIO release 2609 (1.4.112) is older than the installed AIO 1.5.41." in result.stderr

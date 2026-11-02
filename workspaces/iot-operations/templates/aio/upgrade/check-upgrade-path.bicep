@@ -15,16 +15,16 @@
 // -------------------------------------------------------------------------------------
 
 import { aioExtensionName } from '../../common/extension-names.bicep'
-import { upgradeDecision, upgradePaths } from 'upgrade-path.bicep'
+import { targetDecision, upgradePaths } from 'upgrade-path.bicep'
 
 @description('Name of the Arc-connected cluster hosting the AIO instance, from the Site\'s `parameters.clusterName`. The cluster is in the Site\'s resource group.')
 param clusterName string = ''
 
-@description('Target AIO version, from the Site\'s AIO release file or its `aioVersion` override.')
-param aioVersion string
+@description('Target AIO version, from the Site\'s AIO release file or its `aioVersion` override. Empty keeps the installed version, as the extension update does.')
+param aioVersion string = ''
 
-@description('Target AIO release train, from the Site\'s AIO release file or its `aioTrain` override.')
-param aioTrain string
+@description('Target AIO release train, from the Site\'s AIO release file or its `aioTrain` override. Empty keeps the installed train.')
+param aioTrain string = ''
 
 var canRead = !empty(clusterName)
 
@@ -39,7 +39,7 @@ resource aioExtension 'Microsoft.KubernetesConfiguration/extensions@2023-05-01' 
 
 var installedVersion = canRead ? (aioExtension!.properties.?version ?? '') : ''
 var installedTrain = canRead ? (aioExtension!.properties.?releaseTrain ?? '') : ''
-var decision = upgradeDecision(installedVersion, installedTrain, aioVersion, aioTrain, upgradePaths)
+var decision = targetDecision(installedVersion, installedTrain, aioVersion, aioTrain, upgradePaths)
 
 @description('Decision: unchanged, supported or unverified. A refused move fails the deployment with the reason.')
 output status string = decision.status == 'refused' ? fail(decision.message) : decision.status

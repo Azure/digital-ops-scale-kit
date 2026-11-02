@@ -42,7 +42,7 @@
 // the early check is covered too.
 // -------------------------------------------------------------------------------------
 
-import { upgradeDecision, upgradePaths } from 'upgrade-path.bicep'
+import { preserved, targetDecision, upgradePaths } from 'upgrade-path.bicep'
 
 // =====================================================================================
 // Parameters: connected cluster + resolved snapshots (from resolve-extensions chaining)
@@ -116,8 +116,8 @@ param certManagerConfigurationOverrides object = {}
 // Effective values: empty target preserves the resolved current value.
 // =====================================================================================
 
-var effectiveAioVersion = !empty(aioVersion) ? aioVersion : aio.version
-var effectiveAioTrain = !empty(aioTrain) ? aioTrain : aio.releaseTrain
+var effectiveAioVersion = preserved(aioVersion, aio.version)
+var effectiveAioTrain = preserved(aioTrain, aio.releaseTrain)
 var releaseExtensionConfiguration = aioReleaseConfiguration.?extension ?? {}
 var releaseAioConfigurationOverrides = releaseExtensionConfiguration.?configurationOverrides ?? {}
 // The subject name is part of every generation from 2026-07-01. On 2026-03-01 a release opts in.
@@ -179,7 +179,7 @@ var effectiveCertManagerTrain = !empty(certManagerTrain) ? certManagerTrain : ce
 // Upgrade path guard: each PUT reads its version through the decision.
 // =====================================================================================
 
-var upgradePath = upgradeDecision(aio.version, aio.releaseTrain, effectiveAioVersion, effectiveAioTrain, upgradePaths)
+var upgradePath = targetDecision(aio.version, aio.releaseTrain, aioVersion, aioTrain, upgradePaths)
 var upgradeRefused = upgradePath.status == 'refused'
 var guardedAioVersion = upgradeRefused ? fail(upgradePath.message) : effectiveAioVersion
 var guardedSecretStoreVersion = upgradeRefused ? fail(upgradePath.message) : effectiveSecretStoreVersion

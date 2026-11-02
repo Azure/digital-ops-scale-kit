@@ -29,6 +29,15 @@ var upgradePaths = loadYamlContent('upgrade-paths.yaml')
 func upgradeDecision(installedVersion string, installedTrain string, targetVersion string, targetTrain string, paths object) object =>
   decide(installedVersion, toLower(installedTrain), targetVersion, toLower(targetTrain), rowsOf(paths))
 
+@export()
+@description('Returns the target value, or the installed value when the target is empty, as the extension update applies it.')
+func preserved(target string, installed string) string => empty(target) ? installed : target
+
+@export()
+@description('Decides on the target that the extension update applies: an empty version or train keeps the installed one.')
+func targetDecision(installedVersion string, installedTrain string, aioVersion string, aioTrain string, paths object) object =>
+  upgradeDecision(installedVersion, installedTrain, preserved(aioVersion, installedVersion), preserved(aioTrain, installedTrain), paths)
+
 func decide(installed string, installedTrain string, target string, targetTrain string, rows array) object =>
   !isReadableVersion(installed) || empty(installedTrain)
     ? result('unverified', 'aio-upgrade could not read the installed AIO version, so it did not check the upgrade path.', '')
