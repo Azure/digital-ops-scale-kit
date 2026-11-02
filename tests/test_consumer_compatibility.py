@@ -14,6 +14,7 @@ import yaml
 
 from siteops import cli
 from tests.ado_helpers import TEMPLATES
+from tests.yaml_documents import cached_safe_load
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE = "v1.0.0b7"
@@ -75,12 +76,12 @@ def test_snapshot_matches_the_release_tag():
 @pytest.mark.parametrize("platform", ["github", "ado"])
 def test_both_unit_jobs_fetch_the_release_tag_and_require_it(platform):
     if platform == "github":
-        steps = yaml.safe_load((ROOT / ".github/workflows/ci.yaml").read_text(encoding="utf-8"))["jobs"]["test"]["steps"]
+        steps = cached_safe_load((ROOT / ".github/workflows/ci.yaml").read_text(encoding="utf-8"))["jobs"]["test"]["steps"]
         names = [step.get("name") for step in steps]
         bodies = {step.get("name"): step.get("run", "") for step in steps}
         environment = steps[names.index("Run unit tests")].get("env", {})
     else:
-        jobs = yaml.safe_load((ROOT / ".pipelines/ci.yaml").read_text(encoding="utf-8"))["jobs"]
+        jobs = cached_safe_load((ROOT / ".pipelines/ci.yaml").read_text(encoding="utf-8"))["jobs"]
         steps = next(job for job in jobs if job["job"] == "test")["steps"]
         names = [step.get("displayName") for step in steps]
         bodies = {step.get("displayName"): step.get("script", "") for step in steps}
@@ -219,7 +220,7 @@ def _documented_caller():
 
 
 def _callers():
-    return {"sample": yaml.safe_load(SAMPLE.read_text(encoding="utf-8")), "guide": _documented_caller()}
+    return {"sample": cached_safe_load(SAMPLE.read_text(encoding="utf-8")), "guide": _documented_caller()}
 
 
 @pytest.mark.parametrize("caller", ["sample", "guide"])
@@ -265,7 +266,7 @@ def test_external_caller_arguments_fit_each_template_contract(caller, baseline):
 
 @pytest.mark.parametrize("stage", range(2))
 def test_sample_caller_validation_stages_accept_their_inputs(monkeypatch, capsys, stage):
-    arguments = yaml.safe_load(SAMPLE.read_text(encoding="utf-8"))["stages"][stage]["parameters"]
+    arguments = cached_safe_load(SAMPLE.read_text(encoding="utf-8"))["stages"][stage]["parameters"]
     options = ["--site-file", str(CALLER / arguments["siteFile"])] if "siteFile" in arguments else []
     options += ["-l", arguments["selector"]] if "selector" in arguments else []
     code, document = _run(monkeypatch, capsys, CALLER / arguments["workspace"], "validate", *options)

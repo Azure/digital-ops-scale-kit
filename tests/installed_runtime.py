@@ -16,13 +16,17 @@ from tests.native_bundle import write_wheel
 
 ROOT = Path(__file__).resolve().parent.parent
 RUNTIME_WHEELHOUSE = "SITEOPS_TEST_RUNTIME_WHEELHOUSE"
-# The engine source and runtime lock are fixed for a test session, so each is built or
-# downloaded once and every caller receives its own copy of those bytes.
+# The engine source and runtime lock are fixed for a test session, so each test process builds
+# or downloads them once and every caller receives its own copy of those bytes.
 _SESSION_FILES: dict[str, dict[str, bytes]] = {}
+# A parallel run builds them once in the controller, and each worker reads them from here.
+_PREBUILT: Path | None = None
 
 
 def _session_copy(kind: str, destination: Path) -> list[Path] | None:
     files = _SESSION_FILES.get(kind)
+    if files is None and _PREBUILT is not None and (_PREBUILT / kind).is_dir():
+        files = _SESSION_FILES[kind] = {path.name: path.read_bytes() for path in (_PREBUILT / kind).iterdir()}
     if files is None:
         return None
     destination.mkdir()
@@ -122,12 +126,38 @@ def runtime_wheels(root: Path) -> Path:
     return destination
 
 
+def prebuild(root: Path) -> None:
+    """Build the engine wheel and fetch the runtime wheels into `root` for parallel workers.
+
+    A file set that cannot be provisioned here is left out. Each worker then repeats the
+    attempt and reports the failure in the test that needs it, as a serial run does.
+    """
+    root.mkdir()
+    for kind, provision in (("engine", build_engine_wheel), ("runtime", runtime_wheels)):
+        state = root / f"{kind}-state"
+        state.mkdir()
+        try:
+            provision(state)
+        except Exception:
+            continue
+        if kind in _SESSION_FILES:
+            (root / kind).mkdir()
+            for name, content in _SESSION_FILES[kind].items():
+                (root / kind / name).write_bytes(content)
+
+
+def use_prebuilt(root: Path) -> None:
+    """Take the controller's files from `root` on first use instead of building them again."""
+    global _PREBUILT
+    _PREBUILT = root
+
+
 @dataclass(frozen=True)
 class InstalledEngine:
     """An engine installed for one caller.
 
     `root`, `environment` and the tool copies belong to the caller. `application` is
-    shared by every caller installed from the same wheel in this session, so treat it as
+    shared by every caller installed from the same wheel in this process, so treat it as
     read-only. The next install of that wheel fails when its files changed.
     """
 
@@ -148,7 +178,7 @@ class InstalledEngine:
 
 
 # The installed application depends only on the engine wheel and the runtime lock, so each
-# wheel is installed once per session. Every caller still gets its own state, tools and checks.
+# wheel is installed once per test process. Every caller still gets its own state, tools and checks.
 _SESSION_APPLICATIONS: dict[str, tuple[Path, tuple[tuple[str, int, str], ...]]] = {}
 
 

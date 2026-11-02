@@ -10,16 +10,16 @@ import sys
 from pathlib import Path
 
 import pytest
-import yaml
 
 from tests.shell_helpers import run_script
+from tests.yaml_documents import cached_safe_load
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
 
 
 def workflow(name):
-    return yaml.safe_load((WORKFLOWS / name).read_text(encoding="utf-8"))
+    return cached_safe_load((WORKFLOWS / name).read_text(encoding="utf-8"))
 
 
 def test_windows_uv_gate_requires_qualified_native_fixtures_before_tests():

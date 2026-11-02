@@ -9,7 +9,6 @@ import subprocess
 import sys
 
 import pytest
-import yaml
 
 from siteops.artifacts import ArtifactError
 from siteops.workspace_package import extract_package, inspect_package, inspect_produced_package
@@ -26,14 +25,15 @@ from tests.release_helpers import (
 from tests.release_helpers import repository as repository
 from tests.shell_helpers import run_script, write_executable
 from tests.workspace_release_helpers import PRODUCER, _declaration, _load, _produce, _workspace
+from tests.yaml_documents import cached_safe_load
 
 sys.path.insert(0, str(SCRIPTS))
 
 from siteops_release import ReleaseIntentError  # noqa: E402
 from workspace_release import WorkspaceBuild, load_workspace_builds  # noqa: E402
 
-CANDIDATE = yaml.safe_load((ROOT / ".github" / "workflows" / "_release-candidate.yaml").read_text())
-WORKSPACE_WORKFLOW = yaml.safe_load((ROOT / ".github" / "workflows" / "_workspace-distribution.yaml").read_text())
+CANDIDATE = cached_safe_load((ROOT / ".github" / "workflows" / "_release-candidate.yaml").read_text())
+WORKSPACE_WORKFLOW = cached_safe_load((ROOT / ".github" / "workflows" / "_workspace-distribution.yaml").read_text())
 
 
 def _build_step(name):
@@ -468,7 +468,7 @@ printf 'controlled compiler bytes' > "$output"
 
 
 def test_default_preview_declares_the_complete_workspace_path():
-    ci = yaml.safe_load((ROOT / ".github/workflows/ci.yaml").read_text())
+    ci = cached_safe_load((ROOT / ".github/workflows/ci.yaml").read_text())
     selected = ci[True]["workflow_dispatch"]["inputs"]["release-file"]["default"]
     declaration = json.loads((ROOT / selected).read_bytes())
     assert selected == ".github/release-examples/workspace-preview/release.json"

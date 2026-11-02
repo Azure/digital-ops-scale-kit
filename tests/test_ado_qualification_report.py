@@ -7,9 +7,9 @@ import sys
 from pathlib import Path
 
 import pytest
-import yaml
 
 from tests.installed_runtime import isolated_environment
+from tests.yaml_documents import cached_safe_load
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = "a" * 40
@@ -150,7 +150,7 @@ def test_reporting_command_publishes_only_its_own_safe_result(
 
 
 def test_pipeline_collects_native_job_results_and_retains_failure_reporting():
-    document = yaml.safe_load((ROOT / ".pipelines/validate-pipelines.yaml").read_text())
+    document = cached_safe_load((ROOT / ".pipelines/validate-pipelines.yaml").read_text())
     stage = next(stage for stage in document["stages"] if stage.get("stage") == "qualification_report")
     assert set(stage["dependsOn"]) == {
         "preview", "validate_selector", "validate_site_file", "validate_b7_selector", "validate_b7_site_file",

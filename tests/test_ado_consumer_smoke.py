@@ -8,11 +8,11 @@ import sys
 from pathlib import Path
 
 import pytest
-import yaml
 
 from tests.ado_helpers import TEMPLATES, nodes
 from tests.installed_runtime import build_engine_wheel, install_engine
 from tests.shell_helpers import bash_path, run_script, write_executable
+from tests.yaml_documents import cached_safe_load
 
 ROOT = Path(__file__).resolve().parents[1]
 PIPELINE = ROOT / ".pipelines" / "validate-pipelines.yaml"
@@ -25,11 +25,11 @@ STAGES = ["validate_selector", "validate_site_file", "validate_b7_selector", "va
 
 
 def smoke_cases():
-    return yaml.safe_load(SMOKE_STAGES.read_text(encoding="utf-8"))["stages"]
+    return cached_safe_load(SMOKE_STAGES.read_text(encoding="utf-8"))["stages"]
 
 
 def test_smoke_pipeline_reuses_the_consumer_validation_template():
-    document = yaml.safe_load(PIPELINE.read_text(encoding="utf-8"))
+    document = cached_safe_load(PIPELINE.read_text(encoding="utf-8"))
     assert document["trigger"] == document["pr"] == "none"
     assert document["pool"]["vmImage"] == "ubuntu-24.04"
     assert document["variables"] == {"SITE_OVERRIDES": ""}
@@ -66,12 +66,12 @@ def test_smoke_pipeline_reuses_the_consumer_validation_template():
 
 
 def test_preview_failure_does_not_schedule_or_gate_the_consumer_lane():
-    document = yaml.safe_load(PIPELINE.read_text(encoding="utf-8"))
+    document = cached_safe_load(PIPELINE.read_text(encoding="utf-8"))
     stages = document["stages"]
     assert stages[0] == {"template": "templates/consumer-smoke.yaml"}
     preview = next(stage for stage in stages if stage.get("stage") == "preview")
     assert preview["dependsOn"] == []
-    consumer = yaml.safe_load((TEMPLATES / "siteops-validate.yaml").read_text(encoding="utf-8"))
+    consumer = cached_safe_load((TEMPLATES / "siteops-validate.yaml").read_text(encoding="utf-8"))
     assert "dependsOn" not in consumer["stages"][0]
     assert [case["parameters"]["stageName"] for case in smoke_cases()] == STAGES
     report = next(stage for stage in stages if stage.get("stage") == "qualification_report")
@@ -117,7 +117,7 @@ def test_smoke_inputs_validate_with_the_installed_engine(
 
 
 def _pip_consumer():
-    return yaml.safe_load(GITHUB_CI.read_text(encoding="utf-8"))["jobs"]["pip-consumer"]
+    return cached_safe_load(GITHUB_CI.read_text(encoding="utf-8"))["jobs"]["pip-consumer"]
 
 
 def _pip_step(name):
@@ -126,7 +126,7 @@ def _pip_step(name):
 
 def test_github_pip_consumer_installs_this_commit_from_its_git_url():
     job = _pip_consumer()
-    ci = yaml.safe_load(GITHUB_CI.read_text(encoding="utf-8"))["jobs"]
+    ci = cached_safe_load(GITHUB_CI.read_text(encoding="utf-8"))["jobs"]
     assert job["permissions"] == {"contents": "read"}
     assert job["if"] == ci["linux-bootstrap"]["if"]
     checkout, setup, *_ = job["steps"]

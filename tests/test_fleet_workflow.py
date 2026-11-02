@@ -12,9 +12,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import yaml
 
 from tests.actions_expressions import evaluate, truthy
+from tests.yaml_documents import cached_safe_load
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -54,8 +54,8 @@ def load_script(name):
 def test_fleet_onboarding_retains_the_existing_environment_secret_name(
     repository_value, environment_value, expected,
 ):
-    caller = yaml.safe_load((ROOT / ".github/workflows/e2e-test.yaml").read_text())["jobs"]["fleet"]
-    callee = yaml.safe_load((ROOT / ".github/workflows/_fleet-acceptance.yaml").read_text())
+    caller = cached_safe_load((ROOT / ".github/workflows/e2e-test.yaml").read_text())["jobs"]["fleet"]
+    callee = cached_safe_load((ROOT / ".github/workflows/_fleet-acceptance.yaml").read_text())
     host = callee["jobs"]["hosts"]
     connection = next(step for step in host["steps"] if step.get("uses") == "./.github/actions/connect-arc")
     assert "environment" not in caller
@@ -499,7 +499,7 @@ def test_host_requires_the_committed_immutable_owner(inputs, monkeypatch, capsys
 
 
 def test_workflow_keeps_hosts_live_and_uploads_ownership_before_creation():
-    flow = yaml.safe_load((ROOT / ".github/workflows/_fleet-acceptance.yaml").read_text())
+    flow = cached_safe_load((ROOT / ".github/workflows/_fleet-acceptance.yaml").read_text())
     jobs = flow["jobs"]
     assert jobs["controller"]["needs"] == ["select", "prepare"]
     assert jobs["hosts"]["needs"] == ["select", "prepare"]
@@ -526,7 +526,7 @@ def test_workflow_keeps_hosts_live_and_uploads_ownership_before_creation():
         assert jobs[name]["environment"] == "${{ inputs.environment }}"
         assert jobs[name]["runs-on"] == "ubuntu-24.04"
         assert "attestations" not in jobs[name]["permissions"]
-    caller = yaml.safe_load((ROOT / ".github/workflows/e2e-test.yaml").read_text())
+    caller = cached_safe_load((ROOT / ".github/workflows/e2e-test.yaml").read_text())
     assert caller["jobs"]["fleet"]["needs"] == ["fleet-request", "prep"]
     assert caller["jobs"]["fleet-cleanup"]["with"]["kind"] == (
         "${{ inputs.scenario == 'site-cleanup' && 'site' || 'fleet' }}"
@@ -545,7 +545,7 @@ def test_workflow_keeps_hosts_live_and_uploads_ownership_before_creation():
 def test_reconciliation_work_requires_ownership_and_retains_an_admitted_outcome(
     ownership_id, cancelled, prior_result, expected,
 ):
-    workflow = yaml.safe_load((ROOT / ".github/workflows/_fleet-reconcile.yaml").read_text())
+    workflow = cached_safe_load((ROOT / ".github/workflows/_fleet-reconcile.yaml").read_text())
     steps = workflow["jobs"]["reconcile"]["steps"]
     guarded = [
         next(step for step in steps if step.get("with", {}).get("path") == "${{ runner.temp }}/fleet/ownership"),
@@ -564,7 +564,7 @@ def test_reconciliation_work_requires_ownership_and_retains_an_admitted_outcome(
 
 
 def test_allocation_markers_stay_private_and_cleanup_consumes_verified_original_receipts():
-    flow = yaml.safe_load((ROOT / ".github/workflows/_fleet-acceptance.yaml").read_text())
+    flow = cached_safe_load((ROOT / ".github/workflows/_fleet-acceptance.yaml").read_text())
     steps = flow["jobs"]["prepare"]["steps"]
     preflight = next(step for step in steps if step.get("id") == "preflight")
     creation = next(step for step in steps if step.get("name") == "Prepare fleet resource groups")
@@ -576,7 +576,7 @@ def test_allocation_markers_stay_private_and_cleanup_consumes_verified_original_
         ("_fleet-acceptance.yaml", "cleanup", "${{ github.run_id }}", "Reconcile owned resource groups"),
         ("_fleet-reconcile.yaml", "reconcile", "${{ inputs.original-run }}", "Reconcile original owned groups"),
     ):
-        source = yaml.safe_load((ROOT / ".github/workflows" / filename).read_text())
+        source = cached_safe_load((ROOT / ".github/workflows" / filename).read_text())
         steps = source["jobs"][job]["steps"]
         download = next(step for step in steps if step.get("with", {}).get("path") == (
             "${{ runner.temp }}/fleet/ownership"
@@ -594,7 +594,7 @@ def test_allocation_markers_stay_private_and_cleanup_consumes_verified_original_
 
 
 def test_reconciliation_passes_original_job_completion_bound_through_environment():
-    flow = yaml.safe_load((ROOT / ".github/workflows/_fleet-reconcile.yaml").read_text())
+    flow = cached_safe_load((ROOT / ".github/workflows/_fleet-reconcile.yaml").read_text())
     steps = flow["jobs"]["reconcile"]["steps"]
     ownership = next(step for step in steps if step.get("id") == "ownership")
     reconcile = next(step for step in steps if step.get("name") == "Reconcile original owned groups")

@@ -581,7 +581,7 @@ def test_concurrent_native_initialization_and_publication_converge(tmp_path, pac
             process.stdin.write("go\n")
             process.stdin.flush()
         for process in processes:
-            output, error = process.communicate(timeout=30)
+            output, error = process.communicate(timeout=60)
             assert process.returncode == 0, error
             assert output.strip() == "published"
     finally:

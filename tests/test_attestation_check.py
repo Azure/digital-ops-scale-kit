@@ -11,14 +11,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-import yaml
 
 from tests.shell_helpers import required_bash, write_executable
+from tests.yaml_documents import cached_safe_load
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
-DOCUMENT = yaml.safe_load((WORKFLOWS / "_attestation-check.yaml").read_text(encoding="utf-8"))
-CI = yaml.safe_load((WORKFLOWS / "ci.yaml").read_text(encoding="utf-8"))
+DOCUMENT = cached_safe_load((WORKFLOWS / "_attestation-check.yaml").read_text(encoding="utf-8"))
+CI = cached_safe_load((WORKFLOWS / "ci.yaml").read_text(encoding="utf-8"))
 SUBJECT = b"Site Ops 1ES attestation diagnostic. Not a release.\n"
 SHA = "a" * 40
 REPOSITORY = "example/content"

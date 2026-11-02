@@ -10,7 +10,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import yaml
+
+from tests.yaml_documents import cached_safe_load
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -26,7 +27,7 @@ from siteops_release_assets import (  # noqa: E402
 )
 from workspace_engine import EngineSelection  # noqa: E402
 
-WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/_release-candidate.yaml").read_text())
+WORKFLOW = cached_safe_load((ROOT / ".github/workflows/_release-candidate.yaml").read_text())
 
 
 @pytest.fixture

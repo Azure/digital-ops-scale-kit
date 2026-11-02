@@ -23,12 +23,13 @@ from tests.release_helpers import repository as repository
 from tests.shell_helpers import bash_path, write_executable
 from tests.shell_helpers import run_script as _run_script
 from tests.verification_helpers import verified_observation
+from tests.yaml_documents import cached_safe_load
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
-WORKFLOW = yaml.safe_load((ROOT / ".github" / "workflows" / "release.yaml").read_text())
-CANDIDATE_WORKFLOW = yaml.safe_load((ROOT / ".github" / "workflows" / "_release-candidate.yaml").read_text())
-CI_WORKFLOW = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yaml").read_text())
+WORKFLOW = cached_safe_load((ROOT / ".github" / "workflows" / "release.yaml").read_text())
+CANDIDATE_WORKFLOW = cached_safe_load((ROOT / ".github" / "workflows" / "_release-candidate.yaml").read_text())
+CI_WORKFLOW = cached_safe_load((ROOT / ".github" / "workflows" / "ci.yaml").read_text())
 JOBS = {**CANDIDATE_WORKFLOW["jobs"], **WORKFLOW["jobs"]}
 SHA = "c" * 40
 REPO = "example/publisher"
@@ -597,7 +598,7 @@ def test_declared_record_events_do_not_create_a_release_on_an_ordinary_push():
 
 def test_operator_guide_matches_the_visible_workflow_controls():
     guide = (ROOT / "docs" / "releasing.md").read_text(encoding="utf-8")
-    ci = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yaml").read_text())
+    ci = cached_safe_load((ROOT / ".github" / "workflows" / "ci.yaml").read_text())
     for name in ci[True]["workflow_dispatch"]["inputs"]:
         assert f"`{name}`" in guide
     for option in ci[True]["workflow_dispatch"]["inputs"]["run-mode"]["options"]:
@@ -1297,7 +1298,7 @@ def test_release_rehearsal_cannot_reach_publishing_permissions():
     assert JOBS["distribution"]["with"]["report-summary"] is False
     text = yaml.safe_dump(CANDIDATE_WORKFLOW)
     assert "release create" not in text and "--method POST" not in text
-    ci = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yaml").read_text())
+    ci = cached_safe_load((ROOT / ".github" / "workflows" / "ci.yaml").read_text())
     job = ci["jobs"]["release-preview"]
     assert job["needs"] == ["lint", "test", "validate", "release-runner"]
     assert job["with"]["dry-run"] is True

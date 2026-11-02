@@ -600,11 +600,13 @@ def test_packaged_native_install_and_replacement_use_the_verified_path(
                 "'" + value.replace("'", "''") + "'" for value in arguments
             ) + ")\n[IO.File]::WriteAllText($env:TEST_PHASE, 'complete')\n", encoding="utf-8",
         )
+        # A fresh Windows PowerShell 5.1 process on a hosted runner has spent a full minute
+        # loading System.IO.Compression.FileSystem, so allow three minutes before reporting a hang.
         return run_windows_installer(
             [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper)],
             environment={**environment, "TEST_PYTHON": sys.executable, "TEST_ARCHIVE": str(archive),
                          "TEST_HELPER_DIR": str(helper_dir), "TEST_PHASE": str(phase)},
-            cwd=tmp_path, phase=phase,
+            cwd=tmp_path, phase=phase, timeout=180,
         )
 
     first = invoke(bundle)

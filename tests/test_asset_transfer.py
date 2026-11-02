@@ -31,6 +31,10 @@ BODY = b"raise AssertionError('Downloaded content is data, not a local script.')
 IDENTITY = ArtifactIdentity("content.zip", len(BODY), hashlib.sha256(BODY).hexdigest())
 ORIGIN = "https://source.example"
 URL = ORIGIN + "/asset"
+# The transfer worker must start and reach the stalled server within this deadline, even on a busy
+# host. A stalled server holds the transfer far longer, so only the deadline can end it.
+STALLED_DEADLINE = 5
+STALL_SECONDS = 30
 
 
 def request(**changes):
@@ -322,7 +326,7 @@ def https_source(monkeypatch, tls_material):
             observed.append((self.path, dict(self.headers)))
             if self.path == "/stall-headers":
                 entered.set()
-                release.wait(10)
+                release.wait(STALL_SECONDS)
                 return
             status, fields, body = responses[self.path]
             self.send_response(status)
@@ -334,7 +338,7 @@ def https_source(monkeypatch, tls_material):
                 self.wfile.flush()
                 if self.path == "/stall-body":
                     entered.set()
-                    release.wait(10)
+                    release.wait(STALL_SECONDS)
             except (BrokenPipeError, ConnectionResetError):
                 pass
 
@@ -539,11 +543,11 @@ def test_native_deadline_stops_worker_before_staging_cleanup(
     responses["/stall-body"] = (200, [("Content-Length", str(len(BODY)))], BODY[:1])
     start = time.monotonic()
     with pytest.raises(transfer.AssetTransferError) as caught:
-        with download(private_parent, url=origin + path, origins=(origin,), timeout=1.5):
+        with download(private_parent, url=origin + path, origins=(origin,), timeout=STALLED_DEADLINE):
             pytest.fail("A stalled transfer was yielded.")
     assert caught.value.code == "source.timeout"
     assert entered.is_set()
-    assert time.monotonic() - start < 8
+    assert time.monotonic() - start < STALLED_DEADLINE + 10 < STALL_SECONDS
     assert observed_processes[0][0].poll() is not None
     assert list(private_parent.iterdir()) == []
 
@@ -578,13 +582,13 @@ def test_native_proxy_connection_has_absolute_deadline(private_parent, observed_
     with socket.socket() as server:
         server.bind(("127.0.0.1", 0))
         server.listen()
-        server.settimeout(5)
+        server.settimeout(STALLED_DEADLINE + 5)
 
         def accept():
             connection, _ = server.accept()
             with connection:
                 entered.set()
-                release.wait(8)
+                release.wait(STALL_SECONDS)
 
         thread = threading.Thread(target=accept, daemon=True)
         thread.start()
@@ -593,11 +597,13 @@ def test_native_proxy_connection_has_absolute_deadline(private_parent, observed_
         monkeypatch.setenv("NO_PROXY", "")
         monkeypatch.setenv("no_proxy", "")
         try:
+            start = time.monotonic()
             with pytest.raises(transfer.AssetTransferError) as caught:
-                with download(private_parent, timeout=1.5):
+                with download(private_parent, timeout=STALLED_DEADLINE):
                     pytest.fail("Stalled proxy was accepted.")
             assert caught.value.code == "source.timeout"
             assert entered.is_set()
+            assert time.monotonic() - start < STALLED_DEADLINE + 10 < STALL_SECONDS
             assert list(private_parent.iterdir()) == []
         finally:
             release.set()

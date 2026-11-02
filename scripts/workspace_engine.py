@@ -354,6 +354,8 @@ def prepare_engine(
             if len(paths) == 8:
                 raise ArtifactError("The engine build contains undeclared assets.")
             paths.append(path)
+        # File systems list entries in different orders, so the selection uses name order.
+        paths.sort(key=lambda path: path.name)
         assets = tuple(
             ReleaseAsset(path.name, *hash_file(path, limit=MAX_ENGINE_ASSET_BYTES))
             for path in paths

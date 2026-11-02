@@ -9,9 +9,9 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-import yaml
 
 from tests.shell_helpers import bash_path, run_script, write_executable
+from tests.yaml_documents import cached_safe_load
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -302,7 +302,7 @@ def test_controller_checks_independent_policy_and_writes_only_a_complete_receipt
 
 
 def test_candidate_workflow_admits_exact_artifacts_after_the_producer_without_azure_authority():
-    data = yaml.safe_load((ROOT / ".github" / "workflows" / "_release-candidate.yaml").read_text())
+    data = cached_safe_load((ROOT / ".github" / "workflows" / "_release-candidate.yaml").read_text())
     job = data["jobs"]["admit"]
     assert job["needs"] == ["prepare", "review"]
     assert job["runs-on"] == "ubuntu-24.04"
@@ -330,7 +330,7 @@ def test_candidate_workflow_admits_exact_artifacts_after_the_producer_without_az
 
 @pytest.mark.parametrize("failure", ["none", "pip", "run", "jobs", "artifact-12", "roots"])
 def test_admission_metadata_step_stops_on_failed_tools_and_keeps_diagnostics_private(tmp_path, failure):
-    data = yaml.safe_load((ROOT / ".github" / "workflows" / "_release-candidate.yaml").read_text())
+    data = cached_safe_load((ROOT / ".github" / "workflows" / "_release-candidate.yaml").read_text())
     script = next(step["run"] for step in data["jobs"]["admit"]["steps"]
                   if step["name"] == "Prepare admission tooling and metadata")
     binary = tmp_path / "bin"

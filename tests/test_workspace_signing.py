@@ -7,7 +7,6 @@ import shutil
 import sys
 
 import pytest
-import yaml
 
 from siteops.github_attestation import load_github_policy
 from tests.release_helpers import (
@@ -20,9 +19,10 @@ from tests.release_helpers import (
 )
 from tests.shell_helpers import run_script, write_executable
 from tests.workspace_release_helpers import _declaration, _load, _produce, _workspace
+from tests.yaml_documents import cached_safe_load
 
-WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/_workspace-distribution.yaml").read_text())
-CANDIDATE = yaml.safe_load((ROOT / ".github/workflows/_release-candidate.yaml").read_text())
+WORKFLOW = cached_safe_load((ROOT / ".github/workflows/_workspace-distribution.yaml").read_text())
+CANDIDATE = cached_safe_load((ROOT / ".github/workflows/_release-candidate.yaml").read_text())
 
 
 def step(name):

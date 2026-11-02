@@ -23,9 +23,12 @@ python -m pip install -e ".[dev]"
 Run the local validation used for ordinary changes:
 
 ```bash
-pytest -m "not integration"
+pytest -m "not integration" -n auto
 ruff check .
 ```
+
+`-n auto` runs the tests in one worker process per CPU, as CI does. Leave it
+out to run them in a single process, for example under a debugger.
 
 The editable install is a contributor workflow. Operators installing an
 identified build should use the [Site Ops installation guide](docs/install-siteops.md).
@@ -125,8 +128,8 @@ boundaries visible where they affect an operator decision.
 Before opening a pull request:
 
 1. Run the smallest focused tests for the change.
-2. Run `pytest -m "not integration"` and `ruff check .` when the change affects
-   the engine or shared workspace behavior.
+2. Run `pytest -m "not integration" -n auto` and `ruff check .` when the
+   change affects the engine or shared workspace behavior.
 3. Update documentation and samples that exercise the changed contract.
 4. Describe any live validation separately from local or hosted test results.
 

@@ -3,14 +3,15 @@
 from pathlib import Path
 
 import pytest
-import yaml
+
+from tests.yaml_documents import cached_safe_load
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture
 def render_summary(tmp_path, monkeypatch):
-    workflow = yaml.safe_load((ROOT / ".github" / "workflows" / "ci.yaml").read_text(encoding="utf-8"))
+    workflow = cached_safe_load((ROOT / ".github" / "workflows" / "ci.yaml").read_text(encoding="utf-8"))
     program = next(
         step["run"] for step in workflow["jobs"]["test"]["steps"] if step["name"] == "Test Summary"
     )

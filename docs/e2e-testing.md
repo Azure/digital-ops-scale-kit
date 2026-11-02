@@ -18,7 +18,7 @@ Use E2E tests when:
 - Qualifying a new AIO release before updating workspace defaults.
 - Reproducing a field issue from start to finish against a real subscription.
 
-Unit tests (`pytest tests/ -m "not integration"`) cover local engine,
+Unit tests (`pytest tests/ -m "not integration" -n auto`) cover local engine,
 workspace, and workflow behavior and should remain the default gate before
 each commit. E2E runs only when you dispatch it (`workflow_dispatch`).
 

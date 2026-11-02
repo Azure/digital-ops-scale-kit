@@ -17,6 +17,7 @@ from packaging.requirements import Requirement
 from siteops import __version__
 from tests import installed_runtime
 from tests.installed_runtime import build_engine_wheel, install_engine, isolated_environment
+from tests.yaml_documents import cached_safe_load
 
 try:
     import tomllib
@@ -25,6 +26,7 @@ except ModuleNotFoundError:  # Python 3.10, supplied by pytest's dependencies.
 
 
 ROOT = Path(__file__).resolve().parent.parent
+pytest_plugins = ("pytester",)
 
 
 @pytest.fixture(scope="module")
@@ -50,12 +52,12 @@ def test_both_ci_lint_jobs_run_the_ruff_pinned_by_the_dev_extra():
             if Requirement(value).name == "ruff"]
     assert len(ruff) == 1 and str(ruff[0].specifier).startswith("==")
     command = "ruff check siteops tests scripts"
-    github = yaml.safe_load((ROOT / ".github/workflows/ci.yaml").read_text(encoding="utf-8"))
+    github = cached_safe_load((ROOT / ".github/workflows/ci.yaml").read_text(encoding="utf-8"))
     steps = github["jobs"]["lint"]["steps"]
     setup = [step for step in steps if step.get("uses") == "./.github/actions/setup-siteops"]
     assert [step["with"] for step in setup] == [{"install-dev": "true"}]
     assert [step["run"] for step in steps if "ruff" in step.get("run", "")] == [command]
-    ado = yaml.safe_load((ROOT / ".pipelines/ci.yaml").read_text(encoding="utf-8"))
+    ado = cached_safe_load((ROOT / ".pipelines/ci.yaml").read_text(encoding="utf-8"))
     steps = next(job for job in ado["jobs"] if job["job"] == "lint")["steps"]
     setup = [step for step in steps if step.get("template") == "templates/setup-siteops.yaml"]
     assert [step["parameters"] for step in setup] == [{"installDev": True}]
@@ -66,8 +68,8 @@ def test_both_ci_lint_jobs_run_the_ruff_pinned_by_the_dev_extra():
 
 
 def test_both_ci_unit_jobs_run_one_selection_and_list_the_slowest_tests():
-    github = yaml.safe_load((ROOT / ".github/workflows/ci.yaml").read_text(encoding="utf-8"))
-    ado = yaml.safe_load((ROOT / ".pipelines/ci.yaml").read_text(encoding="utf-8"))
+    github = cached_safe_load((ROOT / ".github/workflows/ci.yaml").read_text(encoding="utf-8"))
+    ado = cached_safe_load((ROOT / ".pipelines/ci.yaml").read_text(encoding="utf-8"))
     commands = [
         shlex.split(next(step["run"] for step in github["jobs"]["test"]["steps"] if step.get("name") == "Run unit tests")),
         shlex.split(next(step["script"] for job in ado["jobs"] if job["job"] == "test"
@@ -75,6 +77,8 @@ def test_both_ci_unit_jobs_run_one_selection_and_list_the_slowest_tests():
     ]
     assert commands[0] == commands[1]
     assert commands[0][:5] == ["pytest", "tests/", "-m", "not integration", "-v"]
+    ado_test = next(job for job in ado["jobs"] if job["job"] == "test")
+    assert github["jobs"]["test"]["timeout-minutes"] == ado_test["timeoutInMinutes"] <= 30
     assert "--cov=siteops" in commands[0] and "--durations=25" in commands[0]
 
 
@@ -447,3 +451,159 @@ def test_shared_application_is_reused_only_while_unchanged_and_complete(tmp_path
         installed_runtime._shared_application("wheel", install)
     installed_runtime._interpreter(first).unlink()
     assert installed_runtime._shared_application("wheel", install) == installs[1] != first
+
+
+def test_parallel_workers_copy_the_controller_wheels_without_building_them(tmp_path, monkeypatch):
+    prebuilt = tmp_path / "prebuilt"
+    for kind, name in (("engine", "siteops-1.0-py3-none-any.whl"), ("runtime", "pyyaml-6.0-py3-none-any.whl")):
+        (prebuilt / kind).mkdir(parents=True)
+        (prebuilt / kind / name).write_bytes(kind.encode())
+    monkeypatch.setattr(installed_runtime, "_SESSION_FILES", {})
+    monkeypatch.setattr(installed_runtime, "_PREBUILT", None)
+    monkeypatch.delenv(installed_runtime.RUNTIME_WHEELHOUSE, raising=False)
+    # Any build or download would fail.
+    monkeypatch.setattr(installed_runtime, "subprocess", None)
+    installed_runtime.use_prebuilt(prebuilt)
+    for caller in ("first", "second"):
+        (tmp_path / caller).mkdir()
+        wheel = build_engine_wheel(tmp_path / caller)
+        assert wheel == tmp_path / caller / "wheels" / "siteops-1.0-py3-none-any.whl"
+        assert wheel.read_bytes() == b"engine"
+        runtime = installed_runtime.runtime_wheels(tmp_path / caller)
+        assert runtime.parent == tmp_path / caller
+        assert [path.read_bytes() for path in runtime.iterdir()] == [b"runtime"]
+
+
+def test_parallel_controller_leaves_out_wheels_it_cannot_provide(tmp_path, monkeypatch):
+    def pip(argv, **_):
+        if "download" in argv:
+            return subprocess.CompletedProcess(argv, 1, b"", b"")
+        wheels = Path(argv[argv.index("--wheel-dir") + 1])
+        wheels.mkdir()
+        (wheels / "siteops-1.0-py3-none-any.whl").write_bytes(b"engine")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(installed_runtime, "_SESSION_FILES", {})
+    monkeypatch.setattr(installed_runtime, "_PREBUILT", None)
+    monkeypatch.delenv(installed_runtime.RUNTIME_WHEELHOUSE, raising=False)
+    monkeypatch.setattr(installed_runtime, "subprocess", type("Pip", (), {"run": staticmethod(pip)}))
+    installed_runtime.prebuild(tmp_path / "prebuilt")
+    assert [path.read_bytes() for path in (tmp_path / "prebuilt" / "engine").iterdir()] == [b"engine"]
+    # Each worker then attempts the download itself and reports it where a test needs it.
+    assert not (tmp_path / "prebuilt" / "runtime").exists()
+
+
+def test_parallel_runs_prebuild_only_for_selections_that_use_the_installed_runtime():
+    from tests.conftest import selects_installed_runtime
+
+    def selection(*args):
+        config = type("Config", (), {"args": list(args), "invocation_params": type("Params", (), {"dir": ROOT})})
+        return selects_installed_runtime(config)
+
+    assert selection("tests")
+    assert selection("tests/test_yamlio.py", "tests/test_packaging.py::test_wheel_contains_the_engine_not_a_workspace")
+    assert selection(str(ROOT / "tests" / "test_uv_installation.py"))
+    assert not selection("tests/test_yamlio.py", "tests/workspace")
+    assert not selection("tests/test_bootstrap_scripts.py", "tests/test_uv_bootstrap_windows.py")
+
+
+def test_parallel_runs_keep_each_listed_module_on_one_worker():
+    pytest.importorskip("xdist")
+    from tests import conftest
+
+    assert all((ROOT / module).is_file() for module in conftest.SINGLE_WORKER_MODULES)
+    grouped, single = "tests/test_packaging.py", "tests/test_cli.py"
+    assert grouped in conftest.SINGLE_WORKER_MODULES and single not in conftest.SINGLE_WORKER_MODULES
+
+    class Config:
+        option = type("Option", (), {"keepduplicates": False, "loadscopereorder": True})
+
+        def getvalue(self, name):
+            return {"dist": "load", "tx": ["popen", "popen"]}[name]
+
+    class Node:
+        shutting_down = False
+
+        def __init__(self, name):
+            self.gateway = type("Gateway", (), {"id": name})
+            self.sent = []
+
+        def send_runtest_some(self, indices):
+            self.sent.extend(indices)
+
+        def shutdown(self):
+            self.shutting_down = True
+
+    scheduler = conftest.pytest_xdist_make_scheduler(config=Config(), log=None)
+    collection = [f"{module}::test_{number}" for module in (grouped, single) for number in range(3)]
+    nodes = [Node("gw0"), Node("gw1")]
+    for node in nodes:
+        scheduler.add_node(node)
+        scheduler.add_node_collection(node, collection)
+    scheduler.schedule()
+    done = set()
+    while not scheduler.tests_finished:
+        node, index = next((node, index) for node in nodes for index in node.sent if (node, index) not in done)
+        done.add((node, index))
+        scheduler.mark_test_complete(node, index)
+    workers = {
+        module: {node.gateway.id for node in nodes for index in node.sent if collection[index].startswith(module)}
+        for module in (grouped, single)
+    }
+    assert sorted(index for node in nodes for index in node.sent) == list(range(6))
+    assert len(workers[grouped]) == 1 and len(workers[single]) == 2
+
+
+@pytest.fixture
+def scheduled_suite(pytester, monkeypatch):
+    """A small suite whose parallel runs use this repository's scheduler with one grouped module."""
+    pytest.importorskip("xdist")
+    monkeypatch.setenv("PYTHONPATH", str(ROOT))
+    pytester.makeini("[pytest]\n")
+    pytester.makeconftest(
+        "import pytest\n"
+        "from tests.conftest import module_group_scheduler\n\n"
+        "@pytest.hookimpl(optionalhook=True)\n"
+        "def pytest_xdist_make_scheduler(config, log):\n"
+        "    return module_group_scheduler(config, log, frozenset({'test_grouped.py'}))\n"
+    )
+    pytester.makepyfile(test_grouped=(
+        "import pytest\n\n"
+        "@pytest.mark.parametrize('n', range(4))\n"
+        "def test_grouped(n):\n"
+        "    pass\n"
+    ))
+    return pytester
+
+
+def test_parallel_runs_report_a_crashed_worker_and_run_the_rest(scheduled_suite):
+    scheduled_suite.makepyfile(test_single=(
+        "import os\n"
+        "import time\n"
+        "import pytest\n\n"
+        "@pytest.mark.parametrize('n', range(24))\n"
+        "def test_single(n):\n"
+        "    time.sleep(0.05)\n"
+        "    if n == 9:\n"
+        "        os._exit(3)\n"
+    ))
+    result = scheduled_suite.runpytest_subprocess("-n", "2", "-p", "no:cacheprovider", timeout=120)
+    result.assert_outcomes(passed=27, failed=1)
+    result.stdout.fnmatch_lines(["*crashed while running*test_single.py::test_single?9?*"])
+
+
+# pytest 9 collects a repeated path once unless --keep-duplicates asks for every occurrence.
+@pytest.mark.parametrize(("options", "passed"), [((), 6), (("--keep-duplicates",), 12)])
+def test_parallel_runs_match_serial_runs_for_repeated_paths(scheduled_suite, options, passed):
+    scheduled_suite.makepyfile(test_single=(
+        "import pytest\n\n"
+        "@pytest.mark.parametrize('n', range(2))\n"
+        "def test_single(n):\n"
+        "    pass\n"
+    ))
+    for workers in ((), ("-n", "2")):
+        result = scheduled_suite.runpytest_subprocess(
+            *workers, "-p", "no:cacheprovider", *options,
+            "test_grouped.py", "test_single.py", "test_grouped.py", "test_single.py", timeout=120,
+        )
+        result.assert_outcomes(passed=passed)
