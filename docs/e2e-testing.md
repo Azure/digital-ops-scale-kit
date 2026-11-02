@@ -699,7 +699,7 @@ pytest tests/integration/ -v -m integration
 - **Narrows test collection** to `_UPGRADE_PHASE_ALLOWED_CLASSES` in `tests/integration/conftest.py`. Classes whose assertions require outputs from the install phase are listed in `_UPGRADE_PHASE_INSTALL_ONLY_CLASSES` instead. A workspace test requires every class in the upgrade module to appear in exactly one collection.
 - **Bypasses the `aio_install_result` fixture** so `aio-install` is not deployed again at the new AIO release on top of the existing instance.
 
-When `AIO_RELEASE_FROM` and `AIO_RELEASE_TO` differ, as the workflow sets them, the upgrade tests also select the source release again after the upgrade. They require the `check-upgrade-path` step to refuse that downgrade before any later step runs, then rerun `aio-upgrade` at the target and require the path check to find the installed AIO version unchanged.
+When `AIO_RELEASE_FROM` and `AIO_RELEASE_TO` differ, as the workflow sets them, and this checkout still ships the source release, the upgrade tests also select the source release again after the upgrade. They require the `check-upgrade-path` step to refuse that downgrade before any later step runs, then rerun `aio-upgrade` at the target and require the path check to find the installed AIO version unchanged. An upgrade from a release this checkout no longer ships, such as a published install of 2602, skips that pair.
 
 ## Troubleshooting
 
@@ -708,7 +708,7 @@ When `AIO_RELEASE_FROM` and `AIO_RELEASE_TO` differ, as the workflow sets them, 
 | `azure/login` fails with `AADSTS70021` | Federated credential `sub` claim mismatch. | Confirm the credential matches `repo:<org>/<repo>:environment:<env>` (or branch ref) exactly. See [CI/CD setup](ci-cd-setup.md#azure-oidc-configuration). |
 | Pytest collects 0 integration tests | Selector does not match the rendered Site, or `SITEOPS_EXTRA_SITES_DIRS` is unset. | Check `INTEGRATION_SELECTOR` equals the rendered Site's `name:` field. |
 | Rendered output still contains `${...}` | Template references a variable not in `ALL_VARS`. | Add it to `REQUIRED_VARS` or `OPTIONAL_VARS` in `scripts/render-e2e-site.py`. |
-| AIO deploy fails with `AuthorizationFailed` on role assignment | SP is `Contributor`, not `Owner`. | Escalate to `Owner` on sub (ephemeral) or RG (persistent). |
+| AIO deploy fails with `AuthorizationFailed` on role assignment | The SP cannot assign the role, or the condition does not list it. | Grant Role Based Access Control Administrator with the condition in [Assign Azure roles](ci-cd-setup.md#3-assign-azure-roles), and add any role your phases assign, such as Azure Event Hubs Data Sender, to both role lists. |
 | Teardown in persistent mode leaves resources | The snapshot step failed or was skipped. | Inspect the step summary warning and the `Snapshot RG resources (persistent mode)` step log. Clean up residual resources manually. |
 | Step summary shows `Persistent-mode teardown incomplete (N residual resource(s))` | One or more delta deletes did not converge in 5 retry passes. | Inspect the `[delete-failed pass=*]` warnings in the teardown step log. Clean up the named resources manually. For a connectedCluster, use `az connectedk8s delete -n <name> -g <rg> --yes --force`. |
 | connect-arc times out waiting for `Connected` | Arc registration or heartbeat did not reach `Connected`. Authentication, cluster reachability, or custom locations configuration may be involved. | Verify prerequisite 2. Rerun with `skip-teardown: true` and inspect `az connectedk8s show` from an authorized local session. |
