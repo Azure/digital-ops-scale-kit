@@ -36,6 +36,7 @@ python scripts\build-workspace-package.py `
   --require-feature composition/v1 `
   --require-feature manifest-selection/v1 `
   --require-feature typed-input-maps/v1 `
+  --require-feature step-reports/v1 `
   --include docs `
   --include README.md `
   --license LICENSE `
@@ -122,7 +123,7 @@ its own package, compatibility range and licensing files:
       "package": "iot-operations.zip",
       "compatibility": {
         "siteops": ">=1.0.0b1,<2",
-        "requiredFeatures": ["manifest/v1", "composition/v1", "manifest-selection/v1", "typed-input-maps/v1"]
+        "requiredFeatures": ["manifest/v1", "composition/v1", "manifest-selection/v1", "typed-input-maps/v1", "step-reports/v1"]
       },
       "include": ["docs", "README.md"],
       "licenses": ["LICENSE", "ThirdPartyNotices.txt"]

@@ -661,7 +661,7 @@ def test_real_aio_entries_produce_mapped_template_roots(tmp_path):
         version="preview-1",
         source_revision="fixture",
         siteops_range=">=1.0.0b1,<2",
-        required_features=("manifest/v1", package.TYPED_INPUT_MAPS_FEATURE),
+        required_features=("manifest/v1", package.TYPED_INPUT_MAPS_FEATURE, package.STEP_REPORTS_FEATURE),
         compilation_session_factory=_controlled_factory(
             control_root,
             snapshot,

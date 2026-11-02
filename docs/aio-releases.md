@@ -171,10 +171,17 @@ This applies to every resource area a Site selects through `properties.resourceS
 
 ### Supported upgrade paths
 
-Azure IoT Operations supports upgrade to any patch of the same minor version, or to the next minor version. Move across several minor versions one minor version at a time, for example from a 1.3.x release through a 1.4.x release to a 1.5.x release. A downgrade, or a move between preview and GA in either direction, requires uninstall and reinstall. See [Upgrade Azure IoT Operations](https://learn.microsoft.com/azure/iot-operations/manage-iot-ops/howto-upgrade) for the authoritative rules, and the [upgrade operation guide](../workspaces/iot-operations/manifests/aio-upgrade/README.md#choose-a-supported-upgrade-path) for the minor version of each AIO release and the broker redundancy requirement.
+Microsoft lists, for each AIO version, the versions that can upgrade to it, in the "Upgrade From (AIO)" column of [IoT Operations versions](https://aka.ms/aio-versions). For example, AIO release 2610 (1.5.41) lists every 1.4 and 1.3 version from 2603 to 2609, so it can skip a minor version. `templates/aio/upgrade/upgrade-paths.yaml` copies that list for each AIO release in this workspace, with the page revision and retrieval date.
 
-The optional E2E workflow can exercise selected upgrades between adjacent AIO releases,
-such as `2608` to `2609`. A passing dispatch establishes its selected
+`aio-upgrade` checks the installed AIO version against that list first. It stops before any change in these cases:
+
+- The target's list does not include the installed version. The message names the AIO release to upgrade to first, when the releases in this workspace offer a path.
+- The target is older than the installed version, because Azure IoT Operations does not support a downgrade.
+- The move is between preview and GA, in either direction.
+
+A downgrade, or a move between preview and GA, needs an uninstall and reinstall. When the target is a version and train that the table does not list, for example through an `aioVersion` override, or when the installed version cannot be read, the upgrade continues and Site Ops shows a warning that the path was not checked. The extension update repeats the check on the target it applies. See [Upgrade Azure IoT Operations](https://learn.microsoft.com/azure/iot-operations/manage-iot-ops/howto-upgrade) for Microsoft's guidance, and the [upgrade operation guide](../workspaces/iot-operations/manifests/aio-upgrade/README.md#choose-a-supported-upgrade-path) for the AIO version of each release and the broker redundancy requirement.
+
+Microsoft states that individual upgrade paths require release qualification. The optional E2E workflow can exercise selected upgrades, such as `2609` to `2610`. A passing dispatch establishes its selected
 integration assertions. It is not a general readiness or support
 certification for another cluster or upgrade path.
 
@@ -186,7 +193,7 @@ This policy applies to samples. The platform fundamentals (the top level of `tem
 
 ## Adding a new AIO release
 
-1. **Ship the release YAML.** Create `parameters/aio-releases/<release>.yaml` with the required version, train, API, dependency, and `aioReleaseConfiguration` fields used by the supported release matrix.
+1. **Ship the release YAML.** Create `parameters/aio-releases/<release>.yaml` with the required version, train, API, dependency, and `aioReleaseConfiguration` fields used by the supported release matrix. Add its row to `templates/aio/upgrade/upgrade-paths.yaml` with the same version and train, and Microsoft's "Upgrade From (AIO)" list copied verbatim. Update the table's `source` revision and retrieval date. `tests/workspace/test_aio_upgrade_paths.py` checks the row against the release file and checks the listed paths.
 2. **If `aioApiVersion` is new**, extend every consumer of the AIO API version:
    - `templates/aio/instance.bicep`: add to `@allowed` on `param aioApiVersion`, add a new conditional `module instance_<YYYY>` block, move the version that was newest from `else` into an explicit equality, make the new version the `else`.
    - `templates/aio/modules/update-instance.bicep`: same pattern. The file header has a checklist.
@@ -226,7 +233,7 @@ This policy applies to samples. The platform fundamentals (the top level of `tem
 
 When an AIO release reaches end of life (tied to AIO's official support window), drop it from the workspace.
 
-1. **Remove the release YAML.** Delete `parameters/aio-releases/<release>.yaml`. Git history preserves the values for future reference.
+1. **Remove the release YAML.** Delete `parameters/aio-releases/<release>.yaml` and its row in `templates/aio/upgrade/upgrade-paths.yaml`. Keep its version in other rows' lists, so the check can still name a first hop for an instance that runs it. Git history preserves the values for future reference.
 2. **Verify no Site still pins the removed AIO release.** Run `pytest tests/workspace/ -q`. `test_all_sites_aio_releases_have_config_files` fails fast on any Site that references the missing YAML. Update those Sites to a supported AIO release.
 3. **Remove orphaned Bicep modules for API versions.** If no remaining AIO release uses a given `aioApiVersion` or `adrApiVersion`, the corresponding modules for that version and their `@allowed` + conditional dispatch entries can be removed. For `aioApiVersion` these are `instance-<YYYY-MM-DD>.bicep`, `resolve-instance-<YYYY-MM-DD>.bicep`, `update-instance-<YYYY-MM-DD>.bicep`, `upgrade/modules/deploy-release-resources-<YYYY-MM-DD>.bicep` and `dataflows/modules/dataflows-<YYYY-MM-DD>.bicep`. For `adrApiVersion` they are `adr-ns-<YYYY-MM-DD>.bicep` and `assets/modules/assets-<YYYY-MM-DD>.bicep`. Leave them if any supported release still uses the API version.
 4. **Update sample template API pins if needed.** Samples under `samples/<name>/template.bicep` pin to the **oldest supported** API version. If removing the EOL AIO release leaves a newer oldest supported version, bump the pins. `test_samples_pin_to_oldest_api_version` enforces this.
@@ -243,6 +250,8 @@ Release misconfigurations surface at these points:
 | Workflow prep job | Every requested `aio-releases` entry has a matching YAML | E2E dispatch (`e2e-test.yaml`) |
 | Workspace unit tests | `@allowed` membership, coverage of all Sites and of `base-site.yaml` | Every CI run |
 | Workspace unit tests | `TestUpdateInstanceDispatch`: parameter parity between callers and the dispatcher | Every CI run |
+| Workspace unit tests | `upgrade-paths.yaml` rows equal the release files, and the upgrade decision for every listed pair | Every CI run |
+| `aio-upgrade` | The installed AIO version is in the target's upgrade list, with no downgrade and no move between preview and GA | First step of each run, and again before the extension update |
 | Live integration | Deployed `aioExtension.version` equals YAML's `aioVersion` | E2E matrix (per cell) |
 
 ## See also

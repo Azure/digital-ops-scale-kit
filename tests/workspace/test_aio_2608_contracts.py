@@ -98,6 +98,7 @@ def test_upgrade_manifest_separates_extensions_from_release_resources(workspace)
     steps = manifest["steps"]
     names = [step.get("name") for step in steps if "name" in step]
     assert names == [
+        "check-upgrade-path",
         "resolve-extensions",
         "update-extensions",
         "deploy-release-resources",

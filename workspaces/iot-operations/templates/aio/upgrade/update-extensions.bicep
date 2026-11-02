@@ -34,7 +34,15 @@
 //     equivalent for scalekit-managed installs and avoids a snapshot field for a
 //     value scalekit owns. If Microsoft ever changes the default cert-manager
 //     namespace, both install and this template must be updated together.
+//
+// Upgrade path: before any write, the effective AIO target passes the same
+// decision as the check-upgrade-path step (upgrade-path.bicep). A refused move
+// fails this deployment, and every extension PUT below reads a guarded value,
+// so none of them runs. A Site or step parameter that changes the target after
+// the early check is covered too.
 // -------------------------------------------------------------------------------------
+
+import { upgradeDecision, upgradePaths } from 'upgrade-path.bicep'
 
 // =====================================================================================
 // Parameters: connected cluster + resolved snapshots (from resolve-extensions chaining)
@@ -168,6 +176,16 @@ var effectiveCertManagerVersion = !empty(certManagerVersion) ? certManagerVersio
 var effectiveCertManagerTrain = !empty(certManagerTrain) ? certManagerTrain : certManager.releaseTrain
 
 // =====================================================================================
+// Upgrade path guard: each PUT reads its version through the decision.
+// =====================================================================================
+
+var upgradePath = upgradeDecision(aio.version, aio.releaseTrain, effectiveAioVersion, effectiveAioTrain, upgradePaths)
+var upgradeRefused = upgradePath.status == 'refused'
+var guardedAioVersion = upgradeRefused ? fail(upgradePath.message) : effectiveAioVersion
+var guardedSecretStoreVersion = upgradeRefused ? fail(upgradePath.message) : effectiveSecretStoreVersion
+var guardedCertManagerVersion = upgradeRefused ? fail(upgradePath.message) : effectiveCertManagerVersion
+
+// =====================================================================================
 // Cluster reference (extensions are scoped to the connected cluster).
 // =====================================================================================
 
@@ -185,7 +203,7 @@ resource aioExtensionUpdate 'Microsoft.KubernetesConfiguration/extensions@2023-0
   identity: aio.identity
   properties: {
     extensionType: aio.extensionType
-    version: effectiveAioVersion
+    version: guardedAioVersion
     releaseTrain: effectiveAioTrain
     autoUpgradeMinorVersion: false
     scope: {
@@ -217,7 +235,7 @@ resource secretStoreExtensionUpdate 'Microsoft.KubernetesConfiguration/extension
   identity: secretStore.identity
   properties: {
     extensionType: secretStore.extensionType
-    version: effectiveSecretStoreVersion
+    version: guardedSecretStoreVersion
     releaseTrain: effectiveSecretStoreTrain
     autoUpgradeMinorVersion: false
     // union() preserves existing keys and overlays overrides. Keys removed in
@@ -239,7 +257,7 @@ resource certManagerExtensionUpdate 'Microsoft.KubernetesConfiguration/extension
   identity: certManager.identity
   properties: {
     extensionType: certManager.extensionType
-    version: effectiveCertManagerVersion
+    version: guardedCertManagerVersion
     releaseTrain: effectiveCertManagerTrain
     autoUpgradeMinorVersion: false
     scope: {

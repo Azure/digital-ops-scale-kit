@@ -54,6 +54,7 @@ These changes affect how you install or run Site Ops after v1.0.0b7.
 | Use a condition that limits the roles your deployment identity can assign | Allow Azure Device Registry Administrator. Review the [schema registry role](#schema-registry-role). |
 | Pin a Site to AIO release 2512 or 2602 | Pin a supported release. Review [AIO releases 2512 and 2602](#aio-releases-2512-and-2602). |
 | Set `brokerConfig.backendRedundancyFactor` to 1 | Set it to 2 or more. Review [broker redundancy](#broker-redundancy). |
+| Upgrade AIO with `aio-upgrade` | Nothing changes for a supported upgrade. Review the [upgrade path check](#upgrade-path-check). |
 | Write the YAML key `=` twice in one mapping, quoted or bare | Keep one. Review [repeated equals keys](#repeated-equals-keys). |
 | Match the text of a missing typed input error | Review [missing input messages](#missing-input-messages). |
 | Match the text of a template error from `plan` or `deploy` | Review [template error messages](#template-error-messages). |
@@ -170,11 +171,14 @@ earlier engine refuses a package that declares it, on every route, with
 engine that the content release names. With a local checkout, typed routes on
 an earlier engine fail with `type must be string, boolean or azureResourceId`,
 while configured Sites and `--site-file` runs read no input contract.
+`aio-upgrade` also needs the feature `step-reports/v1`, and an earlier engine
+rejects the `requiredFeatures` key of its Manifest.
 
 If you produce your own packages, add `typed-input-maps/v1` to
 `requiredFeatures`, or `--require-feature typed-input-maps/v1`, for a
 workspace whose input contract declares a `stringMap` input. The producer
-rejects such a workspace without it. See
+rejects such a workspace without it. Add `step-reports/v1` the same way for
+a workspace that contains `aio-upgrade`. See
 [workspace packages](workspace-packages.md#build-workspaces-declared-by-a-release).
 
 ### Schema registry role
@@ -200,6 +204,20 @@ run [`aio-upgrade`](../workspaces/iot-operations/manifests/aio-upgrade/README.md
 A Site that sets `parameters.brokerConfig.backendRedundancyFactor` to 1 now
 fails at the `aio-instance` step, because broker upgrades need 2 or more.
 Set it to 2 or more, or remove it to use the default of 2.
+
+### Upgrade path check
+
+`aio-upgrade` checks the installed AIO version first. It stops before any
+change when the target AIO release's supported upgrade list does not include
+that version, or when the move is a downgrade or between preview and GA, for
+example:
+
+```text
+Microsoft's supported upgrade list for AIO release 2610 (1.5.41) does not include AIO 1.2.154. Upgrade to AIO release 2609 first.
+```
+
+Upgrade to the AIO release that the message names, then to your target.
+Supported upgrades and reruns at the same AIO release are unchanged.
 
 ### Repeated equals keys
 

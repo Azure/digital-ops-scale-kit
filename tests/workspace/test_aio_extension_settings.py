@@ -63,8 +63,13 @@ def _session(tmp_path: Path) -> TemplateCompilationSession:
                 }
                 for name, kind in re.findall(r"^param\s+(\w+)\s+(\w+)", source, re.MULTILINE)
             }
+            template = _arm_template(parameters)
+            template["outputs"] = {
+                name: {"type": kind, "value": None}
+                for name, kind in re.findall(r"^output\s+(\w+)\s+(\w+)", source, re.MULTILINE)
+            }
             Path(argv[argv.index("--outfile") + 1]).write_text(
-                json.dumps(_arm_template(parameters)), encoding="utf-8",
+                json.dumps(template), encoding="utf-8",
             )
         return result
 
@@ -252,7 +257,7 @@ def test_typed_upgrade_applies_settings_over_release_values_at_the_actual_instan
     ]), _observations())
     plan = _plan(workspace, tmp_path, "aio-upgrade", monkeypatch, sites=[site])
     assert [op.identity.step for op in plan.targets[0].operations] == [
-        "resolve-aio", "resolve-extensions", "update-extensions", "deploy-release-resources",
+        "check-upgrade-path", "resolve-aio", "resolve-extensions", "update-extensions", "deploy-release-resources",
     ]
     assert resolve_plan_value(_parameters(plan, "resolve-aio")["aioInstanceName"], {}) == "external-instance"
     update = _parameters(plan, "update-extensions")
@@ -382,7 +387,7 @@ def test_documented_upgrade_commands_resolve_through_the_cli(workspace, tmp_path
         ):
             assert _invoke(shlex.split(line.replace("<AIO-instance-resource-ID>", INSTANCE_ID))[1:]) == 0
         plan = execute.call_args.args[0].plan
-        assert [op.identity.step for op in plan.targets[0].operations][1:3] == [
+        assert [op.identity.step for op in plan.targets[0].operations][2:4] == [
             "resolve-extensions", "update-extensions",
         ]
         update = next(op for op in plan.targets[0].operations if op.identity.step == "update-extensions")
@@ -417,7 +422,7 @@ def test_upgrade_guide_maps_each_release_to_its_version_and_forbids_downgrades(w
         assert f"| {release.stem} | {version} | {'.'.join(version.split('.')[:2])} |" in readme
     prose = " ".join(readme.split())
     assert "--query properties.version" in readme
-    assert "Never select an AIO release older than the one the instance runs" in prose
+    assert "stops before any change when the target's list does not include it, when the target is older" in prose
     assert "returns to the release value on upgrade unless you supply it again" in prose
     assert "../aio-install/README.md#settings-scale-kit-derives" in readme
 

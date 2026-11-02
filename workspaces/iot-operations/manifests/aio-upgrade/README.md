@@ -11,11 +11,12 @@ instance children.
 
 ## Choose a supported upgrade path
 
-Microsoft supports upgrading an instance to any patch of the same minor
-version, or to the next minor version. To downgrade, or to move between a
-preview and a generally available version in either direction, uninstall
-and install the desired version instead. AIO does not upgrade live, so
-expect downtime. See
+Microsoft lists, for each AIO version, the versions that can upgrade to it.
+See the "Upgrade From (AIO)" column in
+[IoT Operations versions](https://aka.ms/aio-versions). A downgrade, or a
+move between a preview and a generally available version in either
+direction, needs an uninstall and an install of the desired version. AIO does
+not upgrade live, so expect downtime. See
 [Upgrade Azure IoT Operations](https://learn.microsoft.com/azure/iot-operations/manage-iot-ops/howto-upgrade).
 
 Each AIO release in this workspace installs one AIO version:
@@ -38,21 +39,35 @@ The AIO Arc extension's version, on the cluster's Extensions page or from
 `az k8s-extension list --cluster-name <cluster> --resource-group <resource-group> --cluster-type connectedClusters --output table`,
 matches the AIO version column exactly.
 
-Move one minor version at a time. From AIO 1.2, upgrade to a 1.3 release
-before a 1.4 release. Never select an AIO release older than the one
-the instance runs, because Microsoft does not support a downgrade.
-`aio-upgrade` applies the AIO release you select without checking the path,
-so choose a supported transition from the instance's current release.
+Choose a target whose list includes the version the instance runs. AIO
+release 2610 upgrades from any 1.4 or 1.3 release in this workspace.
+
+`aio-upgrade` checks the path first. The check reads the installed AIO
+version, then stops before any change when the target's list does not
+include it, when the target is older, or when the move is between preview
+and GA. For example:
+
+```text
+Microsoft's supported upgrade list for AIO release 2610 (1.5.41) does not include AIO 1.2.154. Upgrade to AIO release 2609 first.
+```
+
+Upgrade to the AIO release that the message names, then to your target. A
+rerun at the installed AIO release passes. When the check cannot read the
+installed version, or the target is an AIO version that this workspace does
+not list, the upgrade continues and Site Ops shows a warning that the path
+was not checked. The check reads the cluster that `parameters.clusterName`
+names, so set it on a configured Site. The extension update checks the
+target it applies again, before it changes any extension.
 
 The MQTT broker upgrades through rolling updates, which need a backend
 redundancy factor of 2 or more. Microsoft does not support broker upgrades
 with a factor of 1. Scale Kit installs with 2 by default and accepts 2 to 5
 for `parameters.brokerConfig.backendRedundancyFactor`.
 
-Scale Kit's live tests have exercised selected adjacent upgrades: 2604 to
-2605, 2606 to 2607 and 2608 to 2609. These tests support the content in
-this workspace. They do not certify another cluster or upgrade path,
-which Microsoft's guidance governs.
+Scale Kit's live tests have exercised selected upgrades: 2604 to 2605, 2606
+to 2607 and 2608 to 2609. These tests support the content in this
+workspace. They do not certify another cluster or upgrade path, which
+Microsoft's guidance governs.
 
 ## Prepare the upgrade
 
@@ -154,7 +169,8 @@ siteops -w workspaces/iot-operations deploy manifests/aio-upgrade/manifest.yaml 
 
 Use the intended Azure identity and permissions for the selected resource
 updates. The plan performs local preparation, not an effective RBAC or
-assessment of workload health. The explicit selector replaces the manifest's
+assessment of workload health. It lists the `check-upgrade-path` step, and
+the check itself runs during deployment. The explicit selector replaces the manifest's
 default for the development fleet.
 
 ## Outcome and recovery

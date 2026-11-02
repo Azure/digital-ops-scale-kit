@@ -10,7 +10,7 @@ inputs:
     type: string
     requirement: required
     sensitivity: non-sensitive
-    description: The target AIO release. The typed aioRelease input has no default, so the upgrade never selects a target. Choose a supported transition from the instance's current release.
+    description: The target AIO release. The typed aioRelease input has no default, so the upgrade never selects a target. Choose a release whose supported upgrade list includes the AIO version the instance runs.
     source: sites/base-site.yaml
   - field: properties.deployOptions.enableCertManager
     type: boolean
@@ -44,10 +44,11 @@ inputs:
     description: cert-manager Arc extension settings when enableCertManager is true, also set by the typed certManagerExtensionSettings input. Each key replaces the existing or release value. Never include secrets.
     source: templates/aio/upgrade/update-extensions.bicep
 prerequisites:
-  - An existing AIO installation and a supported upgrade transition, any patch of the same minor version or the next minor version.
+  - An existing AIO installation whose AIO version is in the target AIO release's supported upgrade list.
   - A configured or saved Site with the intended AIO release, or the existing instance ID with typed answers, and permission for the selected updates.
   - A broker backend redundancy factor of 2 or more, the default, so the broker can upgrade.
 effects:
+  - Checks the upgrade path first and stops before any change when the target's list does not include the installed AIO version, or when the move is a downgrade or between preview and GA.
   - Updates extensions and the resources the AIO release requires while preserving supported existing configuration.
   - With enableCertManager false, leaves the cert-manager extension unread and unchanged.
   - Does not perform general migrations of instance child resources.
