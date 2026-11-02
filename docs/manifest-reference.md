@@ -46,7 +46,7 @@ steps:
 | `parallel` | no | Concurrent Sites. See [Parallel execution](#parallel-execution). |
 | `parameters` | no | Parameter sources applied to every step. See [Manifest parameters](#manifest-parameters). |
 | `parameterCompositions` | no | Workspace contracts for composed parameter collections. |
-| `requiredFeatures` | no | Site Ops features the Manifest needs, such as `step-reports/v1`. At most 64 unique names. Included Manifests add theirs. An engine that lacks one refuses the Manifest before any operation runs, with [`content.feature-unsupported`](diagnostics.md#contentfeature-unsupported). |
+| `requiredFeatures` | no | Site Ops features the Manifest needs, such as `step-reports/v1`. A list of at most 64 unique printable names of up to 128 characters. Included Manifests add theirs. An engine that lacks one refuses the Manifest before any operation runs, with [`content.feature-unsupported`](diagnostics.md#contentfeature-unsupported). |
 | `steps` | yes | Ordered steps. Validation reports `Manifest has no steps defined` when the list is empty or missing. |
 
 Any other key at the top level is rejected with a `did you mean` hint. A

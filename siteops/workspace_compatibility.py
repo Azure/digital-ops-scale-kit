@@ -37,7 +37,11 @@ def feature_inventory_problem(features: object) -> str | None:
     for item in features:
         if (
             not isinstance(item, str) or not item.strip() or len(item) > MAX_FEATURE_LENGTH
-            or any(unicodedata.category(character).startswith("C") for character in item)
+            or any(
+                unicodedata.category(character).startswith("C")
+                or unicodedata.category(character) in {"Zl", "Zp"}
+                for character in item
+            )
         ):
             return "must hold nonblank printable names of at most 128 characters"
     if len(set(features)) != len(features):

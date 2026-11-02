@@ -127,12 +127,30 @@ class TestDeclaration:
         assert "future-reports/v9" in str(error.value)
 
     @pytest.mark.parametrize("features", [["a", "a"], [""], ["x" * 129], "step-reports/v1",
-                                          [f"f{index}" for index in range(65)], ["tab\tname"]])
+                                          [f"f{index}" for index in range(65)], ["tab\tname"],
+                                          ["line\u2028separator"]])
     def test_a_malformed_feature_list_is_rejected(self, tmp_workspace, features):
         path = _write_workspace(tmp_workspace, [_check_step()], features=features)
         with pytest.raises(ContentError) as error:
             _load(path)
         assert error.value.diagnostic.code == "content.invalid-type"
+
+    @pytest.mark.parametrize("nested", [False, True])
+    def test_an_explicit_null_feature_list_is_rejected_and_an_empty_one_is_not(self, tmp_workspace, nested):
+        path = tmp_workspace / "manifests" / "features.yaml"
+        _write_workspace(tmp_workspace, [_check_step()])
+        for features, accepted in ((None, False), ([], True)):
+            body = {"sites": ["plant"], "requiredFeatures": features, "steps": [_check_step()]}
+            path.write_text(yaml.safe_dump(
+                {"apiVersion": "siteops/v1", "kind": "Manifest", "metadata": {"name": "features"}, "spec": body}
+                if nested else {"name": "features", **body}
+            ), encoding="utf-8")
+            if accepted:
+                assert _load(path).required_features == ()
+                continue
+            with pytest.raises(ContentError) as error:
+                _load(path)
+            assert error.value.diagnostic.code == "content.invalid-type"
 
     def test_an_included_manifest_contributes_its_requirements(self, tmp_workspace):
         (tmp_workspace / "manifests" / "check.yaml").write_text(yaml.safe_dump({
@@ -201,6 +219,10 @@ class TestReportValue:
     def test_a_valid_message_keeps_its_text_literally(self):
         message = "Use [b]queue[/b] <dlq> & retry 100%"
         assert step_warnings(_wrapped([{"message": message}]), "warnings") == (message,)
+
+    def test_the_message_limit_counts_code_points_not_bytes(self):
+        assert step_warnings(_wrapped([{"message": "\U0001F600" * 500}]), "warnings") == ("\U0001F600" * 500,)
+        assert step_warnings(_wrapped([{"message": "\U0001F600" * 501}]), "warnings") is None
 
 
 class TestPublication:

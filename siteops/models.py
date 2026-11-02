@@ -1808,7 +1808,7 @@ def _parse_step_reports(step_data: dict[str, Any], source_path: Path) -> str | N
 
 def _parse_required_features(spec: dict[str, Any], manifest_path: Path) -> tuple[str, ...]:
     """Return a Manifest's own `requiredFeatures`, validated like a package inventory."""
-    if spec.get("requiredFeatures") is None:
+    if "requiredFeatures" not in spec:
         return ()
     features = spec["requiredFeatures"]
     problem = feature_inventory_problem(features)
