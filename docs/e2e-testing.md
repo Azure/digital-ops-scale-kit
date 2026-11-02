@@ -348,10 +348,10 @@ No Site file specific to Azure is committed. The E2E Site is rendered at run tim
 
 | Mode | Resource group | SP scope | When to use |
 |------|---------------|----------|-------------|
-| ephemeral (default) | Workflow creates and deletes it for each run. | `Owner` at subscription level. | Routine CI validation, fully automated. |
-| persistent | Operator supplies an existing RG. Only resources created during the run are deleted (snapshot delta). The cluster itself is always a fresh k3s on the runner. | `Owner` at RG level. | Restricted subscriptions where `Owner` at subscription level is not acceptable. Matrices with several AIO releases are serialized in the shared RG. |
+| ephemeral (default) | Workflow creates and deletes it for each run. | `Owner`, or `Contributor` plus constrained Role Based Access Control Administrator, at subscription level. | Routine CI validation, fully automated. |
+| persistent | Operator supplies an existing RG. Only resources created during the run are deleted (snapshot delta). The cluster itself is always a fresh k3s on the runner. | The same roles on the RG. | Restricted subscriptions where roles at subscription level are not acceptable. Matrices with several AIO releases are serialized in the shared RG. |
 
-`Owner` is required (not `Contributor`) because AIO deployments make role assignments (for example, schema registry and Key Vault). `Contributor` cannot grant roles.
+AIO deployments assign roles, for example on the schema registry and Key Vault, so the SP needs role assignment rights as well as `Contributor`. [Assign Azure roles](ci-cd-setup.md#3-assign-azure-roles) shows the condition that limits Role Based Access Control Administrator to those roles. The OPC UA solution phase also assigns Azure Event Hubs Data Sender.
 
 ## Prerequisites
 
@@ -359,8 +359,8 @@ No Site file specific to Azure is committed. The E2E Site is rendered at run tim
 
 Follow [CI/CD setup - Azure OIDC Configuration](ci-cd-setup.md#azure-oidc-configuration) to create the service principal and federated credential. The SP needs:
 
-- **ephemeral mode:** `Owner` on the subscription.
-- **persistent mode:** `Owner` on the selected resource group.
+- **ephemeral mode:** `Owner`, or `Contributor` plus constrained Role Based Access Control Administrator, on the subscription.
+- **persistent mode:** the same roles on the selected resource group.
 
 ### 2. Custom Locations RP object ID
 

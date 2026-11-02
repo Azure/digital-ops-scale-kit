@@ -101,7 +101,7 @@ prerequisites:
   - An existing resource group and a Kubernetes cluster connected to Azure Arc that meet the selected AIO release's requirements.
   - Azure CLI for ARM deployment. Source template preparation requires Bicep. Verified workspace packages contain compiled ARM JSON and need no local Bicep compiler for this manifest. This manifest contains no kubectl step.
   - Guided inputs derived from a resource ID require an explicit read by the selected Azure provider using the operator's already configured Azure identity. Source access and deployment authorization remain separate.
-  - An authorized deployment identity, including the permissions required to create role assignments. Common guidance is Owner or User Access Administrator plus Contributor.
+  - An authorized deployment identity, including the permissions required to create role assignments. Common guidance is Contributor plus Role Based Access Control Administrator, with a condition that allows only the roles the content assigns.
   - Enabling Secret Sync requires OIDC and workload identity to be ready on the cluster beforehand.
 effects:
   - Creates or updates AIO extensions, instance resources, custom location, ADR namespace, Schema Registry storage and role assignments.

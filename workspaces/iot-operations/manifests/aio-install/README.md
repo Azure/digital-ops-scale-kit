@@ -181,8 +181,9 @@ Installation can create or update Arc extensions, the AIO instance and
 children, a custom location, an ADR namespace, Schema Registry storage and
 role assignments. Optional capabilities add their own resources.
 Deployment can incur Azure charges and needs permission to create role assignments at
-the applicable scope, commonly Owner or User Access Administrator plus
-Contributor.
+the applicable scope, commonly Contributor plus Role Based Access Control
+Administrator with a condition that allows only the roles the content assigns.
+See [Assign Azure roles](../../../../docs/ci-cd-setup.md#3-assign-azure-roles).
 
 An executable plan establishes local preparation, not Azure authorization
 or cluster readiness. Deployment success reports provider operations.

@@ -86,33 +86,36 @@ Alternatively, configure the subject to match a branch (`ref:refs/heads/main`), 
 
 #### 3. Assign Azure roles
 
-For basic deployments, Contributor is sufficient:
+Give the deployment identity Contributor at the narrowest scope that covers what it deploys, usually the Site resource groups. A step at subscription scope, such as a global Edge Site, needs Contributor on the subscription. Contributor alone is enough when the manifests you deploy create no role assignments:
 
 ```bash
 az role assignment create \
   --assignee $APP_ID \
   --role "Contributor" \
-  --scope /subscriptions/<subscription-id>
+  --scope /subscriptions/<subscription-id>/resourceGroups/<resource-group>
 ```
 
-**For AIO deployments:** The full installation includes RBAC operations (for example, granting the AIO extension Azure Device Registry Administrator on the schema registry). Contributor cannot create role assignments. Use Owner with a condition that prevents privilege escalation:
+**For AIO deployments:** the content assigns roles to the managed identities it uses, so the deployment identity also needs Role Based Access Control Administrator at the same scope. Add a condition that lets it assign and remove only these roles, and only for service principals:
+
+| Role | ID | Assigned by |
+| ---- | -- | ----------- |
+| Storage Blob Data Contributor | `ba92f5b4-2d11-453d-a403-e96b0029c9fe` | `aio-install`, to the schema registry on its storage container |
+| Azure Device Registry Administrator | `12675fd7-7f59-493f-9201-f7944860a2f1` | `aio-install`, to the AIO extension on the schema registry |
+| Key Vault Secrets User | `4633458b-17de-408a-b874-0445c86b69e6` | Secret Sync, to its managed identity on the Key Vault |
+| Key Vault Reader | `21090545-7ca7-4776-b22c-e363652d74d2` | Secret Sync, to its managed identity on the Key Vault |
+
+The OPC UA solution sample also assigns Azure Event Hubs Data Sender (`2b629674-e913-4c01-ae53-ef4638d8f975`) to the AIO extension, unless you set `createRoleAssignment: false`. Add that ID to both role lists in the condition when you deploy the sample.
 
 ```bash
 az role assignment create \
   --assignee $APP_ID \
-  --role "Owner" \
-  --scope /subscriptions/<subscription-id> \
-  --condition $'((!(ActionMatches{\'Microsoft.Authorization/roleAssignments/write\'})) OR (@Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAllValues:GuidNotEquals {8e3af657-a8ff-443c-a75c-2fe8c4bcb635, 18d7d88d-d35e-4fb5-a5c3-7773c20a72d9, f58310d9-a9f6-439a-9e8d-f62e7b41a168})) AND ((!(ActionMatches{\'Microsoft.Authorization/roleAssignments/delete\'})) OR (@Resource[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAllValues:GuidNotEquals {8e3af657-a8ff-443c-a75c-2fe8c4bcb635, 18d7d88d-d35e-4fb5-a5c3-7773c20a72d9, f58310d9-a9f6-439a-9e8d-f62e7b41a168}))' \
+  --role "Role Based Access Control Administrator" \
+  --scope /subscriptions/<subscription-id>/resourceGroups/<resource-group> \
+  --condition $'((!(ActionMatches{\'Microsoft.Authorization/roleAssignments/write\'})) OR (@Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {ba92f5b4-2d11-453d-a403-e96b0029c9fe, 12675fd7-7f59-493f-9201-f7944860a2f1, 4633458b-17de-408a-b874-0445c86b69e6, 21090545-7ca7-4776-b22c-e363652d74d2} AND @Request[Microsoft.Authorization/roleAssignments:PrincipalType] ForAnyOfAnyValues:StringEqualsIgnoreCase {\'ServicePrincipal\'})) AND ((!(ActionMatches{\'Microsoft.Authorization/roleAssignments/delete\'})) OR (@Resource[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {ba92f5b4-2d11-453d-a403-e96b0029c9fe, 12675fd7-7f59-493f-9201-f7944860a2f1, 4633458b-17de-408a-b874-0445c86b69e6, 21090545-7ca7-4776-b22c-e363652d74d2} AND @Resource[Microsoft.Authorization/roleAssignments:PrincipalType] ForAnyOfAnyValues:StringEqualsIgnoreCase {\'ServicePrincipal\'}))' \
   --condition-version "2.0"
 ```
 
-This condition allows creating and deleting role assignments but blocks these privileged roles:
-
-| GUID | Role |
-| ---- | ---- |
-| `8e3af657-a8ff-443c-a75c-2fe8c4bcb635` | Owner |
-| `18d7d88d-d35e-4fb5-a5c3-7773c20a72d9` | User Access Administrator |
-| `f58310d9-a9f6-439a-9e8d-f62e7b41a168` | Role Based Access Control Administrator |
+The condition follows Microsoft's [example that constrains roles and principal types](https://learn.microsoft.com/azure/role-based-access-control/delegate-role-assignments-examples#example-constrain-roles-and-principal-types). When Secret Sync uses an existing Key Vault in another resource group, grant the same constrained role on that vault or its resource group too.
 
 #### Kubernetes RBAC for Arc proxy operations
 
@@ -958,7 +961,7 @@ In ADO → **Pipelines → New pipeline** → **Azure Repos Git** (or GitHub, if
 
 #### 5. Assign Azure roles
 
-Same as GitHub Actions, see [Assign Azure roles](#3-assign-azure-roles). The service connection's managed identity needs the same Contributor (or Owner with conditions) role assignment.
+Same as GitHub Actions, see [Assign Azure roles](#3-assign-azure-roles). The service connection's managed identity needs the same Contributor assignment and, for AIO deployments, the same constrained Role Based Access Control Administrator assignment.
 
 ### Running ADO deployments
 
