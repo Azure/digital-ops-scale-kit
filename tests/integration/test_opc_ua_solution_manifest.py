@@ -57,11 +57,28 @@ TEMPLATE_MANAGED_API_VERSION = "2026-07-01"
 # The schema registry API version that templates/deps/schema-registry.bicep deploys.
 SCHEMA_REGISTRY_API_VERSION = "2026-04-01"
 
+# Releases whose oven telemetry does not reach the broker, so the telemetry test
+# skips them. The schema registry check still runs on them.
+TELEMETRY_EXCLUDED_RELEASES = {
+    "2603": (
+        "AIO release 2603 leaves the oven asset and its inbound endpoint without "
+        "health, and its telemetry does not reach the broker, while the connector "
+        "still registers its schema. Release 2604 fixes connector health "
+        "retransmission and a connector startup timeout."
+    ),
+}
+
 
 def _release_config(orchestrator, site_name: str) -> dict:
     """The release configuration the deployment reads for one site."""
     _, data = load_aio_release(orchestrator, site_name, WORKSPACE_PATH)
     return data
+
+
+def _aio_release(orchestrator, site_name: str) -> str:
+    """The AIO release the site selects."""
+    release, _ = load_aio_release(orchestrator, site_name, WORKSPACE_PATH)
+    return str(release)
 
 
 def _aio_api_version(orchestrator, site_name: str) -> str:
@@ -436,7 +453,9 @@ class TestOpcUaSolutionDataFlowing:
     releases run when their release configuration declares the connector
     version. `samples/opc-ua-solution/README.md` links the Microsoft issue
     explaining why release 2607 has neither path, so that site is skipped
-    without spending the subscribe budget.
+    without spending the subscribe budget. The telemetry test also skips the
+    releases in `TELEMETRY_EXCLUDED_RELEASES`, and the schema check still runs
+    on them.
     """
 
     SA_NAME = "scalekit-mqtt-test-client"
@@ -459,10 +478,20 @@ class TestOpcUaSolutionDataFlowing:
         self, opc_ua_solution_result, aio_namespace, kubectl_available, orchestrator
     ):
         checked = 0
+        skip_reasons: list[str] = []
         for name in site_names(opc_ua_solution_result):
+            release = _aio_release(orchestrator, name)
+            if release in TELEMETRY_EXCLUDED_RELEASES:
+                skip_reasons.append(TELEMETRY_EXCLUDED_RELEASES[release])
+                continue
             api_version = _aio_api_version(orchestrator, name)
             connector_version = _opcua_connector_version(orchestrator, name)
             if api_version >= TEMPLATE_MANAGED_API_VERSION and not connector_version:
+                skip_reasons.append(
+                    "Release 2607 uses the template-managed connector without a "
+                    "release-provided ConnectorTemplate, a documented limitation, "
+                    "so no telemetry is expected."
+                )
                 continue
             manifest = mqtt_subscriber_pod_manifest(
                 sa_name=self.SA_NAME,
@@ -533,11 +562,7 @@ class TestOpcUaSolutionDataFlowing:
             checked += 1
 
         if checked == 0:
-            pytest.skip(
-                "Every site under test uses the template-managed connector "
-                "without a release-provided ConnectorTemplate. Release 2607 "
-                "has this documented limitation, so no telemetry is expected."
-            )
+            pytest.skip(" ".join(dict.fromkeys(skip_reasons)))
 
     def test_connector_schema_is_in_the_schema_registry(
         self, aio_install_result, opc_ua_solution_result, orchestrator
