@@ -33,8 +33,12 @@ ORIGIN = "https://source.example"
 URL = ORIGIN + "/asset"
 # The transfer worker must start and reach the stalled server within this deadline, even on a busy
 # host. A stalled server holds the transfer far longer, so only the deadline can end it.
-STALLED_DEADLINE = 5
+STALLED_DEADLINE = 8
 STALL_SECONDS = 30
+# The worker's own socket timeout is 15 seconds. A stalled transfer that ends sooner was ended by the
+# supervisor's deadline.
+STOPPED_WITHIN = STALLED_DEADLINE + 6
+WORKER_SOCKET_TIMEOUT = 15
 
 
 def request(**changes):
@@ -547,7 +551,7 @@ def test_native_deadline_stops_worker_before_staging_cleanup(
             pytest.fail("A stalled transfer was yielded.")
     assert caught.value.code == "source.timeout"
     assert entered.is_set()
-    assert time.monotonic() - start < STALLED_DEADLINE + 10 < STALL_SECONDS
+    assert time.monotonic() - start < STOPPED_WITHIN < WORKER_SOCKET_TIMEOUT < STALL_SECONDS
     assert observed_processes[0][0].poll() is not None
     assert list(private_parent.iterdir()) == []
 
@@ -603,7 +607,7 @@ def test_native_proxy_connection_has_absolute_deadline(private_parent, observed_
                     pytest.fail("Stalled proxy was accepted.")
             assert caught.value.code == "source.timeout"
             assert entered.is_set()
-            assert time.monotonic() - start < STALLED_DEADLINE + 10 < STALL_SECONDS
+            assert time.monotonic() - start < STOPPED_WITHIN < WORKER_SOCKET_TIMEOUT < STALL_SECONDS
             assert list(private_parent.iterdir()) == []
         finally:
             release.set()

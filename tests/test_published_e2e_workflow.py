@@ -1870,58 +1870,66 @@ def _bash_path(path: Path) -> str:
     return f"/{path.drive[0].lower()}{path.as_posix()[2:]}" if os.name == "nt" else str(path)
 
 
+# A shell function answers the Azure CLI calls inside the step's own shell. Exported, it also
+# reaches the shells that xargs starts for parallel deletes.
+_PERSISTENT_AZ_DOUBLE = """az() {
+  printf '%s\\n' "$*" >> "$FAKE_AZ_LOG"
+  if [[ "$1 $2" == "resource list" ]]; then
+    if [[ "$FAKE_AZ_MODE" == "snapshot-failure" ]]; then
+      printf 'provider error for %s\\n' "$FAKE_AZ_RESOURCE_ID" >&2
+      return 1
+    fi
+    if [[ "$FAKE_AZ_MODE" == "snapshot-success" ]]; then
+      printf '%s\\n' "$FAKE_AZ_RESOURCE_ID"
+      return 0
+    fi
+    local n=0
+    [[ ! -f "$FAKE_AZ_COUNT" ]] || read -r n < "$FAKE_AZ_COUNT"
+    printf '%s\\n' "$((n + 1))" > "$FAKE_AZ_COUNT"
+    if [[ "$FAKE_AZ_MODE" == "teardown-failure" || "$n" == "0" ]]; then
+      printf '%s\\n' "$FAKE_AZ_RESOURCE_ID"
+    fi
+    return 0
+  fi
+  if [[ "$1 $2" == "resource delete" ]]; then
+    if [[ "$FAKE_AZ_MODE" == "teardown-failure" ]]; then
+      printf 'provider error for %s\\n' "$FAKE_AZ_RESOURCE_ID" >&2
+      return 1
+    fi
+    printf 'provider accepted %s\\n' "$FAKE_AZ_RESOURCE_ID"
+    return 0
+  fi
+  if [[ "$1 $2" == "extension add" ]]; then
+    return 0
+  fi
+  if [[ "$1 $2" == "connectedk8s list" ]]; then
+    if [[ "$FAKE_AZ_MODE" == "preflight-failure" ]]; then
+      printf 'provider error for %s\\n' "$FAKE_AZ_RESOURCE_ID" >&2
+      return 1
+    fi
+    printf '0\\n'
+    return 0
+  fi
+  printf 'Unexpected Azure command\\n' >&2
+  return 99
+}
+export -f az
+"""
+
+
 def _run_persistent_step(name: str, tmp_path: Path, mode: str):
     bash = _bash_executable()
     tools = tmp_path / "tools"
     tools.mkdir()
+    # The az function answers every call. This program only runs if that function is missing.
+    stub = tools / "az"
+    stub.write_text("#!/usr/bin/env bash\nexit 99\n", encoding="utf-8", newline="\n")
+    stub.chmod(0o700)
     resource_id = (
         "/subscriptions/00000000-0000-0000-0000-000000000001/"
         "resourceGroups/rg-private-marker/providers/Microsoft.DeviceRegistry/"
         "schemaRegistries/private-resource"
     )
-    az = tools / "az"
-    az.write_text("""#!/usr/bin/env bash
-printf '%s\\n' "$*" >> "$FAKE_AZ_LOG"
-if [[ "$1 $2" == "resource list" ]]; then
-  if [[ "$FAKE_AZ_MODE" == "snapshot-failure" ]]; then
-    printf 'provider error for %s\\n' "$FAKE_AZ_RESOURCE_ID" >&2
-    exit 1
-  fi
-  if [[ "$FAKE_AZ_MODE" == "snapshot-success" ]]; then
-    printf '%s\\n' "$FAKE_AZ_RESOURCE_ID"
-    exit 0
-  fi
-  n=0
-  [[ ! -f "$FAKE_AZ_COUNT" ]] || n=$(cat "$FAKE_AZ_COUNT")
-  printf '%s\\n' "$((n + 1))" > "$FAKE_AZ_COUNT"
-  if [[ "$FAKE_AZ_MODE" == "teardown-failure" || "$n" == "0" ]]; then
-    printf '%s\\n' "$FAKE_AZ_RESOURCE_ID"
-  fi
-  exit 0
-fi
-if [[ "$1 $2" == "resource delete" ]]; then
-  if [[ "$FAKE_AZ_MODE" == "teardown-failure" ]]; then
-    printf 'provider error for %s\\n' "$FAKE_AZ_RESOURCE_ID" >&2
-    exit 1
-  fi
-  printf 'provider accepted %s\\n' "$FAKE_AZ_RESOURCE_ID"
-  exit 0
-fi
-if [[ "$1 $2" == "extension add" ]]; then
-  exit 0
-fi
-if [[ "$1 $2" == "connectedk8s list" ]]; then
-  if [[ "$FAKE_AZ_MODE" == "preflight-failure" ]]; then
-    printf 'provider error for %s\\n' "$FAKE_AZ_RESOURCE_ID" >&2
-    exit 1
-  fi
-  printf '0\\n'
-  exit 0
-fi
-printf 'Unexpected Azure command\\n' >&2
-exit 99
-""", encoding="utf-8", newline="\n")
-    az.chmod(0o700)
     bash_tools = bash.parent.parent / "usr" / "bin" if os.name == "nt" else bash.parent
     env = {
         "HOME": _bash_path(tmp_path),
@@ -1942,7 +1950,7 @@ exit 99
         run = run.replace("sleep 30", ":")
     # The teardown passes start many short processes, which Git Bash runs slowly on a busy host.
     result = subprocess.run(
-        [str(bash), "-c", run], cwd=tmp_path, env=env,
+        [str(bash), "-c", _PERSISTENT_AZ_DOUBLE + run], cwd=tmp_path, env=env,
         capture_output=True, text=True, timeout=600, check=False,
     )
     summary = tmp_path / "summary.md"

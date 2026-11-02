@@ -291,7 +291,7 @@ jobs:
 
       # The next ubuntu-latest image replaces most GNU core utilities with uutils.
       - name: Run Linux bootstrap and filesystem trust tests
-        run: pytest tests/test_uv_bootstrap_linux.py tests/test_bootstrap_scripts.py tests/test_filesystem_trust.py -v
+        run: pytest tests/test_uv_bootstrap_linux.py tests/test_bootstrap_scripts.py tests/test_filesystem_trust.py -v -n auto
 
   windows-bootstrap:
     name: Windows Bootstrap
