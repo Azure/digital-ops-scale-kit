@@ -503,6 +503,29 @@ class TestAioUpgradeDowngradeRefused:
             )
 
 
+class TestAioUpgradeRefusedPath:
+    """A dispatch that expects a refusal: the path check names the first hop and nothing else runs.
+
+    Runs only when the upgrade phase sets AIO_UPGRADE_FIRST_HOP, for example after
+    a published release installs an AIO version that the target's list excludes.
+    """
+
+    def test_refusal_names_the_first_hop(self, aio_upgrade_refused_result, record_property):
+        expected = f"Upgrade to AIO release {os.environ['AIO_UPGRADE_FIRST_HOP'].strip()} first."
+        assert aio_upgrade_refused_result.status is RunStatus.FAILED
+        for site in site_results(aio_upgrade_refused_result):
+            check, *later = site.operations
+            assert check.identity.step == "check-upgrade-path"
+            assert check.status is OperationStatus.FAILED
+            assert later and all(operation.status is OperationStatus.NOT_RUN for operation in later), (
+                f"Site '{site.target}': operations after the refused path check ran."
+            )
+            found = expected in (check.reason.local_message() if check.reason is not None else "")
+            record_property("refusal_failure_category", check.failure.category if check.failure else "none")
+            record_property("refusal_first_hop_found", found)
+            assert found, f"Site '{site.target}': the refusal did not name the expected first hop."
+
+
 class TestAioExtensionInvariants:
     """Upgrade PUT changes only `version` (and `releaseTrain` when the release
     config specifies a different train). All other AIO Arc extension fields

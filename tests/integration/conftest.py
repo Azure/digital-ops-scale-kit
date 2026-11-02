@@ -91,6 +91,7 @@ _UPGRADE_PHASE_ALLOWED_CLASSES = frozenset({
     "TestAioUpgradeTargetVersion",
     "TestAioUpgradePathCheck",
     "TestAioUpgradeDowngradeRefused",
+    "TestAioUpgradeRefusedPath",
     "TestAioExtensionInvariants",
     "TestOpcUaConnectorTemplateUpgrade",
     "TestSecretStoreExtensionInvariants",
@@ -107,6 +108,16 @@ _UPGRADE_PHASE_INSTALL_ONLY_CLASSES = frozenset({
 
 def _is_upgrade_phase() -> bool:
     return os.environ.get(_UPGRADE_PHASE_ENV, "").strip() in ("1", "true", "yes")
+
+
+# A dispatch that expects aio-upgrade to refuse its target names the AIO release
+# the refusal must name first. The upgrade phase then runs only the refusal check.
+_UPGRADE_FIRST_HOP_ENV = "AIO_UPGRADE_FIRST_HOP"
+_REFUSED_UPGRADE_CLASS = "TestAioUpgradeRefusedPath"
+
+
+def _expected_first_hop() -> str:
+    return os.environ.get(_UPGRADE_FIRST_HOP_ENV, "").strip() if _is_upgrade_phase() else ""
 
 
 def _in_ci() -> bool:
@@ -213,9 +224,11 @@ def pytest_collection_finish(session):
             item.add_marker(skip)
 
     if _is_upgrade_phase():
+        refused_hop = _expected_first_hop()
         skip_upgrade = pytest.mark.skip(
             reason=f"{_UPGRADE_PHASE_ENV} active: only upgrade-step tests run "
-            f"in this phase (install fixtures are stubbed)"
+            f"in this phase (install fixtures are stubbed), and only the refusal "
+            f"check when {_UPGRADE_FIRST_HOP_ENV} expects a refusal"
         )
         seen_classes: set[str] = set()
         kept = 0
@@ -224,7 +237,12 @@ def pytest_collection_finish(session):
             cls_name = cls.__name__ if cls is not None else None
             if cls_name is not None:
                 seen_classes.add(cls_name)
-            if cls_name not in _UPGRADE_PHASE_ALLOWED_CLASSES:
+            selected = (
+                cls_name == _REFUSED_UPGRADE_CLASS
+                if refused_hop
+                else cls_name in _UPGRADE_PHASE_ALLOWED_CLASSES and cls_name != _REFUSED_UPGRADE_CLASS
+            )
+            if not selected:
                 item.add_marker(skip_upgrade)
             else:
                 kept += 1
@@ -566,10 +584,12 @@ def aio_upgrade_result(
 
 
 def _forward_upgrade() -> tuple[str, str] | None:
-    """Return the (from, to) releases of an upgrade-phase run that changed release."""
+    """Return the (from, to) releases of an upgrade-phase run that this content can select again."""
     release_from = os.environ.get("AIO_RELEASE_FROM", "").strip()
     release_to = os.environ.get("AIO_RELEASE_TO", "").strip()
     if not _is_upgrade_phase() or not release_from or not release_to or release_from == release_to:
+        return None
+    if not (WORKSPACE_PATH / "parameters" / "aio-releases" / f"{release_from}.yaml").is_file():
         return None
     return release_from, release_to
 
@@ -587,7 +607,7 @@ def aio_upgrade_downgrade_result(
     """
     releases = _forward_upgrade()
     if releases is None:
-        pytest.skip("Not a cross-release upgrade, so no older release is installed to select again.")
+        pytest.skip("Not a cross-release upgrade from a release this content ships.")
     manifest_path = WORKSPACE_PATH / "manifests" / "aio-upgrade" / "manifest.yaml"
     manifest, sites = _resolve_or_fail(orchestrator, manifest_path, selector)
     original = {id(site): site.properties.get("aioRelease") for site in sites}
@@ -611,6 +631,20 @@ def aio_upgrade_rerun_result(
     manifest, sites = _resolve_or_fail(orchestrator, manifest_path, selector)
     result = orchestrator.deploy(manifest_path=manifest_path, manifest=manifest, sites=sites)
     return _assert_deployed(result, "aio-upgrade rerun")
+
+
+@pytest.fixture(scope="session")
+def aio_upgrade_refused_result(
+    orchestrator: Orchestrator,
+    selector: str | None,
+    aio_install_result: RunResult | object,
+) -> RunResult:
+    """Run aio-upgrade when the dispatch expects the path check to refuse it."""
+    if not _expected_first_hop():
+        pytest.skip(f"{_UPGRADE_FIRST_HOP_ENV} is not set, so the upgrade is expected to succeed.")
+    manifest_path = WORKSPACE_PATH / "manifests" / "aio-upgrade" / "manifest.yaml"
+    manifest, sites = _resolve_or_fail(orchestrator, manifest_path, selector)
+    return orchestrator.deploy(manifest_path=manifest_path, manifest=manifest, sites=sites)
 
 
 # Test override keys injected by aio_upgrade_with_overrides_result. Exposed at

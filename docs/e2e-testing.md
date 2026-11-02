@@ -415,7 +415,8 @@ From the **Actions** tab, dispatch **E2E Tests** with the defaults to run one AI
 | `skip-teardown` | false | Preserve the deployment for inspection. Scope depends on mode (see below). |
 | `keep-cluster-alive-minutes` | `0` | Hold the runner for N min before teardown for debugging. Clamped to what is left of the job budget so teardown still runs. Nothing should be added to the persistent RG during the hold (it'll be deleted by teardown). |
 | `tests` | empty (run all) or `aio-install,enable-secretsync` | Allowlist of test phases to deploy and run, separated by commas. Valid values: `aio-install`, `enable-secretsync`, `sync-secrets`, `opc-ua-solution`, `dataflow-sample`, `aio-resources`, `resource-set-samples`, `aio-upgrade`. Useful for demos and focused debugging when paired with `keep-cluster-alive-minutes`. |
-| `upgrade-to` | empty or `2609` | Optional AIO release to upgrade to after the install phase tests pass. Empty skips the upgrade phase. Each cell skips it when it equals the cell's `aio-releases` value. Requires `aio-upgrade` to be in the `tests` allowlist (or `tests` empty). |
+| `upgrade-to` | empty or `2609` | Optional AIO release to upgrade to after the install phase tests pass. Empty skips the upgrade phase. Each cell skips it when it equals the cell's `aio-releases` value. Requires `aio-upgrade` to be in the `tests` allowlist (or `tests` empty). With `published-release`, see [upgrade from a published release](#upgrade-from-a-published-release). |
+| `upgrade-first-hop` | empty | Set it when `aio-upgrade` should refuse `upgrade-to`. It names the AIO release that the refusal must name to upgrade to first. The upgrade phase then checks only that refusal. |
 | `secret-sync-modes` | `enabled` or `enabled,disabled` | Matrix modes for Secret Sync and workload identity. Use `enabled,disabled` with `tests=aio-upgrade` to qualify upgrade behavior with and without the OIDC profile. |
 | `opcua-modes` | `Stable` or `Stable,Disabled` | Source AIO runs only. `Disabled` requires explicit tests limited to `aio-install`, `enable-secretsync`, `sync-secrets` and `aio-upgrade`. Published and candidate acceptance runs require `Stable`. |
 | `published-release` | empty or an exact tag | Empty keeps the integration suite that runs from the checkout source. A tag selects the bounded, verified published package mode below. |
@@ -510,12 +511,12 @@ Published qualification is deliberately bounded:
 | `published-release` | Exact approved published tag |
 | `published-source-sha` | Exact full source commit |
 | `aio-releases` | One AIO release. Guided mode uses `2609`. |
-| `tests` | `aio-install` |
+| `tests` | `aio-install`, or `aio-install,aio-upgrade` with `upgrade-to` |
 | `published-journey` | `configured` or `guided` |
 | `secret-sync-modes` | `disabled` for configured Sites. Guided supports `disabled`, `enabled` or both. |
 | `resource-group` | Existing dedicated RG |
 | `cluster-name` | Empty, so the workflow creates a unique Arc registration. |
-| `upgrade-to` | empty |
+| `upgrade-to` | Empty, or an AIO release in this checkout for a configured Site |
 | `skip-teardown` | `false` |
 | `keep-cluster-alive-minutes` | `0` |
 
@@ -525,7 +526,7 @@ until cleanup of the snapshot delta completes. The RG itself is preserved. Anyth
 another actor adds after the snapshot can enter the deletion delta, so use a
 dedicated RG and do not make concurrent changes during the run. The mode
 establishes the published engine/package deployment route and bounded AIO
-readiness observations. They do not establish upgrade behavior, workload
+readiness observations. Without `upgrade-to`, they do not establish upgrade behavior, workload
 data movement or general production health. A configured disabled cell
 does not establish Secret Sync. A guided enabled cell additionally
 observes the Secret Provider Class, managed identity, vault, federated
@@ -559,6 +560,33 @@ gh workflow run e2e-test.yaml \
   -f tests=aio-install \
   -f secret-sync-modes=disabled,enabled
 ```
+
+### Upgrade from a published release
+
+A configured published cell with `upgrade-to` installs AIO with the published
+release's verified engine and content, at the `aio-releases` value that
+release ships. Then it installs this checkout's engine and runs the upgrade
+phase with this checkout's content, as a source run does. The published
+engine keeps its own verified environment, and the upgrade tests must import
+the checkout engine. Use `upgrade-first-hop` when the path check should
+refuse the target. For example, from AIO release 2602 in v1.0.0b7:
+
+```bash
+gh workflow run e2e-test.yaml \
+  --ref <branch> \
+  -f published-release=v1.0.0b7 \
+  -f published-source-sha=<full-main-commit-of-v1.0.0b7> \
+  -f aio-releases=2602 \
+  -f upgrade-to=2610 \
+  -f upgrade-first-hop=2609 \
+  -f resource-group=<dedicated-existing-rg> \
+  -f tests=aio-install,aio-upgrade \
+  -f secret-sync-modes=disabled
+```
+
+Without `upgrade-first-hop`, and with `upgrade-to=2609`, the same cell expects
+the upgrade to succeed and runs the upgrade tests. The upgrade results artifact
+is uploaded as for a source run.
 
 ### What `skip-teardown` leaves behind
 

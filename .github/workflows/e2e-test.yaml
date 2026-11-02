@@ -69,7 +69,11 @@ on:
         type: number
         default: 0
       upgrade-to:
-        description: Optional AIO release to upgrade to after the install-phase tests pass. Empty = skip the upgrade phase. Each matrix cell whose `aio-releases` value differs from this re-renders the site at the upgrade-to release and runs aio-upgrade.yaml + the upgrade-only integration tests.
+        description: Optional AIO release to upgrade to after the install-phase tests pass. Empty = skip the upgrade phase. Each matrix cell whose `aio-releases` value differs from this re-renders the site at the upgrade-to release and runs aio-upgrade.yaml + the upgrade-only integration tests. With published-release, the published engine and content install and this checkout upgrades.
+        type: string
+        default: ""
+      upgrade-first-hop:
+        description: Optional AIO release that the upgrade path check must name to upgrade to first. Set it when aio-upgrade is expected to refuse upgrade-to. Empty expects the upgrade to succeed.
         type: string
         default: ""
       secret-sync-modes:
@@ -140,7 +144,7 @@ jobs:
           if (str(request.get("skip-teardown", "false")).lower() == "true"
                   or str(request.get("keep-cluster-alive-minutes", "0")) not in {"", "0"}
                   or any(request.get(key, "").strip() for key in (
-                      "resource-group", "cluster-name", "custom-locations-oid", "upgrade-to",
+                      "resource-group", "cluster-name", "custom-locations-oid", "upgrade-to", "upgrade-first-hop",
                       "tests", "published-release", "published-source-sha",
                   ))):
               raise SystemExit("Candidate scenarios use owned targets and mandatory cleanup, not single-Site overrides.")
@@ -292,6 +296,7 @@ jobs:
       persistent: ${{ steps.v.outputs.persistent }}
       rg-key: ${{ steps.v.outputs.rg_key }}
       upgrade-to: ${{ steps.v.outputs.upgrade_to }}
+      upgrade-first-hop: ${{ steps.v.outputs.upgrade_first_hop }}
       pytest-paths: ${{ steps.v.outputs.pytest_paths }}
       isolate-dataflow-sample: ${{ steps.v.outputs.isolate_dataflow_sample }}
       secret-sync-modes: ${{ steps.v.outputs.secret_sync_modes }}
@@ -310,8 +315,9 @@ jobs:
       # A template that does not compile fails every deploy that reaches it, so
       # this runs before the matrix provisions a cluster. Warnings are fatal
       # here, which is what catches an unknown resource type or API version.
+      # A published run checks them when this checkout upgrades.
       - name: Validate Bicep templates
-        if: inputs.published-release == '' && inputs.candidate == ''
+        if: (inputs.published-release == '' || inputs.upgrade-to != '') && inputs.candidate == ''
         shell: pwsh
         run: ./scripts/validate-bicep.ps1
 
@@ -323,6 +329,7 @@ jobs:
           INPUT_CANDIDATE_SET: "${{ inputs.candidate != '' }}"
           INPUT_RELEASES: "${{ inputs.aio-releases }}"
           INPUT_UPGRADE_TO: "${{ inputs.upgrade-to }}"
+          INPUT_UPGRADE_FIRST_HOP: "${{ inputs.upgrade-first-hop }}"
           INPUT_SECRET_SYNC_MODES: "${{ inputs.secret-sync-modes }}"
           INPUT_OPCUA_MODES: "${{ inputs.opcua-modes }}"
           INPUT_TESTS: "${{ inputs.tests }}"
@@ -404,8 +411,11 @@ jobs:
           upgrade_to = output_token(
               os.environ["INPUT_UPGRADE_TO"].strip(), "upgrade-to", maximum=64,
           )
-          if published_mode and upgrade_to:
-              sys.exit("Published E2E does not support the upgrade phase.")
+          upgrade_first_hop = output_token(
+              os.environ["INPUT_UPGRADE_FIRST_HOP"].strip(), "upgrade-first-hop", maximum=64,
+          )
+          if published_mode and upgrade_to and published_journey != "configured":
+              sys.exit("Published E2E runs the upgrade phase only for the configured journey.")
           secret_sync_modes = [
               mode.strip()
               for mode in os.environ["INPUT_SECRET_SYNC_MODES"].split(",")
@@ -453,6 +463,13 @@ jobs:
                   f"Same-version round-trip is already covered by the install-phase "
                   f"test_aio_upgrade_manifest tests."
               )
+          if upgrade_first_hop and not upgrade_to:
+              sys.exit("upgrade-first-hop requires upgrade-to.")
+          if upgrade_first_hop and (
+              upgrade_first_hop == upgrade_to
+              or not (releases_dir / f"{upgrade_first_hop}.yaml").is_file()
+          ):
+              sys.exit("upgrade-first-hop must name another AIO release in this workspace.")
           # Resolve the tests input into a pytest path list. Empty = the
           # full integration suite (preserves prior behavior). A non-empty
           # subset narrows pytest collection to just those test files, which
@@ -543,8 +560,11 @@ jobs:
                   )
               if published_journey == "configured" and secret_sync_modes != ["disabled"]:
                   sys.exit("Published E2E requires secret-sync-modes=disabled.")
-              if ordered != ["aio-install"]:
-                  sys.exit("Published E2E requires tests=aio-install.")
+              expected_tests = ["aio-install", "aio-upgrade"] if upgrade_to else ["aio-install"]
+              if ordered != expected_tests:
+                  sys.exit(f"Published E2E requires tests={','.join(expected_tests)}.")
+              if upgrade_to:
+                  pytest_paths = test_map["aio-upgrade"]
               if os.environ["INPUT_SKIP_TEARDOWN"].lower() == "true":
                   sys.exit("Published E2E cannot skip teardown.")
               if float(os.environ["INPUT_KEEP_ALIVE"] or 0) != 0:
@@ -582,6 +602,7 @@ jobs:
           print(f"opcua_modes={json.dumps(opcua_modes)}")
           print(f"max_parallel={3 if candidate_mode else 1 if persistent or published_mode else 20}")
           print(f"upgrade_to={upgrade_to}")
+          print(f"upgrade_first_hop={upgrade_first_hop}")
           print(f"persistent={'true' if persistent else 'false'}")
           print(f"published_mode={'true' if published_mode or candidate_mode else 'false'}")
           print(f"published_journey={'guided' if candidate_mode else published_journey}")
@@ -2299,6 +2320,30 @@ jobs:
             ${{ runner.temp }}/published-readiness.json
           if-no-files-found: warn
 
+      # A published upgrade leg installs with the published engine and content
+      # above, then upgrades with this checkout. The published engine keeps its
+      # own verified environment, and the upgrade tests import only this one.
+      - name: Install the checkout engine for the upgrade phase
+        uses: ./.github/actions/setup-siteops
+        if: success() && needs.prep.outputs.published-mode == 'true' && needs.prep.outputs.upgrade-to != '' && needs.prep.outputs.upgrade-to != matrix.aio-release
+        with:
+          install-dev: "true"
+
+      - name: Require the checkout engine for the upgrade phase
+        if: success() && needs.prep.outputs.published-mode == 'true' && needs.prep.outputs.upgrade-to != '' && needs.prep.outputs.upgrade-to != matrix.aio-release
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -I - "$GITHUB_WORKSPACE" <<'PY'
+          import sys
+          from pathlib import Path
+
+          import siteops
+
+          if not Path(siteops.__file__).resolve().is_relative_to(Path(sys.argv[1]).resolve()):
+              raise SystemExit("The upgrade phase must import the checkout engine.")
+          PY
+
       - name: Re-render E2E site at upgrade-to
         id: upgrade_render
         if: success() && needs.prep.outputs.upgrade-to != '' && needs.prep.outputs.upgrade-to != matrix.aio-release
@@ -2333,6 +2378,11 @@ jobs:
           SITEOPS_E2E_UPGRADE_PHASE: "1"
           AIO_RELEASE_FROM: ${{ matrix.aio-release }}
           AIO_RELEASE_TO: ${{ needs.prep.outputs.upgrade-to }}
+          AIO_UPGRADE_FIRST_HOP: ${{ needs.prep.outputs.upgrade-first-hop }}
+          # A published install leaves its engine cache and safe path setting
+          # in the job environment. The checkout engine uses its own.
+          SITEOPS_CACHE_DIR: ${{ runner.temp }}/upgrade-cache
+          PYTHONSAFEPATH: ""
           SECRET_SYNC_MODE: ${{ matrix.secret-sync-mode }}
           PYTEST_PATHS: ${{ needs.prep.outputs.pytest-paths }}
           # See the comment on the prior "Run E2E integration tests" step.

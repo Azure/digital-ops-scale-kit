@@ -65,6 +65,7 @@ def _parse_inputs(**changes: str) -> subprocess.CompletedProcess[str]:
         "INPUT_RG": "",
         "INPUT_CLUSTER": "",
         "INPUT_UPGRADE_TO": "",
+        "INPUT_UPGRADE_FIRST_HOP": "",
         "INPUT_SECRET_SYNC_MODES": "enabled",
         "INPUT_OPCUA_MODES": "Stable",
         "INPUT_TESTS": "",
@@ -159,7 +160,7 @@ def test_published_mode_is_explicit_and_bounded():
         "Published E2E requires exactly one aio-releases entry.",
         "Published E2E requires an existing resource group",
         "Published E2E requires secret-sync-modes=disabled.",
-        "Published E2E requires tests=aio-install.",
+        "Published E2E requires tests=",
         "Published E2E cannot skip teardown.",
         "Published E2E cannot keep the cluster alive.",
     ):
@@ -826,7 +827,7 @@ def test_guided_published_journey_pins_qualified_aio_version():
         ),
         (
             {"INPUT_UPGRADE_TO": "2607"},
-            "does not support the upgrade phase",
+            "requires tests=aio-install,aio-upgrade",
         ),
         (
             {"INPUT_SECRET_SYNC_MODES": "enabled"},
@@ -860,6 +861,64 @@ def test_published_input_contract_rejects_scope_expansion(changes, message):
     assert result.returncode != 0
     assert message in result.stderr
 
+
+_PUBLISHED_UPGRADE = {
+    "INPUT_RELEASES": "2602",
+    "INPUT_UPGRADE_TO": "2610",
+    "INPUT_SECRET_SYNC_MODES": "disabled",
+    "INPUT_TESTS": "aio-install,aio-upgrade",
+    "INPUT_PUBLISHED_RELEASE": "v1.0.0b7",
+    "INPUT_PUBLISHED_SOURCE_SHA": "a" * 40,
+    "INPUT_RG": "rg-example",
+}
+_CHECKOUT_UPGRADE_STEPS = (
+    "Install the checkout engine for the upgrade phase",
+    "Require the checkout engine for the upgrade phase",
+)
+
+
+@pytest.mark.parametrize("hop", ["", "2609"])
+def test_published_upgrade_installs_the_release_and_upgrades_with_the_checkout(hop):
+    result = _parse_inputs(**_PUBLISHED_UPGRADE, INPUT_UPGRADE_FIRST_HOP=hop)
+    assert result.returncode == 0, result.stderr
+    outputs = _outputs(result)
+    assert (outputs["published_mode"], outputs["upgrade_to"], outputs["upgrade_first_hop"]) == ("true", "2610", hop)
+    assert outputs["pytest_paths"] == "tests/integration/test_aio_upgrade_manifest.py"
+    prep = cached_safe_load(_workflow())["jobs"]["prep"]
+    assert prep["outputs"]["upgrade-first-hop"] == "${{ steps.v.outputs.upgrade_first_hop }}"
+    bicep = next(step for step in prep["steps"] if step.get("name") == "Validate Bicep templates")
+    for upgrade_to, validated in (("2610", True), ("", False)):
+        context = {"inputs": {"published-release": "v1.0.0b7", "upgrade-to": upgrade_to, "candidate": ""}}
+        assert truthy(evaluate(bicep["if"], context)) is validated
+    for published, release, runs in (("true", "2602", True), ("false", "2602", False), ("true", "2610", False)):
+        context = {
+            "needs": {"prep": {"result": "success", "outputs": {"published-mode": published, "upgrade-to": "2610"}}},
+            "matrix": {"aio-release": release},
+        }
+        for name in _CHECKOUT_UPGRADE_STEPS:
+            assert truthy(evaluate(_e2e_step(name)["if"], context)) is runs, (name, published, release)
+    steps = [step.get("name") for step in cached_safe_load(_workflow())["jobs"]["e2e"]["steps"]]
+    assert steps.index("Deploy AIO through the published engine and package") < steps.index(
+        _CHECKOUT_UPGRADE_STEPS[0]) < steps.index(_CHECKOUT_UPGRADE_STEPS[1]) < steps.index(
+        "Re-render E2E site at upgrade-to")
+    upgrade = _e2e_step("Run upgrade-phase integration tests")["env"]
+    assert upgrade["AIO_UPGRADE_FIRST_HOP"] == "${{ needs.prep.outputs.upgrade-first-hop }}"
+    assert upgrade["SITEOPS_CACHE_DIR"] == "${{ runner.temp }}/upgrade-cache"
+
+
+@pytest.mark.parametrize(("changes", "message"), [
+    ({"INPUT_PUBLISHED_JOURNEY": "guided", "INPUT_RELEASES": "2609", "INPUT_SECRET_SYNC_MODES": "enabled"},
+     "upgrade phase only for the configured journey"),
+    ({"INPUT_TESTS": "aio-install"}, "requires tests=aio-install,aio-upgrade"),
+    ({"INPUT_UPGRADE_TO": "", "INPUT_UPGRADE_FIRST_HOP": "2609"}, "upgrade-first-hop requires upgrade-to"),
+    ({"INPUT_UPGRADE_FIRST_HOP": "2610"}, "must name another AIO release in this workspace"),
+    ({"INPUT_UPGRADE_FIRST_HOP": "2602"}, "must name another AIO release in this workspace"),
+    ({"INPUT_UPGRADE_TO": "2602"}, "upgrade-to '2602' has no matching"),
+])
+def test_published_upgrade_rejects_an_unsupported_shape(changes, message):
+    result = _parse_inputs(**{**_PUBLISHED_UPGRADE, **changes})
+    assert result.returncode != 0
+    assert message in result.stderr
 
 def test_source_input_contract_keeps_existing_parallel_default():
     result = _parse_inputs()
