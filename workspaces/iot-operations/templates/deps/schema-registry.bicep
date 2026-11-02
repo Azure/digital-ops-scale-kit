@@ -100,7 +100,7 @@ resource container 'Microsoft.Storage/storageAccounts/blobServices/containers@20
 /*                          Schema Registry                                  */
 /*****************************************************************************/
 
-resource schemaRegistry 'Microsoft.DeviceRegistry/schemaRegistries@2025-10-01' = {
+resource schemaRegistry 'Microsoft.DeviceRegistry/schemaRegistries@2026-04-01' = {
   name: schemaRegistryName
   location: location
   tags: tags

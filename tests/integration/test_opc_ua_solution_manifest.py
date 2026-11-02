@@ -55,7 +55,7 @@ EXPECTED_OVEN_DATA_KEYS = {"Temperature", "EnergyUse", "Weight"}
 TEMPLATE_MANAGED_API_VERSION = "2026-07-01"
 
 # The schema registry API version that templates/deps/schema-registry.bicep deploys.
-SCHEMA_REGISTRY_API_VERSION = "2025-10-01"
+SCHEMA_REGISTRY_API_VERSION = "2026-04-01"
 
 
 def _release_config(orchestrator, site_name: str) -> dict:

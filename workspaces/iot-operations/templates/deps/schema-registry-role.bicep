@@ -24,7 +24,7 @@ param aioExtensionPrincipalId string
 /*                          Existing Resources                               */
 /*****************************************************************************/
 
-resource schemaRegistry 'Microsoft.DeviceRegistry/schemaRegistries@2025-10-01' existing = {
+resource schemaRegistry 'Microsoft.DeviceRegistry/schemaRegistries@2026-04-01' existing = {
   name: schemaRegistryName
 }
 
