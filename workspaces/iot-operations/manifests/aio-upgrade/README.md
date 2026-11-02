@@ -57,7 +57,9 @@ installed version, or the target is an AIO version that this workspace does
 not list, the upgrade continues and Site Ops shows a warning that the path
 was not checked. The check reads the cluster that `parameters.clusterName`
 names, so set it on a configured Site. The extension update checks the
-target it applies again, before it changes any extension.
+target it applies again, before it changes any extension. To target an
+extension version or release train other than the AIO release's, see
+[Pin an extension version or train](../../../../docs/aio-releases.md#pin-an-extension-version-or-train).
 
 The MQTT broker upgrades through rolling updates, which need a backend
 redundancy factor of 2 or more. Microsoft does not support broker upgrades

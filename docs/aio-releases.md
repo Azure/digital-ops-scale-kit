@@ -101,6 +101,29 @@ properties:
 
 If not specified, the Site inherits the value from its parent template. Every committed Site in this workspace inherits `base-site.yaml`, directly or through a shared template, and `base-site.yaml` declares `"2609"`. A manifest that loads the release file fails preparation for a Site that carries no `aioRelease` at all, reporting that the Site does not carry the property the path selects on.
 
+## Pin an extension version or train
+
+Each AIO release file sets the version and release train of the AIO, secret store and cert-manager Arc extensions. For an advanced case, such as a build that Microsoft support asks you to run, a Site or SiteTemplate can set them under `parameters`. Set only the keys you need:
+
+```yaml
+# sites/munich-prod.yaml
+properties:
+  aioRelease: "2610"
+parameters:
+  aioVersion: "<AIO version>"
+  aioTrain: stable
+  secretStoreVersion: "<secret store version>"
+  secretStoreTrain: stable
+  certManagerVersion: "<cert-manager version>"
+  certManagerTrain: stable
+```
+
+These Site values outrank the release file, which `aio-install` and `aio-upgrade` attach at manifest level. A SiteTemplate value applies to each Site that inherits it, and a Site value replaces it. The IoT Operations API version and the release's other settings still come from the release file. See [parameter resolution](parameter-resolution.md#merge-order).
+
+Scale Kit qualifies each AIO release with its own versions, so an override runs a combination that its tests have not covered. Remove the keys to return to the release's values on the next `aio-install` or `aio-upgrade` run.
+
+`aio-upgrade` checks the [upgrade path](#supported-upgrade-paths) to an overridden AIO version and train that `upgrade-paths.yaml` lists, as for that release. For any other AIO target it shows a warning that the path was not checked. Microsoft pins the secret store and cert-manager versions for each AIO release, so `aio-upgrade` does not check their paths.
+
 ## Available AIO releases
 
 Every file in `workspaces/iot-operations/parameters/aio-releases/` is a shipped AIO release:

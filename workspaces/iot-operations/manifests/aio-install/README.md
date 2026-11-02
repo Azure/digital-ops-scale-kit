@@ -99,6 +99,9 @@ settings of an existing installation, run
 [aio-upgrade](../aio-upgrade/README.md#change-extension-settings) at its
 current AIO release, which keeps the existing settings and removes no key.
 
+To run an extension version or release train other than the AIO release's,
+see [Pin an extension version or train](../../../../docs/aio-releases.md#pin-an-extension-version-or-train).
+
 ### Settings Scale Kit derives
 
 This installation derives some AIO extension settings from other Site

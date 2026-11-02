@@ -296,9 +296,11 @@ class TestWriter:
         pytest.param("1.4.112", {"aioVersion": "1.5.41", "aioTrain": "stable"}, id="supported"),
         pytest.param("1.5.41", {"aioVersion": "1.5.41", "aioTrain": "stable"}, id="rerun"),
         pytest.param("1.5.41", {}, id="preserve-installed"),
+        pytest.param("1.5.41", {"aioVersion": "1.5.50", "aioTrain": "stable"}, id="unlisted-override"),
     ])
     def test_an_allowed_target_writes_every_extension(self, templates, installed, target):
-        document = _snapshot_document(templates, f"writer-{installed}-{len(target)}", self.TEMPLATE, _writer(installed, **target))
+        name = f"writer-{installed}-{target.get('aioVersion', 'kept')}"
+        document = _snapshot_document(templates, name, self.TEMPLATE, _writer(installed, **target))
         versions = {resource["name"]: resource["properties"]["version"] for resource in document["predictedResources"]}
         assert versions == {"azure-iot-operations-abcde": target.get("aioVersion", installed),
                             "azure-secret-store": "1.6.0", "cert-manager": "1.2.1"}
