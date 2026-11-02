@@ -927,6 +927,7 @@ class DeploymentOperation:
     effective_template: Path | None = None
     parameters: MappingValue | None = None
     template_unit_key: CompilationKey | None = None
+    warnings_output: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "template", Path(self.template))

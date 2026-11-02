@@ -18,6 +18,8 @@ from siteops.diagnostics import (
     CLEANUP_INCOMPLETE,
     LOCAL_REPRODUCTION,
     REGISTRY,
+    STEP_REPORT_INVALID,
+    STEP_REPORTED,
     WARNING_CODES,
     ContentDiagnostic,
     ValidationResult,
@@ -212,7 +214,11 @@ def test_renderer_refuses_an_invalid_occurrence_count(value):
 
 
 def test_every_engine_warning_names_a_registered_code():
-    constants = {"CLEANUP_INCOMPLETE": CLEANUP_INCOMPLETE}
+    constants = {
+        "CLEANUP_INCOMPLETE": CLEANUP_INCOMPLETE,
+        "STEP_REPORTED": STEP_REPORTED,
+        "STEP_REPORT_INVALID": STEP_REPORT_INVALID,
+    }
     used = []
     for path in sorted((ROOT / "siteops").glob("*.py")):
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):

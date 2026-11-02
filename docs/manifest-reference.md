@@ -46,6 +46,7 @@ steps:
 | `parallel` | no | Concurrent Sites. See [Parallel execution](#parallel-execution). |
 | `parameters` | no | Parameter sources applied to every step. See [Manifest parameters](#manifest-parameters). |
 | `parameterCompositions` | no | Workspace contracts for composed parameter collections. |
+| `requiredFeatures` | no | Site Ops features the Manifest needs, such as `step-reports/v1`. At most 64 unique names. Included Manifests add theirs. An engine that lacks one refuses the Manifest before any operation runs, with [`content.feature-unsupported`](diagnostics.md#contentfeature-unsupported). |
 | `steps` | yes | Ordered steps. Validation reports `Manifest has no steps defined` when the list is empty or missing. |
 
 Any other key at the top level is rejected with a `did you mean` hint. A
@@ -339,6 +340,50 @@ parameters the template does not declare, and requires every parameter that
 is not nullable and has no default. Nullable parameters may be omitted even
 when they declare no default. A parameter name at the top level derived from
 a prior operation remains deferred until that output resolves.
+
+#### Step reports
+
+A Bicep or ARM step can name one of its template outputs as advisory
+warnings. The Manifest must require `step-reports/v1`:
+
+```yaml
+requiredFeatures:
+  - step-reports/v1
+steps:
+  - name: check-prerequisites
+    template: templates/check-prerequisites.bicep
+    reports:
+      warnings: warnings
+```
+
+```bicep
+output warnings array = [
+  {
+    message: 'The queue has no dead letter target, so failed messages are dropped.'
+  }
+]
+```
+
+- `reports` is a mapping whose only key is `warnings`. Its value is the
+  literal name of a top-level template output, 1 to 256 printable
+  characters. Kubectl, wait and include steps reject `reports`.
+- `validate` checks the declaration and the required feature. `plan` and
+  `deploy` also require the template to declare that output as an `array`.
+- After the operation succeeds, Site Ops reads that output. It must hold at
+  most 16 records, each with exactly one `message` of 1 to 500 printable
+  characters. Each message prints on stderr with its Site and step, and
+  JSON results record
+  [`warning.step-reported`](diagnostics.md#warningstep-reported). A missing or
+  malformed value records
+  [`warning.step-report-invalid`](diagnostics.md#warningstep-report-invalid)
+  once for the operation and shows none of its messages.
+- Warnings are advisory. They never change an operation's status, the exit
+  code or what runs next, and a failed or skipped operation reports nothing.
+  With output redaction on, the log shows only the registry text, so keep
+  secrets and identifiers out of messages anyway.
+- A workspace package that contains such a Manifest must require
+  `step-reports/v1` too. An engine without the feature refuses the Manifest
+  or the package before running anything.
 
 ### Kubectl steps
 

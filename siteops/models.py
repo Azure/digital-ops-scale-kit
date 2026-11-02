@@ -15,6 +15,7 @@ Resources support K8s-style apiVersion/kind validation:
 """
 
 import re
+import unicodedata
 from collections.abc import Callable
 from dataclasses import MISSING, dataclass, field, fields
 from fnmatch import fnmatchcase
@@ -24,6 +25,11 @@ from typing import Any, ClassVar, Protocol, TypeVar
 from siteops import yamlio
 from siteops.diagnostics import ContentError, diagnostic_from_error, warn
 from siteops.sanitize import is_redaction_enabled
+from siteops.workspace_compatibility import (
+    STEP_REPORTS_FEATURE,
+    feature_inventory_problem,
+    unsupported_features,
+)
 
 
 class DataclassInstance(Protocol):
@@ -63,6 +69,7 @@ _MANIFEST_FLAT_KNOWN_KEYS = {
     "parallel",
     "parameters",
     "parameterCompositions",
+    "requiredFeatures",
     "steps",
 }
 
@@ -1133,6 +1140,8 @@ class DeploymentStep:
         parameters: List of parameter file paths (relative to workspace)
         scope: Deployment scope - 'resourceGroup' or 'subscription'
         when: Optional condition expression (e.g., "{{ site.labels.X == 'Y' }}")
+        reports_warnings: Template output that the step's `reports.warnings`
+            names. After the operation succeeds, its records print as warnings.
     """
 
     name: str
@@ -1140,6 +1149,7 @@ class DeploymentStep:
     parameters: list[str] = field(default_factory=list)
     scope: str = "resourceGroup"
     when: WhenCondition | dict[str, Any] | None = None
+    reports_warnings: str | None = None
 
     def __post_init__(self) -> None:
         _normalize_null_collections(self)
@@ -1359,6 +1369,8 @@ class Manifest:
             typed source with `path`, `forEach`, and `collections`
         parameter_compositions: Workspace contracts governing collection
             identity and reference validation
+        required_features: Site Ops features the Manifest and its includes
+            require, which admission checks before any operation runs
 
     Parallel Configuration:
         - parallel: 0           # Unlimited concurrency (all sites at once)
@@ -1378,6 +1390,7 @@ class Manifest:
     parallel: ParallelConfig = field(default_factory=ParallelConfig)
     parameters: list[ManifestParameter] = field(default_factory=list)
     parameter_compositions: list[str] = field(default_factory=list)
+    required_features: tuple[str, ...] = ()
     source_path: Path | None = field(default=None, compare=False)
 
     def __post_init__(self) -> None:
@@ -1495,7 +1508,7 @@ class Manifest:
         # Recursive include resolution. The recursion stack tracks the current
         # DFS path so a fragment shared by two siblings is not flagged as a
         # cycle. The include chain captures the full provenance for diagnostics.
-        steps, parameters, parameter_compositions = _resolve_steps_and_params(
+        steps, parameters, parameter_compositions, required_features = _resolve_steps_and_params(
             spec=spec,
             manifest_path=path,
             workspace_root=root.resolve(),
@@ -1506,6 +1519,7 @@ class Manifest:
         )
 
         _validate_no_step_name_collisions(steps)
+        _admit_required_features(steps, required_features, path)
 
         return cls(
             name=name,
@@ -1516,6 +1530,7 @@ class Manifest:
             parallel=parallel,
             parameters=parameters,
             parameter_compositions=parameter_compositions,
+            required_features=required_features,
             source_path=path.resolve(),
         )
 
@@ -1702,6 +1717,13 @@ def _parse_inline_step(step_data: dict[str, Any], source_path: Path, index: int)
 
     step_type = step_data.get("type", "deployment")
 
+    if step_type in {"kubectl", "wait"} and "reports" in step_data:
+        raise ContentError(
+            f"Step '{step_data['name']}' (type: {step_type}) in '{source_path}' declares `reports`, "
+            "which only a template deployment step supports.",
+            code="content.field-placement-invalid", subject="manifest", source=source_path,
+        )
+
     if step_type == "kubectl":
         if "operation" not in step_data:
             raise ValueError(
@@ -1742,7 +1764,85 @@ def _parse_inline_step(step_data: dict[str, Any], source_path: Path, index: int)
         parameters=_require_collection(step_data, "parameters", source_path, list, str),
         scope=step_data.get("scope", "resourceGroup"),
         when=step_data.get("when"),
+        reports_warnings=_parse_step_reports(step_data, source_path),
     )
+
+
+_STEP_REPORT_KEYS = {"warnings"}
+MAX_REPORT_OUTPUT_NAME = 256
+
+
+def _is_printable_text(value: Any, maximum: int) -> bool:
+    """Whether a value is 1 to `maximum` code points of printable, nonblank text."""
+    return (
+        isinstance(value, str) and bool(value.strip()) and len(value) <= maximum
+        and not any(
+            unicodedata.category(character).startswith("C")
+            or unicodedata.category(character) in {"Zl", "Zp"}
+            for character in value
+        )
+    )
+
+
+def _parse_step_reports(step_data: dict[str, Any], source_path: Path) -> str | None:
+    """Return the output name that a deployment step's `reports.warnings` binds."""
+    if "reports" not in step_data:
+        return None
+    name = step_data["name"]
+    reports = step_data["reports"]
+    if not isinstance(reports, dict) or not reports:
+        raise ContentError(
+            f"Step '{name}' in '{source_path}' must declare `reports` as a mapping with `warnings`.",
+            code="content.invalid-type", subject="manifest", source=source_path,
+        )
+    _validate_known_keys(reports, _STEP_REPORT_KEYS, source_path, f"step '{name}' reports")
+    output = reports.get("warnings")
+    if not _is_printable_text(output, MAX_REPORT_OUTPUT_NAME):
+        raise ContentError(
+            f"Step '{name}' in '{source_path}' must set `reports.warnings` to the name of a template "
+            f"output, 1 to {MAX_REPORT_OUTPUT_NAME} printable characters.",
+            code="content.invalid-type", subject="manifest", source=source_path,
+        )
+    return output
+
+
+def _parse_required_features(spec: dict[str, Any], manifest_path: Path) -> tuple[str, ...]:
+    """Return a Manifest's own `requiredFeatures`, validated like a package inventory."""
+    if spec.get("requiredFeatures") is None:
+        return ()
+    features = spec["requiredFeatures"]
+    problem = feature_inventory_problem(features)
+    if problem is not None:
+        raise ContentError(
+            f"Manifest '{manifest_path}' `requiredFeatures` {problem}.",
+            code="content.invalid-type", subject="manifest", source=manifest_path,
+        )
+    return tuple(features)
+
+
+def _admit_required_features(steps: list["ManifestStep"], features: tuple[str, ...], path: Path) -> None:
+    """Admit a flattened Manifest before any operation runs.
+
+    A step that binds `reports` needs its feature declared, so an engine that
+    cannot honor the binding refuses the Manifest instead of dropping it.
+    """
+    reporting = [
+        step.name for step in steps
+        if isinstance(step, DeploymentStep) and step.reports_warnings is not None
+    ]
+    if reporting and STEP_REPORTS_FEATURE not in features:
+        raise ContentError(
+            f"Manifest '{path}' step '{reporting[0]}' declares `reports`, which needs "
+            f"`requiredFeatures` to include `{STEP_REPORTS_FEATURE}`.",
+            code="content.required-field-missing", subject="manifest", source=path,
+        )
+    unsupported = unsupported_features(features)
+    if unsupported:
+        raise ContentError(
+            f"Manifest '{path}' requires Site Ops features this engine does not support: "
+            f"{', '.join(unsupported)}. Install the Site Ops engine that the content release names.",
+            code="content.feature-unsupported", subject="manifest", source=path,
+        )
 
 
 def _coerce_step_int(value: Any, field_name: str, step_name: str, source_path: Path) -> int:
@@ -2010,8 +2110,8 @@ def _resolve_steps_and_params(
     include_chain: list[Path],
     depth: int,
     input_path_guard: Callable[[Path], Path] | None = None,
-) -> tuple[list["ManifestStep"], list[ManifestParameter], list[str]]:
-    """Resolve includes into flat steps, parameters, and composition contracts.
+) -> tuple[list["ManifestStep"], list[ManifestParameter], list[str], tuple[str, ...]]:
+    """Resolve includes into flat steps, parameters, composition contracts and required features.
 
     Args:
         spec: The current manifest's parsed `spec` dict (i.e., the body
@@ -2031,6 +2131,7 @@ def _resolve_steps_and_params(
 
     steps: list[ManifestStep] = []
     parameters = _parse_parameter_sources(spec, manifest_path)
+    required_features = list(_parse_required_features(spec, manifest_path))
     parameter_compositions = _parse_parameter_compositions(
         spec,
         manifest_path,
@@ -2071,7 +2172,7 @@ def _resolve_steps_and_params(
                 diagnostic=diagnostic_from_error(exc, subject="include", source=target_path),
             ) from exc
 
-        sub_steps, sub_params, sub_compositions = _resolve_steps_and_params(
+        sub_steps, sub_params, sub_compositions, sub_features = _resolve_steps_and_params(
             spec=sub_spec,
             manifest_path=target_path,
             workspace_root=workspace_root,
@@ -2108,8 +2209,11 @@ def _resolve_steps_and_params(
         for composition in sub_compositions:
             if composition not in parameter_compositions:
                 parameter_compositions.append(composition)
+        for feature in sub_features:
+            if feature not in required_features:
+                required_features.append(feature)
 
-    return steps, parameters, parameter_compositions
+    return steps, parameters, parameter_compositions, tuple(required_features)
 
 
 def _validate_no_step_name_collisions(steps: list["ManifestStep"]) -> None:

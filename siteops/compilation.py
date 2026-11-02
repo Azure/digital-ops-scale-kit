@@ -469,9 +469,11 @@ class CompiledTemplate:
     identity: TemplateCompilationIdentity
     parameters: tuple[TemplateParameter, ...]
     arm_json_bytes: bytes = field(repr=False, compare=False)
+    output_types: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "parameters", tuple(self.parameters))
+        object.__setattr__(self, "output_types", tuple(self.output_types))
         if not isinstance(self.arm_json_bytes, bytes):
             raise TypeError("Compiled ARM content must be bytes.")
         names = [parameter.name for parameter in self.parameters]
@@ -484,6 +486,7 @@ class CompiledTemplate:
             key=self.key,
             identity=self.identity,
             parameters=self.parameters,
+            output_types=self.output_types,
         )
 
 
@@ -494,9 +497,11 @@ class PreparedTemplateUnit:
     key: CompilationKey
     identity: TemplateCompilationIdentity
     parameters: tuple[TemplateParameter, ...]
+    output_types: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "parameters", tuple(self.parameters))
+        object.__setattr__(self, "output_types", tuple(self.output_types))
         names = [parameter.name for parameter in self.parameters]
         if len(names) != len(set(names)):
             raise ValueError("Prepared template parameters must be unique.")
@@ -535,6 +540,10 @@ class PreparedTemplateUnit:
     def parameter_names(self) -> frozenset[str]:
         """Return the accepted deployment parameter names."""
         return frozenset(parameter.name for parameter in self.parameters)
+
+    def output_type(self, name: str) -> str | None:
+        """Return the lowercase ARM type of a top-level output, or None when it is not declared."""
+        return dict(self.output_types).get(name)
 
 
 @dataclass(frozen=True)
@@ -751,6 +760,31 @@ def extract_template_parameters(
             )
         )
     return tuple(parameters)
+
+
+def extract_template_output_types(arm_json: Any) -> tuple[tuple[str, str], ...]:
+    """Return each top-level output's name and lowercase ARM type, sorted by name.
+
+    Outputs are read only to check a binding such as `reports.warnings`, so an
+    output whose type cannot be resolved records an empty type rather than
+    failing the template.
+    """
+    raw_outputs = arm_json.get("outputs") if isinstance(arm_json, dict) else None
+    if not isinstance(raw_outputs, dict):
+        return ()
+    output_types: list[tuple[str, str]] = []
+    for name in sorted(key for key in raw_outputs if isinstance(key, str)):
+        body = raw_outputs[name]
+        try:
+            resolved, _ = (
+                _resolve_parameter_type_definition(body, arm_json.get("definitions"), name)
+                if isinstance(body, dict) else ({}, False)
+            )
+        except TemplateOutputError:
+            resolved = {}
+        output_type = resolved.get("type")
+        output_types.append((name, output_type.casefold() if isinstance(output_type, str) else ""))
+    return tuple(output_types)
 
 
 def validate_arm_template(arm_json: Any) -> None:
@@ -1344,6 +1378,7 @@ class TemplateCompilationSession:
             ),
             parameters=parameters,
             arm_json_bytes=source.content,
+            output_types=extract_template_output_types(arm_json),
         )
 
     def _temporary_parent(self) -> Path:
@@ -1501,6 +1536,7 @@ class TemplateCompilationSession:
                 ),
                 parameters=parameters,
                 arm_json_bytes=output,
+                output_types=extract_template_output_types(arm_json),
             )
 
     def _changed_input(

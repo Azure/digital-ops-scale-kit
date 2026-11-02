@@ -98,6 +98,13 @@ Check local file access and encoding, then validate again.
 Use the supported document `apiVersion` and `kind`. A `SiteTemplate` is an
 inheritance parent, not a directly deployable Site.
 
+## content.feature-unsupported
+
+A Manifest, or a Manifest it includes, lists a `requiredFeatures` entry that
+this Site Ops engine does not support. Install the Site Ops engine that the
+content release names. The engine refuses the Manifest before any operation
+runs, so nothing is deployed.
+
 ## content.other
 
 Inspect the detailed error locally, correct the content, and validate again.
@@ -149,6 +156,25 @@ folder that redaction withholds, run the same command locally with
 `SITEOPS_REDACT_OUTPUT=0` and keep that output private. Remove leftovers
 when no Site Ops command is running, because temporary deployment files can
 hold resolved parameter values.
+
+## warning.step-reported
+
+A deployment step whose Manifest declares
+[`reports.warnings`](manifest-reference.md#step-reports) returned a warning.
+The operation outcome is unchanged. Consult the Manifest documentation for
+what its steps report. Detailed messages are available in authorized local
+stderr, where each line names the Site and step, or in the deployment
+outputs in Azure. With output redaction on, the log shows only this
+registry text. JSON results record the code once, with `occurrences` for
+more than one message.
+
+## warning.step-report-invalid
+
+A deployment step returned a value for its `reports.warnings` output that
+does not match the step report contract: an array of at most 16 records,
+each with exactly one `message` of 1 to 500 printable characters. The
+operation outcome is unchanged, and no message from that value is shown.
+Correct the declared warning output in the template.
 
 ## Existing preparation diagnostics
 

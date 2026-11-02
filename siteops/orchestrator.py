@@ -163,6 +163,7 @@ from siteops.sanitize import (
     scrub_site_for_output,
     site_name_for_output,
 )
+from siteops.step_reports import publish_step_warnings
 from siteops.workspace_package import MaterializedPackageBinding
 
 logger = logging.getLogger(__name__)
@@ -4169,6 +4170,7 @@ class Orchestrator:
                 template=template,
                 input_status=InputStatus.DESCRIBED,
                 effective_template=effective_template,
+                warnings_output=step.reports_warnings,
             )
         return PlanStep(
             name=step.name,
@@ -4291,6 +4293,7 @@ class Orchestrator:
                 known_parameter_names,
                 may_include_deferred_names=has_deferred_parameter_name,
             )
+            self._validate_report_binding(template_unit, step.reports_warnings)
             return (
                 DeploymentOperation(
                     template=template_path,
@@ -4302,6 +4305,7 @@ class Orchestrator:
                     ),
                     parameters=classified,
                     template_unit_key=template_unit.key,
+                    warnings_output=step.reports_warnings,
                 ),
                 collect_data_references(classified),
             )
@@ -5529,6 +5533,24 @@ class Orchestrator:
         )
 
     @staticmethod
+    def _validate_report_binding(
+        template_unit: PreparedTemplateUnit,
+        output_name: str | None,
+    ) -> None:
+        """Require a `reports.warnings` binding to name an array output of its template."""
+        if output_name is None or template_unit.output_type(output_name) == "array":
+            return
+        raise PlanValueResolutionError(
+            detail=(
+                f"The step's reports.warnings names output '{output_name}', which the "
+                "deployment template does not declare as an array."
+            ),
+            public_message=(
+                "A step's warning report does not name an array output of its template."
+            ),
+        )
+
+    @staticmethod
     def _validate_prepared_parameter_names(
         template_unit: PreparedTemplateUnit,
         parameter_names: Iterable[Any],
@@ -5989,6 +6011,16 @@ class Orchestrator:
                 if not state.record(operation_result, step_outputs):
                     break
                 operation_results.append(operation_result)
+                if (
+                    isinstance(operation.details, DeploymentOperation)
+                    and operation.details.warnings_output is not None
+                ):
+                    publish_step_warnings(
+                        target.name,
+                        operation.identity.step,
+                        step_outputs,
+                        operation.details.warnings_output,
+                    )
                 if step_outputs:
                     outputs[operation.identity] = step_outputs
                     produced_outputs[operation.identity] = step_outputs

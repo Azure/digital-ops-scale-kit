@@ -116,6 +116,8 @@ _CONTENT = (
      "Check local file access and encoding, then validate again."),
     ("schema-unsupported", "A configuration document uses an unsupported schema or kind.",
      "Use the supported document apiVersion and kind."),
+    ("feature-unsupported", "A Manifest requires a Site Ops feature that this engine does not support.",
+     "Install the Site Ops engine that the content release names."),
     ("other", "Configuration validation reported an unclassified problem.",
      "Inspect the detailed error locally, correct the content, and validate again."),
 )
@@ -258,6 +260,8 @@ for _code, _summary in _RESOURCE_SUMMARIES.items():
     ))
 # Warnings that the engine logs on stderr and also records for result documents.
 CLEANUP_INCOMPLETE = "warning.cleanup-incomplete"
+STEP_REPORTED = "warning.step-reported"
+STEP_REPORT_INVALID = "warning.step-report-invalid"
 _WARNINGS = (
     ("deprecation.manifest-site-selector", "manifest", "A Manifest uses the deprecated siteSelector field.",
      "Rename siteSelector to selector on the Manifest. Both spellings select the same Sites.\n"
@@ -272,6 +276,12 @@ _WARNINGS = (
      "run names each leftover on stderr. If output redaction withheld a location, look in the folder the "
      "command was writing to. Temporary deployment files can hold resolved parameter values. The command "
      "outcome is unchanged.", False),
+    (STEP_REPORTED, "template", "A deployment step reported a warning.",
+     "The operation outcome is unchanged. Consult the Manifest documentation. Detailed messages are "
+     "available in authorized local stderr or the deployment outputs.", False),
+    (STEP_REPORT_INVALID, "template", "A deployment step returned an invalid warning report.",
+     "The operation outcome is unchanged. Correct the declared warning output to match the step report "
+     "contract.", False),
 )
 _definitions.extend(
     _definition(code, summary, guidance, content=content) for code, _, summary, guidance, content in _WARNINGS

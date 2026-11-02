@@ -253,6 +253,33 @@ def _require_input_contract_features(
             )
 
 
+def _require_manifest_features(
+    workspace_path: Path,
+    manifests: tuple[str, ...],
+    required_features: tuple[str, ...],
+) -> None:
+    """Require the package to declare every feature that a packaged Manifest requires.
+
+    Package admission then refuses the package on an engine that a Manifest's
+    own admission would refuse, before anything is extracted or run.
+    """
+    for manifest_path in manifests:
+        try:
+            manifest = Manifest.from_file(
+                workspace_path.joinpath(*manifest_path.split("/")),
+                workspace_root=workspace_path,
+            )
+        except (ValueError, yaml.YAMLError):
+            raise ArtifactError(
+                "Workspace deployment entries or template paths are invalid."
+            ) from None
+        missing = sorted(set(manifest.required_features) - set(required_features))
+        if missing:
+            raise ArtifactError(
+                f"Manifest '{manifest_path}' requires the package feature(s) {', '.join(missing)}."
+            )
+
+
 def workspace_bicep_sources(root: Path, workspace: str) -> tuple[str, ...]:
     """Return Bicep deployment roots discovered throughout the workspace."""
     return tuple(
@@ -552,6 +579,7 @@ def build_package(
     )
     manifests, template_sources = _discover_workspace(snapshot, workspace)
     _require_input_contract_features(snapshot, workspace, manifests, paths, required_features)
+    _require_manifest_features(workspace_path, manifests, required_features)
     requires_bicep = any(
         Path(source).suffix.casefold() == ".bicep"
         for source in template_sources

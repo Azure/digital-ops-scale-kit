@@ -54,7 +54,15 @@ from siteops.compilation import (
 from siteops.diagnostics import CLEANUP_INCOMPLETE, warn
 from siteops.manifest_selection import is_explicit_manifest_path, select_manifest_path
 from siteops.runtime import cleanup_location, describe_cleanup_error
-from siteops.workspace_compatibility import require_engine_version, validate_engine_range
+from siteops.workspace_compatibility import (
+    COMPILED_TEMPLATE_FEATURE,
+    SUPPORTED_FEATURES,
+    require_engine_version,
+    unsupported_features,
+    validate_engine_range,
+)
+from siteops.workspace_compatibility import STEP_REPORTS_FEATURE as STEP_REPORTS_FEATURE
+from siteops.workspace_compatibility import TYPED_INPUT_MAPS_FEATURE as TYPED_INPUT_MAPS_FEATURE
 
 PACKAGE_NAME = "siteops-package.json"
 PACKAGE_API = "siteops/v1alpha1"
@@ -73,15 +81,6 @@ MAX_ARCHIVE_BYTES = 128 * 1024 * 1024
 MAX_METADATA_BYTES = 4 * 1024 * 1024
 MAX_CENTRAL_BYTES = 8 * 1024 * 1024
 MAX_COMPRESSION_RATIO = 200
-COMPILED_TEMPLATE_FEATURE = "compiled-templates/v1"
-TYPED_INPUT_MAPS_FEATURE = "typed-input-maps/v1"
-SUPPORTED_FEATURES = frozenset({
-    "manifest/v1",
-    "composition/v1",
-    "manifest-selection/v1",
-    COMPILED_TEMPLATE_FEATURE,
-    TYPED_INPUT_MAPS_FEATURE,
-})
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 logger = logging.getLogger(__name__)
 
@@ -949,7 +948,7 @@ def check_compatibility(
     features: frozenset[str] = SUPPORTED_FEATURES,
 ) -> None:
     require_engine_version(metadata.siteops_range, engine_version)
-    if set(metadata.required_features) - features:
+    if unsupported_features(metadata.required_features, features):
         raise ArtifactError("This package requires unsupported Site Ops features.")
 
 
