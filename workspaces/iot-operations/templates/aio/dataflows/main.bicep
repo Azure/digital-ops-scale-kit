@@ -40,7 +40,6 @@ param defaultProfileName string = 'default'
 // module block below.
 @description('AIO control-plane API version, supplied by the site release file at parameters/aio-releases/<release>.yaml.')
 @allowed([
-  '2025-10-01'
   '2026-03-01'
   '2026-07-01'
 ])
@@ -49,18 +48,6 @@ param aioApiVersion string
 /*****************************************************************************/
 /*                        Per-generation dispatch                            */
 /*****************************************************************************/
-
-module dataflows_2025 './modules/dataflows-2025-10-01.bicep' = if (aioApiVersion == '2025-10-01') {
-  name: 'dataflows-2025-10-01-${uniqueString(aioInstanceName)}'
-  params: {
-    aioInstanceName: aioInstanceName
-    customLocationName: customLocationName
-    dataflowEndpoints: dataflowEndpoints
-    dataflowProfiles: dataflowProfiles
-    dataflows: dataflows
-    defaultProfileName: defaultProfileName
-  }
-}
 
 module dataflows_2026_03 './modules/dataflows-2026-03-01.bicep' = if (aioApiVersion == '2026-03-01') {
   name: 'dataflows-2026-03-01-${uniqueString(aioInstanceName)}'

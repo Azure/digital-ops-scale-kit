@@ -123,14 +123,12 @@ class TestAssetSemantics:
         to hold in each module rather than in one of them, since a module serves
         one generation.
         """
-        modules = [
-            harness.version_module(workspace, ASSETS, version)
-            for version in harness.supported_api_versions(workspace, ASSETS)
-        ]
-        modules = [module for module in modules if module.is_file()]
-        assert len(modules) > 1, (
-            f"Found {len(modules)} per-generation asset module(s), so the "
-            f"ordering is not being checked on every generation. Either the "
+        versions = harness.supported_api_versions(workspace, ASSETS)
+        modules = [harness.version_module(workspace, ASSETS, version) for version in versions]
+        missing = [module.name for module in modules if not module.is_file()]
+        assert modules and not missing, (
+            f"Missing per-generation asset module(s) {missing} for {versions}, so "
+            f"the ordering is not being checked on every generation. Either the "
             f"family stopped dispatching or its layout changed."
         )
 

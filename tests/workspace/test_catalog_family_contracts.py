@@ -431,11 +431,12 @@ class TestFamilyDeclarationContract:
             for version in harness.supported_api_versions(workspace, spec)
         ]
         present = [(v, p) for v, p in modules if p.is_file()]
-        assert len(present) > 1, (
-            f"Fewer than two generation modules were found for '{spec.family}', "
-            f"so parity cannot be checked. If the family stopped dispatching, "
-            f"update this test."
+        assert present, (
+            f"No generation modules were found for '{spec.family}', so parity "
+            f"cannot be checked. If the family stopped dispatching, update this test."
         )
+        if len(present) == 1:
+            pytest.skip(f"'{spec.family}' has one generation module, so it has no sibling to compare.")
 
         def _normalized(version: str, path: Path) -> list[str]:
             text = path.read_text(encoding="utf-8").replace(version, "<version>")

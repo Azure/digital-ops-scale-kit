@@ -680,7 +680,7 @@ def test_real_aio_entries_produce_mapped_template_roots(tmp_path):
         "templates/edge-site/main.bicep",
         "templates/edge-site/subscription.bicep",
     } <= sources
-    assert "templates/aio/modules/instance-2025-10-01.bicep" not in sources
+    assert "templates/aio/modules/instance-2026-03-01.bicep" not in sources
     instance = next(
         mapping
         for mapping in built.metadata.templates

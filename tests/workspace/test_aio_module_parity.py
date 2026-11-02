@@ -1,6 +1,6 @@
 """Per-API-version Bicep module parity tests for the AIO upgrade flow.
 
-Per-version modules (e.g. `instance-2026-03-01.bicep`, `instance-2025-10-01.bicep`)
+Per-version modules (e.g. `instance-2026-07-01.bicep`, `instance-2026-03-01.bicep`)
 are typically copied from the previous version and minimally diverged when a new
 API version ships. Unintentional drift (a fix applied to one version but not
 mirrored) is a real risk as the module count grows.

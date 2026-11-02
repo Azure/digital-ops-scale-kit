@@ -3,7 +3,7 @@
 // API-version-bound read of an existing AIO instance. Routed by
 // templates/aio/resolve-aio.bicep.
 //
-// See resolve-instance-2025-10-01.bicep header for the rationale on
+// See resolve-instance-2026-03-01.bicep header for the rationale on
 // version-bound reads against Arc-mapped RPs.
 // -------------------------------------------------------------------------------------
 

@@ -78,16 +78,16 @@ resource aioExtension 'Microsoft.KubernetesConfiguration/extensions@2023-05-01' 
   scope: connectedCluster
 }
 
-resource aioInstance 'Microsoft.IoTOperations/instances@2025-10-01' existing = {
+resource aioInstance 'Microsoft.IoTOperations/instances@2026-03-01' existing = {
   name: aioInstanceName
 }
 
-resource defaultDataflowEndpoint 'Microsoft.IoTOperations/instances/dataflowEndpoints@2025-10-01' existing = {
+resource defaultDataflowEndpoint 'Microsoft.IoTOperations/instances/dataflowEndpoints@2026-03-01' existing = {
   name: defaultDataflowEndpointName
   parent: aioInstance
 }
 
-resource defaultDataflowProfile 'Microsoft.IoTOperations/instances/dataflowProfiles@2025-10-01' existing = {
+resource defaultDataflowProfile 'Microsoft.IoTOperations/instances/dataflowProfiles@2026-03-01' existing = {
   name: defaultDataflowProfileName
   parent: aioInstance
 }
@@ -244,7 +244,7 @@ var eventHubHost = replace(replace(eventHubNamespace.properties.serviceBusEndpoi
 /*                                    Data flow                              */
 /*****************************************************************************/
 
-resource dataflowEndpointEventHub 'Microsoft.IoTOperations/instances/dataflowEndpoints@2025-10-01' = {
+resource dataflowEndpointEventHub 'Microsoft.IoTOperations/instances/dataflowEndpoints@2026-03-01' = {
   parent: aioInstance
   name: 'opc-ua-solution-eh-endpoint'
   extendedLocation: {
@@ -272,7 +272,7 @@ resource dataflowEndpointEventHub 'Microsoft.IoTOperations/instances/dataflowEnd
   }
 }
 
-resource dataflowCToF 'Microsoft.IoTOperations/instances/dataflowProfiles/dataflows@2025-10-01' = {
+resource dataflowCToF 'Microsoft.IoTOperations/instances/dataflowProfiles/dataflows@2026-03-01' = {
   parent: defaultDataflowProfile
   name: 'opc-ua-solution-oven-dataflow'
   extendedLocation: {

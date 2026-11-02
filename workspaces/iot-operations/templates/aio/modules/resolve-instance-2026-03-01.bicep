@@ -3,8 +3,12 @@
 // API-version-bound read of an existing AIO instance. Routed by
 // templates/aio/resolve-aio.bicep.
 //
-// See resolve-instance-2025-10-01.bicep header for the rationale on
-// version-bound reads against Arc-mapped RPs.
+// Why version-bound: Microsoft.IoTOperations is an Arc-mapped RP. The ARM
+// API version on `existing` is not just a Bicep schema lens. It issues
+// `GET ?api-version=<pinned>` and the RP/bridge projects through that
+// version's CRD generation. Mismatching the cluster's CRD generation can
+// drift or fail the read. The router selects this module when the site's
+// version config declares aioApiVersion '2026-03-01'.
 // -------------------------------------------------------------------------------------
 
 @description('Name of the existing IoT Operations instance.')

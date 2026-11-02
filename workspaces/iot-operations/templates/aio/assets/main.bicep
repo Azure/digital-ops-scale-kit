@@ -40,7 +40,6 @@ param assets array = []
 // module block below.
 @description('Azure Device Registry API version, supplied by the site release file at parameters/aio-releases/<release>.yaml.')
 @allowed([
-  '2025-10-01'
   '2026-04-01'
 ])
 param adrApiVersion string
@@ -48,18 +47,6 @@ param adrApiVersion string
 /*****************************************************************************/
 /*                        Per-generation dispatch                            */
 /*****************************************************************************/
-
-module assets_2025 './modules/assets-2025-10-01.bicep' = if (adrApiVersion == '2025-10-01') {
-  name: 'assets-2025-10-01-${uniqueString(adrNamespaceName)}'
-  params: {
-    adrNamespaceName: adrNamespaceName
-    customLocationName: customLocationName
-    location: location
-    tags: tags
-    devices: devices
-    assets: assets
-  }
-}
 
 module assets_2026_04 './modules/assets-2026-04-01.bicep' = if (adrApiVersion == '2026-04-01') {
   name: 'assets-2026-04-01-${uniqueString(adrNamespaceName)}'

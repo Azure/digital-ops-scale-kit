@@ -71,7 +71,6 @@ param aioTrain string = ''
 
 @description('IoT Operations API version for release-specific extension configuration defaults.')
 @allowed([
-  '2025-10-01'
   '2026-03-01'
   '2026-07-01'
 ])
@@ -128,13 +127,11 @@ var aioTrustConfigMapKey = aioTrustSource == 'CustomerManaged'
 // These values depend on the cluster-derived extension suffix, so they cannot
 // live as static release-YAML overrides. Add only missing keys to preserve
 // operator-customized values on subsequent applies.
-var aioApplicationUriDefault = aioApiVersion == '2025-10-01'
+var aioApplicationUriDefault = contains(aio.configurationSettings, 'connectors.values.securityPki.applicationUri')
   ? {}
-  : contains(aio.configurationSettings, 'connectors.values.securityPki.applicationUri')
-    ? {}
-    : {
-        'connectors.values.securityPki.applicationUri': 'urn:microsoft.com:aio:opc:ua:broker:${aio.extensionSuffix}'
-      }
+  : {
+      'connectors.values.securityPki.applicationUri': 'urn:microsoft.com:aio:opc:ua:broker:${aio.extensionSuffix}'
+    }
 var aioSubjectNameDefault = !configureSecurityPkiSubjectName
   ? {}
   : contains(aio.configurationSettings, 'connectors.values.securityPki.subjectName')

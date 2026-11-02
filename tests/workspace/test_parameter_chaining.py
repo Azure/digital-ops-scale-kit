@@ -1054,7 +1054,7 @@ class TestReleaseConfigs:
     def test_release_yaml_keys_consistent_across_files(self, workspace):
         """All aio-releases YAML files should declare the same key set.
 
-        If `2603.yaml` adds a key like `storageVersion` that `2512.yaml` doesn't
+        If `2609.yaml` adds a key like `storageVersion` that `2603.yaml` doesn't
         have, upgrades to older targets would fail with missing required params
         (or silently use defaults). Catch divergence early.
         """

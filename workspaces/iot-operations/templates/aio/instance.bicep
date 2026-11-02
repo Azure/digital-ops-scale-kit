@@ -91,7 +91,6 @@ param aioTrain string = 'stable'
 
 @description('IoT Operations API version for resource deployment.')
 @allowed([
-  '2025-10-01'
   '2026-03-01'
   '2026-07-01'
 ])
@@ -125,32 +124,6 @@ resource cluster 'Microsoft.Kubernetes/connectedClusters@2024-07-15-preview' exi
 /*****************************************************************************/
 /*     IoT Operations Resources (API-versioned module deployment)            */
 /*****************************************************************************/
-
-module resources_2025 './modules/instance-2025-10-01.bicep' = if (aioApiVersion == '2025-10-01') {
-  name: 'aio-resources-2025-10-01'
-  params: {
-    clusterName: clusterName
-    clusterNamespace: clusterNamespace
-    clusterLocation: clusterLocation
-    clusterResourceId: cluster.id
-    customLocationName: customLocationName ?? 'location-${HASH}'
-    clExtensionIds: clExtensionIds
-    instanceName: aioInstanceName ?? 'aio-${HASH}'
-    instanceIdentity: instanceIdentity
-    schemaRegistryId: schemaRegistryId
-    adrNamespaceId: adrNamespaceId
-    features: features
-    defaultDataflowInstanceCount: defaultDataflowInstanceCount
-    aioVersion: aioVersion
-    aioTrain: aioTrain
-    aioReleaseConfiguration: aioReleaseConfiguration
-    observabilityEnabled: observabilityEnabled
-    otelCollectorAddress: otelCollectorAddress
-    aioConfigurationOverrides: aioConfigurationOverrides
-    brokerConfig: brokerConfig
-    trustConfig: trustConfig
-  }
-}
 
 module resources_2026 './modules/instance-2026-03-01.bicep' = if (aioApiVersion == '2026-03-01') {
   name: 'aio-resources-2026-03-01'
@@ -214,33 +187,18 @@ module resources_2026_07 './modules/instance-2026-07-01.bicep' = if (aioApiVersi
 // When 2027-01-01 lands:
 //   1. Extend @allowed on aioApiVersion above.
 //   2. Add a new `module resources_<YYYY>` conditional block mirroring the
-//      existing two.
+//      existing ones.
 //   3. Push the previously-newest branch into an explicit equality and make
 //      the new version the else:
 //
-//        var activeResources = aioApiVersion == '2025-10-01' ? { ...2025 }
-//                            : aioApiVersion == '2026-03-01' ? { ...2026 }
+//        var activeResources = aioApiVersion == '2026-03-01' ? { ...2026 }
+//                            : aioApiVersion == '2026-07-01' ? { ...2026_07 }
 //                            : { ...2027 }   // newest, no equality check
 //
 //   4. Mirror the same change in templates/aio/modules/update-instance.bicep.
 // ---------------------------------------------------------------------------
-var activeResources = aioApiVersion == '2025-10-01'
+var activeResources = aioApiVersion == '2026-03-01'
   ? {
-      instanceName: resources_2025!.outputs.instanceName
-      brokerName: resources_2025!.outputs.brokerName
-      brokerListenerName: resources_2025!.outputs.brokerListenerName
-      brokerAuthnName: resources_2025!.outputs.brokerAuthnName
-      brokerSettings: resources_2025!.outputs.brokerSettings
-      aioExtensionId: resources_2025!.outputs.aioExtensionId
-      aioExtensionName: resources_2025!.outputs.aioExtensionName
-      aioExtensionVersion: resources_2025!.outputs.aioExtensionVersion
-      aioExtensionReleaseTrain: resources_2025!.outputs.aioExtensionReleaseTrain
-      aioExtensionPrincipalId: resources_2025!.outputs.aioExtensionPrincipalId
-      customLocationId: resources_2025!.outputs.customLocationId
-      customLocationName: resources_2025!.outputs.customLocationName
-    }
-  : aioApiVersion == '2026-03-01'
-    ? {
       instanceName: resources_2026!.outputs.instanceName
       brokerName: resources_2026!.outputs.brokerName
       brokerListenerName: resources_2026!.outputs.brokerListenerName
@@ -254,20 +212,20 @@ var activeResources = aioApiVersion == '2025-10-01'
       customLocationId: resources_2026!.outputs.customLocationId
       customLocationName: resources_2026!.outputs.customLocationName
     }
-    : {
-        instanceName: resources_2026_07!.outputs.instanceName
-        brokerName: resources_2026_07!.outputs.brokerName
-        brokerListenerName: resources_2026_07!.outputs.brokerListenerName
-        brokerAuthnName: resources_2026_07!.outputs.brokerAuthnName
-        brokerSettings: resources_2026_07!.outputs.brokerSettings
-        aioExtensionId: resources_2026_07!.outputs.aioExtensionId
-        aioExtensionName: resources_2026_07!.outputs.aioExtensionName
-        aioExtensionVersion: resources_2026_07!.outputs.aioExtensionVersion
-        aioExtensionReleaseTrain: resources_2026_07!.outputs.aioExtensionReleaseTrain
-        aioExtensionPrincipalId: resources_2026_07!.outputs.aioExtensionPrincipalId
-        customLocationId: resources_2026_07!.outputs.customLocationId
-        customLocationName: resources_2026_07!.outputs.customLocationName
-      }
+  : {
+      instanceName: resources_2026_07!.outputs.instanceName
+      brokerName: resources_2026_07!.outputs.brokerName
+      brokerListenerName: resources_2026_07!.outputs.brokerListenerName
+      brokerAuthnName: resources_2026_07!.outputs.brokerAuthnName
+      brokerSettings: resources_2026_07!.outputs.brokerSettings
+      aioExtensionId: resources_2026_07!.outputs.aioExtensionId
+      aioExtensionName: resources_2026_07!.outputs.aioExtensionName
+      aioExtensionVersion: resources_2026_07!.outputs.aioExtensionVersion
+      aioExtensionReleaseTrain: resources_2026_07!.outputs.aioExtensionReleaseTrain
+      aioExtensionPrincipalId: resources_2026_07!.outputs.aioExtensionPrincipalId
+      customLocationId: resources_2026_07!.outputs.customLocationId
+      customLocationName: resources_2026_07!.outputs.customLocationName
+    }
 
 /*****************************************************************************/
 /*                          Deployment Outputs                               */

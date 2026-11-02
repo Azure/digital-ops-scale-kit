@@ -36,7 +36,6 @@ param aioInstanceName string
 
 @description('IoT Operations API version for the instance read. Sourced from parameters/aio-releases/<release>.yaml. The pin must match the version the site is currently on.')
 @allowed([
-  '2025-10-01'
   '2026-03-01'
   '2026-07-01'
 ])
@@ -50,19 +49,12 @@ param useSelfHostedIssuer bool = false
 //
 // Adding a new API version:
 //   1. Extend @allowed on aioApiVersion above.
-//   2. Add a new `module resolve_<YYYY>` block mirroring the existing two.
+//   2. Add a new `module resolve_<YYYY>` block mirroring the existing ones.
 //   3. Push the previously-newest branch into an explicit equality and make
 //      the new version the else-branch in `activeInstance` below.
 //   4. Mirror the same change in templates/aio/instance.bicep and
 //      templates/aio/modules/update-instance.bicep.
 // =====================================================================================
-
-module resolve_2025 './modules/resolve-instance-2025-10-01.bicep' = if (aioApiVersion == '2025-10-01') {
-  name: 'resolve-instance-2025-${uniqueString(aioInstanceName)}'
-  params: {
-    aioInstanceName: aioInstanceName
-  }
-}
 
 module resolve_2026 './modules/resolve-instance-2026-03-01.bicep' = if (aioApiVersion == '2026-03-01') {
   name: 'resolve-instance-2026-${uniqueString(aioInstanceName)}'
@@ -81,21 +73,8 @@ module resolve_2026_07 './modules/resolve-instance-2026-07-01.bicep' = if (aioAp
 // Select outputs from the active module. The @allowed constraint guarantees
 // exactly one module deploys. Convention: newest API version is the
 // else-branch, and every older version is an explicit positive equality check.
-var activeInstance = aioApiVersion == '2025-10-01'
+var activeInstance = aioApiVersion == '2026-03-01'
   ? {
-      customLocationResourceId: resolve_2025!.outputs.customLocationResourceId
-      instanceLocation: resolve_2025!.outputs.instanceLocation
-      instanceTags: resolve_2025!.outputs.instanceTags
-      identityType: resolve_2025!.outputs.identityType
-      userAssignedIdentities: resolve_2025!.outputs.userAssignedIdentities
-      schemaRegistryResourceId: resolve_2025!.outputs.schemaRegistryResourceId
-      adrNamespaceResourceId: resolve_2025!.outputs.adrNamespaceResourceId
-      features: resolve_2025!.outputs.features
-      instanceDescription: resolve_2025!.outputs.instanceDescription
-      defaultSecretProviderClassResourceId: resolve_2025!.outputs.defaultSecretProviderClassResourceId
-    }
-  : aioApiVersion == '2026-03-01'
-    ? {
       customLocationResourceId: resolve_2026!.outputs.customLocationResourceId
       instanceLocation: resolve_2026!.outputs.instanceLocation
       instanceTags: resolve_2026!.outputs.instanceTags
@@ -107,18 +86,18 @@ var activeInstance = aioApiVersion == '2025-10-01'
       instanceDescription: resolve_2026!.outputs.instanceDescription
       defaultSecretProviderClassResourceId: resolve_2026!.outputs.defaultSecretProviderClassResourceId
     }
-    : {
-        customLocationResourceId: resolve_2026_07!.outputs.customLocationResourceId
-        instanceLocation: resolve_2026_07!.outputs.instanceLocation
-        instanceTags: resolve_2026_07!.outputs.instanceTags
-        identityType: resolve_2026_07!.outputs.identityType
-        userAssignedIdentities: resolve_2026_07!.outputs.userAssignedIdentities
-        schemaRegistryResourceId: resolve_2026_07!.outputs.schemaRegistryResourceId
-        adrNamespaceResourceId: resolve_2026_07!.outputs.adrNamespaceResourceId
-        features: resolve_2026_07!.outputs.features
-        instanceDescription: resolve_2026_07!.outputs.instanceDescription
-        defaultSecretProviderClassResourceId: resolve_2026_07!.outputs.defaultSecretProviderClassResourceId
-      }
+  : {
+      customLocationResourceId: resolve_2026_07!.outputs.customLocationResourceId
+      instanceLocation: resolve_2026_07!.outputs.instanceLocation
+      instanceTags: resolve_2026_07!.outputs.instanceTags
+      identityType: resolve_2026_07!.outputs.identityType
+      userAssignedIdentities: resolve_2026_07!.outputs.userAssignedIdentities
+      schemaRegistryResourceId: resolve_2026_07!.outputs.schemaRegistryResourceId
+      adrNamespaceResourceId: resolve_2026_07!.outputs.adrNamespaceResourceId
+      features: resolve_2026_07!.outputs.features
+      instanceDescription: resolve_2026_07!.outputs.instanceDescription
+      defaultSecretProviderClassResourceId: resolve_2026_07!.outputs.defaultSecretProviderClassResourceId
+    }
 
 // =====================================================================================
 // Chained Resolution: version-stable

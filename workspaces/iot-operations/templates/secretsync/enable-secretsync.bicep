@@ -87,7 +87,6 @@ param instanceDescription string = ''
 
 @description('IoT Operations API version for the instance PUT. Must match the version the instance was created with.')
 @allowed([
-  '2025-10-01'
   '2026-03-01'
   '2026-07-01'
 ])

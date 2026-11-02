@@ -19,7 +19,7 @@ Resource areas available today:
 To add one dataflow endpoint as an ARM resource, a template needs the AIO instance and custom location resolved, an `extendedLocation` block on every resource, parent wiring, and a literal API version:
 
 ```bicep
-resource aioInstance 'Microsoft.IoTOperations/instances@2025-10-01' existing = {
+resource aioInstance 'Microsoft.IoTOperations/instances@2026-07-01' existing = {
   name: aioInstanceName
 }
 
@@ -27,7 +27,7 @@ resource customLocation 'Microsoft.ExtendedLocation/customLocations@2021-08-31-p
   name: customLocationName
 }
 
-resource endpoint 'Microsoft.IoTOperations/instances/dataflowEndpoints@2025-10-01' = {
+resource endpoint 'Microsoft.IoTOperations/instances/dataflowEndpoints@2026-07-01' = {
   parent: aioInstance
   name: 'my-endpoint'
   extendedLocation: {

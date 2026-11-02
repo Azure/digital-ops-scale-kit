@@ -232,10 +232,6 @@ def test_schema_registry_namespace_fits_the_service_limit_for_every_guided_site_
 
 
 def test_security_pki_defaults_follow_released_aio_behavior(workspace):
-    create_2025 = _read(
-        workspace,
-        "templates/aio/modules/instance-2025-10-01.bicep",
-    )
     create_2026_03 = _read(
         workspace,
         "templates/aio/modules/instance-2026-03-01.bicep",
@@ -254,8 +250,6 @@ def test_security_pki_defaults_follow_released_aio_behavior(workspace):
 
     # The application URI starts with the 2026-03-01 generation. Subject name
     # starts in releases 2605 and 2606, then becomes a 2026-07-01 baseline.
-    assert application_uri not in create_2025
-    assert subject_name not in create_2025
     assert application_uri in create_2026_03
     assert subject_name in create_2026_03
     assert (
@@ -279,7 +273,8 @@ def test_security_pki_defaults_follow_released_aio_behavior(workspace):
         assert "securityPkiSubjectName" not in extension
 
     assert (
-        "var aioApplicationUriDefault = aioApiVersion == '2025-10-01'\n  ? {}"
+        "var aioApplicationUriDefault = contains(aio.configurationSettings, "
+        "'connectors.values.securityPki.applicationUri')\n  ? {}"
         in update_extensions
     )
     assert (

@@ -52,6 +52,7 @@ These changes affect how you install or run Site Ops after v1.0.0b7.
 | Upgrade an existing AIO instance that has no configured Site | Nothing changes for existing use. Review the [typed AIO upgrade](#typed-aio-upgrade). |
 | Run v1.0.0b8 content with an earlier Site Ops engine, or produce your own packages | Install the matching engine. Review the [typed map feature](#typed-map-feature). |
 | Use a condition that limits the roles your deployment identity can assign | Allow Azure Device Registry Administrator. Review the [schema registry role](#schema-registry-role). |
+| Pin a Site to AIO release 2512 or 2602 | Pin a supported release. Review [AIO releases 2512 and 2602](#aio-releases-2512-and-2602). |
 | Write the YAML key `=` twice in one mapping, quoted or bare | Keep one. Review [repeated equals keys](#repeated-equals-keys). |
 | Match the text of a missing typed input error | Review [missing input messages](#missing-input-messages). |
 | Match the text of a template error from `plan` or `deploy` | Review [template error messages](#template-error-messages). |
@@ -185,6 +186,13 @@ which roles your deployment identity can assign, allow this role
 An existing instance keeps its Contributor assignment. Your next
 `aio-install` run adds the new role, after which you can remove Contributor
 with `az role assignment delete`.
+
+### AIO releases 2512 and 2602
+
+AIO releases start at 2603, so a Site that pins `aioRelease` 2512 or 2602
+fails preparation with `which does not exist`. Pin a supported release, and
+to upgrade an existing AIO 1.2 instance, pin a 1.3 release such as 2606 and
+run [`aio-upgrade`](../workspaces/iot-operations/manifests/aio-upgrade/README.md).
 
 ### Repeated equals keys
 

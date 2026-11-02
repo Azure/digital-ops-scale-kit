@@ -28,7 +28,6 @@ param tags object = {}
 
 @description('Azure Device Registry API version for the namespace deployment. Sourced from parameters/aio-releases/<release>.yaml.')
 @allowed([
-  '2025-10-01'
   '2026-04-01'
 ])
 param adrApiVersion string
@@ -40,15 +39,6 @@ param adrApiVersion string
 // The newest API version is the fallback branch. Every older version uses an
 // explicit positive equality check.
 
-module ns_2025 './modules/adr-ns-2025-10-01.bicep' = if (adrApiVersion == '2025-10-01') {
-  name: 'adr-ns-2025-10-01'
-  params: {
-    adrNamespaceName: adrNamespaceName
-    location: location
-    tags: tags
-  }
-}
-
 module ns_2026 './modules/adr-ns-2026-04-01.bicep' = if (adrApiVersion == '2026-04-01') {
   name: 'adr-ns-2026-04-01'
   params: {
@@ -58,17 +48,12 @@ module ns_2026 './modules/adr-ns-2026-04-01.bicep' = if (adrApiVersion == '2026-
   }
 }
 
-var active = adrApiVersion == '2025-10-01'
-  ? {
-      id: ns_2025!.outputs.id
-      name: ns_2025!.outputs.name
-      principalId: ns_2025!.outputs.principalId
-    }
-  : {
-      id: ns_2026!.outputs.id
-      name: ns_2026!.outputs.name
-      principalId: ns_2026!.outputs.principalId
-    }
+// One version is allowed, so `active` reads its module directly.
+var active = {
+  id: ns_2026!.outputs.id
+  name: ns_2026!.outputs.name
+  principalId: ns_2026!.outputs.principalId
+}
 
 /*****************************************************************************/
 /*                          Deployment Outputs                               */

@@ -22,8 +22,6 @@ Each AIO release in this workspace installs one AIO version:
 
 | AIO release | AIO version | Minor version |
 |---|---|---|
-| 2512 | 1.2.154 | 1.2 |
-| 2602 | 1.2.189 | 1.2 |
 | 2603 | 1.3.38 | 1.3 |
 | 2604 | 1.3.70 | 1.3 |
 | 2605 | 1.3.105 | 1.3 |
@@ -39,8 +37,8 @@ The AIO Arc extension's version, on the cluster's Extensions page or from
 `az k8s-extension list --cluster-name <cluster> --resource-group <resource-group> --cluster-type connectedClusters --output table`,
 matches the AIO version column exactly.
 
-Move one minor version at a time. From a 1.2 release, upgrade to a 1.3
-release before a 1.4 release. Never select an AIO release older than the one
+Move one minor version at a time. From AIO 1.2, upgrade to a 1.3 release
+before a 1.4 release. Never select an AIO release older than the one
 the instance runs, because Microsoft does not support a downgrade.
 `aio-upgrade` applies the AIO release you select without checking the path,
 so choose a supported transition from the instance's current release.
